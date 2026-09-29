@@ -13,7 +13,7 @@ BeatKernel is a low-latency, cross-platform Rust runtime for rhythm games, distr
 
 ## Current evidence and remaining work
 
-Phases 0–3 are implemented: [time and transport](../kernel/REQ__time-transport.md), [canonical input](../kernel/REQ__canonical-input.md), pure keyboard mapping fixtures for Windows, Linux, and macOS, and [device-aware binding](../kernel/REQ__binding.md). Binding retains owned typed samples, provenance, and ordered logical destinations. Platform modules remain metadata stubs; the inspector and binding examples use virtual devices. Phase 4 native input and all later runtime phases remain unfinished.
+Phases 0–3 are implemented: [time and transport](../kernel/REQ__time-transport.md), [canonical input](../kernel/REQ__canonical-input.md), pure keyboard mapping fixtures for Windows, Linux, and macOS, and [device-aware binding](../kernel/REQ__binding.md). Binding retains owned typed samples, provenance, and ordered logical destinations. [Phase 4 Windows input](../kernel/REQ__windows-input.md) is implemented and awaiting independent review/full QA. Six native API integration tests and five platform unit tests pass in an isolated Windows Server VM; the native inspector captures device-attributed A Down/Up, provenance and normal/Alt+F4 cleanup through a Hyper-V virtual keyboard. Linux/macOS native modules remain metadata stubs. Phase 4 review/QA and all later runtime phases remain required; native virtual-device execution does not establish physical hardware latency.
 
 Git was initialized locally on 2026-09-29 after these files had been implemented. Initial commits record the existing implementation and its documentation, rather than reconstructing historical development commits.
 

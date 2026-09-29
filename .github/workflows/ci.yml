@@ -23,9 +23,17 @@ jobs:
       - run: cargo run -p beatkernel --example transport --locked
       - run: cargo run -p beatkernel --example binding --locked
       - run: cargo run -p beatkernel-platform --example input_inspector --locked
+      - run: cargo run -p beatkernel-platform --example windows_input_inspector --locked -- --help
+      - run: cargo run -p beatkernel-platform --example windows_input_inspector --locked -- --fixture
+      - if: matrix.os == 'windows-latest'
+        run: cargo run -p beatkernel-platform --example windows_input_inspector --locked -- --seconds 1
       - run: cargo doc --workspace --no-deps --locked
   msrv:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.83.0

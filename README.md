@@ -7,8 +7,14 @@ in Rust. The architecture and phased implementation specification are in
 ## Current implementation
 
 The source implements **Phase 0: repository skeleton**, **Phase 1: integer time
-and transport**, **Phase 2: canonical physical input**, and **Phase 3: binding**. Native input,
-chart compilation, judgment, audio scheduling, and replay remain subsequent phases.
+and transport**, **Phase 2: canonical physical input**, and **Phase 3: binding**.
+Chart compilation, judgment, audio scheduling, and replay remain subsequent phases.
+
+**Phase 4 is in progress:** portable Raw Input packet processing and a Windows
+QPC receipt sampler, native packet acquisition and explicit registration are
+present. Their contract is [Windows input](doc/kernel/REQ__windows-input.md).
+The inspector has captured device-attributed keyboard input in an isolated
+Windows VM. Phase 4's independent review and full QA remain pending.
 
 ```text
 beatkernel/
@@ -20,17 +26,20 @@ beatkernel/
 │   │   ├── src/input/           # typed events, device identity, virtual FIFO, bindings
 │   │   ├── tests/time_transport.rs
 │   │   └── examples/transport.rs
-│   └── beatkernel-platform/     # pure key normalization, native I/O still pending
+│   └── beatkernel-platform/     # pure input processing and Windows acquisition
 │       ├── src/keyboard.rs
+│       ├── src/raw_input.rs
 │       ├── src/{windows,linux,macos}/
-│       └── examples/input_inspector.rs
+│       └── examples/{input_inspector,windows_input_inspector}.rs
 └── .github/workflows/ci.yml
 ```
 
-The only crate dependency is `beatkernel-platform → beatkernel`. The kernel has
+The only workspace dependency is `beatkernel-platform → beatkernel`. The kernel has
 no OS dependency, no game-specific assumptions, no unsafe code, and no third-party
-dependencies. Platform dependency sections are reserved for the corresponding
-target; native input/audio backends are not implemented or advertised as available.
+dependencies. The platform uses pinned `windows-sys` bindings only on Windows,
+with unsafe confined to native FFI; portable input modules prohibit unsafe.
+Windows acquisition is being verified; native Linux/macOS input and audio
+backends remain subsequent phases.
 
 ## Build and verify
 
@@ -46,12 +55,33 @@ cargo test --workspace --release
 cargo run -p beatkernel --example transport
 cargo run -p beatkernel --example binding
 cargo run -p beatkernel-platform --example input_inspector
+cargo run -p beatkernel-platform --example windows_input_inspector -- --fixture
 cargo doc --workspace --no-deps
 ```
 
-The CI workflow runs on Linux, Windows and macOS. Local test execution establishes
-correctness on the available host; CI must execute before claiming results on the
-other operating systems.
+The CI workflow declares Linux, Windows and macOS checks and Linux/Windows Rust
+1.83 checks. Local and isolated-guest verification establish only their observed
+results; the declared CI matrix has not been executed in this workspace.
+
+Phase 4 packet/state tests pass in debug and release on Linux, and the new public
+API examples pass as doctests. Rust 1.83 Windows GNU cross-check and strict Clippy
+compile the Windows backend. Linked Rust 1.83 test binaries also execute in an
+isolated Windows Server VM: six native API integration tests and five platform
+unit tests pass. This verifies QPC, enumeration, ownership/cleanup and query
+bounds. In the interactive guest desktop, the production inspector also captured
+A Down/Up from nonzero native handle `0x10041`, runtime source 1, canonical HID
+usage `0x07:0x04`, sequence 3/4, and QPC/posted-message provenance. Alt+F4 exited
+with code 0 after registration cleanup. This is native Windows input from a
+Hyper-V virtual keyboard; physical hardware latency remains unmeasured.
+
+On Windows, run `cargo run -p beatkernel-platform --example windows_input_inspector
+-- --seconds 10` in the interactive desktop and press keys in its window. Add
+`--hid 0x01:0x04` for an explicitly selected HID collection. The application owns
+its window, registration and foreground cleanup; the library never registers on
+construction. Classes must stay exclusively owned until the guard closes.
+The inspector prints receipt time and raw fields, limits HID previews to 32 bytes,
+and omits device interface paths/serials. `--fixture` is explicitly synthetic on
+all hosts; native mode reports unsupported on other OSes.
 
 ## Time and playback
 
@@ -162,4 +192,5 @@ with gameplay state. This API does not track held state or synthesize releases.
 Run the virtual `binding` example to see source 101 and 102 map the same HID A
 to logical controls 10 and 20, with source 103 retaining touch data on channel 30.
 See [the binding requirements](doc/kernel/REQ__binding.md).
-The next specified phase is Windows native input. The full runtime remains in development.
+Windows native input is awaiting independent review and full QA. The full
+runtime remains in development.
