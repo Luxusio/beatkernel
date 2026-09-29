@@ -13,12 +13,12 @@ BeatKernel is a low-latency, cross-platform Rust runtime for rhythm games, distr
 
 ## Current evidence and remaining work
 
-Phases 0–2 are implemented: [time and transport](../kernel/REQ__time-transport.md), [canonical input](../kernel/REQ__canonical-input.md), and pure keyboard mapping fixtures for Windows, Linux, and macOS. Platform modules remain metadata stubs; the input inspector uses virtual devices. Binding and all later runtime phases remain unfinished.
+Phases 0–3 are implemented: [time and transport](../kernel/REQ__time-transport.md), [canonical input](../kernel/REQ__canonical-input.md), pure keyboard mapping fixtures for Windows, Linux, and macOS, and [device-aware binding](../kernel/REQ__binding.md). Binding retains owned typed samples, provenance, and ordered logical destinations. Platform modules remain metadata stubs; the inspector and binding examples use virtual devices. Phase 4 native input and all later runtime phases remain unfinished.
 
 Git was initialized locally on 2026-09-29 after these files had been implemented. Initial commits record the existing implementation and its documentation, rather than reconstructing historical development commits.
 
 ## Verification
 
-The executable verification configuration is [the Harness manifest](../harness/manifest.yaml). It runs formatting, strict Clippy, workspace tests in debug and release, both virtual examples, and public API documentation. CI also declares Linux, Windows, macOS, and Rust 1.83 checks; local verification alone does not establish execution on all CI hosts or physical hardware.
+The executable verification configuration is [the Harness manifest](../harness/manifest.yaml). It runs formatting, strict Clippy, workspace tests in debug and release, transport, input-inspector and binding examples, and public API documentation. CI also declares Linux, Windows, macOS, and Rust 1.83 checks; local verification alone does not establish execution on all CI hosts or physical hardware.
 
 In the current workspace, Rust 1.83 is available through `/tmp/beatkernel-cargo/bin`, `RUSTUP_HOME=/tmp/beatkernel-rustup`, and `CARGO_HOME=/tmp/beatkernel-cargo`. Other environments need a working Rust 1.83 or newer toolchain with rustfmt and Clippy.

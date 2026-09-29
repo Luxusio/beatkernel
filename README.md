@@ -7,7 +7,7 @@ in Rust. The architecture and phased implementation specification are in
 ## Current implementation
 
 The source implements **Phase 0: repository skeleton**, **Phase 1: integer time
-and transport**, and **Phase 2: canonical physical input**. Binding, native input,
+and transport**, **Phase 2: canonical physical input**, and **Phase 3: binding**. Native input,
 chart compilation, judgment, audio scheduling, and replay remain subsequent phases.
 
 ```text
@@ -17,7 +17,7 @@ beatkernel/
 │   ├── beatkernel/              # OS-independent kernel
 │   │   ├── src/time/            # nanoseconds and clock domains
 │   │   ├── src/transport/       # rates and piecewise host/song mapping
-│   │   ├── src/input/           # typed events, device identity, virtual FIFO
+│   │   ├── src/input/           # typed events, device identity, virtual FIFO, bindings
 │   │   ├── tests/time_transport.rs
 │   │   └── examples/transport.rs
 │   └── beatkernel-platform/     # pure key normalization, native I/O still pending
@@ -44,6 +44,7 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo test --workspace --release
 cargo run -p beatkernel --example transport
+cargo run -p beatkernel --example binding
 cargo run -p beatkernel-platform --example input_inspector
 cargo doc --workspace --no-deps
 ```
@@ -137,5 +138,28 @@ devices and reports no hardware latency. Golden fixtures and namespace sweeps
 verify the tables alongside two-device and typed-event contract tests.
 
 See [the canonical-input requirements](doc/kernel/REQ__canonical-input.md).
-The next specified phase is device-aware binding to game controls and logical
-channels. The complete native rhythm game runtime remains in development.
+
+## Game controls and channels
+
+`BindingMap` maps a complete physical control identity and `DeviceSelector` to a
+caller-defined `GameControlId`. Two devices with the same HID key can have
+different exact bindings. If an exact source/control rule matches, it overrides
+common `Any` rules; unrelated exact rules leave fallback intact. Multiple
+destinations fan out in insertion order, and removal preserves remaining order.
+Identical selector/control/destination triples are rejected without editing the map.
+
+Each `GameInputEvent` owns an unchanged physical sample and can outlive both the
+input and map. Touch contacts, pointer/axis modes, pose data, and all timing/native
+provenance remain intact. Raw HID and Custom payloads need adapter interpretation
+before they have semantic controls for binding.
+
+Mapping uses immutable current configuration and at most two linear passes,
+without heap allocation for the supported semantic variants. Configuration edits
+may allocate; constructing through validated additions is quadratic. Edits during
+a held input stream can change later destinations, so consumers coordinate them
+with gameplay state. This API does not track held state or synthesize releases.
+
+Run the virtual `binding` example to see source 101 and 102 map the same HID A
+to logical controls 10 and 20, with source 103 retaining touch data on channel 30.
+See [the binding requirements](doc/kernel/REQ__binding.md).
+The next specified phase is Windows native input. The full runtime remains in development.
