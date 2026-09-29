@@ -1,4 +1,4 @@
-//! Typed physical input independent of native acquisition and game bindings.
+//! Typed physical input and game bindings independent of native acquisition.
 //!
 //! Device IDs are assigned by callers. Event coordinates and axis units follow
 //! the device adapter's convention and are preserved without normalization.
@@ -35,12 +35,16 @@
 
 mod adapters;
 mod backend;
+mod binding;
 mod control;
 mod device;
 mod event;
 
 pub use adapters::{DeviceAdapter, PhysicalInputSink};
 pub use backend::{VirtualInputBackend, VirtualInputError};
+pub use binding::{
+    Binding, BindingError, BindingMap, DeviceSelector, GameControlId, GameInputEvent,
+};
 pub use control::{BackendId, PhysicalControlId, VendorNamespaceId, KEYBOARD_USAGE_PAGE};
 pub use device::{DeviceCapabilities, DeviceDescriptor, DeviceId, DeviceTransport};
 pub use event::{
