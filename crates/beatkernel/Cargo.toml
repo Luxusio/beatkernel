@@ -1,0 +1,9 @@
+[package]
+name = "beatkernel"
+description = "Deterministic integer time and transport for rhythm game runtimes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

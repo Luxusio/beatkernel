@@ -1,0 +1,16 @@
+[package]
+name = "beatkernel-platform"
+description = "Platform boundaries for BeatKernel native backends"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+beatkernel = { path = "../beatkernel" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+
+[target.'cfg(target_os = "macos")'.dependencies]
