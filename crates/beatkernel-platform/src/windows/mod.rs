@@ -1,4 +1,10 @@
-//! Windows backend boundary; native input/audio/clock I/O is not implemented.
+//! Windows native clock and input/audio backend boundary.
+//!
+//! QPC samples are receipt time with an explicit origin. Raw Input acquisition
+//! uses app-owned registration and a message pump; audio remains a later phase.
 
-/// The OS name for this module stub; this is not a backend capability claim.
+pub mod clock;
+pub mod input;
+
+/// The OS name for this module; this is not a device/input/audio capability claim.
 pub const TARGET_OS: &str = "windows";
