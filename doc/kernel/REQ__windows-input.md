@@ -12,7 +12,9 @@ latency benchmarks remain required by the original design.
 The application owns its window, message pump and process-wide Raw Input
 registration. Constructing the acquisition backend never registers a class.
 Explicit registration checks for existing matching classes, deduplicates the
-requested usages and refuses takeover. The application serializes registration
+requested usages and refuses takeover. The 4,096-class limit applies to distinct
+usages after deduplication; repeated entries do not consume class capacity.
+The application serializes registration
 operations and keeps its current-process/current-thread window alive until
 cleanup. The application grants exclusive ownership of those classes through
 the guard's lifetime, closing it before any ownership transfer. Windows exposes
@@ -117,6 +119,9 @@ returns a clear unsupported error. Both normal and error exits unregister owned
 classes and destroy the window. A stateless close callback posts quit instead of
 destroying the window before guard cleanup, including synchronously sent close.
 The inspector's bounded polling loop is a diagnostic, not a latency benchmark.
+It prints the same descriptor fields for devices found initially, announced by
+arrival notification, or first attached while acquiring a packet, once per
+runtime device ID. This output excludes interface paths and serials.
 HID output shows length and at most 32 preview bytes; the acquisition retains
 the complete reports. No frontend framework is required.
 
