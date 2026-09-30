@@ -218,7 +218,8 @@ fn native_registration_refuses_conflicts_and_cleans_normal_and_error_paths() {
         &[RawInputUsage { page: 0, usage: 1 }]
     )
     .is_err());
-    let mut guard = RawInputRegistration::register(window.hwnd as usize, &[usage, usage]).unwrap();
+    let duplicates = vec![usage; 4097];
+    let mut guard = RawInputRegistration::register(window.hwnd as usize, &duplicates).unwrap();
     assert_eq!(registered_target(usage), Some(window.hwnd as usize));
     assert!(RawInputRegistration::register(window.hwnd as usize, &[usage]).is_err());
     guard.close().unwrap();

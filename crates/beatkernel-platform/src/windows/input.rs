@@ -7,7 +7,13 @@
 #![allow(unsafe_code)]
 
 use std::{
-    collections::BTreeMap, error::Error, fmt, io, marker::PhantomData, mem::size_of, ptr, rc::Rc,
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt, io,
+    marker::PhantomData,
+    mem::size_of,
+    ptr,
+    rc::Rc,
 };
 
 use beatkernel::input::{DeviceDescriptor, DeviceId};
@@ -122,21 +128,26 @@ impl RawInputRegistration {
     /// acquisition is outside this backend's scope.
     pub fn register(window: usize, usages: &[RawInputUsage]) -> Result<Self> {
         validate_window(window)?;
-        if usages.is_empty() || usages.len() > MAX_RAW_INPUT_DEVICES {
+        if usages.is_empty() {
             return Err(WindowsInputError::Invalid(
                 "invalid registration class count",
             ));
         }
-        let mut usages = usages.to_vec();
-        usages.sort_unstable();
-        usages.dedup();
-        for usage in &usages {
+        let mut distinct = BTreeSet::new();
+        for usage in usages {
             if usage.page == 0 || usage.usage == 0 || (usage.page == 1 && usage.usage == 2) {
                 return Err(WindowsInputError::Invalid(
                     "unsupported Raw Input collection",
                 ));
             }
+            distinct.insert(*usage);
+            if distinct.len() > MAX_RAW_INPUT_DEVICES {
+                return Err(WindowsInputError::Invalid(
+                    "invalid registration class count",
+                ));
+            }
         }
+        let usages: Vec<_> = distinct.into_iter().collect();
         let existing = registered_classes()?;
         for usage in &usages {
             if existing.iter().any(|entry| {
