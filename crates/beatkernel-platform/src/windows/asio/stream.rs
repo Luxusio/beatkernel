@@ -400,6 +400,7 @@ pub struct AsioStream {
     phase: AsioStreamPhase,
     native: AsioDiagnostics,
     latencies: AsioLatencies,
+    sample_rate: u32,
 }
 impl AsioStream {
     /// Consumes exact driver/Mixer/channel choices, prepares buffers and primes B.
@@ -466,6 +467,7 @@ impl AsioStream {
                 event_values: std::array::from_fn(|_| AtomicU64::new(0)),
             }),
             phase: AsioStreamPhase::Ready,
+            sample_rate: format.sample_rate(),
             native: AsioDiagnostics::default(),
             latencies: AsioLatencies {
                 input_frames: 0,
@@ -502,6 +504,61 @@ impl AsioStream {
     /// Values are sample frames, not a host-clock relation or acoustic guarantee.
     pub const fn latencies(&self) -> AsioLatencies {
         self.latencies
+    }
+
+    /// Relates one actual rendered block to a bounded host presentation interval.
+    ///
+    /// The caller establishes that this driver's system timestamp uses the
+    /// wrapped multimedia timer and supplies honest timer/latency error bounds.
+    /// This runs off RT, reads one coherent snapshot, then samples the same QPC
+    /// clock used for input. Missing/stale observations never use receipt time
+    /// as a substitute for the native switch timestamp. The result uses the
+    /// Mixer block's frame identity, not the driver's unrelated sample counter.
+    pub fn presentation_observation(
+        &mut self,
+        anchor: &crate::audio::asio::MultimediaClockAnchor,
+        host_clock: &crate::windows::clock::QpcClock,
+        latency_error_ns: u64,
+        output_origin: beatkernel::time::ClockPoint,
+    ) -> Result<
+        crate::audio::asio::AsioPresentationObservation,
+        crate::audio::asio::AsioPresentationError,
+    > {
+        use crate::audio::asio::{AsioPresentationError, AsioPresentationObservation};
+        let snapshot = self
+            .snapshot()
+            .map_err(|_| AsioPresentationError::Unavailable)?;
+        if snapshot.phase != AsioStreamPhase::Running
+            || !snapshot.telemetry_available
+            || snapshot.native.faults.0 != 0
+            || snapshot.native.render_error != 0
+        {
+            return Err(AsioPresentationError::Unavailable);
+        }
+        let observation = snapshot
+            .buffer_observation
+            .ok_or(AsioPresentationError::Unavailable)?;
+        let event = observation.event;
+        if event.flags & 3 != 3 || !(0..=1).contains(&event.buffer_index) {
+            return Err(AsioPresentationError::Unavailable);
+        }
+        if event.flags & (16 | 32) != 0
+            || (event.flags & 4 != 0 && event.sample_rate != f64::from(self.sample_rate))
+        {
+            return Err(AsioPresentationError::RateChanged);
+        }
+        let receipt = host_clock
+            .sample()
+            .map_err(|_| AsioPresentationError::Unavailable)?;
+        let host = anchor.map_wrapped_ns(event.system_nanoseconds, receipt.normalized)?;
+        AsioPresentationObservation::from_render(
+            observation.render,
+            self.sample_rate,
+            host,
+            self.latencies.output_frames,
+            latency_error_ns,
+            output_origin,
+        )
     }
     /// Starts once. Failure releases the driver and drains callbacks immediately.
     pub fn start(&mut self) -> Result<(), AsioStreamError> {

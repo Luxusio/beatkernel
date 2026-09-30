@@ -106,9 +106,28 @@ Callers must establish that the driver uses this timer and that readings are
 within the finite horizon; modular arithmetic cannot identify arbitrary old
 readings from a different wrap epoch. Reacquire the relation before expiry.
 
-This acquisition primitive does not yet connect ASIO callback observations,
-output latency and rendered Mixer blocks to the live input/judge host. Those
-integration steps and native acceptance remain outstanding.
+`AsioStream::presentation_observation` now joins a coherent running callback
+observation to this finite relation, querying fresh shared QPC after reading
+the snapshot. Faults, missing validity, rate/source changes, expired relations
+and unavailable observations reject without a receipt-time fallback.
+`AsioPresentationObservation` associates the actual Mixer block start with the
+native switch host interval shifted by post-buffer-creation output latency.
+It rounds latency duration outwards and retains explicit caller-assessed
+latency error. Driver sample position never substitutes for Mixer frame identity;
+pre-start priming supplies no callback observation. The [SDK latency contract](https://github.com/audiosdk/asio/blob/main/common/asio.h)
+defines latency relative to the buffer selected for rendering at the switch.
+
+This produces bounded presentation observations, not an exact acoustic clock.
+Integration into the live input/judge host, calibration discipline and native
+acceptance remain outstanding.
+
+The rendered-block interval implementation has four additional portable
+fixtures for actual Mixer frame identity, fractional latency rounding,
+overflow and malformed observations. Rust 1.98.1 locked workspace all-target
+and target-only optional Windows Rust source checks passed, compiling these
+fixtures without execution. The Windows check leaves Cargo's SDK feature
+inactive and does not compile/link C++; it establishes no native SDK ABI or
+driver-clock acceptance. Independent reviews and QA remain deferred.
 
 Rust 1.98.1 locked workspace all-target and SDK-free Windows GNU platform/sample
 checks passed after acquisition was added. Four modular-relation fixtures cover
