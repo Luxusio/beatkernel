@@ -1,6 +1,6 @@
 //! Native CoreAudio HAL output with exact settings and guarded preallocated IOProc.
 use super::{clock::MachClock, ffi};
-use crate::audio::{telemetry::Telemetry, AudioStreamSnapshot, AudioStreamStatus, StreamCounters};
+use crate::audio::{AudioStreamSnapshot, AudioStreamStatus, StreamCounters, telemetry::Telemetry};
 use beatkernel::{
     audio::{AudioFormat, Mixer, RenderReport},
     time::{ClockDomainId, ClockPoint, Timestamp},
@@ -169,6 +169,7 @@ struct RenderState {
 struct Context {
     render: UnsafeCell<RenderState>,
     render_telemetry: Telemetry,
+    cadence: Box<crate::audio::cadence::Capture>,
     clock: MachClock,
     origin: Timestamp,
     output_domain: ClockDomainId,
@@ -201,6 +202,7 @@ pub struct CoreAudioStream {
     owner: PhantomData<Rc<()>>,
     final_snapshot: CoreAudioSnapshot,
     final_render_report: Option<RenderReport>,
+    final_cadence: Option<Box<crate::audio::cadence::Capture>>,
 }
 impl CoreAudioStream {
     /// Enumerates actual render devices; it never selects or opens the default.
@@ -320,6 +322,7 @@ impl CoreAudioStream {
                 render_version: 0,
             }),
             render_telemetry: Telemetry::new(),
+            cadence: Box::new(crate::audio::cadence::Capture::new()),
             clock,
             origin: config.origin(),
             output_domain: config.domain(),
@@ -349,6 +352,7 @@ impl CoreAudioStream {
             owner: PhantomData,
             final_snapshot: CoreAudioSnapshot::default(),
             final_render_report: None,
+            final_cadence: None,
         };
         let pointer =
             stream.context.as_deref().expect("context installed") as *const Context as *mut c_void;
@@ -444,8 +448,25 @@ impl CoreAudioStream {
         }
         self.final_snapshot = self.snapshot();
         self.final_render_report = self.last_render_report();
-        self.context.take();
+        let context = self
+            .context
+            .take()
+            .expect("context retained through callback drain");
+        self.final_cadence = Some(context.cadence);
         Ok(())
+    }
+    /// Direct pre-Mixer mach cadence, available after successful unregister/drain.
+    /// Summary allocation stays off callbacks; this is not presentation timing.
+    pub fn render_cadence(
+        &self,
+    ) -> Result<
+        Option<crate::audio::cadence::RenderCadence>,
+        crate::audio::cadence::RenderCadenceError,
+    > {
+        match self.final_cadence.as_deref() {
+            Some(capture) => capture.summary(self.applied.format.sample_rate()).map(Some),
+            None => Ok(None),
+        }
     }
     /// Last successful core render, retained after successful stop.
     /// This is execution history, not native delivery or current clock timing.
@@ -632,10 +653,21 @@ unsafe fn render_buffers(
     if samples > state.scratch.len() {
         return Err(());
     }
+    let render_start = context
+        .clock
+        .sample()
+        .ok()
+        .map(|sample| sample.normalized.timestamp);
     let report = state
         .mixer
         .render(&mut state.scratch[..samples])
         .map_err(|_| ())?;
+    match render_start {
+        Some(at) => context
+            .cadence
+            .record(at, report.start_frame, report.frames as u64),
+        None => context.cadence.mark_unavailable(),
+    }
     // Publish actual completed core rendering before native buffer delivery.
     // Callback guard grants exclusive access to the local version counter.
     context.render_telemetry.publish(

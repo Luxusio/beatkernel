@@ -2,7 +2,7 @@
 #[cfg(target_os = "macos")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     use beatkernel::{
-        audio::{command_queue, AudioFormat, AudioLimits, Mixer, MixerConfig, SampleBank},
+        audio::{AudioFormat, AudioLimits, Mixer, MixerConfig, SampleBank, command_queue},
         input::DeviceId,
         time::{ClockDomainId, Timestamp},
     };
@@ -27,7 +27,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let arguments: Vec<_> = std::env::args().collect();
     if arguments.len() != 5 && arguments.len() != 8 {
-        println!("usage: macos_native DEVICE_ID SAMPLE_RATE CHANNELS BUFFER_FRAMES [--raw separate|leading MAX_REPORT_BYTES]\nChoose an explicit enumerated audio device. Default HID scalar values; --raw explicitly selects timestamped native reports and declared ID layout.");
+        println!(
+            "usage: macos_native DEVICE_ID SAMPLE_RATE CHANNELS BUFFER_FRAMES [--raw separate|leading MAX_REPORT_BYTES]\nChoose an explicit enumerated audio device. Default HID scalar values; --raw explicitly selects timestamped native reports and declared ID layout."
+        );
         return Ok(());
     }
     let raw_options = if arguments.len() == 8 {
@@ -100,9 +102,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let stop = audio.stop();
     let close = input.close();
+    println!(
+        "stopped_render_cadence={:?}; actual pre-Mixer mach intervals, not native presentation or acoustic jitter",
+        audio.render_cadence()
+    );
     match audio.last_render_report() {
-        Some(report) => println!("last successful Mixer render report={report:?}; core execution distinct from native buffer delivery/presentation and physical sound"),
-        None => println!("last successful Mixer render report unavailable; no zero observation substituted"),
+        Some(report) => println!(
+            "last successful Mixer render report={report:?}; core execution distinct from native buffer delivery/presentation and physical sound"
+        ),
+        None => println!(
+            "last successful Mixer render report unavailable; no zero observation substituted"
+        ),
     }
     if let Err(error) = &stop {
         eprintln!("CoreAudio stop error: {error}");
