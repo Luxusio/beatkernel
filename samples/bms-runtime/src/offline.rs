@@ -135,7 +135,7 @@ fn accept(report: RuntimeReport, summary: &mut OfflineReport) -> Result<(), Offl
     }
     Ok(())
 }
-fn render_block(
+pub(crate) fn render_block(
     mixer: &mut Mixer,
     pcm: &mut [f32],
     bytes: &mut [u8],

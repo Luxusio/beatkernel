@@ -1,0 +1,45 @@
+# Recorded BMS audio reconstruction
+
+The separate BMS runtime validates a captured log against the matching chart and
+stored profile through its replay loader, then plans sound commands from the
+actual JudgeEngine results. Live runtime and replay use the same generic
+SoundBinding hit-stage selection. Misses remain silent; normal prepared BMS
+bindings sound Instant and HoldHead, while any additional stage needs an explicit
+binding. The logical judge runs the stored operations, not synthetic autoplay.
+
+Judge results carry effective time. Audio removes the stored profile offset once
+to recover operation song time, then maps output origin + explicit nonnegative
+preroll + song time with checked wide arithmetic. A command before output origin
+or outside representable time fails rather than clamps. Background Play commands
+are admitted only at/before the last recorded song time; empty logs have no BGM.
+Equal-time BGM commands preserve prepared order and precede hit commands, whose
+order follows actual judge results and sound bindings. Finite gains and referenced
+assets are required. The plan exposes origin metadata, actual judge events and
+final logical hash separately from audio execution.
+
+The offline renderer uses the actual core Mixer and shared PCM block writer.
+Timestamp-to-frame selection rounds upward with integer arithmetic. It admits
+only one target-frame group before rendering toward the next group; total notes
+are independent of simultaneous queue and voice capacity. Capacity failures
+return exact failed commands, and successful RenderReports remain separate from
+admission. Blocks, bytes, frame extent and timestamp extent are checked. Frames at
+or beyond the requested output extent are excluded. Zero frames validate the
+recording but admit/write nothing. Logical counts/hash describe the full recording,
+independently of output cutoff. Sample tails may continue beyond the recording's
+last operation, but no later BGM or gameplay commands are invented.
+
+`render_replay_bms` loads bounded WAV assets with an explicit sample rate/channel
+layout, reads bounded replay data and writes newly created raw interleaved f32le.
+Existing output paths are never overwritten. Render/write failure may leave a
+partial newly created file. The renderer does not flush; the CLI flushes its sink.
+Preroll defaults to three seconds and can be set to any nonnegative i64 duration.
+Replay, block, command and voice limits are explicit.
+
+Known ceiling: capture records logical judge operations, not original native
+output scheduling points, PCM or failed audio admissions. This reconstruction
+therefore reproduces selected song-time sounds, not original physical timing or
+past dropped audio. BGM and PCM use the supplied prepared audio setup; the logical
+judge fingerprint does not authenticate them. Native audio replay remains pending.
+Assets are preloaded and
+the finite command plan is allocated off-thread; source/log limits do not bound
+all process memory. Tests, examples, native execution, reviews and QA stay deferred.
