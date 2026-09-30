@@ -28,6 +28,11 @@ or Windows device types.
   the API provides them; report unavailable constraints honestly. Do not limit
   callers to fixed presets. Validate rate/channel/container/valid-bit/channel-mask
   combinations and overflow before passing format memory to the OS.
+- Hardware-engine buffer duration limits are distinct from processing period
+  limits. Preserve both and identify the wake policy used for the buffer query.
+  The portable backend period query uses event-driven bounds; opening a timer
+  stream queries its timer-specific bounds. Unsupported optional queries leave
+  those fields unknown, while device invalidation remains an error.
 - Preserve an explicitly requested zero speaker mask as direct output, rather
   than rejecting it or replacing it with an inferred speaker layout. Device
   support must still be probed. Microsoft's [extensible format contract](https://learn.microsoft.com/en-gb/windows-hardware/drivers/ddi/ksmedia/ns-ksmedia-waveformatextensible)
