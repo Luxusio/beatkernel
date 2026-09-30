@@ -51,7 +51,8 @@ backends remain subsequent phases.
 
 ## Build and verify
 
-Rust 1.83 or newer is required, with `rustfmt` and `clippy` installed. Native
+Rust 1.98.1 or newer is required. `rust-toolchain.toml` pins Rust 1.98.1 with
+`rustfmt` and `clippy` for reproducible development. Native
 Linux builds also require a C linker and libc development files (for example,
 the `gcc` and `libc6-dev` packages on Ubuntu).
 
@@ -70,8 +71,8 @@ cargo run -p beatkernel-platform --example windows_input_inspector -- --fixture
 cargo doc --workspace --no-deps
 ```
 
-The CI workflow declares Linux, Windows and macOS checks and Linux/Windows Rust
-1.83 checks. Local and isolated-guest verification establish only their observed
+The CI workflow declares Linux, Windows and macOS checks using Rust 1.98.1.
+Local and isolated-guest verification establish only their observed
 results; the declared CI matrix has not been executed in this workspace.
 
 Phase 4 packet/state tests pass in debug and release on Linux, and the new public
