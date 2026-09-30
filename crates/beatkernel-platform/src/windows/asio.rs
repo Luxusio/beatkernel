@@ -7,9 +7,13 @@
 // This module owns the native Win32 registry FFI boundary.
 #![allow(unsafe_code)]
 
-/// Optional real SDK driver control; excludes buffer creation and streaming.
+/// Optional real SDK driver control, consumed when preparing an output stream.
 #[cfg(feature = "asio-sdk")]
 pub mod control;
+
+/// Optional owned SDK output buffers and actual Mixer callbacks.
+#[cfg(feature = "asio-sdk")]
+pub mod stream;
 
 use std::{error::Error, fmt, ptr};
 use windows_sys::Win32::{

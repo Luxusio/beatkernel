@@ -1,8 +1,8 @@
-//! Caller-supplied SDK IASIO control bridge; no buffer creation or audio streaming.
+//! Caller-supplied SDK IASIO control, consumed by the optional output stream.
 //!
 //! Enabled only by `asio-sdk` on Windows MSVC targets. The handle owns one COM
-//! STA initialization and one IASIO reference on the opening thread. No callbacks
-//! are installed; rate changes and the driver's GUI require explicit calls.
+//! STA initialization and one IASIO reference on the opening thread. Control
+//! alone installs no callbacks; rate changes and GUI require explicit calls.
 #![allow(unsafe_code)]
 
 use super::{AsioDriverRegistration, AsioEnumerationLimits, AsioRegistryError, AsioRegistryView};
@@ -146,7 +146,7 @@ impl AsioChannelInfo {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct Status {
+pub(super) struct Status {
     domain: i32,
     code: i32,
 }
@@ -179,7 +179,7 @@ unsafe extern "C" {
         -> Status;
     fn bk_asio_control_panel(handle: *mut c_void) -> Status;
 }
-fn check(status: Status, operation: &'static str) -> Result<(), AsioControlError> {
+pub(super) fn check(status: Status, operation: &'static str) -> Result<(), AsioControlError> {
     if status.domain == 0 && status.code == 0 {
         return Ok(());
     }
@@ -260,7 +260,7 @@ impl AsioControl {
             _owner_thread: PhantomData,
         })
     }
-    fn raw(&self) -> *mut c_void {
+    pub(super) fn raw(&self) -> *mut c_void {
         self.handle.expect("live owning control").as_ptr()
     }
     /// Immutable canonical registration used for this exact open.
