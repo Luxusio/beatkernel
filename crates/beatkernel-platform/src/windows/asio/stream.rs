@@ -1,14 +1,20 @@
 //! Owning-thread ASIO output with preallocated Mixer rendering and raw diagnostics.
 #![allow(unsafe_code)]
 
-use super::control::{check, AsioControl, AsioControlError, Status};
+use super::control::{check, AsioControl, AsioControlError, AsioLatencies, Status};
 use crate::audio::{
     asio::{AsioBlockRenderer, AsioBufferRequest, AsioRenderError},
     telemetry::Telemetry,
     AudioStreamSnapshot, AudioStreamStatus, StreamCounters,
 };
 use beatkernel::audio::{Mixer, RenderReport};
-use std::{cell::UnsafeCell, error::Error, ffi::c_void, fmt, ptr};
+use std::{
+    cell::UnsafeCell,
+    error::Error,
+    ffi::c_void,
+    fmt, ptr,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 /// Notifications and failures recorded by the native callbacks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -84,7 +90,17 @@ pub enum AsioStreamPhase {
     Failed,
 }
 
-/// Off-thread software progress plus a separate raw native observation.
+/// One successful callback buffer write, pairing its Mixer block and native event.
+/// Native flags retain their validity meaning; this is not a normalized host clock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AsioBufferObservation {
+    /// Copied raw event for exactly this rendering invocation.
+    pub event: AsioCallbackEvent,
+    /// Actual successful Mixer render used for this native buffer write.
+    pub render: RenderReport,
+}
+
+/// Off-thread software progress plus raw native observations.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AsioStreamSnapshot {
     /// Lifecycle observed independently of software telemetry publication.
@@ -97,6 +113,9 @@ pub struct AsioStreamSnapshot {
     pub buffer_fills: u64,
     /// Last successful core render, even when subsequent native conversion failed.
     pub render: Option<RenderReport>,
+    /// Successful callback write coherent with software counters/report.
+    /// Absent during B priming, failed delivery or unavailable publication.
+    pub buffer_observation: Option<AsioBufferObservation>,
     /// Native observations, cached immediately before close once stopped.
     pub native: AsioDiagnostics,
 }
@@ -213,6 +232,8 @@ struct RenderState {
 struct RenderContext {
     state: UnsafeCell<RenderState>,
     telemetry: Telemetry,
+    publication: AtomicU64,
+    event_values: [AtomicU64; 6],
 }
 // SAFETY: the native bridge's acquire/release nonblocking renderer guard permits
 // at most one callback to access state. Owner accesses it only before native start
@@ -224,7 +245,11 @@ unsafe impl Sync for RenderContext {}
 impl RenderContext {
     // SAFETY required by callers: exclusive pre-start owner or admitted serialized
     // native callback; selected native regions live and are disjoint after prepare.
-    unsafe fn fill(&self, index: i32) -> Result<(), AsioRenderError> {
+    unsafe fn fill(
+        &self,
+        index: i32,
+        event: Option<AsioCallbackEvent>,
+    ) -> Result<(), AsioRenderError> {
         if !matches!(index, 0 | 1) {
             return Err(AsioRenderError::InvalidBuffers);
         }
@@ -238,6 +263,10 @@ impl RenderContext {
             .buffer_fills
             .checked_add(1)
             .ok_or(AsioRenderError::Capacity)?;
+        let next_version = state
+            .version
+            .checked_add(2)
+            .ok_or(AsioRenderError::Capacity)?;
         let count = state.renderer.encodings().len();
         let mut outputs: [&mut [u8]; 32] = std::array::from_fn(|_| &mut [] as &mut [u8]);
         for (output, row) in outputs[..count].iter_mut().zip(&state.rows) {
@@ -248,6 +277,7 @@ impl RenderContext {
             // their storage until close; renderer admission prevents concurrent writes.
             *output = unsafe { std::slice::from_raw_parts_mut(buffer.cast::<u8>(), bytes) };
         }
+        self.publication.store(next_version - 1, Ordering::SeqCst);
         let result = state.renderer.render(&mut outputs[..count]);
         if result.is_ok() {
             state.prepared_frames = next_frames;
@@ -281,16 +311,78 @@ impl RenderContext {
             },
             &mut state.version,
         );
+        let event = event.filter(|_| result.is_ok());
+        let values = event.map_or([0; 6], |event| {
+            [
+                1,
+                u64::from(event.buffer_index as u32)
+                    | (u64::from(event.direct_process as u32) << 32),
+                u64::from(event.flags),
+                event.sample_position,
+                event.system_nanoseconds,
+                event.sample_rate.to_bits(),
+            ]
+        });
+        for (destination, value) in self.event_values.iter().zip(values) {
+            destination.store(value, Ordering::SeqCst);
+        }
+        self.publication.store(next_version, Ordering::SeqCst);
         result.map(|_| ())
     }
+    fn read(&self) -> (AudioStreamSnapshot, Option<AsioBufferObservation>) {
+        for _ in 0..3 {
+            let before = self.publication.load(Ordering::SeqCst);
+            if before == 0 || before & 1 != 0 {
+                continue;
+            }
+            let software = self.telemetry.read();
+            let values: [u64; 6] =
+                std::array::from_fn(|index| self.event_values[index].load(Ordering::SeqCst));
+            if self.publication.load(Ordering::SeqCst) == before && software.telemetry_available {
+                let observation = if values[0] == 1 {
+                    software.render.map(|render| AsioBufferObservation {
+                        render,
+                        event: AsioCallbackEvent {
+                            buffer_index: values[1] as u32 as i32,
+                            direct_process: (values[1] >> 32) as u32 as i32,
+                            flags: values[2] as u32,
+                            sample_position: values[3],
+                            system_nanoseconds: values[4],
+                            sample_rate: f64::from_bits(values[5]),
+                        },
+                    })
+                } else {
+                    None
+                };
+                return (software, observation);
+            }
+        }
+        (
+            AudioStreamSnapshot {
+                telemetry_available: false,
+                status: self.telemetry.read().status,
+                counters: StreamCounters::default(),
+                clock: None,
+                render: None,
+            },
+            None,
+        )
+    }
 }
-unsafe extern "C" fn render(context: *mut c_void, index: i32, _: *const AsioCallbackEvent) -> i32 {
+unsafe extern "C" fn render(
+    context: *mut c_void,
+    index: i32,
+    event: *const AsioCallbackEvent,
+) -> i32 {
     if !matches!(index, 0 | 1) {
         return 1;
     }
     // SAFETY: stable boxed context passed to prepare outlives native admission,
     // serialized by the C++ renderer guard. Close drains before freeing the box.
-    let result = unsafe { (&*context.cast::<RenderContext>()).fill(index) };
+    // SAFETY: C++ passes an initialized event with callback duration lifetime.
+    // Copy immediately; no borrowed native pointer enters retained state.
+    let event = unsafe { event.as_ref() }.copied();
+    let result = unsafe { (&*context.cast::<RenderContext>()).fill(index, event) };
     match result {
         Ok(()) => 0,
         Err(AsioRenderError::Capacity) => 3,
@@ -307,6 +399,7 @@ pub struct AsioStream {
     context: Box<RenderContext>,
     phase: AsioStreamPhase,
     native: AsioDiagnostics,
+    latencies: AsioLatencies,
 }
 impl AsioStream {
     /// Consumes exact driver/Mixer/channel choices, prepares buffers and primes B.
@@ -369,9 +462,15 @@ impl AsioStream {
                     version: 0,
                 }),
                 telemetry: Telemetry::new(),
+                publication: AtomicU64::new(0),
+                event_values: std::array::from_fn(|_| AtomicU64::new(0)),
             }),
             phase: AsioStreamPhase::Ready,
             native: AsioDiagnostics::default(),
+            latencies: AsioLatencies {
+                input_frames: 0,
+                output_frames: 0,
+            },
         };
         let context = ptr::from_ref(stream.context.as_ref())
             .cast_mut()
@@ -394,9 +493,15 @@ impl AsioStream {
             },
             "createBuffers",
         )?;
+        stream.latencies = stream.control.as_mut().unwrap().latencies()?;
         // SAFETY: native prepare validated all regions; start has not enabled render.
-        unsafe { stream.context.fill(1) }?;
+        unsafe { stream.context.fill(1, None) }?;
         Ok(stream)
+    }
+    /// Driver-reported latency after buffer creation; changes require reopening.
+    /// Values are sample frames, not a host-clock relation or acoustic guarantee.
+    pub const fn latencies(&self) -> AsioLatencies {
+        self.latencies
     }
     /// Starts once. Failure releases the driver and drains callbacks immediately.
     pub fn start(&mut self) -> Result<(), AsioStreamError> {
@@ -468,7 +573,7 @@ impl AsioStream {
     /// from rendering, on the control owner thread. Native faults set Failed phase.
     pub fn snapshot(&mut self) -> Result<AsioStreamSnapshot, AsioStreamError> {
         let native = self.diagnostics()?;
-        let software = self.context.telemetry.read();
+        let (software, buffer_observation) = self.context.read();
         let phase = if native.faults.requires_reopen()
             || matches!(software.status, AudioStreamStatus::Failed { .. })
         {
@@ -482,6 +587,7 @@ impl AsioStream {
             prepared_frames: software.counters.submitted_frames,
             buffer_fills: software.counters.buffer_fills,
             render: software.render,
+            buffer_observation,
             native,
         })
     }
@@ -515,3 +621,6 @@ impl Drop for AsioStream {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
