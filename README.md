@@ -456,10 +456,17 @@ cargo run -p beatkernel --example replay -- --save new-demo.bkr
 cargo run -p beatkernel --example replay_file -- new-demo.bkr new-copy.bkr
 cargo run -p beatkernel --example section_restart
 cargo run -p beatkernel --example generalization
+cargo run -p beatkernel --example contact_rebind
 cargo run --release -p beatkernel --example runtime_bench -- --help
 cargo run -p beatkernel-platform --example linux_native -- --help
 cargo run -p beatkernel-platform --example device_adapter
 ```
+
+The [contact policy example](doc/kernel/REQ__generalization.md) uses existing
+custom evaluator hooks for fixed-contact sustain and same-surface reacquisition
+after normal release within a configured grace. It preserves device/contact
+identity in snapshots and uses the same judge during replay. Its fixtures are
+authored and compiled; execution remains deferred.
 
 See [Linux native requirements](doc/platform/REQ__linux-native.md) for explicit
 nodes/endpoints and supported settings. Exact ALSA sizing is the default;

@@ -50,6 +50,19 @@ currently includes WASAPI, ALSA and CoreAudio; it does not establish support for
 every native output API or every installed device configuration. ASIO remains a
 required optional backend with an unresolved implementation/licensing dependency.
 
+## Source continuation on 2026-10-01
+
+The game-owned `contact_rebind` example and generalization fixtures now cover
+fixed-contact sustain versus same-device/surface reacquisition after normal
+release with an inclusive grace. They use existing custom evaluator and
+snapshot/replay hooks. This fills the authored custom lifecycle/rebind fixture
+gap identified above; built-in Tracking still keeps its original contact.
+See the [generalization contract](REQ__generalization.md) for its region,
+ownership, cancellation and deadline limits. Fixture execution is still pending.
+Rust 1.98.1 `cargo check --workspace --all-targets --locked` passed after this
+continuation, compiling the example and twelve new fixture tests without running
+them. Native platform source was unchanged; cross-target checks were not repeated.
+
 ## Build evidence and completion boundary
 
 After the native replay slice, Rust 1.98.1 locked all-target checks passed for the

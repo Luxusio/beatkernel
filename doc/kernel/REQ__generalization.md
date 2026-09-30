@@ -24,3 +24,35 @@ Snapshots capture all these states and canonical bytes. Unsupported custom
 evaluators still fail explicitly. Configuration validation runs before engine
 construction; callbacks never parse game names or native key codes. Fixtures
 and compile checks accompany implementation; formal verification is deferred.
+
+## Game-owned contact reacquisition fixture
+
+The `contact_rebind` core example supplies two custom sustain policies through
+the existing evaluator traits: `Locked` and `AfterRelease { grace }`. This is a
+unit-square touch region fixture, separate from the built-in Tracking path.
+It adds no backend lifecycle synthesis or new kernel rebind API.
+
+A fresh Down within the profile head window acquires device, physical surface,
+logical destination and contact. Move cannot acquire or transfer ownership, and
+another Down cannot steal an active contact. A normal early Up fails the locked
+policy; the other policy retains the original device/surface/destination while
+waiting for a new Down with the same or a different contact ID. Reacquisition is
+inclusive at release time plus positive grace. Another device, surface or
+logical destination cannot rebind. Wrong-contact Move/Up/Cancel is ignored.
+An acquired contact's Cancel or invalid/out-of-region position fails explicitly;
+there is no contact to cancel while detached.
+
+Owner Up in the tail window produces a single `Custom(0)` result using the
+existing grading policy; releasing earlier may enter the configured grace.
+Advancing alone cannot complete a sustain as a hit. Head, detached-grace and tail
+deadlines expire strictly after their inclusive limit using wide arithmetic.
+Detached grace expiry and missing tail release produce TailTimeout. This fixture
+does not establish continuous path coverage between observations.
+
+The custom snapshot schema includes policy/grace, target times, lifecycle,
+device/surface/logical owner, acquired contact and detached release time. Existing
+JudgeEngine snapshots and ReplaySession restoration retain those actual states.
+The generalization test source covers lifecycle boundaries, identity isolation,
+cancellation, region validation, snapshot differences and replay/seek parity.
+The example and fixtures are compiled only; execution and independent review
+remain deferred.
