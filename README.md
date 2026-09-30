@@ -533,6 +533,7 @@ cargo run -p beatkernel --example contact_rebind
 cargo run --release -p beatkernel --example runtime_bench -- --help
 cargo run -p beatkernel-platform --example linux_native -- --help
 cargo run --release -p beatkernel-platform --example linux_input_cadence -- --help
+cargo run --release -p beatkernel-platform --example macos_input_cadence -- --help
 cargo run -p beatkernel-platform --example device_adapter
 ```
 
@@ -546,6 +547,12 @@ The [Linux cadence tool](doc/platform/REQ__linux-input-cadence.md) selects one
 native keyboard signal or hidraw report ID and an explicit nominal period. It
 reports retained interval deviations, delivery age, provenance and native counters
 without per-event printing; native execution remains deferred.
+The [IOHID cadence tool](doc/platform/REQ__macos-input-cadence.md) provides the
+same observers for an explicit registry identity, element cookie and scalar value,
+preserving original mach timestamps.
+The [Windows inspector cadence mode](doc/platform/REQ__windows-input-cadence.md)
+uses `--cadence DEVICE_ID HID_KEY_USAGE down|up|repeat NOMINAL_NS` to summarize
+selected keyboard QPC receipt intervals; these are acquisition receipt times.
 
 See [Linux native requirements](doc/platform/REQ__linux-native.md) for explicit
 nodes/endpoints and supported settings. Exact ALSA sizing is the default;

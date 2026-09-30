@@ -82,5 +82,15 @@ fresh same-domain receipt points feed delivery age. It retains finite summaries,
 source metadata and native counters, stops on loss/order discontinuity and prints
 after acquisition closes. Kernel evdev timing and userspace hidraw receipt timing
 are labeled separately. This fills native acquisition-to-cadence source wiring;
-native execution, measured results and other platform cadence tooling remain
-outstanding.
+native execution and measured results remain outstanding.
+
+[Windows Raw Input cadence](../platform/REQ__windows-input-cadence.md) now selects
+an explicit keyboard session device/usage/state with a 4096-entry ring. It observes
+actual QPC receipt intervals and separately samples receipt-to-inspector age.
+[macOS IOHID cadence](../platform/REQ__macos-input-cadence.md) selects a registry
+identity, element cookie, HID usage and exact native scalar value with 65536-entry
+rings. It observes original mach event timestamps through the shared host mapping.
+Both stop on order/time discontinuities and retain first/last provenance; native
+errors/removal stop the segment and final summaries follow cleanup. Windows
+receipt intervals and IOHID event intervals are different measurement boundaries.
+These compositions add source instrumentation, not executed results.
