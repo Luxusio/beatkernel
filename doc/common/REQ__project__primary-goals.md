@@ -60,6 +60,10 @@ Native BMS composition uses shared [rolling BGM admission](../kernel/REQ__bms-bg
 instead of imposing a whole-chart BGM queue limit. A finite lookahead and
 outstanding-command credit bound keep original scheduled times; a missed cue
 requires explicit restart rather than retimestamping. Assets remain preloaded.
+Native BMS roots also expose [input delivery age](../kernel/REQ__telemetry.md)
+using preserved event points and fresh same-domain receipt points, with backend
+timestamp meanings labeled separately. No physical press-to-sound timing is
+inferred from those software observations.
 [Phase 15's conditional SDK](../kernel/REQ__sdk-status.md) is not activated without
 a concrete C/C# host requirement. The portable runtime benchmark exists but
 has not been executed. ASIO licensing/implementation, deferred verification and

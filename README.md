@@ -424,6 +424,11 @@ report decoder and actual device-aware bindings.
 [Interval jitter telemetry](doc/kernel/REQ__telemetry.md) compares supplied clock
 pairs with an explicit nominal period, separately from processing percentiles.
 The offline benchmark's cadence observations are generated synthetic data.
+The same contract provides bounded input delivery-age telemetry from explicit
+same-domain event/receipt points. Native BMS diagnostics distinguish Windows
+QPC receipt-to-runtime age from Linux kernel and macOS IOHID event-to-runtime
+age. These retained percentiles remain separate from CPU processing and physical
+input-to-sound latency.
 
 macOS has explicit IOHID device acquisition and CoreAudio packed-float32 output
 with requested/applied rate and frame sizes. See the
