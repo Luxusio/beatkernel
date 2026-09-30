@@ -362,7 +362,8 @@ Actual native shared/exclusive playback and independent audio review/QA remain
 pending. The available Windows VM previously had no render endpoints. Windows
 cross-compilation proves source compatibility, not playback. ASIO implementation
 is pending and WASAPI reports `BackendUnavailable(Asio)` for such requests.
-Project-authored source stays MIT; builds incorporating the ASIO SDK follow
+Project-authored source and builds without ASIO are distributed under MIT,
+with applicable third-party notices retained. Builds incorporating the ASIO SDK follow
 [GPLv3 distribution and source-delivery conditions](doc/platform/REQ__asio-distribution.md).
 See the [core audio contract](doc/kernel/REQ__audio.md) and
 [Windows audio contract](doc/platform/REQ__windows-audio.md).

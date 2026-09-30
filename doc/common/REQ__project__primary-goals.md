@@ -1,6 +1,6 @@
 # BeatKernel primary goals
 
-BeatKernel is a low-latency, cross-platform Rust runtime for rhythm games. Project-authored source is distributed under the [MIT license](../../LICENSE); ASIO SDK combined builds follow the [GPLv3 distribution policy](../platform/REQ__asio-distribution.md).
+BeatKernel is a low-latency, cross-platform Rust runtime for rhythm games. Project-authored source and builds without ASIO are distributed under the [MIT license](../../LICENSE), preserving applicable third-party notices. ASIO SDK combined builds follow the [GPLv3 distribution policy](../platform/REQ__asio-distribution.md).
 
 ## Required behavior and boundaries
 
@@ -13,6 +13,21 @@ BeatKernel is a low-latency, cross-platform Rust runtime for rhythm games. Proje
 - Windows audio output must let the caller select and configure an available native backend and device explicitly. Phase 7 must provide WASAPI shared and exclusive streams, expose supported formats, sample rates, channel layouts, buffer periods and clock/underrun telemetry, and return a specific error when the requested mode or device is unavailable; it must not silently change modes. ASIO is a required optional backend target for compatible installed drivers. The user selected GPLv3 conditions for SDK-combined builds while project-authored source remains MIT; third-party SDK code retains its own licenses. Additional native output APIs can be added through the same platform boundary only with a concrete device/API contract and runtime evidence. The OS-independent mixer and scheduler retain their real-time callback restrictions.
 
 Windows' [stream-management contract](https://learn.microsoft.com/en-us/windows/win32/coreaudio/stream-management) distinguishes WASAPI shared and exclusive modes. Steinberg [publishes the ASIO SDK under GPLv3 or a separate proprietary agreement](https://github.com/audiosdk/asio/blob/main/LICENSE.txt). On 2026-10-01 the user selected its GPLv3 path: preserve project-authored MIT source and distribute ASIO-combined builds with GPLv3 notices and Corresponding Source. The [distribution contract](../platform/REQ__asio-distribution.md) replaces the earlier unresolved-license prerequisite.
+
+## Implementation continuation policy
+
+On 2026-10-01 the user instructed that a blocked development item must not stop
+other independently implementable work. Inspect dependencies and proceed with
+the next authorized, unblocked item first. Retain each blocked item with its
+specific reason and prerequisite for resumption, and revisit it when that
+prerequisite changes. Preserve the original full objective and pending acceptance
+requirements; deferral is not completion. Stop for a goal-wide blocker only when
+no meaningful independent work can proceed within the user's scope and current
+instructions. Do not add unrelated features to manufacture progress.
+
+This rule does not lift the existing verification deferral. Compile/format checks
+may still accompany implementation, while execution, independent reviews and
+final QA retain their documented sequencing.
 
 ## Current evidence and remaining work
 

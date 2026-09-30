@@ -6,6 +6,14 @@ under GPLv3 conditions. This selects the SDK's open-source licensing path and
 supersedes the previous unresolved-license prerequisite. It does not change the
 verification deferral or establish an implemented ASIO backend.
 
+The user clarified that builds without ASIO are distributed under MIT conditions.
+
+| Source or build | Project distribution conditions |
+| --- | --- |
+| Project-authored source | MIT |
+| Build without ASIO SDK incorporation | MIT, retaining applicable third-party license notices |
+| Build incorporating the ASIO SDK under GPLv3 | GPLv3 for the combined program, with Corresponding Source and retained component notices |
+
 ## Source licenses
 
 Root [LICENSE](../../LICENSE) and workspace package metadata stay MIT for
@@ -26,8 +34,9 @@ also preserves the licenses attached to individual portions.
 ## Combined build distribution
 
 ASIO SDK incorporation must be an explicit optional build choice, outside the
-core's OS-independent dependency boundary. Non-ASIO builds do not acquire GPLv3
-conditions merely because the ASIO option exists in the repository. An ASIO
+core's OS-independent dependency boundary. Non-ASIO builds are distributed under
+MIT conditions, with applicable third-party notices retained. They do not acquire
+GPLv3 conditions merely because the ASIO option exists in the repository. An ASIO
 combined build must be labeled and distributed under GPLv3 conditions, including
 its GPLv3 license text and retained MIT/third-party notices. The verbatim
 [GPLv3 text](licenses/GPL-3.0.txt) accompanies this policy; including that text
