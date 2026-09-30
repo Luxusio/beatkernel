@@ -11,6 +11,16 @@ once, closes registration before destroying its window, and joins audio before
 returning. Software processing percentiles and inferred native counters retain
 their distinct labels. Native execution remains deferred.
 
+Optional bounded WAV input and an explicit original-source cue use RestartPlan's
+applied frame position as song origin. Each requested repetition starts a fresh
+WASAPI client/Mixer/queue after the preceding stream stops and joins. Two accurate
+increasing native position/QPC observations anchor output frame zero in the host
+domain and preserve the observed inverse rate. Finite mapping validity is checked
+for each input/advance; unavailable calibration fails rather than assuming an
+origin. Closing the window cancels all remaining repetitions. This four-key
+synthetic chart example is composition source, not proof of native timing or a
+general file-format gameplay player. Details: ../platform/REQ__wasapi-presentation.md.
+
 The core runtime has one owner and runs outside the audio callback. It composes
 canonical physical events, explicit clock normalization, BindingMap, Transport,
 JudgeEngine and the bounded scalar audio command producer. The final app owns

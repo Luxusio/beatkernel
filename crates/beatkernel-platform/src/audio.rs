@@ -37,6 +37,7 @@ use std::fmt;
 
 mod convert;
 mod negotiation;
+pub mod presentation;
 #[cfg(any(target_os = "windows", test))]
 pub(crate) mod telemetry;
 
