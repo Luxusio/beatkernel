@@ -58,6 +58,22 @@ has not been executed. ASIO licensing/implementation, deferred verification and
 physical restart synchronization evidence remain outstanding. The full runtime
 Goal is not complete.
 
+Logical visual source now includes Polar and validated caller-defined projection,
+and reverse replay keysounds expose normal-head, reversed-sample and mute policies
+using dedicated output owners. The Windows runtime example connects original-WAV
+frame selection to an observed WASAPI position/QPC relation rather than assuming a
+wall-clock read marks presentation. See [presentation composition](../platform/REQ__wasapi-presentation.md)
+and [reverse playback](../kernel/REQ__reverse-playback.md). Native section timing,
+new fixtures and formal review remain unverified.
+
+The portable [device adapter registry](../platform/REQ__device-adapters.md)
+owns per-device adapter instances, explicit connected/retired identities and
+bounded raw-report fanout. Equal acquisition metadata permits multiple reports
+from one native packet without losing source sequence. The separate
+[interval jitter collector](../kernel/REQ__telemetry.md) observes caller-supplied
+clock points against a declared nominal period; generated benchmark observations
+are labeled synthetic. Neither surface establishes native timing measurements.
+
 Git was initialized locally on 2026-09-29 after these files had been implemented. Initial commits record the existing implementation and its documentation, rather than reconstructing historical development commits.
 
 Phase 7 audio is under implementation: [core audio](../kernel/REQ__audio.md)

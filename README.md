@@ -402,12 +402,22 @@ cargo run -p beatkernel --example section_restart
 cargo run -p beatkernel --example generalization
 cargo run --release -p beatkernel --example runtime_bench -- --help
 cargo run -p beatkernel-platform --example linux_native -- --help
+cargo run -p beatkernel-platform --example device_adapter
 ```
 
 See [Linux native requirements](doc/platform/REQ__linux-native.md) for explicit
 nodes/endpoints and supported settings. Exact ALSA sizing is the default;
 optional rounding reports applied period/buffer sizes. Evdev event loss requires
 an explicit queried-state acknowledgment before gameplay resumes.
+
+The portable [device adapter registry](doc/platform/REQ__device-adapters.md)
+connects caller-owned native descriptors and raw HID reports to bounded canonical
+fanout. Adapters own per-device state and exact acquisition metadata is retained;
+native APIs and game controls remain separate. Its example uses a synthetic vendor
+report decoder and actual device-aware bindings.
+[Interval jitter telemetry](doc/kernel/REQ__telemetry.md) compares supplied clock
+pairs with an explicit nominal period, separately from processing percentiles.
+The offline benchmark's cadence observations are generated synthetic data.
 
 macOS has explicit IOHID device acquisition and CoreAudio packed-float32 output
 with requested/applied rate and frame sizes. See the

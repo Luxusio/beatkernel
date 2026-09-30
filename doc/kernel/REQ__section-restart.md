@@ -44,3 +44,10 @@ and device buffer reset remain explicit host responsibilities.
 observations with a finite validity interval and estimated/unknown uncertainty.
 The section example uses labeled synthetic observations to demonstrate the
 composition only; it does not collect real device presentation timestamps.
+
+The Windows `windows_runtime` example composes a real fresh WASAPI stream with
+original-WAV cue selection. Its observed position/QPC helper anchors the applied
+sample position and enforces finite calibration validity, as described in
+../platform/REQ__wasapi-presentation.md. It creates a synthetic chart at that
+origin rather than restoring an imported recording. This source-level native
+composition does not replace pending native timing and restart measurements.
