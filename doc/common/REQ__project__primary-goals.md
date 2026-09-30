@@ -83,6 +83,15 @@ while native linking, permissions and device reception remain unverified. The
 mutation and metamorphic fixtures; creation does not establish fuzz execution
 or replace pending broader fuzzing/QA evidence.
 
+The final BMS sample additionally has [native Windows composition](../kernel/REQ__bms-native.md)
+with real keyboard input, actual BMS rules/timing/WAV assets and WASAPI. Its
+explicit startup preroll shifts automatic BGM and the output/song origin together;
+compiled targets and input offset stay separate. The shared
+[preparation library](../kernel/REQ__bms-preparation.md) has a WAV default and an
+injected off-thread decoder boundary. No additional codec support is claimed by
+that boundary. Portable workspace and Windows-target compile checks cover the
+source; actual playback and long-run device-clock stability remain unverified.
+
 Git was initialized locally on 2026-09-29 after these files had been implemented. Initial commits record the existing implementation and its documentation, rather than reconstructing historical development commits.
 
 Phase 7 audio is under implementation: [core audio](../kernel/REQ__audio.md)

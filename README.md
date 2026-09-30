@@ -445,3 +445,16 @@ encoding. It does not open a sound device. Both commands require actual files:
 cargo run -p beatkernel-bms --example load_bms -- chart.bms
 cargo run -p beatkernel-bms-runtime -- chart.bms new-output.f32le 30 48000
 ```
+
+The separate [Windows BMS binary](doc/kernel/REQ__bms-native.md) uses actual Raw
+Input, loaded note/BGM timing and WASAPI shared/exclusive output. It requires an
+explicit endpoint and HID-key-to-lane bindings and exposes requested buffer/period
+sizes and profile offsets. Its source has not established native playback.
+[Shared preparation](doc/kernel/REQ__bms-preparation.md) provides bounded asset
+loading with a WAV default and an injected off-thread decoder boundary; compressed
+formats are not implemented by that default. Explicit mono-to-stereo conversion
+is available without changing source frame positions.
+
+```sh
+cargo run -p beatkernel-bms-runtime --bin windows_bms -- --help
+```
