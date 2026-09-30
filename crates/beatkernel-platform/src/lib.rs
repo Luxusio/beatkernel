@@ -4,12 +4,15 @@
 //! deterministic fixtures. Native input/audio/clock boundaries are target-gated.
 //! Backends depend on the OS-independent `beatkernel` types; the core never
 //! depends on this crate. Only the target OS native module is compiled.
+//! [`input`] owns portable device-adapter registration and raw report routing;
+//! native acquisition remains a separate owner supplied by the final host.
 
 #![deny(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
 pub mod audio;
+pub mod input;
 pub mod keyboard;
 pub mod raw_input;
 
