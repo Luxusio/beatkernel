@@ -68,6 +68,9 @@ cargo test --workspace --release
 cargo run -p beatkernel --example transport
 cargo run -p beatkernel --example binding
 cargo run -p beatkernel --example chart
+cargo run -p beatkernel --example audio -- --fixture
+cargo run -p beatkernel-platform --example windows_audio -- --help
+cargo run -p beatkernel-platform --example windows_audio -- --fixture
 cargo run -p beatkernel --example judge -- --help
 cargo run -p beatkernel --example judge -- --fixture
 cargo run -p beatkernel-platform --example input_inspector
@@ -302,3 +305,49 @@ to logical controls 10 and 20, with source 103 retaining touch data on channel 3
 See [the binding requirements](doc/kernel/REQ__binding.md).
 Windows native input passed independent review and CLI QA. The full runtime
 remains in development.
+
+## Audio scheduling and Windows output
+
+`beatkernel::audio` preloads PCM into a bounded `SampleBank`, schedules scalar
+commands through a fixed-capacity SPSC queue and mixes into caller-provided
+buffers without callback allocation or asset release. Play/Stop offsets use one
+absolute frame grid. Rates preserve exact sample phase across buffer partitions;
+Seek clears active voices while retaining future output-scheduled commands.
+Core scheduling time and host/device clock domains remain explicit.
+
+The `audio` example checks literal PCM mixing, Play/Stop offsets and partition
+invariance. The platform `windows_audio --fixture` checks scheduled PCM and
+PCM16 byte packing on every host. These fixtures are synthetic.
+
+On Windows, use `windows_audio --list` to obtain an exact endpoint ID. Probe and
+play require `--device ID --mode shared|exclusive`. With no format flags they
+use the queried mix format; explicit format flags override that reported base.
+`--help` lists arbitrary rate/channel/encoding/valid-bit/layout requests,
+buffer/period frame or nanosecond sizes, optional supported rounding, engine or
+legacy shared operation, event or shared timer wake, and MMCSS priority/off.
+Unsupported formats and size suggestions never silently replace the request.
+
+```sh
+cargo run -p beatkernel-platform --example windows_audio -- --list
+cargo run -p beatkernel-platform --example windows_audio -- --probe --device "ID" --mode shared
+cargo run -p beatkernel-platform --example windows_audio -- --play --device "ID" --mode shared --seconds 2
+cargo run -p beatkernel-platform --example windows_audio -- --play --device "ID" --mode exclusive --buffer frames:480 --period frames:480 --allow-rounding --seconds 2
+```
+
+Use a format the selected endpoint actually supports; the queried shared mix
+format is not a promise of exclusive support. Shared engine/event buffering is
+native-managed. To request independent legacy shared buffer sizing, explicitly
+choose `--shared-period default --wake timer --poll-ms N --buffer frames:N`.
+Exact sizing is the default. Probe buffer bounds are labeled as event queries;
+timer playback queries its selected wake policy internally. Playback is finite
+and bounded to 60 seconds, with a 4 MiB example tone preload limit. The CLI
+reports requested/applied settings, submitted frames, raw device clock and
+inferred metrics outside buffer fill, and requires activity beyond prefill,
+clock progression and joined stop before reporting success.
+
+Actual native shared/exclusive playback and independent audio review/QA remain
+pending. The available Windows VM previously had no render endpoints. Windows
+cross-compilation proves source compatibility, not playback. ASIO currently
+returns an explicit unresolved-license error; native Linux/macOS audio remains
+later work. See the [core audio contract](doc/kernel/REQ__audio.md) and
+[Windows audio contract](doc/platform/REQ__windows-audio.md).
