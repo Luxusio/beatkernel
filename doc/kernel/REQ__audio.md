@@ -61,6 +61,27 @@ native playback has passed verification. Native device control belongs to
   or changing state. Partitioning the same output frames must preserve samples
   and command behavior, including at 44.1 kHz and nonzero origins.
 
+### Exact phase and boundary arithmetic
+
+Sample heads retain an integer frame and an exact rational fractional remainder.
+The increment is the reduced ratio of source sample rate times signed playback
+rate to output sample rate. Changing rate preserves the fractional head. Before
+changing any active voice, check that every required common denominator and
+scaled increment fits signed 128-bit arithmetic. If a sequence of incompatible
+denominators exceeds that representation, count an invalid rate and retain the
+previous rate and all heads. There is no rate magnitude preset; the extreme
+numerators and denominators accepted by `Rate` remain supported when this
+arithmetic is representable.
+
+A head is active in the half-open interval from zero through the asset's frame
+count. Interpolation holds the final sample when its upper neighbor would be
+outside the asset; crossing either boundary retires the voice. Rendering checks
+the unsigned 64-bit output frame cursor and block extent, independently from the
+signed nanosecond command range. It does not impose an additional nanosecond
+limit on output duration. Negative command frames remain ordered by their
+original target before late execution. A valid empty output buffer reports
+current state without consuming commands or advancing the cursor.
+
 ## Queue, backpressure and real-time boundary
 
 - One non-clonable producer and consumer share a fixed-capacity scalar SPSC
