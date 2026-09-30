@@ -1,12 +1,12 @@
-//! Immutable prefix capture; the ALSA worker is the only writer.
+//! Immutable render-start prefix capture, summarized only after writer drain.
 use beatkernel::{telemetry::IntervalJitterSummary, time::Timestamp};
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 const CAPACITY: usize = 4096;
 
-/// Joined worker's actual successful render-start scheduling observations.
+/// Drained native renderer's actual successful render-start observations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AlsaRenderCadence {
+pub struct RenderCadence {
     /// Successful renders observed, saturating at u64::MAX.
     pub successful_renders: u64,
     /// Captured prefix points, at most 4096; first point has no interval.
@@ -17,9 +17,11 @@ pub struct AlsaRenderCadence {
     pub intervals: Option<IntervalJitterSummary>,
 }
 
-/// Invalid captured chronology, arithmetic or bounded summary allocation.
+/// Unavailable timing, invalid chronology or bounded summary resource failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AlsaCadenceError {
+pub enum RenderCadenceError {
+    /// At least one successful render lacked a usable direct timing observation.
+    TimingUnavailable,
     /// Captured host time regressed.
     TimestampRegression,
     /// Render frame starts did not increase or blocks overlapped/were empty.
@@ -29,24 +31,25 @@ pub enum AlsaCadenceError {
     /// Summary could not reserve its bounded off-worker sorting storage.
     AllocationFailed,
 }
-impl std::fmt::Display for AlsaCadenceError {
+impl std::fmt::Display for RenderCadenceError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ALSA render cadence: {self:?}")
+        write!(f, "render cadence: {self:?}")
     }
 }
-impl std::error::Error for AlsaCadenceError {}
+impl std::error::Error for RenderCadenceError {}
 
 struct Point {
     time: AtomicI64,
     start: AtomicU64,
     frames: AtomicU64,
 }
-pub(super) struct Capture {
+pub(crate) struct Capture {
     points: [Point; CAPACITY],
     count: AtomicU64,
+    unavailable: AtomicBool,
 }
 impl Capture {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             points: std::array::from_fn(|_| Point {
                 time: AtomicI64::new(0),
@@ -54,10 +57,16 @@ impl Capture {
                 frames: AtomicU64::new(0),
             }),
             count: AtomicU64::new(0),
+            unavailable: AtomicBool::new(false),
         }
     }
+    /// Writer-only diagnostic failure; no replacement timestamp is fabricated.
+    #[allow(dead_code)]
+    pub(crate) fn mark_unavailable(&self) {
+        self.unavailable.store(true, Ordering::Release);
+    }
     // Worker-only. No slot is overwritten; summary is called after worker join.
-    pub(super) fn record(&self, at: Timestamp, start: u64, frames: u64) {
+    pub(crate) fn record(&self, at: Timestamp, start: u64, frames: u64) {
         let count = self.count.load(Ordering::Relaxed);
         if count < CAPACITY as u64 {
             let point = &self.points[count as usize];
@@ -67,16 +76,19 @@ impl Capture {
         }
         self.count.store(count.saturating_add(1), Ordering::Release);
     }
-    pub(super) fn summary(&self, rate: u32) -> Result<AlsaRenderCadence, AlsaCadenceError> {
+    pub(crate) fn summary(&self, rate: u32) -> Result<RenderCadence, RenderCadenceError> {
+        if self.unavailable.load(Ordering::Acquire) {
+            return Err(RenderCadenceError::TimingUnavailable);
+        }
         if rate == 0 {
-            return Err(AlsaCadenceError::Overflow);
+            return Err(RenderCadenceError::Overflow);
         }
         let count = self.count.load(Ordering::Acquire);
         let retained = count.min(CAPACITY as u64) as usize;
         let mut magnitudes = Vec::new();
         magnitudes
             .try_reserve_exact(retained.saturating_sub(1))
-            .map_err(|_| AlsaCadenceError::AllocationFailed)?;
+            .map_err(|_| RenderCadenceError::AllocationFailed)?;
         let mut previous = None;
         let mut min = i128::MAX;
         let mut max = i128::MIN;
@@ -85,24 +97,24 @@ impl Capture {
             let start = point.start.load(Ordering::Relaxed);
             let frames = point.frames.load(Ordering::Relaxed);
             if frames == 0 {
-                return Err(AlsaCadenceError::FrameRegression);
+                return Err(RenderCadenceError::FrameRegression);
             }
             let end = start
                 .checked_add(frames)
-                .ok_or(AlsaCadenceError::Overflow)?;
+                .ok_or(RenderCadenceError::Overflow)?;
             if let Some((before, before_start, before_end)) = previous {
                 if at < before {
-                    return Err(AlsaCadenceError::TimestampRegression);
+                    return Err(RenderCadenceError::TimestampRegression);
                 }
                 if start <= before_start || start < before_end {
-                    return Err(AlsaCadenceError::FrameRegression);
+                    return Err(RenderCadenceError::FrameRegression);
                 }
                 let expected = i128::from(start - before_start) * 1_000_000_000 / i128::from(rate);
                 let residual = i128::from(at) - i128::from(before) - expected;
                 min = min.min(residual);
                 max = max.max(residual);
                 magnitudes
-                    .push(u64::try_from(residual.abs()).map_err(|_| AlsaCadenceError::Overflow)?);
+                    .push(u64::try_from(residual.abs()).map_err(|_| RenderCadenceError::Overflow)?);
             }
             previous = Some((at, start, end));
         }
@@ -121,7 +133,7 @@ impl Capture {
                 max_abs_deviation_ns: *magnitudes.last().unwrap(),
             })
         };
-        Ok(AlsaRenderCadence {
+        Ok(RenderCadence {
             successful_renders: count,
             retained_points: retained,
             unretained_renders: count.saturating_sub(retained as u64),
@@ -168,15 +180,38 @@ mod tests {
         capture.record(Timestamp::ZERO, 1, 1);
         assert_eq!(
             capture.summary(1000),
-            Err(AlsaCadenceError::TimestampRegression)
+            Err(RenderCadenceError::TimestampRegression)
         );
-        assert_eq!(capture.summary(0), Err(AlsaCadenceError::Overflow));
+        assert_eq!(capture.summary(0), Err(RenderCadenceError::Overflow));
         let overlap = Capture::new();
         overlap.record(Timestamp::ZERO, 0, 2);
         overlap.record(Timestamp::ZERO, 1, 1);
         assert_eq!(
             overlap.summary(1000),
-            Err(AlsaCadenceError::FrameRegression)
+            Err(RenderCadenceError::FrameRegression)
         );
+    }
+    #[test]
+    fn missing_native_timing_never_becomes_zero_jitter() {
+        let capture = Capture::new();
+        capture.record(Timestamp::ZERO, 0, 1);
+        capture.mark_unavailable();
+        capture.record(Timestamp::from_nanos(1_000_000), 1, 1);
+        assert_eq!(
+            capture.summary(1000),
+            Err(RenderCadenceError::TimingUnavailable)
+        );
+    }
+    #[test]
+    fn full_host_span_and_unrepresentable_frame_residual_use_wide_arithmetic() {
+        let capture = Capture::new();
+        capture.record(Timestamp::MIN, 0, 1);
+        capture.record(Timestamp::MAX, 1, 1);
+        let intervals = capture.summary(1_000_000_000).unwrap().intervals.unwrap();
+        assert_eq!(intervals.max_abs_deviation_ns, u64::MAX - 1);
+        let huge = Capture::new();
+        huge.record(Timestamp::ZERO, 0, 1);
+        huge.record(Timestamp::ZERO, u64::MAX - 1, 1);
+        assert_eq!(huge.summary(1), Err(RenderCadenceError::Overflow));
     }
 }

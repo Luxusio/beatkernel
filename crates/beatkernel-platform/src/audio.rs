@@ -37,6 +37,7 @@ use std::fmt;
 
 /// SDK-free ASIO buffer and sample-rate request validation.
 pub mod asio;
+pub mod cadence;
 mod convert;
 mod negotiation;
 pub mod presentation;
@@ -615,4 +616,11 @@ pub trait AudioOutputStream {
     fn start(&mut self) -> Result<(), AudioPlatformError>;
     /// Stops and joins the worker before its queue/mixer/assets can be destroyed.
     fn stop(&mut self) -> Result<(), AudioPlatformError>;
+    /// Optional direct render-start cadence after stop/join; None means unavailable.
+    /// Summaries may allocate off the render worker and do not prove acoustic jitter.
+    fn render_cadence(
+        &self,
+    ) -> Result<Option<cadence::RenderCadence>, cadence::RenderCadenceError> {
+        Ok(None)
+    }
 }

@@ -1,9 +1,9 @@
 //! Dedicated nonblocking ALSA PCM writer with explicit device and sizing.
 #![allow(unsafe_code)]
 
-mod cadence;
+use crate::audio::cadence;
 mod timing;
-pub use cadence::{AlsaCadenceError, AlsaRenderCadence};
+pub use cadence::{RenderCadence as AlsaRenderCadence, RenderCadenceError as AlsaCadenceError};
 use timing::TimingShared;
 pub use timing::{AlsaNativeTimestamp, AlsaTimingSnapshot};
 
