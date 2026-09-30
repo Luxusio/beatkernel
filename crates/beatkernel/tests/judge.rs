@@ -855,6 +855,148 @@ fn custom_axis_consumes_retained_typed_sample_while_builtins_ignore_axis_and_tou
     assert_eq!(sample.value.to_bits(), 0x8000_0000);
 }
 
+struct ObservedCustomEvaluator {
+    predicates: Samples,
+    samples: Samples,
+    accepts_up: bool,
+}
+struct ObservedCustomInteraction {
+    predicates: Samples,
+    inner: AxisInteraction,
+    accepts_up: bool,
+}
+impl InteractionEvaluator for ObservedCustomEvaluator {
+    fn validate(&self, _: &TimedObject, _: &JudgeProfile) -> Result<(), JudgeError> {
+        Ok(())
+    }
+    fn begin(&self, _: &TimedObject, context: &BeginContext<'_>) -> Box<dyn ActiveInteraction> {
+        Box::new(ObservedCustomInteraction {
+            predicates: self.predicates.clone(),
+            inner: AxisInteraction {
+                samples: self.samples.clone(),
+                state: InteractionState::Pending,
+                control: context.control,
+            },
+            accepts_up: self.accepts_up,
+        })
+    }
+}
+impl ActiveInteraction for ObservedCustomInteraction {
+    fn state(&self) -> InteractionState {
+        self.inner.state()
+    }
+    fn accepts_input(&self, event: &GameInputEvent, context: &InteractionContext<'_>) -> bool {
+        self.predicates.lock().unwrap().push(event.clone());
+        if self.accepts_up {
+            self.inner.state == InteractionState::Pending
+                && event.game_control == self.inner.control
+                && matches!(&event.physical, PhysicalInputEvent::Button(button) if button.state == ButtonState::Up)
+        } else {
+            self.inner.accepts_input(event, context)
+        }
+    }
+    fn on_input(
+        &mut self,
+        event: &GameInputEvent,
+        context: &InteractionContext<'_>,
+    ) -> InteractionOutput {
+        self.inner.on_input(event, context)
+    }
+    fn advance_to(
+        &mut self,
+        time: Timestamp,
+        context: &InteractionContext<'_>,
+    ) -> InteractionOutput {
+        self.inner.advance_to(time, context)
+    }
+    fn deadline(&self, profile: &JudgeProfile) -> Option<i128> {
+        self.inner.deadline(profile)
+    }
+}
+struct ObservedResolver(Arc<Mutex<Vec<Vec<Candidate>>>>);
+impl CandidateResolver for ObservedResolver {
+    fn select(&self, candidates: &[Candidate]) -> Option<ObjectId> {
+        self.0.lock().unwrap().push(candidates.to_vec());
+        ClosestCandidate.select(candidates)
+    }
+}
+fn assert_custom_start(event: GameInputEvent, at: i64, accepts_up: bool) {
+    let predicates = Arc::new(Mutex::new(Vec::new()));
+    let samples = Arc::new(Mutex::new(Vec::new()));
+    let selections = Arc::new(Mutex::new(Vec::new()));
+    let mut custom = JudgeEngine::with_policies(
+        chart(&[(1, 500, None, 77)]),
+        vec![Rule {
+            interaction: InteractionId(77),
+            control: GameControlId(1),
+            evaluator: Box::new(ObservedCustomEvaluator {
+                predicates: predicates.clone(),
+                samples: samples.clone(),
+                accepts_up,
+            }),
+        }],
+        profile(0),
+        Box::new(ObservedResolver(selections.clone())),
+        Box::new(WindowJudgePolicy),
+    )
+    .unwrap();
+    assert_eq!(
+        custom.push_input(&event, ts(at)).unwrap(),
+        vec![hit(1, JudgeStage::Custom(77), 88, 0, at, meta(1))]
+    );
+    assert_eq!(custom.state(ObjectId(1)), Some(InteractionState::Completed));
+    assert_eq!(
+        *selections.lock().unwrap(),
+        vec![vec![Candidate {
+            object: ObjectId(1),
+            target: ts(500),
+            delta: i128::from(at - 500),
+        }]]
+    );
+    // Predicate and callback receive the full original bound event. The axis
+    // signed-zero bits are checked separately because float equality hides them.
+    let observed_predicates = predicates.lock().unwrap().clone();
+    assert!(!observed_predicates.is_empty());
+    assert!(observed_predicates.iter().all(|sample| sample == &event));
+    assert_eq!(*samples.lock().unwrap(), vec![event.clone()]);
+    for sample in observed_predicates
+        .iter()
+        .chain(samples.lock().unwrap().iter())
+    {
+        if let PhysicalInputEvent::Axis(axis) = &sample.physical {
+            assert_eq!(axis.value.to_bits(), 0x8000_0000);
+        }
+    }
+    let predicate_count = observed_predicates.len();
+    assert!(custom.push_input(&event, ts(at)).unwrap().is_empty());
+    assert!(custom.advance_to(ts(900)).unwrap().is_empty());
+    assert_eq!(samples.lock().unwrap().len(), 1);
+    assert_eq!(predicates.lock().unwrap().len(), predicate_count);
+    assert_eq!(selections.lock().unwrap().len(), 1);
+}
+#[test]
+fn custom_pending_button_up_starts_at_exact_target_with_original_payload() {
+    assert_custom_start(button(1, 4, 1, ButtonState::Up), 500, true);
+}
+#[test]
+fn custom_pending_axis_without_deadline_starts_outside_builtin_profile_window() {
+    for at in [479, 531] {
+        assert_custom_start(
+            GameInputEvent {
+                game_control: GameControlId(1),
+                physical: PhysicalInputEvent::Axis(AxisEvent {
+                    meta: meta(1),
+                    control: PhysicalControlId::keyboard(7),
+                    value: -0.0,
+                    mode: AxisMode::Relative,
+                }),
+            },
+            at,
+            false,
+        );
+    }
+}
+
 struct UnusedMapper;
 impl ClockMapper for UnusedMapper {
     fn map(&self, _: ClockPoint, _: ClockDomainId) -> Option<Timestamp> {
