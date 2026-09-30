@@ -13,6 +13,12 @@ wide arithmetic before narrowing. Target frames use integer ceiling, matching
 Mixer. Pre-origin targets reject. Stable sorting retains original equal-time
 order, voice/sample identities and gains.
 
+`BgmFeeder::from_output_commands` also accepts already mapped Play timestamps.
+It requires zero additional preroll and preserves their absolute output times;
+wide subtraction from the explicit output origin determines frames, including
+negative origins and the full i64 time span. The same credit, lookahead, ordering
+and exact failure semantics apply to native replay keysounds and BGM together.
+
 The caller supplies an actual completed-render frame cursor and finite admission
 budget. Credits retire only for admitted targets strictly before that cursor;
 targets equal to the render end have not executed yet. The feeder admits commands

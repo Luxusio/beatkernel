@@ -2,7 +2,7 @@
 
 use crate::{replay_playback::reconstruct, PreparedBms};
 use beatkernel::{
-    audio::{AudioCommand, SampleId},
+    audio::{AudioCommand, RenderReport, SampleId},
     judge::{JudgeEvent, JudgeOutcome},
     replay::codec::{ReplayCodecLimits, ReplayFile},
     time::{ClockPoint, Duration, Timestamp},
@@ -20,6 +20,8 @@ pub enum ReplayAudioError {
     Overflow,
     /// Explicit plan storage allocation failed.
     AllocationFailed,
+    /// Actual mixer execution rejected a command; retain its complete evidence.
+    RejectedRender(RenderReport),
 }
 impl std::fmt::Display for ReplayAudioError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -27,6 +29,29 @@ impl std::fmt::Display for ReplayAudioError {
     }
 }
 impl Error for ReplayAudioError {}
+
+/// Checks actual mixer execution before accepting its completed output cursor.
+///
+/// Admission, submitted native frames and physical presentation are different
+/// observations and cannot substitute for this successful RenderReport.
+pub fn completed_render_cursor(report: &RenderReport) -> Result<u64, ReplayAudioError> {
+    let counters = report.counters;
+    if counters.late_commands != 0
+        || counters.pending_full != 0
+        || counters.voice_full != 0
+        || counters.unknown_samples != 0
+        || counters.unknown_stops != 0
+        || counters.invalid_gains != 0
+        || counters.invalid_rates != 0
+        || counters.invalid_times != 0
+    {
+        return Err(ReplayAudioError::RejectedRender(*report));
+    }
+    report
+        .start_frame
+        .checked_add(u64::try_from(report.frames).map_err(|_| ReplayAudioError::Overflow)?)
+        .ok_or(ReplayAudioError::Overflow)
+}
 
 /// Off-thread planned commands, distinct from queue/native execution.
 #[derive(Debug)]

@@ -95,6 +95,30 @@ pub struct BgmFeeder {
 impl BgmFeeder {
     /// Maps song-time Play commands once and preserves original equal-time order.
     pub fn new(commands: Vec<AudioCommand>, config: BgmConfig) -> Result<Self, BgmFeedError> {
+        Self::prepare(commands, config, false)
+    }
+
+    /// Retains already mapped output times without adding origin or preroll again.
+    ///
+    /// Additional preroll must be zero. Relative frame selection uses wide
+    /// subtraction, including negative origins and the complete i64 time span.
+    pub fn from_output_commands(
+        commands: Vec<AudioCommand>,
+        config: BgmConfig,
+    ) -> Result<Self, BgmFeedError> {
+        if config.preroll != Duration::ZERO {
+            return Err(BgmFeedError::InvalidConfiguration(
+                "already mapped output commands require zero additional preroll",
+            ));
+        }
+        Self::prepare(commands, config, true)
+    }
+
+    fn prepare(
+        commands: Vec<AudioCommand>,
+        config: BgmConfig,
+        output_commands: bool,
+    ) -> Result<Self, BgmFeedError> {
         if config.sample_rate == 0
             || config.lookahead.as_nanos() <= 0
             || config.preroll.as_nanos() < 0
@@ -119,11 +143,19 @@ impl BgmFeeder {
             else {
                 return Err(BgmFeedError::InvalidCommand(original));
             };
-            let elapsed = i128::from(at.as_nanos()) + i128::from(config.preroll.as_nanos());
+            let elapsed = if output_commands {
+                i128::from(at.as_nanos()) - i128::from(config.output_origin.timestamp.as_nanos())
+            } else {
+                i128::from(at.as_nanos()) + i128::from(config.preroll.as_nanos())
+            };
             if !gain.is_finite() || elapsed < 0 {
                 return Err(BgmFeedError::InvalidCommand(original));
             }
-            let mapped = i128::from(config.output_origin.timestamp.as_nanos()) + elapsed;
+            let mapped = if output_commands {
+                i128::from(at.as_nanos())
+            } else {
+                i128::from(config.output_origin.timestamp.as_nanos()) + elapsed
+            };
             let mapped = i64::try_from(mapped).map_err(|_| BgmFeedError::Overflow)?;
             cues.push(Cue {
                 command: AudioCommand::Play {
