@@ -44,6 +44,10 @@ or Windows device types.
 accept documented supported rounding/alignment; report every change. Unsupported
   combinations return precise constraints and suggested alternatives. Never
   resize or alter a mode without the selected policy authorizing that change.
+  Native opening errors retain the engine and wake-specific buffer constraints
+  already obtained for that request. A standalone size comparison without a
+  device query reports unknown bounds. Exclusive equality errors must omit
+  sizing suggestions that have not been checked against bounds and multiples.
 
 The user's 2026-09-30 clarification requires adjustable buffers and coverage of
 many configurations. Device/API constraints still apply; expose them so the
@@ -114,6 +118,8 @@ contracts. Requested configuration probing follows [IsFormatSupported](https://l
   wakes and stops the worker, joins it, then releases assets. Signal failures
   require a bounded recovery path; worker panic is reported by join. No detached
   callback may outlive its mixer or sample storage.
+  A failed native Start acknowledgment also joins before returning its original
+  HRESULT; a worker panic remains explicitly observable.
 - Associate the owned render event immediately after successful event-driven
   initialization, before later validation can fail. Cleanup never releases an
   initialized event-driven client while withholding its required event handle.
@@ -163,6 +169,9 @@ is synthetic and does not prove endpoint operation or physical latency.
   callback/deadline failures, scheduling lateness, rejected commands and native
   error separately. Label suspected starvation as inferred. Do not advertise an
   authoritative hardware underrun count when the render API does not supply one.
+  Ready-state observations and caller delay before Start do not count as missed
+  processing deadlines. The first running observation establishes the deadline
+  baseline, and subsequent processing intervals are compared against it.
 - Submitted PCM and progressing clock prove stream activity; virtual execution
   does not prove sound heard, physical-device latency or input-to-audio latency.
 - Off-thread telemetry reads make a bounded attempt to obtain one coherent
