@@ -1,4 +1,6 @@
 //! Pure conversion of observed WASAPI stream-relative positions to output/host maps.
+pub mod discipline;
+
 use super::{AudioClockReadingQuality, AudioStreamSnapshot, AudioStreamStatus};
 use beatkernel::{
     time::{
