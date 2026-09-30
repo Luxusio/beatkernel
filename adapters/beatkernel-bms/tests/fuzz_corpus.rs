@@ -80,7 +80,7 @@ fn valid_timing_hold_and_bgm_variants_have_independent_piecewise_expectations() 
 
         // A distinct syntactic/grid representation must preserve semantics.
         let alternate = format!(
-            "#TITLE corpus 日本語\r\n{}",
+            "{}#TITLE corpus 日本語\r\n",
             valid_document(length, 0).replace('\n', "\r\n")
         );
         let alternative = parse(&alternate, OPTIONS).unwrap().compile().unwrap();
