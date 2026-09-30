@@ -1,4 +1,4 @@
-//! Owner-thread IOHIDManager device enumeration and canonical value acquisition.
+//! Owner-thread IOHIDManager scalar values or explicitly selected raw reports.
 use super::{clock::MachClock, ffi};
 use beatkernel::input::*;
 use std::{
@@ -31,11 +31,64 @@ pub struct HidSample {
     /// Device-local element cookie, retained separately from canonical identity.
     pub element_cookie: u32,
 }
+/// Exact timestamped native input report copied before the callback returns.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HidReport {
+    /// Canonical acquisition metadata with original native mach provenance.
+    pub meta: EventMeta,
+    /// Actual native IOHIDReportType value, retained without reinterpretation.
+    pub report_type: u32,
+    /// Full native uint32 report ID, before canonical width validation.
+    pub report_id: u32,
+    /// Exact callback bytes, without inferred prefix stripping.
+    pub bytes: Vec<u8>,
+    /// Arrival mach absolute ticks supplied by the timestamped callback.
+    pub mach_ticks: u64,
+}
+impl HidReport {
+    /// Normalizes ID/layout explicitly while retaining this independent envelope.
+    /// Hosts select acceptable native report types before vendor routing.
+    pub fn to_raw_report(
+        &self,
+        layout: crate::input::hid_report::NativeReportLayout,
+        max_native_bytes: usize,
+    ) -> Result<RawHidReportEvent, crate::input::hid_report::HidReportConversionError> {
+        crate::input::hid_report::normalize_report(
+            self.meta,
+            self.report_id,
+            &self.bytes,
+            layout,
+            max_native_bytes,
+        )
+    }
+}
+/// Explicit mutually exclusive acquisition paths; raw mode needs macOS 10.15 API.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HidInputOptions {
+    /// Default typed scalar value path, without timestamped report symbol lookup.
+    Values {
+        /// Maximum queued canonical values, in 1..=65,536.
+        queue_capacity: usize,
+    },
+    /// Raw-only callback path; scalar callbacks are never also registered.
+    Reports {
+        /// Maximum queued owned native report envelopes, in 1..=65,536.
+        queue_capacity: usize,
+        /// Maximum bytes per report, in 1..=1 MiB; capacity product <=64 MiB.
+        max_report_bytes: usize,
+    },
+}
 /// Off-callback acquisition failure; no fake successful input is returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HidError {
     /// Input Monitoring/access permission was rejected by IOKit.
     PermissionDenied,
+    /// Timestamped report registration API is unavailable; no receipt-time fallback.
+    Unsupported,
+    /// Native raw report has invalid length or pointer/device representation.
+    InvalidReport,
+    /// Raw report exceeds its configured byte capacity.
+    ReportCapacity,
     /// Native manager/callback failure, preserving the IOReturn code.
     Native(i32),
     /// Configuration/capacity or runtime device/sequence identities exhausted.
@@ -49,7 +102,7 @@ pub enum HidError {
 }
 impl std::fmt::Display for HidError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self { Self::PermissionDenied => f.write_str("IOHID input permission denied; grant Input Monitoring access to the host application"), Self::Native(code) => write!(f, "IOHID failure {code:#x}"), Self::Capacity => f.write_str("IOHID acquisition capacity exhausted"), Self::TimestampOverflow => f.write_str("IOHID mach timestamp overflow"), Self::QueueFull => f.write_str("IOHID acquisition queue full"), Self::Closed => f.write_str("IOHID manager is closed") }
+        match self { Self::PermissionDenied => f.write_str("IOHID input permission denied; grant Input Monitoring access to the host application"), Self::Native(code) => write!(f, "IOHID failure {code:#x}"), Self::Unsupported => f.write_str("timestamped IOHID report API unavailable"), Self::InvalidReport => f.write_str("invalid native IOHID report"), Self::ReportCapacity => f.write_str("native IOHID report exceeds byte capacity"), Self::Capacity => f.write_str("IOHID acquisition capacity exhausted"), Self::TimestampOverflow => f.write_str("IOHID mach timestamp overflow"), Self::QueueFull => f.write_str("IOHID acquisition queue full"), Self::Closed => f.write_str("IOHID manager is closed") }
     }
 }
 impl std::error::Error for HidError {}
@@ -64,6 +117,18 @@ pub struct HidCounters {
     pub unsupported: u64,
     /// Devices retired by a native removal callback.
     pub removed: u64,
+    /// Timestamped native reports copied into the bounded raw queue.
+    pub reports_accepted: u64,
+    /// Native reports dropped because the raw queue filled.
+    pub reports_queue_full: u64,
+    /// Native reports dropped because their byte length exceeded its cap.
+    pub reports_oversized: u64,
+    /// Reports rejected for invalid native length, pointer or device sender.
+    pub reports_invalid: u64,
+    /// Report storage reservation failures on the owner input thread.
+    pub reports_allocation_failed: u64,
+    /// Reports whose supplied mach timestamp cannot be represented.
+    pub reports_timestamp_failed: u64,
 }
 struct DeviceRecord {
     info: HidDevice,
@@ -75,6 +140,8 @@ struct State {
     next_device: u64,
     held: HashSet<(DeviceId, PhysicalControlId)>,
     pending: VecDeque<HidSample>,
+    reports: VecDeque<HidReport>,
+    report_byte_cap: Option<usize>,
     capacity: usize,
     error: Option<HidError>,
     counters: HidCounters,
@@ -107,6 +174,8 @@ impl State {
             Some("Bluetooth" | "BluetoothLowEnergy") => DeviceTransport::Bluetooth,
             _ => DeviceTransport::Unknown,
         };
+        let mut device_capabilities = capabilities(device);
+        device_capabilities.raw_hid = self.report_byte_cap.is_some();
         let info = HidDevice {
             descriptor: DeviceDescriptor {
                 runtime_id: identity,
@@ -115,7 +184,7 @@ impl State {
                 name,
                 serial,
                 transport,
-                capabilities: capabilities(device),
+                capabilities: device_capabilities,
             },
             registry_entry,
         };
@@ -218,17 +287,90 @@ impl State {
         });
         self.counters.accepted = self.counters.accepted.saturating_add(1);
     }
+    unsafe fn report(
+        &mut self,
+        device: ffi::Ref,
+        report_type: u32,
+        report_id: u32,
+        bytes: *mut u8,
+        length: isize,
+        ticks: u64,
+    ) {
+        let Some(cap) = self.report_byte_cap else {
+            return;
+        };
+        if device.is_null() || length < 0 || (length > 0 && bytes.is_null()) {
+            self.counters.reports_invalid = self.counters.reports_invalid.saturating_add(1);
+            self.error = Some(HidError::InvalidReport);
+            return;
+        }
+        self.register(device);
+        let Some(record) = self.devices.get_mut(&(device as usize)) else {
+            return;
+        };
+        let Some(sequence) = record.sequence.checked_add(1) else {
+            self.error = Some(HidError::Capacity);
+            return;
+        };
+        record.sequence = sequence;
+        let source = record.info.descriptor.runtime_id;
+        let length = length as usize; // nonnegative CFIndex fits usize on this ABI
+        if length > cap {
+            self.counters.reports_oversized = self.counters.reports_oversized.saturating_add(1);
+            self.error = Some(HidError::ReportCapacity);
+            return;
+        }
+        if self.reports.len() == self.capacity {
+            self.counters.reports_queue_full = self.counters.reports_queue_full.saturating_add(1);
+            self.error = Some(HidError::QueueFull);
+            return;
+        }
+        let Some(clock) = self.clock.at_ticks(ticks) else {
+            self.counters.reports_timestamp_failed =
+                self.counters.reports_timestamp_failed.saturating_add(1);
+            self.error = Some(HidError::TimestampOverflow);
+            return;
+        };
+        let mut owned = Vec::new();
+        if owned.try_reserve_exact(length).is_err() {
+            self.counters.reports_allocation_failed =
+                self.counters.reports_allocation_failed.saturating_add(1);
+            self.error = Some(HidError::Capacity);
+            return;
+        }
+        if length != 0 {
+            // SAFETY: IOKit supplies this live report buffer for the callback,
+            // validated non-null and within explicit length cap. Copy before return.
+            owned.extend_from_slice(unsafe { std::slice::from_raw_parts(bytes, length) });
+        }
+        let mut meta = EventMeta::new(source, clock.normalized, sequence);
+        meta.native = Some(NativeEventMeta {
+            backend: IOHID_BACKEND,
+            code: Some(report_id),
+            timestamp: Some(clock.native),
+        });
+        meta.original_clock_point = Some(clock.native);
+        self.reports.push_back(HidReport {
+            meta,
+            report_type,
+            report_id,
+            bytes: owned,
+            mach_ticks: ticks,
+        });
+        self.counters.reports_accepted = self.counters.reports_accepted.saturating_add(1);
+    }
 }
 
 /// Native manager pinned to its creating runloop/thread, intentionally !Send/!Sync.
 /// All callbacks run only while this owner polls that runloop. Input callback
-/// allocations are off the audio path; the bounded value queue reports overflow.
+/// allocations are off the audio path; bounded value/report queues report overflow.
 pub struct HidInput {
     manager: ffi::OwnedRef,
     runloop: ffi::OwnedRef,
     state: Box<State>,
     owner_thread: PhantomData<Rc<()>>,
     closed: bool,
+    report_registration: Option<ffi::RegisterTimestampedReport>,
 }
 impl HidInput {
     /// Opens all HID devices without seizure on the current thread's runloop.
@@ -238,9 +380,57 @@ impl HidInput {
         first_device: DeviceId,
         queue_capacity: usize,
     ) -> Result<Self, HidError> {
-        if queue_capacity == 0 {
+        Self::open_with_options(
+            clock,
+            first_device,
+            HidInputOptions::Values { queue_capacity },
+        )
+    }
+    /// Opens only timestamped raw reports; missing macOS API is explicit Unsupported.
+    pub fn open_reports(
+        clock: MachClock,
+        first_device: DeviceId,
+        queue_capacity: usize,
+        max_report_bytes: usize,
+    ) -> Result<Self, HidError> {
+        Self::open_with_options(
+            clock,
+            first_device,
+            HidInputOptions::Reports {
+                queue_capacity,
+                max_report_bytes,
+            },
+        )
+    }
+    /// Selects one acquisition mode on this creating thread's runloop.
+    pub fn open_with_options(
+        clock: MachClock,
+        first_device: DeviceId,
+        options: HidInputOptions,
+    ) -> Result<Self, HidError> {
+        let (queue_capacity, report_byte_cap) = match options {
+            HidInputOptions::Values { queue_capacity } => (queue_capacity, None),
+            HidInputOptions::Reports {
+                queue_capacity,
+                max_report_bytes,
+            } => (queue_capacity, Some(max_report_bytes)),
+        };
+        if queue_capacity == 0 || queue_capacity > 65_536 {
             return Err(HidError::Capacity);
         }
+        let report_registration = if let Some(bytes) = report_byte_cap {
+            if bytes == 0
+                || bytes > 1_048_576
+                || queue_capacity
+                    .checked_mul(bytes)
+                    .is_none_or(|total| total > 67_108_864)
+            {
+                return Err(HidError::Capacity);
+            }
+            Some(ffi::timestamped_report_registration().ok_or(HidError::Unsupported)?)
+        } else {
+            None
+        };
         // SAFETY: null allocator selects CF default; no pointer ownership arguments.
         let manager = ffi::OwnedRef(unsafe { ffi::IOHIDManagerCreate(std::ptr::null(), 0) });
         if manager.0.is_null() {
@@ -249,15 +439,25 @@ impl HidInput {
         // SAFETY: current runloop is a borrowed live reference retained for this owner.
         let runloop = ffi::OwnedRef(unsafe { ffi::CFRetain(ffi::CFRunLoopGetCurrent()) });
         let mut pending = VecDeque::new();
-        pending
-            .try_reserve_exact(queue_capacity)
-            .map_err(|_| HidError::Capacity)?;
+        if report_byte_cap.is_none() {
+            pending
+                .try_reserve_exact(queue_capacity)
+                .map_err(|_| HidError::Capacity)?;
+        }
+        let mut reports = VecDeque::new();
+        if report_byte_cap.is_some() {
+            reports
+                .try_reserve_exact(queue_capacity)
+                .map_err(|_| HidError::Capacity)?;
+        }
         let state = Box::new(State {
             clock,
             devices: BTreeMap::new(),
             next_device: first_device.0,
             held: HashSet::new(),
             pending,
+            reports,
+            report_byte_cap,
             capacity: queue_capacity,
             error: None,
             counters: HidCounters::default(),
@@ -268,6 +468,7 @@ impl HidInput {
             state,
             owner_thread: PhantomData,
             closed: false,
+            report_registration,
         };
         let context = (&mut *input.state as *mut State).cast();
         // SAFETY: boxed context has stable address, remains owned until unschedule,
@@ -280,7 +481,11 @@ impl HidInput {
                 context,
             );
             ffi::IOHIDManagerRegisterDeviceRemovalCallback(input.manager.0, Some(removed), context);
-            ffi::IOHIDManagerRegisterInputValueCallback(input.manager.0, Some(value), context);
+            if let Some(register) = input.report_registration {
+                register(input.manager.0, Some(report), context);
+            } else {
+                ffi::IOHIDManagerRegisterInputValueCallback(input.manager.0, Some(value), context);
+            }
             ffi::IOHIDManagerScheduleWithRunLoop(
                 input.manager.0,
                 input.runloop.0,
@@ -329,6 +534,11 @@ impl HidInput {
     pub fn pop(&mut self) -> Option<HidSample> {
         self.state.pending.pop_front()
     }
+    /// Removes the next raw-only envelope in received callback order.
+    /// Default scalar mode always returns None; layout conversion stays explicit.
+    pub fn pop_report(&mut self) -> Option<HidReport> {
+        self.state.reports.pop_front()
+    }
     /// Current bounded queue/callback diagnostics.
     pub const fn counters(&self) -> HidCounters {
         self.state.counters
@@ -336,7 +546,7 @@ impl HidInput {
 }
 impl HidInput {
     /// Unschedules/unregisters callbacks before closing; reports native failure.
-    /// Pending samples remain drainable, but polling requires an open manager.
+    /// Pending samples/reports remain drainable, but polling requires an open manager.
     pub fn close(&mut self) -> Result<(), HidError> {
         if self.closed {
             return Ok(());
@@ -349,7 +559,15 @@ impl HidInput {
                 self.runloop.0,
                 ffi::kCFRunLoopDefaultMode,
             );
-            ffi::IOHIDManagerRegisterInputValueCallback(self.manager.0, None, std::ptr::null_mut());
+            if let Some(register) = self.report_registration {
+                register(self.manager.0, None, std::ptr::null_mut());
+            } else {
+                ffi::IOHIDManagerRegisterInputValueCallback(
+                    self.manager.0,
+                    None,
+                    std::ptr::null_mut(),
+                );
+            }
             ffi::IOHIDManagerRegisterDeviceMatchingCallback(
                 self.manager.0,
                 None,
@@ -407,6 +625,37 @@ unsafe extern "C" fn value(context: *mut c_void, status: i32, _: *mut c_void, va
     if !value.is_null() {
         state.value(value);
     }
+}
+unsafe extern "C" fn report(
+    context: *mut c_void,
+    status: i32,
+    sender: *mut c_void,
+    report_type: u32,
+    report_id: u32,
+    bytes: *mut u8,
+    length: isize,
+    ticks: u64,
+) {
+    // SAFETY: exact timestamped IOHID ABI. Manager/device forwarding supplies
+    // IOHIDDeviceRef sender; context is boxed, owner-thread-only State until
+    // unschedule/unregister. Buffer is borrowed for this callback duration.
+    let state = unsafe { &mut *context.cast::<State>() };
+    if let Err(error) = check(status) {
+        state.error = Some(error);
+        return;
+    }
+    // SAFETY: native sender/buffer validity belongs to the callback ABI;
+    // State additionally validates null/negative/oversized representations.
+    unsafe {
+        state.report(
+            sender.cast_const(),
+            report_type,
+            report_id,
+            bytes,
+            length,
+            ticks,
+        )
+    };
 }
 fn check(status: i32) -> Result<(), HidError> {
     match status as u32 {

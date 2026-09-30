@@ -6,6 +6,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         input::DeviceId,
         time::{ClockDomainId, Timestamp},
     };
+    use beatkernel_platform::input::hid_report::NativeReportLayout;
     use beatkernel_platform::macos::{
         audio::{CoreAudioRequest, CoreAudioStream},
         clock::MachClock,
@@ -25,10 +26,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let arguments: Vec<_> = std::env::args().collect();
-    if arguments.len() != 5 {
-        println!("usage: macos_native DEVICE_ID SAMPLE_RATE CHANNELS BUFFER_FRAMES\nChoose an explicit enumerated device; no default endpoint is substituted.");
+    if arguments.len() != 5 && arguments.len() != 8 {
+        println!("usage: macos_native DEVICE_ID SAMPLE_RATE CHANNELS BUFFER_FRAMES [--raw separate|leading MAX_REPORT_BYTES]\nChoose an explicit enumerated audio device. Default HID scalar values; --raw explicitly selects timestamped native reports and declared ID layout.");
         return Ok(());
     }
+    let raw_options = if arguments.len() == 8 {
+        if arguments[5] != "--raw" {
+            return Err("expected --raw".into());
+        }
+        let layout = match arguments[6].as_str() {
+            "separate" => NativeReportLayout::SeparateId,
+            "leading" => NativeReportLayout::LeadingId,
+            _ => return Err("raw layout must be separate or leading".into()),
+        };
+        Some((layout, arguments[7].parse::<usize>()?))
+    } else {
+        None
+    };
     let request = CoreAudioRequest {
         device: arguments[1].parse()?,
         format: AudioFormat::new(arguments[2].parse()?, arguments[3].parse()?)?,
@@ -45,7 +59,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let mixer = Mixer::new(config, bank?, consumer)?;
     let mut audio = CoreAudioStream::open(request, clock, mixer)?;
-    let mut input = HidInput::open(clock, DeviceId(1), 1024)?;
+    let mut input = if let Some((_, bytes)) = raw_options {
+        HidInput::open_reports(clock, DeviceId(1), 1024, bytes)?
+    } else {
+        HidInput::open(clock, DeviceId(1), 1024)?
+    };
     println!(
         "applied {:?}; HID devices {:?}",
         audio.configuration(),
@@ -55,8 +73,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let until = Instant::now() + Duration::from_secs(3);
     while Instant::now() < until {
         input.poll(Duration::from_millis(10))?;
-        while let Some(sample) = input.pop() {
-            println!("{sample:?}");
+        if let Some((layout, bytes)) = raw_options {
+            while let Some(report) = input.pop_report() {
+                println!("native raw {report:?}");
+                println!(
+                    "explicit-layout canonical {:?}",
+                    report.to_raw_report(layout, bytes)
+                );
+                // A host may attach descriptors to the portable DeviceAdapterRegistry
+                // and route this canonical report through an explicitly registered
+                // vendor decoder. This example intentionally selects no vendor.
+            }
+        } else {
+            while let Some(sample) = input.pop() {
+                println!("{sample:?}");
+            }
         }
     }
     println!(

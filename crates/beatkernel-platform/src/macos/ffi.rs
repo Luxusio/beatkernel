@@ -2,6 +2,30 @@
 use std::ffi::{c_char, c_void};
 pub(super) type Ref = *const c_void;
 pub(super) type HidCallback = unsafe extern "C" fn(*mut c_void, i32, *mut c_void, Ref);
+// IOHIDBase.h: CFIndex is signed pointer-sized, IOHIDReportType/ID are uint32.
+pub(super) type HidTimestampedReportCallback =
+    unsafe extern "C" fn(*mut c_void, i32, *mut c_void, u32, u32, *mut u8, isize, u64);
+pub(super) type RegisterTimestampedReport =
+    unsafe extern "C" fn(Ref, Option<HidTimestampedReportCallback>, *mut c_void);
+unsafe extern "C" {
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+}
+pub(super) fn timestamped_report_registration() -> Option<RegisterTimestampedReport> {
+    // SAFETY: Apple's dlfcn.h defines RTLD_DEFAULT as (void*)-2. The name is a
+    // static NUL-terminated system IOKit symbol; IOKit is linked for our lifetime.
+    let address = unsafe {
+        dlsym(
+            (-2isize) as *mut c_void,
+            c"IOHIDManagerRegisterInputReportWithTimeStampCallback".as_ptr(),
+        )
+    };
+    if address.is_null() {
+        return None;
+    }
+    // SAFETY: exact named Apple public function and callback signature above;
+    // Darwin dlsym returns a function address representable as this C function pointer.
+    Some(unsafe { std::mem::transmute::<*mut c_void, RegisterTimestampedReport>(address) })
+}
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub(super) struct Timebase {

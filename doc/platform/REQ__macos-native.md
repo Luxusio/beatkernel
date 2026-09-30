@@ -13,3 +13,50 @@ IOProc state lives in a stable boxed allocation with guarded UnsafeCell storage.
 Telemetry preserves actual AudioTimeStamp host ticks and sample-frame bits/validity flags. Presentation ClockPoints come from the callback's output timestamp with an explicit native mach domain and cached integer conversion; an immutable Mixer output-domain/frame-grid origin is supplied by the app. The native presentation point and logical frame-grid point are reported together so the application can explicitly calibrate their relation; HAL startup time is never silently equated to the mixer origin. These are observed clock representations, not a zero-latency or calibrated DAC timing claim. Native permission, link/runtime behavior and hardware timing remain unverified until the user resumes verification.
 
 ABI sources: Apple's [IOHIDManager header](https://github.com/apple-oss-distributions/IOKitUser/blob/main/hid.subproj/IOHIDManager.h), [IOHIDValue header](https://github.com/apple-oss-distributions/IOKitUser/blob/main/hid.subproj/IOHIDValue.h), [IOHIDElement header](https://github.com/apple-oss-distributions/IOKitUser/blob/main/hid.subproj/IOHIDElement.h), [AudioDeviceIOProc documentation](https://developer.apple.com/documentation/coreaudio/audiodeviceioproc), [IOProc registration](https://developer.apple.com/documentation/coreaudio/audiodevicecreateioprocid(_:_:_:_:)), and [Core Audio ASBD layout](https://developer.apple.com/library/archive/documentation/MusicAudio/Conceptual/CoreAudioOverview/CoreAudioEssentials/CoreAudioEssentials.html).
+
+## Explicit timestamped raw IOHID reports
+
+`HidInput::open` keeps the scalar value path. `open_reports` or
+`open_with_options(HidInputOptions::Reports { .. })` selects a separate raw-only
+path and never registers scalar input-value callbacks. Raw mode descriptors set
+`raw_hid=true`; default scalar descriptors do not claim acquired raw reports.
+`pop_report` drains a distinct bounded queue. Native envelopes retain actual report
+type, full uint32 report ID, exact callback bytes, arrival mach ticks and canonical
+metadata derived from that supplied timestamp/device session identity. No current
+receipt-time clock read substitutes for an unavailable acquisition timestamp.
+
+Apple's [IOHIDManager.h](https://github.com/apple-oss-distributions/IOKitUser/blob/main/hid.subproj/IOHIDManager.h#L434-L448)
+marks timestamped manager registration available from macOS 10.15. The exact
+[IOHIDBase.h callback ABI](https://github.com/apple-oss-distributions/IOKitUser/blob/main/hid.subproj/IOHIDBase.h#L103-L111)
+is context pointer, signed IOReturn, sender pointer, uint32 report type, uint32 ID,
+mutable byte pointer, signed pointer-sized CFIndex length, uint64 arrival timestamp.
+The [device implementation](https://github.com/apple-oss-distributions/IOKitUser/blob/main/hid.subproj/IOHIDDevice.c#L1787-L1813)
+forwards the originating IOHIDDeviceRef as sender; the manager propagates registration
+to its devices. Callback buffers are borrowed and copied before return. They are
+never retained or interpreted as IOHIDValueRefs.
+
+Registration resolves `IOHIDManagerRegisterInputReportWithTimeStampCallback` only
+for explicit raw mode via `dlsym`, using Apple's [RTLD_DEFAULT definition](https://github.com/apple-oss-distributions/dyld/blob/main/include/dlfcn.h#L88-L93).
+IOKit is already linked for manager ownership, so the resolved function stays live.
+The new symbol has no static link reference; unavailable symbol yields explicit
+`HidError::Unsupported`. Scalar default acquisition gains no macOS 10.15 symbol
+dependency. [Manager implementation](https://github.com/apple-oss-distributions/IOKitUser/blob/main/hid.subproj/IOHIDManager.c#L1125-L1146)
+stores and propagates a null callback for unregistration. Owner-thread shutdown
+unschedules the runloop and unregisters the cached timestamped callback before
+closing/releasing the manager and boxed context.
+
+Queue slots are capped at 65,536 and raw report bytes at 1 MiB with a 64 MiB
+queue-slots-times-byte-limit ceiling. Full queues, oversized/invalid native reports,
+allocation failures and timestamp failures are explicit counters/errors. This is
+an off-audio owner-thread copying path; no allocation-free callback claim is made.
+Removal retires per-device IDs; previously queued reports retain acquisition identity.
+
+`HidReport::to_raw_report` requires caller-selected `NativeReportLayout` and a byte
+cap, delegating the portable normalization helper. Separate-ID payloads and validated
+leading-ID payloads remain explicit choices. The actual native bytes/ID/type remain
+available independently; no report-prefix or vendor control mapping is guessed.
+The callback is an input-report API, but the envelope still preserves actual type;
+hosts must select acceptable native report types before vendor adapter routing.
+The optional example raw CLI chooses layout explicitly, prints native/canonical
+representations and does not automatically decode vendor controls. Compile checks
+alone do not verify native report delivery, permissions, buffers or runtime linkage.
