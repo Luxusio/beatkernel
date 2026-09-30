@@ -12,11 +12,39 @@
 //! assert_eq!(consumer.try_pop().unwrap(), command);
 //! # Ok::<(), beatkernel::audio::AudioError>(())
 //! ```
+//!
+//! Load samples and allocate mixer storage before entering a callback:
+//!
+//! ```
+//! use beatkernel::{
+//!     audio::{command_queue, AudioCommand, AudioFormat, AudioLimits, Mixer,
+//!         MixerConfig, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId},
+//!     time::{ClockDomainId, Timestamp},
+//! };
+//! let format = AudioFormat::new(48_000, 1)?;
+//! let pcm_limits = PcmLimits::new(1024, 4096, 4)?;
+//! let mut bank = SampleBank::new(format, pcm_limits)?;
+//! bank.insert(SampleId(1), PcmSample::new(format, vec![0.25, 0.5], pcm_limits)?)?;
+//! let limits = AudioLimits::new(4, 4, 4, 128, 4)?;
+//! let config = MixerConfig::new(format, ClockDomainId(1), Timestamp::ZERO, limits);
+//! let (mut producer, consumer) = command_queue(4)?;
+//! let mut mixer = Mixer::new(config, bank, consumer)?;
+//! producer.try_push(AudioCommand::Play {
+//!     voice: VoiceId(1), sample: SampleId(1), at: Timestamp::ZERO, gain: 1.0,
+//! }).unwrap();
+//! let mut output = [0.0; 3];
+//! let report = mixer.render(&mut output)?;
+//! assert_eq!(output, [0.25, 0.5, 0.0]);
+//! assert_eq!(report.frames, 3);
+//! # Ok::<(), beatkernel::audio::AudioError>(())
+//! ```
 
+mod mixer;
 mod model;
 mod pcm;
 mod queue;
 
+pub use mixer::Mixer;
 pub use model::{
     AudioCommand, AudioCounters, AudioError, AudioFormat, AudioLimits, MixerConfig, PcmLimits,
     RenderReport, SampleId, VoiceId,
