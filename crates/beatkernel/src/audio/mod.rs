@@ -5,8 +5,11 @@
 //! `beatkernel-platform`. Scalar commands contain no owning audio assets.
 
 mod model;
+mod pcm;
 
 pub use model::{
     AudioCommand, AudioCounters, AudioError, AudioFormat, AudioLimits, MixerConfig, PcmLimits,
     RenderReport, SampleId, VoiceId,
 };
+
+pub use pcm::{PcmSample, SampleBank, WavError};

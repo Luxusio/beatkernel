@@ -97,13 +97,16 @@ impl SampleEncoding {
 
 /// Validated native interleaved format, including explicit speaker positions.
 ///
-/// A missing mask means caller-selected unspecified native ordering. A present
-/// nonzero mask must contain exactly one bit per channel. No silent conversion.
+/// A missing mask means caller-selected unspecified native ordering. Zero is
+/// explicit direct output without speaker assignment. A present nonzero mask
+/// must contain exactly one bit per channel. No silent conversion.
 ///
 /// ```
 /// use beatkernel_platform::audio::{DeviceFormat, SampleEncoding};
 /// let f = DeviceFormat::new(48_000, 2, SampleEncoding::Float32, Some(3))?;
 /// assert_eq!(f.block_align(), 8);
+/// let direct = DeviceFormat::new(48_000, 8, SampleEncoding::Float32, Some(0))?;
+/// assert_eq!(direct.channel_mask(), Some(0));
 /// assert!(DeviceFormat::new(48_000, 2, SampleEncoding::Float32, Some(1)).is_err());
 /// assert!(DeviceFormat::new(48_000, 2,
 ///     SampleEncoding::Pcm { container_bits: 24, valid_bits: 25 }, None).is_err());
@@ -138,7 +141,7 @@ impl DeviceFormat {
                 return Err(AudioPlatformError::InvalidFormat);
             }
         }
-        if channel_mask.is_some_and(|mask| mask == 0 || mask.count_ones() != u32::from(channels)) {
+        if channel_mask.is_some_and(|mask| mask != 0 && mask.count_ones() != u32::from(channels)) {
             return Err(AudioPlatformError::InvalidFormat);
         }
         let block_align = u32::from(channels) * u32::from(encoding.bytes_per_sample());
