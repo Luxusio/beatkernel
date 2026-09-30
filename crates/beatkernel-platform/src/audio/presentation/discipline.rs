@@ -85,6 +85,8 @@ pub enum DisciplineError {
     Presentation(PresentationError),
     /// Snapshot/query host domain differs from the explicit configured domain.
     DomainMismatch,
+    /// An observer cannot mix WASAPI native counters with caller-supplied pairs.
+    ObservationSourceChanged,
     /// Native device frequency changed between accepted observations.
     FrequencyChanged,
     /// Device position, QPC, host or successful-update chronology regressed.
@@ -122,11 +124,18 @@ impl From<TransportError> for DisciplineError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ObservationSource {
+    Wasapi {
+        frequency: u64,
+        position: u64,
+        qpc: u64,
+    },
+    SuppliedPair,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Observed {
     pair: ClockPair,
-    frequency: u64,
-    position: u64,
-    qpc: u64,
+    source: ObservationSource,
 }
 /// Bounded observation owner; rate application belongs on a control thread.
 #[derive(Clone, Debug)]
@@ -206,33 +215,85 @@ impl PresentationDiscipline {
         &mut self,
         snapshot: AudioStreamSnapshot,
     ) -> Result<ObservationAdmission, DisciplineError> {
+        if self
+            .latest
+            .is_some_and(|previous| previous.source == ObservationSource::SuppliedPair)
+        {
+            return Err(DisciplineError::ObservationSourceChanged);
+        }
         let (pair, frequency, position, qpc) = observation(snapshot, self.output_origin)?;
         if pair.target.domain != self.host_domain {
             return Err(DisciplineError::DomainMismatch);
         }
         let sample = Observed {
             pair,
-            frequency,
-            position,
-            qpc,
+            source: ObservationSource::Wasapi {
+                frequency,
+                position,
+                qpc,
+            },
         };
         if let Some(previous) = self.latest {
-            if frequency != previous.frequency {
+            let ObservationSource::Wasapi {
+                frequency: previous_frequency,
+                position: previous_position,
+                qpc: previous_qpc,
+            } = previous.source
+            else {
+                return Err(DisciplineError::ObservationSourceChanged);
+            };
+            if frequency != previous_frequency {
                 return Err(DisciplineError::FrequencyChanged);
             }
             if sample == previous {
                 return Ok(ObservationAdmission::Unchanged);
             }
-            if position < previous.position
-                || qpc <= previous.qpc
+            if position < previous_position
+                || qpc <= previous_qpc
                 || pair.target.timestamp <= previous.pair.target.timestamp
             {
                 return Err(DisciplineError::NonIncreasing);
             }
-            if position == previous.position {
+            if position == previous_position {
                 return Ok(ObservationAdmission::Unchanged);
             }
         }
+        Ok(self.admit(sample))
+    }
+    /// Admit an explicitly supplied output/host relation without fabricating
+    /// native counters. This source cannot be mixed with WASAPI observations.
+    /// Duplicates/unchanged output do not refresh accepted progress or retention.
+    pub fn observe_clock_pair(
+        &mut self,
+        pair: ClockPair,
+    ) -> Result<ObservationAdmission, DisciplineError> {
+        if pair.source.domain != self.output_origin.domain || pair.target.domain != self.host_domain
+        {
+            return Err(DisciplineError::DomainMismatch);
+        }
+        if let Some(previous) = self.latest {
+            if previous.source != ObservationSource::SuppliedPair {
+                return Err(DisciplineError::ObservationSourceChanged);
+            }
+            if pair.source.timestamp < previous.pair.source.timestamp
+                || pair.target.timestamp < previous.pair.target.timestamp
+            {
+                return Err(DisciplineError::NonIncreasing);
+            }
+            if pair.source.timestamp == previous.pair.source.timestamp {
+                return Ok(ObservationAdmission::Unchanged);
+            }
+            if pair.target.timestamp == previous.pair.target.timestamp {
+                return Err(DisciplineError::NonIncreasing);
+            }
+        }
+        Ok(self.admit(Observed {
+            pair,
+            source: ObservationSource::SuppliedPair,
+        }))
+    }
+    fn admit(&mut self, sample: Observed) -> ObservationAdmission {
+        let pair = sample.pair;
         let retain = self.last_retained.is_none_or(|last| {
             delta(pair.target.timestamp, last.pair.target.timestamp)
                 >= i128::from(self.config.retention_interval.as_nanos())
@@ -247,11 +308,11 @@ impl PresentationDiscipline {
             self.last_retained = Some(sample);
         }
         self.latest = Some(sample);
-        Ok(if retain {
+        if retain {
             ObservationAdmission::Retained
         } else {
             ObservationAdmission::Progress
-        })
+        }
     }
     /// Check explicit host domain and freshness; historical queries are permitted.
     pub fn validate_host(&self, point: ClockPoint) -> Result<(), DisciplineError> {

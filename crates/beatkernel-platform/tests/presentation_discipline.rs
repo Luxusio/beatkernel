@@ -453,3 +453,138 @@ fn full_signed_host_span_uses_wide_arithmetic_without_inventing_overflow() {
         Timestamp::from_nanos(i64::MAX)
     );
 }
+
+fn supplied(output_ns: i64, host_ns: i64) -> ClockPair {
+    ClockPair {
+        source: ClockPoint {
+            domain: ClockDomainId(2),
+            timestamp: Timestamp::from_nanos(output_ns),
+        },
+        target: host(host_ns),
+    }
+}
+#[test]
+fn explicit_supplied_pairs_allow_zero_and_share_continuous_drift_correction() {
+    let mut discipline = observer(0);
+    let mut transport = normal(0);
+    assert_eq!(
+        discipline.observe_clock_pair(supplied(0, 0)).unwrap(),
+        ObservationAdmission::Retained
+    );
+    assert_eq!(
+        discipline.update(host(0), &mut transport).unwrap(),
+        DisciplineUpdate::Warmup { span_ns: 0 }
+    );
+    discipline
+        .observe_clock_pair(supplied(1_000_100_000, 1_000_000_000))
+        .unwrap();
+    let before = transport
+        .position_at(Timestamp::from_nanos(1_000_000_000))
+        .unwrap();
+    assert_eq!(
+        discipline
+            .update(host(1_000_000_000), &mut transport)
+            .unwrap(),
+        DisciplineUpdate::Applied {
+            base_rate_ppm: 100,
+            correction_ppm: 10,
+            applied_rate_ppm: 110,
+            phase_error_ns: 100_000,
+            limited: false
+        }
+    );
+    assert_eq!(
+        transport
+            .position_at(Timestamp::from_nanos(1_000_000_000))
+            .unwrap(),
+        before
+    );
+    assert_eq!(
+        transport
+            .position_at(Timestamp::from_nanos(500_000_000))
+            .unwrap()
+            .as_nanos(),
+        500_000_000
+    );
+    assert_eq!(discipline.quality(), ClockMappingQuality::Unknown);
+}
+
+#[test]
+fn supplied_pair_domains_regressions_and_nonprogress_are_atomic() {
+    let mut discipline = observer(0);
+    discipline.observe_clock_pair(supplied(100, 100)).unwrap();
+    let initial = discipline.latest_pair();
+    assert_eq!(
+        discipline.observe_clock_pair(supplied(100, 100)).unwrap(),
+        ObservationAdmission::Unchanged
+    );
+    assert_eq!(
+        discipline.observe_clock_pair(supplied(100, 200)).unwrap(),
+        ObservationAdmission::Unchanged
+    );
+    assert_eq!(discipline.latest_pair(), initial);
+    for pair in [
+        supplied(99, 200),
+        supplied(101, 99),
+        supplied(100, 99),
+        supplied(101, 100),
+    ] {
+        assert_eq!(
+            discipline.observe_clock_pair(pair),
+            Err(DisciplineError::NonIncreasing)
+        );
+        assert_eq!(discipline.latest_pair(), initial);
+        assert_eq!(discipline.retained_len(), 1);
+    }
+    let mut source_domain = supplied(101, 200);
+    source_domain.source.domain = ClockDomainId(3);
+    let mut host_domain = supplied(101, 200);
+    host_domain.target.domain = ClockDomainId(3);
+    for pair in [source_domain, host_domain] {
+        assert_eq!(
+            discipline.observe_clock_pair(pair),
+            Err(DisciplineError::DomainMismatch)
+        );
+        assert_eq!(discipline.latest_pair(), initial);
+    }
+    assert_eq!(
+        discipline.validate_host(host(2_000_000_101)),
+        Err(DisciplineError::Stale)
+    );
+    assert_eq!(
+        discipline.observe_clock_pair(supplied(200, 200)).unwrap(),
+        ObservationAdmission::Progress
+    );
+    assert_eq!(discipline.latest_pair(), Some(supplied(200, 200)));
+}
+
+#[test]
+fn observations_cannot_switch_native_provenance_in_either_direction() {
+    let mut supplied_observer = observer(0);
+    supplied_observer
+        .observe_clock_pair(supplied(1_000_000_000, 1_000_000_000))
+        .unwrap();
+    let original = supplied_observer.latest_pair();
+    assert_eq!(
+        supplied_observer.observe(snapshot(2_000_000_000, 2_000_000_000)),
+        Err(DisciplineError::ObservationSourceChanged)
+    );
+    assert_eq!(supplied_observer.latest_pair(), original);
+    supplied_observer
+        .observe_clock_pair(supplied(2_000_000_000, 2_000_000_000))
+        .unwrap();
+    let mut native_observer = observer(0);
+    native_observer
+        .observe(snapshot(1_000_000_000, 1_000_000_000))
+        .unwrap();
+    let original = native_observer.latest_pair();
+    assert_eq!(
+        native_observer.observe_clock_pair(supplied(2_000_000_000, 2_000_000_000)),
+        Err(DisciplineError::ObservationSourceChanged)
+    );
+    assert_eq!(native_observer.latest_pair(), original);
+    native_observer
+        .observe(snapshot(2_000_000_000, 2_000_000_000))
+        .unwrap();
+    assert_eq!(native_observer.retained_len(), 2);
+}
