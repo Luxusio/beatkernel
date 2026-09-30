@@ -112,3 +112,53 @@ impl ClockMapper for MachClock {
         ClockMappingQuality::Exact
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cached_rational_timebase_preserves_ticks_and_quantized_endpoints() {
+        let clock = MachClock {
+            numer: 2,
+            denom: 3,
+            origin: 2,
+            native: ClockDomainId(1),
+            host: ClockDomainId(2),
+        };
+        let sample = clock.at_ticks(4).unwrap();
+        assert_eq!(sample.ticks, 4);
+        assert_eq!(sample.native.timestamp.as_nanos(), 2);
+        assert_eq!(sample.normalized.timestamp.as_nanos(), 1);
+        assert_eq!(sample.native.domain, ClockDomainId(1));
+        assert_eq!(sample.normalized.domain, ClockDomainId(2));
+        assert_eq!(
+            clock.at_ticks(0).unwrap().normalized.timestamp.as_nanos(),
+            -1
+        );
+        assert_eq!(
+            clock.at_ticks(2).unwrap().normalized.timestamp.as_nanos(),
+            0
+        );
+        assert_eq!(
+            clock.map(sample.normalized, clock.native_domain()),
+            Some(sample.native.timestamp)
+        );
+        assert_eq!(clock.map(sample.native, ClockDomainId(3)), None);
+    }
+    #[test]
+    fn native_timestamp_overflow_never_becomes_zero_time() {
+        let clock = MachClock {
+            numer: 1,
+            denom: 1,
+            origin: 0,
+            native: ClockDomainId(1),
+            host: ClockDomainId(2),
+        };
+        assert_eq!(
+            clock.at_ticks(i64::MAX as u64).unwrap().native.timestamp,
+            Timestamp::MAX
+        );
+        assert_eq!(clock.at_ticks(i64::MAX as u64 + 1), None);
+        assert_eq!(clock.at_ticks(u64::MAX), None);
+    }
+}

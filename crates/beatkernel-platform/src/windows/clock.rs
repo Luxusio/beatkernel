@@ -117,6 +117,11 @@ impl QpcClock {
         if unsafe { QueryPerformanceCounter(&mut value) } == 0 {
             return None;
         }
+        self.at_counter(value)
+    }
+
+    // Pure conversion boundary shared with fixtures; no OS/error allocation.
+    fn at_counter(&self, value: i64) -> Option<QpcReceipt> {
         let native = self.mapping.point(value).ok()?;
         let timestamp = self.mapping.map(native, self.output)?;
         Some(QpcReceipt {
@@ -154,4 +159,50 @@ fn counter() -> io::Result<i64> {
 fn os_error(operation: &'static str) -> io::Error {
     let error = io::Error::last_os_error();
     io::Error::new(error.kind(), format!("{operation}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn quantized_absolute_endpoints_preserve_raw_ticks_and_signed_origin() {
+        let clock = QpcClock {
+            mapping: QpcClockMapping::new(3, 2, ClockDomainId(9)).unwrap(),
+            output: ClockDomainId(9),
+        };
+        // Quantize endpoints separately: floor(4/3 s) - floor(2/3 s).
+        let sample = clock.at_counter(4).unwrap();
+        assert_eq!((sample.counter, sample.frequency), (4, 3));
+        assert_eq!(sample.native.timestamp.as_nanos(), 1_333_333_333);
+        assert_eq!(sample.normalized.timestamp.as_nanos(), 666_666_667);
+        assert_eq!(sample.normalized.domain, ClockDomainId(9));
+        assert_ne!(sample.native.domain, sample.normalized.domain);
+        assert_eq!(
+            clock.at_counter(1).unwrap().normalized.timestamp.as_nanos(),
+            -333_333_333
+        );
+        assert_eq!(
+            clock.at_counter(2).unwrap().normalized.timestamp.as_nanos(),
+            0
+        );
+    }
+    #[test]
+    fn invalid_or_unrepresentable_counters_remain_absent() {
+        let clock = QpcClock {
+            mapping: QpcClockMapping::new(1, 0, ClockDomainId(9)).unwrap(),
+            output: ClockDomainId(9),
+        };
+        assert_eq!(clock.at_counter(-1), None);
+        assert_eq!(clock.at_counter(i64::MAX), None);
+        assert_eq!(
+            clock
+                .at_counter(9_223_372_036)
+                .unwrap()
+                .native
+                .timestamp
+                .as_nanos(),
+            9_223_372_036_000_000_000
+        );
+        assert_eq!(clock.at_counter(9_223_372_037), None);
+    }
 }
