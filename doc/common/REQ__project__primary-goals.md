@@ -167,18 +167,18 @@ receipt-time substitution. Compilation does not establish acoustic synchronizati
 
 Git was initialized locally on 2026-09-29 after these files had been implemented. Initial commits record the existing implementation and its documentation, rather than reconstructing historical development commits.
 
-Phase 7 audio is under implementation: [core audio](../kernel/REQ__audio.md)
-provides finite PCM preload, bounded scalar SPSC commands and deterministic
-scheduled mixing. [Windows audio](../platform/REQ__windows-audio.md) provides
-native WASAPI enumeration/probing, shared engine/legacy event or explicit timer
-operation, exclusive event operation, requested/applied configuration and
-worker-owned clock telemetry. On Rust 1.98.1, coordinator checks pass 178 tests
-including doctests in each of debug and release on Linux, and strict Clippy
-passes on Linux and for the Windows platform target. Windows cross-compilation
-passes. These checks are not independent audio review/QA or successful native
-playback evidence. Successful native shared/exclusive execution remains
-required; the retained Windows VM previously reported zero render endpoints.
-ASIO licensing remains unresolved, and full Phases 7–15 remain required.
+The [phase inventory](../kernel/REQ__implementation-status.md) maps the full plan
+to current source and outstanding acceptance. Core mixing and native
+WASAPI/ALSA/CoreAudio paths, integrated runtime, visual projection, replay,
+generic interactions and the separate BMS adapter/runtime have source
+implementations. Their current acceptance evidence remains incomplete.
+Historical Phase 7 coordinator checks passed 178 tests including doctests in
+each of debug and release on Linux, plus strict Clippy on Linux and the Windows
+platform target; these do not verify subsequent changes. Native shared/exclusive
+playback remains required; the retained Windows VM previously reported zero
+render endpoints. ASIO implementation/licensing remains unresolved. Phase 15
+retains its confirmed-host prerequisite rather than becoming an unconditional
+SDK requirement. The full runtime is not declared complete.
 
 ## Verification
 
