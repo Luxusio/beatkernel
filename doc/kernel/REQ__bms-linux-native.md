@@ -33,9 +33,17 @@ All BGM commands are prequeued before Mixer/backend start, with checked
 queue and pending capacities are BGM count+1024 and drain budget covers that queue.
 There is no total-note-count limit of4096, implicit voice stealing or streaming claim.
 Queue failures preserve exact command/reason and do not undo grading or retry. Active
-Mixer voices remain separately bounded; the current ALSA aggregate facade does not
-expose all Mixer per-command execution rejection counters, so successful admission
-must not be reported as proven audible output. Shared loader asset/path/PCM limits
+Mixer voices remain separately bounded. After stop/join, the sample prints the
+last successful typed RenderReport and its actual cumulative Mixer counters:
+commands consumed/applied, lateness, pending/voice capacity, unknown samples/stops
+and invalid gains/rates/times, plus active voices and pending commands. None is
+explicitly unavailable, never fabricated as zero. See the platform
+[ALSA render telemetry contract](../platform/REQ__alsa-render-telemetry.md).
+The retained successful report survives terminal output cleanup and is printed
+before returning gameplay/start errors. It does not describe a failed render or
+prove native write completion, device presentation, or physical sound. Successful
+queue admission, Mixer execution and native submitted-frame/error counters remain
+distinct observations; render rejections do not retry inputs or undo grading. Shared loader asset/path/PCM limits
 apply:64 MiB per asset,256 MiB bank. Samples and mixing are preallocated off-thread.
 
 After Start, startup polls actual separately coherent native ALSA timing within a

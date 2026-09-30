@@ -134,15 +134,23 @@ mod native {
                 };
                 let mut stream = AlsaStream::open(request, mixer)?;
                 println!("applied={:?}", stream.configuration());
-                stream.start()?;
-                std::thread::sleep(StdDuration::from_secs(seconds));
-                println!(
-                    "native_timing_before_stop={:?}; estimated sound frames, physical latency unmeasured",
-                    stream.timing_snapshot()
-                );
+                let playback = (|| -> Result<(), Box<dyn Error>> {
+                    stream.start()?;
+                    std::thread::sleep(StdDuration::from_secs(seconds));
+                    println!(
+                        "native_timing_before_stop={:?}; estimated sound frames, physical latency unmeasured",
+                        stream.timing_snapshot()
+                    );
+                    Ok(())
+                })();
                 let result = stream.stop();
+                match stream.last_render_report() {
+                    Some(report) => println!("last successful Mixer render report={report:?}; execution counters do not prove native write/presentation or physical sound"),
+                    None => println!("last successful Mixer render report unavailable; no zero observation substituted"),
+                }
                 println!("observations={:?}", stream.snapshot());
                 println!("native_timing_after_stop={:?}", stream.timing_snapshot());
+                playback?;
                 result?;
                 drop(producer);
             }

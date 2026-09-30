@@ -528,6 +528,10 @@ mod native {
         })();
         let timing = stream.timing_snapshot();
         let stop = stream.stop(); // joins and tears down native handles before evdev drop
+        match stream.last_render_report() {
+            Some(report) => println!("last successful Mixer render report={report:?}; execution counters distinct from queue admission/native writes; physical delivery unverified"),
+            None => println!("last successful Mixer render report unavailable; no render observation substituted"),
+        }
         println!("final independent ALSA counters={:?}; last separately coherent timing={timing:?}; evdev={:?}; pre-origin ignored={before_origin}; physical latency=unmeasured",stream.snapshot(),input.counters());
         if let Err(error) = &stop {
             eprintln!("ALSA stop/join error: {error}");
