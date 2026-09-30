@@ -14,6 +14,9 @@ type Result<T> = std::result::Result<T, Box<dyn Error>>;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct Options {
     chart: PathBuf,
+    record_replay: Option<PathBuf>,
+    replay_max_records: usize,
+    replay_max_bytes: usize,
     evdev: PathBuf,
     alsa: String,
     format: AudioFormat,
@@ -37,6 +40,9 @@ fn parse(args: &[String]) -> Result<Options> {
     let mut bindings = BTreeMap::new();
     let mut keys = HashSet::new();
     let mut seen = HashSet::new();
+    let mut record_replay = None;
+    let mut replay_max_records = 1_000_000usize;
+    let mut replay_max_bytes = 64 * 1024 * 1024usize;
     let (mut early, mut late, mut offset, mut preroll) =
         (150_000_000i64, 150_000_000i64, 0i64, 3_000_000_000i64);
     let mut advance_lag = 2_000_000i64;
@@ -50,6 +56,24 @@ fn parse(args: &[String]) -> Result<Options> {
             return Err(format!("duplicate option {flag}").into());
         }
         match flag.as_str() {
+            "--record-replay" => {
+                if value.is_empty() {
+                    return Err("replay path must be nonempty".into());
+                }
+                record_replay = Some(PathBuf::from(value));
+            }
+            "--replay-max-records" => {
+                replay_max_records = value.parse()?;
+                if replay_max_records == 0 {
+                    return Err("replay record limit must be positive usize".into());
+                }
+            }
+            "--replay-max-bytes" => {
+                replay_max_bytes = value.parse()?;
+                if replay_max_bytes == 0 {
+                    return Err("replay byte limit must be positive usize".into());
+                }
+            }
             "--chart" if !value.is_empty() => chart = Some(PathBuf::from(value)),
             "--evdev" if !value.is_empty() => evdev = Some(PathBuf::from(value)),
             "--alsa" if !value.is_empty() => alsa = Some(value.clone()),
@@ -119,6 +143,9 @@ fn parse(args: &[String]) -> Result<Options> {
         );
     }
     Ok(Options {
+        record_replay,
+        replay_max_records,
+        replay_max_bytes,
         chart: chart.ok_or("explicit --chart required")?,
         evdev: evdev.ok_or("explicit --evdev required")?,
         alsa: alsa.ok_or("explicit --alsa required")?,
@@ -265,10 +292,28 @@ impl Drop for DeliverySession {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn save_capture(
+    capture: Option<beatkernel_bms_runtime::replay_capture::LiveReplayCapture>,
+    path: Option<&std::path::Path>,
+    failed_session: bool,
+) -> Result<()> {
+    let Some(capture) = capture else {
+        return Ok(());
+    };
+    let path = path.ok_or("enabled replay capture missing save path")?;
+    let records = capture.records().len();
+    let bytes = capture.encoded_bytes();
+    println!("replay capture: records={records}, encoded_bytes={bytes}, status={}, path={path:?}; accepted judge operations, physical output unverified", if failed_session { "valid prefix of failed session" } else { "complete recorded session" });
+    let written = capture.save_new(path)?;
+    println!("replay create_new saved {written} bytes to {path:?}");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.is_empty() || args == ["--help"] {
-        println!("linux_bms --chart PATH --evdev NODE --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N --seconds N --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --early-ns N --late-ns N --input-offset-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Seconds is loop duration after startup. Exact one-node keyboard bindings; native float32 ALSA, no fallback. Physical timing Unknown.");
+        println!("linux_bms --chart PATH --evdev NODE --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N --seconds N --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Seconds is loop duration after startup. Exact one-node keyboard bindings; native float32 ALSA, no fallback. Physical timing Unknown.");
         return Ok(());
     }
     let options = parse(&args)?;
@@ -373,7 +418,13 @@ mod native {
             timestamp: Timestamp::from_nanos(i64::try_from(nanos)?),
         })
     }
-    fn print_report(report: RuntimeReport) -> Result<()> {
+    fn print_report(
+        report: RuntimeReport,
+        capture: &mut Option<beatkernel_bms_runtime::replay_capture::LiveReplayCapture>,
+    ) -> Result<()> {
+        if let Some(capture) = capture.as_mut() {
+            capture.record_report(&report)?;
+        }
         for result in report.judge_events {
             println!("judge={result:?}");
         }
@@ -483,7 +534,21 @@ mod native {
             stream.configuration(),input.descriptor(),DEVICE,options.bindings,options.early,options.late,options.offset,options.preroll,options.advance_lag,options.voices,
             if options.mono_stereo { "mono-stereo" } else { "exact" },capacity);
         let mut before_origin = 0u64;
+        let mut capture = None;
         let outcome = (|| -> Result<()> {
+            if options.record_replay.is_some() {
+                let limits = beatkernel::replay::codec::ReplayCodecLimits::new(
+                    options.replay_max_bytes,
+                    options.replay_max_records,
+                    4096,
+                    beatkernel::input::CodecLimits::new(65536, 32768)?,
+                )?;
+                capture = Some(
+                    beatkernel_bms_runtime::replay_capture::LiveReplayCapture::new(
+                        &judge, HOST, limits,
+                    )?,
+                );
+            }
             stream.start()?;
             let mut discipline = PresentationDiscipline::new(
                 DisciplineConfig::default(),
@@ -568,11 +633,14 @@ mod native {
                                 }
                                 discipline.validate_host(host)?;
                                 delivery.observe(host, acquired_now)?;
-                                print_report(runtime.process_input(
-                                    event,
-                                    &ExplicitDomains,
-                                    schedule(&stream)?,
-                                )?)?;
+                                print_report(
+                                    runtime.process_input(
+                                        event,
+                                        &ExplicitDomains,
+                                        schedule(&stream)?,
+                                    )?,
+                                    &mut capture,
+                                )?;
                                 last_operation = host;
                             }
                         }
@@ -612,7 +680,7 @@ mod native {
                             }
                             last_progress = Some(second);
                         }
-                        print_report(report)?;
+                        print_report(report, &mut capture)?;
                     }
                     std::thread::sleep(WallDuration::from_millis(1));
                 }
@@ -631,8 +699,19 @@ mod native {
         if let Err(error) = &stop {
             eprintln!("ALSA stop/join error: {error}");
         }
+        // Final input counters were read above; close evdev before file I/O.
+        drop(input);
+        let save = save_capture(
+            capture,
+            options.record_replay.as_deref(),
+            outcome.is_err() || stop.is_err(),
+        );
+        if let Err(error) = &save {
+            eprintln!("replay save error after cleanup (valid captured prefix retained until save): {error}");
+        }
         outcome?;
         stop?;
+        save?;
         Ok(())
     }
 }
@@ -675,6 +754,46 @@ mod fixtures {
             "2".into(),
         ]);
         assert!(parse(&duplicate).is_err());
+    }
+    #[test]
+    fn optional_replay_cli_defaults_paths_and_checked_caps() {
+        let base = args();
+        let defaults = parse(&base).unwrap();
+        assert!(defaults.record_replay.is_none());
+        assert_eq!(defaults.replay_max_records, 1_000_000);
+        assert_eq!(defaults.replay_max_bytes, 64 * 1024 * 1024);
+        let mut enabled = base.clone();
+        enabled.extend([
+            "--record-replay".into(),
+            "capture.bkr".into(),
+            "--replay-max-records".into(),
+            "1".into(),
+            "--replay-max-bytes".into(),
+            "4096".into(),
+        ]);
+        let parsed = parse(&enabled).unwrap();
+        assert_eq!(parsed.record_replay, Some(PathBuf::from("capture.bkr")));
+        assert_eq!(parsed.replay_max_records, 1);
+        assert_eq!(parsed.replay_max_bytes, 4096);
+        for flag in ["--replay-max-records", "--replay-max-bytes"] {
+            for value in ["0", "-1", "184467440737095516160"] {
+                let mut invalid = base.clone();
+                invalid.extend([flag.into(), value.into()]);
+                assert!(parse(&invalid).is_err());
+            }
+        }
+        let mut empty = base.clone();
+        empty.extend(["--record-replay".into(), String::new()]);
+        assert!(parse(&empty).is_err());
+        for flag in [
+            "--record-replay",
+            "--replay-max-records",
+            "--replay-max-bytes",
+        ] {
+            let mut duplicate = base.clone();
+            duplicate.extend([flag.into(), "1".into(), flag.into(), "2".into()]);
+            assert!(parse(&duplicate).is_err());
+        }
     }
     fn args() -> Vec<String> {
         [

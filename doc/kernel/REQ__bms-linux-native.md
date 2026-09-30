@@ -148,3 +148,32 @@ supplied timestamp age, separately from Runtime process_input CPU duration; it n
 infers device polling frequency nor establishes physical input-to-sound latency. See
 [the core telemetry contract](REQ__telemetry.md). Observation and summary remain on the
 control thread, outside audio callbacks. Source/compile checks are not native evidence.
+
+## Optional accepted-operation replay capture
+
+--record-replay PATH enables the shared
+[accepted-operation capture contract](REQ__bms-replay-capture.md). The path must be
+nonempty and is created only after native stop/close attempts, using create_new; an
+existing file is never overwritten. No replay filesystem I/O occurs in the gameplay
+loop. --replay-max-records N defaults to 1,000,000 and --replay-max-bytes N to
+67,108,864 (64 MiB); both require positive representable usize values. Duplicate
+flags reject. Codec limits are constructed only when capture is enabled, with a
+4,096-byte header and canonical input limits 65,536 encoded/32,768 payload bytes.
+
+Capture is initialized against the pristine actual JudgeEngine immediately inside
+the common startup/error boundary, before it moves into Runtime. Each actual returned
+RuntimeReport is submitted once, including advances, before judge errors propagate.
+Accepted input provenance and unoffset song times remain unchanged; no replacement
+judge, synthetic events or extra input offset is introduced. Recording failure stops
+the session through existing cleanup and preserves the helper's explicitly bounded
+valid prefix. Capture's identity binds the compiled builtin judge setup/profile via
+a versioned noncryptographic fingerprint, not PCM/source authenticity or hardware.
+
+After cleanup attempts, enabled capture prints operation count, encoded byte count
+and complete-session versus failed-session valid-prefix status, then saves the
+canonical replay. Save failures are logged even when an earlier operation/cleanup
+error takes precedence, and are returned if there is no earlier error. Setup before
+capture creation has no captured file; startup failures after creation may save an
+empty valid prefix. Control-thread recording may allocate and encode candidate
+records. Replay contains accepted judge operations rather than physical audio output
+or device latency evidence. Portable CLI fixtures are authored/compiled only.
