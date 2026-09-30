@@ -28,6 +28,14 @@ If a 250,000,000 ns STOP occurs there, an object at tick 480 remains at
 500,000,000 ns and one at tick 960 moves to 1,250,000,000 ns. If BPM also
 changes to 60 at tick 480, the tick-960 object instead lands at 1,750,000,000 ns.
 
+Compiled timestamps use signed 64-bit nanoseconds: a positive song position
+can reach 9,223,372,036,854,775,807 ns (about 292 years from song zero).
+Twenty hours is 72,000,000,000,000 ns; one week is 604,800,000,000,000 ns.
+Neither duration requires a different timestamp representation. Intermediate
+timing products and sums use checked i128 arithmetic; an unrepresentable
+intermediate or final timestamp returns `ChartError::Overflow`. Duration does
+not exempt a chart from the separate item-count and adapter byte limits.
+
 ## Compiled objects and lookup
 
 Each source object has an ID, start tick, optional end tick, interaction and
