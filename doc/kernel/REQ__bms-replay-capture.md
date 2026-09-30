@@ -16,6 +16,8 @@ chart and rule implementations supplied separately. The options field preserves
 the profile as `bms-judge-profile/v1:` followed by LE i64 input offset, u64 window
 count, then each caller-ordered window's u32 grade and i64 early/late bounds.
 These settings remain subject to normal JudgeProfile validation when loading.
+The [BMS replay inspector](REQ__bms-replay-playback.md) performs those identity
+checks and reconstructs recorded operations through the core ReplaySession.
 
 `--record-replay PATH` enables recording. Record and encoded-byte bounds are
 explicit, defaulting to 1,000,000 operations and 64 MiB. Nested physical input

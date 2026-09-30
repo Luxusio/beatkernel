@@ -6,6 +6,8 @@ pub mod bgm;
 pub mod offline;
 /// Bounded capture of the actual native runtime's accepted judgment operations.
 pub mod replay_capture;
+/// Checked durable replay reconstruction through the same builtin BMS judge.
+pub mod replay_playback;
 
 use beatkernel::{
     audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, VoiceId},
