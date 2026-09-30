@@ -378,6 +378,23 @@ The application header fingerprints the pristine compiled judge/profile setup;
 it does not authenticate BMS source or PCM assets. Capture performs bounded
 control-thread allocation/encoding work and records no physical audio timing.
 
+The separate [`replay_bms` inspector](doc/kernel/REQ__bms-replay-playback.md)
+reconstructs captured BMS play with the stored profile and the same JudgeEngine:
+
+```sh
+cargo run -p beatkernel-bms-runtime --bin replay_bms -- --chart CHART.bms --replay SESSION.bkr
+cargo run -p beatkernel-bms-runtime --bin replay_bms -- --chart CHART.bms --replay SESSION.bkr --song-ns 12400000000
+```
+
+It checks the exact runtime version and recompiled setup identity before replay,
+loads no PCM assets, and prints logical results and the actual engine state hash.
+`--cursor N` selects an exact operation boundary; `--song-ns N` performs core
+time seek, including a boundary advance when needed. These options are mutually
+exclusive. File/record caps default to the capture defaults and can be adjusted
+with `--max-bytes N` and `--max-records N`. Failed-session prefix logs reconstruct
+only their recorded extent. This inspector provides no native audio output;
+the commands above and replay comparison fixtures remain unexecuted.
+
 The [durable replay codec](doc/kernel/REQ__replay-codec.md) stores ordered operations,
 runtime identity and optional calibration metadata with explicit byte/count limits.
 Logical restoration does not rewind hardware.

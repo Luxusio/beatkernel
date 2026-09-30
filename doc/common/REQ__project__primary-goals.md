@@ -65,6 +65,11 @@ Native BMS roots also support bounded optional
 Runtime reports and the same core ReplayRecorder/ReplaySession semantics.
 Recording caps and exclusive output creation are explicit; output occurs after
 native cleanup. Execution and deterministic replay checks remain deferred.
+The separate [BMS replay inspector](../kernel/REQ__bms-replay-playback.md) loads
+those logs with the captured profile, validates their recompiled setup identity
+and restores logical results through the same JudgeEngine/ReplaySession. Exact
+operation and song-time seeks reuse the core restoration paths. This adds a
+logical record/playback connection, with native replay audio still outstanding.
 
 Native BMS roots also expose [input delivery age](../kernel/REQ__telemetry.md)
 using preserved event points and fresh same-domain receipt points, with backend
