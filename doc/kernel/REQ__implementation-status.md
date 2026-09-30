@@ -126,6 +126,26 @@ Time-info clock/rate change flags require reopening. Actual SDK C++ compilation
 and driver control execution remain unverified; this does not complete live ASIO
 host timing or deferred native acceptance.
 
+Windows multimedia timer acquisition now retains actual shared QPC brackets.
+Finite modular relations and ASIO presentation observations pair actual rendered
+Mixer frame identity with native switch time and explicit output-latency bounds.
+Two-observation calibration enforces rate/origin/grid identity and finite mapping
+validity, accounting for interval width and extrapolation. Continuous discipline
+admits ASIO blocks separately from WASAPI counters and supplied pairs, with no
+duplicate freshness updates. Unknown residual drift and rolling midpoint accuracy
+remain Unknown; no acoustic accuracy follows from compilation.
+
+The Windows live BMS sample now composes explicitly selected optional ASIO
+through the same physical input, binding, JudgeEngine/Runtime, BGM admission and
+accepted-operation replay capture as WASAPI. It queries actual driver rate and
+selected channels, requires explicit multimedia timer/error assumptions, refreshes
+finite timer anchors and feeds ASIO presentation discipline. Coarse timer plateaus
+wait without refreshing progress. The hidden driver window remains alive until
+stream close/drain; startup driver messages are serviced with bounded work.
+Nine portable CLI fixtures are authored and compiled only. Source composition
+does not establish actual SDK/MSVC build, device compatibility, native output
+or physical input-to-sound timing.
+
 ## Build evidence and completion boundary
 
 After the native replay slice, Rust 1.98.1 locked all-target checks passed for the

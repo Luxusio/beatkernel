@@ -130,7 +130,10 @@ when output frame zero lies inside that validity.
 `PresentationDiscipline::observe_asio` accepts these observations for continuous
 transport correction. It retains ASIO rate and block identity separately from
 WASAPI counters and generic clock pairs, rejects changed rate/overlap/regression,
-and does not refresh freshness for duplicate blocks. Its midpoint-based rolling
+and does not refresh freshness for duplicate blocks. A newer nonoverlapping
+block whose coarse timer midpoint has not progressed returns
+`AwaitingHostProgress` without updating freshness; regression still rejects.
+Its midpoint-based rolling
 model retains Unknown quality. These paths require same-stream observations;
 matching metadata alone cannot prove that two driver instances share a clock.
 Live input/judge host composition and native acceptance remain outstanding.

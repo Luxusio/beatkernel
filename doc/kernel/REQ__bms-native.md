@@ -3,7 +3,9 @@
 `windows_bms` is a separate binary in `beatkernel-bms-runtime`. The default binary
 remains the offline renderer. This native sample loads an actual supported BMS chart
 and bounded WAV bank through the shared preparation library, then composes BMS rules,
-the same core JudgeEngine/Runtime, real Windows Raw Input keyboard events and WASAPI.
+the same core JudgeEngine/Runtime, real Windows Raw Input keyboard events and an
+explicit native output backend. WASAPI is the default; optional ASIO follows the
+backend contract below.
 No synthetic hits, tones, automatic gameplay input or GPU UI are supplied. BGM alone
 is automatic; accepted head/instant stages publish preloaded keysounds. Parser warnings
 are printed, and unsupported parser features remain explicit errors.
@@ -16,6 +18,50 @@ unsupported channels and missing used lanes fail before playback. Bindings expli
 use `DeviceSelector::Any`: any acquired physical keyboard can play the chosen keys.
 The sample does not infer a specific keyboard identity. The native window must have
 focus for foreground keyboard acquisition; console results report actual grades/misses.
+
+## Optional live ASIO backend
+
+`--backend asio` requires Windows and the sample's optional `asio-sdk` feature.
+The default SDK-free build remains MIT and must return an explicit unavailable
+error when ASIO is requested; an SDK-combined build follows the
+[GPLv3 distribution policy](../platform/REQ__asio-distribution.md).
+ASIO requires an exact braced driver CLSID for `--device`, explicit registry view
+`--asio-view native|32|64`, and a distinct ordered `--output-channels 0,1` mapping.
+The driver reports the actual positive integral sample rate; the selected output
+count defines the Mixer layout. Device/rate/channel substitution is prohibited.
+ASIO buffer accepts `default` (driver preferred) or exact `frames:N`. WASAPI mode,
+period and shared-policy options, and nanosecond buffer requests, reject for ASIO.
+ASIO-only options reject for WASAPI, whose explicit mode requirement remains.
+
+The live timing path requires the caller's explicit `--asio-system-clock multimedia`
+declaration that this driver's native timestamps use the wrapped Windows multimedia
+timer. It also requires explicit nonnegative `--asio-timer-error-ns`,
+`--asio-drift-error-ns` and `--asio-latency-error-ns` assessments; there is no inferred
+timer precision or acoustic accuracy. `--asio-anchor-age-ns` selects a finite
+positive horizon, default one second. The acquisition and error envelope must fit
+within the modular clock contract. Fresh QPC/multimedia/QPC anchors are acquired
+before expiry on the control thread, without changing the OS timer period.
+
+Startup uses coherent callback/render observations and post-buffer-creation driver
+output latency to obtain a finite output-frame-zero/song-minus-preroll anchor.
+Ongoing ASIO observations enter the same continuous presentation discipline,
+preserving actual block/rate identity and Unknown rolling-model quality. Duplicate
+blocks never refresh freshness. Coarse timer plateaus likewise wait for actual
+host progress without changing freshness; missing readings skip only while actual progress
+remains fresh. Native faults, rate/source discontinuities and stale observations
+terminate instead of substituting receipt time. Keysounds use the coherent software
+prepared-frame frontier, which is distinct from audible playback position.
+
+The shared physical-input pump, binding/JudgeEngine/Runtime, BGM feeder and accepted
+operation replay capture apply to either backend. ASIO callback cleanup must finish
+before Raw Input unregister and native HWND destruction. Host composition source
+and compile-only fixtures do not establish SDK ABI, sound output or physical sync.
+The driver sysref HWND is owned separately from the focused input window. A bounded
+64-message pass services that HWND during startup and observation without consuming
+physical input messages. Close/quit terminates through cleanup. Inputs before the
+calibrated output frame-zero host origin are counted and excluded without retiming;
+future or regressing accepted input timestamps reject. Deadline advancement waits
+for that origin rather than fabricating an earlier presentation point.
 
 Defaults are `--early-ns 150000000`, `--late-ns 150000000`, `--input-offset-ns 0`,
 `--voices 256`, `--channel-policy exact`, `--buffer default`, `--period default`,

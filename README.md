@@ -481,7 +481,8 @@ cargo run -p beatkernel-bms-runtime --features asio-sdk --bin play_replay_bms --
 
 SDK-combined artifacts follow the documented GPLv3 distribution conditions.
 This command remains unexecuted; actual SDK/MSVC build and native output remain
-unverified. Live ASIO input play and host presentation mapping remain separate work.
+unverified. Live ASIO input play uses the separate `windows_bms` composition
+described below, with explicitly assessed finite clock relations.
 Preroll, lookahead, command capacity, voices and replay limits are configurable.
 Commands retain planned output times and are supplied from actual completed
 Mixer reports; explicit late/queue/native failures end through cleanup. The
@@ -591,9 +592,10 @@ cargo run -p beatkernel-bms-runtime -- chart.bms new-output.f32le 30 48000
 ```
 
 The separate [Windows BMS binary](doc/kernel/REQ__bms-native.md) uses actual Raw
-Input, loaded note/BGM timing and WASAPI shared/exclusive output. It requires an
-explicit endpoint and HID-key-to-lane bindings and exposes requested buffer/period
-sizes and profile offsets. Its source has not established native playback.
+Input, loaded note/BGM timing and WASAPI shared/exclusive output by default, or
+explicit optional ASIO output. It requires an explicit device and HID-key-to-lane
+bindings and exposes requested buffer sizes and profile offsets. WASAPI also
+exposes periods. Its source has not established native playback.
 Its [presentation observer](doc/platform/REQ__presentation-discipline.md) tracks
 progressing device/host observations during playback and applies bounded,
 continuous transport rate corrections. Stale observations or excessive clock
@@ -611,6 +613,20 @@ original mapped times. This schedules preloaded assets and does not stream PCM.
 ```sh
 cargo run -p beatkernel-bms-runtime --bin windows_bms -- --help
 ```
+
+Live ASIO requires Windows, sample feature `asio-sdk`, caller-supplied SDK/MSVC
+toolchain, exact driver CLSID, registry view and ordered output channels. Use
+`--backend asio --asio-view native --output-channels 0,1` with the chart/device/
+seconds/binding options. It queries the driver's actual integral rate and rejects
+WASAPI mode/period/shared-policy flags and nanosecond buffer sizes. Explicit
+`--asio-system-clock multimedia` declares this driver's timer source; supply
+`--asio-timer-error-ns`, `--asio-drift-error-ns` and `--asio-latency-error-ns`
+assessments rather than relying on inferred precision. Optional
+`--asio-anchor-age-ns` defaults to a one-second finite relation horizon.
+Fresh shared-QPC timer brackets and coherent rendered-block observations feed
+startup calibration and the existing continuous correction loop. Replay capture
+and input/judge logic use the same path as WASAPI. SDK-combined artifacts follow
+GPLv3 conditions; the default ASIO-free build remains MIT.
 
 The [Linux BMS binary](doc/kernel/REQ__bms-linux-native.md) composes the same chart
 preparation and Runtime with a selected evdev node and ALSA endpoint. Rate, channels,
