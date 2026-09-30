@@ -69,34 +69,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         audio.configuration(),
         input.devices()
     );
-    audio.start()?;
-    let until = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < until {
-        input.poll(Duration::from_millis(10))?;
-        if let Some((layout, bytes)) = raw_options {
-            while let Some(report) = input.pop_report() {
-                println!("native raw {report:?}");
-                println!(
-                    "explicit-layout canonical {:?}",
-                    report.to_raw_report(layout, bytes)
-                );
-                // A host may attach descriptors to the portable DeviceAdapterRegistry
-                // and route this canonical report through an explicitly registered
-                // vendor decoder. This example intentionally selects no vendor.
-            }
-        } else {
-            while let Some(sample) = input.pop() {
-                println!("{sample:?}");
+    let outcome = (|| -> Result<(), Box<dyn std::error::Error>> {
+        audio.start()?;
+        let until = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < until {
+            input.poll(Duration::from_millis(10))?;
+            if let Some((layout, bytes)) = raw_options {
+                while let Some(report) = input.pop_report() {
+                    println!("native raw {report:?}");
+                    println!(
+                        "explicit-layout canonical {:?}",
+                        report.to_raw_report(layout, bytes)
+                    );
+                    // A host may attach descriptors to the portable DeviceAdapterRegistry
+                    // and route this canonical report through an explicitly registered
+                    // vendor decoder. This example intentionally selects no vendor.
+                }
+            } else {
+                while let Some(sample) = input.pop() {
+                    println!("{sample:?}");
+                }
             }
         }
-    }
+        Ok(())
+    })();
     println!(
         "presentation {:?}; input counters {:?}",
         audio.snapshot(),
         input.counters()
     );
-    audio.stop()?;
-    input.close()?;
+    let stop = audio.stop();
+    let close = input.close();
+    match audio.last_render_report() {
+        Some(report) => println!("last successful Mixer render report={report:?}; core execution distinct from native buffer delivery/presentation and physical sound"),
+        None => println!("last successful Mixer render report unavailable; no zero observation substituted"),
+    }
+    if let Err(error) = &stop {
+        eprintln!("CoreAudio stop error: {error}");
+    }
+    if let Err(error) = &close {
+        eprintln!("IOHID close error: {error}");
+    }
+    outcome?;
+    stop?;
+    close?;
     Ok(())
 }
 #[cfg(not(target_os = "macos"))]

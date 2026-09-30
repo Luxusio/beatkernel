@@ -60,3 +60,21 @@ hosts must select acceptable native report types before vendor adapter routing.
 The optional example raw CLI chooses layout explicitly, prints native/canonical
 representations and does not automatically decode vendor controls. Compile checks
 alone do not verify native report delivery, permissions, buffers or runtime linkage.
+
+## Retained core render diagnostics
+
+`CoreAudioStream::last_render_report` returns the last successful typed core
+Mixer RenderReport, including cumulative command consumption/application, late
+commands, capacity and invalid-command rejections, active voices and pending
+commands. The native example prints that report after stop on normal completion
+and start/run failures; None is explicitly unavailable, never replaced by zeros.
+It attempts input cleanup as well before propagating the original error and logs
+stop/close failures when another error takes precedence.
+
+The [CoreAudio render telemetry contract](REQ__coreaudio-render-telemetry.md)
+defines retained-report publication and callback quiescence. Queue admission,
+completed core mixing, native buffer delivery and acoustic output are separate
+observations. These are actual core counters, not proof of successful native
+buffer transfer, current presentation or physical sound. Successful reports can
+remain available after stop or failure; failed renders do not fabricate new ones.
+Existing shutdown, quiescence and context-retention rules remain unchanged.
