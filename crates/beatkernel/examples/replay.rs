@@ -1,6 +1,14 @@
 //! Finite logical replay demonstrating a real active hold checkpoint and seek.
 use beatkernel::{chart::*, input::*, interaction::HoldEvaluator, judge::*, replay::*, time::*};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.len() == 1 && args[0] == "--help" {
+        println!("replay [--save NEW_FILE.bkr]\nFinite hold replay/checkpoint demo; optional save writes the complete ordered log, not the current inspection cursor.");
+        return Ok(());
+    }
+    if !args.is_empty() && (args.len() != 2 || args[0] != "--save") {
+        return Err("usage: replay [--save NEW_FILE.bkr]".into());
+    }
     let mut source = SourceChart::new(1_000_000_000, Bpm::new(60, 1)?)?;
     source.objects.push(SourceObject {
         id: ObjectId(1),
@@ -67,5 +75,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         replay.engine().state(ObjectId(1)),
         replay.results()
     );
+    if let Some(path) = args.get(1) {
+        use beatkernel::replay::codec::{encode_replay, ReplayCodecLimits, ReplayFile};
+        use std::io::Write;
+        let limits =
+            ReplayCodecLimits::new(1024 * 1024, 1024, 64 * 1024, CodecLimits::new(4096, 1024)?)?;
+        let file = ReplayFile::new(replay.header().clone(), replay.records().to_vec());
+        let bytes = encode_replay(&file, limits)?;
+        let mut output = std::fs::File::create_new(path)?;
+        output.write_all(&bytes)?;
+        output.flush()?;
+        println!("saved {} admitted operations to {path}", file.records.len());
+    }
     Ok(())
 }
