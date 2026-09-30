@@ -3,10 +3,11 @@
 //! Logical judge state is reconstructed forward; audio device/output clocks are
 //! outside this recording. Custom snapshot support must be explicitly supplied.
 
-use crate::judge::snapshot::{hash, Encoder};
+use crate::judge::snapshot::{Encoder, hash};
 use crate::{
     input::GameInputEvent,
     judge::{JudgeEngine, JudgeError, JudgeEvent, JudgeSnapshot, SnapshotError},
+    runtime::RuntimeReport,
     time::{ClockDomainId, Timestamp},
 };
 
@@ -48,6 +49,83 @@ pub struct ReplayRecord {
     pub song_time: Timestamp,
     /// Bound input or explicit advance.
     pub operation: ReplayOperation,
+}
+
+/// Collects the live judge's accepted operations without executing another judge.
+pub struct ReplayRecorder {
+    header: ReplayHeader,
+    records: Vec<ReplayRecord>,
+}
+impl ReplayRecorder {
+    /// Starts an empty recording in an explicit normalized input domain.
+    pub fn new(header: ReplayHeader) -> Result<Self, ReplayError> {
+        if header.version != REPLAY_VERSION {
+            return Err(ReplayError::UnsupportedVersion(header.version));
+        }
+        Ok(Self {
+            header,
+            records: Vec::new(),
+        })
+    }
+    /// Appends a live operation's successfully admitted input prefix or advance.
+    ///
+    /// Call once for each report, in runtime operation order. Audio admission
+    /// failures do not change the accepted judge log. Validation is atomic across
+    /// the report; a reported judge error still permits recording accepted inputs.
+    pub fn record_report(&mut self, report: &RuntimeReport) -> Result<(), ReplayError> {
+        let advance = report.input.is_none() && report.judge_error.is_none();
+        let count = report.bound_inputs.len() + usize::from(advance);
+        if count == 0 {
+            return Ok(());
+        }
+        if self
+            .records
+            .last()
+            .is_some_and(|last| last.song_time > report.song_time)
+        {
+            return Err(ReplayError::NonMonotonicSongTime);
+        }
+        if report
+            .bound_inputs
+            .iter()
+            .any(|input| input.physical.meta().clock_domain != self.header.normalized_clock)
+        {
+            return Err(ReplayError::ClockDomainMismatch);
+        }
+        let end = self
+            .records
+            .len()
+            .checked_add(count)
+            .ok_or(ReplayError::Overflow)?;
+        u64::try_from(end).map_err(|_| ReplayError::Overflow)?;
+        for input in &report.bound_inputs {
+            self.records.push(ReplayRecord {
+                ordinal: self.records.len() as u64,
+                song_time: report.song_time,
+                operation: ReplayOperation::Input(input.clone()),
+            });
+        }
+        if advance {
+            self.records.push(ReplayRecord {
+                ordinal: self.records.len() as u64,
+                song_time: report.song_time,
+                operation: ReplayOperation::Advance,
+            });
+        }
+        Ok(())
+    }
+    /// Ordered input/advance log for serialization or subsequent reconstruction.
+    pub fn records(&self) -> &[ReplayRecord] {
+        &self.records
+    }
+    /// Declared chart, rule, options and normalized clock identity.
+    pub fn header(&self) -> &ReplayHeader {
+        &self.header
+    }
+    /// Transfers ownership to the host serializer or ReplaySession constructor.
+    pub fn into_parts(self) -> (ReplayHeader, Vec<ReplayRecord>) {
+        (self.header, self.records)
+    }
 }
 
 /// Reusable checkpoint with exact result prefix and recording identity.

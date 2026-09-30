@@ -18,3 +18,10 @@ Restoration clones and validates all state before replacing an engine and preser
 Stable hashes use versioned tagged little-endian encodings, length-prefixed sequences, sorted encodings of unordered ownership sets, full interaction/policy bytes and full result provenance. The fixed FNV-1a 64-bit algorithm is a deterministic divergence diagnostic, not a collision-resistant integrity/authentication primitive. Wall-clock telemetry, device queues and audible mixer state are excluded. Float samples use their exact IEEE bits.
 
 Replay restores logical judging only. Audio output clocks and callback queues are not rewound by judge snapshots. Custom rule identities, deterministic behavior and snapshot support remain application obligations. Snapshot allocations run outside real-time callbacks. Verification and native/hardware execution remain deferred by the user's 2026-09-30 instruction; runnable fixtures accompany implementation without asserting PASS.
+
+The live recorder captures accepted operations from RuntimeReport without running
+a second judge. Successfully admitted bound inputs are recorded in report order,
+including an accepted prefix before a fanout failure. An explicit successful
+advance is recorded even if it emits no result. Unbound physical input, rejected
+operations, CPU telemetry and output queue failures do not invent judge advances.
+The normalized domain and song chronology are checked before appending a report.
