@@ -21,6 +21,10 @@ origin. Closing the window cancels all remaining repetitions. This four-key
 synthetic chart example is composition source, not proof of native timing or a
 general file-format gameplay player. Details: ../platform/REQ__wasapi-presentation.md.
 
+`SoundBinding::command_for` selects a Play only for a matching object/stage Hit,
+using the caller's independent output timestamp. Live publication and recorded
+audio planning share this selection without changing JudgeEngine results.
+
 The core runtime has one owner and runs outside the audio callback. It composes
 canonical physical events, explicit clock normalization, BindingMap, Transport,
 JudgeEngine and the bounded scalar audio command producer. The final app owns

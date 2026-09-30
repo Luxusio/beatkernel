@@ -28,6 +28,23 @@ pub struct SoundBinding {
     /// Finite signed gain.
     pub gain: f32,
 }
+impl SoundBinding {
+    /// Selects a matching hit without changing its independently supplied output time.
+    ///
+    /// Hosts validate finite gains during setup. This performs no clock mapping,
+    /// queue admission, allocation or judge mutation.
+    pub fn command_for(&self, event: &JudgeEvent, at: Timestamp) -> Option<AudioCommand> {
+        (matches!(event.outcome, JudgeOutcome::Hit { .. })
+            && self.object == event.object
+            && self.stage == event.stage)
+            .then_some(AudioCommand::Play {
+                voice: self.voice,
+                sample: self.sample,
+                at,
+                gain: self.gain,
+            })
+    }
+}
 
 /// Operation failure before binding; judge fanout failures live in the report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,16 +304,9 @@ impl Runtime {
             if !matches!(event.outcome, JudgeOutcome::Hit { .. }) {
                 continue;
             }
-            for sound in self
-                .sounds
-                .iter()
-                .filter(|sound| sound.object == event.object && sound.stage == event.stage)
-            {
-                let command = AudioCommand::Play {
-                    voice: sound.voice,
-                    sample: sound.sample,
-                    at: report.audio_at.timestamp,
-                    gain: sound.gain,
+            for sound in &self.sounds {
+                let Some(command) = sound.command_for(event, report.audio_at.timestamp) else {
+                    continue;
                 };
                 match admit_audio(&mut self.producer, counters, command) {
                     Ok(()) => {
