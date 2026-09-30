@@ -104,5 +104,21 @@ at 500 ms, Hold on lane 2 from 500 to 1,500 ms, and Instant on lanes 3 and 4 at
 offset is zero. Results print song time, stage/outcome and original host/source/
 sequence provenance; timeout results say `input=none`.
 It is not native keyboard acquisition. File
-parsers, native/audio integration, full tracking primitives and snapshot-based
-seek/reverse remain later phases of [the original plan](../../plan.md).
+parsers, native/audio integration, tracking and snapshot-based seek/reverse now
+have separate source implementations listed in the
+[phase inventory](REQ__implementation-status.md). This judge example does not
+establish their current acceptance.
+
+## Public policy composition example
+
+`examples/custom_judge.rs` uses `JudgeEngine::with_policies` with actual virtual
+canonical keyboard input, exact-device binding and Transport conversion. At song
+510 ms, eligible targets at 500/520 ms illustrate default closest-target tie
+selection versus custom later-target priority. Its custom grading keeps profile
+window eligibility and labels early input 70, on-time/late 71. Actual returned
+JudgeEvents and subsequent unselected-target expiry are printed by both engines;
+the example does not manufacture output or add game-specific core branches.
+These stateless custom policies retain unsupported default snapshot hooks, so
+the example does not claim checkpoint/replay support. Existing custom resolver
+and grading fixtures remain the behavior tests; execution of both fixtures and
+this example stays deferred.

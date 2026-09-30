@@ -43,6 +43,10 @@ QPC and mach render diagnostics use `sample_realtime()`, which calls the native
 time primitive and performs checked conversion without error boxing or formatting.
 General control-thread `sample()` retains its rich errors. This avoids introducing
 error-path allocations into native rendering.
+Pure clock-source fixtures additionally cover raw ticks, distinct domains,
+quantized endpoint subtraction, pre-origin signed time and overflow returning
+absent data. They supply no native sampler call or failure-path allocation result;
+execution and callback allocation audit remain deferred.
 
 On WASAPI/CoreAudio/ASIO diagnostic clock failure, successful audio rendering is not
 replaced with silence or a guessed timestamp. Capture is permanently marked

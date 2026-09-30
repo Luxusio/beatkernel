@@ -198,6 +198,10 @@ rounding, capacity and adapter boundaries.
 registrations mapping opaque interaction IDs to logical controls and evaluators.
 `InstantEvaluator` accepts point objects; `HoldEvaluator` requires an end strictly
 after the start. `with_policies` replaces candidate selection and grading.
+The `custom_judge` example sends the same virtual bound key to default and custom
+judges, illustrating later-target priority and directional grade labels:
+`cargo run -p beatkernel --example custom_judge`. Custom policies retain timing
+eligibility; replay checkpoints additionally require their snapshot hooks.
 The default resolver picks the closest eligible target, then earlier target and
 ObjectId; `EarliestCandidate` provides another deterministic choice. Builtin
 starts use `StartEligibility::ProfileButtonPress`: fresh Down inside the widest
