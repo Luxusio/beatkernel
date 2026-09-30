@@ -14,14 +14,14 @@ use beatkernel::{
     interaction::InstantEvaluator,
     judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeStage, JudgeWindow, Rule},
     runtime::{Runtime, SoundBinding},
-    telemetry::{RuntimeCounters, RuntimeTelemetry},
+    telemetry::{IntervalJitter, RuntimeCounters, RuntimeTelemetry},
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
     transport::{Rate, Transport},
 };
 use std::{error::Error, hint::black_box, time::Instant};
 
 const HOST_ORIGIN: i64 = 1_000_000_000;
-const HELP: &str = "Portable BeatKernel runtime CPU benchmark\nUsage: cargo run --release -p beatkernel --example runtime_bench -- [options]\n  --iterations N         measured blocks, 1..10000 (default 2000)\n  --warmup N             warmup blocks, 0..1000 (default 100)\n  --buffer-frames N      maximum variable render frames, 8..4096 (default 128)\n  --queue-capacity N     scalar queue slots, 1..65536 (default 64)\n  --telemetry-samples N  retained observations per timing ring, 1..65536 (default 4096)\n  --sample-rate N        frames/second, 8000..192000 (default 48000)\n  --help\nOffline PCM rendering only. Physical latency, native jitter and actual underruns are unavailable. No hardware or optimization claim.";
+const HELP: &str = "Portable BeatKernel runtime CPU benchmark\nUsage: cargo run --release -p beatkernel --example runtime_bench -- [options]\n  --iterations N         measured blocks, 1..10000 (default 2000)\n  --warmup N             warmup blocks, 0..1000 (default 100)\n  --buffer-frames N      maximum variable render frames, 8..4096 (default 128)\n  --queue-capacity N     scalar queue slots, 1..65536 (default 64)\n  --telemetry-samples N  retained observations per timing ring, 1..65536 (default 4096)\n  --sample-rate N        frames/second, 8000..192000 (default 48000)\n  --help\nOffline PCM rendering and explicitly generated synthetic interval jitter only. Physical latency, native jitter and actual underruns are unavailable. No hardware or optimization claim.";
 
 #[derive(Clone, Copy, Debug)]
 struct Options {
@@ -369,10 +369,28 @@ fn run(options: Options) -> Result<(), Box<dyn Error>> {
     // independently and takes counter deltas from warmed gameplay/audio owners.
     input_timing = RuntimeTelemetry::new(options.telemetry_samples);
     mixer_timing = RuntimeTelemetry::new(options.telemetry_samples);
+    // Generated timestamps have a separate synthetic domain and explicit
+    // nominal cadence. They are independent of CPU time and native callbacks.
+    let nominal = Duration::from_nanos(1_000_000);
+    let mut synthetic_at = ClockPoint {
+        domain: ClockDomainId(90),
+        timestamp: Timestamp::ZERO,
+    };
+    let mut synthetic_jitter =
+        IntervalJitter::new(options.telemetry_samples, nominal, synthetic_at)?;
     let started = Instant::now();
     let mut checksum = 0.0;
     for index in options.warmup..workload.blocks.len() {
         let block = workload.blocks[index];
+        let deviation = [-20_000, 10_000, 0, -5_000, 2_000][(index - options.warmup) % 5];
+        let interval = nominal
+            .checked_add(Duration::from_nanos(deviation))
+            .ok_or("synthetic interval overflow")?;
+        synthetic_at.timestamp = synthetic_at
+            .timestamp
+            .checked_add(interval)
+            .ok_or("synthetic clock overflow")?;
+        black_box(synthetic_jitter.observe(synthetic_at)?);
         checksum += workload.block(
             block,
             options.sample_rate,
@@ -408,6 +426,7 @@ fn run(options: Options) -> Result<(), Box<dyn Error>> {
         mixer_timing.processing(),
         options.telemetry_samples
     );
+    println!("synthetic_generated_interval_jitter_ns={:?} nominal_ns={} clock_domain={} pairs={} (generated timestamps; not measured callback/device timing)", synthetic_jitter.summary()?, nominal.as_nanos(), synthetic_at.domain.0, synthetic_jitter.observed_pairs());
     println!("software_runtime_counters={runtime:?}");
     println!("software_mixer_counters={audio:?}");
     println!("native_input_latency=unavailable physical_output_latency=unavailable native_callback_arrival_jitter=unavailable actual_native_underruns=unavailable");
