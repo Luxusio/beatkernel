@@ -7,6 +7,22 @@ name = "beatkernel"
 version = "0.1.0"
 
 [[package]]
+name = "beatkernel-bms"
+version = "0.1.0"
+dependencies = [
+ "beatkernel",
+]
+
+[[package]]
+name = "beatkernel-bms-runtime"
+version = "0.1.0"
+dependencies = [
+ "beatkernel",
+ "beatkernel-bms",
+ "beatkernel-platform",
+]
+
+[[package]]
 name = "beatkernel-platform"
 version = "0.1.0"
 dependencies = [

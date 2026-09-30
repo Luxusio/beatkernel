@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/beatkernel", "crates/beatkernel-platform"]
+members = ["crates/beatkernel", "crates/beatkernel-platform", "adapters/beatkernel-bms", "samples/bms-runtime"]
 resolver = "2"
 
 [workspace.package]

@@ -1,0 +1,10 @@
+[package]
+name = "beatkernel-bms"
+description = "Bounded deterministic BMS text/profile adapter for BeatKernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+beatkernel = { path = "../../crates/beatkernel" }

@@ -1,0 +1,12 @@
+[package]
+name = "beatkernel-bms-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+beatkernel = { path = "../../crates/beatkernel" }
+beatkernel-platform = { path = "../../crates/beatkernel-platform" }
+beatkernel-bms = { path = "../../adapters/beatkernel-bms" }

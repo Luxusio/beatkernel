@@ -1,0 +1,243 @@
+use beatkernel::{
+    chart::ObjectId,
+    judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
+    time::Duration,
+};
+use beatkernel_bms::*;
+#[test]
+fn tempo_stop_measure_length_and_layered_bgm_use_true_song_time() {
+    let text = "#BPM 120\n#BPM0A 240\n#STOP01 48\n#WAV01 kick.wav\n#WAV02 pad.ogg\n#00002:0.75\n#00011:010001\n#00012:000100\n#00008:000A00\n#00009:000100\n#00001:000100\n#00001:000200\n#00103:00780000\n#00111:01000001\n#00116:01";
+    let parsed = parse(text, ParseOptions::default()).unwrap();
+    assert_eq!(parsed.source.ticks_per_beat, 1);
+    assert_eq!(parsed.measures[0].end.ticks(), 3);
+    assert_eq!(parsed.measures[1].end.ticks(), 7);
+    assert_eq!(parsed.source.stops[0].duration.as_nanos(), 250_000_000);
+    let compiled = parsed.compile().unwrap();
+    let lane_times: Vec<_> = compiled
+        .chart
+        .objects()
+        .iter()
+        .map(|object| {
+            let note = parsed
+                .notes
+                .iter()
+                .find(|note| note.object == object.id)
+                .unwrap();
+            (note.lane.channel(), object.time.start.as_nanos())
+        })
+        .collect();
+    assert_eq!(
+        lane_times,
+        vec![
+            (0x11, 0),
+            (0x12, 500_000_000),
+            (0x11, 1_000_000_000),
+            (0x11, 1_250_000_000),
+            (0x16, 1_250_000_000),
+            (0x11, 2_500_000_000)
+        ]
+    );
+    assert_eq!(compiled.bgm.len(), 2);
+    assert_eq!(compiled.bgm[0].at.as_nanos(), 500_000_000);
+    assert_eq!(compiled.bgm[1].at, compiled.bgm[0].at);
+    assert!(compiled.bgm[0].ordinal < compiled.bgm[1].ordinal);
+    assert_eq!(parsed.samples[&2], "pad.ogg");
+    assert!(parsed.notes.iter().any(|note| note.lane.is_scratch()));
+}
+#[test]
+fn exact_fractional_measure_and_subdivision_grid_never_truncates_beats() {
+    let parsed = parse(
+        "#BPM 60\n#WAV01 a.wav\n#00002:0.125\n#00011:000001",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(parsed.source.ticks_per_beat, 6);
+    assert_eq!(parsed.source.objects[0].start.ticks(), 2);
+    assert_eq!(parsed.measures[0].end.ticks(), 3);
+    assert_eq!(
+        parsed.compile().unwrap().chart.objects()[0]
+            .time
+            .start
+            .as_nanos(),
+        333_333_333
+    );
+    let options = ParseOptions {
+        max_resolution: 2,
+        ..ParseOptions::default()
+    };
+    let error = parse("#WAV01 a.wav\n#00011:000001", options).unwrap_err();
+    assert_eq!(error.line, 2);
+    assert_eq!(error.kind, BmsErrorKind::Resolution);
+}
+#[test]
+fn long_notes_pair_across_measures_preserving_unsounded_tail_and_lane_rules() {
+    let parsed = parse(
+        "#BPM 60\n#LNTYPE 1\n#WAV01 head.wav\n#00051:0001\n#00151:0002\n#00016:01\n#00021:01",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    let hold = parsed
+        .source
+        .objects
+        .iter()
+        .find(|object| object.end.is_some())
+        .unwrap();
+    assert_eq!(hold.start.ticks(), 2);
+    assert_eq!(hold.end.unwrap().ticks(), 6);
+    assert_eq!(hold.interaction.0, 0x51);
+    let note = parsed
+        .notes
+        .iter()
+        .find(|note| note.object == hold.id)
+        .unwrap();
+    assert_eq!(note.lane.control().0, 0x11);
+    assert_eq!(note.tail_sample.unwrap().0, 2);
+    assert!(!parsed.samples.contains_key(&2));
+    let compiled = parsed.compile().unwrap();
+    let compiled_hold = compiled
+        .chart
+        .objects()
+        .iter()
+        .find(|object| object.id == hold.id)
+        .unwrap();
+    assert_eq!(compiled_hold.time.start.as_nanos(), 2_000_000_000);
+    assert_eq!(compiled_hold.time.end.unwrap().as_nanos(), 6_000_000_000);
+    let profile = JudgeProfile::new(
+        vec![JudgeWindow {
+            grade: JudgeGrade(1),
+            early: Duration::from_nanos(1),
+            late: Duration::from_nanos(1),
+        }],
+        Duration::ZERO,
+    )
+    .unwrap();
+    assert!(JudgeEngine::new(compiled.chart, parsed.rules(), profile).is_ok());
+}
+#[test]
+fn duplicate_nonzero_positions_have_explicit_policy_and_zeros_never_delete() {
+    let merged = parse(
+        "#WAV01 a.wav\n#WAV02 b.wav\n#00011:0100\n#00011:00000200",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(merged.notes.len(), 2);
+    let text = "#WAV01 a.wav\n#WAV02 b.wav\n#00011:01\n#00011:02\n#00011:00";
+    let error = parse(text, ParseOptions::default()).unwrap_err();
+    assert_eq!(error.line, 4);
+    assert!(matches!(error.kind, BmsErrorKind::Duplicate(_)));
+    let options = ParseOptions {
+        duplicates: DuplicatePolicy::LastWins,
+        ..ParseOptions::default()
+    };
+    let parsed = parse(text, options).unwrap();
+    assert_eq!(parsed.notes.len(), 1);
+    assert_eq!(parsed.notes[0].sample.0, 2);
+    let layered = parse(
+        "#WAV01 a.wav\n#00001:01\n#00001:01",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(layered.bgm.len(), 2);
+    assert!(layered.source.objects.is_empty());
+}
+#[test]
+fn stops_ignore_measure_length_and_use_same_beat_new_tempo() {
+    let parsed = parse(
+        "#BPM 60\n#BPMZZ 120\n#STOPZZ 48\n#00002:0.5\n#00008:ZZ\n#00009:ZZ",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(parsed.source.stops[0].duration.as_nanos(), 500_000_000);
+    assert_eq!(parsed.source.bpm_changes[0].bpm.numerator(), 120);
+}
+#[test]
+fn unsupported_and_missing_definitions_are_line_specific() {
+    for command in [
+        "#RANDOM 2",
+        "#LNOBJ ZZ",
+        "#LNTYPE 2",
+        "#STP 001.0 100",
+        "#00031:01",
+        "#000SC:01",
+    ] {
+        let error = parse(command, ParseOptions::default()).unwrap_err();
+        assert_eq!(error.line, 1, "{command}");
+        assert!(
+            matches!(error.kind, BmsErrorKind::Unsupported(_)),
+            "{command}: {error:?}"
+        );
+    }
+    let error = parse("#BPM 120\n#00011:ZZ", ParseOptions::default()).unwrap_err();
+    assert_eq!(error.line, 2);
+    assert_eq!(
+        error.kind,
+        BmsErrorKind::MissingDefinition {
+            kind: "WAV",
+            index: 1295
+        }
+    );
+    assert!(matches!(
+        parse("#WAV01 a.wav\n#00051:01", ParseOptions::default())
+            .unwrap_err()
+            .kind,
+        BmsErrorKind::LongNote(_)
+    ));
+    assert!(matches!(
+        parse(
+            "#WAV01 a.wav\n#00051:0101\n#00011:01",
+            ParseOptions::default()
+        )
+        .unwrap_err()
+        .kind,
+        BmsErrorKind::LongNote(_)
+    ));
+}
+#[test]
+fn independent_timing_channels_conflict_even_with_last_wins() {
+    let options = ParseOptions {
+        duplicates: DuplicatePolicy::LastWins,
+        ..ParseOptions::default()
+    };
+    assert!(matches!(
+        parse("#BPM01 240\n#00003:78\n#00008:01", options)
+            .unwrap_err()
+            .kind,
+        BmsErrorKind::Duplicate(_)
+    ));
+    assert!(matches!(
+        parse("#STOP01 48\n#00009:01\n#00009:01", options)
+            .unwrap_err()
+            .kind,
+        BmsErrorKind::Duplicate(_)
+    ));
+}
+#[test]
+fn parser_caps_bytes_lines_tokens_and_retains_utf8_metadata() {
+    let options = ParseOptions {
+        max_bytes: 2,
+        ..ParseOptions::default()
+    };
+    assert!(matches!(
+        parse("#BPM 120", options).unwrap_err().kind,
+        BmsErrorKind::Limit("input bytes")
+    ));
+    let options = ParseOptions {
+        max_objects: 1,
+        ..ParseOptions::default()
+    };
+    assert_eq!(
+        parse("#WAV01 a.wav\n#00011:0101", options)
+            .unwrap_err()
+            .line,
+        2
+    );
+    let parsed = parse(
+        "\u{feff}#TITLE 日本語\n#WAVzz exact path.ogg\n#00011:zz\n#BMP01 scene.png",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(parsed.metadata["TITLE"], "日本語");
+    assert_eq!(parsed.samples[&1295], "exact path.ogg");
+    assert_eq!(parsed.notes[0].object, ObjectId(1));
+    assert_eq!(parsed.warnings[0].line, 4);
+}
