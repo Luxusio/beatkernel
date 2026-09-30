@@ -401,6 +401,8 @@ all planes and all mixed samples before delivery. SDK-free fixtures compile on a
 three targets; execution remains deferred. Metadata-only Windows Rust type-checking
 of the optional wrapper does not compile/link the SDK C++ bridge or establish an
 enabled GNU SDK build. Actual SDK-enabled builds still require MSVC and supplied SDK.
+The separate BMS sample forwards this feature through its own `asio-sdk` feature;
+its default remains SDK-free.
 See the [core audio contract](doc/kernel/REQ__audio.md) and
 [Windows audio contract](doc/platform/REQ__windows-audio.md).
 
@@ -453,11 +455,28 @@ and past audio queue failures were not recorded. This command's execution
 remains pending.
 
 The [`play_replay_bms` native player](doc/kernel/REQ__bms-native-replay.md) sends
-the same plan to WASAPI on Windows, ALSA on Linux or CoreAudio on macOS. Select
+the same plan to WASAPI on Windows, ALSA on Linux, CoreAudio on macOS or optional
+Windows ASIO. Select
 `--chart PATH --replay PATH --device ID --seconds N --rate HZ --channels N`;
 Linux also requires `--buffer-frames N --period-frames N`, and macOS requires
 `--buffer-frames N`. Windows accepts `--mode shared|exclusive` and
 `--shared-policy engine-period|legacy`, buffer/period frames or native defaults.
+Explicit `--backend wasapi|asio|alsa|coreaudio` must match the host; omission keeps
+the existing host default. ASIO additionally requires sample feature `asio-sdk`,
+an enumerated driver CLSID as `--device`, explicit `--asio-view native|32|64` and
+distinct mixer-ordered `--output-channels 0,1`. It rejects mode/shared-policy/period
+flags and uses driver-preferred or exact buffer frames. The actual driver rate
+must match `--rate`; no rate/device fallback occurs. The host supplies a hidden
+window until stream close/drain. For a Windows MSVC environment with the supplied
+SDK, replace the example CLSID with the explicitly enumerated registration:
+
+```sh
+cargo run -p beatkernel-bms-runtime --features asio-sdk --bin play_replay_bms -- --chart song.bms --replay session.bkr --backend asio --device "{12345678-9ABC-DEF0-1234-56789ABCDEF0}" --asio-view native --output-channels 0,1 --rate 48000 --channels 2 --buffer-frames 256 --seconds 30
+```
+
+SDK-combined artifacts follow the documented GPLv3 distribution conditions.
+This command remains unexecuted; actual SDK/MSVC build and native output remain
+unverified. Live ASIO input play and host presentation mapping remain separate work.
 Preroll, lookahead, command capacity, voices and replay limits are configurable.
 Commands retain planned output times and are supplied from actual completed
 Mixer reports; explicit late/queue/native failures end through cleanup. The

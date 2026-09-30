@@ -18,7 +18,7 @@ Paths below are relative to the repository root.
 | 4: Windows input | `crates/beatkernel-platform/src/windows/`, `raw_input.rs`, input-inspector example; [contract](REQ__windows-input.md) | Historical virtual keyboard evidence exists. Current source and physical timestamp/jitter comparisons remain unverified. |
 | 5: chart compiler | `crates/beatkernel/src/chart/`, chart example; [contract](REQ__chart-compiler.md) | Historical golden evidence exists; current compiler/BMS changes require executed regressions. |
 | 6: judge | `crates/beatkernel/src/judge/`, `interaction/builtin.rs`, judge example; [contract](REQ__judge.md) | Historical judge evidence exists; current profile, routing, ownership and restoration paths need execution. |
-| 7: audio | `crates/beatkernel/src/audio/`, platform native audio modules; [core](REQ__audio.md), [Windows](../platform/REQ__windows-audio.md), [ASIO stream](../platform/REQ__asio-stream.md) | WASAPI shared/exclusive and optional ASIO buffer/callback/Mixer stream source exists. Actual SDK compilation, native playback, callback allocation/locking checks and scheduling fixtures remain deferred. ASIO final-host composition and presentation mapping remain pending. |
+| 7: audio | `crates/beatkernel/src/audio/`, platform native audio modules; [core](REQ__audio.md), [Windows](../platform/REQ__windows-audio.md), [ASIO stream](../platform/REQ__asio-stream.md) | WASAPI shared/exclusive and optional ASIO buffer/callback/Mixer stream source exists. ASIO recorded-output host source exists; live-input host and presentation mapping remain pending. Actual SDK compilation, native playback, callback allocation/locking checks and scheduling fixtures remain deferred. |
 | 8: integrated loop | `crates/beatkernel/src/runtime/`, `telemetry/`, runtime/native BMS examples; [runtime](REQ__runtime.md), [benchmark](REQ__runtime-benchmark.md) | Current integrated fixtures, percentiles under executed workloads, native drop/underrun behavior and physical latency measurements remain deferred. |
 | 9: visual projection | `crates/beatkernel/src/visual/`, external SVG example; [contract](REQ__visual.md) | Lane/Point/Path/Polar/Custom source and reusable frame/index paths exist; fixture execution and renderer QA remain deferred. |
 | 10: replay/snapshot | `crates/beatkernel/src/replay/`, judge snapshots, runtime restart/playback, replay examples; [replay](REQ__replay.md), [restart](REQ__section-restart.md), [reverse](REQ__reverse-playback.md) | Current repeated replay/seek hashes, codec failures, reverse policy and native restart output remain unverified. Logical restoration does not guarantee acoustic restart alignment. |
@@ -108,7 +108,16 @@ Default Rust 1.98.1 host workspace and Windows GNU/macOS platform all-target
 checks passed. A metadata-only Windows GNU compilation additionally type-checked
 optional control/stream Rust source without activating Cargo SDK compilation or
 linking C++. Actual SDK/MSVC build, native playback, presentation mapping and
-final-host composition remain outstanding. This does not enable GNU SDK builds.
+live-input host composition remain outstanding. This does not enable GNU SDK builds.
+
+The native replay host now selects ASIO explicitly through the sample's optional
+SDK feature, exact CLSID/view and distinct output channel mapping. It reuses the
+checked replay/JudgeEngine audio plan, actual Mixer and rolling command feeder,
+retaining a hidden same-thread HWND through stream teardown. Eight portable CLI
+fixtures are authored. A coherent buffer observation now pairs each successful
+callback's copied raw event with the actual rendered Mixer block; post-create
+driver latency remains available. These are inputs for future live presentation
+mapping, not normalized host time or physical playback evidence.
 
 ## Build evidence and completion boundary
 

@@ -75,7 +75,11 @@ WASAPI requests for ASIO now return the existing typed
 `BackendUnavailable(Asio)` failure. The old public `AsioLicenseUnresolved` variant
 is retained for existing callers, but current WASAPI code no longer emits it.
 
-The policy prerequisite is resolved; remaining ASIO work includes final-host
+The sample's optional `asio-sdk` feature forwards platform SDK incorporation;
+its defaults remain SDK-free. The recorded BMS host has an ASIO source path,
+without an executed or distributed ASIO-combined release artifact.
+
+The policy prerequisite is resolved; remaining ASIO work includes live-input host
 composition, presentation mapping, build/source provenance and actual output acceptance. SDK incorporation
 must preserve third-party licensing boundaries described here. Native execution,
 tests, independent review and QA remain deferred by the existing user instruction.

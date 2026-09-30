@@ -41,6 +41,20 @@ normalized host timestamp. Native clock publication is bounded and coherent;
 counter exhaustion reports unavailable rather than wrapping. Presentation mapping
 and physical output acceptance remain separate requirements.
 
+`AsioStreamSnapshot::buffer_observation` pairs a successfully prepared callback
+block's actual `RenderReport` with that callback's copied raw event. A fixed
+scalar outer generation covers both this event and software counters/report;
+bounded readers reject collisions, and checked exhaustion fails before further
+Mixer advancement. Pre-start B priming has no callback observation. Core/PCM
+delivery failure preserves the Mixer report but supplies no successful buffer
+observation. Separate C++ diagnostic events must not be paired with arbitrary
+software reports. `AsioStream::latencies` retains the actual driver latency
+query after buffer creation; a subsequent change still requires reopening.
+These are synchronization inputs, not an established presentation relation.
+The [SDK time-info and latency contract](https://github.com/audiosdk/asio/blob/main/common/asio.h)
+uses Windows timeGetTime-derived timestamps and requires latency accounting;
+conversion to the input host's QPC domain remains explicit future work.
+
 This source slice does not add outputReady optimization or hot buffer resizing.
 WASAPI's backend still rejects ASIO requests; the separate `AsioStream` API is
 the native path. SDK-combined artifacts follow the [GPLv3 distribution policy](REQ__asio-distribution.md);
@@ -65,5 +79,15 @@ without executing them. A separate metadata-only Windows GNU Rust invocation
 included optional control/stream Rust source without activating Cargo's SDK
 feature/build script or linking C++. It type-checks that Rust source only and
 does not enable GNU SDK builds or verify actual MSVC/C++/SDK ABI compatibility.
-Real SDK builds still require supplied headers and MSVC or clang-cl. Final-host
-ASIO composition and presentation mapping remain implementation work.
+Real SDK builds still require supplied headers and MSVC or clang-cl. The separate
+[recorded BMS host](../kernel/REQ__bms-native-replay.md) now consumes this API with
+explicit sample feature/driver/view/channel settings and an owned hidden HWND.
+Live-input ASIO host composition and presentation mapping remain implementation work.
+
+Subsequent target-only Rust source configuration checks include the optional
+stream, its five pure-Rust publication fixtures and the recorded-host Windows
+module. Eight ASIO CLI fixtures also compile through ordinary default checks.
+Those checks activate source cfg while leaving Cargo's SDK feature/build script
+inactive, and emit metadata without native SDK linkage. They do not establish
+real feature-forwarded SDK compilation, C++ ABI compatibility, fixture success
+or native playback. All execution and independent reviews remain deferred.

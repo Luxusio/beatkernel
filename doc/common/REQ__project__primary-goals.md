@@ -91,7 +91,7 @@ publication and renders song-time keysounds/BGM using the actual Mixer. Queue,
 voice and output-frame caps are explicit; logical state is separate from rendered
 extent. Original physical scheduling and past dropped audio are not recorded.
 The [native replay player](../kernel/REQ__bms-native-replay.md) connects that plan
-to explicit WASAPI/ALSA/CoreAudio output configurations. Rolling admission uses
+to explicit WASAPI/ALSA/CoreAudio or optional Windows ASIO output configurations. Rolling admission uses
 actual successful Mixer frame ends, retaining planned timestamps and terminating
 on core/queue/native failures. This is source integration with build checks;
 actual native replay output and physical timing evidence remain deferred.
@@ -208,7 +208,7 @@ compilation/control acceptance remain pending. The separate
 [ASIO stream source](../platform/REQ__asio-stream.md) now owns actual SDK buffers,
 serialized callbacks and the core Mixer, with explicit channel/rate/buffer choices,
 pre-start B priming and terminal cleanup before freeing callback state. Native
-playback, final-host integration and clock presentation mapping remain pending.
+playback, live-input host integration and clock presentation mapping remain pending.
 The SDK-free [ASIO planar PCM converter](../platform/REQ__asio-pcm.md) prepares
 selected mixer channels for eighteen native PCM layouts with explicit byte order,
 valid-bit alignment and checked buffer extents. It does not establish an active
@@ -217,6 +217,14 @@ render fixtures are authored and compiled without execution. SDK-free host,
 Windows GNU and macOS checks passed; optional Windows Rust wrappers additionally
 type-checked through metadata-only compilation without building/linking C++.
 This supplies no actual SDK/MSVC ABI or native output acceptance evidence.
+
+The recorded BMS host now reuses that stream through explicit sample feature
+`asio-sdk`, exact registry CLSID/view, selected native output indices and exact
+or preferred buffer frames. A hidden same-thread host window survives driver
+teardown. Eight portable option fixtures are authored, with execution deferred.
+Coherent stream buffer observations additionally pair actual successful callback
+Mixer blocks with copied raw native timing; post-create driver latency is retained.
+These inputs do not establish a QPC presentation relation or live ASIO timing.
 
 ## Verification
 

@@ -189,7 +189,9 @@ Corresponding Source delivery. Optional
 [SDK driver control](REQ__asio-driver-control.md) and portable buffer/rate
 validation have source implementations. The separate [ASIO stream source](REQ__asio-stream.md)
 adds SDK buffer/callback ownership and actual Mixer delivery. SDK compilation,
-native output and final-host presentation integration remain pending.
+native output and live-input presentation integration remain pending. The
+[recorded BMS host](../kernel/REQ__bms-native-replay.md) now has an explicit ASIO
+source path through its optional SDK feature and separate stream API.
 Current WASAPI code reports `BackendUnavailable(Asio)` for ASIO requests, rather
 than the earlier unresolved-license placeholder. Additional native APIs need
 concrete capability and runtime contracts through the same platform boundary.
