@@ -158,7 +158,7 @@ impl Mixer {
     /// such rejection leaves the rate and all voices unchanged.
     pub fn render(&mut self, output: &mut [f32]) -> Result<RenderReport, AudioError> {
         let channels = usize::from(self.config.format().channels());
-        if output.len() % channels != 0 {
+        if !output.len().is_multiple_of(channels) {
             return Err(AudioError::InvalidBuffer);
         }
         let frames = output.len() / channels;

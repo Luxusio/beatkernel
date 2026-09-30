@@ -41,7 +41,9 @@ impl PcmSample {
         validate_storage(format, sample_count, limits)?;
         if encoding == Encoding::Float
             && data
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .any(|sample| !float_sample(sample).is_finite())
         {
             return Err(AudioError::NonFiniteSample.into());
@@ -224,7 +226,7 @@ fn validate_storage(
     samples: usize,
     limits: PcmLimits,
 ) -> Result<(), AudioError> {
-    if samples % usize::from(format.channels()) != 0 {
+    if !samples.is_multiple_of(usize::from(format.channels())) {
         return Err(AudioError::InvalidBuffer);
     }
     if pcm_bytes(samples)? > limits.max_asset_bytes() {

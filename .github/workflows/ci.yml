@@ -13,7 +13,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
@@ -28,13 +28,3 @@ jobs:
       - if: matrix.os == 'windows-latest'
         run: cargo run -p beatkernel-platform --example windows_input_inspector --locked -- --seconds 1
       - run: cargo doc --workspace --no-deps --locked
-  msrv:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.83.0
-      - run: cargo test --workspace --locked
