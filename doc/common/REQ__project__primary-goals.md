@@ -104,6 +104,13 @@ The Windows section-restart example creates a fresh observer for each applied cu
 Neither source establishes a hardware accuracy bound or replaces deferred native
 execution, tests and independent review.
 
+Linux ALSA source additionally exposes [coherent native timing observations](../platform/REQ__alsa-timing.md)
+separately from its independent aggregate counters. It requests monotonic native
+timestamps explicitly and retains raw status/delay and query intervals. Estimated
+sound-frame position requires valid running status and delay; terminal/unavailable
+queries invalidate publication. Native execution and acoustic accuracy remain
+unverified, and this does not yet add a Linux-native BMS composition.
+
 Git was initialized locally on 2026-09-29 after these files had been implemented. Initial commits record the existing implementation and its documentation, rather than reconstructing historical development commits.
 
 Phase 7 audio is under implementation: [core audio](../kernel/REQ__audio.md)

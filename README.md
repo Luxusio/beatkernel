@@ -409,6 +409,10 @@ See [Linux native requirements](doc/platform/REQ__linux-native.md) for explicit
 nodes/endpoints and supported settings. Exact ALSA sizing is the default;
 optional rounding reports applied period/buffer sizes. Evdev event loss requires
 an explicit queried-state acknowledgment before gameplay resumes.
+Separate [ALSA timing snapshots](doc/platform/REQ__alsa-timing.md) associate native
+status, signed delay and monotonic timestamp with worker submission counts. Sound
+frame position is an estimate; acoustic latency and automatic input calibration
+remain unmeasured.
 
 The portable [device adapter registry](doc/platform/REQ__device-adapters.md)
 connects caller-owned native descriptors and raw HID reports to bounded canonical
