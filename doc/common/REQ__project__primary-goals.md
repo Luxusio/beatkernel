@@ -74,6 +74,15 @@ from one native packet without losing source sequence. The separate
 clock points against a declared nominal period; generated benchmark observations
 are labeled synthetic. Neither surface establishes native timing measurements.
 
+macOS input now has an explicitly selected raw-report mode using a dynamically
+resolved timestamped IOHID callback. It retains original bytes/IDs/mach arrival
+ticks and exposes declared report-framing conversion; default scalar value
+acquisition remains separate. Apple-target compile checks cover this source,
+while native linking, permissions and device reception remain unverified. The
+[bounded BMS/compiler corpus](../kernel/REQ__bms-fuzz.md) supplies authored
+mutation and metamorphic fixtures; creation does not establish fuzz execution
+or replace pending broader fuzzing/QA evidence.
+
 Git was initialized locally on 2026-09-29 after these files had been implemented. Initial commits record the existing implementation and its documentation, rather than reconstructing historical development commits.
 
 Phase 7 audio is under implementation: [core audio](../kernel/REQ__audio.md)

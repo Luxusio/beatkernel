@@ -426,6 +426,12 @@ cover its native source; successful linking, execution and hardware timing remai
 unverified. [Phase 15 SDK status](doc/kernel/REQ__sdk-status.md) retains the
 specified condition for introducing a C host ABI.
 
+macOS also exposes an explicit timestamped raw-report input mode. It retains
+native bytes/IDs and mach arrival timestamps for host-selected vendor adapters;
+the default scalar value mode is separate. Raw mode requires an available native
+timestamped callback API. Report framing conversion requires a declared ID layout,
+preserving the original envelope instead of guessing from payload bytes.
+
 The [BMS adapter](doc/kernel/REQ__bms-adapter.md) parses bounded UTF-8 text,
 base/direct/extended BPM, STOP, measure lengths, layered BGM and paired LNTYPE1
 holds with exact rational subdivision. Unsupported commands fail explicitly;
