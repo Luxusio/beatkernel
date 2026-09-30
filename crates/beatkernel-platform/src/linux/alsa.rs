@@ -6,9 +6,12 @@ use timing::TimingShared;
 pub use timing::{AlsaNativeTimestamp, AlsaTimingSnapshot};
 
 use super::{LinuxError, MonotonicClock};
-use crate::audio::{encode_pcm, DeviceFormat, SampleEncoding};
+use crate::audio::{
+    encode_pcm, telemetry::Telemetry, AudioStreamSnapshot, AudioStreamStatus, DeviceFormat,
+    SampleEncoding, StreamCounters,
+};
 use beatkernel::{
-    audio::Mixer,
+    audio::{AudioError, Mixer, RenderReport},
     time::{ClockDomainId, ClockPoint, Timestamp},
 };
 use std::{
@@ -110,6 +113,7 @@ struct Shared {
     observed: AtomicI64,
     observed_valid: AtomicBool,
     timing: TimingShared,
+    render_telemetry: Telemetry,
 }
 impl Shared {
     fn new() -> Self {
@@ -127,6 +131,7 @@ impl Shared {
             observed: AtomicI64::new(0),
             observed_valid: AtomicBool::new(false),
             timing: TimingShared::new(),
+            render_telemetry: Telemetry::new(),
         }
     }
 }
@@ -295,6 +300,12 @@ impl AlsaStream {
             }
         }
     }
+    /// Last successful core mixer report, retained after stop or native failure.
+    /// It proves core rendering, not native submission or acoustic presentation.
+    /// None before a successful render or while publication is unavailable.
+    pub fn last_render_report(&self) -> Option<RenderReport> {
+        self.shared.render_telemetry.read().render
+    }
     /// Separately coherent native status; unavailable before Start/after stop,
     /// during publication or after an unavailable/failed native query.
     /// Native PREPARED may yield raw fields with no played-frame estimate.
@@ -371,10 +382,17 @@ fn run_worker(
 ) -> Result<(), LinuxError> {
     let clock = MonotonicClock::new(config.requested.monotonic_domain);
     let mut pending_offset = config.period_frames as usize;
+    let mut render_version = 0u64;
     let align = usize::from(config.format.block_align());
     while !shared.stop.load(Ordering::Acquire) {
         if pending_offset == config.period_frames as usize {
-            mixer.render(render).map_err(LinuxError::Mixer)?;
+            render_and_publish(
+                &mut mixer,
+                render,
+                &shared.render_telemetry,
+                &mut render_version,
+            )
+            .map_err(LinuxError::Mixer)?;
             encode_pcm(config.format, render, conversion).map_err(LinuxError::Conversion)?;
             shared
                 .rendered
@@ -412,6 +430,27 @@ fn run_worker(
         shared.observed_valid.store(true, Ordering::Release);
     }
     pcm.drop_stream()
+}
+
+// Publishes only successful core rendering, before conversion/native admission.
+fn render_and_publish(
+    mixer: &mut Mixer,
+    output: &mut [f32],
+    telemetry: &Telemetry,
+    version: &mut u64,
+) -> Result<RenderReport, AudioError> {
+    let report = mixer.render(output)?;
+    telemetry.publish(
+        AudioStreamSnapshot {
+            telemetry_available: true,
+            status: AudioStreamStatus::Running,
+            counters: StreamCounters::default(),
+            clock: None,
+            render: Some(report),
+        },
+        version,
+    );
+    Ok(report)
 }
 
 // Opaque C objects are never dereferenced by Rust; they remain worker-owned.
@@ -850,5 +889,114 @@ mod tests {
         assert!(validate_sizes(&request, 64, 64, 0).is_err());
         assert!(validate_sizes(&request, 256, 0, 0).is_err());
         assert!(validate_sizes(&request, 256, 64, 1).is_err());
+    }
+
+    #[test]
+    fn real_mixer_reports_expose_execution_rejections_and_survive_stop() {
+        use beatkernel::audio::{
+            command_queue, AudioCommand, AudioFormat, AudioLimits, MixerConfig, PcmLimits,
+            PcmSample, SampleBank, SampleId, VoiceId,
+        };
+        let requested = request();
+        let shared = Arc::new(Shared::new());
+        let mut stream = AlsaStream {
+            configuration: AlsaAppliedConfig {
+                format: requested.format,
+                buffer_frames: requested.buffer_frames,
+                period_frames: requested.period_frames,
+                sizing_adjusted: false,
+                output_domain: ClockDomainId(9),
+                output_origin: Timestamp::ZERO,
+                requested,
+            },
+            shared: Arc::clone(&shared),
+            worker: None, // Pure facade fixture: no native thread/PCM/device.
+        };
+        assert_eq!(stream.last_render_report(), None);
+        let format = AudioFormat::new(48_000, 2).unwrap();
+        let pcm_limits = PcmLimits::new(1024, 4096, 4).unwrap();
+        let mut bank = SampleBank::new(format, pcm_limits).unwrap();
+        bank.insert(
+            SampleId(1),
+            PcmSample::new(format, vec![0.5; 64], pcm_limits).unwrap(),
+        )
+        .unwrap();
+        let limits = AudioLimits::new(8, 1, 8, 8, 8).unwrap();
+        let (mut producer, consumer) = command_queue(8).unwrap();
+        for (voice, sample) in [(1, 1), (2, 1), (3, 99)] {
+            producer
+                .try_push(AudioCommand::Play {
+                    voice: VoiceId(voice),
+                    sample: SampleId(sample),
+                    at: Timestamp::ZERO,
+                    gain: 1.0,
+                })
+                .unwrap();
+        }
+        let mut mixer = Mixer::new(
+            MixerConfig::new(format, ClockDomainId(9), Timestamp::ZERO, limits),
+            bank,
+            consumer,
+        )
+        .unwrap();
+        let mut version = 0;
+        let mut output = [0.0; 8];
+        let first = render_and_publish(
+            &mut mixer,
+            &mut output,
+            &shared.render_telemetry,
+            &mut version,
+        )
+        .unwrap();
+        assert_eq!(first.counters.voice_full, 1);
+        assert_eq!(first.counters.unknown_samples, 1);
+        assert_eq!(first.active_voices, 1);
+        assert_eq!(first.frames, 4);
+        assert_eq!(first.counters.rendered_frames, 4);
+        assert_eq!(stream.last_render_report(), Some(first));
+        assert!(output.iter().all(|sample| *sample == 0.5));
+        assert!(!first.producer_disconnected);
+        producer
+            .try_push(AudioCommand::Play {
+                voice: VoiceId(1),
+                sample: SampleId(1),
+                at: Timestamp::from_nanos(1),
+                gain: 1.0,
+            })
+            .unwrap();
+        drop(producer);
+        let second = render_and_publish(
+            &mut mixer,
+            &mut output,
+            &shared.render_telemetry,
+            &mut version,
+        )
+        .unwrap();
+        assert_eq!(second.start_frame, 4);
+        assert_eq!(second.counters.rendered_frames, 8);
+        assert_eq!(second.counters.late_commands, 1);
+        assert_eq!(second.counters.voice_full, 1);
+        assert!(second.producer_disconnected);
+        assert_eq!(stream.last_render_report(), Some(second));
+        let published_version = version;
+        assert!(render_and_publish(
+            &mut mixer,
+            &mut [0.0; 18],
+            &shared.render_telemetry,
+            &mut version
+        )
+        .is_err());
+        assert_eq!(version, published_version);
+        assert_eq!(stream.last_render_report(), Some(second));
+        // The internal carrier exposes no clock or synthetic native counters.
+        let carrier = shared.render_telemetry.read();
+        assert_eq!(carrier.clock, None);
+        assert_eq!(carrier.counters, StreamCounters::default());
+        shared.errno.store(-32, Ordering::Release);
+        shared.status.store(3, Ordering::Release);
+        assert_eq!(stream.last_render_report(), Some(second));
+        stream.stop().unwrap();
+        assert_eq!(stream.last_render_report(), Some(second));
+        assert_eq!(stream.timing_snapshot(), None);
     }
 }

@@ -38,7 +38,7 @@ use std::fmt;
 mod convert;
 mod negotiation;
 pub mod presentation;
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 pub(crate) mod telemetry;
 
 pub use convert::encode_pcm;

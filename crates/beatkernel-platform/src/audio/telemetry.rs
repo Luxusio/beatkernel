@@ -24,6 +24,7 @@ pub(crate) struct Telemetry {
 
 /// Observes one running deadline interval; Ready/prefill is not an interval.
 /// Clear the baseline on native Start so its first observation only anchors.
+#[cfg(any(target_os = "windows", test))]
 pub(crate) fn observe_deadline(
     previous: &mut Option<u64>,
     qpc_100ns: u64,
