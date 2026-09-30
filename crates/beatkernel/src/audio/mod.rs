@@ -24,6 +24,6 @@ pub use model::{
 
 pub use pcm::{PcmSample, SampleBank, WavError};
 pub use queue::{
-    command_queue, CommandConsumer, CommandProducer, CommandPushError, QueueCounters, QueuePopError,
-    QueuePushError,
+    command_queue, CommandConsumer, CommandProducer, CommandPushError, QueueCounters,
+    QueuePopError, QueuePushError,
 };
