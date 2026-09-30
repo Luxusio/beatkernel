@@ -152,6 +152,10 @@ sorted by start time and ID. `objects_in_window(start, end)` borrows starts in
 the half-open window without allocation. Compilation belongs on a control
 thread.
 
+This API accepts Rust data structures. BMS/osu! file parsers are not implemented
+yet; future format adapters will translate their source semantics into this
+model. The chart tests currently use synthetic source data.
+
 At a shared beat, object endpoints and markers receive the pre-STOP time; the
 new BPM and STOP affect following beats. SV never changes judge targets.
 Duplicate IDs/markers, invalid ranges and overflow are explicit errors. At
@@ -216,5 +220,5 @@ with gameplay state. This API does not track held state or synthesize releases.
 Run the virtual `binding` example to see source 101 and 102 map the same HID A
 to logical controls 10 and 20, with source 103 retaining touch data on channel 30.
 See [the binding requirements](doc/kernel/REQ__binding.md).
-Windows native input is awaiting independent review and full QA. The full
-runtime remains in development.
+Windows native input passed independent review and CLI QA. The full runtime
+remains in development.
