@@ -12,9 +12,9 @@ than silently being promoted to a precise measurement.
 A portable platform helper converts native position to the mixer's explicit
 output-origin grid with checked wide arithmetic, then creates a finite supplied-
 pair affine map. The caller declares its validity/extrapolation and uncertainty.
-Default uncertainty remains Unknown. Transport uses the inverse observed slope
-so logical progression follows measured output progression instead of assuming
-device/QPC rates are identical. Extrapolating the initial frame-zero host origin
+Default uncertainty remains Unknown. The helper can supply an inverse observed
+slope; native composition uses that short startup relation only to establish
+the frame-zero host origin and starts Transport at normal rate. Extrapolating this origin
 is explicit and does not provide an absolute acoustic latency guarantee.
 
 Native section composition preloads bounded WAV PCM before starting output and
@@ -25,8 +25,22 @@ output frame zero is tied to the observed relation. Shared/exclusive endpoint an
 source/output channel compatibility remain explicit; no mode/channel fallback.
 Startup waits for usable observations with a finite deadline, while failure still
 joins output and closes input registration before window destruction.
-Input and runtime advancement check the finite calibration on every host query;
-an expired or mismatched relation terminates through the same cleanup path.
+Each fresh repetition owns a new [ongoing observer](REQ__presentation-discipline.md)
+seeded from actual progressing accurate snapshots. The control thread polls native
+observations throughout playback, validates current-host freshness and input host
+domains, and updates continuous Transport rate before advancement.
+Each pump processes at most 256 native messages before returning to observation
+and advancement, so a continuously nonempty message queue cannot starve control.
+Past segments remain available for delayed acquisitions. The observer uses the
+applied selected song origin, without changing PCM playback rate, chart timing or
+judge state.
+Unavailable/degraded snapshots may be skipped only within the explicit progress
+age; unchanged position does not refresh progress. Terminal stream status, stale
+progress, clock resets, frequency/domain changes and excessive rate/phase errors
+terminate through cleanup. Measured/correction/applied ppm, phase error and limiting
+are reported with Unknown quality. Positive bounded correction does not promise
+absolute acoustic synchronization. Observer storage is bounded; Transport history
+may grow off-thread during the finite run.
 Closing the window cancels all remaining repetitions. The synthetic four-key
 chart is anchored at the selected music position; it is not an imported chart.
 

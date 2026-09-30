@@ -77,9 +77,15 @@ mod native {
         runtime::restart::{FrameRounding, RestartPlan},
         runtime::{Runtime, SoundBinding},
         time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
+        transport::Rate,
     };
     use beatkernel_platform::{
-        audio::presentation::{PresentationError, WasapiPresentationClock},
+        audio::presentation::{
+            discipline::{
+                DisciplineConfig, DisciplineError, DisciplineUpdate, PresentationDiscipline,
+            },
+            PresentationError, WasapiPresentationClock,
+        },
         audio::{
             AudioBackendKind, AudioDeviceId, AudioOutputBackend, AudioOutputStream,
             AudioStreamMode, AudioStreamRequest, AudioStreamStatus, BufferRequest, PeriodRequest,
@@ -235,6 +241,25 @@ mod native {
             std::thread::yield_now();
         }
         Err("coherent audio telemetry unavailable".into())
+    }
+
+    fn observe_progress(
+        stream: &WasapiStream,
+        discipline: &mut PresentationDiscipline,
+    ) -> Result<(), Box<dyn Error>> {
+        let snapshot = stream.snapshot();
+        if snapshot.status != AudioStreamStatus::Running {
+            return Err(format!("audio terminated: {:?}", snapshot.status).into());
+        }
+        match discipline.observe(snapshot) {
+            Ok(_) => Ok(()),
+            Err(DisciplineError::Presentation(
+                PresentationError::Unavailable
+                | PresentationError::Inaccurate
+                | PresentationError::BeforePresentation,
+            )) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn presentation(
@@ -474,19 +499,42 @@ mod native {
         let mut input = WindowsInput::new(clock);
         input.enumerate_devices()?;
         stream.start()?;
-        let (relation, transport) = match presentation(&stream, seconds).and_then(|relation| {
-            let transport = relation.transport(applied_song)?;
-            Ok((relation, transport))
-        }) {
-            Ok(pair) => pair,
-            Err(error) => {
-                let close = registration.close();
-                let stop = stream.stop();
-                close?;
-                stop?;
-                return Err(error);
-            }
-        };
+        let (relation, transport, mut discipline) =
+            match presentation(&stream, seconds).and_then(|relation| {
+                let mut transport = relation.transport(applied_song)?;
+                transport.set_rate(transport.anchor().host_time, Rate::NORMAL)?;
+                let mut discipline = PresentationDiscipline::new(
+                    DisciplineConfig::default(),
+                    ClockPoint {
+                        domain: OUTPUT,
+                        timestamp: Timestamp::ZERO,
+                    },
+                    HOST,
+                    applied_song,
+                )?;
+                let deadline = Instant::now() + WallDuration::from_secs(2);
+                loop {
+                    observe_progress(&stream, &mut discipline)?;
+                    if discipline.latest_pair().is_some() {
+                        discipline.validate_host(clock.sample()?.normalized)?;
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        return Err("no usable presentation progress within 2 seconds".into());
+                    }
+                    std::thread::sleep(WallDuration::from_millis(1));
+                }
+                Ok((relation, transport, discipline))
+            }) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    let close = registration.close();
+                    let stop = stream.stop();
+                    close?;
+                    stop?;
+                    return Err(error);
+                }
+            };
         println!(
             "observed song anchor={:?} mapping_quality={:?}; physical accuracy remains unmeasured",
             transport.anchor(),
@@ -503,9 +551,18 @@ mod native {
         let mut closed = false;
         let outcome = (|| -> Result<(), Box<dyn Error>> {
             'pump: while Instant::now() < deadline {
+                observe_progress(&stream, &mut discipline)?;
+                discipline.validate_host(clock.sample()?.normalized)?;
                 let mut message: MSG = unsafe { std::mem::zeroed() };
+                let mut processed_messages = 0;
                 // SAFETY: writable MSG belongs to this thread; native queue fills it synchronously.
-                while unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
+                while processed_messages < 256
+                    && unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) } != 0
+                {
+                    processed_messages += 1;
+                    if Instant::now() >= deadline {
+                        break 'pump;
+                    }
                     if message.message == WM_QUIT || message.message == WM_CLOSE {
                         closed = true;
                         break 'pump;
@@ -526,13 +583,10 @@ mod native {
                         }
                         let batch = acquired?;
                         for event in batch.input.events {
-                            relation.mapper().map_checked(
-                                ClockPoint {
-                                    domain: event.meta().clock_domain,
-                                    timestamp: event.meta().timestamp,
-                                },
-                                OUTPUT,
-                            )?;
+                            discipline.validate_host(ClockPoint {
+                                domain: event.meta().clock_domain,
+                                timestamp: event.meta().timestamp,
+                            })?;
                             let report = runtime.process_input(
                                 event,
                                 &ExplicitDomains,
@@ -568,7 +622,14 @@ mod native {
                     }
                 }
                 let host = clock.sample()?.normalized;
-                relation.mapper().map_checked(host, OUTPUT)?;
+                if let update @ DisciplineUpdate::Applied { .. } =
+                    discipline.update(host, runtime.transport_mut())?
+                {
+                    println!(
+                        "presentation correction={update:?}; quality={:?}",
+                        discipline.quality()
+                    );
+                }
                 let report = runtime.advance_to(
                     host,
                     &ExplicitDomains,

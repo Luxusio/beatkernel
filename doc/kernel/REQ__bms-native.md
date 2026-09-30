@@ -43,32 +43,56 @@ commands remain visible in audio snapshot counters. Queue failures report exact 
 without retry or judge rollback. No 4096-total-notes ceiling or silent voice stealing
 is introduced. Shared loader file/path/PCM limits apply (64 MiB per asset, 256 MiB bank).
 
-After native Start, two coherent accurate WASAPI device-position/QPC observations establish
-`WasapiPresentationClock`. The observed relation maps output frame zero to logical song
-`-preroll`; input and deadline queries explicitly check the finite calibrated
-validity interval. The unit song/output relation makes prequeued BGM output times
-exactly song time plus preroll; observed inverse slope applies only between host
-acquisition and song.
-Two startup observations infer a slope over a short span; they do not establish
-rate stability over the whole duration or repeatable native synchronization.
-Recalibration and physical measurement remain future work. Default three-second
-preroll gives up to two seconds for calibration before song zero; smaller preroll
-can expire during calibration. Zero preroll explicitly permits startup calibration
-to advance initial BGM/notes before input processing begins. Progress prints
-remaining countdown or current song nanoseconds, with a window focus prompt;
-this is logical composition, not a physical first-presentation guarantee.
-Calibration waits at most two seconds; failure ends the session rather than substituting
-receipt time. Checked validity extends from output zero through requested loop
-duration + preroll + three seconds of startup/slack,
-with explicit bounded extrapolation and caller-supplied 100 ns observation representation
-error but no supplied drift bound. Relation quality therefore stays Unknown; physical
-first-presentation accuracy, DAC latency and keyboard-to-speaker latency remain unmeasured.
-Keysounds schedule from coherent submitted-frame telemetry with the independent output
-domain and Unknown relation to physical presentation; they may be late, reported by Mixer.
-`--seconds` is the finite monotonic wall duration of the gameplay loop *after*
-calibration, including any remaining preroll countdown. The gameplay pump begins after calibration; any queued native messages are
-acquired through the real Raw Input path with its retained timestamps rather than
-synthesized. Prefilling BGM prevents its startup commands from being lost.
+After native Start, two coherent accurate WASAPI device-position/QPC observations
+establish the startup output-frame-zero host anchor through `WasapiPresentationClock`.
+Transport maps that anchor to song `-preroll`, then starts at `Rate::NORMAL`; the
+short startup slope is not retained as a permanent playback rate. The input offset
+is still applied once by JudgeProfile, and compiled chart/Judge targets never move.
+Every prequeued BGM output timestamp remains song time plus preroll, independent
+of subsequent host-to-song rate corrections.
+
+A `PresentationDiscipline` observes real coherent running snapshots on the control
+thread, seeded from an accurate nonzero presentation observation with a bounded
+two-second retry. Only unavailable, inaccurate or before-presentation observations
+may be skipped; terminal output status and other native/chronology/domain/frequency
+failures stop the session. Each loop checks current host freshness before processing
+messages, validates each acquired input host point, then updates the existing
+Transport continuously at sampled current host time before advancing deadlines.
+Each batch processes at most 256 native messages before returning to observation
+and advancement, so continuous message arrival cannot starve clock control.
+Warmup requires one second of observed span; progressing observations retain a
+bounded 64-pair history spaced at least 100 ms apart, with updates at most once per
+second. Unchanged positions and duplicate observations never refresh progress age.
+Unavailable/degraded snapshots may be skipped only while accepted progress is at
+most two seconds old; stale observations stop with an explicit error.
+
+The default controller estimates signed rate deviation from normal, spreads phase
+correction over ten seconds, limits final correction to +/-1000 ppm and rejects
+base drift beyond that bound or phase error beyond 250 ms. Applied reports print
+measured/correction/final signed ppm, phase nanoseconds and whether limiting was
+needed. Controller quality remains Unknown: observed clock convergence is not a
+measured physical accuracy or DAC latency guarantee. Continuous rate updates retain
+Transport history for late events; they never seek/reset judges, change Mixer rate,
+remap BGM/preroll, or replay inputs. Native discontinuity requires explicit host
+resynchronization outside this sample.
+
+Default three-second preroll provides logical startup headroom. Initial calibration
+and discipline seeding each have a two-second retry cap, so delays can still exhaust
+that headroom; smaller or zero preroll can allow initial BGM/notes to advance before
+the gameplay pump. Choose larger explicit preroll when that bounded headroom is needed.
+Progress prints remaining countdown or current song nanoseconds and a focus prompt.
+Calibration failure ends the session instead of inventing receipt-time observations.
+The initial finite affine interval covers requested loop duration + preroll + three
+seconds startup/slack only to construct the origin; ongoing queries are guarded by
+fresh presentation discipline, not the lifetime of that initial slope. Startup
+observations and ongoing correction still do not establish physical first-presentation
+accuracy or repeatable long-run hardware synchronization. Keysounds use coherent
+submitted-frame scheduling on their separate output grid with Unknown physical
+presentation relation; Mixer reports lateness. `--seconds` is the finite monotonic
+wall duration after initial calibration and discipline seeding, including remaining
+preroll countdown. Queued native messages keep their actual acquisition metadata;
+no synthetic input substitutes for startup messages. Prefilling BGM preserves startup
+commands regardless of when the gameplay pump begins.
 
 All setup/start/calibration/pump exits stop and join the stream and release Raw Input before
 native window destruction. Native resources use RAII guards for early failures. Explicit

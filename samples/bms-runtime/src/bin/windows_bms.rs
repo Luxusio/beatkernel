@@ -242,11 +242,18 @@ mod native {
         judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
         runtime::{Runtime, RuntimeReport},
         time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Timestamp},
+        transport::Rate,
     };
     use beatkernel_bms_runtime::{load_prepared, ChannelPolicy};
     use beatkernel_platform::{
         audio::{
-            presentation::{PresentationError, WasapiPresentationClock},
+            presentation::{
+                discipline::{
+                    DisciplineConfig, DisciplineError, DisciplineUpdate, ObservationAdmission,
+                    PresentationDiscipline,
+                },
+                PresentationError, WasapiPresentationClock,
+            },
             AudioBackendKind, AudioDeviceId, AudioOutputBackend, AudioOutputStream,
             AudioStreamMode, AudioStreamRequest, AudioStreamStatus,
         },
@@ -452,6 +459,50 @@ mod native {
         Err("no usable increasing presentation observations within 2 seconds".into())
     }
 
+    fn skippable_observation(error: &DisciplineError) -> bool {
+        matches!(
+            error,
+            DisciplineError::Presentation(
+                PresentationError::Unavailable
+                    | PresentationError::Inaccurate
+                    | PresentationError::BeforePresentation
+            )
+        )
+    }
+    fn observe_running(
+        stream: &WasapiStream,
+        discipline: &mut PresentationDiscipline,
+    ) -> Result<Option<ObservationAdmission>> {
+        let snapshot = stream.snapshot();
+        if snapshot.status != AudioStreamStatus::Running {
+            return Err(format!(
+                "native presentation observation terminated: {:?}",
+                snapshot.status
+            )
+            .into());
+        }
+        match discipline.observe(snapshot) {
+            Ok(admission) => Ok(Some(admission)),
+            Err(error) if skippable_observation(&error) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+    fn seed_discipline(
+        stream: &WasapiStream,
+        discipline: &mut PresentationDiscipline,
+    ) -> Result<()> {
+        let deadline = Instant::now() + WallDuration::from_secs(2);
+        while Instant::now() < deadline {
+            if matches!(
+                observe_running(stream, discipline)?,
+                Some(ObservationAdmission::Retained | ObservationAdmission::Progress)
+            ) {
+                return Ok(());
+            }
+            std::thread::sleep(WallDuration::from_millis(1));
+        }
+        Err("no accurate progressing presentation seed within two seconds".into())
+    }
     // Own registration and its target together. Created before stream, so early
     // returns drop/join audio before this guard unregisters and destroys Window.
     struct AcquisitionWindow {
@@ -613,7 +664,20 @@ mod native {
                 &stream,
                 calibration_extent(options.seconds, options.preroll)?,
             )?;
-            let transport = relation.transport(Timestamp::from_nanos(-options.preroll))?;
+            let mut transport = relation.transport(Timestamp::from_nanos(-options.preroll))?;
+            transport.set_rate(transport.anchor().host_time, Rate::NORMAL)?;
+            let mut discipline = PresentationDiscipline::new(
+                DisciplineConfig::default(),
+                ClockPoint {
+                    domain: OUTPUT,
+                    timestamp: Timestamp::ZERO,
+                },
+                HOST,
+                Timestamp::from_nanos(-options.preroll),
+            )?;
+            seed_discipline(&stream, &mut discipline)?;
+            discipline.validate_host(clock.sample()?.normalized)?;
+            println!("presentation discipline seed={:?} config={:?} quality={:?}; ongoing continuous transport correction, PCM/BGM rate unchanged", discipline.latest_pair(), discipline.config(), discipline.quality());
             println!("observed output-zero/song-minus-preroll anchor={:?}; mapping quality={:?}; keysound scheduling=submitted frame grid/Unknown; physical latency=unmeasured", transport.anchor(), relation.quality());
             let mut runtime = Runtime::new(
                 HOST,
@@ -628,11 +692,22 @@ mod native {
             let deadline = Instant::now() + WallDuration::from_secs(options.seconds);
             let mut last_progress_second = None;
             'pump: while Instant::now() < deadline {
+                // Missing/degraded readings can skip only while real progressing
+                // observations stay fresh. Terminal/native chronology errors stop.
+                let _admission = observe_running(&stream, &mut discipline)?;
+                discipline.validate_host(clock.sample()?.normalized)?;
                 // SAFETY: MSG is an initialized POD native message buffer, local to this thread.
                 let mut message: MSG = unsafe { std::mem::zeroed() };
+                let mut processed_messages = 0;
                 // SAFETY: writable MSG local to the owning native message thread.
-                while unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) } != 0 {
-                    if message.message == WM_QUIT || message.message == WM_CLOSE {
+                while processed_messages < 256
+                    && unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) } != 0
+                {
+                    processed_messages += 1;
+                    if Instant::now() >= deadline
+                        || message.message == WM_QUIT
+                        || message.message == WM_CLOSE
+                    {
                         break 'pump;
                     }
                     if message.hwnd == acquisition.hwnd() && message.message == WM_INPUT {
@@ -650,13 +725,10 @@ mod native {
                             }
                         }
                         for event in acquired?.input.events {
-                            relation.mapper().map_checked(
-                                ClockPoint {
-                                    domain: event.meta().clock_domain,
-                                    timestamp: event.meta().timestamp,
-                                },
-                                OUTPUT,
-                            )?;
+                            discipline.validate_host(ClockPoint {
+                                domain: event.meta().clock_domain,
+                                timestamp: event.meta().timestamp,
+                            })?;
                             print_report(runtime.process_input(
                                 event,
                                 &ExplicitDomains,
@@ -685,7 +757,17 @@ mod native {
                     }
                 }
                 let host = clock.sample()?.normalized;
-                relation.mapper().map_checked(host, OUTPUT)?;
+                discipline.validate_host(host)?;
+                if let DisciplineUpdate::Applied {
+                    base_rate_ppm,
+                    correction_ppm,
+                    applied_rate_ppm,
+                    phase_error_ns,
+                    limited,
+                } = discipline.update(host, runtime.transport_mut())?
+                {
+                    println!("presentation discipline measured={base_rate_ppm:+}ppm correction={correction_ppm:+}ppm applied={applied_rate_ppm:+}ppm phase={phase_error_ns}ns limited={limited} quality={:?}", discipline.quality());
+                }
                 let report = runtime.advance_to(
                     host,
                     &ExplicitDomains,
