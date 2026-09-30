@@ -20,6 +20,7 @@ dependencies = [
  "beatkernel",
  "beatkernel-bms",
  "beatkernel-platform",
+ "windows-sys",
 ]
 
 [[package]]
