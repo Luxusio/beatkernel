@@ -10,8 +10,10 @@ The source implements **Phase 0: repository skeleton**, **Phase 1: integer time
 and transport**, **Phase 2: canonical physical input**, **Phase 3: binding**,
 and **Phase 4: Windows native input**. **Phase 5: chart compilation** passed
 independent review and CLI QA. **Phase 6: Instant/Hold judging** is implemented.
-Audio scheduling and replay remain
-subsequent phases.
+**Phase 7 audio implementation is in progress:** PCM loading, bounded command
+queuing, deterministic mixing and native WASAPI streams are present. Independent
+audio review and actual shared/exclusive playback verification remain pending.
+Integrated gameplay, replay and the remaining phases are still required.
 
 **Phase 4 passed independent review and CLI QA:** portable Raw Input processing and a Windows
 QPC receipt sampler, native packet acquisition and explicit registration are
@@ -32,6 +34,7 @@ beatkernel/
 │   │   ├── src/chart/           # source charts and absolute compiled timelines
 │   │   ├── src/interaction/     # typed evaluator and active-interaction seams
 │   │   ├── src/judge/           # profiles, policies and forward Instant/Hold judging
+│   │   ├── src/audio/           # PCM preload, bounded queue and deterministic mixer
 │   │   ├── tests/time_transport.rs
 │   │   └── examples/transport.rs
 │   └── beatkernel-platform/     # pure input processing and Windows acquisition
@@ -42,9 +45,10 @@ beatkernel/
 └── .github/workflows/ci.yml
 ```
 
-The only workspace dependency is `beatkernel-platform → beatkernel`. The kernel has
+The workspace dependency direction is `beatkernel-platform → beatkernel`. The kernel has
 no OS dependency, no game-specific assumptions, no unsafe code, and no third-party
-dependencies. The platform uses pinned `windows-sys` bindings only on Windows,
+dependencies. The platform uses pinned `windows-sys` and generated `windows`
+bindings only on Windows,
 with unsafe confined to native FFI; portable input modules prohibit unsafe.
 Windows acquisition has native guest evidence; native Linux/macOS input and audio
 backends remain subsequent phases.

@@ -26,8 +26,21 @@ Twenty-three targeted judge tests pass in debug and release, and strict core all
 
 Git was initialized locally on 2026-09-29 after these files had been implemented. Initial commits record the existing implementation and its documentation, rather than reconstructing historical development commits.
 
+Phase 7 audio is under implementation: [core audio](../kernel/REQ__audio.md)
+provides finite PCM preload, bounded scalar SPSC commands and deterministic
+scheduled mixing. [Windows audio](../platform/REQ__windows-audio.md) provides
+native WASAPI enumeration/probing, shared engine/legacy event or explicit timer
+operation, exclusive event operation, requested/applied configuration and
+worker-owned clock telemetry. On Rust 1.98.1, coordinator checks pass 161 tests
+including doctests in each of debug and release on Linux, and strict Clippy
+passes on Linux and for the Windows platform target. Windows cross-compilation
+passes. These checks are not independent audio review/QA or successful native
+playback evidence. Successful native shared/exclusive execution remains
+required; the retained Windows VM previously reported zero render endpoints.
+ASIO licensing remains unresolved, and full Phases 7–15 remain required.
+
 ## Verification
 
-The executable verification configuration is [the Harness manifest](../harness/manifest.yaml). It runs formatting, strict Clippy, workspace tests in debug and release, transport, binding, chart, input-inspector and judge help/fixture examples, and public API documentation. Timestamped judge stdin also receives task-specific CLI QA. CI declares Linux, Windows, macOS, and Rust 1.83 checks; local verification alone does not establish execution on all CI hosts or physical hardware.
+The executable verification configuration is [the Harness manifest](../harness/manifest.yaml). It runs formatting, strict Clippy, workspace tests in debug and release, transport, binding, chart, input-inspector and judge help/fixture examples, and public API documentation. Timestamped judge stdin also receives task-specific CLI QA. CI declares Linux, Windows and macOS checks using Rust 1.98.1; local verification alone does not establish execution on all CI hosts or physical hardware.
 
-Contributors need a working Rust 1.83 or newer toolchain with rustfmt, Clippy and a host linker. Task-local isolated toolchain paths are environment-specific and are not a project installation contract.
+Contributors need a working Rust 1.98.1 or newer toolchain with rustfmt, Clippy and a host linker. The [toolchain guide](../build/GUIDE__rust-toolchain.md) records the pinned compiler policy. Task-local isolated toolchain paths are environment-specific and are not a project installation contract.
