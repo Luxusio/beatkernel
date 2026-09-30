@@ -39,7 +39,9 @@ Known ceiling: capture records logical judge operations, not original native
 output scheduling points, PCM or failed audio admissions. This reconstruction
 therefore reproduces selected song-time sounds, not original physical timing or
 past dropped audio. BGM and PCM use the supplied prepared audio setup; the logical
-judge fingerprint does not authenticate them. Native audio replay remains pending.
+judge fingerprint does not authenticate them. The
+[native replay player](REQ__bms-native-replay.md) connects this plan to existing
+output backends; actual native replay execution evidence remains pending.
 Assets are preloaded and
 the finite command plan is allocated off-thread; source/log limits do not bound
 all process memory. Tests, examples, native execution, reviews and QA stay deferred.

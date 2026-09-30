@@ -409,8 +409,20 @@ seconds; `--preroll-ns`, `--block-frames`, `--command-capacity`, `--voices`,
 unoffset song times, while logical counts/hash describe the full recording even
 when output is cut short. Empty logs have no sounds, and prefix logs include no
 later BGM. This reconstructs song-time sounds; original native scheduling points
-and past audio queue failures were not recorded. Native replay output and this
-command's execution remain pending.
+and past audio queue failures were not recorded. This command's execution
+remains pending.
+
+The [`play_replay_bms` native player](doc/kernel/REQ__bms-native-replay.md) sends
+the same plan to WASAPI on Windows, ALSA on Linux or CoreAudio on macOS. Select
+`--chart PATH --replay PATH --device ID --seconds N --rate HZ --channels N`;
+Linux also requires `--buffer-frames N --period-frames N`, and macOS requires
+`--buffer-frames N`. Windows accepts `--mode shared|exclusive` and
+`--shared-policy engine-period|legacy`, buffer/period frames or native defaults.
+Preroll, lookahead, command capacity, voices and replay limits are configurable.
+Commands retain planned output times and are supplied from actual completed
+Mixer reports; explicit late/queue/native failures end through cleanup. The
+finite duration includes preroll and does not infer acoustic completion. Native
+playback and physical timing remain unverified; only source checks have run.
 
 The [durable replay codec](doc/kernel/REQ__replay-codec.md) stores ordered operations,
 runtime identity and optional calibration metadata with explicit byte/count limits.
