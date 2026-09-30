@@ -446,9 +446,12 @@ base/direct/extended BPM, STOP, measure lengths, layered BGM and paired LNTYPE1
 holds with exact rational subdivision. Unsupported commands fail explicitly;
 this is a documented subset, not universal BMS compatibility. It returns real
 SourceChart/rules/sample mappings without opening assets or depending on platform.
-The [offline sample](doc/kernel/REQ__bms-sample.md) loads WAV assets, sends synthetic
-perfect input through Runtime and writes chunked float32 PCM using platform
-encoding. It does not open a sound device. Both commands require actual files:
+The [offline sample](doc/kernel/REQ__bms-sample.md) uses shared WAV preparation,
+sends synthetic input through Runtime and interleaves scheduled commands with
+chunked float32 PCM rendering. Total notes are independent of concurrent voices
+and outstanding commands; finite capacity failures are explicit. Output channels
+default to two; an optional final argument selects another exact channel count.
+It does not open a sound device. Both commands require actual files:
 
 ```sh
 cargo run -p beatkernel-bms --example load_bms -- chart.bms

@@ -52,6 +52,10 @@ native audio execution and physical timing evidence remain deferred. Phase 14
 now includes the [bounded BMS adapter](../kernel/REQ__bms-adapter.md) and
 [offline final composition sample](../kernel/REQ__bms-sample.md); the adapter
 depends only on core, while the executable composes core/platform/adapter.
+The BMS runtime remains a separate crate. Its offline composition reuses shared
+preparation and renders chronologically with separate concurrent-voice and
+outstanding-command capacities; total notes are not capped at 4096. This source
+change does not supply executed fixture or native playback evidence.
 [Phase 15's conditional SDK](../kernel/REQ__sdk-status.md) is not activated without
 a concrete C/C# host requirement. The portable runtime benchmark exists but
 has not been executed. ASIO licensing/implementation, deferred verification and
