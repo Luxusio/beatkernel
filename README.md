@@ -185,6 +185,8 @@ through a separate pending index, including Up or samples outside the builtin
 window. Candidate resolution chooses at most one pending start per logical
 destination. Builtins ignore nonbutton samples, which remain typed for custom
 evaluators.
+Pending objects with a declared deadline strictly before effective input time
+cannot consume candidate selection; equality and absent deadlines stay eligible.
 
 Pass an unchanged `GameInputEvent` and explicitly mapped song timestamp to
 `push_input`. Both `push_input` and `advance_to` apply the signed profile offset
