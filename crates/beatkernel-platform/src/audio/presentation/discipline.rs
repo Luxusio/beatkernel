@@ -49,6 +49,9 @@ pub enum ObservationAdmission {
     Progress,
     /// Device position unchanged; no state/freshness update.
     Unchanged,
+    /// A newer ASIO block has the same coarse host midpoint; no state or
+    /// freshness is updated until the timer relation actually progresses.
+    AwaitingHostProgress,
 }
 /// Explicit skip or successfully applied continuous correction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -372,9 +375,12 @@ impl PresentationDiscipline {
             }
             if observation.render.start_frame < end_frame
                 || pair.source.timestamp <= previous.pair.source.timestamp
-                || pair.target.timestamp <= previous.pair.target.timestamp
+                || pair.target.timestamp < previous.pair.target.timestamp
             {
                 return Err(DisciplineError::NonIncreasing);
+            }
+            if pair.target.timestamp == previous.pair.target.timestamp {
+                return Ok(ObservationAdmission::AwaitingHostProgress);
             }
         }
         Ok(self.admit(Observed {

@@ -714,7 +714,6 @@ mod asio_observations {
             observation(399, 1000, 999_000_000, 1_001_000_000),
             observation(432, 1000, 999_000_000, 1_001_000_000),
             observation(1000, 1000, 398_000_000, 400_000_000),
-            observation(1000, 1000, 399_000_000, 401_000_000),
         ] {
             assert_eq!(
                 discipline.observe_asio(invalid),
@@ -723,6 +722,12 @@ mod asio_observations {
             assert_eq!(discipline.latest_pair(), original);
             assert_eq!(discipline.retained_len(), 1);
         }
+        assert_eq!(
+            discipline.observe_asio(observation(1000, 1000, 399_000_000, 401_000_000)),
+            Ok(ObservationAdmission::AwaitingHostProgress)
+        );
+        assert_eq!(discipline.latest_pair(), original);
+        assert_eq!(discipline.retained_len(), 1);
         assert_eq!(
             discipline.observe_asio(observation(1400, 1000, 1_399_000_000, 1_401_000_000)),
             Ok(ObservationAdmission::Retained)
