@@ -35,6 +35,8 @@ use beatkernel::{
 };
 use std::fmt;
 
+/// SDK-free ASIO buffer and sample-rate request validation.
+pub mod asio;
 mod convert;
 mod negotiation;
 pub mod presentation;
