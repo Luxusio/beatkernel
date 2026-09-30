@@ -85,7 +85,8 @@ does not enable GNU SDK builds or verify actual MSVC/C++/SDK ABI compatibility.
 Real SDK builds still require supplied headers and MSVC or clang-cl. The separate
 [recorded BMS host](../kernel/REQ__bms-native-replay.md) now consumes this API with
 explicit sample feature/driver/view/channel settings and an owned hidden HWND.
-Live-input ASIO host composition and presentation mapping remain implementation work.
+The subsequent [live BMS host composition](../kernel/REQ__bms-native.md) uses
+the finite presentation mapping described below; native acceptance remains pending.
 
 ## Windows multimedia clock acquisition
 

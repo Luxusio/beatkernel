@@ -1,7 +1,8 @@
 # Implementation inventory and outstanding acceptance
 
 This inventory maps the ordered [plan](../../plan.md) to source present on
-2026-09-30, following native BMS replay integration at commit `6fc523c`.
+2026-10-01, including native BMS replay, live ASIO composition and the
+subsequent Runtime-driven visual example.
 It records implementation locations, not independent review or phase acceptance.
 The user's verification deferral remains in force. Earlier executed evidence in
 the [primary goals](../common/REQ__project__primary-goals.md) applies only to the
@@ -18,9 +19,9 @@ Paths below are relative to the repository root.
 | 4: Windows input | `crates/beatkernel-platform/src/windows/`, `raw_input.rs`, input-inspector example; [contract](REQ__windows-input.md) | Historical virtual keyboard evidence exists. Current source and physical timestamp/jitter comparisons remain unverified. |
 | 5: chart compiler | `crates/beatkernel/src/chart/`, chart example; [contract](REQ__chart-compiler.md) | Historical golden evidence exists; current compiler/BMS changes require executed regressions. |
 | 6: judge | `crates/beatkernel/src/judge/`, `interaction/builtin.rs`, judge example; [contract](REQ__judge.md) | Historical judge evidence exists; current profile, routing, ownership and restoration paths need execution. |
-| 7: audio | `crates/beatkernel/src/audio/`, platform native audio modules; [core](REQ__audio.md), [Windows](../platform/REQ__windows-audio.md), [ASIO stream](../platform/REQ__asio-stream.md) | WASAPI shared/exclusive and optional ASIO buffer/callback/Mixer stream source exists. ASIO recorded-output host source exists; live-input host and presentation mapping remain pending. Actual SDK compilation, native playback, callback allocation/locking checks and scheduling fixtures remain deferred. |
+| 7: audio | `crates/beatkernel/src/audio/`, platform native audio modules; [core](REQ__audio.md), [Windows](../platform/REQ__windows-audio.md), [ASIO stream](../platform/REQ__asio-stream.md) | WASAPI shared/exclusive and optional ASIO buffer/callback/Mixer stream source exists. ASIO recorded and live BMS host source, finite presentation mapping and continuous correction are implemented. Actual SDK compilation, native playback, callback allocation/locking checks and scheduling fixtures remain deferred. |
 | 8: integrated loop | `crates/beatkernel/src/runtime/`, `telemetry/`, runtime/native BMS examples; [runtime](REQ__runtime.md), [benchmark](REQ__runtime-benchmark.md) | Current integrated fixtures, percentiles under executed workloads, native drop/underrun behavior and physical latency measurements remain deferred. |
-| 9: visual projection | `crates/beatkernel/src/visual/`, external SVG example; [contract](REQ__visual.md) | Lane/Point/Path/Polar/Custom source and reusable frame/index paths exist; fixture execution and renderer QA remain deferred. |
+| 9: visual projection | `crates/beatkernel/src/visual/`, external SVG examples including `runtime_visual`; [contract](REQ__visual.md) | Lane/Point/Path/Polar/Custom source and reusable frame/index paths exist. The Runtime-driven composition uses actual reports with four lanes and a path; example/fixture execution and renderer QA remain deferred. |
 | 10: replay/snapshot | `crates/beatkernel/src/replay/`, judge snapshots, runtime restart/playback, replay examples; [replay](REQ__replay.md), [restart](REQ__section-restart.md), [reverse](REQ__reverse-playback.md) | Current repeated replay/seek hashes, codec failures, reverse policy and native restart output remain unverified. Logical restoration does not guarantee acoustic restart alignment. |
 | 11: generalization | `interaction/advanced.rs`, generalization example and fixtures; [contract](REQ__generalization.md) | Axis, dual-contact, repeated, composite, pointer and pose configurations exist. Current fixtures need execution; custom policies are not automatically validated by their trait boundary. |
 | 12: Linux | `crates/beatkernel-platform/src/linux/`, `samples/bms-runtime/src/bin/linux_bms.rs`; [composition](REQ__bms-linux-native.md) | evdev/hidraw/ALSA source exists. Native permissions, device mapping equivalence, playback and timing require execution. |
@@ -107,8 +108,9 @@ Seven actual-Mixer planar fixtures are authored and compile without execution.
 Default Rust 1.98.1 host workspace and Windows GNU/macOS platform all-target
 checks passed. A metadata-only Windows GNU compilation additionally type-checked
 optional control/stream Rust source without activating Cargo SDK compilation or
-linking C++. Actual SDK/MSVC build, native playback, presentation mapping and
-live-input host composition remain outstanding. This does not enable GNU SDK builds.
+linking C++. Actual SDK/MSVC build and native playback remain outstanding.
+Presentation mapping and live-input host composition were implemented in the
+later source continuations below. This does not enable GNU SDK builds.
 
 The native replay host now selects ASIO explicitly through the sample's optional
 SDK feature, exact CLSID/view and distinct output channel mapping. It reuses the

@@ -19,6 +19,23 @@ The external visual example writes SVG from logical frame states. Implementation
 and buildability do not establish renderer QA; verification is deferred by the
 user's 2026-09-30 instruction.
 
+## Runtime-driven final composition
+
+The `runtime_visual` example composes virtual physical input, bindings, the actual
+JudgeEngine/Runtime and Mixer command queue with lane and path projection. Each
+frame uses the returned RuntimeReport song time and actual emitted judge events,
+with caller-owned reusable RenderFrame storage. The external SVG renderer reads
+only projected logical state, immutable path geometry and transient events;
+renderer ownership and GPU operations remain outside the kernel.
+
+The trace and frame count are finite and explicitly synthetic. The output is a
+contact sheet written with create_new; an existing file is never overwritten.
+This demonstrates composition source, not native acquisition, visual QA or
+physical timing. Example execution remains deferred.
+Rust 1.98.1 locked workspace all-target compilation passed after the example
+was added. Compilation does not establish emitted SVG correctness, actual
+fixture outcomes or renderer acceptance; no example or test was executed.
+
 ## Radial and caller-defined geometry
 
 `Projection::Polar` supports the radial-approach user: finite center and angle in

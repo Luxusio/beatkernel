@@ -512,9 +512,17 @@ Visual projection also exposes Polar and custom logical output, and
 [reverse keysound playback](doc/kernel/REQ__reverse-playback.md) provides explicit
 normal-sample, reversed-sample and mute policies on a dedicated Mixer/queue.
 
+The `runtime_visual` example connects virtual physical input and the actual
+Runtime to a reusable logical RenderFrame. Its finite four-lane/path SVG contact
+sheet uses returned song times and emitted judge events rather than a fixed
+projection timestamp. It creates a new output file and keeps rendering outside
+the kernel. This is an authored software composition; execution and renderer
+QA remain deferred.
+
 ```sh
 cargo run -p beatkernel --example runtime
 cargo run -p beatkernel --example visual
+cargo run -p beatkernel --example runtime_visual -- new-runtime-frames.svg
 cargo run -p beatkernel --example reverse_playback
 cargo run -p beatkernel --example replay
 cargo run -p beatkernel --example replay -- --save new-demo.bkr
