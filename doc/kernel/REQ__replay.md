@@ -32,3 +32,10 @@ cannot make differently configured rules compatible. Custom canonical encodings
 must include rule implementation identity and immutable parameters as well as
 mutable state, and support them from construction onward. Unsupported startup
 state keeps logical live play available but disallows complete checkpoints.
+
+`replay::codec` persists the ordered log in a bounded versioned envelope including
+runtime version and optional calibration metadata. It embeds complete canonical
+physical-input blobs with raw IEEE bits and validates domain/ordinal/chronology.
+The log reconstructs checkpoints through supplied rules rather than serializing
+trait objects. File IO belongs to examples/hosts, outside callbacks. Application
+identity validation remains required before loading the intended chart/rules.

@@ -366,18 +366,27 @@ returns an explicit unresolved-license error. See the [core audio contract](doc/
 
 The [runtime](doc/kernel/REQ__runtime.md) shares JudgeEngine with
 [replay](doc/kernel/REQ__replay.md); ReplayRecorder captures accepted live
-operations without another judge. Logical restoration does not rewind hardware.
+operations without another judge. The [bounded input codec](doc/kernel/REQ__input-codec.md)
+preserves complete canonical events/native provenance and raw IEEE float bits.
+The [durable replay codec](doc/kernel/REQ__replay-codec.md) stores ordered operations,
+runtime identity and optional calibration metadata with explicit byte/count limits.
+Logical restoration does not rewind hardware.
 [Section restart](doc/kernel/REQ__section-restart.md) prepares a fresh Mixer and
 queue at an explicitly selected original source frame. The host must stop/reset
 old output and establish the first sample's presentation-to-host clock mapping.
 Integer frame selection prevents accumulated selection rounding; it does not
 prove physical synchronization. The portable `section_restart` example renders
-the same suffix into newly prepared software outputs.
+the same suffix into newly prepared software outputs and demonstrates explicit
+synthetic output/host observations. The [affine clock mapper](doc/kernel/REQ__clock-calibration.md)
+accepts supplied clock pairs, finite validity and explicit uncertainty. It never
+collects observations or promotes hardware observations to an exact relation.
 
 ```sh
 cargo run -p beatkernel --example runtime
 cargo run -p beatkernel --example visual
 cargo run -p beatkernel --example replay
+cargo run -p beatkernel --example replay -- --save new-demo.bkr
+cargo run -p beatkernel --example replay_file -- new-demo.bkr new-copy.bkr
 cargo run -p beatkernel --example section_restart
 cargo run -p beatkernel --example generalization
 cargo run --release -p beatkernel --example runtime_bench -- --help

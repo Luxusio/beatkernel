@@ -39,3 +39,8 @@ keysounds. `mapped_transport` retains the supplied mapper's reported uncertainty
 and returns old owners for disposal after native stop/reset. These APIs implement
 the portable preparation/installation boundary; native presentation calibration
 and device buffer reset remain explicit host responsibilities.
+
+`time::AffineClockMapper` can supply the integer output/host relation from paired
+observations with a finite validity interval and estimated/unknown uncertainty.
+The section example uses labeled synthetic observations to demonstrate the
+composition only; it does not collect real device presentation timestamps.
