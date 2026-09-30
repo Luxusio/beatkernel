@@ -264,6 +264,11 @@ impl JudgeEngine {
         &self.chart
     }
 
+    /// Borrows the immutable timing profile used by inputs and advances.
+    pub const fn profile(&self) -> &JudgeProfile {
+        &self.profile
+    }
+
     fn checked_time(&self, mapped: Timestamp) -> Result<Timestamp, JudgeError> {
         let time = mapped
             .checked_add(self.profile.input_offset())

@@ -4,6 +4,8 @@
 pub mod bgm;
 /// Synthetic offline composition using the same runtime and mixer as native apps.
 pub mod offline;
+/// Bounded capture of the actual native runtime's accepted judgment operations.
+pub mod replay_capture;
 
 use beatkernel::{
     audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, VoiceId},

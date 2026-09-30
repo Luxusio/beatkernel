@@ -18,7 +18,9 @@ preroll are valid. Seek/reverse judging requires later snapshot restoration.
 
 A profile contains nonnegative asymmetric early/late windows, ordered from
 narrow to wide and nested on both sides, with unique grade IDs. First matching
-window wins; endpoints are inclusive. At target 500 ms with early 20 ms and late
+window wins; endpoints are inclusive. `JudgeEngine::profile()` exposes an
+immutable view of the actual configured profile so host-owned replay metadata
+can retain its windows and offset. At target 500 ms with early 20 ms and late
 30 ms, 480 ms and 530 ms both hit, while 479,999,999 ns is too early and
 530,000,001 ns is too late. Misses expire only **strictly after** their deadline.
 `advance_to(530 ms)` followed by an input at 530 ms therefore still allows that
