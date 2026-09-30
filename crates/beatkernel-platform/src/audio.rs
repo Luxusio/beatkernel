@@ -37,6 +37,8 @@ use std::fmt;
 
 mod convert;
 mod negotiation;
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod telemetry;
 
 pub use convert::encode_pcm;
 pub use negotiation::{resolve_period, validate_buffer_size, ResolvedPeriod};
@@ -395,6 +397,18 @@ pub struct AppliedStreamConfig {
     pub sizing_adjusted: bool,
 }
 
+/// Native API reading quality, independent of clock-mapping uncertainty.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AudioClockReadingQuality {
+    /// Native API reports an accurate reading (WASAPI S_OK).
+    Accurate,
+    /// Native API reports degraded measurement accuracy (WASAPI S_FALSE).
+    Degraded,
+    /// The native reading quality has not been established.
+    #[default]
+    Unknown,
+}
+
 /// Raw device-clock reading, preserving its native units and QPC association.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioClockSnapshot {
@@ -404,6 +418,8 @@ pub struct AudioClockSnapshot {
     pub frequency: u64,
     /// IAudioClock QPC association in 100 ns units, not raw QPC ticks.
     pub qpc_100ns: u64,
+    /// Native measurement status; no numeric error bound is implied.
+    pub reading_quality: AudioClockReadingQuality,
     /// Explicitly mapped host-domain association, if calibration succeeded.
     pub host_point: Option<ClockPoint>,
     /// Quality of the explicit host association.
