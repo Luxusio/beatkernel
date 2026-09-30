@@ -33,3 +33,10 @@ Existing shared telemetry fixtures already cover scalar encoding and publication
 exhaustion; duplicate field-encoding tests are not added. Fixtures are authored
 and compiled, but no tests, native calls, QA or review are executed during the
 user's verification deferral.
+
+The separate [render-worker cadence capture](REQ__alsa-render-cadence.md) samples
+actual render-start CLOCK_MONOTONIC points and retains successful block identity
+in a fixed prefix. It is summarized only after worker join, with explicit
+unretained counts, and is not derived by pairing this report with independent
+ALSA snapshot fields. Rendering success and scheduling cadence still do not
+establish native delivery or acoustic playback.

@@ -94,3 +94,11 @@ Both stop on order/time discontinuities and retain first/last provenance; native
 errors/removal stop the segment and final summaries follow cleanup. Windows
 receipt intervals and IOHID event intervals are different measurement boundaries.
 These compositions add source instrumentation, not executed results.
+
+ALSA now captures [render-worker scheduling cadence](../platform/REQ__alsa-render-cadence.md)
+directly at the worker's pre-Mixer clock boundary, retaining actual successful
+block frames. After join, a finite prefix summary subtracts frame-derived expected
+time from observed intervals. Startup fills remain included, and exhausted prefix
+capacity is visible. This is distinct from native input cadence, callback arrival,
+presentation-grid accuracy and acoustic latency; real hardware measurements and
+other audio backends' direct scheduling capture remain outstanding.

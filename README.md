@@ -555,7 +555,10 @@ uses `--cadence DEVICE_ID HID_KEY_USAGE down|up|repeat NOMINAL_NS` to summarize
 selected keyboard QPC receipt intervals; these are acquisition receipt times.
 
 See [Linux native requirements](doc/platform/REQ__linux-native.md) for explicit
-nodes/endpoints and supported settings. Exact ALSA sizing is the default;
+nodes/endpoints and supported settings. The `linux_native audio` command also
+prints a [joined render-worker cadence summary](doc/platform/REQ__alsa-render-cadence.md)
+with an explicit bounded prefix and startup-fill scope.
+Exact ALSA sizing is the default;
 optional rounding reports applied period/buffer sizes. Evdev event loss requires
 an explicit queried-state acknowledgment before gameplay resumes.
 Separate [ALSA timing snapshots](doc/platform/REQ__alsa-timing.md) associate native

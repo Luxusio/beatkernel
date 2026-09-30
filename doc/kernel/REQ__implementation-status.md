@@ -155,6 +155,13 @@ host workspace and for platform/BMS packages targeting `x86_64-pc-windows-gnu`
 and `x86_64-apple-darwin`. These are compilation checks; they do not establish
 linking, native execution, ARM64 support, device output or fixture success.
 
+ALSA's [direct render-worker cadence](../platform/REQ__alsa-render-cadence.md)
+now captures actual pre-Mixer monotonic timestamps with successful frame identity
+and summarizes a finite prefix after worker join. The Linux native audio example
+prints this alongside applied sizes and actual xrun counters. Startup fill bursts
+remain included. Direct Windows/macOS/ASIO worker/callback scheduling capture
+remains authorable source work; this ALSA slice does not establish hardware results.
+
 The remaining full-plan acceptance includes current regression execution,
 deterministic replay/seek comparisons, native Windows output and at least one
 other native platform, callback audit, measured latency/jitter/drop/underrun
