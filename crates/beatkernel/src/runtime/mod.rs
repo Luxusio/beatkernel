@@ -1,5 +1,7 @@
 //! Single-owner forward runtime connecting canonical input to scalar audio.
 
+pub mod restart;
+
 use crate::{
     audio::{AudioCommand, CommandProducer, CommandPushError, QueuePushError, SampleId, VoiceId},
     chart::ObjectId,
@@ -347,6 +349,23 @@ impl Runtime {
         self.last_song = None;
         self.sequences.clear();
         (previous_judge, previous_transport)
+    }
+
+    /// Installs restored gameplay and a fresh audio producer in one owner operation.
+    ///
+    /// Stop/reset the old native output first and reconstruct `judge` at the
+    /// replacement Transport's song origin. Producer timestamps must use this
+    /// Runtime's configured audio domain. Returns all old control owners for
+    /// off-thread disposal; old native buffers are not flushed by this method.
+    pub fn replace_session(
+        &mut self,
+        judge: JudgeEngine,
+        transport: Transport,
+        producer: CommandProducer,
+    ) -> (JudgeEngine, Transport, CommandProducer) {
+        let (previous_judge, previous_transport) = self.replace_state(judge, transport);
+        let previous_producer = std::mem::replace(&mut self.producer, producer);
+        (previous_judge, previous_transport, previous_producer)
     }
 
     /// Current software observations and caller-reported native counters.
