@@ -4,7 +4,9 @@
 //! effects are outside the engine's atomic-error guarantee. Outputs contain
 //! only stage results: the engine stamps object, time and input provenance.
 
+mod advanced;
 mod builtin;
+pub use advanced::{CompositeEvaluator, RepeatedEvaluator, TrackingEvaluator, TrackingInput};
 pub use builtin::{HoldEvaluator, InstantEvaluator};
 
 use crate::{
@@ -82,7 +84,7 @@ pub trait InteractionEvaluator: Send + Sync {
 
     /// Begins an object already accepted by [`Self::validate`].
     fn begin(&self, object: &TimedObject, context: &BeginContext<'_>)
-        -> Box<dyn ActiveInteraction>;
+    -> Box<dyn ActiveInteraction>;
 }
 
 /// Eligibility used to build separate builtin and custom pending indexes.
@@ -96,6 +98,13 @@ pub enum StartEligibility {
 
 /// Single-owner state transitions for one validated object.
 pub trait ActiveInteraction: Send {
+    /// Additional logical destinations observed by this interaction.
+    ///
+    /// These are immutable for the interaction lifetime and included in native
+    /// engine routing, allowing prerequisite state separate from a trigger.
+    fn additional_controls(&self) -> &[GameControlId] {
+        &[]
+    }
     /// Deep-copies all state for reusable in-memory checkpoints.
     /// Custom implementations remain source-compatible and unsupported by default.
     fn snapshot_clone(&self) -> Option<Box<dyn ActiveInteraction>> {

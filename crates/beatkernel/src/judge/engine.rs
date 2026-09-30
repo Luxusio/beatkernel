@@ -39,6 +39,7 @@ pub struct JudgeEngine {
     active_controls: HashMap<GameControlId, BTreeSet<(ObjectId, usize)>>,
     held: HashSet<InputOwner>,
     effective_time: Option<Timestamp>,
+    initial_configuration: Result<Vec<u8>, SnapshotError>,
 }
 
 impl JudgeEngine {
@@ -123,10 +124,12 @@ impl JudgeEngine {
             active_controls: HashMap::new(),
             held: HashSet::new(),
             effective_time: None,
+            initial_configuration: Err(SnapshotError::ConfigurationMismatch),
         };
         for index in 0..count {
             engine.refresh(index, None);
         }
+        engine.initial_configuration = engine.canonical_state_bytes();
         Ok(engine)
     }
 
@@ -329,21 +332,35 @@ impl JudgeEngine {
 
     fn refresh(&mut self, index: usize, consumed_deadline: Option<i128>) {
         let key = (self.chart.objects()[index].id, index);
-        let control = self.controls[index];
+        let mut routes = vec![self.controls[index]];
+        for control in self.interactions[index].additional_controls() {
+            if !routes.contains(control) {
+                routes.push(*control);
+            }
+        }
         if self.eligibility[index] == StartEligibility::EvaluatorDefined {
-            if self.interactions[index].state() == InteractionState::Pending {
-                self.custom_pending.entry(control).or_default().insert(key);
-            } else if let Some(indices) = self.custom_pending.get_mut(&control) {
-                indices.remove(&key);
+            for control in &routes {
+                if self.interactions[index].state() == InteractionState::Pending {
+                    self.custom_pending.entry(*control).or_default().insert(key);
+                } else if let Some(indices) = self.custom_pending.get_mut(control) {
+                    indices.remove(&key);
+                }
             }
         }
         if self.interactions[index].state() == InteractionState::Active {
             self.active.insert(key);
-            self.active_controls.entry(control).or_default().insert(key);
+            for control in &routes {
+                self.active_controls
+                    .entry(*control)
+                    .or_default()
+                    .insert(key);
+            }
         } else {
             self.active.remove(&key);
-            if let Some(indices) = self.active_controls.get_mut(&control) {
-                indices.remove(&key);
+            for control in &routes {
+                if let Some(indices) = self.active_controls.get_mut(control) {
+                    indices.remove(&key);
+                }
             }
         }
         let deadline = if self.interactions[index].state() == InteractionState::Completed {
@@ -489,6 +506,7 @@ impl JudgeEngine {
             || self.profile != source.profile
             || self.controls != source.controls
             || self.eligibility != source.eligibility
+            || self.initial_configuration != source.initial_configuration
         {
             return Err(SnapshotError::ConfigurationMismatch);
         }
@@ -499,7 +517,10 @@ impl JudgeEngine {
 
     /// Hashes complete logical state, not merely time or lifecycle labels.
     pub fn stable_hash(&self) -> Result<u64, SnapshotError> {
-        Ok(super::snapshot::hash(&self.canonical_state_bytes()?))
+        let mut bytes = super::snapshot::Encoder::new(b"beatkernel-judge-complete/v2");
+        bytes.bytes(self.initial_configuration.as_ref().map_err(Clone::clone)?);
+        bytes.bytes(&self.canonical_state_bytes()?);
+        Ok(super::snapshot::hash(&bytes.finish()))
     }
 
     pub(crate) fn canonical_state_bytes(&self) -> Result<Vec<u8>, SnapshotError> {
@@ -523,6 +544,10 @@ impl JudgeEngine {
         for (index, interaction) in self.interactions.iter().enumerate() {
             bytes.u64(self.chart.objects()[index].id.0);
             bytes.u32(self.controls[index].0);
+            bytes.u64(interaction.additional_controls().len() as u64);
+            for control in interaction.additional_controls() {
+                bytes.u32(control.0);
+            }
             bytes.u8(match self.eligibility[index] {
                 StartEligibility::ProfileButtonPress => 0,
                 StartEligibility::EvaluatorDefined => 1,
@@ -555,6 +580,7 @@ impl JudgeEngine {
     fn clone_checkpoint(&self) -> Result<Self, SnapshotError> {
         // Require canonical bytes as well as cloning: unsupported custom states
         // must never enter a purported complete deterministic checkpoint.
+        self.initial_configuration.as_ref().map_err(Clone::clone)?;
         self.canonical_state_bytes()?;
         let resolver = self
             .resolver
@@ -594,6 +620,7 @@ impl JudgeEngine {
             active_controls: self.active_controls.clone(),
             held: self.held.clone(),
             effective_time: self.effective_time,
+            initial_configuration: self.initial_configuration.clone(),
         };
         clone.canonical_state_bytes()?;
         Ok(clone)

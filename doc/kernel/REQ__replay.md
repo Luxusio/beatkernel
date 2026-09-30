@@ -25,3 +25,10 @@ including an accepted prefix before a fanout failure. An explicit successful
 advance is recorded even if it emits no result. Unbound physical input, rejected
 operations, CPU telemetry and output queue failures do not invent judge advances.
 The normalized domain and song chronology are checked before appending a report.
+
+Snapshot compatibility also includes canonical initial evaluator, resolver and
+policy state captured at construction. Matching chart/profile/control IDs alone
+cannot make differently configured rules compatible. Custom canonical encodings
+must include rule implementation identity and immutable parameters as well as
+mutable state, and support them from construction onward. Unsupported startup
+state keeps logical live play available but disallows complete checkpoints.
