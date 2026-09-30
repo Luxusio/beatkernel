@@ -119,6 +119,13 @@ callback's copied raw event with the actual rendered Mixer block; post-create
 driver latency remains available. These are inputs for future live presentation
 mapping, not normalized host time or physical playback evidence.
 
+Bounded clock-source metadata and actual SDK control source now enumerate/select
+explicit internal/external indices before stream construction, with preserved
+raw names and associated input metadata. Eight portable fixtures are authored.
+Time-info clock/rate change flags require reopening. Actual SDK C++ compilation
+and driver control execution remain unverified; this does not complete live ASIO
+host timing or deferred native acceptance.
+
 ## Build evidence and completion boundary
 
 After the native replay slice, Rust 1.98.1 locked all-target checks passed for the

@@ -16,7 +16,7 @@ Windows' [stream-management contract](https://learn.microsoft.com/en-us/windows/
 
 ## Implementation continuation policy
 
-On 2026-10-01 the user instructed that a blocked development item must not stop
+On 2026-10-01 the user instructed and reconfirmed that a blocked development item must not stop
 other independently implementable work. Inspect dependencies and proceed with
 the next authorized, unblocked item first. Retain each blocked item with its
 specific reason and prerequisite for resumption, and revisit it when that
@@ -225,6 +225,13 @@ teardown. Eight portable option fixtures are authored, with execution deferred.
 Coherent stream buffer observations additionally pair actual successful callback
 Mixer blocks with copied raw native timing; post-create driver latency is retained.
 These inputs do not establish a QPC presentation relation or live ASIO timing.
+
+Native ASIO controls additionally expose bounded actual clock-source enumeration
+and explicit selection, separately from external synchronization by rate zero.
+They preserve source indices, raw names/current flags and associated input metadata
+without device/source fallback. Eight portable metadata fixtures are authored;
+actual SDK/native control execution remains pending. Time-info clock/rate-change
+flags require reopening before further Mixer delivery.
 
 ## Verification
 

@@ -384,7 +384,12 @@ original C++ bridge against a supplied SDK. On Windows, set
 target with MSVC or clang-cl. Enabled Windows GNU SDK builds are currently rejected
 pending compatible ABI support. Default CI and verification commands check the SDK-free build;
 `--all-features` on Windows requires these ASIO prerequisites. Driver controls
-expose native capabilities and explicit rate changes. `windows::asio::stream::AsioStream`
+expose native capabilities and explicit rate changes. Clock-source controls
+enumerate bounded actual native identities and explicitly select an enumerated
+internal/external source before stream construction. Raw names, current flags
+and associated input channel/group remain visible. Rate-zero external sync is
+a separate request; source selection does not prove external signal presence.
+`windows::asio::stream::AsioStream`
 consumes a control and Mixer, maps distinct output channels, creates SDK double
 buffers and primes B before an explicit one-time start. Callback state stays alive
 until stop/dispose/Release and callback drain. Native reset/rate/buffer notifications

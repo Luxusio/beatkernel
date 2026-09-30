@@ -6,7 +6,8 @@ under GPLv3 conditions. This selects the SDK's open-source licensing path and
 supersedes the previous unresolved-license prerequisite. It does not change the
 verification deferral or establish an implemented ASIO backend.
 
-The user clarified that builds without ASIO are distributed under MIT conditions.
+The user clarified and reconfirmed that builds without ASIO are distributed
+under MIT conditions. This is the default distribution policy for SDK-free builds.
 
 | Source or build | Project distribution conditions |
 | --- | --- |

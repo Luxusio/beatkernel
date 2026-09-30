@@ -51,6 +51,9 @@ observation. Separate C++ diagnostic events must not be paired with arbitrary
 software reports. `AsioStream::latencies` retains the actual driver latency
 query after buffer creation; a subsequent change still requires reopening.
 These are synchronization inputs, not an established presentation relation.
+Explicit time-info clock-source-change flags fault the stream for resynchronization,
+and rate-change flags fault it for rate reconfiguration, even when a simultaneous
+valid-rate field is absent. Equal-rate startup notifications remain acceptable.
 The [SDK time-info and latency contract](https://github.com/audiosdk/asio/blob/main/common/asio.h)
 uses Windows timeGetTime-derived timestamps and requires latency accounting;
 conversion to the input host's QPC domain remains explicit future work.
