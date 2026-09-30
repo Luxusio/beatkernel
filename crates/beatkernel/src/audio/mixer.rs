@@ -104,6 +104,11 @@ impl Head {
 }
 
 impl Mixer {
+    /// Actual immutable format, scheduling origin and capacities owned by this mixer.
+    pub const fn configuration(&self) -> MixerConfig {
+        self.config
+    }
+
     /// Allocates all voice and pending-command storage before output begins.
     ///
     /// Bank output format must exactly match configuration; individual assets
