@@ -383,8 +383,8 @@ collects observations or promotes hardware observations to an exact relation.
 
 The Windows `windows_runtime` example accepts `--song FILE.wav --start-ns N`
 and `--restarts 1..8`. Each repetition uses fresh output and an observed WASAPI
-position/QPC relation to anchor the applied source frame; finite calibration
-validity is enforced during input and runtime advancement. See the
+position/QPC relation to anchor the applied source frame. Ongoing observations
+guard freshness and apply continuous bounded Transport rate corrections. See the
 [presentation contract](doc/platform/REQ__wasapi-presentation.md). Native playback
 and physical synchronization remain unverified.
 Visual projection also exposes Polar and custom logical output, and
@@ -450,6 +450,10 @@ The separate [Windows BMS binary](doc/kernel/REQ__bms-native.md) uses actual Raw
 Input, loaded note/BGM timing and WASAPI shared/exclusive output. It requires an
 explicit endpoint and HID-key-to-lane bindings and exposes requested buffer/period
 sizes and profile offsets. Its source has not established native playback.
+Its [presentation observer](doc/platform/REQ__presentation-discipline.md) tracks
+progressing device/host observations during playback and applies bounded,
+continuous transport rate corrections. Stale observations or excessive clock
+disagreement fail explicitly; this does not establish a physical timing bound.
 [Shared preparation](doc/kernel/REQ__bms-preparation.md) provides bounded asset
 loading with a WAV default and an injected off-thread decoder boundary; compressed
 formats are not implemented by that default. Explicit mono-to-stereo conversion

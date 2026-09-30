@@ -92,6 +92,18 @@ injected off-thread decoder boundary. No additional codec support is claimed by
 that boundary. Portable workspace and Windows-target compile checks cover the
 source; actual playback and long-run device-clock stability remain unverified.
 
+Native BMS composition now connects an ongoing
+[presentation observer](../platform/REQ__presentation-discipline.md) to the existing
+Transport. It estimates output/host drift over retained observations and spreads
+bounded phase corrections through continuous positive rate changes, preserving
+past transport segments and judge chronology. Repeated/stalled device positions
+do not extend freshness. Stale progress, clock resets and excessive disagreements
+require explicit failure/resynchronization rather than silently changing origin.
+The observer's storage is bounded; retained Transport history can grow off-thread.
+The Windows section-restart example creates a fresh observer for each applied cue.
+Neither source establishes a hardware accuracy bound or replaces deferred native
+execution, tests and independent review.
+
 Git was initialized locally on 2026-09-29 after these files had been implemented. Initial commits record the existing implementation and its documentation, rather than reconstructing historical development commits.
 
 Phase 7 audio is under implementation: [core audio](../kernel/REQ__audio.md)
