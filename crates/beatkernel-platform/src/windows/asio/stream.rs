@@ -7,6 +7,7 @@ use crate::audio::{
     telemetry::Telemetry,
     AudioStreamSnapshot, AudioStreamStatus, StreamCounters,
 };
+use crate::windows::clock::QpcClock;
 use beatkernel::audio::{Mixer, RenderReport};
 use std::{
     cell::UnsafeCell,
@@ -231,6 +232,8 @@ struct RenderState {
 }
 struct RenderContext {
     state: UnsafeCell<RenderState>,
+    host_clock: Option<QpcClock>,
+    cadence: crate::audio::cadence::Capture,
     telemetry: Telemetry,
     publication: AtomicU64,
     event_values: [AtomicU64; 6],
@@ -278,7 +281,24 @@ impl RenderContext {
             *output = unsafe { std::slice::from_raw_parts_mut(buffer.cast::<u8>(), bytes) };
         }
         self.publication.store(next_version - 1, Ordering::SeqCst);
+        // Only actual native callbacks are timed; owner-side B priming has no
+        // callback event. Raw ASIO system time is never a QPC substitute.
+        let render_start = if event.is_some() {
+            self.host_clock
+                .and_then(|clock| clock.sample_realtime())
+                .map(|receipt| receipt.normalized.timestamp)
+        } else {
+            None
+        };
         let result = state.renderer.render(&mut outputs[..count]);
+        if let (Some(_), Some(_), Ok(report)) = (self.host_clock, event, &result) {
+            match render_start {
+                Some(at) => self
+                    .cadence
+                    .record(at, report.start_frame, report.frames as u64),
+                None => self.cadence.mark_unavailable(),
+            }
+        }
         if result.is_ok() {
             state.prepared_frames = next_frames;
             state.buffer_fills = next_fills;
@@ -406,10 +426,33 @@ impl AsioStream {
     /// Consumes exact driver/Mixer/channel choices, prepares buffers and primes B.
     /// Does not change rate, select another device, start, or show driver UI.
     pub fn prepare(
+        control: AsioControl,
+        mixer: Mixer,
+        channels: Vec<u32>,
+        request: AsioBufferRequest,
+    ) -> Result<Self, AsioStreamError> {
+        Self::prepare_internal(control, mixer, channels, request, None)
+    }
+
+    /// Prepares exact buffers with opt-in direct callback render-entry cadence.
+    /// The supplied shared QPC clock retains its application-selected origin;
+    /// priming is excluded and cadence is available only after terminal close.
+    pub fn prepare_with_clock(
+        control: AsioControl,
+        mixer: Mixer,
+        channels: Vec<u32>,
+        request: AsioBufferRequest,
+        host_clock: QpcClock,
+    ) -> Result<Self, AsioStreamError> {
+        Self::prepare_internal(control, mixer, channels, request, Some(host_clock))
+    }
+
+    fn prepare_internal(
         mut control: AsioControl,
         mixer: Mixer,
         channels: Vec<u32>,
         request: AsioBufferRequest,
+        host_clock: Option<QpcClock>,
     ) -> Result<Self, AsioStreamError> {
         fn require_send<T: Send>() {}
         require_send::<AsioBlockRenderer>();
@@ -455,6 +498,8 @@ impl AsioStream {
         let mut stream = Self {
             control: Some(control),
             context: Box::new(RenderContext {
+                host_clock,
+                cadence: crate::audio::cadence::Capture::new(),
                 state: UnsafeCell::new(RenderState {
                     renderer,
                     rows,
@@ -648,6 +693,23 @@ impl AsioStream {
             native,
         })
     }
+    /// Actual successful callback render-entry cadence after close has detached
+    /// and drained callbacks, including a retained prefix following failure.
+    /// Returns None while live or when prepared without an explicit clock.
+    /// This does not measure driver callback arrival, delivery or acoustic time.
+    pub fn render_cadence(
+        &self,
+    ) -> Result<
+        Option<crate::audio::cadence::RenderCadence>,
+        crate::audio::cadence::RenderCadenceError,
+    > {
+        if self.control.is_some() || self.context.host_clock.is_none() {
+            Ok(None)
+        } else {
+            self.context.cadence.summary(self.sample_rate).map(Some)
+        }
+    }
+
     /// Terminal stop/dispose/Release, always attempting cleanup after diagnostics errors.
     /// A repeated stop is harmless; no implicit restart or Mixer rewind occurs.
     pub fn stop(&mut self) -> Result<(), AsioStreamError> {

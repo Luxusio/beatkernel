@@ -1,8 +1,8 @@
 //! Control-thread backend ownership shared by the physical-input gameplay pump.
 #[cfg(feature = "asio-sdk")]
-use super::native::Window;
-#[cfg(feature = "asio-sdk")]
 use super::native::OUTPUT;
+#[cfg(feature = "asio-sdk")]
+use super::native::Window;
 use super::*;
 use beatkernel::{
     audio::{AudioFormat, CommandProducer, Mixer, RenderReport},
@@ -16,17 +16,17 @@ use beatkernel_platform::{
         AsioPresentationObservation, MultimediaClockAnchor,
     },
     windows::asio::{
+        AsioEnumerationLimits, AsioRegistryView,
         control::AsioControl,
         enumerate_asio_drivers,
         stream::{AsioStream, AsioStreamPhase},
-        AsioEnumerationLimits, AsioRegistryView,
     },
 };
 use beatkernel_platform::{
     audio::{
-        presentation::discipline::{ObservationAdmission, PresentationDiscipline},
         AudioBackendKind, AudioDeviceId, AudioOutputBackend, AudioOutputStream, AudioStreamMode,
         AudioStreamRequest,
+        presentation::discipline::{ObservationAdmission, PresentationDiscipline},
     },
     windows::{
         audio::{WasapiBackend, WasapiOptions, WasapiStream},
@@ -100,7 +100,9 @@ impl Setup {
                 );
             }
             let format = AudioFormat::new(rate as u32, u16::try_from(channels.len())?)?;
-            println!("ASIO selected registration={driver:?}; actual format={format:?}; timer/latency bounds are supplied estimates, not native accuracy proof");
+            println!(
+                "ASIO selected registration={driver:?}; actual format={format:?}; timer/latency bounds are supplied estimates, not native accuracy proof"
+            );
             Ok(Self::Asio {
                 control,
                 window,
@@ -141,8 +143,10 @@ impl Setup {
                 if resolved as usize > AudioLimits::MAX_RENDER_FRAMES {
                     return Err("ASIO preferred buffer exceeds core render ceiling".into());
                 }
-                println!("ASIO requested={request:?}; reported={constraints:?}; resolved={resolved} frames");
-                let stream = AsioStream::prepare(
+                println!(
+                    "ASIO requested={request:?}; reported={constraints:?}; resolved={resolved} frames"
+                );
+                let stream = AsioStream::prepare_with_clock(
                     control,
                     mixer,
                     options
@@ -150,6 +154,7 @@ impl Setup {
                         .clone()
                         .ok_or("ASIO output channels required")?,
                     request,
+                    clock,
                 )?;
                 Ok(Output::Asio(AsioOutput {
                     stream,
@@ -180,13 +185,38 @@ impl Output {
     }
     pub(super) fn stop(&mut self) -> Result<()> {
         match self {
-            Self::Wasapi(s) => Ok(s.stop()?),
+            Self::Wasapi(s) => {
+                let result = s.stop();
+                println!(
+                    "joined WASAPI render-start cadence={:?}; software scheduling, physical jitter unmeasured",
+                    s.render_cadence()
+                );
+                Ok(result?)
+            }
             #[cfg(feature = "asio-sdk")]
-            Self::Asio(s) => Ok(s.stream.stop()?),
+            Self::Asio(s) => {
+                let result = s.stream.stop();
+                println!(
+                    "closed ASIO render-start QPC cadence={:?}; software scheduling, driver system time and physical jitter distinct",
+                    s.stream.render_cadence()
+                );
+                Ok(result?)
+            }
         }
     }
     pub(super) fn description(&mut self) -> String {
-        match self{Self::Wasapi(s)=>format!("WASAPI applied={:?} snapshot={:?}",s.configuration(),s.snapshot()),#[cfg(feature="asio-sdk")]Self::Asio(s)=>format!("ASIO software prepared/raw native diagnostics={:?}; prepared is not audible position; raw ns is not QPC",s.stream.snapshot())}
+        match self {
+            Self::Wasapi(s) => format!(
+                "WASAPI applied={:?} snapshot={:?}",
+                s.configuration(),
+                s.snapshot()
+            ),
+            #[cfg(feature = "asio-sdk")]
+            Self::Asio(s) => format!(
+                "ASIO software prepared/raw native diagnostics={:?}; prepared is not audible position; raw ns is not QPC",
+                s.stream.snapshot()
+            ),
+        }
     }
     pub(super) fn render_report(&mut self) -> Result<Option<RenderReport>> {
         match self {
@@ -346,7 +376,7 @@ pub(super) struct AsioOutput {
 impl AsioOutput {
     fn pump_driver_messages(&self) -> Result<()> {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE, WM_CLOSE, WM_QUIT,
+            DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage, WM_CLOSE, WM_QUIT,
         };
         // SAFETY: initialized POD message storage, owned by the native window
         // thread. The filter retains physical-input messages for the common

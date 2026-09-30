@@ -55,6 +55,8 @@ fn rig(samples: &[f32], frames: u32) -> MemoryRig {
     };
     MemoryRig {
         context: RenderContext {
+            host_clock: None,
+            cadence: crate::audio::cadence::Capture::new(),
             state: UnsafeCell::new(RenderState {
                 renderer,
                 rows,
@@ -101,6 +103,19 @@ fn event(index: i32, ordinal: u64) -> AsioCallbackEvent {
         system_nanoseconds: 8000 + ordinal * 13,
         sample_rate: 48_000.25,
     }
+}
+
+#[test]
+fn clock_free_memory_rendering_never_fabricates_cadence_from_native_time() {
+    let mut memory = rig(&[0.5, -0.5, 0.25, 0.75], 2);
+    memory.play(0, 1.0);
+    memory.fill(1, None).unwrap();
+    memory.fill(0, Some(event(0, 1))).unwrap();
+    assert!(memory.context.host_clock.is_none());
+    let summary = memory.context.cadence.summary(4).unwrap();
+    assert_eq!(summary.successful_renders, 0);
+    assert_eq!(summary.retained_points, 0);
+    assert!(summary.intervals.is_none());
 }
 
 #[test]

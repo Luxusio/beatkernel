@@ -1019,6 +1019,7 @@ mod asio_native {
         }
         fn stop(&mut self) -> Result<()> {
             let result = self.stream.stop();
+            println!("closed ASIO render-start QPC cadence={:?}; priming excluded, native delivery/acoustic jitter unmeasured", self.stream.render_cadence());
             if let Ok(snapshot) = self.stream.snapshot() {
                 if snapshot.render.is_some() {
                     self.retained = snapshot.render;
@@ -1095,7 +1096,10 @@ mod asio_native {
                 control.channel_info(*channel, false)?
             );
         }
-        let stream = AsioStream::prepare(control, mixer, channels, request)?;
+        let host_clock = beatkernel_platform::windows::clock::QpcClock::new(
+            beatkernel::time::ClockDomainId(1),
+        )?;
+        let stream = AsioStream::prepare_with_clock(control, mixer, channels, request, host_clock)?;
         Ok(Box::new(Stream {
             stream,
             window,
