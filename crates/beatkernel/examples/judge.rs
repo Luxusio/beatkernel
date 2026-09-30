@@ -164,7 +164,7 @@ fn run(input: impl BufRead) -> Result<(), Box<dyn Error>> {
     let mut last_song = 0;
     println!("Virtual four-control playback; host_origin_ns={HOST_ORIGIN}");
     for (index, line) in input.lines().enumerate() {
-        let line = line?;
+        let line = line.map_err(|error| format!("line {}: {error}", index + 1))?;
         if line.trim().is_empty() {
             continue;
         }
@@ -204,6 +204,15 @@ fn run(input: impl BufRead) -> Result<(), Box<dyn Error>> {
     }
     print_events(judge.advance_to(Timestamp::from_nanos(last_song.max(FINISH_SONG)))?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn invalid_utf8_reports_its_input_line() {
+        let error = super::run(std::io::Cursor::new(b"1500000000 1 down\n\xff\n")).unwrap_err();
+        assert!(error.to_string().starts_with("line 2:"));
+    }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
