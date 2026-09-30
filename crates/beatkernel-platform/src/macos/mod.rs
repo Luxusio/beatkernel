@@ -5,5 +5,6 @@ pub mod audio;
 pub mod clock;
 mod ffi;
 pub mod input;
+pub mod presentation;
 /// The OS name, independent of permission and hardware capability.
 pub const TARGET_OS: &str = "macos";
