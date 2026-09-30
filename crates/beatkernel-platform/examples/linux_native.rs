@@ -136,8 +136,13 @@ mod native {
                 println!("applied={:?}", stream.configuration());
                 stream.start()?;
                 std::thread::sleep(StdDuration::from_secs(seconds));
+                println!(
+                    "native_timing_before_stop={:?}; estimated sound frames, physical latency unmeasured",
+                    stream.timing_snapshot()
+                );
                 let result = stream.stop();
                 println!("observations={:?}", stream.snapshot());
+                println!("native_timing_after_stop={:?}", stream.timing_snapshot());
                 result?;
                 drop(producer);
             }

@@ -7,7 +7,10 @@ mod input;
 #[allow(unsafe_code)]
 mod sys;
 
-pub use alsa::{AlsaAppliedConfig, AlsaRequest, AlsaSnapshot, AlsaStatus, AlsaStream};
+pub use alsa::{
+    AlsaAppliedConfig, AlsaNativeTimestamp, AlsaRequest, AlsaSnapshot, AlsaStatus, AlsaStream,
+    AlsaTimingSnapshot,
+};
 pub use input::{EvdevDevice, EvdevItem, EvdevSnapshot, HidrawDevice, LinuxInputCounters};
 pub use sys::{LinuxError, MonotonicClock};
 

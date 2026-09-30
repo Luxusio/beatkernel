@@ -1,6 +1,10 @@
 //! Dedicated nonblocking ALSA PCM writer with explicit device and sizing.
 #![allow(unsafe_code)]
 
+mod timing;
+use timing::TimingShared;
+pub use timing::{AlsaNativeTimestamp, AlsaTimingSnapshot};
+
 use super::{LinuxError, MonotonicClock};
 use crate::audio::{encode_pcm, DeviceFormat, SampleEncoding};
 use beatkernel::{
@@ -105,6 +109,7 @@ struct Shared {
     failures: AtomicU64,
     observed: AtomicI64,
     observed_valid: AtomicBool,
+    timing: TimingShared,
 }
 impl Shared {
     fn new() -> Self {
@@ -121,6 +126,7 @@ impl Shared {
             failures: AtomicU64::new(0),
             observed: AtomicI64::new(0),
             observed_valid: AtomicBool::new(false),
+            timing: TimingShared::new(),
         }
     }
 }
@@ -203,6 +209,8 @@ impl AlsaStream {
                     return Ok(());
                 }
                 worker_shared.status.store(1, Ordering::Release);
+                // Worker-local unwind/return guard clears timing even on panic.
+                let _timing_guard = TimingInvalidation(&worker_shared.timing);
                 let result = run_worker(
                     &mut pcm,
                     mixer,
@@ -274,16 +282,37 @@ impl AlsaStream {
         worker.thread().unpark();
         match worker.join() {
             Ok(result) => {
+                self.shared.timing.invalidate();
                 if result.is_ok() {
                     self.shared.status.store(2, Ordering::Release);
                 }
                 result
             }
             Err(_) => {
+                self.shared.timing.invalidate();
                 self.shared.status.store(4, Ordering::Release);
                 Err(LinuxError::WorkerPanicked)
             }
         }
+    }
+    /// Separately coherent native status; unavailable before Start/after stop,
+    /// during publication or after an unavailable/failed native query.
+    /// Native PREPARED may yield raw fields with no played-frame estimate.
+    /// No native calls, allocations or locks occur on the caller.
+    pub fn timing_snapshot(&self) -> Option<AlsaTimingSnapshot> {
+        if self.shared.stop.load(Ordering::SeqCst) || self.shared.status.load(Ordering::SeqCst) != 1
+        {
+            return None;
+        }
+        let snapshot = self
+            .shared
+            .timing
+            .snapshot(self.configuration.requested.monotonic_domain);
+        if self.shared.stop.load(Ordering::SeqCst) || self.shared.status.load(Ordering::SeqCst) != 1
+        {
+            return None;
+        }
+        snapshot
     }
     /// Reads fixed atomic observations outside the writer.
     pub fn snapshot(&self) -> AlsaSnapshot {
@@ -321,6 +350,13 @@ impl Drop for AlsaStream {
     }
 }
 
+struct TimingInvalidation<'a>(&'a TimingShared);
+impl Drop for TimingInvalidation<'_> {
+    fn drop(&mut self) {
+        self.0.invalidate();
+    }
+}
+
 fn increment(counter: &AtomicU64, amount: u64) {
     let old = counter.load(Ordering::Relaxed);
     counter.store(old.saturating_add(amount), Ordering::Relaxed);
@@ -352,11 +388,22 @@ fn run_worker(
         )? {
             Some(frames) if frames > 0 => {
                 pending_offset += frames;
-                increment(&shared.submitted, frames as u64);
+                let submitted = shared
+                    .submitted
+                    .load(Ordering::Relaxed)
+                    .checked_add(frames as u64)
+                    .ok_or(LinuxError::Overflow)?;
+                shared.submitted.store(submitted, Ordering::Relaxed);
             }
             _ => {
-                pcm.wait()?;
+                if !pcm.wait()? {
+                    continue;
+                }
             }
+        }
+        shared.timing.invalidate();
+        if let Some(timing) = pcm.timing(&clock, shared.submitted.load(Ordering::Relaxed))? {
+            shared.timing.publish(timing);
         }
         let point = clock.now()?;
         shared
@@ -447,6 +494,17 @@ functions! {
     sw_current: unsafe extern "C" fn(Handle, Handle) -> c_int => c"snd_pcm_sw_params_current",
     avail_min: unsafe extern "C" fn(Handle, Handle, Frames) -> c_int => c"snd_pcm_sw_params_set_avail_min",
     start_threshold: unsafe extern "C" fn(Handle, Handle, Frames) -> c_int => c"snd_pcm_sw_params_set_start_threshold",
+    tstamp_mode: unsafe extern "C" fn(Handle, Handle, c_int) -> c_int => c"snd_pcm_sw_params_set_tstamp_mode",
+    tstamp_type: unsafe extern "C" fn(Handle, Handle, c_int) -> c_int => c"snd_pcm_sw_params_set_tstamp_type",
+    get_tstamp_mode: unsafe extern "C" fn(Handle, *mut c_int) -> c_int => c"snd_pcm_sw_params_get_tstamp_mode",
+    get_tstamp_type: unsafe extern "C" fn(Handle, *mut c_int) -> c_int => c"snd_pcm_sw_params_get_tstamp_type",
+    status_malloc: unsafe extern "C" fn(*mut Handle) -> c_int => c"snd_pcm_status_malloc",
+    status_free: unsafe extern "C" fn(Handle) -> () => c"snd_pcm_status_free",
+    status: unsafe extern "C" fn(Handle, Handle) -> c_int => c"snd_pcm_status",
+    status_state: unsafe extern "C" fn(Handle) -> c_int => c"snd_pcm_status_get_state",
+    status_delay: unsafe extern "C" fn(Handle) -> SignedFrames => c"snd_pcm_status_get_delay",
+    status_avail: unsafe extern "C" fn(Handle) -> Frames => c"snd_pcm_status_get_avail",
+    status_htstamp: unsafe extern "C" fn(Handle, *mut NativeTimespec) -> () => c"snd_pcm_status_get_htstamp",
     sw_apply: unsafe extern "C" fn(Handle, Handle) -> c_int => c"snd_pcm_sw_params",
     prepare: unsafe extern "C" fn(Handle) -> c_int => c"snd_pcm_prepare",
     write: unsafe extern "C" fn(Handle, *const c_void, Frames) -> SignedFrames => c"snd_pcm_writei",
@@ -454,8 +512,19 @@ functions! {
     drop_stream: unsafe extern "C" fn(Handle) -> c_int => c"snd_pcm_drop",
 }
 
+// snd_htimestamp_t is struct timespec. Supported Linux LP64 targets use
+// signed 64-bit time_t and long; sys::supported_abi gates native opening.
+#[repr(C)]
+struct NativeTimespec {
+    seconds: c_long,
+    nanoseconds: c_long,
+}
+
 struct NativePcm {
     handle: Handle,
+    native_status: Handle,
+    timestamp_mode: c_int,
+    timestamp_type: c_int,
     api: Api,
 }
 impl NativePcm {
@@ -469,11 +538,22 @@ impl NativePcm {
         check("snd_pcm_open", unsafe {
             (api.open)(&mut handle, endpoint.as_ptr(), 0, 1)
         })?;
-        let pcm = Self { handle, api };
+        let mut pcm = Self {
+            handle,
+            api,
+            native_status: ptr::null_mut(),
+            timestamp_mode: 0,
+            timestamp_type: 0,
+        };
         let (buffer, period) = pcm.configure(request)?;
+        // SAFETY: writable output pointer; the worker owns this matching status
+        // allocation until Drop, including every later setup/return failure.
+        check("snd_pcm_status_malloc", unsafe {
+            (pcm.api.status_malloc)(&mut pcm.native_status)
+        })?;
         Ok((pcm, buffer, period))
     }
-    fn configure(&self, request: &AlsaRequest) -> Result<(u32, u32), LinuxError> {
+    fn configure(&mut self, request: &AlsaRequest) -> Result<(u32, u32), LinuxError> {
         let mut hw = ptr::null_mut();
         // SAFETY: ALSA output allocation pointer is writable; successful params
         // remains valid through each matching API call and is freed exactly once.
@@ -500,7 +580,33 @@ impl NativePcm {
                     "sw_params_start_threshold",
                     (self.api.start_threshold)(self.handle, sw, Frames::from(buffer - period)),
                 )?;
+                check(
+                    "sw_params_set_tstamp_mode",
+                    (self.api.tstamp_mode)(self.handle, sw, 1),
+                )?;
+                check(
+                    "sw_params_set_tstamp_type",
+                    (self.api.tstamp_type)(self.handle, sw, 1),
+                )?;
                 check("sw_params", (self.api.sw_apply)(self.handle, sw))?;
+                // Reload applied parameters rather than inspecting request storage.
+                check(
+                    "sw_params_current timestamp readback",
+                    (self.api.sw_current)(self.handle, sw),
+                )?;
+                check(
+                    "sw_params_get_tstamp_mode",
+                    (self.api.get_tstamp_mode)(sw, &mut self.timestamp_mode),
+                )?;
+                check(
+                    "sw_params_get_tstamp_type",
+                    (self.api.get_tstamp_type)(sw, &mut self.timestamp_type),
+                )?;
+                if self.timestamp_mode != 1 || self.timestamp_type != 1 {
+                    return Err(LinuxError::InvalidConfiguration(
+                        "ALSA requires applied ENABLE/MONOTONIC timestamps",
+                    ));
+                }
                 check("snd_pcm_prepare", (self.api.prepare)(self.handle))
             })()
         };
@@ -604,13 +710,56 @@ impl NativePcm {
         }
         Ok(Some(result as usize))
     }
-    fn wait(&mut self) -> Result<(), LinuxError> {
+    fn wait(&mut self) -> Result<bool, LinuxError> {
         // SAFETY: valid worker-owned PCM. 20 ms timeout bounds stop observation.
         let result = unsafe { (self.api.wait)(self.handle, 20) };
-        if result == -4 {
-            return Ok(());
+        if result == -4 || result == -11 {
+            return Ok(false);
         }
-        check("snd_pcm_wait", result)
+        check("snd_pcm_wait", result)?;
+        Ok(true)
+    }
+    fn timing(
+        &mut self,
+        clock: &MonotonicClock,
+        submitted: u64,
+    ) -> Result<Option<AlsaTimingSnapshot>, LinuxError> {
+        let started = clock.now()?;
+        // SAFETY: live worker-owned PCM and preallocated matching status object.
+        let result = unsafe { (self.api.status)(self.handle, self.native_status) };
+        let finished = clock.now()?;
+        if result == -11 || result == -4 {
+            return Ok(None);
+        }
+        check("snd_pcm_status", result)?;
+        let mut stamp = NativeTimespec {
+            seconds: 0,
+            nanoseconds: 0,
+        };
+        // SAFETY: successful status initialized its matching opaque object; all
+        // getters use that same object. Timespec output has the gated LP64 ABI.
+        let (state, delay, available) = unsafe {
+            (self.api.status_htstamp)(self.native_status, &mut stamp);
+            (
+                (self.api.status_state)(self.native_status),
+                (self.api.status_delay)(self.native_status),
+                (self.api.status_avail)(self.native_status),
+            )
+        };
+        Ok(Some(timing::interpret(
+            state,
+            submitted,
+            delay as i64,
+            available as u64,
+            AlsaNativeTimestamp {
+                seconds: stamp.seconds as i64,
+                nanoseconds: stamp.nanoseconds as i64,
+            },
+            started,
+            finished,
+            self.timestamp_mode,
+            self.timestamp_type,
+        )))
     }
     fn drop_stream(&mut self) -> Result<(), LinuxError> {
         // SAFETY: worker owns a live PCM; drop terminates output, retaining handle.
@@ -623,6 +772,9 @@ impl Drop for NativePcm {
     fn drop(&mut self) {
         // SAFETY: worker owns handle exclusively; close precedes library unload.
         unsafe {
+            if !self.native_status.is_null() {
+                (self.api.status_free)(self.native_status);
+            }
             (self.api.close)(self.handle);
         }
     }

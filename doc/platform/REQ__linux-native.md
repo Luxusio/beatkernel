@@ -56,6 +56,15 @@ physical presentation clock. No automatic mapping from native input time to
 output time or physical latency estimate is claimed. Hardware execution,
 benchmarks, and formal QA remain deferred by user instruction (2026-09-30).
 
+The separate [ALSA timing contract](REQ__alsa-timing.md) adds native status,
+signed playback delay and an associated monotonic status timestamp. A worker-owned
+preallocated status container and bounded atomic publication keep those fields
+coherent independently of the aggregate counters. Submitted minus valid native
+delay supplies an explicitly estimated sound-frame position; prepared/nonrunning
+status and invalid delay cannot create that estimate. Native timestamps and the
+userspace query interval remain separate. These observations do not prove acoustic
+latency, automatically calibrate input, or complete a Linux BMS composition.
+
 Primary ABI/API references:
 - [Linux input UAPI](https://github.com/torvalds/linux/blob/master/include/uapi/linux/input.h)
 - [Linux input event synchronization](https://www.kernel.org/doc/html/latest/input/event-codes.html)
