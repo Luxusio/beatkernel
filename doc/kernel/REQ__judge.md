@@ -67,6 +67,15 @@ Public evaluator/active-interaction seams support begin, input, advance and stat
 inspection. Builtin button evaluators ignore nonbutton input without flattening
 its typed payload. A custom evaluator may consume the retained sample. Grading
 and candidate policy can be replaced by callers.
+`StartEligibility` explicitly separates `ProfileButtonPress` from
+`EvaluatorDefined` start routing. Instant/Hold use the former: only fresh Down
+inside the widest profile window is eligible. Custom evaluators default to the
+latter: their predicate accepts typed samples, including Up or samples outside
+the builtin window, through a separate pending-object index. Candidate selection
+still chooses at most one accepted pending object per bound input. Completed
+objects leave that index. Pending interactions advance when their declared
+deadline expires; continuously advancing interactions begin Active. A pending
+interaction declaring no deadline receives no time callbacks.
 
 Library-owned fallible validation completes before state updates. Evaluator
 transitions are infallible; callback panics and external side effects are outside
