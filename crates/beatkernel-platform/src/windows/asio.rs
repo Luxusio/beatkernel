@@ -1,11 +1,15 @@
-//! Read-only ASIO registration discovery; no driver loading or audio support.
+//! SDK-free ASIO registration discovery and optional SDK driver control.
 //!
-//! Uses Windows registry metadata, independently of any ASIO SDK. Registration
+//! Discovery uses Windows registry metadata independently of any ASIO SDK. Registration
 //! identity does not prove process-bitness compatibility, loadability or output.
 //! Native enumeration is bounded but is not a transactional registry snapshot.
 
 // This module owns the native Win32 registry FFI boundary.
 #![allow(unsafe_code)]
+
+/// Optional real SDK driver control; excludes buffer creation and streaming.
+#[cfg(feature = "asio-sdk")]
+pub mod control;
 
 use std::{error::Error, fmt, ptr};
 use windows_sys::Win32::{

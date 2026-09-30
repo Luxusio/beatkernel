@@ -6,6 +6,13 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = []
+asio-sdk = ["dep:cc"]
+
+[build-dependencies]
+cc = { version = "=1.5.1", optional = true }
+
 [dependencies]
 beatkernel = { path = "../beatkernel" }
 
