@@ -90,6 +90,14 @@ buffer callbacks, mixer delivery and stream lifecycle. The current local Windows
 C++ compilation path is unavailable; source does not establish native acceptance.
 Nine portable configuration fixtures are authored; execution remains deferred.
 
+SDK-free [planar ASIO PCM conversion](../platform/REQ__asio-pcm.md) now extracts
+explicit interleaved mixer channels into eighteen native PCM layouts. It shares
+integer quantization with the existing platform PCM converter while preserving
+ASIO's distinct low-valid-bit container alignment. Endian, channel, finite-value,
+exact-extent and allocation fixtures are authored, with execution still deferred.
+This prepares native buffer filling; ASIO callbacks and stream delivery remain
+pending and no native playback acceptance is claimed.
+
 ## Build evidence and completion boundary
 
 After the native replay slice, Rust 1.98.1 locked all-target checks passed for the

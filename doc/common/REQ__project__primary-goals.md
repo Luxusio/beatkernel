@@ -205,6 +205,10 @@ fixtures are unexecuted. The optional
 capability queries and explicit hardware controls, while portable `audio::asio`
 validates reported buffer constraints and exact requests. Native SDK feature
 compilation/control acceptance and ASIO stream callbacks/output remain pending.
+The SDK-free [ASIO planar PCM converter](../platform/REQ__asio-pcm.md) prepares
+selected mixer channels for eighteen native PCM layouts with explicit byte order,
+valid-bit alignment and checked buffer extents. It does not establish an active
+driver stream or native playback evidence.
 
 ## Verification
 

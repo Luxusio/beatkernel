@@ -386,6 +386,10 @@ pending compatible ABI support. Default CI and verification commands check the S
 expose native capabilities and explicit rate changes; ASIO callbacks and mixer
 output remain to be implemented. Portable `audio::asio` validates exact buffer
 sizes and distinguishes positive Hertz from explicit external clock selection.
+Its [planar PCM conversion](doc/platform/REQ__asio-pcm.md) extracts selected mixer
+channels into eighteen native ASIO PCM layouts, covering both byte orders and
+reduced valid-bit containers. Conversion allocates nothing, checks extents and
+finite selected samples before writing, and explicitly rejects DSD/unknown types.
 See the [core audio contract](doc/kernel/REQ__audio.md) and
 [Windows audio contract](doc/platform/REQ__windows-audio.md).
 

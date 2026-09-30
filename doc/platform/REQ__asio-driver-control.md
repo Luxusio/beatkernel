@@ -25,7 +25,9 @@ Queries expose actual channel counts, buffer bounds, current rate, latencies and
 channel metadata. Driver failures preserve operation and native code; malformed
 reports fail explicitly. Channel names preserve bounded original bytes without
 assuming UTF-8, and unknown nonnegative sample type identities remain visible
-without claiming conversion support. Ordinary methods accept only `ASE_OK`;
+without claiming conversion support. `AsioChannelInfo::pcm_encoding` explicitly
+selects the SDK-free [planar PCM converter](REQ__asio-pcm.md) from that reported
+type and rejects unsupported types. Ordinary methods accept only `ASE_OK`;
 the SDK's special `ASE_SUCCESS` for future calls is not accepted as success here.
 Sample-rate changes and driver control panels require
 explicit calls. External clock selection is an explicit request with native
