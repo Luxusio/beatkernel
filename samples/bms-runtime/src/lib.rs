@@ -1,5 +1,7 @@
 //! Off-thread bounded BMS preparation shared by offline and native compositions.
 #![forbid(unsafe_code)]
+/// Rolling BGM admission on an explicitly configured output frame grid.
+pub mod bgm;
 /// Synthetic offline composition using the same runtime and mixer as native apps.
 pub mod offline;
 
