@@ -35,6 +35,8 @@ visual IDs, optional audio binding, and owned opaque metadata. The compiler
 maps both endpoints independently and rejects a reversed source range. It sorts
 compiled objects by start timestamp, then object ID. Time-window lookup returns
 a borrowed slice of starts in `[start, end)`; it allocates no memory.
+An empty or reversed query window returns an empty slice, and a ranged object
+is included only by its start time, not merely by overlap with the window.
 
 SV is a signed rational visual speed. Compiled SV markers have their own
 absolute timestamps, but changing SV never changes an object's judge target.
