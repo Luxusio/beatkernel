@@ -127,7 +127,11 @@ applied values after opening. Probe buffer bounds are labeled as event-driven
 query results; timer playback obtains its own wake-specific bounds internally.
 Unsupported formats are advisory results, never automatically substituted.
 
-Playback duration is explicitly finite and bounded to 60 seconds. The example
+Playback duration must convert to at least one integer nanosecond and is
+explicitly finite and bounded to 60 seconds. Invalid arguments known without
+device queries are rejected before host dispatch, including fully specified
+format byte-rate overflow and mixed-unit exclusive size mismatches when the
+sample rate is explicit. The example
 preloads a small tone off-thread, schedules scalar Play commands and reports
 submitted frames, clock readings and inferred counters outside buffer fill.
 Native failures, invalid arguments, absent devices and unsupported hosts exit
