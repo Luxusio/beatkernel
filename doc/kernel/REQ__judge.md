@@ -52,6 +52,8 @@ tail windows grades the tail. Late release or continued holding strictly beyond
 the tail late boundary yields a tail miss. There is no regrab or automatic
 perfect tail. Head and tail results are separate; scoring consumers combine
 them according to their own rules. A terminal stage never emits twice.
+If a replacement grading policy rejects an in-window owner release, the tail
+ends with `RejectedInput`; a rejected head remains pending until its deadline.
 
 Input-caused results retain original source/timing/native provenance and report
 effective song time, ObjectId, stage, grade or miss reason, and signed delta

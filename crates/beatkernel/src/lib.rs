@@ -20,5 +20,7 @@
 
 pub mod chart;
 pub mod input;
+pub mod interaction;
+pub mod judge;
 pub mod time;
 pub mod transport;
