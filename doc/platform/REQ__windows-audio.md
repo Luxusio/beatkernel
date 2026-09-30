@@ -181,11 +181,13 @@ is synthetic and does not prove endpoint operation or physical latency.
 
 ## ASIO and other output APIs
 
-ASIO remains a required optional backend for compatible installed drivers after
-its licensing/distribution path is verified. No SDK-derived source, bindings or
-binary enters this MIT project merely because ASIO is requested. The existing
-[licensing condition](../common/REQ__project__primary-goals.md) remains in effect.
-Report unsupported/unresolved backends specifically. Additional native APIs need
+ASIO remains a required optional backend for compatible installed drivers.
+The user selected the [GPLv3 SDK-combined build policy](REQ__asio-distribution.md)
+on 2026-10-01 while project-authored source stays MIT. SDK files and derived code
+retain their own licenses; combined binary releases require GPLv3 notices and
+Corresponding Source delivery. Native ASIO implementation is still pending.
+Current WASAPI code reports `BackendUnavailable(Asio)` for ASIO requests, rather
+than the earlier unresolved-license placeholder. Additional native APIs need
 concrete capability and runtime contracts through the same platform boundary.
 
 ## Verification and current environment evidence

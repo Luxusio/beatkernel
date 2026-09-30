@@ -1,6 +1,6 @@
 # BeatKernel primary goals
 
-BeatKernel is a low-latency, cross-platform Rust runtime for rhythm games, distributed as a public library under the [MIT license](../../LICENSE).
+BeatKernel is a low-latency, cross-platform Rust runtime for rhythm games. Project-authored source is distributed under the [MIT license](../../LICENSE); ASIO SDK combined builds follow the [GPLv3 distribution policy](../platform/REQ__asio-distribution.md).
 
 ## Required behavior and boundaries
 
@@ -10,9 +10,9 @@ BeatKernel is a low-latency, cross-platform Rust runtime for rhythm games, distr
 - Keep game-specific rules and OS branches outside core. Avoid allocation, locks, and I/O in real-time audio paths when implemented.
 - Preserve generic input capabilities beyond keyboards: axes, touch, pointers, pose, raw HID, and custom payloads.
 - Keep the runtime independent of React and other UI frameworks.
-- Windows audio output must let the caller select and configure an available native backend and device explicitly. Phase 7 must provide WASAPI shared and exclusive streams, expose supported formats, sample rates, channel layouts, buffer periods and clock/underrun telemetry, and return a specific error when the requested mode or device is unavailable; it must not silently change modes. ASIO is a required optional backend target for compatible installed drivers, with a separately verified licensing and distribution path before its SDK or bindings enter the MIT project. Additional native output APIs can be added through the same platform boundary only with a concrete device/API contract and runtime evidence. The OS-independent mixer and scheduler retain their real-time callback restrictions.
+- Windows audio output must let the caller select and configure an available native backend and device explicitly. Phase 7 must provide WASAPI shared and exclusive streams, expose supported formats, sample rates, channel layouts, buffer periods and clock/underrun telemetry, and return a specific error when the requested mode or device is unavailable; it must not silently change modes. ASIO is a required optional backend target for compatible installed drivers. The user selected GPLv3 conditions for SDK-combined builds while project-authored source remains MIT; third-party SDK code retains its own licenses. Additional native output APIs can be added through the same platform boundary only with a concrete device/API contract and runtime evidence. The OS-independent mixer and scheduler retain their real-time callback restrictions.
 
-Windows' [stream-management contract](https://learn.microsoft.com/en-us/windows/win32/coreaudio/stream-management) distinguishes WASAPI shared and exclusive modes. Steinberg [publishes the ASIO SDK under GPLv3 or a separate proprietary agreement](https://github.com/audiosdk/asio/blob/main/LICENSE.txt); the project must resolve that choice before incorporating SDK-derived code or shipping an ASIO backend under the project's MIT distribution.
+Windows' [stream-management contract](https://learn.microsoft.com/en-us/windows/win32/coreaudio/stream-management) distinguishes WASAPI shared and exclusive modes. Steinberg [publishes the ASIO SDK under GPLv3 or a separate proprietary agreement](https://github.com/audiosdk/asio/blob/main/LICENSE.txt). On 2026-10-01 the user selected its GPLv3 path: preserve project-authored MIT source and distribute ASIO-combined builds with GPLv3 notices and Corresponding Source. The [distribution contract](../platform/REQ__asio-distribution.md) replaces the earlier unresolved-license prerequisite.
 
 ## Current evidence and remaining work
 
@@ -23,7 +23,7 @@ audio verification must not block Phases 8 onward. Keep native execution,
 independent reviews and final QA as outstanding work; do not mark them passed
 or call the full runtime complete. Compile and format checks may accompany
 implementation to keep the code buildable. MIT, dependency boundaries,
-real-time restrictions and the ASIO licensing condition remain required.
+real-time restrictions and the selected ASIO distribution policy remain required.
 
 Phases 0–3 are implemented: [time and transport](../kernel/REQ__time-transport.md), [canonical input](../kernel/REQ__canonical-input.md), pure keyboard mapping fixtures for Windows, Linux, and macOS, and [device-aware binding](../kernel/REQ__binding.md). Binding retains owned typed samples, provenance, and ordered logical destinations. [Phase 4 Windows input](../kernel/REQ__windows-input.md) passed independent review and CLI QA. Six native API integration tests and five platform unit tests pass in an isolated Windows Server VM. An earlier inspector build captured device-attributed A Down/Up, provenance and normal/Alt+F4 cleanup through a Hyper-V virtual keyboard; the latest revision passed finite native execution with no acquisitions in a locked guest. Native virtual-device execution does not establish physical hardware latency.
 
@@ -87,7 +87,7 @@ timestamp meanings labeled separately. No physical press-to-sound timing is
 inferred from those software observations.
 [Phase 15's conditional SDK](../kernel/REQ__sdk-status.md) is not activated without
 a concrete C/C# host requirement. The portable runtime benchmark exists but
-has not been executed. ASIO licensing/implementation, deferred verification and
+has not been executed. ASIO implementation/source delivery, deferred verification and
 physical restart synchronization evidence remain outstanding. The full runtime
 Goal is not complete.
 
@@ -176,7 +176,8 @@ Historical Phase 7 coordinator checks passed 178 tests including doctests in
 each of debug and release on Linux, plus strict Clippy on Linux and the Windows
 platform target; these do not verify subsequent changes. Native shared/exclusive
 playback remains required; the retained Windows VM previously reported zero
-render endpoints. ASIO implementation/licensing remains unresolved. Phase 15
+render endpoints. ASIO implementation is pending under the selected GPLv3 build
+policy. Phase 15
 retains its confirmed-host prerequisite rather than becoming an unconditional
 SDK requirement. The full runtime is not declared complete.
 

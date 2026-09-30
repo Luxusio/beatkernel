@@ -18,7 +18,7 @@ Paths below are relative to the repository root.
 | 4: Windows input | `crates/beatkernel-platform/src/windows/`, `raw_input.rs`, input-inspector example; [contract](REQ__windows-input.md) | Historical virtual keyboard evidence exists. Current source and physical timestamp/jitter comparisons remain unverified. |
 | 5: chart compiler | `crates/beatkernel/src/chart/`, chart example; [contract](REQ__chart-compiler.md) | Historical golden evidence exists; current compiler/BMS changes require executed regressions. |
 | 6: judge | `crates/beatkernel/src/judge/`, `interaction/builtin.rs`, judge example; [contract](REQ__judge.md) | Historical judge evidence exists; current profile, routing, ownership and restoration paths need execution. |
-| 7: audio | `crates/beatkernel/src/audio/`, platform native audio modules; [core](REQ__audio.md), [Windows](../platform/REQ__windows-audio.md) | WASAPI shared/exclusive source exists. Native playback, callback allocation/locking checks and scheduling fixtures remain deferred. ASIO source is still absent pending a compatible licensing/distribution path. |
+| 7: audio | `crates/beatkernel/src/audio/`, platform native audio modules; [core](REQ__audio.md), [Windows](../platform/REQ__windows-audio.md) | WASAPI shared/exclusive source exists. Native playback, callback allocation/locking checks and scheduling fixtures remain deferred. ASIO source is still absent; the GPLv3 build policy below supersedes its baseline licensing prerequisite. |
 | 8: integrated loop | `crates/beatkernel/src/runtime/`, `telemetry/`, runtime/native BMS examples; [runtime](REQ__runtime.md), [benchmark](REQ__runtime-benchmark.md) | Current integrated fixtures, percentiles under executed workloads, native drop/underrun behavior and physical latency measurements remain deferred. |
 | 9: visual projection | `crates/beatkernel/src/visual/`, external SVG example; [contract](REQ__visual.md) | Lane/Point/Path/Polar/Custom source and reusable frame/index paths exist; fixture execution and renderer QA remain deferred. |
 | 10: replay/snapshot | `crates/beatkernel/src/replay/`, judge snapshots, runtime restart/playback, replay examples; [replay](REQ__replay.md), [restart](REQ__section-restart.md), [reverse](REQ__reverse-playback.md) | Current repeated replay/seek hashes, codec failures, reverse policy and native restart output remain unverified. Logical restoration does not guarantee acoustic restart alignment. |
@@ -48,7 +48,8 @@ The default asset decoder supports WAV. An injected off-thread decoder is an
 extension point, not evidence of bundled FLAC/OGG/MP3 support. Native output source
 currently includes WASAPI, ALSA and CoreAudio; it does not establish support for
 every native output API or every installed device configuration. ASIO remains a
-required optional backend with an unresolved implementation/licensing dependency.
+required optional backend. Its baseline licensing prerequisite is superseded by
+the source/build policy below; native implementation remains pending.
 
 ## Source continuation on 2026-10-01
 
@@ -63,6 +64,16 @@ Rust 1.98.1 `cargo check --workspace --all-targets --locked` passed after this
 continuation, compiling the example and twelve new fixture tests without running
 them. Native platform source was unchanged; cross-target checks were not repeated.
 
+## Source/build licensing decision on 2026-10-01
+
+The user approved keeping project-authored source MIT and distributing ASIO SDK
+combined builds under GPLv3 conditions. The [distribution contract](../platform/REQ__asio-distribution.md)
+records third-party license preservation and Corresponding Source obligations.
+This resolves the baseline policy prerequisite in the Phase 7 row. It does not
+claim an ASIO backend or release artifact: WASAPI currently rejects ASIO as an
+unavailable backend. The full-plan task has resumed to apply this decision;
+verification remains deferred.
+
 ## Build evidence and completion boundary
 
 After the native replay slice, Rust 1.98.1 locked all-target checks passed for the
@@ -74,6 +85,6 @@ The remaining full-plan acceptance includes current regression execution,
 deterministic replay/seek comparisons, native Windows output and at least one
 other native platform, callback audit, measured latency/jitter/drop/underrun
 behavior, independent reviews and final QA. These activities remain deferred by
-the user's sequencing instruction. ASIO requires its separate compatible
-licensing/distribution path before implementation. No full completion verdict
+the user's sequencing instruction. ASIO implementation must follow the selected
+GPLv3 combined-build distribution policy. No full completion verdict
 follows from this source inventory, and the full-plan task remains open.

@@ -34,6 +34,8 @@ Known ceiling: initial data and commands are preloaded, and dense schedules or
 control stalls can exhaust finite credit/lookahead. Actual native rendering can
 race a control-thread admission; late/execution errors remain observable. Original
 native scheduling and past dropped audio were not captured and are not reproduced.
-ASIO is still unavailable until a compatible distribution/licensing path exists.
+ASIO native output remains unimplemented. Its SDK-combined builds will follow
+the selected [GPLv3 distribution policy](../platform/REQ__asio-distribution.md)
+while project-authored source remains MIT.
 Native sound output/timing, tests, examples, reviews and QA remain unexecuted
 under the user's deferral; cross-compilation proves source compatibility only.
