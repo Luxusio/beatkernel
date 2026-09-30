@@ -113,6 +113,29 @@ contracts. Requested configuration probing follows [IsFormatSupported](https://l
 - Device loss or render failure produces explicit terminal status. Reopening or
   selecting another configuration is the caller's action, not automatic fallback.
 
+## Executable inspection and playback
+
+The `windows_audio` example exposes help and a deterministic portable PCM
+fixture on every host. Native list/probe/play commands require Windows.
+Probe and play require an explicit device identity and shared/exclusive mode;
+there is no implicit default-device or mode fallback. A caller may choose the
+queried mix format or explicit rate/channels/encoding/valid bits/speaker mask,
+buffer and period in frames or nanoseconds, exact versus opted-in rounding,
+shared engine versus legacy policy, event versus shared timer wake, and MMCSS
+priority or off. Report all selected values before opening and requested versus
+applied values after opening. Probe buffer bounds are labeled as event-driven
+query results; timer playback obtains its own wake-specific bounds internally.
+Unsupported formats are advisory results, never automatically substituted.
+
+Playback duration is explicitly finite and bounded to 60 seconds. The example
+preloads a small tone off-thread, schedules scalar Play commands and reports
+submitted frames, clock readings and inferred counters outside buffer fill.
+Native failures, invalid arguments, absent devices and unsupported hosts exit
+unsuccessfully. Clean stop joins the worker before releasing assets. Successful
+playback requires submissions beyond prefill and an observed progressing device
+clock; do not label prefill alone as successful running output. Fixture output
+is synthetic and does not prove endpoint operation or physical latency.
+
 ## Clock and telemetry
 
 - Preserve raw audio-clock position, frequency, QPC association and reading
