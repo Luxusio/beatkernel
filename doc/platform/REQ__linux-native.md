@@ -69,6 +69,13 @@ native sound-frame/host pairs with the same bounded continuous presentation
 discipline as the Windows sample. Its settings, input loss policy and native
 execution limitations are documented independently.
 
+The separate [mixer render report](REQ__alsa-render-telemetry.md) exposes the last
+successful core render outcome and its cumulative command execution counters.
+It is retained after output stop/failure for diagnostics. Rendering, queue
+admission and native frame submission are distinct; this report does not prove
+audible output or provide a fresh presentation clock. Native timing and aggregate
+counter coherence remain unchanged.
+
 Primary ABI/API references:
 - [Linux input UAPI](https://github.com/torvalds/linux/blob/master/include/uapi/linux/input.h)
 - [Linux input event synchronization](https://www.kernel.org/doc/html/latest/input/event-codes.html)

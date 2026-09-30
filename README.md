@@ -413,6 +413,8 @@ Separate [ALSA timing snapshots](doc/platform/REQ__alsa-timing.md) associate nat
 status, signed delay and monotonic timestamp with worker submission counts. Sound
 frame position is an estimate; acoustic latency and automatic input calibration
 remain unmeasured.
+ALSA also retains the [last mixer render report](doc/platform/REQ__alsa-render-telemetry.md)
+with actual late/rejected command counters, independently of native frame submission.
 
 The portable [device adapter registry](doc/platform/REQ__device-adapters.md)
 connects caller-owned native descriptors and raw HID reports to bounded canonical

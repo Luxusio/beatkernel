@@ -116,6 +116,12 @@ estimated, feed continuous bounded transport correction, and do not fabricate
 Windows clock metadata. Input loss stops rather than guessing lost events; native
 execution and synchronization accuracy remain unverified.
 
+ALSA additionally exposes the [last successful mixer report](../platform/REQ__alsa-render-telemetry.md)
+with core cumulative late/execution rejection counters. Linux native diagnostics
+print it after stop/join, including error cleanup. A rendered block remains
+different from native submission and audible output; retaining this report does
+not extend native clock freshness or establish physical playback evidence.
+
 Git was initialized locally on 2026-09-29 after these files had been implemented. Initial commits record the existing implementation and its documentation, rather than reconstructing historical development commits.
 
 Phase 7 audio is under implementation: [core audio](../kernel/REQ__audio.md)
