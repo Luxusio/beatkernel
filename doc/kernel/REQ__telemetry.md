@@ -1,5 +1,31 @@
 # Explicit software timing and interval jitter
 
+InputDeliveryTelemetry separately observes canonical event timestamp age at an
+explicit fresh receipt point in one caller-selected clock domain. It reads no
+clock and converts no timestamp. Both points must use the configured domain,
+receipt must not precede the event, and successive receipt points must not
+regress. Invalid observations leave all state unchanged. Event times themselves
+may arrive out of order across devices; gameplay ordering belongs to Runtime.
+Checked i128 subtraction yields u64 nanoseconds, including Timestamp::MIN to
+Timestamp::MAX. Equal points record a real zero-age sample.
+
+Retention is bounded to 0..65536 durations with fallible setup allocation. Zero
+disables retention while successful observations are still counted, saturating.
+Recording reuses the existing private duration ring without allocation after
+setup. Summary reports retained-tail nearest-rank p50/p95/p99/max and returns None
+without retained observations; it copies/sorts outside callbacks. Clones preserve
+independent actual history. No physical or nominal interval is inferred.
+
+Native BMS compositions label their input age separately from Runtime processing:
+Windows QPC acquisition receipt to runtime, Linux preserved kernel event time to
+runtime, and macOS preserved IOHID event time to runtime. A fresh same-domain
+observation follows acquisition; event metadata/provenance stays unchanged.
+Eligible selected input is observed before gameplay dispatch. Final summaries
+print after cleanup on successful and failing paths, with unavailable history
+represented as None. These ages include only the boundary represented by each
+backend's timestamp; they do not measure physical press-to-sound latency or prove
+hardware timestamp accuracy. Execution and hardware measurements remain deferred.
+
 RuntimeTelemetry retains its existing API: a bounded ring of processing durations
 with nearest-rank p50/p95/p99/max, saturating runtime counters, and host-reported
 input drops/underruns. These observations do not prove physical latency or device

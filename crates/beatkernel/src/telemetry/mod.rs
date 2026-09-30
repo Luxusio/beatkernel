@@ -1,5 +1,8 @@
 //! Bounded software timing observations; no inferred physical latency.
 
+mod input_delivery;
+pub use input_delivery::{InputDeliveryError, InputDeliveryObservation, InputDeliveryTelemetry};
+
 /// Nearest-rank percentiles of the currently retained software durations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimingSummary {
