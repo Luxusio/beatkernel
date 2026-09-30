@@ -5,6 +5,9 @@
 
 use std::fmt;
 
+mod pcm;
+pub use pcm::{encode_asio_channel, AsioPcmEncoding, AsioPcmError};
+
 /// Invalid driver metadata or an unsupported exact configuration request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AsioConfigurationError {

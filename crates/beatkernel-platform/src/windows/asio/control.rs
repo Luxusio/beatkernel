@@ -6,7 +6,10 @@
 #![allow(unsafe_code)]
 
 use super::{AsioDriverRegistration, AsioEnumerationLimits, AsioRegistryError, AsioRegistryView};
-use crate::audio::asio::{AsioBufferConstraints, AsioConfigurationError, AsioSampleRateRequest};
+use crate::audio::asio::{
+    AsioBufferConstraints, AsioConfigurationError, AsioPcmEncoding, AsioPcmError,
+    AsioSampleRateRequest,
+};
 use std::{error::Error, ffi::c_void, fmt, marker::PhantomData, ptr::NonNull, rc::Rc};
 
 /// Native error-code namespace, preserved separately from the operation name.
@@ -129,6 +132,12 @@ pub struct AsioChannelInfo {
     name_len: usize,
 }
 impl AsioChannelInfo {
+    /// Selects SDK-free PCM conversion from the actual reported type identity.
+    /// DSD and unknown identities remain explicit unsupported-type errors.
+    pub fn pcm_encoding(&self) -> Result<AsioPcmEncoding, AsioPcmError> {
+        AsioPcmEncoding::from_native(self.sample_type)
+    }
+
     /// Exact bytes before the validated terminal NUL, at most 31 bytes.
     pub fn name_bytes(&self) -> &[u8] {
         &self.name[..self.name_len]

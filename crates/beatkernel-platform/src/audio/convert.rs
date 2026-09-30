@@ -24,14 +24,20 @@ pub fn encode_pcm(
                 container_bits,
                 valid_bits,
             } => {
-                let scale = 1i64 << (valid_bits - 1);
-                let signed = (f64::from(*value).clamp(-1.0, 1.0) * scale as f64)
-                    .round()
-                    .clamp(-scale as f64, (scale - 1) as f64) as i64;
+                let signed = quantize_signed_pcm(*value, valid_bits);
                 let encoded = (signed << (container_bits - valid_bits)).to_le_bytes();
                 bytes.copy_from_slice(&encoded[..width]);
             }
         }
     }
     Ok(())
+}
+
+// Callers validate finite samples and derive widths from validated formats.
+// The result is signed valid-bit PCM before choosing native container alignment.
+pub(super) fn quantize_signed_pcm(value: f32, valid_bits: u16) -> i64 {
+    let scale = 1i64 << (valid_bits - 1);
+    (f64::from(value).clamp(-1.0, 1.0) * scale as f64)
+        .round()
+        .clamp(-scale as f64, (scale - 1) as f64) as i64
 }
