@@ -1,7 +1,8 @@
 //! The OS-independent foundation of the BeatKernel rhythm game runtime.
 //!
 //! Integer nanosecond time, historical host-to-song transport mapping, and typed
-//! canonical input and device-aware game bindings form the core. Callers supply clock domains;
+//! canonical input, device-aware game bindings and compiled charts form the core.
+//! Callers supply clock domains;
 //! native clock and input acquisition belong in `beatkernel-platform`.
 //!
 //! ```
@@ -17,6 +18,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod chart;
 pub mod input;
 pub mod time;
 pub mod transport;
