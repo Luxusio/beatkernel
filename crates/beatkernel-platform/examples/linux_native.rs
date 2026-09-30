@@ -3,8 +3,8 @@
 mod native {
     use beatkernel::{
         audio::{
-            command_queue, AudioCommand, AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits,
-            PcmSample, SampleBank, SampleId, VoiceId,
+            AudioCommand, AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, PcmSample,
+            SampleBank, SampleId, VoiceId, command_queue,
         },
         input::DeviceId,
         time::{ClockDomainId, Timestamp},
@@ -50,7 +50,9 @@ mod native {
                                 std::thread::sleep(StdDuration::from_millis(1))
                             }
                             EvdevItem::Resync(snapshot) => {
-                                println!("loss barrier: host must reconcile keys/axes before gameplay resumes: {snapshot:?}");
+                                println!(
+                                    "loss barrier: host must reconcile keys/axes before gameplay resumes: {snapshot:?}"
+                                );
                                 // Inspector has no held gameplay state; printing the loss snapshot
                                 // reconciles its observational state before acknowledgment.
                                 device.acknowledge_resync();
@@ -145,11 +147,19 @@ mod native {
                 })();
                 let result = stream.stop();
                 match stream.last_render_report() {
-                    Some(report) => println!("last successful Mixer render report={report:?}; execution counters do not prove native write/presentation or physical sound"),
-                    None => println!("last successful Mixer render report unavailable; no zero observation substituted"),
+                    Some(report) => println!(
+                        "last successful Mixer render report={report:?}; execution counters do not prove native write/presentation or physical sound"
+                    ),
+                    None => println!(
+                        "last successful Mixer render report unavailable; no zero observation substituted"
+                    ),
                 }
                 println!("observations={:?}", stream.snapshot());
                 println!("native_timing_after_stop={:?}", stream.timing_snapshot());
+                println!(
+                    "joined_render_worker_cadence={:?}; includes startup buffer-fill bursts, not native delivery or physical sound jitter",
+                    stream.render_cadence()
+                );
                 playback?;
                 result?;
                 drop(producer);

@@ -9,8 +9,8 @@ mod presentation;
 mod sys;
 
 pub use alsa::{
-    AlsaAppliedConfig, AlsaNativeTimestamp, AlsaRequest, AlsaSnapshot, AlsaStatus, AlsaStream,
-    AlsaTimingSnapshot,
+    AlsaAppliedConfig, AlsaCadenceError, AlsaNativeTimestamp, AlsaRenderCadence, AlsaRequest,
+    AlsaSnapshot, AlsaStatus, AlsaStream, AlsaTimingSnapshot,
 };
 pub use input::{EvdevDevice, EvdevItem, EvdevSnapshot, HidrawDevice, LinuxInputCounters};
 pub use presentation::alsa_presentation_pair;

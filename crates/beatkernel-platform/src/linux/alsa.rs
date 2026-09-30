@@ -1,25 +1,28 @@
 //! Dedicated nonblocking ALSA PCM writer with explicit device and sizing.
 #![allow(unsafe_code)]
 
+mod cadence;
 mod timing;
+pub use cadence::{AlsaCadenceError, AlsaRenderCadence};
 use timing::TimingShared;
 pub use timing::{AlsaNativeTimestamp, AlsaTimingSnapshot};
 
 use super::{LinuxError, MonotonicClock};
 use crate::audio::{
-    encode_pcm, telemetry::Telemetry, AudioStreamSnapshot, AudioStreamStatus, DeviceFormat,
-    SampleEncoding, StreamCounters,
+    AudioStreamSnapshot, AudioStreamStatus, DeviceFormat, SampleEncoding, StreamCounters,
+    encode_pcm, telemetry::Telemetry,
 };
 use beatkernel::{
     audio::{AudioError, Mixer, RenderReport},
     time::{ClockDomainId, ClockPoint, Timestamp},
 };
 use std::{
-    ffi::{c_char, c_int, c_long, c_uint, c_ulong, c_void, CString},
+    ffi::{CString, c_char, c_int, c_long, c_uint, c_ulong, c_void},
     ptr,
     sync::{
-        atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, AtomicU8, Ordering},
-        mpsc, Arc,
+        Arc,
+        atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU8, AtomicU64, Ordering},
+        mpsc,
     },
     thread::{self, JoinHandle},
 };
@@ -114,6 +117,7 @@ struct Shared {
     observed_valid: AtomicBool,
     timing: TimingShared,
     render_telemetry: Telemetry,
+    cadence: cadence::Capture,
 }
 impl Shared {
     fn new() -> Self {
@@ -132,6 +136,7 @@ impl Shared {
             observed_valid: AtomicBool::new(false),
             timing: TimingShared::new(),
             render_telemetry: Telemetry::new(),
+            cadence: cadence::Capture::new(),
         }
     }
 }
@@ -325,6 +330,17 @@ impl AlsaStream {
         }
         snapshot
     }
+    /// Successful render-start cadence, available only after stop joins the worker.
+    /// Includes startup fill bursts; this is not native delivery/acoustic jitter.
+    pub fn render_cadence(&self) -> Result<Option<AlsaRenderCadence>, AlsaCadenceError> {
+        if self.worker.is_some() {
+            return Ok(None);
+        }
+        self.shared
+            .cadence
+            .summary(self.configuration.format.pcm().sample_rate())
+            .map(Some)
+    }
     /// Reads fixed atomic observations outside the writer.
     pub fn snapshot(&self) -> AlsaSnapshot {
         let status = match self.shared.status.load(Ordering::Acquire) {
@@ -386,13 +402,19 @@ fn run_worker(
     let align = usize::from(config.format.block_align());
     while !shared.stop.load(Ordering::Acquire) {
         if pending_offset == config.period_frames as usize {
-            render_and_publish(
+            let render_start = clock.now()?;
+            let report = render_and_publish(
                 &mut mixer,
                 render,
                 &shared.render_telemetry,
                 &mut render_version,
             )
             .map_err(LinuxError::Mixer)?;
+            shared.cadence.record(
+                render_start.timestamp,
+                report.start_frame,
+                report.frames as u64,
+            );
             encode_pcm(config.format, render, conversion).map_err(LinuxError::Conversion)?;
             shared
                 .rendered
@@ -678,7 +700,7 @@ impl NativePcm {
             _ => {
                 return Err(LinuxError::InvalidConfiguration(
                     "ALSA backend requires all container bits valid",
-                ))
+                ));
             }
         };
         let mut period = Frames::from(request.period_frames);
@@ -894,8 +916,8 @@ mod tests {
     #[test]
     fn real_mixer_reports_expose_execution_rejections_and_survive_stop() {
         use beatkernel::audio::{
-            command_queue, AudioCommand, AudioFormat, AudioLimits, MixerConfig, PcmLimits,
-            PcmSample, SampleBank, SampleId, VoiceId,
+            AudioCommand, AudioFormat, AudioLimits, MixerConfig, PcmLimits, PcmSample, SampleBank,
+            SampleId, VoiceId, command_queue,
         };
         let requested = request();
         let shared = Arc::new(Shared::new());
@@ -979,13 +1001,15 @@ mod tests {
         assert!(second.producer_disconnected);
         assert_eq!(stream.last_render_report(), Some(second));
         let published_version = version;
-        assert!(render_and_publish(
-            &mut mixer,
-            &mut [0.0; 18],
-            &shared.render_telemetry,
-            &mut version
-        )
-        .is_err());
+        assert!(
+            render_and_publish(
+                &mut mixer,
+                &mut [0.0; 18],
+                &shared.render_telemetry,
+                &mut version
+            )
+            .is_err()
+        );
         assert_eq!(version, published_version);
         assert_eq!(stream.last_render_report(), Some(second));
         // The internal carrier exposes no clock or synthetic native counters.
