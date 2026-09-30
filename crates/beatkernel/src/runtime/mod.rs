@@ -1,5 +1,6 @@
 //! Single-owner forward runtime connecting canonical input to scalar audio.
 
+pub mod playback;
 pub mod restart;
 
 use crate::{
