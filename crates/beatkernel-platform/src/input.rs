@@ -1,5 +1,7 @@
 //! Bounded, portable host composition for per-device vendor report adapters.
 
+pub mod hid_report;
+
 use beatkernel::input::{
     DeviceAdapter, DeviceDescriptor, DeviceId, EventMeta, PhysicalInputEvent, PhysicalInputSink,
     RawHidReportEvent,

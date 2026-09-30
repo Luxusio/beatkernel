@@ -59,3 +59,23 @@ still persists. Decoder-specific malformed report behavior belongs to the adapte
 the core trait has no decoder-error return, so zero emissions is not proof that a
 report was valid. Authored vendor fixture/example decode actual bytes and then use
 canonical `BindingMap`; tests and examples are not executed in this deferred-QA lane.
+
+## Explicit native report framing
+
+The portable `input::hid_report::normalize_report` boundary converts borrowed
+native bytes and a separate integer report ID into the canonical report payload.
+The caller chooses SeparateId when native bytes contain only payload, or LeadingId
+when numbered reports include their ID byte. The latter requires an exact matching
+nonzero prefix and strips exactly one byte; native ID zero denotes an unnumbered
+report and leaves all bytes untouched in either mode. No byte-pattern heuristic
+selects framing, because an ordinary payload can begin with the same byte as its ID.
+IDs above 255 are rejected rather than truncated. The configured native-byte bound
+includes any prefix and must be in 1..=16 MiB; the canonical copy reserves storage
+fallibly. Empty unnumbered payloads remain raw data for decoder-specific validation.
+The entire supplied EventMeta is copied without clock remapping or provenance edits.
+
+Native envelopes may retain the original complete bytes beside the normalized
+report. macOS raw acquisition uses this explicit framing conversion; Apple exposes
+report ID, bytes, length and arrival timestamp separately in its callback ABI.
+Sources: [Apple IOHIDBase header](https://github.com/apple-oss-distributions/IOKitUser/blob/main/hid.subproj/IOHIDBase.h)
+and [IOHIDManager header](https://github.com/apple-oss-distributions/IOKitUser/blob/main/hid.subproj/IOHIDManager.h).
