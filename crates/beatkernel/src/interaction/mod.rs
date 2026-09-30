@@ -72,12 +72,26 @@ pub struct InteractionOutput {
 
 /// Setup-time validation and per-object active-interaction construction.
 pub trait InteractionEvaluator: Send + Sync {
+    /// Declares start routing; custom evaluators own acceptance by default.
+    fn start_eligibility(&self) -> StartEligibility {
+        StartEligibility::EvaluatorDefined
+    }
+
     /// Rejects malformed configuration before an engine is constructed.
     fn validate(&self, object: &TimedObject, profile: &JudgeProfile) -> Result<(), JudgeError>;
 
     /// Begins an object already accepted by [`Self::validate`].
     fn begin(&self, object: &TimedObject, context: &BeginContext<'_>)
         -> Box<dyn ActiveInteraction>;
+}
+
+/// Eligibility used to build separate builtin and custom pending indexes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartEligibility {
+    /// A fresh button Down inside the profile's widest start window.
+    ProfileButtonPress,
+    /// The evaluator predicate decides eligibility for unchanged typed input.
+    EvaluatorDefined,
 }
 
 /// Single-owner state transitions for one validated object.
@@ -96,6 +110,10 @@ pub trait ActiveInteraction: Send {
     ) -> InteractionOutput;
 
     /// Advances to effective song time; deadlines expire strictly before it.
+    ///
+    /// Pending interactions are called on deadline expiry. Active interactions
+    /// also receive each engine advance. Pending interactions with no deadline
+    /// receive no time callbacks.
     fn advance_to(
         &mut self,
         song_time: Timestamp,

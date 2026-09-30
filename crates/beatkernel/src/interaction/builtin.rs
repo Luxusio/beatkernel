@@ -7,7 +7,7 @@ use crate::{
 
 use super::{
     ActiveInteraction, BeginContext, InputOwner, InteractionContext, InteractionEvaluator,
-    InteractionOutput, InteractionResult, InteractionState,
+    InteractionOutput, InteractionResult, InteractionState, StartEligibility,
 };
 
 /// A point interaction completed by a fresh button press.
@@ -19,6 +19,10 @@ pub struct InstantEvaluator;
 pub struct HoldEvaluator;
 
 impl InteractionEvaluator for InstantEvaluator {
+    fn start_eligibility(&self) -> StartEligibility {
+        StartEligibility::ProfileButtonPress
+    }
+
     fn validate(&self, object: &TimedObject, _: &JudgeProfile) -> Result<(), JudgeError> {
         if object.time.end.is_some() {
             return Err(JudgeError::InvalidObjectRange { object: object.id });
@@ -40,6 +44,10 @@ impl InteractionEvaluator for InstantEvaluator {
 }
 
 impl InteractionEvaluator for HoldEvaluator {
+    fn start_eligibility(&self) -> StartEligibility {
+        StartEligibility::ProfileButtonPress
+    }
+
     fn validate(&self, object: &TimedObject, _: &JudgeProfile) -> Result<(), JudgeError> {
         if object.time.end.is_none_or(|end| end <= object.time.start) {
             return Err(JudgeError::InvalidObjectRange { object: object.id });

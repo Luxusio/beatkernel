@@ -8,7 +8,7 @@ use crate::{
     input::{ButtonState, EventMeta, GameControlId, GameInputEvent, PhysicalInputEvent},
     interaction::{
         ActiveInteraction, BeginContext, InputOwner, InteractionContext, InteractionOutput,
-        InteractionState,
+        InteractionState, StartEligibility,
     },
     time::Timestamp,
 };
@@ -29,7 +29,9 @@ pub struct JudgeEngine {
     policy: Box<dyn JudgePolicy>,
     interactions: Vec<Box<dyn ActiveInteraction>>,
     controls: Vec<GameControlId>,
+    eligibility: Vec<StartEligibility>,
     starts: HashMap<GameControlId, Vec<usize>>,
+    custom_pending: HashMap<GameControlId, BTreeSet<(ObjectId, usize)>>,
     identities: HashMap<ObjectId, usize>,
     deadlines: BinaryHeap<Reverse<(i128, ObjectId, usize)>>,
     scheduled: Vec<Option<i128>>,
@@ -83,6 +85,7 @@ impl JudgeEngine {
         }
         let mut interactions = Vec::with_capacity(chart.objects().len());
         let mut controls = Vec::with_capacity(chart.objects().len());
+        let mut eligibility = Vec::with_capacity(chart.objects().len());
         let mut starts: HashMap<GameControlId, Vec<usize>> = HashMap::new();
         let mut identities = HashMap::new();
         for (index, object) in chart.objects().iter().enumerate() {
@@ -95,7 +98,11 @@ impl JudgeEngine {
                 },
             ));
             controls.push(rule.control);
-            starts.entry(rule.control).or_default().push(index);
+            let start_eligibility = rule.evaluator.start_eligibility();
+            eligibility.push(start_eligibility);
+            if start_eligibility == StartEligibility::ProfileButtonPress {
+                starts.entry(rule.control).or_default().push(index);
+            }
             identities.insert(object.id, index);
         }
         let count = interactions.len();
@@ -106,7 +113,9 @@ impl JudgeEngine {
             policy,
             interactions,
             controls,
+            eligibility,
             starts,
+            custom_pending: HashMap::new(),
             identities,
             deadlines: BinaryHeap::new(),
             scheduled: vec![None; count],
@@ -142,13 +151,10 @@ impl JudgeEngine {
             )),
             _ => None,
         };
-        let fresh_start = button
-            .is_none_or(|(owner, state)| state == ButtonState::Down && !self.held.contains(&owner));
-        let candidates = if fresh_start {
-            self.candidates(event, time)
-        } else {
-            Vec::new()
-        };
+        let fresh_start = button.is_some_and(|(owner, state)| {
+            state == ButtonState::Down && !self.held.contains(&owner)
+        });
+        let candidates = self.candidates(event, time, fresh_start);
         let selected = if candidates.is_empty() {
             None
         } else {
@@ -273,39 +279,61 @@ impl JudgeEngine {
         }
     }
 
-    fn candidates(&self, event: &GameInputEvent, time: Timestamp) -> Vec<Candidate> {
-        let Some(starts) = self.starts.get(&event.game_control) else {
-            return Vec::new();
-        };
+    fn candidates(
+        &self,
+        event: &GameInputEvent,
+        time: Timestamp,
+        fresh_start: bool,
+    ) -> Vec<Candidate> {
         let now = i128::from(time.as_nanos());
-        let first_time = now - i128::from(self.profile.max_late().as_nanos());
-        let last_time = now + i128::from(self.profile.max_early().as_nanos());
-        let first = starts.partition_point(|&index| {
-            i128::from(self.chart.objects()[index].time.start.as_nanos()) < first_time
-        });
-        let last = starts.partition_point(|&index| {
-            i128::from(self.chart.objects()[index].time.start.as_nanos()) <= last_time
-        });
         let context = self.context(time);
-        starts[first..last]
-            .iter()
-            .filter_map(|&index| {
-                let interaction = &self.interactions[index];
-                let object = &self.chart.objects()[index];
-                (interaction.state() == InteractionState::Pending
-                    && interaction.accepts_input(event, &context))
-                .then_some(Candidate {
+        let mut candidates = Vec::new();
+        let mut consider = |index: usize| {
+            let interaction = &self.interactions[index];
+            let object = &self.chart.objects()[index];
+            if interaction.state() == InteractionState::Pending
+                && interaction.accepts_input(event, &context)
+            {
+                candidates.push(Candidate {
                     object: object.id,
                     target: object.time.start,
                     delta: now - i128::from(object.time.start.as_nanos()),
-                })
-            })
-            .collect()
+                });
+            }
+        };
+        if fresh_start {
+            if let Some(starts) = self.starts.get(&event.game_control) {
+                let first_time = now - i128::from(self.profile.max_late().as_nanos());
+                let last_time = now + i128::from(self.profile.max_early().as_nanos());
+                let first = starts.partition_point(|&index| {
+                    i128::from(self.chart.objects()[index].time.start.as_nanos()) < first_time
+                });
+                let last = starts.partition_point(|&index| {
+                    i128::from(self.chart.objects()[index].time.start.as_nanos()) <= last_time
+                });
+                for &index in &starts[first..last] {
+                    consider(index);
+                }
+            }
+        }
+        if let Some(pending) = self.custom_pending.get(&event.game_control) {
+            for &(_, index) in pending {
+                consider(index);
+            }
+        }
+        candidates
     }
 
     fn refresh(&mut self, index: usize, consumed_deadline: Option<i128>) {
         let key = (self.chart.objects()[index].id, index);
         let control = self.controls[index];
+        if self.eligibility[index] == StartEligibility::EvaluatorDefined {
+            if self.interactions[index].state() == InteractionState::Pending {
+                self.custom_pending.entry(control).or_default().insert(key);
+            } else if let Some(indices) = self.custom_pending.get_mut(&control) {
+                indices.remove(&key);
+            }
+        }
         if self.interactions[index].state() == InteractionState::Active {
             self.active.insert(key);
             self.active_controls.entry(control).or_default().insert(key);
