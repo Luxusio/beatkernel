@@ -17,6 +17,7 @@ verify_commands:
   - cargo run -p beatkernel --example chart --locked
   - cargo run -p beatkernel --example judge --locked -- --help
   - cargo run -p beatkernel --example judge --locked -- --fixture
+  - cargo test -p beatkernel --example judge --locked
   - cargo run -p beatkernel-platform --example input_inspector --locked
   - cargo run -p beatkernel-platform --example windows_input_inspector --locked -- --help
   - cargo run -p beatkernel-platform --example windows_input_inspector --locked -- --fixture

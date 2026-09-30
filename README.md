@@ -177,10 +177,14 @@ registrations mapping opaque interaction IDs to logical controls and evaluators.
 `InstantEvaluator` accepts point objects; `HoldEvaluator` requires an end strictly
 after the start. `with_policies` replaces candidate selection and grading.
 The default resolver picks the closest eligible target, then earlier target and
-ObjectId; `EarliestCandidate` provides another deterministic choice. A fresh
-button Down selects at most one pending start per logical destination. Repeat
-and duplicate Down do not become new presses; builtin evaluators ignore
-nonbutton samples, which remain typed for custom evaluators.
+ObjectId; `EarliestCandidate` provides another deterministic choice. Builtin
+starts use `StartEligibility::ProfileButtonPress`: fresh Down inside the widest
+profile window. Repeat and duplicate Down do not become new builtin presses.
+Custom evaluators default to `EvaluatorDefined` and select accepted typed input
+through a separate pending index, including Up or samples outside the builtin
+window. Candidate resolution chooses at most one pending start per logical
+destination. Builtins ignore nonbutton samples, which remain typed for custom
+evaluators.
 
 Pass an unchanged `GameInputEvent` and explicitly mapped song timestamp to
 `push_input`. Both `push_input` and `advance_to` apply the signed profile offset
@@ -199,6 +203,9 @@ Ordered `JudgeEvent` values include object, stage, outcome, effective song time
 and original input metadata; timeouts have no input provenance. Library-owned
 validation errors leave state unchanged. Extension callbacks are trusted and
 infallible; their panics and external side effects are outside that guarantee.
+Pending interactions advance on declared deadline expiry; active interactions
+also receive each engine advance. A pending interaction with no deadline does
+not receive time callbacks.
 Setup, dispatch and result ownership can allocate. The engine is a single-owner,
 forward gameplay-thread API with no measured latency guarantee.
 
