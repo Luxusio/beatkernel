@@ -1,4 +1,4 @@
-//! Real BMS/WAV assets, physical keyboard acquisition and explicit native WASAPI.
+//! Real BMS/WAV assets, physical keyboard acquisition and explicit WASAPI/ASIO output.
 #[cfg(any(target_os = "windows", test))]
 use beatkernel::audio::AudioCommand;
 #[cfg(test)]
@@ -13,7 +13,32 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Backend {
+    Wasapi,
+    Asio,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AsioView {
+    Native,
+    Bits32,
+    Bits64,
+}
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 struct Options {
+    backend: Backend,
+    #[cfg_attr(not(feature = "asio-sdk"), allow(dead_code))]
+    asio_view: Option<AsioView>,
+    #[cfg_attr(not(feature = "asio-sdk"), allow(dead_code))]
+    output_channels: Option<Vec<u32>>,
+    #[cfg_attr(not(feature = "asio-sdk"), allow(dead_code))]
+    asio_timer_error: u64,
+    #[cfg_attr(not(feature = "asio-sdk"), allow(dead_code))]
+    asio_drift_error: u64,
+    #[cfg_attr(not(feature = "asio-sdk"), allow(dead_code))]
+    asio_latency_error: u64,
+    #[cfg_attr(not(feature = "asio-sdk"), allow(dead_code))]
+    asio_anchor_age: u64,
     chart: PathBuf,
     record_replay: Option<PathBuf>,
     replay_max_records: usize,
@@ -57,6 +82,12 @@ fn size(value: &str) -> Result<Option<(bool, u64)>> {
     }
 }
 fn parse(args: &[String]) -> Result<Options> {
+    let mut backend = Backend::Wasapi;
+    let mut asio_view = None;
+    let mut output_channels = None;
+    let mut asio_system_clock = false;
+    let (mut asio_timer_error, mut asio_drift_error, mut asio_latency_error) = (None, None, None);
+    let mut asio_anchor_age = 1_000_000_000u64;
     let mut chart = None;
     let mut device = None;
     let mut exclusive = None;
@@ -84,6 +115,61 @@ fn parse(args: &[String]) -> Result<Options> {
             return Err(format!("duplicate option {flag}").into());
         }
         match flag.as_str() {
+            "--backend" => {
+                backend = match value.as_str() {
+                    "wasapi" => Backend::Wasapi,
+                    "asio" => Backend::Asio,
+                    _ => return Err("backend must be wasapi or asio".into()),
+                }
+            }
+            "--asio-view" => {
+                asio_view = Some(match value.as_str() {
+                    "native" => AsioView::Native,
+                    "32" => AsioView::Bits32,
+                    "64" => AsioView::Bits64,
+                    _ => return Err("ASIO view must be native, 32 or 64".into()),
+                })
+            }
+            "--output-channels" => {
+                let mut selected = Vec::new();
+                for token in value.split(',') {
+                    if token.is_empty() || !token.bytes().all(|b| b.is_ascii_digit()) {
+                        return Err("invalid ASIO channel token".into());
+                    }
+                    let index: u32 = token.parse()?;
+                    if index > i32::MAX as u32 || selected.contains(&index) || selected.len() == 32
+                    {
+                        return Err("invalid or duplicate ASIO output channel".into());
+                    }
+                    selected.push(index);
+                }
+                output_channels = Some(selected);
+            }
+            "--asio-system-clock" => {
+                if value != "multimedia" {
+                    return Err("ASIO system clock must be explicitly multimedia".into());
+                }
+                asio_system_clock = true;
+            }
+            "--asio-timer-error-ns" | "--asio-drift-error-ns" | "--asio-latency-error-ns" => {
+                if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err("ASIO error bounds must be nonnegative decimal nanoseconds".into());
+                }
+                let error: u64 = value.parse()?;
+                i64::try_from(error)?;
+                match flag.as_str() {
+                    "--asio-timer-error-ns" => asio_timer_error = Some(error),
+                    "--asio-drift-error-ns" => asio_drift_error = Some(error),
+                    _ => asio_latency_error = Some(error),
+                }
+            }
+            "--asio-anchor-age-ns" => {
+                asio_anchor_age = value.parse()?;
+                if asio_anchor_age == 0 || asio_anchor_age >= (1u64 << 31) * 1_000_000 {
+                    return Err("ASIO anchor age must be positive and below half timer wrap".into());
+                }
+            }
+
             "--record-replay" => {
                 if value.is_empty() {
                     return Err("replay path must be nonempty".into());
@@ -184,7 +270,64 @@ fn parse(args: &[String]) -> Result<Options> {
             _ => return Err(format!("unknown or empty option {flag}").into()),
         }
     }
-    let exclusive = exclusive.ok_or("explicit --mode required")?;
+    let mut device = device.ok_or("explicit --device required")?;
+    let exclusive = if backend == Backend::Wasapi {
+        if seen.iter().any(|flag| flag.starts_with("--asio-")) || output_channels.is_some() {
+            return Err("ASIO flags require --backend asio".into());
+        }
+        exclusive.ok_or("explicit --mode required")?
+    } else {
+        if exclusive.is_some()
+            || seen.contains("--period")
+            || seen.contains("--shared-policy")
+            || matches!(buffer, BufferRequest::Duration(_))
+        {
+            return Err("ASIO rejects mode, period, shared policy and nanosecond buffers".into());
+        }
+        if asio_view.is_none()
+            || output_channels.is_none()
+            || !asio_system_clock
+            || asio_timer_error.is_none()
+            || asio_drift_error.is_none()
+            || asio_latency_error.is_none()
+        {
+            return Err("ASIO requires view, output channels, multimedia declaration and all three explicit error bounds".into());
+        }
+        let b = device.as_bytes();
+        if b.len() != 38
+            || b[0] != b'{'
+            || b[37] != b'}'
+            || b[1..37].iter().enumerate().any(|(i, b)| {
+                if [8, 13, 18, 23].contains(&i) {
+                    *b != b'-'
+                } else {
+                    !b.is_ascii_hexdigit()
+                }
+            })
+            || !b[1..37].iter().any(|b| b.is_ascii_hexdigit() && *b != b'0')
+        {
+            return Err("ASIO requires a nonzero braced UUID CLSID".into());
+        }
+        let zero = beatkernel::time::ClockPoint {
+            domain: beatkernel::time::ClockDomainId(1),
+            timestamp: beatkernel::time::Timestamp::ZERO,
+        };
+        beatkernel_platform::audio::asio::MultimediaClockAnchor::new(
+            0,
+            zero,
+            zero,
+            asio_anchor_age,
+            asio_timer_error.unwrap(),
+            asio_drift_error.unwrap(),
+        )?;
+        device.make_ascii_uppercase();
+        if let BufferRequest::Frames(frames) = buffer {
+            if frames as usize > AudioLimits::MAX_RENDER_FRAMES {
+                return Err("ASIO buffer exceeds core render ceiling".into());
+            }
+        }
+        false
+    };
     if exclusive && seen.contains("--shared-policy") {
         return Err("shared-policy is unavailable in exclusive mode".into());
     }
@@ -198,11 +341,18 @@ fn parse(args: &[String]) -> Result<Options> {
         return Err("windows must be nonnegative; voices must be 1..4096".into());
     }
     Ok(Options {
+        backend,
+        asio_view,
+        output_channels,
+        asio_timer_error: asio_timer_error.unwrap_or(0),
+        asio_drift_error: asio_drift_error.unwrap_or(0),
+        asio_latency_error: asio_latency_error.unwrap_or(0),
+        asio_anchor_age,
         record_replay,
         replay_max_records,
         replay_max_bytes,
         chart: chart.ok_or("explicit --chart required")?,
-        device: device.ok_or("explicit --device required")?,
+        device,
         exclusive,
         seconds: seconds.ok_or("explicit --seconds required")?,
         bindings,
@@ -338,7 +488,7 @@ fn save_capture(
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.is_empty() || args == ["--help"] {
-        println!("windows_bms --chart PATH --device EXACT_ID --mode shared|exclusive --seconds N --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Seconds is loop duration after calibration, including remaining preroll. Bind every used BMS lane explicitly; Any physical keyboard, focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured.");
+        println!("windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive --seconds N --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Seconds is loop duration after calibration, including remaining preroll. Bind every used BMS lane explicitly; Any physical keyboard, focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured.");
         return Ok(());
     }
     let options = parse(&args)?;
@@ -374,11 +524,10 @@ mod native {
                 },
                 PresentationError, WasapiPresentationClock,
             },
-            AudioBackendKind, AudioDeviceId, AudioOutputBackend, AudioOutputStream,
-            AudioStreamMode, AudioStreamRequest, AudioStreamStatus,
+            AudioOutputStream, AudioStreamStatus,
         },
         windows::{
-            audio::{WasapiBackend, WasapiOptions, WasapiStream},
+            audio::WasapiStream,
             clock::QpcClock,
             input::{RawInputRegistration, RawInputUsage, WindowsInput},
         },
@@ -397,8 +546,8 @@ mod native {
             WS_OVERLAPPEDWINDOW, WS_VISIBLE,
         },
     };
-    const HOST: ClockDomainId = ClockDomainId(1);
-    const OUTPUT: ClockDomainId = ClockDomainId(2);
+    pub(super) const HOST: ClockDomainId = ClockDomainId(1);
+    pub(super) const OUTPUT: ClockDomainId = ClockDomainId(2);
     struct ExplicitDomains;
     impl ClockMapper for ExplicitDomains {
         fn map(&self, _: ClockPoint, _: ClockDomainId) -> Option<Timestamp> {
@@ -408,8 +557,8 @@ mod native {
             ClockMappingQuality::Unknown
         }
     }
-    struct Window {
-        hwnd: HWND,
+    pub(super) struct Window {
+        pub(super) hwnd: HWND,
         instance: HINSTANCE,
         class: Vec<u16>,
     }
@@ -435,10 +584,21 @@ mod native {
 
     impl Window {
         fn new() -> Result<Self> {
-            let class: Vec<u16> = format!("BeatKernelBms{}", std::process::id())
-                .encode_utf16()
-                .chain(Some(0))
-                .collect();
+            Self::with_visibility(true)
+        }
+        #[cfg(feature = "asio-sdk")]
+        pub(super) fn hidden() -> Result<Self> {
+            Self::with_visibility(false)
+        }
+        fn with_visibility(visible: bool) -> Result<Self> {
+            let class: Vec<u16> = format!(
+                "BeatKernelBms{}{}",
+                std::process::id(),
+                if visible { "Input" } else { "AsioSysref" }
+            )
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
             // SAFETY: documented null query gets this executable's module.
             let instance = unsafe { GetModuleHandleW(ptr::null()) };
             if instance.is_null() {
@@ -477,7 +637,11 @@ mod native {
                     0,
                     window.class.as_ptr(),
                     title.as_ptr(),
-                    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    if visible {
+                        WS_OVERLAPPEDWINDOW | WS_VISIBLE
+                    } else {
+                        0
+                    },
                     100,
                     100,
                     640,
@@ -508,7 +672,7 @@ mod native {
         }
     }
 
-    fn schedule_at(stream: &WasapiStream, rate: u32) -> Result<ClockPoint> {
+    pub(super) fn schedule_wasapi(stream: &WasapiStream, rate: u32) -> Result<ClockPoint> {
         for _ in 0..64 {
             let snapshot = stream.snapshot();
             if snapshot.status != AudioStreamStatus::Running {
@@ -527,7 +691,7 @@ mod native {
         Err("coherent audio telemetry unavailable".into())
     }
 
-    fn presentation(
+    pub(super) fn presentation_wasapi(
         stream: &WasapiStream,
         extent: i64,
         bgm: &mut BgmSession,
@@ -595,7 +759,7 @@ mod native {
             )
         )
     }
-    fn observe_running(
+    pub(super) fn observe_wasapi(
         stream: &WasapiStream,
         discipline: &mut PresentationDiscipline,
     ) -> Result<Option<ObservationAdmission>> {
@@ -613,7 +777,7 @@ mod native {
             Err(error) => Err(error.into()),
         }
     }
-    fn seed_discipline(
+    pub(super) fn seed_wasapi(
         stream: &WasapiStream,
         discipline: &mut PresentationDiscipline,
         bgm: &mut BgmSession,
@@ -621,7 +785,7 @@ mod native {
     ) -> Result<()> {
         let deadline = Instant::now() + WallDuration::from_secs(2);
         while Instant::now() < deadline {
-            let admission = observe_running(stream, discipline)?;
+            let admission = observe_wasapi(stream, discipline)?;
             feed_rendered(bgm, stream.snapshot().render, |command| {
                 producer.try_push(command)
             })?;
@@ -692,22 +856,11 @@ mod native {
         let mut delivery = DeliverySession(beatkernel::telemetry::InputDeliveryTelemetry::new(
             4096, HOST,
         )?);
-        let backend = WasapiBackend;
-        let device = AudioDeviceId(options.device.clone());
-        let format = backend.mix_format(&device)?;
-        let request = AudioStreamRequest::new(
-            device,
-            AudioBackendKind::Wasapi,
-            if options.exclusive {
-                AudioStreamMode::Exclusive
-            } else {
-                AudioStreamMode::Shared(options.shared)
-            },
-            format,
-            options.buffer,
-            options.period,
-        )?;
-        let pcm = format.pcm();
+        if options.backend == Backend::Asio && !cfg!(feature = "asio-sdk") {
+            return Err("ASIO requires sample feature asio-sdk, caller SDK and MSVC compiler; no files loaded".into());
+        }
+        let setup = super::live_output::Setup::new(&options, clock)?;
+        let pcm = setup.format();
         let prepared = load_prepared(
             &options.chart,
             pcm,
@@ -789,11 +942,8 @@ mod native {
         let mut acquisition = AcquisitionWindow::new()?;
         let mut input = WindowsInput::new(clock);
         input.enumerate_devices()?;
-        let mut stream = backend.open(request, mixer, clock, WasapiOptions::default())?;
-        println!(
-            "requested/applied native output={:?}",
-            stream.configuration()
-        );
+        let mut stream = setup.open(mixer, &options, clock)?;
+        println!("requested/applied native output={:?}", stream.description());
         println!("Focus the BeatKernel BMS native window and play the explicitly bound physical keys. Console prints actual grades and misses.");
         println!("preroll={}ns; output zero maps to song -preroll; short startup pairs do not establish long-run clock stability", options.preroll);
         if options.preroll == 0 {
@@ -802,6 +952,7 @@ mod native {
             );
         }
         let mut capture = None;
+        let mut pre_origin_inputs = 0u64;
         let outcome = (|| -> Result<()> {
             if options.record_replay.is_some() {
                 let limits = beatkernel::replay::codec::ReplayCodecLimits::new(
@@ -817,13 +968,12 @@ mod native {
                 );
             }
             stream.start()?;
-            let relation = presentation(
-                &stream,
+            let (mut transport, quality) = stream.calibrate(
+                &options,
                 calibration_extent(options.seconds, options.preroll)?,
                 &mut bgm,
                 &mut producer,
             )?;
-            let mut transport = relation.transport(Timestamp::from_nanos(-options.preroll))?;
             transport.set_rate(transport.anchor().host_time, Rate::NORMAL)?;
             let mut discipline = PresentationDiscipline::new(
                 DisciplineConfig::default(),
@@ -834,10 +984,12 @@ mod native {
                 HOST,
                 Timestamp::from_nanos(-options.preroll),
             )?;
-            seed_discipline(&stream, &mut discipline, &mut bgm, &mut producer)?;
+            stream.seed(&mut discipline, &mut bgm, &mut producer)?;
             discipline.validate_host(clock.sample()?.normalized)?;
             println!("presentation discipline seed={:?} config={:?} quality={:?}; ongoing continuous transport correction, PCM/BGM rate unchanged", discipline.latest_pair(), discipline.config(), discipline.quality());
-            println!("observed output-zero/song-minus-preroll anchor={:?}; mapping quality={:?}; keysound scheduling=submitted frame grid/Unknown; physical latency=unmeasured", transport.anchor(), relation.quality());
+            println!("observed output-zero/song-minus-preroll anchor={:?}; mapping quality={:?}; keysound scheduling=backend software output frontier/Unknown; physical latency=unmeasured", transport.anchor(), quality);
+            let initial_host = transport.anchor().host_time;
+            let mut last_accepted_host = initial_host;
             let mut runtime = Runtime::new(
                 HOST,
                 OUTPUT,
@@ -853,8 +1005,8 @@ mod native {
             'pump: while Instant::now() < deadline {
                 // Missing/degraded readings can skip only while real progressing
                 // observations stay fresh. Terminal/native chronology errors stop.
-                let _admission = observe_running(&stream, &mut discipline)?;
-                feed_rendered(&mut bgm, stream.snapshot().render, |command| {
+                let _admission = stream.observe(&mut discipline)?;
+                feed_rendered(&mut bgm, stream.render_report()?, |command| {
                     runtime.enqueue_audio(command)
                 })?;
                 discipline.validate_host(clock.sample()?.normalized)?;
@@ -894,14 +1046,31 @@ mod native {
                             // Raw Input metadata is QPC receipt time; this fresh point
                             // measures software delivery, not native hardware age.
                             let received = clock.sample()?.normalized;
+                            if options.backend == Backend::Asio {
+                                if host.timestamp > received.timestamp {
+                                    return Err(
+                                        "ASIO live input is later than fresh QPC receipt".into()
+                                    );
+                                }
+                                if host.timestamp < initial_host {
+                                    pre_origin_inputs = pre_origin_inputs
+                                        .checked_add(1)
+                                        .ok_or("pre-origin input counter overflow")?;
+                                    continue;
+                                }
+                                if host.timestamp < last_accepted_host {
+                                    return Err("ASIO live input host chronology regressed".into());
+                                }
+                            }
                             discipline.validate_host(received)?;
                             discipline.validate_host(host)?;
                             delivery.observe(host, received)?;
+                            last_accepted_host = host.timestamp;
                             print_report(
                                 runtime.process_input(
                                     event,
                                     &ExplicitDomains,
-                                    schedule_at(&stream, pcm.sample_rate())?,
+                                    stream.schedule(pcm.sample_rate())?,
                                 )?,
                                 &mut capture,
                             )?;
@@ -928,6 +1097,10 @@ mod native {
                     }
                 }
                 let host = clock.sample()?.normalized;
+                if options.backend == Backend::Asio && host.timestamp < initial_host {
+                    std::thread::sleep(WallDuration::from_millis(1));
+                    continue;
+                }
                 discipline.validate_host(host)?;
                 if let DisciplineUpdate::Applied {
                     base_rate_ppm,
@@ -942,8 +1115,9 @@ mod native {
                 let report = runtime.advance_to(
                     host,
                     &ExplicitDomains,
-                    schedule_at(&stream, pcm.sample_rate())?,
+                    stream.schedule(pcm.sample_rate())?,
                 )?;
+                last_accepted_host = host.timestamp;
                 let nanos = report.song_time.as_nanos();
                 let second = nanos.div_euclid(1_000_000_000);
                 if last_progress_second != Some(second) {
@@ -966,11 +1140,12 @@ mod native {
             Ok(())
         })();
         // Both cleanups run before propagating any start/calibration/pump error.
-        let stop = stream.stop(); // joins worker and frees native COM output there
+        let stop = stream.stop(); // closes/drains the selected native backend
         let close = acquisition.registration.close();
+        println!("pre-output-origin physical inputs ignored without retimestamping={pre_origin_inputs}; physical latency remains unmeasured");
         println!(
             "final audio snapshot={:?}; physical latency=unmeasured",
-            stream.snapshot()
+            stream.description()
         );
         if let Err(error) = &stop {
             eprintln!("native output stop/join error: {error}");
@@ -1128,3 +1303,10 @@ mod preroll_fixtures {
         assert!(calibration_extent(u64::MAX, 0).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "windows_bms/asio_fixtures.rs"]
+mod asio_fixtures;
+#[cfg(target_os = "windows")]
+#[path = "windows_bms/output.rs"]
+mod live_output;
