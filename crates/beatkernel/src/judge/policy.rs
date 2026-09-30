@@ -4,6 +4,15 @@ use super::{JudgeGrade, JudgeProfile};
 
 /// Infallible caller-defined grading over the unchanged timing delta.
 pub trait JudgePolicy: Send + Sync {
+    /// Deep-copies all mutable policy state, or declares checkpoint unsupported.
+    fn snapshot_clone(&self) -> Option<Box<dyn JudgePolicy>> {
+        None
+    }
+    /// Stable schema identity and canonical complete policy state.
+    fn snapshot_bytes(&self) -> Option<Vec<u8>> {
+        None
+    }
+
     /// Returns a grade or rejects the delta without mutating judge state.
     fn grade(&self, delta: i128, profile: &JudgeProfile) -> Option<JudgeGrade>;
 }
@@ -13,6 +22,13 @@ pub trait JudgePolicy: Send + Sync {
 pub struct WindowJudgePolicy;
 
 impl JudgePolicy for WindowJudgePolicy {
+    fn snapshot_clone(&self) -> Option<Box<dyn JudgePolicy>> {
+        Some(Box::new(*self))
+    }
+    fn snapshot_bytes(&self) -> Option<Vec<u8>> {
+        Some(b"WindowJudgePolicy/v1".to_vec())
+    }
+
     fn grade(&self, delta: i128, profile: &JudgeProfile) -> Option<JudgeGrade> {
         profile.grade(delta)
     }
@@ -31,6 +47,15 @@ pub struct Candidate {
 
 /// Replaceable selection among eligible starts; declining is permitted.
 pub trait CandidateResolver: Send + Sync {
+    /// Deep-copies all mutable resolver state, or declares checkpoint unsupported.
+    fn snapshot_clone(&self) -> Option<Box<dyn CandidateResolver>> {
+        None
+    }
+    /// Stable schema identity and canonical complete resolver state.
+    fn snapshot_bytes(&self) -> Option<Vec<u8>> {
+        None
+    }
+
     /// Returns a candidate identity, validated by the engine before mutation.
     fn select(&self, candidates: &[Candidate]) -> Option<ObjectId>;
 }
@@ -40,6 +65,13 @@ pub trait CandidateResolver: Send + Sync {
 pub struct ClosestCandidate;
 
 impl CandidateResolver for ClosestCandidate {
+    fn snapshot_clone(&self) -> Option<Box<dyn CandidateResolver>> {
+        Some(Box::new(*self))
+    }
+    fn snapshot_bytes(&self) -> Option<Vec<u8>> {
+        Some(b"ClosestCandidate/v1".to_vec())
+    }
+
     fn select(&self, candidates: &[Candidate]) -> Option<ObjectId> {
         candidates
             .iter()
@@ -59,6 +91,13 @@ impl CandidateResolver for ClosestCandidate {
 pub struct EarliestCandidate;
 
 impl CandidateResolver for EarliestCandidate {
+    fn snapshot_clone(&self) -> Option<Box<dyn CandidateResolver>> {
+        Some(Box::new(*self))
+    }
+    fn snapshot_bytes(&self) -> Option<Vec<u8>> {
+        Some(b"EarliestCandidate/v1".to_vec())
+    }
+
     fn select(&self, candidates: &[Candidate]) -> Option<ObjectId> {
         candidates
             .iter()

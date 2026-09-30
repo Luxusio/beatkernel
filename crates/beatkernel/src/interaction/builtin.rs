@@ -72,6 +72,7 @@ impl InteractionEvaluator for HoldEvaluator {
     }
 }
 
+#[derive(Clone)]
 struct ButtonInteraction {
     start: Timestamp,
     end: Option<Timestamp>,
@@ -127,6 +128,24 @@ impl ButtonInteraction {
 }
 
 impl ActiveInteraction for ButtonInteraction {
+    fn snapshot_clone(&self) -> Option<Box<dyn ActiveInteraction>> {
+        Some(Box::new(self.clone()))
+    }
+
+    fn snapshot_bytes(&self) -> Option<Vec<u8>> {
+        let mut bytes = crate::judge::snapshot::Encoder::new(b"button-interaction/v1");
+        bytes.i64(self.start.as_nanos());
+        bytes.option(self.end, |bytes, end| bytes.i64(end.as_nanos()));
+        bytes.u32(self.control.0);
+        bytes.u8(match self.state {
+            InteractionState::Pending => 0,
+            InteractionState::Active => 1,
+            InteractionState::Completed => 2,
+        });
+        bytes.option(self.owner, |bytes, owner| bytes.owner(owner));
+        Some(bytes.finish())
+    }
+
     fn state(&self) -> InteractionState {
         self.state
     }

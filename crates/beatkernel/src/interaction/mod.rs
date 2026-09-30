@@ -96,6 +96,18 @@ pub enum StartEligibility {
 
 /// Single-owner state transitions for one validated object.
 pub trait ActiveInteraction: Send {
+    /// Deep-copies all state for reusable in-memory checkpoints.
+    /// Custom implementations remain source-compatible and unsupported by default.
+    fn snapshot_clone(&self) -> Option<Box<dyn ActiveInteraction>> {
+        None
+    }
+
+    /// Versioned canonical bytes for all state affecting future transitions.
+    /// Implementations must include a stable implementation/schema identity.
+    fn snapshot_bytes(&self) -> Option<Vec<u8>> {
+        None
+    }
+
     /// Returns the current lifecycle phase.
     fn state(&self) -> InteractionState;
 

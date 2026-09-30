@@ -3,8 +3,9 @@
 mod engine;
 mod policy;
 mod profile;
+pub(crate) mod snapshot;
 
-pub use engine::JudgeEngine;
+pub use engine::{JudgeEngine, JudgeSnapshot, SnapshotError};
 pub use policy::{
     Candidate, CandidateResolver, ClosestCandidate, EarliestCandidate, JudgePolicy,
     WindowJudgePolicy,

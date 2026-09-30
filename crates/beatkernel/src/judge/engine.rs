@@ -414,3 +414,188 @@ impl JudgeEngine {
         }));
     }
 }
+
+/// A complete reusable in-memory checkpoint, including custom object state.
+/// Allocates off the real-time boundary; it does not snapshot an audio device.
+pub struct JudgeSnapshot {
+    engine: JudgeEngine,
+}
+
+/// Explicit failure to capture or restore a complete checkpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotError {
+    /// This object's implementation has not opted into complete checkpoints.
+    UnsupportedInteraction {
+        /// Chart-local object whose complete state cannot be captured.
+        object: ObjectId,
+    },
+    /// The grading policy has not opted into complete checkpoints.
+    UnsupportedPolicy,
+    /// The candidate resolver has not opted into complete checkpoints.
+    UnsupportedResolver,
+    /// Compiled chart, profile or registered routing differs.
+    ConfigurationMismatch,
+}
+impl std::fmt::Display for SnapshotError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedInteraction { object } => {
+                write!(f, "object {} does not support complete snapshots", object.0)
+            }
+            Self::UnsupportedPolicy => {
+                f.write_str("judge policy does not support complete snapshots")
+            }
+            Self::UnsupportedResolver => {
+                f.write_str("candidate resolver does not support complete snapshots")
+            }
+            Self::ConfigurationMismatch => {
+                f.write_str("snapshot chart/profile/routing does not match engine")
+            }
+        }
+    }
+}
+impl std::error::Error for SnapshotError {}
+
+impl JudgeSnapshot {
+    /// Last accepted effective song time captured by this checkpoint.
+    pub fn effective_song_time(&self) -> Option<Timestamp> {
+        self.engine.effective_time
+    }
+    /// Canonical complete-state diagnostic hash with a fixed versioned encoding.
+    pub fn stable_hash(&self) -> Result<u64, SnapshotError> {
+        self.engine.stable_hash()
+    }
+}
+
+impl JudgeEngine {
+    /// Captures every state affecting judging, failing on unsupported custom state.
+    pub fn snapshot(&self) -> Result<JudgeSnapshot, SnapshotError> {
+        Ok(JudgeSnapshot {
+            engine: self.clone_checkpoint()?,
+        })
+    }
+
+    /// Builds an independent engine from a reusable checkpoint.
+    pub fn from_snapshot(snapshot: &JudgeSnapshot) -> Result<Self, SnapshotError> {
+        snapshot.engine.clone_checkpoint()
+    }
+
+    /// Atomically restores a compatible checkpoint after every clone succeeds.
+    /// The snapshot can be restored repeatedly; callback/external effects remain
+    /// the responsibility of custom implementations.
+    pub fn restore(&mut self, snapshot: &JudgeSnapshot) -> Result<(), SnapshotError> {
+        let source = &snapshot.engine;
+        if self.chart != source.chart
+            || self.profile != source.profile
+            || self.controls != source.controls
+            || self.eligibility != source.eligibility
+        {
+            return Err(SnapshotError::ConfigurationMismatch);
+        }
+        let replacement = source.clone_checkpoint()?;
+        *self = replacement;
+        Ok(())
+    }
+
+    /// Hashes complete logical state, not merely time or lifecycle labels.
+    pub fn stable_hash(&self) -> Result<u64, SnapshotError> {
+        Ok(super::snapshot::hash(&self.canonical_state_bytes()?))
+    }
+
+    pub(crate) fn canonical_state_bytes(&self) -> Result<Vec<u8>, SnapshotError> {
+        use super::snapshot::Encoder;
+        let mut bytes = Encoder::new(b"beatkernel-judge-state/v1");
+        bytes.chart(&self.chart);
+        bytes.profile(&self.profile);
+        bytes.bytes(
+            &self
+                .resolver
+                .snapshot_bytes()
+                .ok_or(SnapshotError::UnsupportedResolver)?,
+        );
+        bytes.bytes(
+            &self
+                .policy
+                .snapshot_bytes()
+                .ok_or(SnapshotError::UnsupportedPolicy)?,
+        );
+        bytes.u64(self.interactions.len() as u64);
+        for (index, interaction) in self.interactions.iter().enumerate() {
+            bytes.u64(self.chart.objects()[index].id.0);
+            bytes.u32(self.controls[index].0);
+            bytes.u8(match self.eligibility[index] {
+                StartEligibility::ProfileButtonPress => 0,
+                StartEligibility::EvaluatorDefined => 1,
+            });
+            bytes.bytes(&interaction.snapshot_bytes().ok_or(
+                SnapshotError::UnsupportedInteraction {
+                    object: self.chart.objects()[index].id,
+                },
+            )?);
+            bytes.option(self.scheduled[index], Encoder::i128);
+        }
+        let mut owners: Vec<_> = self
+            .held
+            .iter()
+            .map(|owner| {
+                let mut entry = Encoder::new(b"owner/v1");
+                entry.owner(*owner);
+                entry.finish()
+            })
+            .collect();
+        owners.sort();
+        bytes.u64(owners.len() as u64);
+        for owner in owners {
+            bytes.bytes(&owner);
+        }
+        bytes.option(self.effective_time, |out, time| out.i64(time.as_nanos()));
+        Ok(bytes.finish())
+    }
+
+    fn clone_checkpoint(&self) -> Result<Self, SnapshotError> {
+        // Require canonical bytes as well as cloning: unsupported custom states
+        // must never enter a purported complete deterministic checkpoint.
+        self.canonical_state_bytes()?;
+        let resolver = self
+            .resolver
+            .snapshot_clone()
+            .ok_or(SnapshotError::UnsupportedResolver)?;
+        let policy = self
+            .policy
+            .snapshot_clone()
+            .ok_or(SnapshotError::UnsupportedPolicy)?;
+        let interactions = self
+            .interactions
+            .iter()
+            .enumerate()
+            .map(|(index, interaction)| {
+                interaction
+                    .snapshot_clone()
+                    .ok_or(SnapshotError::UnsupportedInteraction {
+                        object: self.chart.objects()[index].id,
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let clone = Self {
+            chart: self.chart.clone(),
+            profile: self.profile.clone(),
+            resolver,
+            policy,
+            interactions,
+            controls: self.controls.clone(),
+            eligibility: self.eligibility.clone(),
+            starts: self.starts.clone(),
+            custom_pending: self.custom_pending.clone(),
+            identities: self.identities.clone(),
+            // Preserve consumed-deadline suppression and exact dispatch indexes.
+            deadlines: self.deadlines.clone(),
+            scheduled: self.scheduled.clone(),
+            active: self.active.clone(),
+            active_controls: self.active_controls.clone(),
+            held: self.held.clone(),
+            effective_time: self.effective_time,
+        };
+        clone.canonical_state_bytes()?;
+        Ok(clone)
+    }
+}
