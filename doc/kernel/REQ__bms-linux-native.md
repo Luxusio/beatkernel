@@ -28,9 +28,24 @@ Output encoding is float32, with exact requested rate/channels/period/buffer and
 Period must be positive, less than buffer, and at most the Mixer render ceiling
 1,048,576 frames. Requested/applied settings and every canonical binding are printed.
 
-All BGM commands are prequeued before Mixer/backend start, with checked
-`output_at = song_at + preroll`. BGM count is capped at64,512, leaving1024 live slots;
-queue and pending capacities are BGM count+1024 and drain budget covers that queue.
+BGM uses the shared [rolling admission contract](REQ__bms-bgm-admission.md).
+The queue, pending storage and render drain budget are fixed at 65,536 independently
+of total chart BGM count. At most 64,512 admitted BGM targets remain outstanding,
+leaving 1,024 nominal live-command slots; this is not hard isolation from input bursts.
+Checked output timestamps remain original song time plus preroll on output origin zero;
+compiled chart/Judge targets stay unchanged. Initial admission occurs before native
+open/prefill. Startup calibration continues from actual completed Mixer render ends
+through the sole producer; the live loop feeds before input through Runtime::enqueue_audio
+with a 256-command budget. No timestamp is changed to recover a missed cue.
+
+--bgm-lookahead-ns accepts positive i64 nanoseconds and defaults to 3,000,000,000.
+Large output buffers, control stalls or dense bursts can exhaust finite lookahead or
+capacity. An unadmitted target behind the rendered cursor terminates explicitly;
+choose an explicit larger horizon or restart. The schedule and PCM assets remain
+preloaded, with parser/asset bounds; rolling command admission is not PCM streaming.
+Feeder configuration and admitted/remaining/outstanding/deferred summary print on
+normal and error exit after successful feeder construction. Admission is distinct
+from actual Mixer execution, native delivery and acoustic output.
 There is no total-note-count limit of4096, implicit voice stealing or streaming claim.
 Queue failures preserve exact command/reason and do not undo grading or retry. Active
 Mixer voices remain separately bounded. After stop/join, the sample prints the

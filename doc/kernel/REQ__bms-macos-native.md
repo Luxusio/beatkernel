@@ -32,9 +32,25 @@ report timestamp-failure counter is also checked defensively without claiming it
 measures scalar failures. Complete counters are included in loss diagnostics.
 Polling belongs to the runloop owner thread, outside audio rendering.
 
-All BGM commands are prequeued with checked output_at=song_at+preroll before native
-start, using BGM count+1024 queue/pending slots (BGM capped64,512; total65,536).
-The drain budget covers the prefilled queue. No total-note ceiling of4096, streaming
+BGM uses the shared [rolling admission contract](REQ__bms-bgm-admission.md).
+The queue, pending storage and render drain budget are fixed at 65,536 independently
+of total chart BGM count. At most 64,512 admitted BGM targets remain outstanding,
+leaving 1,024 nominal live-command slots; this is not hard isolation from input bursts.
+Checked output timestamps remain original song time plus preroll on output origin zero;
+compiled chart/Judge targets stay unchanged. Initial admission occurs before native
+open/prefill. Startup calibration continues from actual completed Mixer render ends
+through the sole producer; the live loop feeds before input through Runtime::enqueue_audio
+with a 256-command budget. No timestamp is changed to recover a missed cue.
+
+--bgm-lookahead-ns accepts positive i64 nanoseconds and defaults to 3,000,000,000.
+Large output buffers, control stalls or dense bursts can exhaust finite lookahead or
+capacity. An unadmitted target behind the rendered cursor terminates explicitly;
+choose an explicit larger horizon or restart. The schedule and PCM assets remain
+preloaded, with parser/asset bounds; rolling command admission is not PCM streaming.
+Feeder configuration and admitted/remaining/outstanding/deferred summary print on
+normal and error exit after successful feeder construction. Admission is distinct
+from actual Mixer execution, native delivery and acoustic output.
+No total-note ceiling of4096, streaming
 claim or silent voice stealing is introduced. Mixer voices are separately bounded;
 queue failures preserve exact command/reason without grading rollback or retry.
 CoreAudio exact device/rate/channels/buffer request rejects mismatch/unsupported

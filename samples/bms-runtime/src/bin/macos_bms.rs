@@ -1,6 +1,8 @@
 //! Actual BMS/WAV assets, one explicit IORegistry input and exact CoreAudio output.
+#[cfg(any(target_os = "macos", test))]
+use beatkernel::audio::AudioCommand;
 use beatkernel::{
-    audio::{AudioCommand, AudioFormat, AudioLimits},
+    audio::{AudioFormat, AudioLimits},
     time::{ClockPair, ClockPoint, Timestamp},
 };
 use std::{
@@ -22,6 +24,7 @@ struct Options {
     late: i64,
     offset: i64,
     preroll: i64,
+    bgm_lookahead: i64,
     advance_lag: i64,
     voices: usize,
     mono_stereo: bool,
@@ -35,6 +38,7 @@ fn parse(args: &[String]) -> Result<Options> {
     let (mut early, mut late, mut offset, mut preroll) =
         (150_000_000i64, 150_000_000i64, 0i64, 3_000_000_000i64);
     let mut advance_lag = 2_000_000i64;
+    let mut bgm_lookahead = 3_000_000_000i64;
     let mut voices = 256usize;
     let mut mono_stereo = false;
     let mut args = args.iter();
@@ -75,6 +79,12 @@ fn parse(args: &[String]) -> Result<Options> {
             "--early-ns" => early = value.parse()?,
             "--late-ns" => late = value.parse()?,
             "--input-offset-ns" => offset = value.parse()?,
+            "--bgm-lookahead-ns" => {
+                bgm_lookahead = value.parse()?;
+                if bgm_lookahead <= 0 {
+                    return Err("BGM lookahead must be positive i64 nanoseconds".into());
+                }
+            }
             "--preroll-ns" => preroll = value.parse()?,
             "--advance-lag-ns" => advance_lag = value.parse()?,
             "--voices" => voices = value.parse()?,
@@ -125,35 +135,38 @@ fn parse(args: &[String]) -> Result<Options> {
         late,
         offset,
         preroll,
+        bgm_lookahead,
         advance_lag,
         voices,
         mono_stereo,
     })
 }
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(test)]
 fn shift_bgm(command: AudioCommand, preroll: i64) -> Result<AudioCommand> {
     if !(0..=10_000_000_000).contains(&preroll) {
         return Err("invalid preroll".into());
     }
-    match command {
-        AudioCommand::Play {
-            voice,
-            sample,
-            at,
-            gain,
-        } => Ok(AudioCommand::Play {
-            voice,
-            sample,
-            gain,
-            at: Timestamp::from_nanos(
-                at.as_nanos()
-                    .checked_add(preroll)
-                    .ok_or("BGM/preroll timestamp overflow")?,
-            ),
-        }),
-        _ => Err("prepared BGM must contain only Play commands".into()),
-    }
+    let mut feeder = beatkernel_bms_runtime::bgm::BgmFeeder::new(
+        vec![command],
+        beatkernel_bms_runtime::bgm::BgmConfig {
+            output_origin: beatkernel::time::ClockPoint {
+                domain: beatkernel::time::ClockDomainId(1),
+                timestamp: Timestamp::ZERO,
+            },
+            sample_rate: 1,
+            preroll: beatkernel::time::Duration::from_nanos(preroll),
+            lookahead: beatkernel::time::Duration::from_nanos(i64::MAX),
+            max_pending: 1,
+        },
+    )?;
+    let mut mapped = None;
+    feeder.feed(0, 1, |command| {
+        mapped = Some(command);
+        Ok(())
+    })?;
+    mapped.ok_or_else(|| "fixture command beyond feeder horizon".into())
 }
+
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn estimated_origin(pair: ClockPair, origin: ClockPoint) -> Result<Timestamp> {
     if pair.source.domain != origin.domain {
@@ -209,10 +222,47 @@ fn validate_input_chronology(input: ClockPoint, last_operation: ClockPoint) -> R
     }
     Ok(())
 }
+#[cfg(target_os = "macos")]
+struct BgmSession(beatkernel_bms_runtime::bgm::BgmFeeder);
+#[cfg(target_os = "macos")]
+impl std::ops::Deref for BgmSession {
+    type Target = beatkernel_bms_runtime::bgm::BgmFeeder;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+#[cfg(target_os = "macos")]
+impl std::ops::DerefMut for BgmSession {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+#[cfg(target_os = "macos")]
+impl Drop for BgmSession {
+    fn drop(&mut self) {
+        println!("BGM feeder config={:?}; final admission summary={:?}; admission does not prove execution/native delivery/acoustic output", self.config(), self.report());
+    }
+}
+#[cfg(target_os = "macos")]
+fn feed_rendered(
+    bgm: &mut BgmSession,
+    report: Option<beatkernel::audio::RenderReport>,
+    admit: impl FnMut(AudioCommand) -> std::result::Result<(), beatkernel::audio::CommandPushError>,
+) -> Result<()> {
+    if let Some(report) = report {
+        let end = report
+            .start_frame
+            .checked_add(u64::try_from(report.frames)?)
+            .ok_or("BGM render cursor overflow")?;
+        bgm.feed(end, 256, admit)?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.is_empty() || args == ["--help"] {
-        println!("macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N --seconds N --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --early-ns N --late-ns N --input-offset-ns N --preroll-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Exact one-registry attachment, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown.");
+        println!("macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N --seconds N --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --early-ns N --late-ns N --input-offset-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Exact one-registry attachment, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown.");
         return Ok(());
     }
     let options = parse(&args)?;
@@ -338,12 +388,18 @@ mod native {
         selected: DeviceId,
         registry: u64,
         discipline: &mut PresentationDiscipline,
+        bgm: &mut BgmSession,
+        producer: &mut beatkernel::audio::CommandProducer,
     ) -> Result<ClockPair> {
         let deadline = Instant::now() + WallDuration::from_secs(2);
         while Instant::now() < deadline {
             input.poll(WallDuration::from_millis(1))?;
             check_hid(input, selected, registry)?;
-            if let Some(pair) = observe(audio, clock)? {
+            let pair = observe(audio, clock)?;
+            feed_rendered(bgm, audio.last_render_report(), |command| {
+                producer.try_push(command)
+            })?;
+            if let Some(pair) = pair {
                 discipline.observe_clock_pair(pair)?;
                 return Ok(pair);
             }
@@ -417,20 +473,22 @@ mod native {
             )?,
         )?;
         const SLACK: usize = 1024;
-        let capacity = prepared
-            .bgm_commands
-            .len()
-            .checked_add(SLACK)
-            .ok_or("BGM command count overflow")?;
-        if capacity > AudioLimits::MAX_COMMANDS {
-            return Err("BGM exceeds 64512, reserving 1024 live slots".into());
-        }
+        let capacity = AudioLimits::MAX_COMMANDS;
         let (mut producer, consumer) = command_queue(capacity)?;
-        for command in prepared.bgm_commands {
-            producer
-                .try_push(shift_bgm(command, options.preroll)?)
-                .map_err(|e| format!("exact BGM admission failure: {e:?}"))?;
-        }
+        let mut bgm = BgmSession(beatkernel_bms_runtime::bgm::BgmFeeder::new(
+            prepared.bgm_commands,
+            beatkernel_bms_runtime::bgm::BgmConfig {
+                output_origin: beatkernel::time::ClockPoint {
+                    domain: OUTPUT,
+                    timestamp: Timestamp::ZERO,
+                },
+                sample_rate: options.format.sample_rate(),
+                preroll: Duration::from_nanos(options.preroll),
+                lookahead: Duration::from_nanos(options.bgm_lookahead),
+                max_pending: capacity - SLACK,
+            },
+        )?);
+        bgm.feed(0, capacity - SLACK, |command| producer.try_push(command))?;
         let mixer = Mixer::new(
             MixerConfig::new(
                 options.format,
@@ -498,6 +556,8 @@ mod native {
                 selected_id,
                 options.keyboard_registry,
                 &mut discipline,
+                &mut bgm,
+                &mut producer,
             )?;
             let origin = ClockPoint {
                 domain: HOST,
@@ -533,6 +593,9 @@ mod native {
                     if let Some(pair) = observe(&audio, &clock)? {
                         discipline.observe_clock_pair(pair)?;
                     }
+                    feed_rendered(&mut bgm, audio.last_render_report(), |command| {
+                        runtime.enqueue_audio(command)
+                    })?;
                     discipline.validate_host(clock.sample()?.normalized)?;
                     let mut backlog = true;
                     for _ in 0..256 {
@@ -642,6 +705,32 @@ mod fixtures {
             domain: ClockDomainId(2),
             timestamp: Timestamp::from_nanos(n),
         }
+    }
+    #[test]
+    fn bgm_lookahead_cli_is_explicit_positive_and_checked() {
+        let base = args();
+        assert_eq!(parse(&base).unwrap().bgm_lookahead, 3_000_000_000);
+        for value in ["1", "9223372036854775807"] {
+            let mut supplied = base.clone();
+            supplied.extend(["--bgm-lookahead-ns".into(), value.into()]);
+            assert_eq!(
+                parse(&supplied).unwrap().bgm_lookahead,
+                value.parse::<i64>().unwrap()
+            );
+        }
+        for value in ["0", "-1", "9223372036854775808"] {
+            let mut supplied = base.clone();
+            supplied.extend(["--bgm-lookahead-ns".into(), value.into()]);
+            assert!(parse(&supplied).is_err());
+        }
+        let mut duplicate = base;
+        duplicate.extend([
+            "--bgm-lookahead-ns".into(),
+            "1".into(),
+            "--bgm-lookahead-ns".into(),
+            "2".into(),
+        ]);
+        assert!(parse(&duplicate).is_err());
     }
     fn args() -> Vec<String> {
         [

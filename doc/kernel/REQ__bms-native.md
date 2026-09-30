@@ -33,12 +33,25 @@ shared-policy flags are rejected in exclusive mode. Buffer/period accept `defaul
 validates native representability and exclusive matching rules. WasapiOptions uses its
 explicit default event-driven wake and normal MMCSS priority.
 
-All BGM commands are prequeued before Mixer/backend startup, with checked
-`output_timestamp = original_song_timestamp + preroll` on a fresh output grid
-at zero. Compiled chart/Judge targets stay unchanged. BGM count is bounded at 64,512;
-queue and pending capacities are BGM count + 1,024 reserved live slots (at most 65,536).
-The render drain budget covers the full prefilled queue; the native backend still owns
-bounded buffer rendering. Concurrent voice/pending/rate execution rejections and late
+BGM uses the shared [rolling admission contract](REQ__bms-bgm-admission.md).
+The queue, pending storage and render drain budget are fixed at 65,536 independently
+of total chart BGM count. At most 64,512 admitted BGM targets remain outstanding,
+leaving 1,024 nominal live-command slots; this is not hard isolation from input bursts.
+Checked output timestamps remain original song time plus preroll on output origin zero;
+compiled chart/Judge targets stay unchanged. Initial admission occurs before native
+open/prefill. Startup calibration continues from actual completed Mixer render ends
+through the sole producer; the live loop feeds before input through Runtime::enqueue_audio
+with a 256-command budget. No timestamp is changed to recover a missed cue.
+
+--bgm-lookahead-ns accepts positive i64 nanoseconds and defaults to 3,000,000,000.
+Large output buffers, control stalls or dense bursts can exhaust finite lookahead or
+capacity. An unadmitted target behind the rendered cursor terminates explicitly;
+choose an explicit larger horizon or restart. The schedule and PCM assets remain
+preloaded, with parser/asset bounds; rolling command admission is not PCM streaming.
+Feeder configuration and admitted/remaining/outstanding/deferred summary print on
+normal and error exit after successful feeder construction. Admission is distinct
+from actual Mixer execution, native delivery and acoustic output.
+ Concurrent voice/pending/rate execution rejections and late
 commands remain visible in audio snapshot counters. Queue failures report exact commands
 without retry or judge rollback. No 4096-total-notes ceiling or silent voice stealing
 is introduced. Shared loader file/path/PCM limits apply (64 MiB per asset, 256 MiB bank).
@@ -48,7 +61,7 @@ establish the startup output-frame-zero host anchor through `WasapiPresentationC
 Transport maps that anchor to song `-preroll`, then starts at `Rate::NORMAL`; the
 short startup slope is not retained as a permanent playback rate. The input offset
 is still applied once by JudgeProfile, and compiled chart/Judge targets never move.
-Every prequeued BGM output timestamp remains song time plus preroll, independent
+Every admitted BGM output timestamp remains song time plus preroll, independent
 of subsequent host-to-song rate corrections.
 
 A `PresentationDiscipline` observes real coherent running snapshots on the control
@@ -91,8 +104,9 @@ submitted-frame scheduling on their separate output grid with Unknown physical
 presentation relation; Mixer reports lateness. `--seconds` is the finite monotonic
 wall duration after initial calibration and discipline seeding, including remaining
 preroll countdown. Queued native messages keep their actual acquisition metadata;
-no synthetic input substitutes for startup messages. Prefilling BGM preserves startup
-commands regardless of when the gameplay pump begins.
+no synthetic input substitutes for startup messages. Initial rolling admission supplies cues within its finite horizon before native
+prefill. Startup/live admission must keep pace with real rendered progress; an
+exhausted horizon fails explicitly rather than recovering missed cues.
 
 All setup/start/calibration/pump exits stop and join the stream and release Raw Input before
 native window destruction. Native resources use RAII guards for early failures. Explicit
@@ -103,5 +117,5 @@ focus loss or unplug; applications requiring held-state cancellation need explic
 `--help` and argument validation are portable. A non-Windows native request returns an
 explicit unsupported-host error. This lane authors source and uses formatting plus host/
 Windows compile checks only; execution, native delivery, tests, reviews and QA are deferred. Portable preroll
-CLI boundary, BGM shift/identity and checked overflow fixtures are authored inside
+CLI boundary, actual feeder mapping/identity and checked overflow fixtures are authored inside
 the binary under cfg(test), compiled but not executed.

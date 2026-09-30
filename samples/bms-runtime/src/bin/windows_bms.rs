@@ -1,8 +1,9 @@
 //! Real BMS/WAV assets, physical keyboard acquisition and explicit native WASAPI.
-use beatkernel::{
-    audio::{AudioCommand, AudioLimits},
-    time::{Duration, Timestamp},
-};
+#[cfg(any(target_os = "windows", test))]
+use beatkernel::audio::AudioCommand;
+#[cfg(test)]
+use beatkernel::time::Timestamp;
+use beatkernel::{audio::AudioLimits, time::Duration};
 use beatkernel_platform::audio::{BufferRequest, PeriodRequest, SharedPeriodPolicy};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -22,6 +23,7 @@ struct Options {
     late: i64,
     offset: i64,
     preroll: i64,
+    bgm_lookahead: i64,
     voices: usize,
     mono_stereo: bool,
     buffer: BufferRequest,
@@ -62,6 +64,7 @@ fn parse(args: &[String]) -> Result<Options> {
     let mut late = 150_000_000i64;
     let mut offset = 0i64;
     let mut preroll = 3_000_000_000i64;
+    let mut bgm_lookahead = 3_000_000_000i64;
     let mut voices = 256usize;
     let mut mono_stereo = false;
     let mut buffer = BufferRequest::DeviceDefault;
@@ -109,6 +112,12 @@ fn parse(args: &[String]) -> Result<Options> {
             "--early-ns" => early = value.parse()?,
             "--late-ns" => late = value.parse()?,
             "--input-offset-ns" => offset = value.parse()?,
+            "--bgm-lookahead-ns" => {
+                bgm_lookahead = value.parse()?;
+                if bgm_lookahead <= 0 {
+                    return Err("BGM lookahead must be positive i64 nanoseconds".into());
+                }
+            }
             "--preroll-ns" => {
                 preroll = value.parse()?;
                 if !(0..=10_000_000_000).contains(&preroll) {
@@ -174,6 +183,7 @@ fn parse(args: &[String]) -> Result<Options> {
         late,
         offset,
         preroll,
+        bgm_lookahead,
         voices,
         mono_stereo,
         buffer,
@@ -181,30 +191,32 @@ fn parse(args: &[String]) -> Result<Options> {
         shared,
     })
 }
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg(test)]
 fn shift_bgm(command: AudioCommand, preroll: i64) -> Result<AudioCommand> {
     if !(0..=10_000_000_000).contains(&preroll) {
         return Err("invalid preroll".into());
     }
-    match command {
-        AudioCommand::Play {
-            voice,
-            sample,
-            at,
-            gain,
-        } => Ok(AudioCommand::Play {
-            voice,
-            sample,
-            at: Timestamp::from_nanos(
-                at.as_nanos()
-                    .checked_add(preroll)
-                    .ok_or("BGM/preroll timestamp overflow")?,
-            ),
-            gain,
-        }),
-        _ => Err("prepared BGM must contain only Play commands".into()),
-    }
+    let mut feeder = beatkernel_bms_runtime::bgm::BgmFeeder::new(
+        vec![command],
+        beatkernel_bms_runtime::bgm::BgmConfig {
+            output_origin: beatkernel::time::ClockPoint {
+                domain: beatkernel::time::ClockDomainId(1),
+                timestamp: Timestamp::ZERO,
+            },
+            sample_rate: 1,
+            preroll: beatkernel::time::Duration::from_nanos(preroll),
+            lookahead: beatkernel::time::Duration::from_nanos(i64::MAX),
+            max_pending: 1,
+        },
+    )?;
+    let mut mapped = None;
+    feeder.feed(0, 1, |command| {
+        mapped = Some(command);
+        Ok(())
+    })?;
+    mapped.ok_or_else(|| "fixture command beyond feeder horizon".into())
 }
+
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn calibration_extent(seconds: u64, preroll: i64) -> Result<i64> {
     let nanos = i64::try_from(seconds)?
@@ -215,10 +227,47 @@ fn calibration_extent(seconds: u64, preroll: i64) -> Result<i64> {
     Ok(nanos)
 }
 
+#[cfg(target_os = "windows")]
+struct BgmSession(beatkernel_bms_runtime::bgm::BgmFeeder);
+#[cfg(target_os = "windows")]
+impl std::ops::Deref for BgmSession {
+    type Target = beatkernel_bms_runtime::bgm::BgmFeeder;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+#[cfg(target_os = "windows")]
+impl std::ops::DerefMut for BgmSession {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+#[cfg(target_os = "windows")]
+impl Drop for BgmSession {
+    fn drop(&mut self) {
+        println!("BGM feeder config={:?}; final admission summary={:?}; admission does not prove execution/native delivery/acoustic output", self.config(), self.report());
+    }
+}
+#[cfg(target_os = "windows")]
+fn feed_rendered(
+    bgm: &mut BgmSession,
+    report: Option<beatkernel::audio::RenderReport>,
+    admit: impl FnMut(AudioCommand) -> std::result::Result<(), beatkernel::audio::CommandPushError>,
+) -> Result<()> {
+    if let Some(report) = report {
+        let end = report
+            .start_frame
+            .checked_add(u64::try_from(report.frames)?)
+            .ok_or("BGM render cursor overflow")?;
+        bgm.feed(end, 256, admit)?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.is_empty() || args == ["--help"] {
-        println!("windows_bms --chart PATH --device EXACT_ID --mode shared|exclusive --seconds 1..3600 --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices 1..4096 --early-ns N --late-ns N --input-offset-ns N --preroll-ns 0..10000000000\nDefaults: buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Seconds is loop duration after calibration, including remaining preroll. Bind every used BMS lane explicitly; Any physical keyboard, focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured.");
+        println!("windows_bms --chart PATH --device EXACT_ID --mode shared|exclusive --seconds N --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Seconds is loop duration after calibration, including remaining preroll. Bind every used BMS lane explicitly; Any physical keyboard, focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured.");
         return Ok(());
     }
     let options = parse(&args)?;
@@ -407,7 +456,12 @@ mod native {
         Err("coherent audio telemetry unavailable".into())
     }
 
-    fn presentation(stream: &WasapiStream, extent: i64) -> Result<WasapiPresentationClock> {
+    fn presentation(
+        stream: &WasapiStream,
+        extent: i64,
+        bgm: &mut BgmSession,
+        producer: &mut beatkernel::audio::CommandProducer,
+    ) -> Result<WasapiPresentationClock> {
         use beatkernel::time::{CalibrationUncertainty, ClockInterval, ExtrapolationPolicy};
         use beatkernel_platform::audio::AudioClockReadingQuality;
         let deadline = Instant::now() + WallDuration::from_secs(2);
@@ -417,6 +471,7 @@ mod native {
             if snapshot.status != AudioStreamStatus::Running {
                 return Err("audio terminated before presentation calibration".into());
             }
+            feed_rendered(bgm, snapshot.render, |command| producer.try_push(command))?;
             let usable = snapshot.telemetry_available
                 && snapshot.clock.is_some_and(|clock| {
                     clock.position != 0
@@ -490,11 +545,17 @@ mod native {
     fn seed_discipline(
         stream: &WasapiStream,
         discipline: &mut PresentationDiscipline,
+        bgm: &mut BgmSession,
+        producer: &mut beatkernel::audio::CommandProducer,
     ) -> Result<()> {
         let deadline = Instant::now() + WallDuration::from_secs(2);
         while Instant::now() < deadline {
+            let admission = observe_running(stream, discipline)?;
+            feed_rendered(bgm, stream.snapshot().render, |command| {
+                producer.try_push(command)
+            })?;
             if matches!(
-                observe_running(stream, discipline)?,
+                admission,
                 Some(ObservationAdmission::Retained | ObservationAdmission::Progress)
             ) {
                 return Ok(());
@@ -611,14 +672,7 @@ mod native {
             )?,
         )?;
         const LIVE_SLACK: usize = 1024;
-        let capacity = prepared
-            .bgm_commands
-            .len()
-            .checked_add(LIVE_SLACK)
-            .ok_or("BGM capacity overflow")?;
-        if capacity > AudioLimits::MAX_COMMANDS {
-            return Err("BGM count exceeds 64512, leaving 1024 reserved live command slots".into());
-        }
+        let capacity = AudioLimits::MAX_COMMANDS;
         let limits = AudioLimits::new(
             capacity,
             options.voices,
@@ -627,14 +681,22 @@ mod native {
             capacity,
         )?;
         let (mut producer, consumer) = command_queue(capacity)?;
-        for command in prepared.bgm_commands {
-            // Output zero corresponds to song -preroll; compiled targets stay unchanged.
-            producer
-                .try_push(shift_bgm(command, options.preroll)?)
-                .map_err(|error| {
-                    format!("BGM admission failed, exact command/reason: {error:?}")
-                })?;
-        }
+        let mut bgm = BgmSession(beatkernel_bms_runtime::bgm::BgmFeeder::new(
+            prepared.bgm_commands,
+            beatkernel_bms_runtime::bgm::BgmConfig {
+                output_origin: beatkernel::time::ClockPoint {
+                    domain: OUTPUT,
+                    timestamp: Timestamp::ZERO,
+                },
+                sample_rate: pcm.sample_rate(),
+                preroll: Duration::from_nanos(options.preroll),
+                lookahead: Duration::from_nanos(options.bgm_lookahead),
+                max_pending: capacity - LIVE_SLACK,
+            },
+        )?);
+        bgm.feed(0, capacity - LIVE_SLACK, |command| {
+            producer.try_push(command)
+        })?;
         let mixer = Mixer::new(
             MixerConfig::new(pcm, OUTPUT, Timestamp::ZERO, limits),
             prepared.bank,
@@ -663,6 +725,8 @@ mod native {
             let relation = presentation(
                 &stream,
                 calibration_extent(options.seconds, options.preroll)?,
+                &mut bgm,
+                &mut producer,
             )?;
             let mut transport = relation.transport(Timestamp::from_nanos(-options.preroll))?;
             transport.set_rate(transport.anchor().host_time, Rate::NORMAL)?;
@@ -675,7 +739,7 @@ mod native {
                 HOST,
                 Timestamp::from_nanos(-options.preroll),
             )?;
-            seed_discipline(&stream, &mut discipline)?;
+            seed_discipline(&stream, &mut discipline, &mut bgm, &mut producer)?;
             discipline.validate_host(clock.sample()?.normalized)?;
             println!("presentation discipline seed={:?} config={:?} quality={:?}; ongoing continuous transport correction, PCM/BGM rate unchanged", discipline.latest_pair(), discipline.config(), discipline.quality());
             println!("observed output-zero/song-minus-preroll anchor={:?}; mapping quality={:?}; keysound scheduling=submitted frame grid/Unknown; physical latency=unmeasured", transport.anchor(), relation.quality());
@@ -695,6 +759,9 @@ mod native {
                 // Missing/degraded readings can skip only while real progressing
                 // observations stay fresh. Terminal/native chronology errors stop.
                 let _admission = observe_running(&stream, &mut discipline)?;
+                feed_rendered(&mut bgm, stream.snapshot().render, |command| {
+                    runtime.enqueue_audio(command)
+                })?;
                 discipline.validate_host(clock.sample()?.normalized)?;
                 // SAFETY: MSG is an initialized POD native message buffer, local to this thread.
                 let mut message: MSG = unsafe { std::mem::zeroed() };
@@ -818,6 +885,32 @@ mod native {
 mod preroll_fixtures {
     use super::*;
     use beatkernel::audio::{SampleId, VoiceId};
+    #[test]
+    fn bgm_lookahead_cli_is_explicit_positive_and_checked() {
+        let base = arguments(None);
+        assert_eq!(parse(&base).unwrap().bgm_lookahead, 3_000_000_000);
+        for value in ["1", "9223372036854775807"] {
+            let mut supplied = base.clone();
+            supplied.extend(["--bgm-lookahead-ns".into(), value.into()]);
+            assert_eq!(
+                parse(&supplied).unwrap().bgm_lookahead,
+                value.parse::<i64>().unwrap()
+            );
+        }
+        for value in ["0", "-1", "9223372036854775808"] {
+            let mut supplied = base.clone();
+            supplied.extend(["--bgm-lookahead-ns".into(), value.into()]);
+            assert!(parse(&supplied).is_err());
+        }
+        let mut duplicate = base;
+        duplicate.extend([
+            "--bgm-lookahead-ns".into(),
+            "1".into(),
+            "--bgm-lookahead-ns".into(),
+            "2".into(),
+        ]);
+        assert!(parse(&duplicate).is_err());
+    }
     fn arguments(preroll: Option<&str>) -> Vec<String> {
         let mut args = vec![
             "--chart",
