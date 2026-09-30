@@ -1,4 +1,15 @@
-//! Linux backend boundary; native input/audio/clock I/O is not implemented.
+//! Explicit Linux evdev/hidraw acquisition and ALSA output workers.
+//!
+//! Native device selection and clock relationships remain caller-owned.
 
-/// The OS name for this module stub; this is not a backend capability claim.
+mod alsa;
+mod input;
+#[allow(unsafe_code)]
+mod sys;
+
+pub use alsa::{AlsaAppliedConfig, AlsaRequest, AlsaSnapshot, AlsaStatus, AlsaStream};
+pub use input::{EvdevDevice, EvdevItem, EvdevSnapshot, HidrawDevice, LinuxInputCounters};
+pub use sys::{LinuxError, MonotonicClock};
+
+/// The native target represented by this module.
 pub const TARGET_OS: &str = "linux";
