@@ -292,6 +292,9 @@ impl JudgeEngine {
             let interaction = &self.interactions[index];
             let object = &self.chart.objects()[index];
             if interaction.state() == InteractionState::Pending
+                && interaction
+                    .deadline(&self.profile)
+                    .is_none_or(|deadline| deadline >= now)
                 && interaction.accepts_input(event, &context)
             {
                 candidates.push(Candidate {
