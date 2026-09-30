@@ -109,6 +109,27 @@ impl QpcClock {
         })
     }
 
+    /// Samples QPC without constructing or formatting an error on failure.
+    /// Suitable for render diagnostics; None is unavailable, never zero time.
+    pub fn sample_realtime(&self) -> Option<QpcReceipt> {
+        let mut value = 0i64;
+        // SAFETY: writable aligned counter; synchronous API retains no pointer.
+        if unsafe { QueryPerformanceCounter(&mut value) } == 0 {
+            return None;
+        }
+        let native = self.mapping.point(value).ok()?;
+        let timestamp = self.mapping.map(native, self.output)?;
+        Some(QpcReceipt {
+            counter: value,
+            frequency: self.mapping.frequency(),
+            native,
+            normalized: ClockPoint {
+                domain: self.output,
+                timestamp,
+            },
+        })
+    }
+
     /// Returns the immutable mapping/origin used by every sample.
     pub const fn mapping(&self) -> &QpcClockMapping {
         &self.mapping

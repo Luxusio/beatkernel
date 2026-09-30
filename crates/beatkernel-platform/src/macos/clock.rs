@@ -56,6 +56,13 @@ impl MachClock {
         self.at_ticks(ticks)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "mach timestamp overflow"))
     }
+    /// Samples without constructing an allocated error on conversion failure.
+    /// None remains unavailable for callback diagnostics; it is not zero time.
+    pub fn sample_realtime(&self) -> Option<MachSample> {
+        // SAFETY: read-only native time primitive; no pointers or ownership.
+        self.at_ticks(unsafe { ffi::mach_absolute_time() })
+    }
+
     /// Converts saved native ticks, retaining their exact raw value.
     pub fn at_ticks(&self, ticks: u64) -> Option<MachSample> {
         let native = self.native_point(ticks)?;

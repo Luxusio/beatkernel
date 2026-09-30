@@ -655,8 +655,7 @@ unsafe fn render_buffers(
     }
     let render_start = context
         .clock
-        .sample()
-        .ok()
+        .sample_realtime()
         .map(|sample| sample.normalized.timestamp);
     let report = state
         .mixer

@@ -1202,7 +1202,7 @@ impl Worker {
                 // Direct render-entry QPC, never the device presentation clock.
                 // Ready prefill has no capture; failure is diagnostic only.
                 let render_start = cadence
-                    .and_then(|_| self.clock.sample().ok())
+                    .and_then(|_| self.clock.sample_realtime())
                     .map(|receipt| receipt.normalized.timestamp);
                 match self.mixer.render(&mut self.scratch[..count]) {
                     Ok(report) => {
