@@ -3,7 +3,7 @@
 //! Logical judge state is reconstructed forward; audio device/output clocks are
 //! outside this recording. Custom snapshot support must be explicitly supplied.
 
-use crate::judge::snapshot::{Encoder, hash};
+use crate::judge::snapshot::{hash, Encoder};
 use crate::{
     input::GameInputEvent,
     judge::{JudgeEngine, JudgeError, JudgeEvent, JudgeSnapshot, SnapshotError},

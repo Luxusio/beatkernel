@@ -84,7 +84,7 @@ pub trait InteractionEvaluator: Send + Sync {
 
     /// Begins an object already accepted by [`Self::validate`].
     fn begin(&self, object: &TimedObject, context: &BeginContext<'_>)
-    -> Box<dyn ActiveInteraction>;
+        -> Box<dyn ActiveInteraction>;
 }
 
 /// Eligibility used to build separate builtin and custom pending indexes.

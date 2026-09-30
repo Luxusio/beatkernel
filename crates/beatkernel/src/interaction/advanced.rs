@@ -8,7 +8,7 @@ use crate::{
         AxisMode, ButtonState, ContactId, GameControlId, GameInputEvent, PhysicalInputEvent,
         PointerMode, TouchPhase,
     },
-    judge::{JudgeError, JudgeOutcome, JudgeProfile, JudgeStage, MissReason, snapshot::Encoder},
+    judge::{snapshot::Encoder, JudgeError, JudgeOutcome, JudgeProfile, JudgeStage, MissReason},
     time::{Duration, Timestamp},
 };
 use std::collections::BTreeMap;

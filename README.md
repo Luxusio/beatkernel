@@ -10,10 +10,17 @@ The source implements **Phase 0: repository skeleton**, **Phase 1: integer time
 and transport**, **Phase 2: canonical physical input**, **Phase 3: binding**,
 and **Phase 4: Windows native input**. **Phase 5: chart compilation** passed
 independent review and CLI QA. **Phase 6: Instant/Hold judging** is implemented.
-**Phase 7 audio implementation is in progress:** PCM loading, bounded command
+**Phase 7 audio implementation is present:** PCM loading, bounded command
 queuing, deterministic mixing and native WASAPI streams are present. Independent
 audio review and actual shared/exclusive playback verification remain pending.
-Integrated gameplay, replay and the remaining phases are still required.
+Phases 8–10 now provide the integrated runtime, indexed visual projection and
+complete logical replay checkpoints. Section restart preparation selects frames
+from original PCM and creates fresh output owners. Phase 11 generic repeated,
+composite and tracking interactions and Phase 12 Linux evdev/hidraw/ALSA source
+are present. Phase 13 IOHID/CoreAudio source is also implemented and cross-checked;
+Phase 14 provides a bounded BMS text adapter and a separate offline composition sample.
+These additions have build checks, while review, tests and native execution are
+deferred by user instruction. The full runtime is not yet complete.
 
 **Phase 4 passed independent review and CLI QA:** portable Raw Input processing and a Windows
 QPC receipt sampler, native packet acquisition and explicit registration are
@@ -35,9 +42,13 @@ beatkernel/
 │   │   ├── src/interaction/     # typed evaluator and active-interaction seams
 │   │   ├── src/judge/           # profiles, policies and forward Instant/Hold judging
 │   │   ├── src/audio/           # PCM preload, bounded queue and deterministic mixer
+│   │   ├── src/runtime/         # integrated forward loop and section restart setup
+│   │   ├── src/visual/          # indexed Lane/Point/Path logical projection
+│   │   ├── src/replay/          # accepted operation recording and checkpoints
+│   │   ├── src/telemetry/       # bounded software processing percentiles
 │   │   ├── tests/time_transport.rs
 │   │   └── examples/transport.rs
-│   └── beatkernel-platform/     # pure input processing and Windows acquisition
+│   └── beatkernel-platform/     # native Windows/Linux/macOS acquisition and output
 │       ├── src/keyboard.rs
 │       ├── src/raw_input.rs
 │       ├── src/{windows,linux,macos}/
@@ -45,13 +56,15 @@ beatkernel/
 └── .github/workflows/ci.yml
 ```
 
-The workspace dependency direction is `beatkernel-platform → beatkernel`. The kernel has
+The native library dependency direction is `beatkernel-platform → beatkernel`.
+`adapters/beatkernel-bms` depends only on core; `samples/bms-runtime` composes all
+three at the executable boundary. The kernel has
 no OS dependency, no game-specific assumptions, no unsafe code, and no third-party
 dependencies. The platform uses pinned `windows-sys` and generated `windows`
 bindings only on Windows,
 with unsafe confined to native FFI; portable input modules prohibit unsafe.
-Windows acquisition has native guest evidence; native Linux/macOS input and audio
-backends remain subsequent phases.
+Windows acquisition has native guest evidence. Linux acquisition and ALSA output
+have native source implementations; Linux/macOS native runtime evidence is pending.
 
 ## Build and verify
 
@@ -348,6 +361,51 @@ clock progression and joined stop before reporting success.
 Actual native shared/exclusive playback and independent audio review/QA remain
 pending. The available Windows VM previously had no render endpoints. Windows
 cross-compilation proves source compatibility, not playback. ASIO currently
-returns an explicit unresolved-license error; native Linux/macOS audio remains
-later work. See the [core audio contract](doc/kernel/REQ__audio.md) and
+returns an explicit unresolved-license error. See the [core audio contract](doc/kernel/REQ__audio.md) and
 [Windows audio contract](doc/platform/REQ__windows-audio.md).
+
+The [runtime](doc/kernel/REQ__runtime.md) shares JudgeEngine with
+[replay](doc/kernel/REQ__replay.md); ReplayRecorder captures accepted live
+operations without another judge. Logical restoration does not rewind hardware.
+[Section restart](doc/kernel/REQ__section-restart.md) prepares a fresh Mixer and
+queue at an explicitly selected original source frame. The host must stop/reset
+old output and establish the first sample's presentation-to-host clock mapping.
+Integer frame selection prevents accumulated selection rounding; it does not
+prove physical synchronization. The portable `section_restart` example renders
+the same suffix into newly prepared software outputs.
+
+```sh
+cargo run -p beatkernel --example runtime
+cargo run -p beatkernel --example visual
+cargo run -p beatkernel --example replay
+cargo run -p beatkernel --example section_restart
+cargo run -p beatkernel --example generalization
+cargo run --release -p beatkernel --example runtime_bench -- --help
+cargo run -p beatkernel-platform --example linux_native -- --help
+```
+
+See [Linux native requirements](doc/platform/REQ__linux-native.md) for explicit
+nodes/endpoints and supported settings. Exact ALSA sizing is the default;
+optional rounding reports applied period/buffer sizes. Evdev event loss requires
+an explicit queried-state acknowledgment before gameplay resumes.
+
+macOS has explicit IOHID device acquisition and CoreAudio packed-float32 output
+with requested/applied rate and frame sizes. See the
+[macOS contract](doc/platform/REQ__macos-native.md). Apple-target compile checks
+cover its native source; successful linking, execution and hardware timing remain
+unverified. [Phase 15 SDK status](doc/kernel/REQ__sdk-status.md) retains the
+specified condition for introducing a C host ABI.
+
+The [BMS adapter](doc/kernel/REQ__bms-adapter.md) parses bounded UTF-8 text,
+base/direct/extended BPM, STOP, measure lengths, layered BGM and paired LNTYPE1
+holds with exact rational subdivision. Unsupported commands fail explicitly;
+this is a documented subset, not universal BMS compatibility. It returns real
+SourceChart/rules/sample mappings without opening assets or depending on platform.
+The [offline sample](doc/kernel/REQ__bms-sample.md) loads WAV assets, sends synthetic
+perfect input through Runtime and writes chunked float32 PCM using platform
+encoding. It does not open a sound device. Both commands require actual files:
+
+```sh
+cargo run -p beatkernel-bms --example load_bms -- chart.bms
+cargo run -p beatkernel-bms-runtime -- chart.bms new-output.f32le 30 48000
+```

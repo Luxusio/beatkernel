@@ -31,7 +31,32 @@ Phases 0–3 are implemented: [time and transport](../kernel/REQ__time-transport
 
 [Phase 6 judging](../kernel/REQ__judge.md) implements Instant/Hold evaluators, caller rule registration, configurable inclusive asymmetric windows, replaceable candidate/grading policies and ordered results with retained input provenance. Inputs and advances use explicitly mapped song time with the profile offset applied once. Hold heads acquire device/physical-control/logical-control ownership; only owner release can grade a tail, and early release or timeout produces an explicit miss. Repeat and duplicate Down do not create fresh builtin presses. Explicit start eligibility keeps builtin button/profile limits separate from custom evaluator predicates. Library validation errors preserve state; trusted infallible callbacks have a separate panic/side-effect boundary. Setup and dispatch/results may allocate; judging is single-owner and forward-only.
 
-Twenty-three targeted judge tests pass in debug and release, and strict core all-target Clippy passes. Custom regressions cover accepted Up, typed axis samples outside builtin windows, exclusion of overdue pending candidates, inclusive declared deadlines and invalid-selection atomicity. The four-control console offers help, a deterministic synthetic fixture and timestamped stdin routed through virtual canonical input, binding and Transport. Targeted console checks cover help, repeated fixture output and ten stdin error/boundary/EOF cases; an example unit test covers line-numbered invalid UTF-8 errors. Full Phases 7–15 remain required: audio, integrated loop, projection, replay/seek/reverse restoration, generalization, native Linux/macOS, parsers, FFI and optimization. Linux/macOS native modules currently remain metadata stubs. The full runtime Goal is not complete.
+The Phase 6 baseline passed twenty-three targeted judge tests in debug and release,
+and strict core all-target Clippy. Custom regressions cover accepted Up, typed axis
+samples outside builtin windows, exclusion of overdue pending candidates,
+inclusive declared deadlines and invalid-selection atomicity. The four-control
+console offers help, a deterministic synthetic fixture and timestamped stdin
+routed through virtual canonical input, binding and Transport. Its baseline CLI
+checks covered ten stdin error/boundary/EOF cases and invalid UTF-8 diagnostics.
+These earlier checks do not verify subsequent implementation changes.
+
+Phases 8–10 now have [integrated runtime](../kernel/REQ__runtime.md),
+[visual projection](../kernel/REQ__visual.md) and [logical replay](../kernel/REQ__replay.md)
+source and examples. Live recording consumes admitted RuntimeReport operations
+without a second judge. [Section restart](../kernel/REQ__section-restart.md)
+prepares a frame-selected PCM suffix and fresh output owners; native buffer reset
+and observed first-presentation clock mapping remain host responsibilities.
+Generic Phase 11 interaction source and Phase 12/13 native Linux/macOS backend
+source are implemented with build checks. Current tests, independent reviews,
+native audio execution and physical timing evidence remain deferred. Phase 14
+now includes the [bounded BMS adapter](../kernel/REQ__bms-adapter.md) and
+[offline final composition sample](../kernel/REQ__bms-sample.md); the adapter
+depends only on core, while the executable composes core/platform/adapter.
+[Phase 15's conditional SDK](../kernel/REQ__sdk-status.md) is not activated without
+a concrete C/C# host requirement. The portable runtime benchmark exists but
+has not been executed. ASIO licensing/implementation, deferred verification and
+physical restart synchronization evidence remain outstanding. The full runtime
+Goal is not complete.
 
 Git was initialized locally on 2026-09-29 after these files had been implemented. Initial commits record the existing implementation and its documentation, rather than reconstructing historical development commits.
 

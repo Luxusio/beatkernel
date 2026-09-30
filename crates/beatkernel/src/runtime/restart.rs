@@ -5,8 +5,8 @@
 
 use crate::{
     audio::{
-        AudioCommand, AudioError, CommandProducer, CommandPushError, Mixer, MixerConfig, PcmLimits,
-        PcmSample, SampleBank, SampleId, VoiceId, command_queue,
+        command_queue, AudioCommand, AudioError, CommandProducer, CommandPushError, Mixer,
+        MixerConfig, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId,
     },
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Timestamp},
     transport::{Rate, Transport},
