@@ -365,6 +365,16 @@ is pending and WASAPI reports `BackendUnavailable(Asio)` for such requests.
 Project-authored source and builds without ASIO are distributed under MIT,
 with applicable third-party notices retained. Builds incorporating the ASIO SDK follow
 [GPLv3 distribution and source-delivery conditions](doc/platform/REQ__asio-distribution.md).
+Read-only [ASIO driver discovery](doc/platform/REQ__asio-driver-discovery.md)
+lists registrations from an explicit Windows registry view without loading the
+SDK or a driver. For example:
+
+```sh
+cargo run -p beatkernel-platform --example asio_inspector -- --view native
+cargo run -p beatkernel-platform --example asio_inspector -- --view 64 --max-drivers 256 --max-value-units 4096
+```
+
+These discovery commands do not establish ASIO stream support or device output.
 See the [core audio contract](doc/kernel/REQ__audio.md) and
 [Windows audio contract](doc/platform/REQ__windows-audio.md).
 

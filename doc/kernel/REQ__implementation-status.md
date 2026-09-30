@@ -74,6 +74,12 @@ claim an ASIO backend or release artifact: WASAPI currently rejects ASIO as an
 unavailable backend. The full-plan task has resumed to apply this decision;
 verification remains deferred.
 
+ASIO driver registration discovery source now provides explicit Windows registry
+views and bounded canonical driver identities through a separate
+[inspector/API](../platform/REQ__asio-driver-discovery.md). It incorporates no SDK
+and opens no audio. This is progress toward ASIO selection, not an implemented
+ASIO stream or executed device evidence.
+
 ## Build evidence and completion boundary
 
 After the native replay slice, Rust 1.98.1 locked all-target checks passed for the

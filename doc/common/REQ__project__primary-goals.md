@@ -196,6 +196,12 @@ policy. Phase 15
 retains its confirmed-host prerequisite rather than becoming an unconditional
 SDK requirement. The full runtime is not declared complete.
 
+Windows now has a separate [ASIO driver discovery](../platform/REQ__asio-driver-discovery.md)
+source path with explicit registry view, bounded typed metadata and canonical
+CLSID identities. It uses read-only Win32 registry calls without incorporating
+SDK source, loading a driver or opening audio. Native enumeration and current
+fixtures are unexecuted; SDK bridge/output implementation remains pending.
+
 ## Verification
 
 The executable verification configuration is [the Harness manifest](../harness/manifest.yaml). It runs formatting, strict Clippy, workspace tests in debug and release, transport, binding, chart, input-inspector and judge help/fixture examples, and public API documentation. Timestamped judge stdin also receives task-specific CLI QA. CI declares Linux, Windows and macOS checks using Rust 1.98.1; local verification alone does not establish execution on all CI hosts or physical hardware.
