@@ -65,7 +65,7 @@ pub fn resolve_period(
             return Err(constraint(
                 ConfigurationConstraint::ExclusiveBufferEqualsPeriod,
                 constraints,
-                Some(wanted),
+                None,
             ));
         }
     }

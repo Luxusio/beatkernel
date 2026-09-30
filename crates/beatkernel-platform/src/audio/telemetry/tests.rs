@@ -59,6 +59,41 @@ fn snapshot() -> AudioStreamSnapshot {
 }
 
 #[test]
+fn first_running_deadline_observation_ignores_ready_open_and_start_delay() {
+    let telemetry = Telemetry::new();
+    let mut generation = 0;
+    let mut ready = snapshot();
+    ready.status = AudioStreamStatus::Ready;
+    ready.counters.inferred_deadline_misses = 0;
+    ready.clock.as_mut().unwrap().qpc_100ns = 10;
+    telemetry.publish(ready, &mut generation);
+    assert_eq!(telemetry.read().status, AudioStreamStatus::Ready);
+    // Ready metadata is not a processing deadline baseline. The production
+    // helper receives only running observations; a long initial gap is benign.
+    let mut previous = None;
+    let period = Duration::from_nanos(5_000_000);
+    assert!(!observe_deadline(&mut previous, 10_000_000, period));
+    assert_eq!(previous, Some(10_000_000));
+    let mut running = ready;
+    running.status = AudioStreamStatus::Running;
+    running.clock.as_mut().unwrap().qpc_100ns = 10_000_000;
+    telemetry.publish(running, &mut generation);
+    assert_eq!(telemetry.read().counters.inferred_deadline_misses, 0);
+    assert!(observe_deadline(&mut previous, 10_100_001, period));
+}
+
+#[test]
+fn running_deadline_interval_is_strict_checked_and_ignores_backward_readings() {
+    let period = Duration::from_nanos(5_000_000);
+    let mut previous = Some(1_000_000);
+    assert!(!observe_deadline(&mut previous, 1_100_000, period)); // Exactly two periods.
+    assert!(observe_deadline(&mut previous, 1_200_001, period)); // One hundred ns beyond.
+    assert!(!observe_deadline(&mut previous, 1_199_999, period));
+    let mut extreme = Some(0);
+    assert!(observe_deadline(&mut extreme, u64::MAX, Duration::MAX));
+}
+
+#[test]
 fn production_publication_preserves_literal_scalar_widths_signed_times_and_all_counters() {
     let telemetry = Telemetry::new();
     let mut generation = 0;

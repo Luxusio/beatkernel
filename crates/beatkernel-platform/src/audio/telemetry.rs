@@ -22,6 +22,20 @@ pub(crate) struct Telemetry {
     values: [AtomicU64; 33],
 }
 
+/// Observes one running deadline interval; Ready/prefill is not an interval.
+/// Clear the baseline on native Start so its first observation only anchors.
+pub(crate) fn observe_deadline(
+    previous: &mut Option<u64>,
+    qpc_100ns: u64,
+    period: Duration,
+) -> bool {
+    let before = previous.replace(qpc_100ns);
+    before.is_some_and(|before| {
+        qpc_100ns >= before
+            && u128::from(qpc_100ns - before) * 100 > (period.as_nanos() as u128) * 2
+    })
+}
+
 impl Telemetry {
     pub(crate) fn new() -> Self {
         Self {

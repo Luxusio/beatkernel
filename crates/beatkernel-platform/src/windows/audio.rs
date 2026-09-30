@@ -6,7 +6,7 @@
 
 use super::clock::QpcClock;
 use crate::audio::{
-    telemetry::{status_code, Telemetry},
+    telemetry::{observe_deadline, status_code, Telemetry},
     *,
 };
 use beatkernel::{
@@ -315,7 +315,16 @@ impl AudioOutputStream for WasapiStream {
                     Ok(())
                 }
             }
-            Ok(Err(code)) => Err(native(code)),
+            Ok(Err(code)) => {
+                // The negative acknowledgment precedes owner-thread teardown.
+                // Join before exposing its original HRESULT to the caller.
+                let _ = self.stop();
+                if self.snapshot().status == AudioStreamStatus::WorkerPanicked {
+                    Err(AudioPlatformError::WorkerFailure)
+                } else {
+                    Err(native(code))
+                }
+            }
             Err(_) => {
                 let _ = self.stop();
                 Err(AudioPlatformError::WorkerFailure)
@@ -757,6 +766,27 @@ fn configuration_error(
     }
 }
 
+fn validate_native_buffer_size(
+    request: &AudioStreamRequest,
+    actual_frames: u32,
+    reported: PeriodConstraints,
+) -> Result<bool, AudioPlatformError> {
+    validate_buffer_size(request, actual_frames).map_err(|error| match error {
+        AudioPlatformError::ConfigurationUnsupported {
+            constraint,
+            suggested_buffer_frames,
+            suggested_period_frames,
+            ..
+        } => AudioPlatformError::ConfigurationUnsupported {
+            constraint,
+            constraints: reported,
+            suggested_buffer_frames,
+            suggested_period_frames,
+        },
+        other => other,
+    })
+}
+
 struct Worker {
     client: IAudioClient,
     renderer: IAudioRenderClient,
@@ -929,7 +959,7 @@ impl Worker {
         }
         // SAFETY: client initialized on this thread; native scalar configuration.
         let buffer_frames = unsafe { client.GetBufferSize() }.map_err(win_error)?;
-        adjusted |= validate_buffer_size(&request, buffer_frames)?;
+        adjusted |= validate_native_buffer_size(&request, buffer_frames, reported)?;
         if buffer_frames as usize > mixer.config().limits().max_render_frames() {
             return Err(AudioPlatformError::Capacity);
         }
@@ -1020,6 +1050,8 @@ impl Worker {
                         break;
                     }
                     running = true;
+                    // Prefill/Ready time is not a running deadline interval.
+                    self.last_qpc = None;
                     self.snapshot.status = AudioStreamStatus::Running;
                     self.publish(&control.telemetry);
                     let _ = started.send(Ok(()));
@@ -1215,19 +1247,14 @@ impl Worker {
             // a bound for the complete device-to-host measurement relation.
             mapping_quality: ClockMappingQuality::Unknown,
         });
-        if running {
-            if let Some(previous) = self.last_qpc {
-                let period = self.configuration.period_duration.as_nanos() as u128;
-                if qpc >= previous && u128::from(qpc - previous) * 100 > period * 2 {
-                    self.snapshot.counters.inferred_deadline_misses = self
-                        .snapshot
-                        .counters
-                        .inferred_deadline_misses
-                        .saturating_add(1);
-                }
-            }
+        if running && observe_deadline(&mut self.last_qpc, qpc, self.configuration.period_duration)
+        {
+            self.snapshot.counters.inferred_deadline_misses = self
+                .snapshot
+                .counters
+                .inferred_deadline_misses
+                .saturating_add(1);
         }
-        self.last_qpc = Some(qpc);
         Ok(())
     }
 

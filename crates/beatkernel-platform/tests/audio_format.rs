@@ -458,6 +458,62 @@ fn buffers_are_independent_and_device_default_does_not_change_exact_period() {
     assert_eq!(resolve_period(&default, constraints()).unwrap().frames, 240);
 }
 #[test]
+fn exclusive_mismatch_never_advertises_unchecked_period_or_buffer_suggestions() {
+    let native = PeriodConstraints {
+        min_frames: Some(96),
+        max_frames: Some(480),
+        fundamental_frames: Some(48),
+        ..PeriodConstraints::default()
+    };
+    for (buffer, period, alignment) in [
+        (192, 97, None),
+        (192, 48, None),
+        (192, 481, None),
+        (192, 240, Some(128)),
+    ] {
+        let selected = request(
+            AudioStreamMode::Exclusive,
+            BufferRequest::Frames(buffer),
+            PeriodRequest::Frames(period),
+        );
+        let constraints = PeriodConstraints {
+            alignment_frames: alignment,
+            ..native
+        };
+        for policy in [
+            NegotiationPolicy::Exact,
+            NegotiationPolicy::AllowSupportedRounding,
+        ] {
+            assert_eq!(
+                resolve_period(&selected.clone().with_negotiation(policy), constraints),
+                Err(AudioPlatformError::ConfigurationUnsupported {
+                    constraint: ConfigurationConstraint::ExclusiveBufferEqualsPeriod,
+                    constraints,
+                    suggested_buffer_frames: None,
+                    suggested_period_frames: None,
+                })
+            );
+        }
+    }
+    let paired = request(
+        AudioStreamMode::Exclusive,
+        BufferRequest::Frames(192),
+        PeriodRequest::Frames(192),
+    );
+    assert_eq!(resolve_period(&paired, native).unwrap().frames, 192);
+    let aligned = PeriodConstraints {
+        alignment_frames: Some(128),
+        ..native
+    };
+    let paired = request(
+        AudioStreamMode::Exclusive,
+        BufferRequest::Frames(384),
+        PeriodRequest::Frames(384),
+    );
+    assert_eq!(resolve_period(&paired, aligned).unwrap().frames, 384);
+}
+
+#[test]
 fn legacy_requires_explicit_default_and_exclusive_requires_matching_sizes() {
     let legacy = request(
         AudioStreamMode::Shared(SharedPeriodPolicy::DeviceDefault),
