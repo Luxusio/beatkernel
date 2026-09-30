@@ -30,6 +30,11 @@ struct BkAsioChannel {
 };
 static_assert(sizeof(BkAsioStatus) == 8, "Bridge status ABI mismatch");
 static_assert(sizeof(BkAsioChannel) == 52, "Bridge channel ABI mismatch");
+struct BkAsioClock {
+    std::int32_t index, channel, group, current;
+    std::uint8_t name[32];
+};
+static_assert(sizeof(BkAsioClock) == 48, "Bridge clock ABI mismatch");
 struct BkAsioOutput {
     std::int32_t channel, sample_type;
     std::uint32_t width;
@@ -141,8 +146,12 @@ struct Admission {
     ~Admission() { if (entered) readers.fetch_sub(1, std::memory_order_seq_cst); }
 };
 template<class Native64> std::uint64_t native64(const Native64& value) noexcept {
-    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(value.hi)) << 32)
-        | static_cast<std::uint32_t>(value.lo);
+    if constexpr (std::is_integral<Native64>::value) {
+        return static_cast<std::uint64_t>(value);
+    } else {
+        return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(value.hi)) << 32)
+            | static_cast<std::uint32_t>(value.lo);
+    }
 }
 void publish(Control* c, const BkAsioEvent& event) noexcept {
     const auto version = c->version.load(std::memory_order_seq_cst);
@@ -197,6 +206,8 @@ ASIOTime* time_switch(ASIOTime* time, long index, ASIOBool direct) {
     if (!time) c->faults.fetch_or(MalformedTime);
     else {
         event.flags = static_cast<std::uint32_t>(time->timeInfo.flags);
+        if (event.flags & kClockSourceChanged) c->faults.fetch_or(Resync);
+        if (event.flags & kSampleRateChanged) c->faults.fetch_or(Rate);
         if (event.flags & kSamplePositionValid) event.position = native64(time->timeInfo.samplePosition);
         if (event.flags & kSystemTimeValid) event.system_ns = native64(time->timeInfo.systemTime);
         if (event.flags & kSampleRateValid) {
@@ -352,6 +363,36 @@ extern "C" BkAsioStatus bk_asio_channel(void* raw, std::int32_t index,
 }
 extern "C" BkAsioStatus bk_asio_control_panel(void* raw) noexcept {
     return guarded(raw, [&](IASIO* driver) { return asio_result(driver->controlPanel()); });
+}
+
+extern "C" BkAsioStatus bk_asio_clocks(void* raw, BkAsioClock* output,
+    std::int32_t capacity, std::int32_t* count) noexcept {
+    if (!output || !count || capacity < 1 || capacity > 4096) return {Bridge, BadArgument};
+    return guarded(raw, [&](IASIO* driver) {
+        auto clocks = std::unique_ptr<ASIOClockSource[]>(new (std::nothrow) ASIOClockSource[capacity]{});
+        if (!clocks) return BkAsioStatus{Bridge, Allocation};
+        for (int i = 0; i < capacity; ++i) std::memset(clocks[i].name, 0xff, sizeof(clocks[i].name));
+        long available = capacity;
+        auto result = asio_result(driver->getClockSources(clocks.get(), &available));
+        if (result.domain) return result;
+        *count = static_cast<std::int32_t>(available);
+        // Required count can exceed capacity; no uninitialized rows are copied.
+        if (available > capacity || available < 1) return ok();
+        for (long i = 0; i < available; ++i)
+            if (!std::memchr(clocks[i].name, 0, sizeof(clocks[i].name))) return BkAsioStatus{Bridge, BadString};
+        for (long i = 0; i < available; ++i) {
+            output[i].index = static_cast<std::int32_t>(clocks[i].index);
+            output[i].channel = static_cast<std::int32_t>(clocks[i].associatedChannel);
+            output[i].group = static_cast<std::int32_t>(clocks[i].associatedGroup);
+            output[i].current = static_cast<std::int32_t>(clocks[i].isCurrentSource);
+            std::memcpy(output[i].name, clocks[i].name, sizeof(output[i].name));
+        }
+        return ok();
+    });
+}
+extern "C" BkAsioStatus bk_asio_select_clock(void* raw, std::int32_t index) noexcept {
+    if (index < 0) return {Bridge, BadArgument};
+    return guarded(raw, [&](IASIO* driver) { return asio_result(driver->setClockSource(index)); });
 }
 
 extern "C" BkAsioStatus bk_asio_prepare(void* raw, BkAsioOutput* outputs,

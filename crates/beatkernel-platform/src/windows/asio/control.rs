@@ -7,8 +7,8 @@
 
 use super::{AsioDriverRegistration, AsioEnumerationLimits, AsioRegistryError, AsioRegistryView};
 use crate::audio::asio::{
-    AsioBufferConstraints, AsioConfigurationError, AsioPcmEncoding, AsioPcmError,
-    AsioSampleRateRequest,
+    validate_clock_sources, AsioBufferConstraints, AsioClockSource, AsioClockSourceError,
+    AsioConfigurationError, AsioPcmEncoding, AsioPcmError, AsioSampleRateRequest,
 };
 use std::{error::Error, ffi::c_void, fmt, marker::PhantomData, ptr::NonNull, rc::Rc};
 
@@ -29,6 +29,8 @@ pub enum AsioControlErrorDomain {
 /// Control/setup failures, without device replacement or fallback.
 #[derive(Debug)]
 pub enum AsioControlError {
+    /// Bounded clock-source report or explicit selection failed validation.
+    ClockSource(AsioClockSourceError),
     /// Supplied registration did not satisfy the SDK-free metadata contract.
     Registration(AsioRegistryError),
     /// Portable buffer/rate validation rejected the request/report.
@@ -63,6 +65,7 @@ pub enum AsioControlError {
 impl fmt::Display for AsioControlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ClockSource(error) => write!(f, "ASIO clock source: {error}"),
             Self::Registration(error) => write!(f, "ASIO registration: {error}"),
             Self::Configuration(error) => write!(f, "ASIO configuration: {error}"),
             Self::RegistryViewMismatch { view } => write!(
@@ -87,6 +90,7 @@ impl fmt::Display for AsioControlError {
 impl Error for AsioControlError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::ClockSource(error) => Some(error),
             Self::Registration(error) => Some(error),
             Self::Configuration(error) => Some(error),
             _ => None,
@@ -96,6 +100,11 @@ impl Error for AsioControlError {
 impl From<AsioConfigurationError> for AsioControlError {
     fn from(error: AsioConfigurationError) -> Self {
         Self::Configuration(error)
+    }
+}
+impl From<AsioClockSourceError> for AsioControlError {
+    fn from(error: AsioClockSourceError) -> Self {
+        Self::ClockSource(error)
     }
 }
 
@@ -160,7 +169,23 @@ struct RawChannel {
     sample_type: i32,
     name: [u8; 32],
 }
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+struct RawClock {
+    index: i32,
+    channel: i32,
+    group: i32,
+    current: i32,
+    name: [u8; 32],
+}
 unsafe extern "C" {
+    fn bk_asio_clocks(
+        handle: *mut c_void,
+        output: *mut RawClock,
+        capacity: i32,
+        count: *mut i32,
+    ) -> Status;
+    fn bk_asio_select_clock(handle: *mut c_void, index: i32) -> Status;
     fn bk_asio_open(clsid: *const u16, host: usize, out: *mut *mut c_void) -> Status;
     fn bk_asio_close(handle: *mut c_void) -> Status;
     fn bk_asio_channels(handle: *mut c_void, inputs: *mut i32, outputs: *mut i32) -> Status;
@@ -266,6 +291,76 @@ impl AsioControl {
     /// Immutable canonical registration used for this exact open.
     pub fn registration(&self) -> &AsioDriverRegistration {
         &self.registration
+    }
+    /// Queries actual driver clock identities with an explicit 1–4096 entry cap.
+    /// Preserves original names and indices; no automatic selection or resizing.
+    pub fn clock_sources(
+        &mut self,
+        max_sources: usize,
+    ) -> Result<Vec<AsioClockSource>, AsioControlError> {
+        if !(1..=4096).contains(&max_sources) {
+            return Err(AsioClockSourceError::InvalidLimits.into());
+        }
+        let channels = self.channels()?;
+        let mut raw = Vec::new();
+        raw.try_reserve_exact(max_sources)
+            .map_err(|_| AsioClockSourceError::Capacity)?;
+        raw.resize(max_sources, RawClock::default());
+        let mut count = 0;
+        // SAFETY: live owner-thread control and explicitly bounded initialized
+        // project ABI storage. C++ owns actual SDK rows and copies only available
+        // rows within capacity; trusted driver contract from open still applies.
+        check(
+            unsafe { bk_asio_clocks(self.raw(), raw.as_mut_ptr(), max_sources as i32, &mut count) },
+            "getClockSources",
+        )?;
+        if count < 1 {
+            return Err(AsioClockSourceError::MalformedReport.into());
+        }
+        if count as usize > max_sources {
+            return Err(AsioClockSourceError::Capacity.into());
+        }
+        let mut sources = Vec::new();
+        sources
+            .try_reserve_exact(count as usize)
+            .map_err(|_| AsioClockSourceError::Capacity)?;
+        for raw in &raw[..count as usize] {
+            let source = AsioClockSource::from_raw(
+                raw.index,
+                raw.channel,
+                raw.group,
+                raw.current,
+                raw.name,
+            )?;
+            if source
+                .associated_channel()
+                .is_some_and(|channel| channel >= channels.inputs)
+            {
+                return Err(AsioClockSourceError::MalformedReport.into());
+            }
+            sources.push(source);
+        }
+        validate_clock_sources(&sources, max_sources)?;
+        Ok(sources)
+    }
+    /// Requests this exact enumerated source index before stream construction.
+    /// Requery current source and sample rate afterward; native acceptance alone
+    /// does not prove an external synchronization signal is available.
+    pub fn set_clock_source(
+        &mut self,
+        index: u32,
+        max_sources: usize,
+    ) -> Result<(), AsioControlError> {
+        let sources = self.clock_sources(max_sources)?;
+        if !sources.iter().any(|source| source.index() == index) {
+            return Err(AsioClockSourceError::InvalidSelection { index }.into());
+        }
+        // SAFETY: index is validated against a current signed-SDK source report;
+        // synchronous owner-thread operation retains no Rust pointers.
+        check(
+            unsafe { bk_asio_select_clock(self.raw(), index as i32) },
+            "setClockSource",
+        )
     }
     /// Queries current native channel counts; no arbitrary channel ceiling added.
     pub fn channels(&mut self) -> Result<AsioChannels, AsioControlError> {

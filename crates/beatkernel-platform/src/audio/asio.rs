@@ -9,6 +9,8 @@ mod pcm;
 pub use pcm::{encode_asio_channel, AsioPcmEncoding, AsioPcmError};
 mod render;
 pub use render::{AsioBlockRenderer, AsioRenderError};
+mod clocks;
+pub use clocks::{validate_clock_sources, AsioClockSource, AsioClockSourceError};
 
 /// Invalid driver metadata or an unsupported exact configuration request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
