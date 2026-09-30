@@ -118,8 +118,22 @@ pre-start priming supplies no callback observation. The [SDK latency contract](h
 defines latency relative to the buffer selected for rendering at the switch.
 
 This produces bounded presentation observations, not an exact acoustic clock.
-Integration into the live input/judge host, calibration discipline and native
-acceptance remain outstanding.
+`AsioPresentationClock` calibrates two progressing observations with matching
+sample rate and frame-zero origin. It validates the actual rendered frame grid,
+uses bounded host interval midpoints, and includes interval radii, frame-grid
+quantization and amplification over explicitly permitted extrapolation in the
+observation error. Caller-supplied residual drift remains an estimate; an absent
+bound retains Unknown quality. Mapping rejects queries outside finite validity.
+Transport construction preserves the inverse observed slope and only succeeds
+when output frame zero lies inside that validity.
+
+`PresentationDiscipline::observe_asio` accepts these observations for continuous
+transport correction. It retains ASIO rate and block identity separately from
+WASAPI counters and generic clock pairs, rejects changed rate/overlap/regression,
+and does not refresh freshness for duplicate blocks. Its midpoint-based rolling
+model retains Unknown quality. These paths require same-stream observations;
+matching metadata alone cannot prove that two driver instances share a clock.
+Live input/judge host composition and native acceptance remain outstanding.
 
 The rendered-block interval implementation has four additional portable
 fixtures for actual Mixer frame identity, fractional latency rounding,
