@@ -5,7 +5,74 @@ use crate::{
     judge::JudgeEvent,
     time::{Duration, Timestamp},
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
+
+/// Context borrowed by a caller-defined projection for one visible object.
+#[derive(Clone, Copy, Debug)]
+pub struct CustomProjectionContext<'a> {
+    /// Compiled object carrying exact identity, geometry binding and song range.
+    pub object: &'a TimedObject,
+    /// Current song time, independent of renderer pixels and judge state.
+    pub song_time: Timestamp,
+    /// Inclusive visible song-window start.
+    pub window_start: Timestamp,
+    /// Inclusive visible song-window end.
+    pub window_end: Timestamp,
+}
+
+/// Fixed-size caller-defined geometry state, with no per-frame owned payload.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CustomRenderState {
+    /// Exact compiled object identity; checked against the callback context.
+    pub object: ObjectId,
+    /// Exact compiled visual identity; checked against the callback context.
+    pub visual: VisualId,
+    /// Caller-defined state schema interpreted by the external renderer.
+    pub type_tag: u32,
+    /// Caller geometry-table identity; not dereferenced by the core.
+    pub geometry_ref: u64,
+    /// Bounded scalar coordinates/parameters; every slot must remain finite.
+    pub values: [f64; 16],
+    /// Number of meaningful scalar slots, at most sixteen.
+    pub value_count: u8,
+    /// Finite normalized progress in the inclusive range zero through one.
+    pub progress: f64,
+}
+
+/// Genuine application projection extension, configured outside the core.
+///
+/// Implementations own immutable geometry and should be pure over the context.
+/// The core invokes project only for indexed visible objects and validates its
+/// fixed-size output; callback allocation, panics and side effects are external.
+pub trait CustomProjection: std::fmt::Debug + Send + Sync {
+    /// Validates one bound object at setup, before construction succeeds.
+    fn validate(&self, object: &TimedObject) -> Result<(), VisualError>;
+    /// Calculates bounded logical state for one indexed visible object.
+    fn project(
+        &self,
+        context: CustomProjectionContext<'_>,
+    ) -> Result<CustomRenderState, VisualError>;
+}
+
+/// Shared ownership of an actual custom implementation; clones share its state.
+/// Equality compares allocation identity rather than arbitrary implementation data.
+#[derive(Clone, Debug)]
+pub struct CustomProjectionHandle(Arc<dyn CustomProjection>);
+impl CustomProjectionHandle {
+    /// Allocates one application implementation during setup.
+    pub fn new(projection: impl CustomProjection + 'static) -> Self {
+        Self(Arc::new(projection))
+    }
+    /// Shares an already-owned application projection without cloning its geometry.
+    pub fn from_shared(projection: Arc<dyn CustomProjection>) -> Self {
+        Self(projection)
+    }
+}
+impl PartialEq for CustomProjectionHandle {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 /// A caller-supplied visual shape; geometry uses logical units.
 #[derive(Clone, Debug, PartialEq)]
@@ -23,6 +90,24 @@ pub enum Projection {
         position: [f64; 2],
         /// Positive approach duration.
         approach: Duration,
+    },
+    /// Radial approach around a fixed center and angle, independent of scroll.
+    Polar {
+        /// Finite logical center.
+        center: [f64; 2],
+        /// Finite angle in radians.
+        angle: f64,
+        /// Nonnegative target radius at progress one.
+        radius: f64,
+        /// Nonnegative initial radius at progress zero.
+        approach_radius: f64,
+        /// Positive approach duration.
+        approach: Duration,
+    },
+    /// Application-owned custom geometry and genuine projection callback.
+    Custom {
+        /// Validated application implementation shared across clones.
+        projection: CustomProjectionHandle,
     },
     /// Piecewise linear path, uniformly parameterized over object duration.
     Path {
@@ -63,6 +148,21 @@ pub enum RenderObjectState {
         /// Zero before approach, one at target.
         approach_progress: f64,
     },
+    /// Logical radial approach, converted into pixels by an external renderer.
+    Polar {
+        /// Chart object.
+        object: ObjectId,
+        /// Logical center.
+        center: [f64; 2],
+        /// Angle in radians.
+        angle: f64,
+        /// Interpolated nonnegative logical radius.
+        radius: f64,
+        /// Zero before approach, one at target.
+        approach_progress: f64,
+    },
+    /// Validated bounded geometry for the external renderer's custom schema.
+    Custom(CustomRenderState),
     /// Path reference and calculated head/window progress.
     Path {
         /// Chart object.
@@ -104,6 +204,10 @@ pub enum VisualError {
     InvalidPath(ObjectId),
     /// Window end precedes its start.
     ReversedWindow,
+    /// Custom output changed object or visual identity.
+    CustomIdentityMismatch(ObjectId),
+    /// Custom output has too many scalars or progress outside zero through one.
+    InvalidCustomState(ObjectId),
     /// A calculated coordinate is nonfinite.
     Overflow,
 }
@@ -147,6 +251,20 @@ impl VisualProjector {
                 Projection::Lane { unit, .. } if unit.as_nanos() > 0 => {}
                 Projection::Point { position, approach }
                     if approach.as_nanos() > 0 && position.iter().all(|v| v.is_finite()) => {}
+                Projection::Polar {
+                    center,
+                    angle,
+                    radius,
+                    approach_radius,
+                    approach,
+                } if center.iter().all(|value| value.is_finite())
+                    && angle.is_finite()
+                    && radius.is_finite()
+                    && *radius >= 0.0
+                    && approach_radius.is_finite()
+                    && *approach_radius >= 0.0
+                    && approach.as_nanos() > 0 => {}
+                Projection::Custom { .. } => {}
                 Projection::Path { points }
                     if points.len() >= 2 && points.iter().flatten().all(|v| v.is_finite()) => {}
                 _ => return Err(VisualError::InvalidGeometry),
@@ -159,6 +277,9 @@ impl VisualProjector {
             let projection = map
                 .get(&object.visual)
                 .ok_or(VisualError::MissingBinding(object.visual))?;
+            if let Projection::Custom { projection } = projection {
+                projection.0.validate(object)?;
+            }
             if matches!(projection, Projection::Path { .. })
                 && object.time.end.is_none_or(|end| end <= object.time.start)
             {
@@ -300,15 +421,50 @@ impl VisualProjector {
                     tail_distance,
                 }
             }
-            Projection::Point { position, approach } => {
-                let remaining =
-                    (i128::from(object.time.start.as_nanos()) - i128::from(song.as_nanos())) as f64;
-                RenderObjectState::Point {
-                    object: object.id,
-                    position: *position,
-                    approach_progress: (1.0 - remaining / approach.as_nanos() as f64)
-                        .clamp(0.0, 1.0),
+            Projection::Point { position, approach } => RenderObjectState::Point {
+                object: object.id,
+                position: *position,
+                approach_progress: approach_progress(object.time.start, song, *approach),
+            },
+            Projection::Polar {
+                center,
+                angle,
+                radius,
+                approach_radius,
+                approach,
+            } => {
+                let progress = approach_progress(object.time.start, song, *approach);
+                let radius = approach_radius * (1.0 - progress) + radius * progress;
+                if !radius.is_finite() {
+                    return Err(VisualError::Overflow);
                 }
+                RenderObjectState::Polar {
+                    object: object.id,
+                    center: *center,
+                    angle: *angle,
+                    radius,
+                    approach_progress: progress,
+                }
+            }
+            Projection::Custom { projection } => {
+                let state = projection.0.project(CustomProjectionContext {
+                    object,
+                    song_time: song,
+                    window_start,
+                    window_end,
+                })?;
+                if state.object != object.id || state.visual != object.visual {
+                    return Err(VisualError::CustomIdentityMismatch(object.id));
+                }
+                if !state.values.iter().all(|value| value.is_finite())
+                    || !state.progress.is_finite()
+                {
+                    return Err(VisualError::Overflow);
+                }
+                if state.value_count > 16 || !(0.0..=1.0).contains(&state.progress) {
+                    return Err(VisualError::InvalidCustomState(object.id));
+                }
+                RenderObjectState::Custom(state)
             }
             Projection::Path { points } => {
                 let end = object.time.end.expect("validated ranged path");
@@ -341,6 +497,11 @@ impl VisualProjector {
         };
         Ok(result)
     }
+}
+
+fn approach_progress(target: Timestamp, song: Timestamp, approach: Duration) -> f64 {
+    let remaining = (i128::from(target.as_nanos()) - i128::from(song.as_nanos())) as f64;
+    (1.0 - remaining / approach.as_nanos() as f64).clamp(0.0, 1.0)
 }
 
 fn build_index(
