@@ -311,3 +311,62 @@ fn session_replacement_resets_chronology_and_routes_new_commands_to_fresh_queue(
     drop(old_producer);
     assert!(old_consumer.is_disconnected());
 }
+
+#[test]
+fn explicit_audio_interleaves_with_hits_without_mutating_gameplay_or_input_chronology() {
+    let (mut runtime, mut consumer) = fixture(3);
+    let background = AudioCommand::Play {
+        voice: VoiceId(99),
+        sample: SampleId(7),
+        at: Timestamp::from_nanos(9_000_000),
+        gain: 0.25,
+    };
+    let initial = runtime.judge().stable_hash().unwrap();
+    runtime.enqueue_audio(background).unwrap();
+    assert_eq!(runtime.judge().stable_hash().unwrap(), initial);
+    let report = runtime
+        .process_input(input(1, 2_000_000, 0), &Clocks, point(3, 3_000_000))
+        .unwrap();
+    assert!(report.judge_error.is_none());
+    assert_eq!(consumer.try_pop().unwrap(), background);
+    assert_eq!(consumer.try_pop().unwrap(), report.audio_commands[0]);
+    let stop = AudioCommand::Stop {
+        voice: VoiceId(99),
+        at: Timestamp::from_nanos(-1),
+    };
+    let after_hit = runtime.judge().stable_hash().unwrap();
+    runtime.enqueue_audio(stop).unwrap();
+    assert_eq!(runtime.judge().stable_hash().unwrap(), after_hit);
+    assert_eq!(consumer.try_pop().unwrap(), stop); // Output times are not host times.
+    assert!(matches!(
+        runtime.process_input(input(2, 1_000_000, 0), &Clocks, point(3, 4_000_000)),
+        Err(RuntimeError::NonMonotonicHost)
+    ));
+    assert_eq!(runtime.telemetry().counters().audio_commands, 3);
+}
+
+#[test]
+fn explicit_audio_full_and_disconnect_return_exact_commands_and_share_counters() {
+    let (mut runtime, mut consumer) = fixture(1);
+    let command = AudioCommand::Stop {
+        voice: VoiceId(u64::MAX),
+        at: Timestamp::MAX,
+    };
+    let initial = runtime.judge().stable_hash().unwrap();
+    runtime.enqueue_audio(command).unwrap();
+    let full = runtime.enqueue_audio(command).unwrap_err();
+    assert_eq!(full.command, command);
+    assert_eq!(full.reason, QueuePushError::Full);
+    assert_eq!(consumer.try_pop().unwrap(), command);
+    drop(consumer);
+    let disconnected = runtime.enqueue_audio(command).unwrap_err();
+    assert_eq!(disconnected.command, command);
+    assert_eq!(disconnected.reason, QueuePushError::Disconnected);
+    assert_eq!(runtime.judge().stable_hash().unwrap(), initial);
+    let counters = runtime.telemetry().counters();
+    assert_eq!(counters.audio_commands, 1);
+    assert_eq!(counters.queue_full, 1);
+    assert_eq!(counters.queue_disconnected, 1);
+    assert_eq!(counters.inputs, 0);
+    assert_eq!(counters.judge_results, 0);
+}

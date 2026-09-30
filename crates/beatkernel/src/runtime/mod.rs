@@ -8,7 +8,7 @@ use crate::{
     chart::ObjectId,
     input::{BindingMap, DeviceId, GameInputEvent, PhysicalInputEvent},
     judge::{JudgeEngine, JudgeError, JudgeEvent, JudgeOutcome, JudgeStage},
-    telemetry::RuntimeTelemetry,
+    telemetry::{RuntimeCounters, RuntimeTelemetry},
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Timestamp},
     transport::{Transport, TransportError},
 };
@@ -265,6 +265,16 @@ impl Runtime {
         self.last_song = Some(song);
     }
 
+    /// Admit an explicit command to the same queue used by judged keysounds.
+    ///
+    /// The timestamp must already use the configured audio output domain.
+    /// This control-thread operation performs no clock mapping or gameplay
+    /// mutation. Exact failures are returned without retry; admission does not
+    /// establish successful mixer execution or native playback.
+    pub fn enqueue_audio(&mut self, command: AudioCommand) -> Result<(), CommandPushError> {
+        admit_audio(&mut self.producer, self.telemetry.counters_mut(), command)
+    }
+
     fn publish(&mut self, report: &mut RuntimeReport) {
         let counters = self.telemetry.counters_mut();
         counters.judge_results = counters
@@ -288,21 +298,11 @@ impl Runtime {
                     at: report.audio_at.timestamp,
                     gain: sound.gain,
                 };
-                match self.producer.try_push(command) {
+                match admit_audio(&mut self.producer, counters, command) {
                     Ok(()) => {
-                        counters.audio_commands = counters.audio_commands.saturating_add(1);
                         report.audio_commands.push(command);
                     }
                     Err(error) => {
-                        match error.reason {
-                            QueuePushError::Full => {
-                                counters.queue_full = counters.queue_full.saturating_add(1)
-                            }
-                            QueuePushError::Disconnected => {
-                                counters.queue_disconnected =
-                                    counters.queue_disconnected.saturating_add(1)
-                            }
-                        }
                         report.audio_failures.push(error);
                     }
                 }
@@ -377,6 +377,24 @@ impl Runtime {
     pub fn telemetry_mut(&mut self) -> &mut RuntimeTelemetry {
         &mut self.telemetry
     }
+}
+
+fn admit_audio(
+    producer: &mut CommandProducer,
+    counters: &mut RuntimeCounters,
+    command: AudioCommand,
+) -> Result<(), CommandPushError> {
+    let result = producer.try_push(command);
+    match &result {
+        Ok(()) => counters.audio_commands = counters.audio_commands.saturating_add(1),
+        Err(error) => match error.reason {
+            QueuePushError::Full => counters.queue_full = counters.queue_full.saturating_add(1),
+            QueuePushError::Disconnected => {
+                counters.queue_disconnected = counters.queue_disconnected.saturating_add(1)
+            }
+        },
+    }
+    result
 }
 
 fn normalize(

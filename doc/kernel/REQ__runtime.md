@@ -41,6 +41,16 @@ returns the exact failed command, increments counters and does not undo judging.
 A judge failure in binding fanout stops remaining destinations and is retained in
 the report together with all preceding results: fanout is not transactional.
 
+`Runtime::enqueue_audio` lets the owning control thread submit an explicit
+AudioCommand to that same bounded producer between gameplay operations. This
+supports application background audio and scalar rate/stop/seek controls without
+creating another producer or introducing game-specific logic. Command timestamps
+must already be in the configured audio output domain; this method performs no
+host/song mapping, judge advance, transport edit or acquisition-sequence change.
+It returns the exact queue failure without retry and shares the hit-publication
+admission/full/disconnection counters. Admission does not prove mixer execution
+or native output; scalar Seek does not reconstruct gameplay state.
+
 The Phase 8 forward loop does not restore judge state for seek/reverse. Negative
 transport segments and song-time regression are rejected. Mutable engine and
 transport access are intended for a caller coordinating Phase 10 restoration;
