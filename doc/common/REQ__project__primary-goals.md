@@ -16,6 +16,15 @@ Windows' [stream-management contract](https://learn.microsoft.com/en-us/windows/
 
 ## Current evidence and remaining work
 
+On 2026-09-30 the user instructed that verification be deferred and
+implementation continue through the remaining phases. This overrides the
+original phase-completion sequencing rule for implementation: pending Windows
+audio verification must not block Phases 8 onward. Keep native execution,
+independent reviews and final QA as outstanding work; do not mark them passed
+or call the full runtime complete. Compile and format checks may accompany
+implementation to keep the code buildable. MIT, dependency boundaries,
+real-time restrictions and the ASIO licensing condition remain required.
+
 Phases 0–3 are implemented: [time and transport](../kernel/REQ__time-transport.md), [canonical input](../kernel/REQ__canonical-input.md), pure keyboard mapping fixtures for Windows, Linux, and macOS, and [device-aware binding](../kernel/REQ__binding.md). Binding retains owned typed samples, provenance, and ordered logical destinations. [Phase 4 Windows input](../kernel/REQ__windows-input.md) passed independent review and CLI QA. Six native API integration tests and five platform unit tests pass in an isolated Windows Server VM. An earlier inspector build captured device-attributed A Down/Up, provenance and normal/Alt+F4 cleanup through a Hyper-V virtual keyboard; the latest revision passed finite native execution with no acquisitions in a locked guest. Native virtual-device execution does not establish physical hardware latency.
 
 [Phase 5 chart compilation](../kernel/REQ__chart-compiler.md) passed independent review and CLI QA. It provides absolute object start/end times, rational BPM, integer STOPs and separate visual SV markers. Eleven debug/release golden tests cover timing boundaries, deterministic ordering and validation.
