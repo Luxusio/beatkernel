@@ -1,0 +1,107 @@
+//! Explicit checked mach absolute-time sampling and origin normalization.
+use super::ffi;
+use beatkernel::time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Timestamp};
+use std::io;
+/// Shared native mach clock and one explicit origin/domain mapping.
+#[derive(Clone, Copy, Debug)]
+pub struct MachClock {
+    numer: u32,
+    denom: u32,
+    origin: u64,
+    native: ClockDomainId,
+    host: ClockDomainId,
+}
+/// One unmodified tick sample with absolute/native and normalized host points.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MachSample {
+    /// Raw mach_absolute_time counter, preserved without truncation.
+    pub ticks: u64,
+    /// Absolute mach nanoseconds in the declared native domain.
+    pub native: ClockPoint,
+    /// Elapsed nanoseconds from this clock's explicit initialization origin.
+    pub normalized: ClockPoint,
+}
+impl MachClock {
+    /// Caches the native timebase and samples one explicit origin.
+    /// Native and host IDs must differ because their timestamp origins differ.
+    pub fn new(native: ClockDomainId, host: ClockDomainId) -> io::Result<Self> {
+        if native == host {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "mach absolute and origin-relative clocks require distinct domains",
+            ));
+        }
+        let mut timebase = ffi::Timebase::default();
+        // SAFETY: aligned writable mach_timebase_info_data_t; API retains no pointer.
+        let status = unsafe { ffi::mach_timebase_info(&mut timebase) };
+        if status != 0 || timebase.numer == 0 || timebase.denom == 0 {
+            return Err(io::Error::other(format!(
+                "mach_timebase_info failed: {status}"
+            )));
+        }
+        // SAFETY: mach_absolute_time has no arguments or ownership requirements.
+        let origin = unsafe { ffi::mach_absolute_time() };
+        Ok(Self {
+            numer: timebase.numer,
+            denom: timebase.denom,
+            origin,
+            native,
+            host,
+        })
+    }
+    /// Samples the native mach counter exactly once.
+    pub fn sample(&self) -> io::Result<MachSample> {
+        // SAFETY: process-local read-only kernel time primitive.
+        let ticks = unsafe { ffi::mach_absolute_time() };
+        self.at_ticks(ticks)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "mach timestamp overflow"))
+    }
+    /// Converts saved native ticks, retaining their exact raw value.
+    pub fn at_ticks(&self, ticks: u64) -> Option<MachSample> {
+        let native = self.native_point(ticks)?;
+        let timestamp = self.map(native, self.host)?;
+        Some(MachSample {
+            ticks,
+            native,
+            normalized: ClockPoint {
+                domain: self.host,
+                timestamp,
+            },
+        })
+    }
+    /// Absolute mach nanoseconds, independent of the initialization origin.
+    pub fn native_point(&self, ticks: u64) -> Option<ClockPoint> {
+        let nanos = u128::from(ticks) * u128::from(self.numer) / u128::from(self.denom);
+        Some(ClockPoint {
+            domain: self.native,
+            timestamp: Timestamp::from_nanos(i64::try_from(nanos).ok()?),
+        })
+    }
+    /// Explicit absolute mach domain.
+    pub const fn native_domain(&self) -> ClockDomainId {
+        self.native
+    }
+    /// Explicit origin-relative host domain.
+    pub const fn host_domain(&self) -> ClockDomainId {
+        self.host
+    }
+}
+impl ClockMapper for MachClock {
+    fn map(&self, from: ClockPoint, to: ClockDomainId) -> Option<Timestamp> {
+        if from.domain == to {
+            return Some(from.timestamp);
+        }
+        let origin = self.native_point(self.origin)?.timestamp.as_nanos();
+        let nanos = if from.domain == self.native && to == self.host {
+            i128::from(from.timestamp.as_nanos()) - i128::from(origin)
+        } else if from.domain == self.host && to == self.native {
+            i128::from(from.timestamp.as_nanos()) + i128::from(origin)
+        } else {
+            return None;
+        };
+        Some(Timestamp::from_nanos(i64::try_from(nanos).ok()?))
+    }
+    fn quality(&self) -> ClockMappingQuality {
+        ClockMappingQuality::Exact
+    }
+}
