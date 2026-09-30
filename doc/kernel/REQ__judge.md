@@ -75,8 +75,19 @@ slices and deadline processing rather than rescan all completed chart objects
 on every input/frame. Setup and results can allocate: this is a single-owner
 gameplay-thread API, not an RT audio callback, and has no measured latency claim.
 
-The console example will offer a labeled synthetic fixture and a timestamped
-stdin stream routed through virtual canonical input, four-control bindings and
-explicit Transport mapping. It is not native keyboard acquisition. File
+The console example offers `--help`, a labeled synthetic `--fixture`, and a
+timestamped `--stdin` stream routed through virtual canonical input, four-control
+bindings and explicit Transport mapping. Each nonblank line is
+`host_ns lane down|up|repeat`, with lanes 1..4 and nondecreasing signed i64 host
+nanoseconds. Host origin 1,000,000,000 ns maps to song zero; earlier timestamps,
+malformed fields, unknown lanes and states fail with a line number and nonzero
+exit. Equal timestamps are accepted. Blank lines are ignored. EOF advances to
+at least song 1,600,000,001 ns, beyond the fixed chart's widest deadlines, so
+unplayed stages produce explicit misses. The fixed chart has Instant on lane 1
+at 500 ms, Hold on lane 2 from 500 to 1,500 ms, and Instant on lanes 3 and 4 at
+1,000 and 1,500 ms. Grade 1 uses inclusive +/-20 ms and grade 2 +/-100 ms;
+offset is zero. Results print song time, stage/outcome and original host/source/
+sequence provenance; timeout results say `input=none`.
+It is not native keyboard acquisition. File
 parsers, native/audio integration, full tracking primitives and snapshot-based
 seek/reverse remain later phases of [the original plan](../../plan.md).

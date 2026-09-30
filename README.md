@@ -8,14 +8,16 @@ in Rust. The architecture and phased implementation specification are in
 
 The source implements **Phase 0: repository skeleton**, **Phase 1: integer time
 and transport**, **Phase 2: canonical physical input**, **Phase 3: binding**,
-and **Phase 4: Windows native input**. Judgment, audio scheduling, and replay
-remain subsequent phases.
+and **Phase 4: Windows native input**. **Phase 5: chart compilation** passed
+independent review and CLI QA. **Phase 6: Instant/Hold judging** is implemented.
+Audio scheduling and replay remain
+subsequent phases.
 
 **Phase 4 passed independent review and CLI QA:** portable Raw Input processing and a Windows
 QPC receipt sampler, native packet acquisition and explicit registration are
 present. Their contract is [Windows input](doc/kernel/REQ__windows-input.md).
 The inspector has captured device-attributed keyboard input in an isolated
-Windows VM. **Phase 5 chart compilation is present:**
+Windows VM. **Phase 5 chart compilation:**
 its [timing contract](doc/kernel/REQ__chart-compiler.md) covers BPM, STOP,
 object endpoints and separate SV markers.
 
@@ -28,6 +30,8 @@ beatkernel/
 │   │   ├── src/transport/       # rates and piecewise host/song mapping
 │   │   ├── src/input/           # typed events, device identity, virtual FIFO, bindings
 │   │   ├── src/chart/           # source charts and absolute compiled timelines
+│   │   ├── src/interaction/     # typed evaluator and active-interaction seams
+│   │   ├── src/judge/           # profiles, policies and forward Instant/Hold judging
 │   │   ├── tests/time_transport.rs
 │   │   └── examples/transport.rs
 │   └── beatkernel-platform/     # pure input processing and Windows acquisition
@@ -59,6 +63,8 @@ cargo test --workspace --release
 cargo run -p beatkernel --example transport
 cargo run -p beatkernel --example binding
 cargo run -p beatkernel --example chart
+cargo run -p beatkernel --example judge -- --help
+cargo run -p beatkernel --example judge -- --fixture
 cargo run -p beatkernel-platform --example input_inspector
 cargo run -p beatkernel-platform --example windows_input_inspector -- --fixture
 cargo doc --workspace --no-deps
@@ -163,6 +169,66 @@ Duplicate IDs/markers, invalid ranges and overflow are explicit errors. At
 beat 1 place beat 2 at 1,750 ms. Run the chart example to see the compiled point
 and range. [The chart contract](doc/kernel/REQ__chart-compiler.md) defines
 rounding, capacity and adapter boundaries.
+
+## Judging and console playback
+
+`JudgeEngine` owns a compiled chart, a validated `JudgeProfile` and caller `Rule`
+registrations mapping opaque interaction IDs to logical controls and evaluators.
+`InstantEvaluator` accepts point objects; `HoldEvaluator` requires an end strictly
+after the start. `with_policies` replaces candidate selection and grading.
+The default resolver picks the closest eligible target, then earlier target and
+ObjectId; `EarliestCandidate` provides another deterministic choice. A fresh
+button Down selects at most one pending start per logical destination. Repeat
+and duplicate Down do not become new presses; builtin evaluators ignore
+nonbutton samples, which remain typed for custom evaluators.
+
+Pass an unchanged `GameInputEvent` and explicitly mapped song timestamp to
+`push_input`. Both `push_input` and `advance_to` apply the signed profile offset
+once; positive offset moves effective time later. Times may be equal or negative
+but cannot regress. Windows have nonnegative asymmetric early/late bounds,
+nested from narrow to wide with unique grade IDs; the first inclusive match
+wins. Deadlines expire strictly after their late boundary, so advancing to a
+deadline still permits input at that same time.
+
+A Hold reports a graded head, acquires `(DeviceId, PhysicalControlId,
+GameControlId)` ownership, then reports a separate tail. Only the owner Up
+releases it: release before the widest early tail boundary breaks it, release
+inside the tail windows grades it, and expiry yields a miss. There is no regrab
+or automatic perfect tail. Callers combine stage results into their own score.
+Ordered `JudgeEvent` values include object, stage, outcome, effective song time
+and original input metadata; timeouts have no input provenance. Library-owned
+validation errors leave state unchanged. Extension callbacks are trusted and
+infallible; their panics and external side effects are outside that guarantee.
+Setup, dispatch and result ownership can allocate. The engine is a single-owner,
+forward gameplay-thread API with no measured latency guarantee.
+
+The example's `--fixture` prints a labeled synthetic transcript. With no
+arguments or `--help`, it prints help. `--stdin` accepts nonblank lines of
+`host_ns lane down|up|repeat`, where lanes are 1..4 and signed i64 timestamps
+must be nondecreasing and at least 1,000,000,000 ns. Virtual canonical input
+passes through four-control bindings and `Transport`; that host origin maps to
+song zero. The fixed chart has lane 1 Instant at 500 ms, lane 2 Hold from
+500 to 1,500 ms, lane 3 Instant at 1,000 ms and lane 4 Instant at 1,500 ms.
+Grade 1 is inclusive +/-20 ms, grade 2 +/-100 ms, and offset is zero.
+
+```sh
+cargo run -p beatkernel --example judge -- --stdin <<'EOF'
+1500000000 1 down
+1500000000 2 down
+2000000000 3 down
+2500000000 2 up
+2500000000 4 down
+EOF
+```
+
+This produces five grade-1 stage hits with zero deltas. Equal timestamps are
+valid and blank lines are ignored. Malformed fields, unknown lanes/states,
+timestamps before origin and decreasing timestamps exit nonzero with a line
+number. EOF advances to at least song 1,600,000,001 ns to report remaining
+misses; timeout output says `input=none`. This console path uses virtual input.
+Native gameplay/audio integration, file parsers, replay/snapshot restoration
+for seek/reverse and the remaining Phases 7–15 stay required. The
+[judge contract](doc/kernel/REQ__judge.md) specifies the API and extension limits.
 
 ## Canonical physical input
 
