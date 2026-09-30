@@ -31,7 +31,7 @@ provides finite PCM preload, bounded scalar SPSC commands and deterministic
 scheduled mixing. [Windows audio](../platform/REQ__windows-audio.md) provides
 native WASAPI enumeration/probing, shared engine/legacy event or explicit timer
 operation, exclusive event operation, requested/applied configuration and
-worker-owned clock telemetry. On Rust 1.98.1, coordinator checks pass 161 tests
+worker-owned clock telemetry. On Rust 1.98.1, coordinator checks pass 174 tests
 including doctests in each of debug and release on Linux, and strict Clippy
 passes on Linux and for the Windows platform target. Windows cross-compilation
 passes. These checks are not independent audio review/QA or successful native
