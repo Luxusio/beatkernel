@@ -33,8 +33,13 @@ selection with empty complete input and empty destination is accepted.
 
 `AsioChannelInfo::pcm_encoding` maps actual driver metadata to this converter's
 encoding without claiming support for unknown types or native output. The
-[control bridge](REQ__asio-driver-control.md) remains separate from pending
-ASIO buffer creation, callbacks, mixer delivery and stream lifecycle.
+[control bridge](REQ__asio-driver-control.md) is consumed by the separate
+[stream](REQ__asio-stream.md) when preparing SDK buffers. Its SDK-free
+`AsioBlockRenderer` owns the actual Mixer and preallocated scratch, validates all
+output planes before Mixer mutation and checks the entire mixed block for finite
+values before writing any plane. The last successful Mixer report remains visible
+even if subsequent PCM delivery fails. Zero frames or channel-count mismatch is
+`InvalidConfiguration`; exceeding the actual Mixer render limit is `Capacity`.
 
 Source and fixtures are SDK-free MIT code. Current tests, native execution,
 independent review and QA remain deferred. Compilation alone does not establish
@@ -46,3 +51,6 @@ fixtures and the existing platform PCM fixtures compiled without execution.
 The optional SDK-gated Windows control wrapper and C++ bridge are not compiled
 by these checks. Allocation assertions are authored evidence to execute later,
 not measured callback behavior or a current no-allocation acceptance verdict.
+Seven additional actual-Mixer renderer fixtures are authored and compiled without
+execution; they cover heterogeneous literal planes, preflight atomicity, retained
+reports, capacity, contiguous rendering and allocation instrumentation.

@@ -65,16 +65,17 @@ against caller-supplied SDK headers on MSVC targets; those enabled combined
 artifacts require GPLv3 distribution conditions. SDK source is not vendored or
 downloaded by the build script. Preserve the actual supplied SDK revision and
 source, including licenses, when distributing combined artifacts.
-No ASIO native output backend is implemented yet.
+The separate [ASIO stream source](REQ__asio-stream.md) now owns SDK double buffers,
+callbacks, Mixer delivery and explicit start/terminal stop.
 The separate [Windows driver discovery](REQ__asio-driver-discovery.md) path uses
 read-only registry APIs without incorporating SDK code or opening drivers.
 There is no ASIO-combined release artifact or executed native-control evidence.
-The feature's source/build path does not claim stream support.
+Actual SDK-enabled compilation and native output acceptance remain unverified.
 WASAPI requests for ASIO now return the existing typed
 `BackendUnavailable(Asio)` failure. The old public `AsioLicenseUnresolved` variant
 is retained for existing callers, but current WASAPI code no longer emits it.
 
-The policy prerequisite is resolved; remaining ASIO work is native stream implementation,
-build/source provenance and actual output acceptance. Future SDK incorporation
+The policy prerequisite is resolved; remaining ASIO work includes final-host
+composition, presentation mapping, build/source provenance and actual output acceptance. SDK incorporation
 must preserve third-party licensing boundaries described here. Native execution,
 tests, independent review and QA remain deferred by the existing user instruction.

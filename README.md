@@ -361,8 +361,9 @@ clock progression and joined stop before reporting success.
 
 Actual native shared/exclusive playback and independent audio review/QA remain
 pending. The available Windows VM previously had no render endpoints. Windows
-cross-compilation proves source compatibility, not playback. ASIO streaming
-is pending and WASAPI reports `BackendUnavailable(Asio)` for such requests.
+cross-compilation proves source compatibility, not playback. ASIO has a separate
+[stream API](doc/platform/REQ__asio-stream.md) source implementation; SDK compilation
+and native playback remain pending. WASAPI reports `BackendUnavailable(Asio)` for such requests.
 Project-authored source and builds without ASIO are distributed under MIT,
 with applicable third-party notices retained. Builds incorporating the ASIO SDK follow
 [GPLv3 distribution and source-delivery conditions](doc/platform/REQ__asio-distribution.md).
@@ -383,13 +384,23 @@ original C++ bridge against a supplied SDK. On Windows, set
 target with MSVC or clang-cl. Enabled Windows GNU SDK builds are currently rejected
 pending compatible ABI support. Default CI and verification commands check the SDK-free build;
 `--all-features` on Windows requires these ASIO prerequisites. Driver controls
-expose native capabilities and explicit rate changes; ASIO callbacks and mixer
-output remain to be implemented. Portable `audio::asio` validates exact buffer
+expose native capabilities and explicit rate changes. `windows::asio::stream::AsioStream`
+consumes a control and Mixer, maps distinct output channels, creates SDK double
+buffers and primes B before an explicit one-time start. Callback state stays alive
+until stop/dispose/Release and callback drain. Native reset/rate/buffer notifications
+require explicit reconstruction. Software prepared frames and raw driver sample
+position/system time are separate; no physical synchronization is inferred.
+Portable `audio::asio` validates exact buffer
 sizes and distinguishes positive Hertz from explicit external clock selection.
 Its [planar PCM conversion](doc/platform/REQ__asio-pcm.md) extracts selected mixer
 channels into eighteen native ASIO PCM layouts, covering both byte orders and
 reduced valid-bit containers. Conversion allocates nothing, checks extents and
 finite selected samples before writing, and explicitly rejects DSD/unknown types.
+`AsioBlockRenderer` renders the actual Mixer into preallocated scratch and validates
+all planes and all mixed samples before delivery. SDK-free fixtures compile on all
+three targets; execution remains deferred. Metadata-only Windows Rust type-checking
+of the optional wrapper does not compile/link the SDK C++ bridge or establish an
+enabled GNU SDK build. Actual SDK-enabled builds still require MSVC and supplied SDK.
 See the [core audio contract](doc/kernel/REQ__audio.md) and
 [Windows audio contract](doc/platform/REQ__windows-audio.md).
 

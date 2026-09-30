@@ -187,7 +187,9 @@ on 2026-10-01 while project-authored source stays MIT. SDK files and derived cod
 retain their own licenses; combined binary releases require GPLv3 notices and
 Corresponding Source delivery. Optional
 [SDK driver control](REQ__asio-driver-control.md) and portable buffer/rate
-validation have source implementations; native stream callbacks/output remain pending.
+validation have source implementations. The separate [ASIO stream source](REQ__asio-stream.md)
+adds SDK buffer/callback ownership and actual Mixer delivery. SDK compilation,
+native output and final-host presentation integration remain pending.
 Current WASAPI code reports `BackendUnavailable(Asio)` for ASIO requests, rather
 than the earlier unresolved-license placeholder. Additional native APIs need
 concrete capability and runtime contracts through the same platform boundary.

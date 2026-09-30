@@ -44,14 +44,16 @@ These semantics use the SDK's [buffer and rate specification](https://github.com
 
 ## Implementation and acceptance boundaries
 
-This slice provides driver control source and portable configuration. It does
-not implement ASIO buffers, callbacks, mixer delivery, start/stop or native
-playback. Driver discovery is a [separate SDK-free path](REQ__asio-driver-discovery.md).
-WASAPI's backend selection still reports ASIO unavailable as an output backend.
+Control and portable configuration are implemented separately from the
+[owned output stream](REQ__asio-stream.md). `AsioStream::prepare` consumes the
+control, so callers cannot change rate or show driver UI while its buffers and
+Mixer callbacks are active. Driver discovery remains a
+[separate SDK-free path](REQ__asio-driver-discovery.md). WASAPI's backend selection
+still reports ASIO unavailable; callers use the separate ASIO stream API.
 
 Portable fixtures can be compiled on Linux; default Windows Rust checks do not
 compile an enabled SDK bridge. The current local environment lacks a Windows
-C++ compiler. Windows feature compilation and native control acceptance remain
+C++ compiler. Actual Windows SDK feature compilation and native control acceptance remain
 pending. Tests, native execution, independent reviews and QA remain deferred
 by the user's instruction; no playback or synchronization claim follows from
 source or compilation alone.
@@ -61,3 +63,8 @@ all-feature configurations, compiling nine portable fixtures without executing
 them. The locked Windows GNU platform all-target check passed for the SDK-free
 configuration. Linux all-features does not compile SDK C++ or the target-gated
 Rust control wrapper, so it supplies no Windows SDK control acceptance evidence.
+
+A subsequent metadata-only Windows GNU Rust compilation included the target-gated
+control and stream Rust source without activating the Cargo SDK feature or linking
+C++. This establishes Rust type-checking only. It does not establish enabled GNU
+SDK support, MSVC ABI compatibility, actual SDK compilation or native acceptance.

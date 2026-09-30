@@ -18,7 +18,7 @@ Paths below are relative to the repository root.
 | 4: Windows input | `crates/beatkernel-platform/src/windows/`, `raw_input.rs`, input-inspector example; [contract](REQ__windows-input.md) | Historical virtual keyboard evidence exists. Current source and physical timestamp/jitter comparisons remain unverified. |
 | 5: chart compiler | `crates/beatkernel/src/chart/`, chart example; [contract](REQ__chart-compiler.md) | Historical golden evidence exists; current compiler/BMS changes require executed regressions. |
 | 6: judge | `crates/beatkernel/src/judge/`, `interaction/builtin.rs`, judge example; [contract](REQ__judge.md) | Historical judge evidence exists; current profile, routing, ownership and restoration paths need execution. |
-| 7: audio | `crates/beatkernel/src/audio/`, platform native audio modules; [core](REQ__audio.md), [Windows](../platform/REQ__windows-audio.md) | WASAPI shared/exclusive source exists. Native playback, callback allocation/locking checks and scheduling fixtures remain deferred. ASIO discovery, buffer negotiation and SDK control source are described below; stream callbacks/output remain pending. |
+| 7: audio | `crates/beatkernel/src/audio/`, platform native audio modules; [core](REQ__audio.md), [Windows](../platform/REQ__windows-audio.md), [ASIO stream](../platform/REQ__asio-stream.md) | WASAPI shared/exclusive and optional ASIO buffer/callback/Mixer stream source exists. Actual SDK compilation, native playback, callback allocation/locking checks and scheduling fixtures remain deferred. ASIO final-host composition and presentation mapping remain pending. |
 | 8: integrated loop | `crates/beatkernel/src/runtime/`, `telemetry/`, runtime/native BMS examples; [runtime](REQ__runtime.md), [benchmark](REQ__runtime-benchmark.md) | Current integrated fixtures, percentiles under executed workloads, native drop/underrun behavior and physical latency measurements remain deferred. |
 | 9: visual projection | `crates/beatkernel/src/visual/`, external SVG example; [contract](REQ__visual.md) | Lane/Point/Path/Polar/Custom source and reusable frame/index paths exist; fixture execution and renderer QA remain deferred. |
 | 10: replay/snapshot | `crates/beatkernel/src/replay/`, judge snapshots, runtime restart/playback, replay examples; [replay](REQ__replay.md), [restart](REQ__section-restart.md), [reverse](REQ__reverse-playback.md) | Current repeated replay/seek hashes, codec failures, reverse policy and native restart output remain unverified. Logical restoration does not guarantee acoustic restart alignment. |
@@ -49,7 +49,7 @@ extension point, not evidence of bundled FLAC/OGG/MP3 support. Native output sou
 currently includes WASAPI, ALSA and CoreAudio; it does not establish support for
 every native output API or every installed device configuration. ASIO remains a
 required optional backend. Its baseline licensing prerequisite is superseded by
-the source/build policy below; native implementation remains pending.
+the source/build policy below; native output acceptance remains pending.
 
 ## Source continuation on 2026-10-01
 
@@ -85,8 +85,8 @@ optional Windows [SDK driver control bridge](../platform/REQ__asio-driver-contro
 Exact sizes preserve reported bounds and granularity without implicit rounding;
 external clock is distinct from a positive finite Hertz request. The SDK feature
 uses a supplied SDK and C++ toolchain, retaining the default MIT build boundary.
-Control queries and explicit hardware configuration are separate from pending
-buffer callbacks, mixer delivery and stream lifecycle. The current local Windows
+Control queries and explicit hardware configuration are separate from the
+owned buffer/callback stream described below. The current local Windows
 C++ compilation path is unavailable; source does not establish native acceptance.
 Nine portable configuration fixtures are authored; execution remains deferred.
 
@@ -95,8 +95,20 @@ explicit interleaved mixer channels into eighteen native PCM layouts. It shares
 integer quantization with the existing platform PCM converter while preserving
 ASIO's distinct low-valid-bit container alignment. Endian, channel, finite-value,
 exact-extent and allocation fixtures are authored, with execution still deferred.
-This prepares native buffer filling; ASIO callbacks and stream delivery remain
-pending and no native playback acceptance is claimed.
+The separate stream uses this converter for native buffer filling; no native
+playback acceptance is claimed.
+
+[ASIO stream source](../platform/REQ__asio-stream.md) now provides actual SDK
+double-buffer preparation, callback admission/serialization, explicit channel
+routing, actual Mixer delivery, B priming, one-time start and terminal cleanup.
+The stable Rust callback context outlives native callback drain and driver release.
+Raw native clock observations remain distinct from prepared software frames.
+Seven actual-Mixer planar fixtures are authored and compile without execution.
+Default Rust 1.98.1 host workspace and Windows GNU/macOS platform all-target
+checks passed. A metadata-only Windows GNU compilation additionally type-checked
+optional control/stream Rust source without activating Cargo SDK compilation or
+linking C++. Actual SDK/MSVC build, native playback, presentation mapping and
+final-host composition remain outstanding. This does not enable GNU SDK builds.
 
 ## Build evidence and completion boundary
 

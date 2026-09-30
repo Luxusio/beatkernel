@@ -191,7 +191,7 @@ Historical Phase 7 coordinator checks passed 178 tests including doctests in
 each of debug and release on Linux, plus strict Clippy on Linux and the Windows
 platform target; these do not verify subsequent changes. Native shared/exclusive
 playback remains required; the retained Windows VM previously reported zero
-render endpoints. ASIO implementation is pending under the selected GPLv3 build
+render endpoints. ASIO native acceptance remains pending under the selected GPLv3 build
 policy. Phase 15
 retains its confirmed-host prerequisite rather than becoming an unconditional
 SDK requirement. The full runtime is not declared complete.
@@ -204,11 +204,19 @@ fixtures are unexecuted. The optional
 [SDK driver control bridge](../platform/REQ__asio-driver-control.md) adds native
 capability queries and explicit hardware controls, while portable `audio::asio`
 validates reported buffer constraints and exact requests. Native SDK feature
-compilation/control acceptance and ASIO stream callbacks/output remain pending.
+compilation/control acceptance remain pending. The separate
+[ASIO stream source](../platform/REQ__asio-stream.md) now owns actual SDK buffers,
+serialized callbacks and the core Mixer, with explicit channel/rate/buffer choices,
+pre-start B priming and terminal cleanup before freeing callback state. Native
+playback, final-host integration and clock presentation mapping remain pending.
 The SDK-free [ASIO planar PCM converter](../platform/REQ__asio-pcm.md) prepares
 selected mixer channels for eighteen native PCM layouts with explicit byte order,
 valid-bit alignment and checked buffer extents. It does not establish an active
-driver stream or native playback evidence.
+driver stream or native playback evidence by itself. Seven actual-Mixer planar
+render fixtures are authored and compiled without execution. SDK-free host,
+Windows GNU and macOS checks passed; optional Windows Rust wrappers additionally
+type-checked through metadata-only compilation without building/linking C++.
+This supplies no actual SDK/MSVC ABI or native output acceptance evidence.
 
 ## Verification
 
