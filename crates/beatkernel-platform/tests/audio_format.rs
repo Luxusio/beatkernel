@@ -250,6 +250,14 @@ fn native_formats_validate_width_mask_byte_rate_without_rate_presets() {
     assert_eq!(format.channel_mask(), Some(7));
     assert!(DeviceFormat::new(48_000, 8, SampleEncoding::Float32, Some(0)).is_ok());
     assert!(DeviceFormat::new(48_000, 2, SampleEncoding::Float32, None).is_ok());
+    for (channels, mask) in [(1, 0x0004_0000), (1, 0x8000_0000), (2, 0x8000_0001)] {
+        // Popcount matches each channel count; reserved assignments themselves
+        // must fail through the direct public API before native use.
+        assert_eq!(
+            DeviceFormat::new(48_000, channels, SampleEncoding::Float32, Some(mask)),
+            Err(AudioPlatformError::InvalidFormat)
+        );
+    }
     for (rate, channels, encoding, mask) in [
         (0, 1, SampleEncoding::Float32, None),
         (48_000, 0, SampleEncoding::Float32, None),
@@ -370,7 +378,7 @@ fn engine_exact_periods_and_defaults_keep_native_bounds_and_report_rounding() {
         assert_eq!(resolved.duration, dur(5_000_000));
         assert!(!resolved.adjusted);
     }
-    for (requested, suggested) in [(1, 96), (97, 144), (961, 960)] {
+    for (requested, suggested) in [(1, 96), (97, 144)] {
         let exact = engine(
             BufferRequest::DeviceDefault,
             PeriodRequest::Frames(requested),
@@ -530,21 +538,23 @@ fn duration_only_native_period_bounds_default_and_missing_evidence_are_explicit(
     assert_eq!(default.frames, 240);
     assert_eq!(default.duration, dur(5_000_000));
     assert!(!default.adjusted);
-    for (wanted, suggestion) in [(96, 97), (241, 240)] {
-        let request = engine(BufferRequest::DeviceDefault, PeriodRequest::Frames(wanted));
-        assert!(
-            matches!(resolve_period(&request,native),Err(AudioPlatformError::ConfigurationUnsupported {suggested_period_frames:Some(actual),..}) if actual==suggestion)
-        );
-        assert_eq!(
-            resolve_period(
-                &request.with_negotiation(NegotiationPolicy::AllowSupportedRounding),
-                native
-            )
-            .unwrap()
-            .frames,
-            suggestion
-        );
-    }
+    let selected = engine(BufferRequest::DeviceDefault, PeriodRequest::Frames(96));
+    assert!(matches!(
+        resolve_period(&selected, native),
+        Err(AudioPlatformError::ConfigurationUnsupported {
+            suggested_period_frames: Some(97),
+            ..
+        })
+    ));
+    assert_eq!(
+        resolve_period(
+            &selected.with_negotiation(NegotiationPolicy::AllowSupportedRounding),
+            native
+        )
+        .unwrap()
+        .frames,
+        97
+    );
     assert!(matches!(
         resolve_period(
             &engine(BufferRequest::DeviceDefault, PeriodRequest::DeviceDefault),
@@ -555,6 +565,70 @@ fn duration_only_native_period_bounds_default_and_missing_evidence_are_explicit(
             ..
         })
     ));
+}
+
+#[test]
+fn above_maximum_periods_and_upward_multiples_crossing_maximum_are_advisory_only() {
+    let duration_bounds = PeriodConstraints {
+        min_period: Some(dur(2_000_001)),
+        max_period: Some(dur(5_000_001)),
+        ..PeriodConstraints::default()
+    };
+    let fundamental_bounds = PeriodConstraints {
+        min_frames: Some(128),
+        max_frames: Some(960),
+        fundamental_frames: Some(128),
+        ..PeriodConstraints::default()
+    };
+    for (native, period, suggestion) in [
+        (constraints(), PeriodRequest::Frames(961), 960),
+        (constraints(), PeriodRequest::Duration(dur(20_000_001)), 960),
+        (duration_bounds, PeriodRequest::Frames(241), 240),
+        (
+            duration_bounds,
+            PeriodRequest::Duration(dur(5_000_001)),
+            240,
+        ),
+        (fundamental_bounds, PeriodRequest::Frames(959), 896),
+        (
+            fundamental_bounds,
+            PeriodRequest::Duration(dur(19_000_000)),
+            896,
+        ),
+    ] {
+        for policy in [
+            NegotiationPolicy::Exact,
+            NegotiationPolicy::AllowSupportedRounding,
+        ] {
+            let selected = engine(BufferRequest::DeviceDefault, period).with_negotiation(policy);
+            assert_eq!(
+                resolve_period(&selected, native),
+                Err(AudioPlatformError::ConfigurationUnsupported {
+                    constraint: ConfigurationConstraint::PeriodBounds,
+                    constraints: native,
+                    suggested_buffer_frames: None,
+                    suggested_period_frames: Some(suggestion),
+                }),
+                "period {period:?}, policy {policy:?}"
+            );
+        }
+    }
+    // Supported maximum boundaries remain valid under either policy.
+    for period in [
+        PeriodRequest::Frames(960),
+        PeriodRequest::Duration(dur(20_000_000)),
+    ] {
+        for policy in [
+            NegotiationPolicy::Exact,
+            NegotiationPolicy::AllowSupportedRounding,
+        ] {
+            let selected = engine(BufferRequest::DeviceDefault, period).with_negotiation(policy);
+            let resolved = resolve_period(&selected, constraints()).unwrap();
+            assert_eq!(resolved.frames, 960);
+            assert_eq!(resolved.duration, dur(20_000_000));
+            assert!(!resolved.adjusted);
+        }
+    }
 }
 
 #[test]

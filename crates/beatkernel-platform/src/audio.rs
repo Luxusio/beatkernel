@@ -174,7 +174,9 @@ impl DeviceFormat {
                 return Err(AudioPlatformError::InvalidFormat);
             }
         }
-        if channel_mask.is_some_and(|mask| mask != 0 && mask.count_ones() != u32::from(channels)) {
+        if channel_mask.is_some_and(|mask| {
+            mask & !0x0003_ffff != 0 || (mask != 0 && mask.count_ones() != u32::from(channels))
+        }) {
             return Err(AudioPlatformError::InvalidFormat);
         }
         let block_align = u32::from(channels) * u32::from(encoding.bytes_per_sample());

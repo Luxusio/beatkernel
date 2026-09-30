@@ -83,6 +83,24 @@ fn production_waveformat_float_guid_and_unspecified_layout_roundtrip() {
 }
 
 #[test]
+fn native_owned_format_readback_rejects_reserved_speaker_assignments_with_matching_counts() {
+    for (channels, valid_mask, reserved_mask) in [
+        (1, 4, 0x0004_0000),
+        (1, 4, 0x8000_0000),
+        (2, 3, 0x8000_0001),
+    ] {
+        let format =
+            DeviceFormat::new(48_000, channels, SampleEncoding::Float32, Some(valid_mask)).unwrap();
+        let mut wave = wave_format(format);
+        assert_eq!(decode(&wave), Ok(format));
+        wave.dwChannelMask = reserved_mask;
+        // decode uses the complete owned stack allocation and production FFI
+        // parser. The mutation preserves channel popcount, isolating bit validity.
+        assert_eq!(decode(&wave), Err(AudioPlatformError::InvalidFormat));
+    }
+}
+
+#[test]
 fn native_format_readback_rejects_invalid_full_owned_structures_before_use() {
     let valid =
         wave_format(DeviceFormat::new(48_000, 2, SampleEncoding::Float32, Some(3)).unwrap());

@@ -113,6 +113,8 @@ pub fn resolve_period(
     let adjusted = !exact_duration || suggested != Some(wanted);
     // DeviceDefault explicitly accepts its native integer reporting resolution.
     if suggested.is_none()
+        // A smaller supported maximum is advisory, never an upward rounding.
+        || candidate > u64::from(maximum)
         || (adjusted
             && request.period() != PeriodRequest::DeviceDefault
             && request.negotiation() == NegotiationPolicy::Exact)
