@@ -280,3 +280,34 @@ fn bounded_percentiles_and_external_loss_counts_do_not_invent_latency() {
     assert_eq!(telemetry.counters().input_drops, 7);
     assert_eq!(telemetry.counters().audio_underruns, 2);
 }
+
+#[test]
+fn session_replacement_resets_chronology_and_routes_new_commands_to_fresh_queue() {
+    let (mut runtime, mut old_consumer) = fixture(4);
+    let initial = runtime.judge().snapshot().unwrap();
+    let transport = runtime.transport().clone();
+    runtime
+        .process_input(input(1, 2_000_000, 8), &Clocks, point(3, 3_000_000))
+        .unwrap();
+    let (producer, mut new_consumer) = command_queue(4).unwrap();
+    let (_, _, old_producer) = runtime.replace_session(
+        JudgeEngine::from_snapshot(&initial).unwrap(),
+        transport,
+        producer,
+    );
+    let report = runtime
+        .process_input(input(1, 2_000_000, 1), &Clocks, point(3, 9_000_000))
+        .unwrap();
+    assert!(report.judge_error.is_none());
+    assert_eq!(
+        new_consumer.try_pop().unwrap().at(),
+        Timestamp::from_nanos(9_000_000)
+    );
+    assert_eq!(
+        old_consumer.try_pop().unwrap().at(),
+        Timestamp::from_nanos(3_000_000)
+    );
+    assert!(!old_consumer.is_disconnected());
+    drop(old_producer);
+    assert!(old_consumer.is_disconnected());
+}
