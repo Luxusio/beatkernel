@@ -7,14 +7,17 @@ in Rust. The architecture and phased implementation specification are in
 ## Current implementation
 
 The source implements **Phase 0: repository skeleton**, **Phase 1: integer time
-and transport**, **Phase 2: canonical physical input**, and **Phase 3: binding**.
-Chart compilation, judgment, audio scheduling, and replay remain subsequent phases.
+and transport**, **Phase 2: canonical physical input**, **Phase 3: binding**,
+and **Phase 4: Windows native input**. Judgment, audio scheduling, and replay
+remain subsequent phases.
 
-**Phase 4 is in progress:** portable Raw Input packet processing and a Windows
+**Phase 4 passed independent review and CLI QA:** portable Raw Input processing and a Windows
 QPC receipt sampler, native packet acquisition and explicit registration are
 present. Their contract is [Windows input](doc/kernel/REQ__windows-input.md).
 The inspector has captured device-attributed keyboard input in an isolated
-Windows VM. Phase 4's independent review and full QA remain pending.
+Windows VM. **Phase 5 chart compilation is present:**
+its [timing contract](doc/kernel/REQ__chart-compiler.md) covers BPM, STOP,
+object endpoints and separate SV markers.
 
 ```text
 beatkernel/
@@ -24,6 +27,7 @@ beatkernel/
 │   │   ├── src/time/            # nanoseconds and clock domains
 │   │   ├── src/transport/       # rates and piecewise host/song mapping
 │   │   ├── src/input/           # typed events, device identity, virtual FIFO, bindings
+│   │   ├── src/chart/           # source charts and absolute compiled timelines
 │   │   ├── tests/time_transport.rs
 │   │   └── examples/transport.rs
 │   └── beatkernel-platform/     # pure input processing and Windows acquisition
@@ -38,7 +42,7 @@ The only workspace dependency is `beatkernel-platform → beatkernel`. The kerne
 no OS dependency, no game-specific assumptions, no unsafe code, and no third-party
 dependencies. The platform uses pinned `windows-sys` bindings only on Windows,
 with unsafe confined to native FFI; portable input modules prohibit unsafe.
-Windows acquisition is being verified; native Linux/macOS input and audio
+Windows acquisition has native guest evidence; native Linux/macOS input and audio
 backends remain subsequent phases.
 
 ## Build and verify
@@ -54,6 +58,7 @@ cargo test --workspace
 cargo test --workspace --release
 cargo run -p beatkernel --example transport
 cargo run -p beatkernel --example binding
+cargo run -p beatkernel --example chart
 cargo run -p beatkernel-platform --example input_inspector
 cargo run -p beatkernel-platform --example windows_input_inspector -- --fixture
 cargo doc --workspace --no-deps
@@ -72,7 +77,9 @@ bounds. In the interactive guest desktop, the production inspector also captured
 A Down/Up from nonzero native handle `0x10041`, runtime source 1, canonical HID
 usage `0x07:0x04`, sequence 3/4, and QPC/posted-message provenance. Alt+F4 exited
 with code 0 after registration cleanup. This is native Windows input from a
-Hyper-V virtual keyboard; physical hardware latency remains unmeasured.
+Hyper-V virtual keyboard; physical hardware latency remains unmeasured. The
+latest inspector revision passed finite native execution and cleanup in a locked
+guest with no acquisitions; its live-input capture was from an earlier build.
 
 On Windows, run `cargo run -p beatkernel-platform --example windows_input_inspector
 -- --seconds 10` in the interactive desktop and press keys in its window. Add
@@ -135,6 +142,23 @@ thread, outside the future real-time audio callback.
 
 The exact behavior and verification contract are documented in
 [the time/transport requirements](doc/kernel/REQ__time-transport.md).
+
+## Chart compilation
+
+`beatkernel::chart::SourceChart` stores nonnegative integer beat ticks, rational
+BPM, nanosecond STOPs, opaque object bindings and separate rational SV changes.
+Compilation produces owned objects with absolute start/end song timestamps,
+sorted by start time and ID. `objects_in_window(start, end)` borrows starts in
+the half-open window without allocation. Compilation belongs on a control
+thread.
+
+At a shared beat, object endpoints and markers receive the pre-STOP time; the
+new BPM and STOP affect following beats. SV never changes judge targets.
+Duplicate IDs/markers, invalid ranges and overflow are explicit errors. At
+120 BPM a beat-1 object lands at 500 ms. A 250 ms STOP and change to 60 BPM at
+beat 1 place beat 2 at 1,750 ms. Run the chart example to see the compiled point
+and range. [The chart contract](doc/kernel/REQ__chart-compiler.md) defines
+rounding, capacity and adapter boundaries.
 
 ## Canonical physical input
 

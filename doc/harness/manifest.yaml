@@ -14,6 +14,7 @@ verify_commands:
   - cargo test --workspace --release --locked
   - cargo run -p beatkernel --example transport --locked
   - cargo run -p beatkernel --example binding --locked
+  - cargo run -p beatkernel --example chart --locked
   - cargo run -p beatkernel-platform --example input_inspector --locked
   - cargo run -p beatkernel-platform --example windows_input_inspector --locked -- --help
   - cargo run -p beatkernel-platform --example windows_input_inspector --locked -- --fixture
