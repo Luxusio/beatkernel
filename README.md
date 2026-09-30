@@ -381,9 +381,20 @@ synthetic output/host observations. The [affine clock mapper](doc/kernel/REQ__cl
 accepts supplied clock pairs, finite validity and explicit uncertainty. It never
 collects observations or promotes hardware observations to an exact relation.
 
+The Windows `windows_runtime` example accepts `--song FILE.wav --start-ns N`
+and `--restarts 1..8`. Each repetition uses fresh output and an observed WASAPI
+position/QPC relation to anchor the applied source frame; finite calibration
+validity is enforced during input and runtime advancement. See the
+[presentation contract](doc/platform/REQ__wasapi-presentation.md). Native playback
+and physical synchronization remain unverified.
+Visual projection also exposes Polar and custom logical output, and
+[reverse keysound playback](doc/kernel/REQ__reverse-playback.md) provides explicit
+normal-sample, reversed-sample and mute policies on a dedicated Mixer/queue.
+
 ```sh
 cargo run -p beatkernel --example runtime
 cargo run -p beatkernel --example visual
+cargo run -p beatkernel --example reverse_playback
 cargo run -p beatkernel --example replay
 cargo run -p beatkernel --example replay -- --save new-demo.bkr
 cargo run -p beatkernel --example replay_file -- new-demo.bkr new-copy.bkr
