@@ -122,6 +122,11 @@ print it after stop/join, including error cleanup. A rendered block remains
 different from native submission and audible output; retaining this report does
 not extend native clock freshness or establish physical playback evidence.
 
+CoreAudio exposes the same [successful mixer report](../platform/REQ__coreaudio-render-telemetry.md)
+contract through callback-owned publication and a final retained report after
+callback quiescence. Native example cleanup prints these core execution counters.
+This adds no native playback evidence and does not yet provide a macOS BMS sample.
+
 Git was initialized locally on 2026-09-29 after these files had been implemented. Initial commits record the existing implementation and its documentation, rather than reconstructing historical development commits.
 
 Phase 7 audio is under implementation: [core audio](../kernel/REQ__audio.md)

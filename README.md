@@ -431,6 +431,9 @@ with requested/applied rate and frame sizes. See the
 cover its native source; successful linking, execution and hardware timing remain
 unverified. [Phase 15 SDK status](doc/kernel/REQ__sdk-status.md) retains the
 specified condition for introducing a C host ABI.
+CoreAudio retains the [last successful mixer report](doc/platform/REQ__coreaudio-render-telemetry.md)
+with late and rejected command counters after stop, separately from callback
+presentation timestamps and native device delivery.
 
 macOS also exposes an explicit timestamped raw-report input mode. It retains
 native bytes/IDs and mach arrival timestamps for host-selected vendor adapters;
