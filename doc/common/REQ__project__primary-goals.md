@@ -109,7 +109,12 @@ separately from its independent aggregate counters. It requests monotonic native
 timestamps explicitly and retains raw status/delay and query intervals. Estimated
 sound-frame position requires valid running status and delay; terminal/unavailable
 queries invalidate publication. Native execution and acoustic accuracy remain
-unverified, and this does not yet add a Linux-native BMS composition.
+unverified. The separate [Linux-native BMS composition](../kernel/REQ__bms-linux-native.md)
+connects actual evdev input and ALSA output to the same shared preparation and
+Runtime/JudgeEngine. Native sound-frame/host observations remain explicitly
+estimated, feed continuous bounded transport correction, and do not fabricate
+Windows clock metadata. Input loss stops rather than guessing lost events; native
+execution and synchronization accuracy remain unverified.
 
 Git was initialized locally on 2026-09-29 after these files had been implemented. Initial commits record the existing implementation and its documentation, rather than reconstructing historical development commits.
 

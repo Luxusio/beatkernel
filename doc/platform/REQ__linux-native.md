@@ -63,7 +63,11 @@ coherent independently of the aggregate counters. Submitted minus valid native
 delay supplies an explicitly estimated sound-frame position; prepared/nonrunning
 status and invalid delay cannot create that estimate. Native timestamps and the
 userspace query interval remain separate. These observations do not prove acoustic
-latency, automatically calibrate input, or complete a Linux BMS composition.
+latency or automatically calibrate input. The separate
+[Linux BMS composition](../kernel/REQ__bms-linux-native.md) uses explicitly estimated
+native sound-frame/host pairs with the same bounded continuous presentation
+discipline as the Windows sample. Its settings, input loss policy and native
+execution limitations are documented independently.
 
 Primary ABI/API references:
 - [Linux input UAPI](https://github.com/torvalds/linux/blob/master/include/uapi/linux/input.h)

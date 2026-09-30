@@ -466,3 +466,14 @@ is available without changing source frame positions.
 ```sh
 cargo run -p beatkernel-bms-runtime --bin windows_bms -- --help
 ```
+
+The [Linux BMS binary](doc/kernel/REQ__bms-linux-native.md) composes the same chart
+preparation and Runtime with a selected evdev node and ALSA endpoint. Rate, channels,
+period and buffer are explicit; acquired key events drive actual judging. Native
+status-derived output/host pairs feed bounded continuous transport correction with
+Unknown accuracy. Input-loss barriers stop the session instead of guessing missing
+input. Source compilation does not establish native playback or acoustic sync.
+
+```sh
+cargo run -p beatkernel-bms-runtime --bin linux_bms -- --help
+```
