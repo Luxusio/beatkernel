@@ -70,6 +70,11 @@ those logs with the captured profile, validates their recompiled setup identity
 and restores logical results through the same JudgeEngine/ReplaySession. Exact
 operation and song-time seeks reuse the core restoration paths. This adds a
 logical record/playback connection, with native replay audio still outstanding.
+The [recorded BMS audio planner/renderer](../kernel/REQ__bms-replay-audio.md)
+selects actual hit-stage sounds through the same core SoundBinding helper as live
+publication and renders song-time keysounds/BGM using the actual Mixer. Queue,
+voice and output-frame caps are explicit; logical state is separate from rendered
+extent. Original physical scheduling and past dropped audio are not recorded.
 
 Native BMS roots also expose [input delivery age](../kernel/REQ__telemetry.md)
 using preserved event points and fresh same-domain receipt points, with backend

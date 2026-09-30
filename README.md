@@ -395,6 +395,23 @@ with `--max-bytes N` and `--max-records N`. Failed-session prefix logs reconstru
 only their recorded extent. This inspector provides no native audio output;
 the commands above and replay comparison fixtures remain unexecuted.
 
+[`render_replay_bms`](doc/kernel/REQ__bms-replay-audio.md) renders the captured
+judgments and chart BGM through the actual core Mixer, with shared bounded WAV
+preparation:
+
+```sh
+cargo run -p beatkernel-bms-runtime --bin render_replay_bms -- --chart CHART.bms --replay SESSION.bkr --output NEW.f32le --seconds 60 --rate 48000 --channels 2
+```
+
+The output is newly created raw interleaved f32le. Preroll defaults to three
+seconds; `--preroll-ns`, `--block-frames`, `--command-capacity`, `--voices`,
+`--max-records` and `--max-bytes` expose finite controls. Audio uses recorded
+unoffset song times, while logical counts/hash describe the full recording even
+when output is cut short. Empty logs have no sounds, and prefix logs include no
+later BGM. This reconstructs song-time sounds; original native scheduling points
+and past audio queue failures were not recorded. Native replay output and this
+command's execution remain pending.
+
 The [durable replay codec](doc/kernel/REQ__replay-codec.md) stores ordered operations,
 runtime identity and optional calibration metadata with explicit byte/count limits.
 Logical restoration does not rewind hardware.
