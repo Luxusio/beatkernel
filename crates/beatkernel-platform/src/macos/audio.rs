@@ -1,7 +1,8 @@
 //! Native CoreAudio HAL output with exact settings and guarded preallocated IOProc.
 use super::{clock::MachClock, ffi};
+use crate::audio::{telemetry::Telemetry, AudioStreamSnapshot, AudioStreamStatus, StreamCounters};
 use beatkernel::{
-    audio::{AudioFormat, Mixer},
+    audio::{AudioFormat, Mixer, RenderReport},
     time::{ClockDomainId, ClockPoint, Timestamp},
 };
 use std::{
@@ -163,9 +164,11 @@ pub struct CoreAudioSnapshot {
 struct RenderState {
     mixer: Mixer,
     scratch: Vec<f32>,
+    render_version: u64,
 }
 struct Context {
     render: UnsafeCell<RenderState>,
+    render_telemetry: Telemetry,
     clock: MachClock,
     origin: Timestamp,
     output_domain: ClockDomainId,
@@ -197,6 +200,7 @@ pub struct CoreAudioStream {
     started: bool,
     owner: PhantomData<Rc<()>>,
     final_snapshot: CoreAudioSnapshot,
+    final_render_report: Option<RenderReport>,
 }
 impl CoreAudioStream {
     /// Enumerates actual render devices; it never selects or opens the default.
@@ -310,7 +314,12 @@ impl CoreAudioStream {
             native_clock: clock.native_domain(),
         };
         let context = Box::new(Context {
-            render: UnsafeCell::new(RenderState { mixer, scratch }),
+            render: UnsafeCell::new(RenderState {
+                mixer,
+                scratch,
+                render_version: 0,
+            }),
+            render_telemetry: Telemetry::new(),
             clock,
             origin: config.origin(),
             output_domain: config.domain(),
@@ -339,6 +348,7 @@ impl CoreAudioStream {
             started: false,
             owner: PhantomData,
             final_snapshot: CoreAudioSnapshot::default(),
+            final_render_report: None,
         };
         let pointer =
             stream.context.as_deref().expect("context installed") as *const Context as *mut c_void;
@@ -433,8 +443,18 @@ impl CoreAudioStream {
             std::thread::yield_now();
         }
         self.final_snapshot = self.snapshot();
+        self.final_render_report = self.last_render_report();
         self.context.take();
         Ok(())
+    }
+    /// Last successful core render, retained after successful stop.
+    /// This is execution history, not native delivery or current clock timing.
+    /// Reads are bounded and perform no allocation, native calls or locking.
+    pub fn last_render_report(&self) -> Option<RenderReport> {
+        match self.context.as_deref() {
+            Some(context) => context.render_telemetry.read().render,
+            None => self.final_render_report,
+        }
     }
     /// Reads bounded atomic numeric/presentation telemetry outside the callback.
     pub fn snapshot(&self) -> CoreAudioSnapshot {
@@ -616,6 +636,18 @@ unsafe fn render_buffers(
         .mixer
         .render(&mut state.scratch[..samples])
         .map_err(|_| ())?;
+    // Publish actual completed core rendering before native buffer delivery.
+    // Callback guard grants exclusive access to the local version counter.
+    context.render_telemetry.publish(
+        AudioStreamSnapshot {
+            telemetry_available: true,
+            status: AudioStreamStatus::Running,
+            counters: StreamCounters::default(),
+            clock: None,
+            render: Some(report),
+        },
+        &mut state.render_version,
+    );
     let mut first_channel = 0usize;
     for buffer in buffers {
         let buffer_channels = buffer.channels as usize;
