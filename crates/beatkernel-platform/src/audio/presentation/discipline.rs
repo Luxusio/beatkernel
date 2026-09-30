@@ -83,6 +83,8 @@ pub enum DisciplineError {
     AllocationFailed,
     /// Existing native snapshot validation failed.
     Presentation(PresentationError),
+    /// Supplied ASIO rendered-block metadata or bounded host interval is invalid.
+    AsioPresentation(crate::audio::asio::AsioPresentationError),
     /// Snapshot/query host domain differs from the explicit configured domain.
     DomainMismatch,
     /// An observer cannot mix WASAPI native counters with caller-supplied pairs.
@@ -131,6 +133,11 @@ enum ObservationSource {
         qpc: u64,
     },
     SuppliedPair,
+    Asio {
+        sample_rate: u32,
+        start_frame: u64,
+        end_frame: u64,
+    },
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Observed {
@@ -290,6 +297,93 @@ impl PresentationDiscipline {
         Ok(self.admit(Observed {
             pair,
             source: ObservationSource::SuppliedPair,
+        }))
+    }
+
+    /// Admits an ASIO rendered block using its bounded host interval midpoint.
+    ///
+    /// Keeps ASIO rate/frame identity distinct from WASAPI counters and generic
+    /// supplied pairs. Midpoints support continuous correction only; discipline
+    /// quality remains Unknown and does not discard uncertainty to claim exact
+    /// acoustic synchronization. Duplicate blocks do not refresh freshness.
+    pub fn observe_asio(
+        &mut self,
+        observation: crate::audio::asio::AsioPresentationObservation,
+    ) -> Result<ObservationAdmission, DisciplineError> {
+        use crate::audio::asio::{AsioPresentationError, AsioPresentationObservation};
+        if observation.output_origin != self.output_origin
+            || observation.host.before.domain != self.host_domain
+            || observation.host.after.domain != self.host_domain
+        {
+            return Err(DisciplineError::DomainMismatch);
+        }
+        let validated = AsioPresentationObservation::from_render(
+            observation.render,
+            observation.sample_rate,
+            observation.host,
+            0,
+            0,
+            observation.output_origin,
+        )
+        .map_err(DisciplineError::AsioPresentation)?;
+        if validated.output != observation.output {
+            return Err(DisciplineError::AsioPresentation(
+                AsioPresentationError::Malformed,
+            ));
+        }
+        let midpoint = i128::from(observation.host.before.timestamp.as_nanos())
+            + (i128::from(observation.host.after.timestamp.as_nanos())
+                - i128::from(observation.host.before.timestamp.as_nanos()))
+                / 2;
+        let target = ClockPoint {
+            domain: self.host_domain,
+            timestamp: Timestamp::from_nanos(
+                i64::try_from(midpoint).map_err(|_| DisciplineError::Overflow)?,
+            ),
+        };
+        let pair = ClockPair {
+            source: observation.output,
+            target,
+        };
+        let end_frame = observation
+            .render
+            .start_frame
+            .checked_add(
+                u64::try_from(observation.render.frames).map_err(|_| DisciplineError::Overflow)?,
+            )
+            .ok_or(DisciplineError::Overflow)?;
+        if let Some(previous) = self.latest {
+            let ObservationSource::Asio {
+                sample_rate,
+                start_frame,
+                end_frame,
+            } = previous.source
+            else {
+                return Err(DisciplineError::ObservationSourceChanged);
+            };
+            if sample_rate != observation.sample_rate {
+                return Err(DisciplineError::FrequencyChanged);
+            }
+            if observation.render.start_frame < start_frame {
+                return Err(DisciplineError::NonIncreasing);
+            }
+            if observation.render.start_frame == start_frame {
+                return Ok(ObservationAdmission::Unchanged);
+            }
+            if observation.render.start_frame < end_frame
+                || pair.source.timestamp <= previous.pair.source.timestamp
+                || pair.target.timestamp <= previous.pair.target.timestamp
+            {
+                return Err(DisciplineError::NonIncreasing);
+            }
+        }
+        Ok(self.admit(Observed {
+            pair,
+            source: ObservationSource::Asio {
+                sample_rate: observation.sample_rate,
+                start_frame: observation.render.start_frame,
+                end_frame,
+            },
         }))
     }
     fn admit(&mut self, sample: Observed) -> ObservationAdmission {

@@ -9,6 +9,10 @@ use beatkernel::{
 /// One actual rendered block paired with a caller-bounded host presentation interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AsioPresentationObservation {
+    /// Immutable Mixer sample rate used to define the output grid.
+    pub sample_rate: u32,
+    /// Caller-assigned frame-zero origin, retained for calibration validation.
+    pub output_origin: ClockPoint,
     /// Output-grid point of the actual block's first rendered frame.
     pub output: ClockPoint,
     /// Inclusive host interval after explicit driver latency and error accounting.
@@ -30,6 +34,8 @@ pub enum AsioPresentationError {
     Overflow,
     /// Explicit multimedia-clock relation rejected the native reading.
     Clock(MultimediaClockError),
+    /// Finite affine calibration or clock query rejected this relation.
+    Calibration(beatkernel::time::CalibrationError),
 }
 
 impl std::fmt::Display for AsioPresentationError {
@@ -40,6 +46,7 @@ impl std::fmt::Display for AsioPresentationError {
             Self::RateChanged => formatter.write_str("ASIO presentation sample rate changed"),
             Self::Overflow => formatter.write_str("ASIO presentation extent or timestamp overflow"),
             Self::Clock(error) => write!(formatter, "ASIO presentation clock: {error}"),
+            Self::Calibration(error) => write!(formatter, "ASIO presentation calibration: {error}"),
         }
     }
 }
@@ -47,6 +54,7 @@ impl std::error::Error for AsioPresentationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Clock(error) => Some(error),
+            Self::Calibration(error) => Some(error),
             _ => None,
         }
     }
@@ -54,6 +62,12 @@ impl std::error::Error for AsioPresentationError {
 impl From<MultimediaClockError> for AsioPresentationError {
     fn from(error: MultimediaClockError) -> Self {
         Self::Clock(error)
+    }
+}
+
+impl From<beatkernel::time::CalibrationError> for AsioPresentationError {
+    fn from(error: beatkernel::time::CalibrationError) -> Self {
+        Self::Calibration(error)
     }
 }
 
@@ -101,6 +115,8 @@ impl AsioPresentationObservation {
                 .map_err(|_| AsioPresentationError::Overflow)
         };
         Ok(Self {
+            sample_rate,
+            output_origin,
             output: ClockPoint {
                 domain: output_origin.domain,
                 timestamp: narrow(output_ns)?,

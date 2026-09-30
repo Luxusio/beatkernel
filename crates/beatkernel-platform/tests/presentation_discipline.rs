@@ -588,3 +588,234 @@ fn observations_cannot_switch_native_provenance_in_either_direction() {
         .unwrap();
     assert_eq!(native_observer.retained_len(), 2);
 }
+
+mod asio_observations {
+    use super::*;
+    use beatkernel::audio::{AudioCounters, RenderReport};
+    use beatkernel_platform::audio::asio::{
+        AsioPresentationError, AsioPresentationObservation, MultimediaHostInterval,
+    };
+
+    fn report(start_frame: u64) -> RenderReport {
+        RenderReport {
+            start_frame,
+            frames: 64,
+            active_voices: 0,
+            pending_commands: 0,
+            song_position: Timestamp::ZERO,
+            producer_disconnected: false,
+            counters: AudioCounters::default(),
+        }
+    }
+    fn observation(start: u64, rate: u32, before: i64, after: i64) -> AsioPresentationObservation {
+        AsioPresentationObservation::from_render(
+            report(start),
+            rate,
+            MultimediaHostInterval {
+                before: host(before),
+                after: host(after),
+            },
+            0,
+            0,
+            ClockPoint {
+                domain: ClockDomainId(2),
+                timestamp: Timestamp::ZERO,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn asio_midpoint_pair_retains_unknown_quality_and_continuous_normal_rate() {
+        let mut discipline = observer(0);
+        let mut transport = normal(0);
+        let first = observation(400, 1000, 399_000_000, 401_000_000);
+        assert_eq!(
+            discipline.observe_asio(first),
+            Ok(ObservationAdmission::Retained)
+        );
+        assert_eq!(
+            discipline.latest_pair(),
+            Some(supplied(400_000_000, 400_000_000))
+        );
+        assert_eq!(
+            discipline.update(host(400_000_000), &mut transport),
+            Ok(DisciplineUpdate::Warmup { span_ns: 0 })
+        );
+        let second = observation(1400, 1000, 1_399_000_000, 1_401_000_000);
+        assert_eq!(
+            discipline.observe_asio(second),
+            Ok(ObservationAdmission::Retained)
+        );
+        let before = transport
+            .position_at(Timestamp::from_nanos(1_400_000_000))
+            .unwrap();
+        assert_eq!(
+            discipline.update(host(1_400_000_000), &mut transport),
+            Ok(DisciplineUpdate::Applied {
+                base_rate_ppm: 0,
+                correction_ppm: 0,
+                applied_rate_ppm: 0,
+                phase_error_ns: 0,
+                limited: false,
+            })
+        );
+        assert_eq!(
+            transport
+                .position_at(Timestamp::from_nanos(1_400_000_000))
+                .unwrap(),
+            before
+        );
+        assert_eq!(discipline.quality(), ClockMappingQuality::Unknown);
+        let mut wide = observer(0);
+        wide.observe_asio(observation(0, 1000, i64::MIN, i64::MAX))
+            .unwrap();
+        assert_eq!(wide.latest_pair(), Some(supplied(0, -1)));
+    }
+
+    #[test]
+    fn duplicate_asio_frame_never_refreshes_progress_age_even_with_later_receipt_interval() {
+        let mut discipline = observer(0);
+        let first = observation(400, 1000, 399_000_000, 401_000_000);
+        discipline.observe_asio(first).unwrap();
+        assert_eq!(
+            discipline.observe_asio(first),
+            Ok(ObservationAdmission::Unchanged)
+        );
+        let duplicate = observation(400, 1000, 3_999_000_000, 4_001_000_000);
+        assert_eq!(
+            discipline.observe_asio(duplicate),
+            Ok(ObservationAdmission::Unchanged)
+        );
+        assert_eq!(
+            discipline.latest_pair(),
+            Some(supplied(400_000_000, 400_000_000))
+        );
+        assert_eq!(discipline.retained_len(), 1);
+        assert_eq!(discipline.validate_host(host(2_400_000_000)), Ok(()));
+        assert_eq!(
+            discipline.validate_host(host(2_400_000_001)),
+            Err(DisciplineError::Stale)
+        );
+    }
+
+    #[test]
+    fn asio_rate_change_regressed_frames_overlap_and_nonincreasing_host_are_atomic() {
+        let mut discipline = observer(0);
+        discipline
+            .observe_asio(observation(400, 1000, 399_000_000, 401_000_000))
+            .unwrap();
+        let original = discipline.latest_pair();
+        assert_eq!(
+            discipline.observe_asio(observation(1000, 2000, 999_000_000, 1_001_000_000)),
+            Err(DisciplineError::FrequencyChanged)
+        );
+        for invalid in [
+            observation(399, 1000, 999_000_000, 1_001_000_000),
+            observation(432, 1000, 999_000_000, 1_001_000_000),
+            observation(1000, 1000, 398_000_000, 400_000_000),
+            observation(1000, 1000, 399_000_000, 401_000_000),
+        ] {
+            assert_eq!(
+                discipline.observe_asio(invalid),
+                Err(DisciplineError::NonIncreasing)
+            );
+            assert_eq!(discipline.latest_pair(), original);
+            assert_eq!(discipline.retained_len(), 1);
+        }
+        assert_eq!(
+            discipline.observe_asio(observation(1400, 1000, 1_399_000_000, 1_401_000_000)),
+            Ok(ObservationAdmission::Retained)
+        );
+    }
+
+    #[test]
+    fn asio_origin_domains_and_forged_output_grid_fail_without_selecting_provenance() {
+        let valid = observation(400, 1000, 399_000_000, 401_000_000);
+        let mut origin = valid;
+        origin.output_origin.timestamp = Timestamp::from_nanos(1);
+        let mut host_domain = valid;
+        host_domain.host.before.domain = ClockDomainId(3);
+        let mut output_domain = valid;
+        output_domain.output.domain = ClockDomainId(3);
+        let mut output_time = valid;
+        output_time.output.timestamp = Timestamp::from_nanos(400_000_001);
+        let mut backwards = valid;
+        backwards.host.before.timestamp = backwards
+            .host
+            .after
+            .timestamp
+            .checked_add(Duration::from_nanos(1))
+            .unwrap();
+        let mut no_frames = valid;
+        no_frames.render.frames = 0;
+        for invalid in [
+            origin,
+            host_domain,
+            output_domain,
+            output_time,
+            backwards,
+            no_frames,
+        ] {
+            let mut discipline = observer(0);
+            assert!(discipline.observe_asio(invalid).is_err());
+            assert_eq!(discipline.latest_pair(), None);
+            assert_eq!(discipline.retained_len(), 0);
+            assert_eq!(
+                discipline.observe_clock_pair(supplied(0, 0)),
+                Ok(ObservationAdmission::Retained)
+            );
+        }
+        let mut discipline = observer(0);
+        assert_eq!(
+            discipline.observe_asio(origin),
+            Err(DisciplineError::DomainMismatch)
+        );
+        assert_eq!(
+            discipline.observe_asio(output_time),
+            Err(DisciplineError::AsioPresentation(
+                AsioPresentationError::Malformed
+            ))
+        );
+        assert_eq!(
+            discipline.observe_asio(valid),
+            Ok(ObservationAdmission::Retained)
+        );
+    }
+
+    #[test]
+    fn asio_wasapi_and_supplied_pairs_cannot_mix_in_any_direction() {
+        let asio = observation(1000, 1000, 999_000_000, 1_001_000_000);
+        for first_native in [false, true] {
+            let mut discipline = observer(0);
+            if first_native {
+                discipline
+                    .observe(snapshot(1_000_000_000, 1_000_000_000))
+                    .unwrap();
+            } else {
+                discipline
+                    .observe_clock_pair(supplied(1_000_000_000, 1_000_000_000))
+                    .unwrap();
+            }
+            let original = discipline.latest_pair();
+            assert_eq!(
+                discipline.observe_asio(asio),
+                Err(DisciplineError::ObservationSourceChanged)
+            );
+            assert_eq!(discipline.latest_pair(), original);
+        }
+        for next_native in [false, true] {
+            let mut discipline = observer(0);
+            discipline.observe_asio(asio).unwrap();
+            let original = discipline.latest_pair();
+            let result = if next_native {
+                discipline.observe(snapshot(2_000_000_000, 2_000_000_000))
+            } else {
+                discipline.observe_clock_pair(supplied(2_000_000_000, 2_000_000_000))
+            };
+            assert_eq!(result, Err(DisciplineError::ObservationSourceChanged));
+            assert_eq!(discipline.latest_pair(), original);
+            assert_eq!(discipline.retained_len(), 1);
+        }
+    }
+}

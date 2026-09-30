@@ -15,6 +15,8 @@ mod multimedia_clock;
 pub use multimedia_clock::{MultimediaClockAnchor, MultimediaClockError, MultimediaHostInterval};
 mod presentation;
 pub use presentation::{AsioPresentationError, AsioPresentationObservation};
+mod calibration;
+pub use calibration::AsioPresentationClock;
 
 /// Invalid driver metadata or an unsupported exact configuration request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
