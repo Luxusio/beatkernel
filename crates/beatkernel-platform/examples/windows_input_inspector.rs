@@ -230,9 +230,10 @@ mod native_windows {
     use super::*;
     use beatkernel_platform::windows::{
         clock::QpcClock,
-        input::{RawInputRegistration, RawInputUsage, WindowsInput},
+        input::{RawInputRegistration, RawInputUsage, WindowsInput, WindowsInputDevice},
     };
     use std::{
+        collections::BTreeSet,
         ptr,
         time::{Duration, Instant},
     };
@@ -347,6 +348,18 @@ mod native_windows {
         }
     }
 
+    fn print_device(device: &WindowsInputDevice) {
+        println!(
+            "device={} kind={:?} usage={:?} vendor={:?} product={:?} name={:?}",
+            device.descriptor.runtime_id.0,
+            device.kind,
+            device.usage,
+            device.descriptor.vendor_id,
+            device.descriptor.product_id,
+            device.descriptor.name
+        );
+    }
+
     pub(super) fn run(options: Options) -> Result<(), Box<dyn Error>> {
         let clock = QpcClock::new(HOST_CLOCK)?;
         let window = Window::new()?;
@@ -358,16 +371,10 @@ mod native_windows {
         let mut registration = RawInputRegistration::register(window.hwnd as usize, &usages)?;
         let mut input = WindowsInput::new(clock);
         println!("NATIVE Windows Raw Input inspector; QPC receipt time, not hardware latency");
+        let mut printed_devices = BTreeSet::new();
         for device in input.enumerate_devices()? {
-            println!(
-                "device={} kind={:?} usage={:?} vendor={:?} product={:?} name={:?}",
-                device.descriptor.runtime_id.0,
-                device.kind,
-                device.usage,
-                device.descriptor.vendor_id,
-                device.descriptor.product_id,
-                device.descriptor.name
-            );
+            print_device(&device);
+            printed_devices.insert(device.descriptor.runtime_id);
         }
         let deadline = Instant::now() + Duration::from_secs(options.seconds);
         let mut acquisitions = 0u64;
@@ -400,6 +407,13 @@ mod native_windows {
                             );
                         }
                     }
+                    // Acquisition can attach a device even when the packet is
+                    // rejected later, so describe new sources on both paths.
+                    for device in input.devices() {
+                        if printed_devices.insert(device.descriptor.runtime_id) {
+                            print_device(device);
+                        }
+                    }
                     match result {
                         Ok(batch) => {
                             acquisitions += 1;
@@ -419,7 +433,10 @@ mod native_windows {
                     match message.wParam as u32 {
                         GIDC_ARRIVAL => match input.attach_device(message.lParam as usize) {
                             Ok(device) => {
-                                println!("device arrived={}", device.descriptor.runtime_id.0)
+                                println!("device arrived={}", device.descriptor.runtime_id.0);
+                                if printed_devices.insert(device.descriptor.runtime_id) {
+                                    print_device(&device);
+                                }
                             }
                             Err(error) => eprintln!("arrival rejected: {error}"),
                         },
