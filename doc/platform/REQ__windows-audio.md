@@ -19,6 +19,11 @@ or Windows device types.
   or duration requests; expose device-default selection as an explicit policy.
   Support independent size/period requests whenever the native mode permits.
   Report units, requested values and actual applied values separately.
+- Explicit device-managed buffer selection is also available. IAudioClient3
+  computes buffer capacity from the selected processing period; this selection
+  accepts that capacity while preserving Exact period negotiation. A numeric
+  buffer request still requires an exact applied match or explicit rounding
+  permission. Do not silently interpret a numeric size as device-managed.
 - Query minimum, maximum, fundamental increment and alignment constraints where
   the API provides them; report unavailable constraints honestly. Do not limit
   callers to fixed presets. Validate rate/channel/container/valid-bit/channel-mask
@@ -51,6 +56,20 @@ caller can make the next choice.
   fill the complete required packet. Prefill before starting. Support native
   float32 and PCM16/24/32 conversion with checked format and buffer bounds.
 
+Native integer conversion clamps finite input to [-1, 1], rounds to the nearest
+signed valid-bit value with ties away from zero, saturates at the signed limits,
+and left-aligns valid bits in the little-endian container. Float32 preserves
+finite input values. Validate every input value and the exact interleaved byte
+extent before writing any output; conversion never allocates. Channel order is
+preserved, including explicit direct output. There is no hidden dithering or
+channel remapping.
+
+Frame requests compare against applied frame counts. Duration requests require
+exact rational frame duration under Exact policy; unrepresentable durations
+return a supported frame suggestion. Opt-in negotiation may round upward to a
+supported fundamental multiple within device bounds. Unknown native bounds
+remain unknown, and a suggested size does not prove the device will initialize.
+
 These mode constraints follow Microsoft's [stream management](https://learn.microsoft.com/en-us/windows/win32/coreaudio/stream-management)
 and [exclusive stream](https://learn.microsoft.com/en-us/windows/win32/coreaudio/exclusive-mode-streams)
 contracts. Requested configuration probing follows [IsFormatSupported](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-isformatsupported).
@@ -60,6 +79,10 @@ contracts. Requested configuration probing follows [IsFormatSupported](https://l
 - A dedicated worker owns its COM apartment, interfaces, render events and
   MMCSS registration. Allocate all mixer and conversion storage before Start;
   setup, error formatting and COM teardown remain outside buffer filling.
+- The caller may select MMCSS priority or explicitly disable registration.
+  Unsupported or failed priority setup is reported rather than silently applied.
+  Start acknowledges native startup. Stop is terminal for that stream instance
+  and joins its worker; starting again requires explicitly opening a new stream.
 - Fill paths use fixed numeric error/status reporting, including native failure
   exits. Audit projected COM error construction for allocation; use narrow
   documented raw FFI calls where necessary. Every acquired buffer has exactly
