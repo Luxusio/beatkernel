@@ -1,5 +1,8 @@
 //! Off-thread bounded BMS preparation shared by offline and native compositions.
 #![forbid(unsafe_code)]
+/// Synthetic offline composition using the same runtime and mixer as native apps.
+pub mod offline;
+
 use beatkernel::{
     audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, VoiceId},
     judge::JudgeStage,
