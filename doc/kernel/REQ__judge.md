@@ -73,7 +73,11 @@ inside the widest profile window is eligible. Custom evaluators default to the
 latter: their predicate accepts typed samples, including Up or samples outside
 the builtin window, through a separate pending-object index. Candidate selection
 still chooses at most one accepted pending object per bound input. Completed
-objects leave that index. Pending interactions advance when their declared
+objects leave that index. Pending objects whose declared inclusive deadline is
+strictly before effective input time are excluded before resolver validation;
+expiry cannot consume the selected object and discard a live candidate's input.
+Equality remains eligible and invalid selections remain atomic. Pending
+interactions advance when their declared
 deadline expires; continuously advancing interactions begin Active. A pending
 interaction declaring no deadline receives no time callbacks.
 
