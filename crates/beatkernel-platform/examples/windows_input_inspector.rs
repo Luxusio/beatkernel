@@ -17,8 +17,16 @@ struct Options {
     fixture: bool,
     seconds: u64,
     hid: Vec<(u16, u16)>,
+    cadence: Option<CadenceOptions>,
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+struct CadenceOptions {
+    device: DeviceId,
+    usage: u16,
+    state: beatkernel::input::ButtonState,
+    nominal_ns: i64,
+}
 fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
@@ -28,9 +36,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         println!(
             "BeatKernel Windows Raw Input inspector\n\
-Usage: windows_input_inspector [--seconds 1..3600] [--hid page:usage]...\n\
+Usage: windows_input_inspector [--seconds N] [--hid page:usage]... [--cadence DEVICE_ID HID_KEY_USAGE down|up|repeat NOMINAL_NS]\n\
        windows_input_inspector --fixture\n\
 Native mode requires Windows and opens an app-owned input window (default 10s).\n\
+Seconds: ordinary 1..3600; cadence 1..60 (default 10). Cadence selects an enumerated session device/key/state; nominal ns must be positive. It suppresses event printing and reports actual QPC receipt cadence plus receipt-to-inspector age after cleanup, not hardware jitter or input loss inference.\n\
 HID numbers are decimal or 0x-prefixed hex; keyboard is always registered.\n\
 --fixture uses synthetic packet bytes on every host; it accepts no native options.\n\
 QPC is receipt time; MSG.time is posted-message metadata, not hardware time."
@@ -41,11 +50,51 @@ QPC is receipt time; MSG.time is posted-message metadata, not hardware time."
         fixture: false,
         seconds: 10,
         hid: Vec::new(),
+        cadence: None,
     };
     let mut native_options = false;
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--cadence" => {
+                native_options = true;
+                if options.cadence.is_some() {
+                    return Err(invalid("duplicate --cadence").into());
+                }
+                let device: u64 = args
+                    .next()
+                    .ok_or_else(|| invalid("cadence requires DEVICE_ID"))?
+                    .parse()?;
+                let usage = args
+                    .next()
+                    .ok_or_else(|| invalid("cadence requires HID_KEY_USAGE"))?;
+                let usage: u16 = if let Some(hex) = usage.strip_prefix("0x") {
+                    u16::from_str_radix(hex, 16)?
+                } else {
+                    usage.parse()?
+                };
+                let state = match args.next().map(String::as_str) {
+                    Some("down") => beatkernel::input::ButtonState::Down,
+                    Some("up") => beatkernel::input::ButtonState::Up,
+                    Some("repeat") => beatkernel::input::ButtonState::Repeat,
+                    _ => return Err(invalid("cadence state must be down, up or repeat").into()),
+                };
+                let nominal_ns: i64 = args
+                    .next()
+                    .ok_or_else(|| invalid("cadence requires NOMINAL_NS"))?
+                    .parse()?;
+                if device == 0 || usage == 0 || nominal_ns <= 0 {
+                    return Err(
+                        invalid("cadence requires positive device, usage and nominal ns").into(),
+                    );
+                }
+                options.cadence = Some(CadenceOptions {
+                    device: DeviceId(device),
+                    usage,
+                    state,
+                    nominal_ns,
+                });
+            }
             "--fixture" => options.fixture = true,
             "--seconds" => {
                 native_options = true;
@@ -87,6 +136,9 @@ QPC is receipt time; MSG.time is posted-message metadata, not hardware time."
             _ => return Err(invalid(&format!("unknown argument: {arg}")).into()),
         }
     }
+    if options.cadence.is_some() && options.seconds > 60 {
+        return Err(invalid("cadence seconds must be 1..60").into());
+    }
     if options.fixture {
         if native_options {
             return Err(invalid("--fixture cannot be combined with native options").into());
@@ -104,9 +156,26 @@ fn print_packet(
     input: &InputBatch,
 ) -> Result<(), Box<dyn Error>> {
     let packet = RawInputPacket::parse(bytes, layout)?;
-    println!("packet source={} native_handle={:#x} sequence={} status={:?} kind={} size={} input_code={:#x}", source.0, packet.header().device_handle, input.sequence, input.status, packet.header().kind, packet.header().size, packet.header().input_code);
+    println!(
+        "packet source={} native_handle={:#x} sequence={} status={:?} kind={} size={} input_code={:#x}",
+        source.0,
+        packet.header().device_handle,
+        input.sequence,
+        input.status,
+        packet.header().kind,
+        packet.header().size,
+        packet.header().input_code
+    );
     if let RawInputData::Keyboard(key) = packet.data() {
-        println!("keyboard make={:#06x} flags={:#06x} reserved={:#06x} vkey={:#06x} message={:#x} extra={:#x}", key.make_code, key.flags, key.reserved, key.virtual_key, key.message, key.extra_information);
+        println!(
+            "keyboard make={:#06x} flags={:#06x} reserved={:#06x} vkey={:#06x} message={:#x} extra={:#x}",
+            key.make_code,
+            key.flags,
+            key.reserved,
+            key.virtual_key,
+            key.message,
+            key.extra_information
+        );
     }
     for event in &input.events {
         let meta = event.meta();
@@ -180,7 +249,12 @@ fn fixture() -> Result<(), Box<dyn Error>> {
             body.extend(0u32.to_le_bytes());
             let bytes = packet(layout, 1, *handle, &body);
             let point = mapping.point(2000 + index as i64)?;
-            println!("fixture layout={layout:?} receipt_counter={} frequency=1000000000 native_ns={} host_ns={}", 2000 + index, point.timestamp.as_nanos(), mapping.map(point, HOST_CLOCK).unwrap().as_nanos());
+            println!(
+                "fixture layout={layout:?} receipt_counter={} frequency=1000000000 native_ns={} host_ns={}",
+                2000 + index,
+                point.timestamp.as_nanos(),
+                mapping.map(point, HOST_CLOCK).unwrap().as_nanos()
+            );
             let input =
                 processor.process(&RawInputPacket::parse(&bytes, layout)?, point, &mapping)?;
             print_packet(
@@ -241,9 +315,9 @@ mod native_windows {
         Foundation::{HINSTANCE, HWND},
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
-            RegisterClassW, TranslateMessage, UnregisterClassW, GIDC_ARRIVAL, GIDC_REMOVAL, MSG,
-            PM_REMOVE, WM_CLOSE, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_QUIT, WNDCLASSW,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GIDC_ARRIVAL,
+            GIDC_REMOVAL, MSG, PM_REMOVE, PeekMessageW, RegisterClassW, TranslateMessage,
+            UnregisterClassW, WM_CLOSE, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_QUIT, WNDCLASSW,
             WS_OVERLAPPEDWINDOW, WS_VISIBLE,
         },
     };
@@ -360,6 +434,111 @@ mod native_windows {
         );
     }
 
+    struct Cadence {
+        options: CadenceOptions,
+        jitter: beatkernel::telemetry::IntervalJitter,
+        delivery: beatkernel::telemetry::InputDeliveryTelemetry,
+        first: Option<beatkernel::input::EventMeta>,
+        last: Option<beatkernel::input::EventMeta>,
+        matched: u64,
+        regressions: u64,
+        native_rejections: u64,
+        selected_removed: bool,
+    }
+    impl Cadence {
+        fn new(options: CadenceOptions) -> Result<Self, Box<dyn Error>> {
+            // Placeholder only reserves storage; reset uses the first actual event
+            // as baseline, so no artificial interval contributes to a summary.
+            let baseline = beatkernel::time::ClockPoint {
+                domain: HOST_CLOCK,
+                timestamp: beatkernel::time::Timestamp::ZERO,
+            };
+            let jitter = beatkernel::telemetry::IntervalJitter::new(
+                4096,
+                beatkernel::time::Duration::from_nanos(options.nominal_ns),
+                baseline,
+            )?;
+            let delivery = beatkernel::telemetry::InputDeliveryTelemetry::new(4096, HOST_CLOCK)?;
+            Ok(Self {
+                options,
+                jitter,
+                delivery,
+                first: None,
+                last: None,
+                matched: 0,
+                regressions: 0,
+                native_rejections: 0,
+                selected_removed: false,
+            })
+        }
+        fn observe(
+            &mut self,
+            event: &PhysicalInputEvent,
+            received: beatkernel::time::ClockPoint,
+        ) -> Result<(), Box<dyn Error>> {
+            let PhysicalInputEvent::Button(button) = event else {
+                return Ok(());
+            };
+            if button.meta.source != self.options.device
+                || button.control
+                    != beatkernel::input::PhysicalControlId::keyboard(self.options.usage)
+                || button.state != self.options.state
+            {
+                return Ok(());
+            }
+            let meta = button.meta;
+            if self.last.is_some_and(|last| {
+                meta.sequence <= last.sequence
+                    || meta.timestamp < last.timestamp
+                    || meta.clock_domain != last.clock_domain
+            }) {
+                self.regressions = self
+                    .regressions
+                    .checked_add(1)
+                    .ok_or("cadence regression counter overflow")?;
+                return Err("selected cadence sequence/timestamp/domain regressed".into());
+            }
+            let point = beatkernel::time::ClockPoint {
+                domain: meta.clock_domain,
+                timestamp: meta.timestamp,
+            };
+            self.delivery.observe(point, received)?;
+            if self.first.is_none() {
+                self.jitter.reset(
+                    beatkernel::time::Duration::from_nanos(self.options.nominal_ns),
+                    point,
+                )?;
+                self.first = Some(meta);
+            } else {
+                self.jitter.observe(point)?;
+            }
+            self.last = Some(meta);
+            self.matched = self
+                .matched
+                .checked_add(1)
+                .ok_or("cadence match counter overflow")?;
+            Ok(())
+        }
+        fn print_summary(self) {
+            println!(
+                "selected QPC-receipt cadence: matched={} pairs={} summary={:?}; first actual metadata={:?}; last actual metadata={:?}",
+                self.matched,
+                self.jitter.observed_pairs(),
+                self.jitter.summary(),
+                self.first,
+                self.last
+            );
+            println!(
+                "QPC receipt-to-inspector delivery age: events={} retained summary={:?}; ordering regressions={} native read rejections={} selected removal={}; unknown hardware/source event loss is not inferred from filtered sequence gaps",
+                self.delivery.observed_events(),
+                self.delivery.summary(),
+                self.regressions,
+                self.native_rejections,
+                self.selected_removed
+            );
+        }
+    }
+
     pub(super) fn run(options: Options) -> Result<(), Box<dyn Error>> {
         let clock = QpcClock::new(HOST_CLOCK)?;
         let window = Window::new()?;
@@ -372,97 +551,170 @@ mod native_windows {
         let mut input = WindowsInput::new(clock);
         println!("NATIVE Windows Raw Input inspector; QPC receipt time, not hardware latency");
         let mut printed_devices = BTreeSet::new();
-        for device in input.enumerate_devices()? {
-            print_device(&device);
-            printed_devices.insert(device.descriptor.runtime_id);
+        let enumerated = input.enumerate_devices();
+        if let Ok(devices) = &enumerated {
+            for device in devices {
+                print_device(device);
+                printed_devices.insert(device.descriptor.runtime_id);
+            }
         }
-        let deadline = Instant::now() + Duration::from_secs(options.seconds);
         let mut acquisitions = 0u64;
-        'pump: while Instant::now() < deadline {
-            // SAFETY: MSG has only integer/opaque-pointer fields, so zero is a
-            // valid bit pattern. PeekMessage fills it before inspection.
-            let mut message: MSG = unsafe { std::mem::zeroed() };
-            // SAFETY: live aligned writable MSG and no retained pointer.
-            while Instant::now() < deadline
-                && unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) } != 0
-            {
-                if message.message == WM_QUIT
-                    || (message.message == WM_CLOSE && message.hwnd == window.hwnd)
+        let mut cadence = options.cadence.map(Cadence::new).transpose()?;
+        let outcome = (|| -> Result<(), Box<dyn Error>> {
+            enumerated?;
+            if let Some(cadence) = cadence.as_ref() {
+                let selected = input
+                    .devices()
+                    .find(|d| d.descriptor.runtime_id == cadence.options.device)
+                    .ok_or("explicit cadence session DeviceId is absent from enumeration")?;
+                if selected.kind != RawDeviceKind::Keyboard {
+                    return Err("cadence selection must be a keyboard device".into());
+                }
+                println!(
+                    "selected cadence device={} HID usage={} state={:?} nominal={}ns; QPC receipt intervals, not hardware events; sequence gaps are not proof of loss",
+                    cadence.options.device.0,
+                    cadence.options.usage,
+                    cadence.options.state,
+                    cadence.options.nominal_ns
+                );
+            }
+            let deadline = Instant::now() + Duration::from_secs(options.seconds);
+            'pump: while Instant::now() < deadline {
+                // SAFETY: MSG has only integer/opaque-pointer fields, so zero is a
+                // valid bit pattern. PeekMessage fills it before inspection.
+                let mut message: MSG = unsafe { std::mem::zeroed() };
+                // SAFETY: live aligned writable MSG and no retained pointer.
+                while Instant::now() < deadline
+                    && unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) } != 0
                 {
-                    // Do not dispatch WM_CLOSE: cleanup registration first.
-                    break 'pump;
-                }
-                if message.hwnd == window.hwnd && message.message == WM_INPUT {
-                    let result = input.read_raw_input(message.lParam as usize, Some(message.time));
-                    if message.wParam & 0xff == 0 {
-                        // SAFETY: this is the actual foreground message from
-                        // this window's queue. Acquisition finishes first;
-                        // cleanup runs exactly once before handling any error.
-                        unsafe {
-                            DefWindowProcW(
-                                message.hwnd,
-                                message.message,
-                                message.wParam,
-                                message.lParam,
-                            );
-                        }
+                    if message.message == WM_QUIT
+                        || (message.message == WM_CLOSE && message.hwnd == window.hwnd)
+                    {
+                        // Do not dispatch WM_CLOSE: cleanup registration first.
+                        break 'pump;
                     }
-                    // Acquisition can attach a device even when the packet is
-                    // rejected later, so describe new sources on both paths.
-                    for device in input.devices() {
-                        if printed_devices.insert(device.descriptor.runtime_id) {
-                            print_device(device);
+                    if message.hwnd == window.hwnd && message.message == WM_INPUT {
+                        let result =
+                            input.read_raw_input(message.lParam as usize, Some(message.time));
+                        if message.wParam & 0xff == 0 {
+                            // SAFETY: this is the actual foreground message from
+                            // this window's queue. Acquisition finishes first;
+                            // cleanup runs exactly once before handling any error.
+                            unsafe {
+                                DefWindowProcW(
+                                    message.hwnd,
+                                    message.message,
+                                    message.wParam,
+                                    message.lParam,
+                                );
+                            }
                         }
-                    }
-                    match result {
-                        Ok(batch) => {
-                            acquisitions += 1;
-                            println!("receipt counter={} frequency={} native_ns={} native_clock={} host_ns={} host_clock={} posted_ms={:?}", batch.receipt.counter, batch.receipt.frequency, batch.receipt.native.timestamp.as_nanos(), batch.receipt.native.domain.0, batch.receipt.normalized.timestamp.as_nanos(), batch.receipt.normalized.domain.0, batch.message_time_ms);
-                            let layout = if std::mem::size_of::<usize>() == 8 {
-                                RawInputLayout::Win64
-                            } else {
-                                RawInputLayout::Win32
-                            };
-                            print_packet(&batch.packet, layout, batch.device, &batch.input)?;
-                        }
-                        Err(error) => eprintln!("input rejected: {error}"),
-                    }
-                    continue; // Foreground cleanup has already dispatched it.
-                }
-                if message.hwnd == window.hwnd && message.message == WM_INPUT_DEVICE_CHANGE {
-                    match message.wParam as u32 {
-                        GIDC_ARRIVAL => match input.attach_device(message.lParam as usize) {
-                            Ok(device) => {
-                                println!("device arrived={}", device.descriptor.runtime_id.0);
+                        // Acquisition can attach a device even when the packet is
+                        // rejected later, so describe new sources on both paths.
+                        if cadence.is_none() {
+                            for device in input.devices() {
                                 if printed_devices.insert(device.descriptor.runtime_id) {
-                                    print_device(&device);
+                                    print_device(device);
                                 }
                             }
-                            Err(error) => eprintln!("arrival rejected: {error}"),
-                        },
-                        GIDC_REMOVAL => {
-                            if let Some(device) = input.remove_device(message.lParam as usize) {
-                                println!("device removed={}", device.descriptor.runtime_id.0);
+                        }
+                        match result {
+                            Ok(batch) => {
+                                acquisitions += 1;
+                                if let Some(cadence) = cadence.as_mut() {
+                                    let received = clock.sample()?.normalized;
+                                    for event in &batch.input.events {
+                                        cadence.observe(event, received)?;
+                                    }
+                                    continue;
+                                }
+                                println!(
+                                    "receipt counter={} frequency={} native_ns={} native_clock={} host_ns={} host_clock={} posted_ms={:?}",
+                                    batch.receipt.counter,
+                                    batch.receipt.frequency,
+                                    batch.receipt.native.timestamp.as_nanos(),
+                                    batch.receipt.native.domain.0,
+                                    batch.receipt.normalized.timestamp.as_nanos(),
+                                    batch.receipt.normalized.domain.0,
+                                    batch.message_time_ms
+                                );
+                                let layout = if std::mem::size_of::<usize>() == 8 {
+                                    RawInputLayout::Win64
+                                } else {
+                                    RawInputLayout::Win32
+                                };
+                                print_packet(&batch.packet, layout, batch.device, &batch.input)?;
+                            }
+                            Err(error) => {
+                                if let Some(cadence) = cadence.as_mut() {
+                                    cadence.native_rejections = cadence
+                                        .native_rejections
+                                        .checked_add(1)
+                                        .ok_or("cadence rejection counter overflow")?;
+                                    return Err(error.into());
+                                }
+                                eprintln!("input rejected: {error}");
                             }
                         }
-                        _ => eprintln!("unknown device notification={}", message.wParam),
+                        continue; // Foreground cleanup has already dispatched it.
+                    }
+                    if message.hwnd == window.hwnd && message.message == WM_INPUT_DEVICE_CHANGE {
+                        match message.wParam as u32 {
+                            GIDC_ARRIVAL => match input.attach_device(message.lParam as usize) {
+                                Ok(device) => {
+                                    if cadence.is_some() {
+                                        continue;
+                                    }
+                                    println!("device arrived={}", device.descriptor.runtime_id.0);
+                                    if printed_devices.insert(device.descriptor.runtime_id) {
+                                        print_device(&device);
+                                    }
+                                }
+                                Err(error) => eprintln!("arrival rejected: {error}"),
+                            },
+                            GIDC_REMOVAL => {
+                                if let Some(device) = input.remove_device(message.lParam as usize) {
+                                    if let Some(cadence) = cadence.as_mut() {
+                                        if device.descriptor.runtime_id == cadence.options.device {
+                                            cadence.selected_removed = true;
+                                            return Err("selected cadence device removed; no reconnect retargeting".into());
+                                        }
+                                    } else {
+                                        println!(
+                                            "device removed={}",
+                                            device.descriptor.runtime_id.0
+                                        );
+                                    }
+                                }
+                            }
+                            _ => eprintln!("unknown device notification={}", message.wParam),
+                        }
+                    }
+                    // SAFETY: actual initialized message from this thread's queue;
+                    // stateless callback delegates normal messages to DefWindowProc;
+                    // WM_CLOSE only posts quit until registration cleanup finishes.
+                    unsafe {
+                        TranslateMessage(&message);
+                        DispatchMessageW(&message);
+                    }
+                    if Instant::now() >= deadline {
+                        break 'pump;
                     }
                 }
-                // SAFETY: actual initialized message from this thread's queue;
-                // stateless callback delegates normal messages to DefWindowProc;
-                // WM_CLOSE only posts quit until registration cleanup finishes.
-                unsafe {
-                    TranslateMessage(&message);
-                    DispatchMessageW(&message);
-                }
-                if Instant::now() >= deadline {
-                    break 'pump;
-                }
+                std::thread::sleep(Duration::from_millis(1));
             }
-            std::thread::sleep(Duration::from_millis(1));
+            Ok(())
+        })();
+        let close = registration.close();
+        if let Some(cadence) = cadence {
+            cadence.print_summary();
         }
-        registration.close()?;
-        println!("native acquisitions={acquisitions}; owned registrations closed");
+        if let Err(error) = &close {
+            eprintln!("registration close failed: {error}");
+        }
+        println!("native acquisitions={acquisitions}; close result={close:?}");
+        outcome?;
+        close?;
         Ok(())
     }
 }
