@@ -118,6 +118,12 @@ different arithmetic representation and corresponding real-time verification.
   one four-frame render admits only Play; two two-frame renders admit Stop on
   the second callback and silence its last two frames. Size the drain budget
   for expected command bursts and observe lateness/capacity counters.
+- The drain budget bounds new queue admissions, not execution of already due
+  pending commands. Due execution is bounded by pending capacity. Sorted
+  insertion and front removal can require quadratic work for dense batches;
+  mixing scans configured voice slots per frame/channel. Finite capacity bounds
+  do not guarantee that every maximum configuration meets a device deadline.
+  Measure representative settings during integrated timing verification.
 - Rendering performs no heap allocation, reallocation, deallocation, blocking
   lock, decode, disk/network I/O or ordinary logging/formatting. Disconnect is
   observable state, not permission to drop queue/sample ownership during render.
