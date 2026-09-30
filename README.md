@@ -532,6 +532,7 @@ cargo run -p beatkernel --example generalization
 cargo run -p beatkernel --example contact_rebind
 cargo run --release -p beatkernel --example runtime_bench -- --help
 cargo run -p beatkernel-platform --example linux_native -- --help
+cargo run --release -p beatkernel-platform --example linux_input_cadence -- --help
 cargo run -p beatkernel-platform --example device_adapter
 ```
 
@@ -540,6 +541,11 @@ custom evaluator hooks for fixed-contact sustain and same-surface reacquisition
 after normal release within a configured grace. It preserves device/contact
 identity in snapshots and uses the same judge during replay. Its fixtures are
 authored and compiled; execution remains deferred.
+
+The [Linux cadence tool](doc/platform/REQ__linux-input-cadence.md) selects one
+native keyboard signal or hidraw report ID and an explicit nominal period. It
+reports retained interval deviations, delivery age, provenance and native counters
+without per-event printing; native execution remains deferred.
 
 See [Linux native requirements](doc/platform/REQ__linux-native.md) for explicit
 nodes/endpoints and supported settings. Exact ALSA sizing is the default;

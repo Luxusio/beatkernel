@@ -74,3 +74,13 @@ Authored fixtures cover signed/absolute nearest-rank behavior, equality, ring
 retention, unknown-before-pair state, atomic rejection/reset, full signed timestamp
 span, nominal validation and original RuntimeTelemetry compatibility. They are
 compile-checked during implementation; fixture execution is deferred.
+
+The [Linux input cadence example](../platform/REQ__linux-input-cadence.md) now
+observes an explicitly selected real evdev keyboard signal or hidraw report ID
+against a caller-supplied nominal period. Actual event points feed IntervalJitter;
+fresh same-domain receipt points feed delivery age. It retains finite summaries,
+source metadata and native counters, stops on loss/order discontinuity and prints
+after acquisition closes. Kernel evdev timing and userspace hidraw receipt timing
+are labeled separately. This fills native acquisition-to-cadence source wiring;
+native execution, measured results and other platform cadence tooling remain
+outstanding.
