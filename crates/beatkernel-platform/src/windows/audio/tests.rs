@@ -68,6 +68,7 @@ fn failing_ack_stream(panic_after_ack: bool) -> (WasapiStream, Arc<AtomicBool>) 
     let control = Arc::new(Control {
         request: AtomicU8::new(0),
         telemetry: Telemetry::new(),
+        cadence: crate::audio::cadence::Capture::new(),
     });
     let dropped = Arc::new(AtomicBool::new(false));
     let (ack_tx, started) = mpsc::sync_channel(1);

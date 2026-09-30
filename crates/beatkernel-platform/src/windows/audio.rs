@@ -208,6 +208,7 @@ impl WasapiBackend {
         let control = Arc::new(Control {
             request: AtomicU8::new(0),
             telemetry: Telemetry::new(),
+            cadence: crate::audio::cadence::Capture::new(),
         });
         let worker_control = Arc::clone(&control);
         let (opened_tx, opened_rx) = mpsc::sync_channel(1);
@@ -290,6 +291,24 @@ impl AudioOutputStream for WasapiStream {
 
     fn snapshot(&self) -> AudioStreamSnapshot {
         self.control.telemetry.read()
+    }
+
+    fn render_cadence(
+        &self,
+    ) -> Result<
+        Option<crate::audio::cadence::RenderCadence>,
+        crate::audio::cadence::RenderCadenceError,
+    > {
+        // Joining the sole writer also retains its prefix after native failure.
+        // Live snapshots cannot establish that this immutable prefix is drained.
+        if self.worker.is_some() {
+            Ok(None)
+        } else {
+            self.control
+                .cadence
+                .summary(self.configuration.format.sample_rate())
+                .map(Some)
+        }
     }
 
     fn start(&mut self) -> Result<(), AudioPlatformError> {
@@ -1031,7 +1050,7 @@ impl Worker {
             _mmcss: mmcss,
             _apartment: apartment,
         };
-        worker.fill(false).map_err(native)?;
+        worker.fill(false, None).map_err(native)?;
         Ok(worker)
     }
 
@@ -1095,7 +1114,7 @@ impl Worker {
                 break;
             }
             if should_fill {
-                if let Err(code) = self.fill(true) {
+                if let Err(code) = self.fill(true, Some(&control.cadence)) {
                     self.fail(code);
                     break;
                 }
@@ -1132,7 +1151,11 @@ impl Worker {
 
     // Real-time fill boundary: no projected COM errors, allocation, release of
     // owning assets/interfaces, locks, logging or channels occur in this method.
-    fn fill(&mut self, running: bool) -> Result<(), i32> {
+    fn fill(
+        &mut self,
+        running: bool,
+        cadence: Option<&crate::audio::cadence::Capture>,
+    ) -> Result<(), i32> {
         let exclusive = self.configuration.requested.mode() == AudioStreamMode::Exclusive;
         let mut padding = 0;
         if !exclusive {
@@ -1176,8 +1199,21 @@ impl Worker {
             let render = if pointer.is_null() {
                 Err(E_INVALIDARG_CODE)
             } else {
+                // Direct render-entry QPC, never the device presentation clock.
+                // Ready prefill has no capture; failure is diagnostic only.
+                let render_start = cadence
+                    .and_then(|_| self.clock.sample().ok())
+                    .map(|receipt| receipt.normalized.timestamp);
                 match self.mixer.render(&mut self.scratch[..count]) {
                     Ok(report) => {
+                        if let Some(cadence) = cadence {
+                            match render_start {
+                                Some(at) => {
+                                    cadence.record(at, report.start_frame, report.frames as u64);
+                                }
+                                None => cadence.mark_unavailable(),
+                            }
+                        }
                         // SAFETY: GetBuffer guarantees writable storage for the
                         // requested complete frames. Exact extent is bounded by
                         // negotiated capacity; no pointer survives ReleaseBuffer.
@@ -1309,6 +1345,7 @@ impl Drop for BufferLease<'_> {
 struct Control {
     request: AtomicU8,
     telemetry: Telemetry,
+    cadence: crate::audio::cadence::Capture,
 }
 
 #[cfg(test)]

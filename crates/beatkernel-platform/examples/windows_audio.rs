@@ -633,8 +633,11 @@ mod native {
         drop(producer);
         let final_snapshot = stream.snapshot();
         print_snapshot("joined", final_snapshot);
+        let cadence = stream.render_cadence();
+        println!("joined Running render-entry QPC cadence={cadence:?}; Ready prefill excluded; not callback-arrival, native delivery or acoustic jitter");
         operation?;
         stopped?;
+        cadence?;
         if final_snapshot.status != AudioStreamStatus::Stopped {
             return Err("worker did not report clean terminal stop".into());
         }
