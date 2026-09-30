@@ -82,6 +82,18 @@ limit on output duration. Negative command frames remain ordered by their
 original target before late execution. A valid empty output buffer reports
 current state without consuming commands or advancing the cursor.
 
+Unknown Stop is an applied no-op: it increments both the applied-command and
+unknown-stop counters. Rejected commands increment their rejection counters
+without counting as applied. Preroll counts as late even when upward rounding
+places its target at frame zero.
+
+### Known ceiling
+
+A rate change for a live fractional sample head is rejected if its exact common
+denominator exceeds signed 128-bit representation. The previous rate and every
+voice head remain unchanged. Supporting wider exact phases would require a
+different arithmetic representation and corresponding real-time verification.
+
 ## Queue, backpressure and real-time boundary
 
 - One non-clonable producer and consumer share a fixed-capacity scalar SPSC
