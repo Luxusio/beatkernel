@@ -997,6 +997,222 @@ fn custom_pending_axis_without_deadline_starts_outside_builtin_profile_window() 
     }
 }
 
+struct DeadlineAxisEvaluator {
+    deadline: i64,
+    samples: Samples,
+}
+struct DeadlineAxisInteraction {
+    deadline: i64,
+    inner: AxisInteraction,
+}
+impl InteractionEvaluator for DeadlineAxisEvaluator {
+    fn validate(&self, _: &TimedObject, _: &JudgeProfile) -> Result<(), JudgeError> {
+        Ok(())
+    }
+    fn begin(&self, _: &TimedObject, context: &BeginContext<'_>) -> Box<dyn ActiveInteraction> {
+        Box::new(DeadlineAxisInteraction {
+            deadline: self.deadline,
+            inner: AxisInteraction {
+                samples: self.samples.clone(),
+                state: InteractionState::Pending,
+                control: context.control,
+            },
+        })
+    }
+}
+impl ActiveInteraction for DeadlineAxisInteraction {
+    fn state(&self) -> InteractionState {
+        self.inner.state()
+    }
+    fn accepts_input(&self, event: &GameInputEvent, context: &InteractionContext<'_>) -> bool {
+        // Acceptance intentionally depends on the typed payload alone; the
+        // declared deadline is the engine's scheduling and eligibility boundary.
+        self.inner.accepts_input(event, context)
+    }
+    fn on_input(
+        &mut self,
+        event: &GameInputEvent,
+        context: &InteractionContext<'_>,
+    ) -> InteractionOutput {
+        self.inner.on_input(event, context)
+    }
+    fn advance_to(&mut self, time: Timestamp, _: &InteractionContext<'_>) -> InteractionOutput {
+        if self.inner.state == InteractionState::Pending && time > ts(self.deadline) {
+            self.inner.state = InteractionState::Completed;
+            InteractionOutput {
+                results: vec![InteractionResult {
+                    stage: JudgeStage::Custom(77),
+                    outcome: JudgeOutcome::Miss {
+                        reason: MissReason::HeadTimeout,
+                    },
+                }],
+            }
+        } else {
+            InteractionOutput::default()
+        }
+    }
+    fn deadline(&self, _: &JudgeProfile) -> Option<i128> {
+        (self.inner.state != InteractionState::Completed).then_some(i128::from(self.deadline))
+    }
+}
+fn deadline_axis_engine(samples: Samples, resolver: Box<dyn CandidateResolver>) -> JudgeEngine {
+    JudgeEngine::with_policies(
+        chart(&[(1, 100, None, 77), (2, 200, None, 78)]),
+        vec![(77, 100), (78, 300)]
+            .into_iter()
+            .map(|(interaction, deadline)| Rule {
+                interaction: InteractionId(interaction),
+                control: GameControlId(1),
+                evaluator: Box::new(DeadlineAxisEvaluator {
+                    deadline,
+                    samples: samples.clone(),
+                }),
+            })
+            .collect(),
+        profile(0),
+        resolver,
+        Box::new(WindowJudgePolicy),
+    )
+    .unwrap()
+}
+fn deadline_axis_input() -> GameInputEvent {
+    GameInputEvent {
+        game_control: GameControlId(1),
+        physical: PhysicalInputEvent::Axis(AxisEvent {
+            meta: meta(1),
+            control: PhysicalControlId::keyboard(7),
+            value: -0.0,
+            mode: AxisMode::Relative,
+        }),
+    }
+}
+
+#[test]
+fn custom_expired_candidate_cannot_steal_live_input_in_either_call_order() {
+    let input = deadline_axis_input();
+    for advance_first in [false, true] {
+        let samples = Arc::new(Mutex::new(Vec::new()));
+        let selections = Arc::new(Mutex::new(Vec::new()));
+        let mut e = deadline_axis_engine(
+            samples.clone(),
+            Box::new(ObservedResolver(selections.clone())),
+        );
+        let mut events = Vec::new();
+        if advance_first {
+            events.extend(e.advance_to(ts(150)).unwrap());
+        }
+        events.extend(e.push_input(&input, ts(150)).unwrap());
+        if !advance_first {
+            events.extend(e.advance_to(ts(150)).unwrap());
+        }
+        assert_eq!(
+            events,
+            vec![
+                miss(
+                    1,
+                    JudgeStage::Custom(77),
+                    MissReason::HeadTimeout,
+                    150,
+                    None
+                ),
+                hit(2, JudgeStage::Custom(77), 88, 0, 150, meta(1)),
+            ],
+            "advance_first={advance_first}"
+        );
+        assert_eq!(
+            *selections.lock().unwrap(),
+            vec![vec![Candidate {
+                object: ObjectId(2),
+                target: ts(200),
+                delta: -50,
+            }]]
+        );
+        for id in [ObjectId(1), ObjectId(2)] {
+            assert_eq!(e.state(id), Some(InteractionState::Completed));
+        }
+        let captured = samples.lock().unwrap().clone();
+        assert_eq!(captured, vec![input.clone()]);
+        let PhysicalInputEvent::Axis(sample) = &captured[0].physical else {
+            panic!("axis payload flattened")
+        };
+        assert_eq!(sample.value.to_bits(), 0x8000_0000);
+        assert!(e.push_input(&input, ts(150)).unwrap().is_empty());
+        assert!(e.advance_to(ts(301)).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn custom_declared_deadline_equality_remains_eligible_in_either_call_order() {
+    let input = deadline_axis_input();
+    for advance_first in [false, true] {
+        let samples = Arc::new(Mutex::new(Vec::new()));
+        let mut e = deadline_axis_engine(samples.clone(), Box::new(ClosestCandidate));
+        let mut events = Vec::new();
+        if advance_first {
+            events.extend(e.advance_to(ts(100)).unwrap());
+        }
+        events.extend(e.push_input(&input, ts(100)).unwrap());
+        if !advance_first {
+            events.extend(e.advance_to(ts(100)).unwrap());
+        }
+        assert_eq!(
+            events,
+            vec![hit(1, JudgeStage::Custom(77), 88, 0, 100, meta(1))]
+        );
+        assert_eq!(e.state(ObjectId(1)), Some(InteractionState::Completed));
+        assert_eq!(e.state(ObjectId(2)), Some(InteractionState::Pending));
+        assert_eq!(*samples.lock().unwrap(), vec![input.clone()]);
+        assert_eq!(
+            e.advance_to(ts(301)).unwrap(),
+            vec![miss(
+                2,
+                JudgeStage::Custom(77),
+                MissReason::HeadTimeout,
+                301,
+                None
+            )]
+        );
+    }
+}
+
+#[test]
+fn custom_past_deadline_resolver_selection_is_rejected_before_expiry_or_chronology() {
+    let samples = Arc::new(Mutex::new(Vec::new()));
+    let mut e = deadline_axis_engine(samples.clone(), Box::new(Pick(ObjectId(1))));
+    assert_eq!(
+        e.push_input(&deadline_axis_input(), ts(150)),
+        Err(JudgeError::InvalidCandidate {
+            object: ObjectId(1)
+        })
+    );
+    assert_eq!(e.effective_song_time(), None);
+    for id in [ObjectId(1), ObjectId(2)] {
+        assert_eq!(e.state(id), Some(InteractionState::Pending));
+    }
+    assert!(samples.lock().unwrap().is_empty());
+    assert_eq!(
+        e.advance_to(ts(101)).unwrap(),
+        vec![miss(
+            1,
+            JudgeStage::Custom(77),
+            MissReason::HeadTimeout,
+            101,
+            None
+        )]
+    );
+    assert_eq!(e.state(ObjectId(2)), Some(InteractionState::Pending));
+    assert_eq!(
+        e.advance_to(ts(301)).unwrap(),
+        vec![miss(
+            2,
+            JudgeStage::Custom(77),
+            MissReason::HeadTimeout,
+            301,
+            None
+        )]
+    );
+}
+
 struct UnusedMapper;
 impl ClockMapper for UnusedMapper {
     fn map(&self, _: ClockPoint, _: ClockDomainId) -> Option<Timestamp> {
