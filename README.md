@@ -471,6 +471,11 @@ loading with a WAV default and an injected off-thread decoder boundary; compress
 formats are not implemented by that default. Explicit mono-to-stereo conversion
 is available without changing source frame positions.
 
+[Rolling BGM admission](doc/kernel/REQ__bms-bgm-admission.md) keeps native command
+storage independent of total BGM count. Its explicit lookahead and outstanding
+credit budget use completed mixer frames; missed unadmitted cues fail with their
+original mapped times. This schedules preloaded assets and does not stream PCM.
+
 ```sh
 cargo run -p beatkernel-bms-runtime --bin windows_bms -- --help
 ```

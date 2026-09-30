@@ -56,6 +56,10 @@ The BMS runtime remains a separate crate. Its offline composition reuses shared
 preparation and renders chronologically with separate concurrent-voice and
 outstanding-command capacities; total notes are not capped at 4096. This source
 change does not supply executed fixture or native playback evidence.
+Native BMS composition uses shared [rolling BGM admission](../kernel/REQ__bms-bgm-admission.md)
+instead of imposing a whole-chart BGM queue limit. A finite lookahead and
+outstanding-command credit bound keep original scheduled times; a missed cue
+requires explicit restart rather than retimestamping. Assets remain preloaded.
 [Phase 15's conditional SDK](../kernel/REQ__sdk-status.md) is not activated without
 a concrete C/C# host requirement. The portable runtime benchmark exists but
 has not been executed. ASIO licensing/implementation, deferred verification and
