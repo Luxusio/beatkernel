@@ -7,6 +7,10 @@ license.workspace = true
 publish = false
 default-run = "beatkernel-bms-runtime"
 
+[features]
+default = []
+asio-sdk = ["beatkernel-platform/asio-sdk"]
+
 [dependencies]
 beatkernel = { path = "../../crates/beatkernel" }
 beatkernel-platform = { path = "../../crates/beatkernel-platform" }

@@ -30,6 +30,7 @@ enum Backend {
     Windows,
     Linux,
     Macos,
+    Asio,
     Unsupported,
 }
 fn host_backend() -> Backend {
@@ -43,8 +44,25 @@ fn host_backend() -> Backend {
         Backend::Unsupported
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AsioView {
+    Native,
+    Bits32,
+    Bits64,
+}
 #[derive(Debug)]
 struct Options {
+    backend: Backend,
+    #[cfg_attr(
+        not(all(target_os = "windows", feature = "asio-sdk")),
+        allow(dead_code)
+    )]
+    asio_view: Option<AsioView>,
+    #[cfg_attr(
+        not(all(target_os = "windows", feature = "asio-sdk")),
+        allow(dead_code)
+    )]
+    output_channels: Option<Vec<u32>>,
     chart: PathBuf,
     replay: PathBuf,
     device: String,
@@ -78,7 +96,10 @@ fn positive_u32(value: &str) -> Result<u32> {
     }
     Ok(count)
 }
-fn parse(args: &[String], backend: Backend) -> Result<Options> {
+fn parse(args: &[String], host: Backend) -> Result<Options> {
+    let mut backend = host;
+    let mut asio_view = None;
+    let mut output_channels = None;
     let (mut chart, mut replay, mut device, mut seconds, mut rate, mut channels) =
         (None, None, None, None, None, None);
     let (mut buffer, mut period) = (None, None);
@@ -100,6 +121,39 @@ fn parse(args: &[String], backend: Backend) -> Result<Options> {
         }
         let value = args.next().ok_or("each option requires a value")?;
         match flag.as_str() {
+            "--backend" => {
+                backend = match value.as_str() {
+                    "wasapi" => Backend::Windows,
+                    "asio" => Backend::Asio,
+                    "alsa" => Backend::Linux,
+                    "coreaudio" => Backend::Macos,
+                    _ => return Err("backend must be wasapi, asio, alsa or coreaudio".into()),
+                }
+            }
+            "--asio-view" => {
+                asio_view = Some(match value.as_str() {
+                    "native" => AsioView::Native,
+                    "32" => AsioView::Bits32,
+                    "64" => AsioView::Bits64,
+                    _ => return Err("ASIO view must be native, 32 or 64".into()),
+                })
+            }
+            "--output-channels" => {
+                let mut selected = Vec::new();
+                for token in value.split(',') {
+                    if token.is_empty() || !token.bytes().all(|b| b.is_ascii_digit()) {
+                        return Err("ASIO channel tokens must be unsigned decimal indices".into());
+                    }
+                    let index: u32 = token.parse()?;
+                    if index > i32::MAX as u32 || selected.contains(&index) || selected.len() == 32
+                    {
+                        return Err("invalid or duplicate ASIO output channel".into());
+                    }
+                    selected.push(index);
+                }
+                output_channels = Some(selected);
+            }
+
             "--chart" | "--replay" => {
                 if value.is_empty() {
                     return Err(format!("{flag} requires a nonempty path").into());
@@ -165,7 +219,16 @@ fn parse(args: &[String], backend: Backend) -> Result<Options> {
             _ => return Err(format!("unknown option {flag}").into()),
         }
     }
-    let device = device.ok_or("--device ID is required")?;
+    let mut device = device.ok_or("--device ID is required")?;
+    if backend == Backend::Asio && host != Backend::Windows {
+        return Err("ASIO requires a Windows host".into());
+    }
+    if backend != host && !(host == Backend::Windows && backend == Backend::Asio) {
+        return Err("requested backend is incompatible with host".into());
+    }
+    if backend != Backend::Asio && (asio_view.is_some() || output_channels.is_some()) {
+        return Err("ASIO flags require --backend asio".into());
+    }
     if backend != Backend::Windows && (mode_set || shared_set) {
         return Err("--mode and --shared-policy apply only to Windows".into());
     }
@@ -203,6 +266,35 @@ fn parse(args: &[String], backend: Backend) -> Result<Options> {
                 return Err("WASAPI requested sizes exceed core render ceiling".into());
             }
         }
+        Backend::Asio => {
+            if period.is_some() || mode_set || shared_set {
+                return Err("ASIO rejects period/mode/shared-policy flags".into());
+            }
+            if asio_view.is_none() || output_channels.is_none() {
+                return Err("ASIO requires --asio-view and --output-channels".into());
+            }
+            if buffer.is_some_and(|n| n as usize > AudioLimits::MAX_RENDER_FRAMES) {
+                return Err("ASIO buffer exceeds core render ceiling".into());
+            }
+            let bytes = device.as_bytes();
+            if bytes.len() != 38
+                || bytes[0] != b'{'
+                || bytes[37] != b'}'
+                || bytes[1..37].iter().enumerate().any(|(i, b)| {
+                    if [8, 13, 18, 23].contains(&i) {
+                        *b != b'-'
+                    } else {
+                        !b.is_ascii_hexdigit()
+                    }
+                })
+                || !bytes[1..37]
+                    .iter()
+                    .any(|b| b.is_ascii_hexdigit() && *b != b'0')
+            {
+                return Err("ASIO device requires a nonzero braced UUID CLSID".into());
+            }
+            device.make_ascii_uppercase();
+        }
         Backend::Unsupported => {
             return Err("native replay output supports only Windows, Linux and macOS".into())
         }
@@ -211,6 +303,12 @@ fn parse(args: &[String], backend: Backend) -> Result<Options> {
         rate.ok_or("--rate HZ is required")?,
         channels.ok_or("--channels N is required")?,
     )?;
+    if output_channels
+        .as_ref()
+        .is_some_and(|v| v.len() != usize::from(format.channels()))
+    {
+        return Err("ASIO output channel count must match --channels".into());
+    }
     DeviceFormat::new(
         format.sample_rate(),
         format.channels(),
@@ -231,6 +329,9 @@ fn parse(args: &[String], backend: Backend) -> Result<Options> {
         CodecLimits::new(65536, 32768)?,
     )?;
     Ok(Options {
+        backend,
+        asio_view,
+        output_channels,
         chart: chart.ok_or("--chart PATH is required")?,
         replay: replay.ok_or("--replay PATH is required")?,
         device,
@@ -252,10 +353,10 @@ fn parse(args: &[String], backend: Backend) -> Result<Options> {
 trait NativeOutput {
     fn start(&mut self) -> Result<()>;
     fn stop(&mut self) -> Result<()>;
-    fn poll(&self) -> Result<Option<RenderReport>>;
-    fn last_render(&self) -> Option<RenderReport>;
-    fn final_check(&self) -> Result<()>;
-    fn print_native(&self);
+    fn poll(&mut self) -> Result<Option<RenderReport>>;
+    fn last_render(&mut self) -> Option<RenderReport>;
+    fn final_check(&mut self) -> Result<()>;
+    fn print_native(&mut self);
 }
 
 #[cfg(target_os = "windows")]
@@ -297,22 +398,32 @@ mod native {
         fn stop(&mut self) -> Result<()> {
             Ok(self.0.stop()?)
         }
-        fn poll(&self) -> Result<Option<RenderReport>> {
+        fn poll(&mut self) -> Result<Option<RenderReport>> {
             let snapshot = self.0.snapshot();
             Self::check(snapshot, false)?;
             Ok(snapshot.render)
         }
-        fn last_render(&self) -> Option<RenderReport> {
+        fn last_render(&mut self) -> Option<RenderReport> {
             self.0.snapshot().render
         }
-        fn final_check(&self) -> Result<()> {
+        fn final_check(&mut self) -> Result<()> {
             Self::check(self.0.snapshot(), true)
         }
-        fn print_native(&self) {
+        fn print_native(&mut self) {
             println!("WASAPI applied={:?}; native snapshot={:?}; inferred counters are not acoustic proof", self.0.configuration(), self.0.snapshot());
         }
     }
     pub(super) fn open(options: &Options, mixer: Mixer) -> Result<Box<dyn NativeOutput>> {
+        if options.backend == Backend::Asio {
+            #[cfg(feature = "asio-sdk")]
+            {
+                return super::asio_native::open(options, mixer);
+            }
+            #[cfg(not(feature = "asio-sdk"))]
+            {
+                return Err("ASIO requires feature asio-sdk".into());
+            }
+        }
         let request = AudioStreamRequest::new(
             AudioDeviceId(options.device.clone()),
             AudioBackendKind::Wasapi,
@@ -375,17 +486,17 @@ mod native {
         fn stop(&mut self) -> Result<()> {
             Ok(self.0.stop()?)
         }
-        fn poll(&self) -> Result<Option<RenderReport>> {
+        fn poll(&mut self) -> Result<Option<RenderReport>> {
             self.check(false)?;
             Ok(self.0.last_render_report())
         }
-        fn last_render(&self) -> Option<RenderReport> {
+        fn last_render(&mut self) -> Option<RenderReport> {
             self.0.last_render_report()
         }
-        fn final_check(&self) -> Result<()> {
+        fn final_check(&mut self) -> Result<()> {
             self.check(true)
         }
-        fn print_native(&self) {
+        fn print_native(&mut self) {
             println!("ALSA applied={:?}; independent native counters={:?}; retained core report does not prove native writes/acoustic output", self.0.configuration(), self.0.snapshot());
         }
     }
@@ -438,17 +549,17 @@ mod native {
         fn stop(&mut self) -> Result<()> {
             Ok(self.0.stop()?)
         }
-        fn poll(&self) -> Result<Option<RenderReport>> {
+        fn poll(&mut self) -> Result<Option<RenderReport>> {
             self.check()?;
             Ok(self.0.last_render_report())
         }
-        fn last_render(&self) -> Option<RenderReport> {
+        fn last_render(&mut self) -> Option<RenderReport> {
             self.0.last_render_report()
         }
-        fn final_check(&self) -> Result<()> {
+        fn final_check(&mut self) -> Result<()> {
             self.check()
         }
-        fn print_native(&self) {
+        fn print_native(&mut self) {
             println!("CoreAudio applied={:?}; native counters={:?}; retained render is distinct from callback delivery/acoustic output", self.0.configuration(), self.0.snapshot());
         }
     }
@@ -477,6 +588,12 @@ mod native {
 }
 
 fn run(options: Options) -> Result<()> {
+    if options.backend == Backend::Asio && !cfg!(all(target_os = "windows", feature = "asio-sdk")) {
+        return Err(
+            "ASIO requires Windows and sample feature asio-sdk with supplied SDK/MSVC toolchain"
+                .into(),
+        );
+    }
     let limits = ReplayCodecLimits::new(
         options.max_bytes,
         options.max_records,
@@ -587,7 +704,7 @@ fn run(options: Options) -> Result<()> {
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.is_empty() || args == ["--help"] {
-        println!("play_replay_bms --chart PATH --replay PATH --device ID --seconds N --rate HZ --channels N [--buffer-frames N --period-frames N --mode shared|exclusive --shared-policy engine-period|legacy --preroll-ns N --lookahead-ns N --command-capacity N --voices N --max-records N --max-bytes N]\nHost backend: WASAPI on Windows, ALSA on Linux, CoreAudio on macOS. No input acquisition. Exact float32 rate/channels; no endpoint/mode fallback.\nLinux requires explicit buffer/period; macOS requires numeric AudioDeviceID and buffer, rejects period. Mode/shared-policy are Windows only, default shared engine-period; explicit shared-policy rejects exclusive. Windows buffer/period default to device settings, and unsupported requested combinations reject.\nDefaults: preroll 3000000000ns, lookahead 3000000000ns, commands 65536, voices 4096, records 1000000, replay bytes 67108864. Nonnegative i64 preroll, positive i64 lookahead, positive checked finite seconds and capacities.\nSeconds is wall playback duration after Start including preroll; no automatic tail drain. Finite horizons/credit can fail on stalls/dense cues; final admission/core/native diagnostics remain separate. Source implementation is not native sound or physical timing evidence.");
+        println!("play_replay_bms --chart PATH --replay PATH --device ID --seconds N --rate HZ --channels N [--backend wasapi|asio|alsa|coreaudio --asio-view native|32|64 --output-channels 0,1 --buffer-frames N --period-frames N --mode shared|exclusive --shared-policy engine-period|legacy --preroll-ns N --lookahead-ns N --command-capacity N --voices N --max-records N --max-bytes N]\nASIO requires Windows + asio-sdk, explicit braced CLSID/view/output channels, rejects mode/shared-policy/period, buffer default driver preferred.\nHost backend: WASAPI on Windows, ALSA on Linux, CoreAudio on macOS. No input acquisition. Exact float32 rate/channels; no endpoint/mode fallback.\nLinux requires explicit buffer/period; macOS requires numeric AudioDeviceID and buffer, rejects period. Mode/shared-policy are Windows only, default shared engine-period; explicit shared-policy rejects exclusive. Windows buffer/period default to device settings, and unsupported requested combinations reject.\nDefaults: preroll 3000000000ns, lookahead 3000000000ns, commands 65536, voices 4096, records 1000000, replay bytes 67108864. Nonnegative i64 preroll, positive i64 lookahead, positive checked finite seconds and capacities.\nSeconds is wall playback duration after Start including preroll; no automatic tail drain. Finite horizons/credit can fail on stalls/dense cues; final admission/core/native diagnostics remain separate. Source implementation is not native sound or physical timing evidence.");
         return Ok(());
     }
     run(parse(&args, host_backend())?)
@@ -742,5 +859,247 @@ mod fixtures {
             invalid[index + 1] = value.into();
             assert!(parse(&invalid, Backend::Windows).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+#[path = "play_replay_bms/asio_fixtures.rs"]
+mod asio_fixtures;
+
+#[cfg(all(target_os = "windows", feature = "asio-sdk"))]
+#[allow(unsafe_code)]
+mod asio_native {
+    use super::*;
+    use beatkernel_platform::{
+        audio::asio::AsioBufferRequest,
+        windows::asio::{
+            control::AsioControl,
+            enumerate_asio_drivers,
+            stream::{AsioStream, AsioStreamPhase, AsioStreamSnapshot},
+            AsioEnumerationLimits, AsioRegistryView,
+        },
+    };
+    use std::{io, ptr};
+    use windows_sys::Win32::{
+        Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
+        System::LibraryLoader::GetModuleHandleW,
+        UI::WindowsAndMessaging::{
+            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
+            RegisterClassW, TranslateMessage, UnregisterClassW, MSG, PM_REMOVE, WM_CLOSE, WM_QUIT,
+            WNDCLASSW,
+        },
+    };
+    unsafe extern "system" fn host_window(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        // Keep the hidden system reference alive until explicit driver teardown.
+        // The control loop owns stop; WM_CLOSE must not destroy a window still
+        // retained by the ASIO driver.
+        if message == WM_CLOSE {
+            return 0;
+        }
+        // SAFETY: parameters originate in Windows dispatch; no Rust userdata is retained.
+        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    }
+    struct Window {
+        hwnd: HWND,
+        instance: HINSTANCE,
+        class: Vec<u16>,
+    }
+    impl Window {
+        fn new() -> Result<Self> {
+            let class: Vec<u16> = format!("BeatKernelAsioReplay{}", std::process::id())
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+            // SAFETY: null requests the current executable module.
+            let instance = unsafe { GetModuleHandleW(ptr::null()) };
+            if instance.is_null() {
+                return Err(io::Error::last_os_error().into());
+            }
+            // SAFETY: zero is valid for all unused native class fields.
+            let mut descriptor: WNDCLASSW = unsafe { std::mem::zeroed() };
+            descriptor.lpfnWndProc = Some(host_window);
+            descriptor.hInstance = instance;
+            descriptor.lpszClassName = class.as_ptr();
+            // SAFETY: live terminated class name; system WNDPROC retains no Rust data.
+            if unsafe { RegisterClassW(&descriptor) } == 0 {
+                return Err(io::Error::last_os_error().into());
+            }
+            let mut window = Self {
+                hwnd: ptr::null_mut(),
+                instance,
+                class,
+            };
+            // SAFETY: registered live class/module; hidden owner-thread window with no userdata.
+            window.hwnd = unsafe {
+                CreateWindowExW(
+                    0,
+                    window.class.as_ptr(),
+                    window.class.as_ptr(),
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    instance,
+                    ptr::null(),
+                )
+            };
+            if window.hwnd.is_null() {
+                return Err(io::Error::last_os_error().into());
+            }
+            Ok(window)
+        }
+        fn pump(&mut self) -> Result<()> {
+            // SAFETY: all-zero native message storage is valid before PeekMessage fills it.
+            let mut message: MSG = unsafe { std::mem::zeroed() };
+            for _ in 0..256 {
+                // SAFETY: owner-thread message storage is live; bounded dispatch off audio thread.
+                if unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) } == 0 {
+                    break;
+                }
+                if message.message == WM_QUIT {
+                    return Err("ASIO host received WM_QUIT".into());
+                }
+                // SAFETY: message was returned by this thread's native queue.
+                unsafe {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+            }
+            Ok(())
+        }
+    }
+    impl Drop for Window {
+        fn drop(&mut self) {
+            // SAFETY: owner thread; Stream stop/drop drains driver before this window is destroyed.
+            unsafe {
+                if !self.hwnd.is_null() {
+                    DestroyWindow(self.hwnd);
+                }
+                UnregisterClassW(self.class.as_ptr(), self.instance);
+            }
+        }
+    }
+    // Declaration order also drops stream before the driver's caller-owned HWND.
+    struct Stream {
+        stream: AsioStream,
+        window: Window,
+        retained: Option<RenderReport>,
+    }
+    impl Stream {
+        fn snapshot(&mut self, final_check: bool) -> Result<AsioStreamSnapshot> {
+            let snapshot = self.stream.snapshot()?;
+            if snapshot.render.is_some() {
+                self.retained = snapshot.render;
+            }
+            if snapshot.native.faults.requires_reopen()
+                || snapshot.native.render_error != 0
+                || snapshot.native.faults.0 & 32 != 0
+            {
+                return Err(format!("ASIO callback/native fault or overload: {snapshot:?}").into());
+            }
+            match snapshot.phase {
+                AsioStreamPhase::Running => {}
+                AsioStreamPhase::Stopped if final_check => {}
+                phase => return Err(format!("ASIO unexpected/terminal phase: {phase:?}").into()),
+            }
+            Ok(snapshot)
+        }
+    }
+    impl NativeOutput for Stream {
+        fn start(&mut self) -> Result<()> {
+            Ok(self.stream.start()?)
+        }
+        fn stop(&mut self) -> Result<()> {
+            let result = self.stream.stop();
+            if let Ok(snapshot) = self.stream.snapshot() {
+                if snapshot.render.is_some() {
+                    self.retained = snapshot.render;
+                }
+            }
+            Ok(result?)
+        }
+        fn poll(&mut self) -> Result<Option<RenderReport>> {
+            self.window.pump()?;
+            let snapshot = self.snapshot(false)?;
+            Ok(if snapshot.telemetry_available {
+                snapshot.render
+            } else {
+                None
+            })
+        }
+        fn last_render(&mut self) -> Option<RenderReport> {
+            if let Ok(snapshot) = self.stream.snapshot() {
+                if snapshot.render.is_some() {
+                    self.retained = snapshot.render;
+                }
+            }
+            self.retained
+        }
+        fn final_check(&mut self) -> Result<()> {
+            self.snapshot(true).map(|_| ())
+        }
+        fn print_native(&mut self) {
+            println!("ASIO final software-prepared progress/raw native diagnostics={:?}; prepared frames are not audible progress and raw native nanoseconds are not QPC", self.stream.snapshot());
+        }
+    }
+    impl Drop for Stream {
+        fn drop(&mut self) {
+            let _ = self.stream.stop();
+        }
+    }
+    pub(super) fn open(options: &Options, mixer: Mixer) -> Result<Box<dyn NativeOutput>> {
+        let view = match options.asio_view.ok_or("ASIO view required")? {
+            AsioView::Native => AsioRegistryView::Native,
+            AsioView::Bits32 => AsioRegistryView::Bits32,
+            AsioView::Bits64 => AsioRegistryView::Bits64,
+        };
+        let registrations = enumerate_asio_drivers(view, AsioEnumerationLimits::default())?;
+        let mut matches = registrations
+            .iter()
+            .filter(|driver| driver.id.clsid == options.device);
+        let registration = matches
+            .next()
+            .ok_or("selected ASIO CLSID was not registered in the explicit view")?;
+        if matches.next().is_some() {
+            return Err("ASIO CLSID has ambiguous registrations".into());
+        }
+        let window = Window::new()?;
+        // SAFETY: explicitly selected installed driver is trusted; window is valid,
+        // owned by this thread and retained until stream stop/Release/callback drain.
+        let mut control = unsafe { AsioControl::open(registration, Some(window.hwnd as usize)) }?;
+        let constraints = control.buffer_constraints()?;
+        let request = options.buffer.map_or(
+            AsioBufferRequest::DriverPreferred,
+            AsioBufferRequest::Frames,
+        );
+        let resolved = constraints.resolve(request)?;
+        if resolved as usize > AudioLimits::MAX_RENDER_FRAMES {
+            return Err("ASIO driver buffer exceeds core render ceiling".into());
+        }
+        let channels = options
+            .output_channels
+            .clone()
+            .ok_or("ASIO output channels required")?;
+        println!("ASIO exact registration={registration:?}; requested buffer={request:?}; reported={constraints:?}; resolved frames={resolved}; reported rate={}; Mixer rate={}", control.sample_rate()?, options.format.sample_rate());
+        for channel in &channels {
+            println!(
+                "ASIO selected native output={:?}",
+                control.channel_info(*channel, false)?
+            );
+        }
+        let stream = AsioStream::prepare(control, mixer, channels, request)?;
+        Ok(Box::new(Stream {
+            stream,
+            window,
+            retained: None,
+        }))
     }
 }
