@@ -39,7 +39,12 @@ unsupported renderer remains unavailable. This adds no OS dependency to core.
   rendering records a point. The existing callback serialization guards the sole
   writer; no additional callback lock or allocation is introduced.
 
-On WASAPI/CoreAudio diagnostic clock failure, successful audio rendering is not
+QPC and mach render diagnostics use `sample_realtime()`, which calls the native
+time primitive and performs checked conversion without error boxing or formatting.
+General control-thread `sample()` retains its rich errors. This avoids introducing
+error-path allocations into native rendering.
+
+On WASAPI/CoreAudio/ASIO diagnostic clock failure, successful audio rendering is not
 replaced with silence or a guessed timestamp. Capture is permanently marked
 unavailable and the drained summary returns `TimingUnavailable`. Partial prefix
 history does not silently imply complete clock observations. Failed renders add
@@ -56,7 +61,12 @@ attempts, including failure paths with explicit unavailable data.
 This instrumentation measures software render scheduling relative to output frame
 rate. It does not prove callback-arrival jitter, native buffer admission,
 presentation clock accuracy, acoustic timing, underrun causation or physical
-latency. ASIO direct scheduling capture remains separate source work. Five
+latency. ASIO opt-in capture also uses actual pre-render QPC timestamps, excluding
+owner-side B priming. `prepare_with_clock` accepts an explicit shared QpcClock;
+clock-free `prepare` retains its existing behavior with absent cadence capability.
+ASIO returns cadence only after terminal close detaches/drains callbacks, including
+retained history after native errors. Live/recorded BMS hosts opt in and print
+summaries after stop. Driver system time is never a QPC substitute. Five
 portable fixtures are authored for actual frame gaps, prefix exhaustion,
 chronology errors, missing clock data and full timestamp spans. Compilation
 does not execute them. Device measurements, RT performance audit, independent

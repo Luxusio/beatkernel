@@ -100,11 +100,13 @@ directly at the worker's pre-Mixer clock boundary, retaining actual successful
 block frames. After join, a finite prefix summary subtracts frame-derived expected
 time from observed intervals. Startup fills remain included, and exhausted prefix
 capacity is visible. This is distinct from native input cadence, callback arrival,
-presentation-grid accuracy and acoustic latency; real hardware measurements and
-ASIO direct scheduling capture remains outstanding. WASAPI and CoreAudio now
+presentation-grid accuracy and acoustic latency; real hardware measurements
+remain outstanding. WASAPI, CoreAudio and opt-in ASIO now
 reuse the [shared prefix capture](../platform/REQ__native-render-cadence.md), with
 actual pre-Mixer QPC/mach points and successful variable-block frame identity.
 WASAPI excludes Ready prefill; CoreAudio waits for unregister/drain before owner
-summary. A missing diagnostic clock yields a typed unavailable result without a
+summary; ASIO excludes B priming and waits for callback detach/drain. QPC and
+mach queries in native rendering avoid allocated error construction.
+A missing diagnostic clock yields a typed unavailable result without a
 fabricated timestamp or callback-side summary allocation. These observations
 are software render-start cadence, not native callback entry or presentation.

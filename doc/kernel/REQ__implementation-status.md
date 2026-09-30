@@ -160,8 +160,9 @@ now captures actual pre-Mixer monotonic timestamps with successful frame identit
 and summarizes a finite prefix after worker join. The Linux native audio example
 prints this alongside applied sizes and actual xrun counters. Startup fill bursts
 remain included. WASAPI and CoreAudio now reuse shared direct pre-Mixer capture
-at their QPC/mach boundaries. ASIO direct scheduling capture remains authorable
-source work; these source slices do not establish hardware results.
+at their QPC/mach boundaries. Optional ASIO also captures actual callback renders
+using an explicit shared QPC clock; default clock-free preparation remains
+available. These source slices do not establish hardware results.
 
 The remaining full-plan acceptance includes current regression execution,
 deterministic replay/seek comparisons, native Windows output and at least one

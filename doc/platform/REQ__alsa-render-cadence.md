@@ -49,7 +49,8 @@ This measures render-worker scheduling residuals, not device delivery, callback
 arrival, acoustic jitter, underrun causation or physical latency. Snapshot
 presentation fields and aggregate counters retain their own independent scopes.
 Windows and macOS now use the shared direct render-start capture at their own
-documented boundaries; ASIO direct scheduling capture remains separate.
+documented boundaries; ASIO opt-in QPC capture is also implemented separately
+from driver presentation time.
 The shared authored arithmetic/chronology/prefix
 fixtures compile but remain unexecuted; actual buffer-size measurements, RT audit,
 independent review and QA remain deferred by the user's instruction.

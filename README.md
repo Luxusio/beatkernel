@@ -561,6 +561,9 @@ with an explicit bounded prefix and startup-fill scope.
 WASAPI `windows_audio` and CoreAudio `macos_native` also print
 [direct render-start cadence](doc/platform/REQ__native-render-cadence.md) after
 cleanup, preserving their distinct software clock boundaries.
+Optional ASIO live/recorded BMS output now opts into QPC render-start cadence,
+excluding buffer priming and reporting only after callback drain. Existing
+clock-free ASIO preparation remains available.
 Exact ALSA sizing is the default;
 optional rounding reports applied period/buffer sizes. Evdev event loss requires
 an explicit queried-state acknowledgment before gameplay resumes.

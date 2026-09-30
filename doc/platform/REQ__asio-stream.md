@@ -160,3 +160,26 @@ Those checks activate source cfg while leaving Cargo's SDK feature/build script
 inactive, and emit metadata without native SDK linkage. They do not establish
 real feature-forwarded SDK compilation, C++ ABI compatibility, fixture success
 or native playback. All execution and independent reviews remain deferred.
+
+## Direct render-start scheduling cadence
+
+`AsioStream::prepare_with_clock` preserves all explicit buffer/device choices and
+additionally accepts a caller-provided shared QpcClock. Actual native callbacks
+sample allocation-free QPC immediately before successful AsioBlockRenderer
+rendering and capture its actual frame identity in the
+[shared finite prefix](REQ__native-render-cadence.md). Pre-start B priming is
+excluded. `prepare` keeps clock-free behavior; no QPC domain/origin is invented.
+Raw driver system nanoseconds continue to belong to presentation interpretation.
+
+`render_cadence()` returns absent capability before terminal close or for a
+clock-free preparation. Close detaches/drains callback readers before summary
+access, even when it reports native failure. Missing explicit diagnostic clock
+data returns `TimingUnavailable`; no replacement sample is fabricated and audio
+rendering is preserved. Live and recorded BMS compositions opt in and print after
+stop. The new memory-backed fixture is authored/compiled only and confirms that
+clock-free priming/native events cannot fabricate a timing history.
+
+Default workspace, default Windows GNU and optional Windows Rust-source metadata
+checks pass. The optional source cfg check does not activate Cargo SDK compilation,
+link C++, validate ABI or execute a driver. Actual SDK/MSVC build, RT performance
+audit, native buffer measurements, review and QA remain outstanding.
