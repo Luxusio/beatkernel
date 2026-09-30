@@ -3,6 +3,7 @@ use std::{
     cell::Cell,
 };
 
+use beatkernel::transport::Rate;
 use beatkernel::{
     audio::*,
     time::{ClockDomainId, Timestamp},
@@ -191,6 +192,53 @@ fn pending_full_rejection_and_future_execution_do_not_allocate_or_free() {
     assert_eq!(asset, [0.25, 0.5, 0.75, 1.0]);
     assert_eq!(report.active_voices, 0);
     assert!(report.producer_disconnected);
+    drop(mixer);
+}
+
+#[test]
+fn rate_changes_and_rational_overflow_rejection_do_not_allocate_or_free() {
+    let (mut producer, mut mixer) = rig(AudioLimits::new(8, 2, 8, 8, 8).unwrap());
+    let retained = Rate::new(1, u64::MAX).unwrap();
+    producer
+        .try_push(AudioCommand::SetRate {
+            rate: retained,
+            at: ts(0),
+        })
+        .unwrap();
+    producer.try_push(play(1, 0)).unwrap();
+    let mut one = [99.0];
+    render(&mut mixer, &mut one);
+    assert_eq!(one, [0.25]);
+    producer
+        .try_push(AudioCommand::SetRate {
+            rate: Rate::new(1, u64::MAX - 2).unwrap(),
+            at: ts(1_000_000),
+        })
+        .unwrap();
+    let report = render(&mut mixer, &mut one);
+    assert_eq!(report.counters.invalid_rates, 1);
+    assert_eq!(mixer.rate(), retained);
+    assert_eq!(one, [0.25]);
+    producer
+        .try_push(AudioCommand::SetRate {
+            rate: Rate::ZERO,
+            at: ts(2_000_000),
+        })
+        .unwrap();
+    let mut paused = [99.0; 2];
+    render(&mut mixer, &mut paused);
+    assert_eq!(paused, [0.0; 2]);
+    producer
+        .try_push(AudioCommand::SetRate {
+            rate: Rate::REVERSE,
+            at: ts(4_000_000),
+        })
+        .unwrap();
+    let mut reverse = [99.0; 2];
+    let report = render(&mut mixer, &mut reverse);
+    assert_eq!(reverse, [0.25, 0.0]);
+    assert_eq!(report.active_voices, 0);
+    drop(producer);
     drop(mixer);
 }
 

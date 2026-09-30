@@ -642,6 +642,186 @@ fn unrepresentable_command_time_is_counted_and_following_play_still_runs() {
 }
 
 #[test]
+fn bounded_admission_budget_makes_queued_stop_callback_partition_visible() {
+    let run = |parts: &[usize]| {
+        let limits = AudioLimits::new(2, 1, 2, 8, 1).unwrap();
+        let (mut producer, mut mixer) = rig(
+            AudioFormat::new(1000, 1).unwrap(),
+            1000,
+            &[0.25, 0.5, 0.75, 1.0],
+            limits,
+            0,
+        );
+        producer.try_push(play(1, 0, 1.0)).unwrap();
+        producer.try_push(stop(1, 0)).unwrap();
+        let mut output = Vec::new();
+        for &frames in parts {
+            let mut block = vec![99.0; frames];
+            mixer.render(&mut block).unwrap();
+            output.extend(block);
+        }
+        (output, mixer.counters())
+    };
+    let whole = run(&[4]);
+    let split = run(&[2, 2]);
+    assert_eq!(whole.0, [0.25, 0.5, 0.75, 1.0]);
+    assert_eq!(whole.1.commands_consumed, 1);
+    assert_eq!(whole.1.late_commands, 0);
+    assert_eq!(split.0, [0.25, 0.5, 0.0, 0.0]);
+    assert_eq!(split.1.commands_consumed, 2);
+    assert_eq!(split.1.late_commands, 1);
+}
+
+#[test]
+fn unequal_44100_to_48000_stereo_resampling_matches_rational_oracle_and_partitions() {
+    let samples: Vec<f32> = (0..32)
+        .flat_map(|frame| [frame as f32 / 64.0, -(frame as f32) / 128.0])
+        .collect();
+    let run = |parts: &[usize]| {
+        let origin = 9_000_000_123;
+        let (mut producer, mut mixer) = rig(
+            AudioFormat::new(48_000, 2).unwrap(),
+            44_100,
+            &samples,
+            bounds(),
+            origin,
+        );
+        producer.try_push(play(1, origin, 1.0)).unwrap();
+        let mut output = Vec::new();
+        for &frames in parts {
+            let mut block = vec![99.0; frames * 2];
+            mixer.render(&mut block).unwrap();
+            output.extend(block);
+        }
+        (output, mixer.counters())
+    };
+    // The independent linear ramp has slope 1/64 left and -1/128 right.
+    // Source position is n*147/160; the final upper neighbor is held.
+    let expected: Vec<f32> = (0..40)
+        .flat_map(|frame| {
+            let numerator = frame * 147;
+            if numerator >= 32 * 160 {
+                [0.0, 0.0]
+            } else {
+                let position = f64::from(numerator.min(31 * 160)) / 160.0;
+                [(position / 64.0) as f32, (-position / 128.0) as f32]
+            }
+        })
+        .collect();
+    let whole = run(&[40]);
+    assert_eq!(whole.0, expected);
+    assert_eq!(run(&[1; 40]), whole);
+    assert_eq!(run(&[7, 2, 11, 1, 19]), whole);
+}
+
+#[test]
+fn rate_rejection_preflights_all_live_voices_before_changing_any_head() {
+    let retained = Rate::new(1, u64::MAX).unwrap();
+    let build = |reject: bool| {
+        let format = AudioFormat::new(1, 1).unwrap();
+        let pcm_limits = PcmLimits::new(128, 256, 2).unwrap();
+        let mut bank = SampleBank::new(format, pcm_limits).unwrap();
+        // 65535 divides u64::MAX: the first live head's reduced denominator
+        // accepts the new common denominator, while the second head cannot.
+        bank.insert(
+            SampleId(1),
+            PcmSample::new(
+                AudioFormat::new(65_535, 1).unwrap(),
+                vec![0.25, 0.5, 0.75],
+                pcm_limits,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        bank.insert(
+            SampleId(2),
+            PcmSample::new(format, vec![-0.125, -0.25, -0.375], pcm_limits).unwrap(),
+        )
+        .unwrap();
+        let limits = bounds();
+        let (mut producer, consumer) = command_queue(limits.queue_capacity()).unwrap();
+        let mut mixer = Mixer::new(
+            MixerConfig::new(format, ClockDomainId(71), Timestamp::ZERO, limits),
+            bank,
+            consumer,
+        )
+        .unwrap();
+        producer.try_push(set_rate(retained, 0)).unwrap();
+        producer.try_push(play(1, 0, 1.0)).unwrap();
+        producer
+            .try_push(AudioCommand::Play {
+                voice: VoiceId(2),
+                sample: SampleId(2),
+                at: ts(0),
+                gain: 1.0,
+            })
+            .unwrap();
+        let mut first = [99.0];
+        mixer.render(&mut first).unwrap();
+        assert_eq!(first, [0.125]);
+        if reject {
+            producer
+                .try_push(set_rate(
+                    Rate::new(i64::MAX, u64::MAX - 2).unwrap(),
+                    1_000_000_000,
+                ))
+                .unwrap();
+        }
+        let mut output = [99.0; 2];
+        let report = mixer.render(&mut output).unwrap();
+        (output, report, mixer.rate())
+    };
+    let control = build(false);
+    let rejected = build(true);
+    assert_eq!(rejected.0, control.0);
+    assert_eq!(rejected.0, [0.125, 0.125]);
+    assert_eq!(rejected.1.active_voices, 2);
+    assert_eq!(control.1.active_voices, 2);
+    assert_eq!(rejected.2, retained);
+    assert_eq!(rejected.1.counters.invalid_rates, 1);
+    assert_eq!(
+        rejected.1.counters.commands_applied,
+        control.1.counters.commands_applied
+    );
+}
+
+#[test]
+fn applied_counter_distinguishes_handled_unknown_stop_from_rejected_commands() {
+    let limits = AudioLimits::new(16, 1, 16, 8, 16).unwrap();
+    let (mut producer, mut mixer) = rig(
+        AudioFormat::new(1000, 1).unwrap(),
+        1000,
+        &[0.25; 4],
+        limits,
+        0,
+    );
+    for command in [
+        play(1, 0, 1.0),
+        stop(99, 0),
+        play(2, 0, 1.0),
+        play(1, 0, f32::NAN),
+        AudioCommand::Play {
+            voice: VoiceId(1),
+            sample: SampleId(99),
+            at: ts(0),
+            gain: 1.0,
+        },
+        set_rate(Rate::NORMAL, 0),
+    ] {
+        producer.try_push(command).unwrap();
+    }
+    let mut output = [99.0];
+    let report = mixer.render(&mut output).unwrap();
+    assert_eq!(output, [0.25]);
+    assert_eq!(report.counters.commands_consumed, 6);
+    assert_eq!(report.counters.commands_applied, 3);
+    assert_eq!(report.counters.unknown_stops, 1);
+    assert_eq!(report.counters.voice_full, 1);
+    assert_eq!(report.counters.invalid_gains, 1);
+    assert_eq!(report.counters.unknown_samples, 1);
+}
+
+#[test]
 fn empty_asset_is_inactive_and_disconnected_producer_does_not_drop_scheduled_work() {
     let (mut producer, mut mixer) = mono(&[]);
     producer.try_push(play(1, 0, 1.0)).unwrap();

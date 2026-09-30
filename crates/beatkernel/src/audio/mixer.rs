@@ -151,6 +151,9 @@ impl Mixer {
     /// telemetry without consuming commands or changing state. Future commands
     /// are sorted in fixed-capacity storage; equal targets retain submission
     /// order. Late commands retain their original target ordering.
+    /// Commands beyond the per-render drain budget remain queued. Partition
+    /// invariance applies to commands admitted before their execution frames;
+    /// callback partitions can change admission timing under queue backlog.
     ///
     /// Rate processing uses exact rational sample heads. Every single valid
     /// Rate can form a new head. A later rate change can be rejected when the
