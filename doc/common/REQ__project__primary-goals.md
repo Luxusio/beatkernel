@@ -60,6 +60,12 @@ Native BMS composition uses shared [rolling BGM admission](../kernel/REQ__bms-bg
 instead of imposing a whole-chart BGM queue limit. A finite lookahead and
 outstanding-command credit bound keep original scheduled times; a missed cue
 requires explicit restart rather than retimestamping. Assets remain preloaded.
+Native BMS roots also support bounded optional
+[accepted-operation capture](../kernel/REQ__bms-replay-capture.md), using actual
+Runtime reports and the same core ReplayRecorder/ReplaySession semantics.
+Recording caps and exclusive output creation are explicit; output occurs after
+native cleanup. Execution and deterministic replay checks remain deferred.
+
 Native BMS roots also expose [input delivery age](../kernel/REQ__telemetry.md)
 using preserved event points and fresh same-domain receipt points, with backend
 timestamp meanings labeled separately. No physical press-to-sound timing is

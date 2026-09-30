@@ -368,6 +368,16 @@ The [runtime](doc/kernel/REQ__runtime.md) shares JudgeEngine with
 [replay](doc/kernel/REQ__replay.md); ReplayRecorder captures accepted live
 operations without another judge. The [bounded input codec](doc/kernel/REQ__input-codec.md)
 preserves complete canonical events/native provenance and raw IEEE float bits.
+The separate BMS runtime's three native executables support optional
+[live replay capture](doc/kernel/REQ__bms-replay-capture.md) with
+`--record-replay NEW_PATH`, `--replay-max-records N` and `--replay-max-bytes N`.
+Defaults are 1,000,000 accepted operations and 64 MiB of encoded data. Inputs
+and explicit advances come from the actual runtime reports; accepted prefixes
+are retained after failure. Files are created exclusively after native cleanup.
+The application header fingerprints the pristine compiled judge/profile setup;
+it does not authenticate BMS source or PCM assets. Capture performs bounded
+control-thread allocation/encoding work and records no physical audio timing.
+
 The [durable replay codec](doc/kernel/REQ__replay-codec.md) stores ordered operations,
 runtime identity and optional calibration metadata with explicit byte/count limits.
 Logical restoration does not rewind hardware.
