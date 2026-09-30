@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod audio;
 pub mod chart;
 pub mod input;
 pub mod interaction;

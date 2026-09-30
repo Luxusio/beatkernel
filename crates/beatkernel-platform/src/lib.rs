@@ -9,6 +9,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
+pub mod audio;
 pub mod keyboard;
 pub mod raw_input;
 
