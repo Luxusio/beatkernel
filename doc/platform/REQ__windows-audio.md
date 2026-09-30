@@ -47,6 +47,14 @@ caller can make the next choice.
   when available, including minimum/maximum and fundamental-frame multiples.
   Legacy shared buffering is an explicitly selected policy, not an invisible
   fallback from a requested modern low-period stream.
+- Shared event-driven initialization uses an OS-managed buffer. For an
+  independently sized legacy shared buffer, callers explicitly select the
+  timer-driven wake policy and a polling interval in whole milliseconds.
+  This leaves the engine's device-default processing period unchanged. The
+  default wake policy remains event-driven; numeric buffer requests are never
+  silently converted to a timer-driven stream. Exclusive output uses events.
+  Microsoft's [Initialize contract](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize)
+  requires zero buffer and period arguments for shared event initialization.
 - Exclusive event-driven initialization requires matching buffer and period.
   Reject conflicting independent requests with that constraint. An OS alignment
   suggestion is returned, or retried only under explicit caller policy. Format
@@ -107,6 +115,10 @@ contracts. Requested configuration probing follows [IsFormatSupported](https://l
   authoritative hardware underrun count when the render API does not supply one.
 - Submitted PCM and progressing clock prove stream activity; virtual execution
   does not prove sound heard, physical-device latency or input-to-audio latency.
+- Off-thread telemetry reads make a bounded attempt to obtain one coherent
+  worker publication. A collision reports telemetry unavailable explicitly;
+  placeholder zero counters are not measurements. Lifecycle status remains
+  separately observable, and callers can retry outside the render path.
 
 ## ASIO and other output APIs
 
@@ -133,3 +145,10 @@ registry inventories corroborated this. The guest was stopped normally with no
 driver/settings changes. It can test enumeration and absent-device behavior;
 successful output still requires a suitable endpoint. This is an environment
 limitation, not a reduction of the implementation or verification requirements.
+
+A further bounded probe reused the existing Windows Sandbox on 2026-09-30.
+The provider accepted start, but guest command transport timed out before any
+endpoint inventory was returned. Owner status only described recorded state,
+so it did not establish guest readiness or audio capability. The Sandbox was
+stopped normally afterward with provider exit code zero. Its endpoint support
+remains unknown; this attempt supplied no native playback evidence.
