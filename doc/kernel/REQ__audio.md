@@ -11,6 +11,11 @@ native playback has passed verification. Native device control belongs to
   become owned finite interleaved samples with explicit rate and channel count.
   Extensible WAVE accepts known PCM/float subformats only, with consistent
   container width, valid bits, block alignment and channel mask.
+- Integer extensible PCM permits 1 through container-width valid bits, stored
+  left-aligned; floating PCM requires 32 valid/container bits. A zero channel
+  mask denotes direct output without speaker assignment. Nonzero speaker masks
+  require one assignment per channel in this loader. RIFF pad bytes need only
+  exist; their value is ignored. Plain PCM's unused cbSize is ignored.
 - Validate declared RIFF size, all chunk bounds and odd padding, one fmt/data
   chunk each, frame alignment, nonzero rate/channels and allocation limits.
   Data may precede fmt because complete validation occurs before decoding.

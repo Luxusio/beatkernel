@@ -23,6 +23,10 @@ or Windows device types.
   the API provides them; report unavailable constraints honestly. Do not limit
   callers to fixed presets. Validate rate/channel/container/valid-bit/channel-mask
   combinations and overflow before passing format memory to the OS.
+- Preserve an explicitly requested zero speaker mask as direct output, rather
+  than rejecting it or replacing it with an inferred speaker layout. Device
+  support must still be probed. Microsoft's [extensible format contract](https://learn.microsoft.com/en-gb/windows-hardware/drivers/ddi/ksmedia/ns-ksmedia-waveformatextensible)
+  defines this layout for multichannel port-oriented devices.
 - Exact configuration is the default. Explicit caller-opt-in negotiation may
   accept documented supported rounding/alignment; report every change. Unsupported
   combinations return precise constraints and suggested alternatives. Never
