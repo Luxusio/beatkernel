@@ -3,12 +3,43 @@
 //! Enumeration, probing and opening are off the real-time path. Native support
 //! must be established by a backend: these types never fabricate a stream.
 //! Exact configuration is the default; suggestions are never implicit consent.
+//!
+//! Native buffer conversion and reported period constraints can be tested
+//! without opening a device:
+//!
+//! ```
+//! use beatkernel_platform::audio::*;
+//! let format = DeviceFormat::new(48_000, 2,
+//!     SampleEncoding::Pcm { container_bits: 16, valid_bits: 16 }, Some(3))?;
+//! let mut bytes = [0; 4];
+//! encode_pcm(format, &[-1.0, 0.5], &mut bytes)?;
+//! assert_eq!(bytes, [0, 128, 0, 64]);
+//! let request = AudioStreamRequest::new(AudioDeviceId("explicit-device".into()),
+//!     AudioBackendKind::Wasapi, AudioStreamMode::Shared(SharedPeriodPolicy::EnginePeriod),
+//!     format, BufferRequest::DeviceDefault, PeriodRequest::Frames(128))?;
+//! let constraints = PeriodConstraints {
+//!     min_frames: Some(48), max_frames: Some(512), fundamental_frames: Some(4),
+//!     ..PeriodConstraints::default()
+//! };
+//! assert_eq!(resolve_period(&request, constraints)?.frames, 128);
+//! assert_eq!(validate_buffer_size(&request, 512)?, false);
+//! # Ok::<(), AudioPlatformError>(())
+//! ```
+
+// Fixed-size error diagnostics keep conversion error paths allocation-free.
+#![allow(clippy::result_large_err)]
 
 use beatkernel::{
     audio::{AudioFormat, RenderReport},
     time::{ClockMappingQuality, ClockPoint, Duration},
 };
 use std::fmt;
+
+mod convert;
+mod negotiation;
+
+pub use convert::encode_pcm;
+pub use negotiation::{resolve_period, validate_buffer_size, ResolvedPeriod};
 
 /// Native audio API selected by the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,6 +218,11 @@ impl DeviceFormat {
 /// Caller-controlled native buffer capacity, independent from processing period.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BufferRequest {
+    /// Explicitly accept the device-managed capacity for the selected mode.
+    ///
+    /// This permits engine-managed buffers without changing an Exact period
+    /// request. Actual capacity remains available in AppliedStreamConfig.
+    DeviceDefault,
     /// Exact positive frame count unless negotiation was explicitly enabled.
     Frames(u32),
     /// Positive integer nanoseconds; the backend reports native unit rounding.
@@ -240,7 +276,9 @@ impl AudioStreamRequest {
         period: PeriodRequest,
     ) -> Result<Self, AudioPlatformError> {
         if device.0.is_empty()
+            || device.0.contains('\0')
             || !match buffer {
+                BufferRequest::DeviceDefault => true,
                 BufferRequest::Frames(n) => n != 0,
                 BufferRequest::Duration(d) => d.as_nanos() > 0,
             }
@@ -312,6 +350,14 @@ pub enum FormatSupport {
 /// Device-provided timing/size constraints; None means not reported by the API.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PeriodConstraints {
+    /// Minimum native buffer duration, when reported by the hardware engine.
+    pub min_buffer_duration: Option<Duration>,
+    /// Maximum native buffer duration, when reported by the hardware engine.
+    pub max_buffer_duration: Option<Duration>,
+    /// Wake policy for the buffer-duration query; None when no bounds reported.
+    pub buffer_bounds_event_driven: Option<bool>,
+    /// Native default engine period in frames, when explicitly reported.
+    pub default_frames: Option<u32>,
     /// Default period in nanoseconds.
     pub default_period: Option<Duration>,
     /// Minimum engine period in frames.
@@ -403,6 +449,12 @@ pub struct StreamCounters {
 /// Off-thread stream telemetry snapshot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AudioStreamSnapshot {
+    /// Whether counters/clock/render form one coherent worker publication.
+    ///
+    /// A bounded read colliding with publication may return false. In that
+    /// case counters are unavailable (zero placeholders), clock/render are
+    /// absent, and status is independently observed. Retry outside rendering.
+    pub telemetry_available: bool,
     /// Worker lifecycle/terminal failure state.
     pub status: AudioStreamStatus,
     /// Native counters with inferred metrics explicitly labeled.
@@ -416,6 +468,10 @@ pub struct AudioStreamSnapshot {
 /// Native request constraint requiring an explicit caller configuration choice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ConfigurationConstraint {
+    /// Reported native buffer capacity differs from the explicit size request.
+    BufferSize,
+    /// Timer-driven filling is supported only for shared sessions.
+    TimerRequiresShared,
     /// Exclusive event-driven buffering requires identical buffer/period.
     ExclusiveBufferEqualsPeriod,
     /// Engine-period shared mode is unavailable; explicitly choose legacy path.
