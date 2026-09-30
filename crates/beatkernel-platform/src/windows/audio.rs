@@ -197,7 +197,9 @@ impl WasapiBackend {
         options: WasapiOptions,
     ) -> Result<WasapiStream, AudioPlatformError> {
         if request.backend() == AudioBackendKind::Asio {
-            return Err(AudioPlatformError::AsioLicenseUnresolved);
+            return Err(AudioPlatformError::BackendUnavailable(
+                AudioBackendKind::Asio,
+            ));
         }
         validate_options(&request, options)?;
         if mixer.config().format() != request.format().pcm() {

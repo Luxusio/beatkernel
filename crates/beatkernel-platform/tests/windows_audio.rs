@@ -117,7 +117,9 @@ fn repeated_absent_endpoint_open_failure_and_asio_remain_specific() {
     let (_producer, mixer) = mixer(request.format());
     assert!(matches!(
         backend.open(request, mixer, clock, WasapiOptions::default()),
-        Err(AudioPlatformError::AsioLicenseUnresolved)
+        Err(AudioPlatformError::BackendUnavailable(
+            AudioBackendKind::Asio
+        ))
     ));
 }
 

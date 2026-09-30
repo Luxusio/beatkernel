@@ -49,7 +49,7 @@ pub use negotiation::{resolve_period, validate_buffer_size, ResolvedPeriod};
 pub enum AudioBackendKind {
     /// Windows Audio Session API.
     Wasapi,
-    /// Installed ASIO driver; requires a resolved licensing/distribution path.
+    /// Installed ASIO driver; SDK-combined builds follow GPLv3 distribution terms.
     Asio,
 }
 
@@ -516,7 +516,8 @@ pub enum AudioPlatformError {
     DeviceUnavailable,
     /// Requested backend is unavailable on this host.
     BackendUnavailable(AudioBackendKind),
-    /// ASIO licensing/distribution path has not been resolved.
+    /// Legacy licensing failure retained for callers of earlier backend versions.
+    /// Current WASAPI code reports unavailable ASIO rather than this variant.
     AsioLicenseUnresolved,
     /// Exact requested format is unavailable; optional closest is advisory.
     FormatUnsupported {
