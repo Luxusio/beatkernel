@@ -175,6 +175,20 @@ fn coherent_snapshot(stream: &impl AudioOutputStream) -> AudioStreamSnapshot {
 }
 
 fn native_smoke(mode: AudioStreamMode) {
+    native_smoke_config(
+        mode,
+        BufferRequest::DeviceDefault,
+        WasapiOptions::default(),
+        NegotiationPolicy::Exact,
+    );
+}
+
+fn native_smoke_config(
+    mode: AudioStreamMode,
+    buffer: BufferRequest,
+    options: WasapiOptions,
+    negotiation: NegotiationPolicy,
+) {
     let device = AudioDeviceId(
         std::env::var("BEATKERNEL_AUDIO_DEVICE")
             .expect("set BEATKERNEL_AUDIO_DEVICE to an explicit active endpoint"),
@@ -191,10 +205,11 @@ fn native_smoke(mode: AudioStreamMode) {
         AudioBackendKind::Wasapi,
         mode,
         format,
-        BufferRequest::DeviceDefault,
+        buffer,
         PeriodRequest::DeviceDefault,
     )
-    .unwrap();
+    .unwrap()
+    .with_negotiation(negotiation);
     let clock = QpcClock::new(ClockDomainId(93)).unwrap();
     for _ in 0..2 {
         let (mut producer, mixer) = mixer(format);
@@ -207,12 +222,18 @@ fn native_smoke(mode: AudioStreamMode) {
             })
             .unwrap();
         let mut stream = backend
-            .open(request.clone(), mixer, clock, WasapiOptions::default())
+            .open(request.clone(), mixer, clock, options)
             .unwrap();
         assert_eq!(stream.configuration().requested, request);
         assert_eq!(stream.configuration().format, format);
         assert!(stream.configuration().buffer_frames > 0);
-        assert_eq!(stream.options().wake_policy, WasapiWakePolicy::EventDriven);
+        assert_eq!(stream.options().wake_policy, options.wake_policy);
+        if let BufferRequest::Frames(wanted) = buffer {
+            if stream.configuration().buffer_frames != wanted {
+                assert!(stream.configuration().sizing_adjusted);
+                assert_eq!(negotiation, NegotiationPolicy::AllowSupportedRounding);
+            }
+        }
         let primed = coherent_snapshot(&stream);
         assert_eq!(primed.status, AudioStreamStatus::Ready);
         stream.start().unwrap();
@@ -301,6 +322,27 @@ fn unsupported_format_suggestion_is_advisory_and_never_opened_automatically() {
     assert!(
         matches!(backend.open(request, mixer, clock, WasapiOptions::default()),
         Err(AudioPlatformError::FormatUnsupported { closest: returned }) if returned == closest)
+    );
+}
+
+#[test]
+#[ignore = "requires explicit BEATKERNEL_AUDIO_DEVICE and BEATKERNEL_AUDIO_BUFFER_FRAMES for native legacy timer playback"]
+fn selected_endpoint_legacy_timer_reports_buffer_submits_and_stops() {
+    let frames = std::env::var("BEATKERNEL_AUDIO_BUFFER_FRAMES")
+        .expect("set an explicit positive buffer frame count")
+        .parse::<u32>()
+        .unwrap();
+    assert!(frames > 0);
+    native_smoke_config(
+        AudioStreamMode::Shared(SharedPeriodPolicy::DeviceDefault),
+        BufferRequest::Frames(frames),
+        WasapiOptions {
+            mmcss_priority: Some(WasapiPriority::Normal),
+            wake_policy: WasapiWakePolicy::Timer {
+                poll_interval: Duration::from_nanos(1_000_000),
+            },
+        },
+        NegotiationPolicy::AllowSupportedRounding,
     );
 }
 
