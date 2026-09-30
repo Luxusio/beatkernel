@@ -28,6 +28,9 @@ or Windows device types.
   the API provides them; report unavailable constraints honestly. Do not limit
   callers to fixed presets. Validate rate/channel/container/valid-bit/channel-mask
   combinations and overflow before passing format memory to the OS.
+  Direct API format construction rejects reserved speaker-mask bits outside
+  `0x0003ffff`, just as the loader and CLI do; unspecified and zero masks remain
+  valid selections.
 - Hardware-engine buffer duration limits are distinct from processing period
   limits. Preserve both and identify the wake policy used for the buffer query.
   The portable backend period query uses event-driven bounds; opening a timer
@@ -38,7 +41,7 @@ or Windows device types.
   support must still be probed. Microsoft's [extensible format contract](https://learn.microsoft.com/en-gb/windows-hardware/drivers/ddi/ksmedia/ns-ksmedia-waveformatextensible)
   defines this layout for multichannel port-oriented devices.
 - Exact configuration is the default. Explicit caller-opt-in negotiation may
-  accept documented supported rounding/alignment; report every change. Unsupported
+accept documented supported rounding/alignment; report every change. Unsupported
   combinations return precise constraints and suggested alternatives. Never
   resize or alter a mode without the selected policy authorizing that change.
 
@@ -85,6 +88,10 @@ exact rational frame duration under Exact policy; unrepresentable durations
 return a supported frame suggestion. Opt-in negotiation may round upward to a
 supported fundamental multiple within device bounds. Unknown native bounds
 remain unknown, and a suggested size does not prove the device will initialize.
+If no upward-supported period fits the maximum, both Exact and opt-in policies
+return a configuration error. A smaller supported maximum is advisory only;
+applying it requires the caller to submit a new explicit request. Tests must
+cover above-maximum frame and duration requests under both policies.
 
 These mode constraints follow Microsoft's [stream management](https://learn.microsoft.com/en-us/windows/win32/coreaudio/stream-management)
 and [exclusive stream](https://learn.microsoft.com/en-us/windows/win32/coreaudio/exclusive-mode-streams)
