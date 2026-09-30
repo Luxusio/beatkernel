@@ -18,7 +18,7 @@ Paths below are relative to the repository root.
 | 4: Windows input | `crates/beatkernel-platform/src/windows/`, `raw_input.rs`, input-inspector example; [contract](REQ__windows-input.md) | Historical virtual keyboard evidence exists. Current source and physical timestamp/jitter comparisons remain unverified. |
 | 5: chart compiler | `crates/beatkernel/src/chart/`, chart example; [contract](REQ__chart-compiler.md) | Historical golden evidence exists; current compiler/BMS changes require executed regressions. |
 | 6: judge | `crates/beatkernel/src/judge/`, `interaction/builtin.rs`, judge example; [contract](REQ__judge.md) | Historical judge evidence exists; current profile, routing, ownership and restoration paths need execution. |
-| 7: audio | `crates/beatkernel/src/audio/`, platform native audio modules; [core](REQ__audio.md), [Windows](../platform/REQ__windows-audio.md) | WASAPI shared/exclusive source exists. Native playback, callback allocation/locking checks and scheduling fixtures remain deferred. ASIO source is still absent; the GPLv3 build policy below supersedes its baseline licensing prerequisite. |
+| 7: audio | `crates/beatkernel/src/audio/`, platform native audio modules; [core](REQ__audio.md), [Windows](../platform/REQ__windows-audio.md) | WASAPI shared/exclusive source exists. Native playback, callback allocation/locking checks and scheduling fixtures remain deferred. ASIO discovery, buffer negotiation and SDK control source are described below; stream callbacks/output remain pending. |
 | 8: integrated loop | `crates/beatkernel/src/runtime/`, `telemetry/`, runtime/native BMS examples; [runtime](REQ__runtime.md), [benchmark](REQ__runtime-benchmark.md) | Current integrated fixtures, percentiles under executed workloads, native drop/underrun behavior and physical latency measurements remain deferred. |
 | 9: visual projection | `crates/beatkernel/src/visual/`, external SVG example; [contract](REQ__visual.md) | Lane/Point/Path/Polar/Custom source and reusable frame/index paths exist; fixture execution and renderer QA remain deferred. |
 | 10: replay/snapshot | `crates/beatkernel/src/replay/`, judge snapshots, runtime restart/playback, replay examples; [replay](REQ__replay.md), [restart](REQ__section-restart.md), [reverse](REQ__reverse-playback.md) | Current repeated replay/seek hashes, codec failures, reverse policy and native restart output remain unverified. Logical restoration does not guarantee acoustic restart alignment. |
@@ -79,6 +79,16 @@ views and bounded canonical driver identities through a separate
 [inspector/API](../platform/REQ__asio-driver-discovery.md). It incorporates no SDK
 and opens no audio. This is progress toward ASIO selection, not an implemented
 ASIO stream or executed device evidence.
+
+ASIO continuation adds SDK-free `audio::asio` buffer/rate validation and an
+optional Windows [SDK driver control bridge](../platform/REQ__asio-driver-control.md).
+Exact sizes preserve reported bounds and granularity without implicit rounding;
+external clock is distinct from a positive finite Hertz request. The SDK feature
+uses a supplied SDK and C++ toolchain, retaining the default MIT build boundary.
+Control queries and explicit hardware configuration are separate from pending
+buffer callbacks, mixer delivery and stream lifecycle. The current local Windows
+C++ compilation path is unavailable; source does not establish native acceptance.
+Nine portable configuration fixtures are authored; execution remains deferred.
 
 ## Build evidence and completion boundary
 

@@ -61,7 +61,8 @@ The native library dependency direction is `beatkernel-platform → beatkernel`.
 three at the executable boundary. The kernel has
 no OS dependency, no game-specific assumptions, no unsafe code, and no third-party
 dependencies. The platform uses pinned `windows-sys` and generated `windows`
-bindings only on Windows,
+bindings only on Windows, and the optional `cc` build dependency for explicit
+SDK bridge builds,
 with unsafe confined to native FFI; portable input modules prohibit unsafe.
 Windows acquisition has native guest evidence. Linux acquisition and ALSA output
 have native source implementations; Linux/macOS native runtime evidence is pending.
@@ -75,7 +76,7 @@ the `gcc` and `libc6-dev` packages on Ubuntu).
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo test --workspace --release
 cargo run -p beatkernel --example transport
@@ -360,7 +361,7 @@ clock progression and joined stop before reporting success.
 
 Actual native shared/exclusive playback and independent audio review/QA remain
 pending. The available Windows VM previously had no render endpoints. Windows
-cross-compilation proves source compatibility, not playback. ASIO implementation
+cross-compilation proves source compatibility, not playback. ASIO streaming
 is pending and WASAPI reports `BackendUnavailable(Asio)` for such requests.
 Project-authored source and builds without ASIO are distributed under MIT,
 with applicable third-party notices retained. Builds incorporating the ASIO SDK follow
@@ -375,6 +376,16 @@ cargo run -p beatkernel-platform --example asio_inspector -- --view 64 --max-dri
 ```
 
 These discovery commands do not establish ASIO stream support or device output.
+Optional [ASIO driver control](doc/platform/REQ__asio-driver-control.md) uses an
+original C++ bridge against a supplied SDK. On Windows, set
+`BEATKERNEL_ASIO_SDK_DIR` to the SDK root and use
+`cargo check -p beatkernel-platform --features asio-sdk --locked` for an MSVC
+target with MSVC or clang-cl. Enabled Windows GNU SDK builds are currently rejected
+pending compatible ABI support. Default CI and verification commands check the SDK-free build;
+`--all-features` on Windows requires these ASIO prerequisites. Driver controls
+expose native capabilities and explicit rate changes; ASIO callbacks and mixer
+output remain to be implemented. Portable `audio::asio` validates exact buffer
+sizes and distinguishes positive Hertz from explicit external clock selection.
 See the [core audio contract](doc/kernel/REQ__audio.md) and
 [Windows audio contract](doc/platform/REQ__windows-audio.md).
 

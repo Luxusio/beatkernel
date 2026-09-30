@@ -38,8 +38,10 @@ The `asio_inspector` platform example requires `--view native|32|64` when
 enumerating; optional count/value caps remain explicit. Its portable help path
 does not enumerate or open audio. Constructor, identity and limit fixtures are
 authored and compiled only. Native enumeration, fixture execution and independent
-review remain deferred. SDK-combined bridge builds and actual driver streaming
-are subsequent required ASIO work, not claimed by this discovery API.
+review remain deferred. The separate optional
+[SDK control bridge](REQ__asio-driver-control.md) provides native capability and
+configuration source. Actual driver streaming is subsequent required ASIO work,
+not claimed by this discovery API.
 
 Rust 1.98.1 locked all-target checks passed for the host workspace and the Windows
 GNU platform target. The seven registration fixtures, three private returned-

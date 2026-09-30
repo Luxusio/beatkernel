@@ -200,7 +200,11 @@ Windows now has a separate [ASIO driver discovery](../platform/REQ__asio-driver-
 source path with explicit registry view, bounded typed metadata and canonical
 CLSID identities. It uses read-only Win32 registry calls without incorporating
 SDK source, loading a driver or opening audio. Native enumeration and current
-fixtures are unexecuted; SDK bridge/output implementation remains pending.
+fixtures are unexecuted. The optional
+[SDK driver control bridge](../platform/REQ__asio-driver-control.md) adds native
+capability queries and explicit hardware controls, while portable `audio::asio`
+validates reported buffer constraints and exact requests. Native SDK feature
+compilation/control acceptance and ASIO stream callbacks/output remain pending.
 
 ## Verification
 

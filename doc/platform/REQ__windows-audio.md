@@ -185,7 +185,9 @@ ASIO remains a required optional backend for compatible installed drivers.
 The user selected the [GPLv3 SDK-combined build policy](REQ__asio-distribution.md)
 on 2026-10-01 while project-authored source stays MIT. SDK files and derived code
 retain their own licenses; combined binary releases require GPLv3 notices and
-Corresponding Source delivery. Native ASIO implementation is still pending.
+Corresponding Source delivery. Optional
+[SDK driver control](REQ__asio-driver-control.md) and portable buffer/rate
+validation have source implementations; native stream callbacks/output remain pending.
 Current WASAPI code reports `BackendUnavailable(Asio)` for ASIO requests, rather
 than the earlier unresolved-license placeholder. Additional native APIs need
 concrete capability and runtime contracts through the same platform boundary.
