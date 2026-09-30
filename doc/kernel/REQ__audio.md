@@ -59,7 +59,8 @@ native playback has passed verification. Native device control belongs to
   arithmetic, then clamp once to [-1, 1]. Validate output buffer alignment,
   configured frame limit and frame-cursor arithmetic before consuming commands
   or changing state. Partitioning the same output frames must preserve samples
-  and command behavior, including at 44.1 kHz and nonzero origins.
+  and command behavior for commands admitted to the mixer before their execution
+  frames, including at 44.1 kHz and nonzero origins.
 
 ### Exact phase and boundary arithmetic
 
@@ -108,6 +109,15 @@ different arithmetic representation and corresponding real-time verification.
   reject newly consumed commands and count them; preserve prior pending work.
   Preallocate voice and pending storage. Expose maximum frames, voices, samples,
   PCM bytes, queue/pending commands and drain work as checked setup limits.
+- Queue admission does not guarantee mixer admission in that same callback.
+  Commands beyond the per-render drain budget remain queued for a later render;
+  they count as late if their target frame has passed when admitted. Changing
+  callback partitions can therefore change queue admission timing when the
+  budget is insufficient, while admitted sample phase and target-frame mapping
+  remain partition invariant. For budget 1 and prequeued Play/Stop at frame 0,
+  one four-frame render admits only Play; two two-frame renders admit Stop on
+  the second callback and silence its last two frames. Size the drain budget
+  for expected command bursts and observe lateness/capacity counters.
 - Rendering performs no heap allocation, reallocation, deallocation, blocking
   lock, decode, disk/network I/O or ordinary logging/formatting. Disconnect is
   observable state, not permission to drop queue/sample ownership during render.

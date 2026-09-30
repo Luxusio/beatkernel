@@ -147,6 +147,11 @@ is synthetic and does not prove endpoint operation or physical latency.
   reported QPC time uses 100 ns units; map it explicitly to the existing host
   clock origin rather than treating it as a raw QueryPerformanceCounter tick.
   See [GetPosition](https://learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclock-getposition).
+- Preserve native reading quality separately: S_OK is Accurate, S_FALSE is
+  Degraded, and an otherwise unclassified success is Unknown. The 100 ns unit
+  conversion and integer-origin arithmetic do not bound overall device/driver
+  measurement uncertainty. Keep `mapping_quality` Unknown until such a complete
+  bound is established, even when the computed `host_point` is representable.
 - Report submitted frames, actual buffer/period, padding, stream latency,
   callback/deadline failures, scheduling lateness, rejected commands and native
   error separately. Label suspected starvation as inferred. Do not advertise an
