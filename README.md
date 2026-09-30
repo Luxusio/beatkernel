@@ -558,6 +558,9 @@ See [Linux native requirements](doc/platform/REQ__linux-native.md) for explicit
 nodes/endpoints and supported settings. The `linux_native audio` command also
 prints a [joined render-worker cadence summary](doc/platform/REQ__alsa-render-cadence.md)
 with an explicit bounded prefix and startup-fill scope.
+WASAPI `windows_audio` and CoreAudio `macos_native` also print
+[direct render-start cadence](doc/platform/REQ__native-render-cadence.md) after
+cleanup, preserving their distinct software clock boundaries.
 Exact ALSA sizing is the default;
 optional rounding reports applied period/buffer sizes. Evdev event loss requires
 an explicit queried-state acknowledgment before gameplay resumes.

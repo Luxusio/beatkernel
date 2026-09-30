@@ -37,3 +37,12 @@ MachClock/native callback context is platform work, so native callback execution
 verification remains explicitly deferred. Scoped formatting and Apple-target
 library/test compilation are allowed; no tests, native calls, linking, review or
 QA are executed during the user's verification deferral.
+
+## Direct scheduling cadence
+
+CoreAudio also retains a [direct pre-Mixer cadence prefix](REQ__native-render-cadence.md).
+It samples the shared mach clock immediately before actual rendering, retaining
+successful RenderReport frame identity. After successful unregister/drain, the
+capture transfers to the owner for summary on request. Presentation timestamps
+and callback entry timing remain distinct; no acoustic jitter follows from this
+software scheduling observer. Native execution remains deferred.

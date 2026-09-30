@@ -1,7 +1,9 @@
 # ALSA render-worker scheduling cadence
 
 `AlsaStream::render_cadence()` supplies direct worker-boundary timing for plan
-P11 and §17.4. It returns `Ok(None)` while the worker handle remains unjoined.
+P11 and §17.4 through the [shared native capture](REQ__native-render-cadence.md).
+Its public result/error names remain aliases of the shared portable types.
+It returns `Ok(None)` while the worker handle remains unjoined.
 After `stop()` joins, it returns a checked summary, including partial history
 when the worker failed or panicked. No observed points yields an absent interval
 summary, not fabricated zero jitter. This is separate from presentation timing.
@@ -46,7 +48,8 @@ invocations without implicit rounding or fallback.
 This measures render-worker scheduling residuals, not device delivery, callback
 arrival, acoustic jitter, underrun causation or physical latency. Snapshot
 presentation fields and aggregate counters retain their own independent scopes.
-Windows, macOS and ASIO direct worker/callback scheduling instrumentation is not
-claimed by this ALSA source slice. Three authored arithmetic/chronology/prefix
+Windows and macOS now use the shared direct render-start capture at their own
+documented boundaries; ASIO direct scheduling capture remains separate.
+The shared authored arithmetic/chronology/prefix
 fixtures compile but remain unexecuted; actual buffer-size measurements, RT audit,
 independent review and QA remain deferred by the user's instruction.

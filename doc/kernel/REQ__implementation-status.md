@@ -159,8 +159,9 @@ ALSA's [direct render-worker cadence](../platform/REQ__alsa-render-cadence.md)
 now captures actual pre-Mixer monotonic timestamps with successful frame identity
 and summarizes a finite prefix after worker join. The Linux native audio example
 prints this alongside applied sizes and actual xrun counters. Startup fill bursts
-remain included. Direct Windows/macOS/ASIO worker/callback scheduling capture
-remains authorable source work; this ALSA slice does not establish hardware results.
+remain included. WASAPI and CoreAudio now reuse shared direct pre-Mixer capture
+at their QPC/mach boundaries. ASIO direct scheduling capture remains authorable
+source work; these source slices do not establish hardware results.
 
 The remaining full-plan acceptance includes current regression execution,
 deterministic replay/seek comparisons, native Windows output and at least one
