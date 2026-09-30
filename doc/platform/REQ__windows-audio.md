@@ -65,6 +65,9 @@ caller can make the next choice.
   suggestion is returned, or retried only under explicit caller policy. Format
   unavailable, exclusive access disabled, endpoint busy and device invalidated
   remain distinguishable failures.
+- An alignment failure's suggested next buffer size is not an alignment
+  increment. Return that size as a suggestion; leave the increment unknown
+  unless the native API actually reports it.
 - Shared wakes fill available frames derived from padding. Exclusive event wakes
   fill the complete required packet. Prefill before starting. Support native
   float32 and PCM16/24/32 conversion with checked format and buffer bounds.
@@ -104,6 +107,9 @@ contracts. Requested configuration probing follows [IsFormatSupported](https://l
   wakes and stops the worker, joins it, then releases assets. Signal failures
   require a bounded recovery path; worker panic is reported by join. No detached
   callback may outlive its mixer or sample storage.
+- Associate the owned render event immediately after successful event-driven
+  initialization, before later validation can fail. Cleanup never releases an
+  initialized event-driven client while withholding its required event handle.
 - Device loss or render failure produces explicit terminal status. Reopening or
   selecting another configuration is the caller's action, not automatic fallback.
 
