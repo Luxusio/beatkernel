@@ -482,3 +482,13 @@ input. Source compilation does not establish native playback or acoustic sync.
 ```sh
 cargo run -p beatkernel-bms-runtime --bin linux_bms -- --help
 ```
+
+The [macOS BMS binary](doc/kernel/REQ__bms-macos-native.md) uses an explicit
+CoreAudio device and IORegistry input entry with the same preparation and judge.
+[CoreAudio presentation pairs](doc/platform/REQ__coreaudio-presentation.md) retain
+the callback's native mach/output-frame association and explicit host mapping.
+Native playback, permissions and physical synchronization remain unverified.
+
+```sh
+cargo run -p beatkernel-bms-runtime --bin macos_bms -- --help
+```

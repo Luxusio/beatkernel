@@ -125,7 +125,12 @@ not extend native clock freshness or establish physical playback evidence.
 CoreAudio exposes the same [successful mixer report](../platform/REQ__coreaudio-render-telemetry.md)
 contract through callback-owned publication and a final retained report after
 callback quiescence. Native example cleanup prints these core execution counters.
-This adds no native playback evidence and does not yet provide a macOS BMS sample.
+This adds no native playback evidence. The separate
+[macOS BMS composition](../kernel/REQ__bms-macos-native.md) connects selected IOHID
+keyboard controls and CoreAudio output to the shared preparation and judge. Its
+[presentation converter](../platform/REQ__coreaudio-presentation.md) uses supplied
+mach-domain normalization and native callback/output-grid association without
+receipt-time substitution. Compilation does not establish acoustic synchronization.
 
 Git was initialized locally on 2026-09-29 after these files had been implemented. Initial commits record the existing implementation and its documentation, rather than reconstructing historical development commits.
 
