@@ -22,6 +22,20 @@ pub struct QpcReceipt {
     pub normalized: ClockPoint,
 }
 
+/// A multimedia timer reading bracketed by the application's shared QPC clock.
+///
+/// This retains acquisition bounds, not a hardware-event timestamp or a claim
+/// about multimedia timer resolution. The raw value wraps every 2^32 ms.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MultimediaClockReceipt {
+    /// QPC sampled immediately before the timer query.
+    pub before: QpcReceipt,
+    /// Unmodified `timeGetTime` milliseconds since boot, modulo 2^32.
+    pub milliseconds: u32,
+    /// QPC sampled immediately after the timer query.
+    pub after: QpcReceipt,
+}
+
 /// A native QPC sampler with one explicit origin and output domain.
 ///
 /// Construct one clock in the application composition root and copy it into
@@ -35,6 +49,31 @@ pub struct QpcClock {
 }
 
 impl QpcClock {
+    /// Samples the multimedia timer between two QPC observations.
+    ///
+    /// Runs off the real-time callback. This does not request a new timer
+    /// period, infer timer accuracy, or assume ASIO drivers use this clock.
+    /// Consumers must supply finite validity and honest measurement/drift error
+    /// bounds when constructing a multimedia clock relation.
+    pub fn sample_multimedia(&self) -> io::Result<MultimediaClockReceipt> {
+        let before = self.sample()?;
+        // SAFETY: this synchronous WinMM query takes no pointers and retains
+        // no application state. It returns the native wrapping DWORD directly.
+        let milliseconds = unsafe { windows::Win32::Media::timeGetTime() };
+        let after = self.sample()?;
+        if after.counter < before.counter {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "QPC moved backwards during multimedia clock acquisition",
+            ));
+        }
+        Ok(MultimediaClockReceipt {
+            before,
+            milliseconds,
+            after,
+        })
+    }
+
     /// Queries frequency and initialization counter, validating the time mapping.
     pub fn new(output: ClockDomainId) -> io::Result<Self> {
         let mut frequency = 0i64;

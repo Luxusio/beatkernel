@@ -87,6 +87,35 @@ Real SDK builds still require supplied headers and MSVC or clang-cl. The separat
 explicit sample feature/driver/view/channel settings and an owned hidden HWND.
 Live-input ASIO host composition and presentation mapping remain implementation work.
 
+## Windows multimedia clock acquisition
+
+`QpcClock::sample_multimedia` queries `timeGetTime` between two samples of the
+same shared QPC clock used for input. It retains raw wrapping milliseconds and
+both native/normalized QPC receipts, without changing timer period or claiming
+hardware precision. Microsoft's [timer contract](https://learn.microsoft.com/en-us/windows/win32/api/timeapi/nf-timeapi-timegettime)
+specifies a 2^32-ms wrap and machine-dependent precision, potentially five
+milliseconds or more by default.
+
+The SDK-free `MultimediaClockAnchor` accepts an explicit finite horizon and
+caller-supplied measurement and drift bounds. It resolves canonical wrapped
+nanoseconds near that anchor, rejects ambiguous epochs, wrong domains, stale
+host observations and arithmetic overflow, and returns a host interval rather
+than an invented exact timestamp. Bounds must describe actual clock behavior;
+unknown timer accuracy does not justify constructing a bounded relation.
+Callers must establish that the driver uses this timer and that readings are
+within the finite horizon; modular arithmetic cannot identify arbitrary old
+readings from a different wrap epoch. Reacquire the relation before expiry.
+
+This acquisition primitive does not yet connect ASIO callback observations,
+output latency and rendered Mixer blocks to the live input/judge host. Those
+integration steps and native acceptance remain outstanding.
+
+Rust 1.98.1 locked workspace all-target and SDK-free Windows GNU platform/sample
+checks passed after acquisition was added. Four modular-relation fixtures cover
+wrap crossing, expiry/domain mismatch, ambiguous/noncanonical timestamps and
+host overflow; they are authored and compiled only. No native timer acquisition,
+driver-clock relation or audible presentation accuracy has been verified.
+
 Subsequent target-only Rust source configuration checks include the optional
 stream, its five pure-Rust publication fixtures and the recorded-host Windows
 module. Eight ASIO CLI fixtures also compile through ordinary default checks.
