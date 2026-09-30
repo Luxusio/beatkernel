@@ -239,6 +239,32 @@ fn feed_rendered(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+struct DeliverySession(beatkernel::telemetry::InputDeliveryTelemetry);
+#[cfg(target_os = "linux")]
+impl std::ops::Deref for DeliverySession {
+    type Target = beatkernel::telemetry::InputDeliveryTelemetry;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+#[cfg(target_os = "linux")]
+impl std::ops::DerefMut for DeliverySession {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+#[cfg(target_os = "linux")]
+impl Drop for DeliverySession {
+    fn drop(&mut self) {
+        let observed = self.observed_events();
+        match self.summary() {
+            Some(summary) => println!("kernel-event-to-runtime delivery age: observed_events={observed}; retained samples={} p50={}ns p95={}ns p99={}ns max={}ns; HOST={:?}, capacity={}; separate from CPU processing; physical input-to-sound unknown", summary.samples, summary.p50_ns, summary.p95_ns, summary.p99_ns, summary.max_ns, self.domain(), self.capacity()),
+            None => println!("kernel-event-to-runtime delivery age: observed_events={observed}; retained summary unavailable; no zero observation substituted; separate from CPU processing; physical input-to-sound unknown"),
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.is_empty() || args == ["--help"] {
@@ -361,6 +387,10 @@ mod native {
     }
     pub(super) fn run(options: Options) -> Result<()> {
         let clock = MonotonicClock::new(HOST);
+        // Declared before device owners so every exit reports after their cleanup.
+        let mut delivery = DeliverySession(beatkernel::telemetry::InputDeliveryTelemetry::new(
+            4096, HOST,
+        )?);
         let prepared = load_prepared(
             &options.chart,
             options.format,
@@ -537,6 +567,7 @@ mod native {
                                     continue;
                                 }
                                 discipline.validate_host(host)?;
+                                delivery.observe(host, acquired_now)?;
                                 print_report(runtime.process_input(
                                     event,
                                     &ExplicitDomains,

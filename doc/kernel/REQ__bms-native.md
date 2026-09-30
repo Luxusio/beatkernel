@@ -119,3 +119,26 @@ explicit unsupported-host error. This lane authors source and uses formatting pl
 Windows compile checks only; execution, native delivery, tests, reviews and QA are deferred. Portable preroll
 CLI boundary, actual feeder mapping/identity and checked overflow fixtures are authored inside
 the binary under cfg(test), compiled but not executed.
+
+## Supplied input delivery age
+
+A 4,096-sample HOST-domain InputDeliveryTelemetry ring is allocated before native
+devices. Eligible canonical events actually submitted to Runtime retain their original
+metadata; their event point is compared with a fresh same-HOST receipt observation
+after acquisition/pop and before dispatch. Excluded pre-origin or other-device events
+do not enter this ring. The observer does not apply the input profile offset, clamp
+event times or modify judging. Domain mismatch, future event or decreasing receipt
+points fail through existing cleanup; event times from different devices may regress
+without violating the delivery observer (Runtime chronology remains separate).
+
+Windows samples fresh QPC after Raw Input decoding. Raw Input event metadata already
+uses QPC receipt time, so this is **QPC RECEIPT-to-runtime software delivery age**,
+not a native kernel timestamp or hardware-origin delay.
+
+Final diagnostics after native cleanup attempts, on success and error exit, print the
+explicit label, total successfully observed events and retained-window p50/p95/p99/max
+nanoseconds. No retained samples prints unavailable rather than zero. This measures
+supplied timestamp age, separately from Runtime process_input CPU duration; it neither
+infers device polling frequency nor establishes physical input-to-sound latency. See
+[the core telemetry contract](REQ__telemetry.md). Observation and summary remain on the
+control thread, outside audio callbacks. Source/compile checks are not native evidence.

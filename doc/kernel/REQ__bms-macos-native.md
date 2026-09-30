@@ -113,3 +113,26 @@ Portable help and CLI/math fixtures open no devices; non-macOS execution is expl
 unsupported. Fixtures are authored/compiled but unrun. This lane performs scoped
 formatting and host/Apple/Windows compile checks only, no native/link/test execution,
 review or QA. Source compilation does not prove playback works on hardware.
+
+## Supplied input delivery age
+
+A 4,096-sample HOST-domain InputDeliveryTelemetry ring is allocated before native
+devices. Eligible canonical events actually submitted to Runtime retain their original
+metadata; their event point is compared with a fresh same-HOST receipt observation
+after acquisition/pop and before dispatch. Excluded pre-origin or other-device events
+do not enter this ring. The observer does not apply the input profile offset, clamp
+event times or modify judging. Domain mismatch, future event or decreasing receipt
+points fail through existing cleanup; event times from different devices may regress
+without violating the delivery observer (Runtime chronology remains separate).
+
+macOS reuses the fresh normalized Mach observation after IOHID queue pop, measuring
+**IOHID-event-to-runtime delivery age** from the preserved canonical IOHID timestamp
+without repeating its native conversion. Only the selected attachment contributes.
+
+Final diagnostics after native cleanup attempts, on success and error exit, print the
+explicit label, total successfully observed events and retained-window p50/p95/p99/max
+nanoseconds. No retained samples prints unavailable rather than zero. This measures
+supplied timestamp age, separately from Runtime process_input CPU duration; it neither
+infers device polling frequency nor establishes physical input-to-sound latency. See
+[the core telemetry contract](REQ__telemetry.md). Observation and summary remain on the
+control thread, outside audio callbacks. Source/compile checks are not native evidence.
