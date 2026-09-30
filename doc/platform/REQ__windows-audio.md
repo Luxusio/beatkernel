@@ -190,6 +190,16 @@ concrete capability and runtime contracts through the same platform boundary.
 
 ## Verification and current environment evidence
 
+The user's 2026-09-30 instruction authorizes installing a virtual audio driver
+in the owned Windows verification guest and completing actual native stream
+tests there. Use an official package and record its version, source, hash,
+signature and installed device status. Keep third-party driver binaries and
+source outside the MIT runtime product. Necessary isolated build dependencies
+may be installed for executable verification. Test shared and exclusive output,
+submission beyond prefill, progressing clocks, stop/reopen and explicit failure
+handling. Virtual endpoints establish native API operation, not physical audio
+latency; the latter still requires hardware measurements.
+
 Pure tests cover format packing, widths/layouts, exact/closest responses, buffer
 and period requests, shared negotiation and exclusive alignment policies. Native
 tests must execute finite shared and exclusive streams with explicit settings,
@@ -211,3 +221,19 @@ endpoint inventory was returned. Owner status only described recorded state,
 so it did not establish guest readiness or audio capability. The Sandbox was
 stopped normally afterward with provider exit code zero. Its endpoint support
 remains unknown; this attempt supplied no native playback evidence.
+
+The authorized virtual-driver attempt downloaded the official
+[25.7.14 package](https://github.com/VirtualDrivers/Virtual-Audio-Driver/releases/expanded_assets/25.7.14)
+and matched its published SHA-256
+`dd10560994de65a7e587fb8b93c0d7e9838292d9c3566a0976c2786d727292bd`.
+Its INF specifies driver version `4.57.21.655`, root hardware identity
+`ROOT\VirtualAudioDriver` and minimum build 22000. Package download and hash
+validation do not establish Windows signature trust or successful installation.
+The retained VM reached its login screen, but native command execution and
+package upload both failed with `hyper-v-guest-provider-failed`. A Windows 11
+guest could not be created because its base image was unavailable; automatic
+Server guest creation failed at `Set-VMFirmware`. No driver installation or
+successful native stream execution resulted from those attempts.
+An isolated MinGW linker did successfully build the current Rust 1.98.1
+`windows_audio.exe`; this removes the earlier missing-linker blocker without
+establishing native playback.
