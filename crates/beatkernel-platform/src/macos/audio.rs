@@ -205,6 +205,16 @@ pub struct CoreAudioStream {
     final_cadence: Option<Box<crate::audio::cadence::Capture>>,
 }
 impl CoreAudioStream {
+    /// Query the OS default media output without changing or opening a stream.
+    pub fn default_output_device() -> Result<u32, CoreAudioError> {
+        // AudioHardware.h: system object 1, global UInt32 'dOut' property.
+        let id: u32 = scalar(1, address(u32::from_be_bytes(*b"dOut"), GLOBAL))?;
+        if id == 0 {
+            return Err(CoreAudioError::DeviceUnavailable);
+        }
+        Ok(id)
+    }
+
     /// Enumerates actual render devices; it never selects or opens the default.
     pub fn devices() -> Result<Vec<CoreAudioDevice>, CoreAudioError> {
         let identities = u32_property(1, address(DEVICES, GLOBAL))?;

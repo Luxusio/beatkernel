@@ -3,7 +3,7 @@ use super::{clock::MachClock, ffi};
 use beatkernel::input::*;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
-    ffi::{c_void, CString},
+    ffi::{CString, c_void},
     marker::PhantomData,
     rc::Rc,
     time::Duration,
@@ -18,6 +18,202 @@ pub struct HidDevice {
     pub descriptor: DeviceDescriptor,
     /// Native IORegistry entry identity, when the service reports it.
     pub registry_entry: Option<u64>,
+}
+
+/// Keyboard/keypad primary-usage metadata, without opening an HID manager.
+/// Registry identity is native metadata, not a runtime/session DeviceId.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyboardDevice {
+    /// Native positive IORegistry identity, resolved again at acquisition.
+    pub registry_entry: u64,
+    /// Complete optional UTF-8 product name.
+    pub name: Option<String>,
+    /// Optional USB/HID vendor identity reported by the service.
+    pub vendor_id: Option<u16>,
+    /// Optional USB/HID product identity reported by the service.
+    pub product_id: Option<u16>,
+    /// Complete optional native transport description.
+    pub transport: Option<String>,
+}
+
+struct DiscoveryObject(u32);
+impl Drop for DiscoveryObject {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            // SAFETY: each iterator/service returned by IOKit owns one handle.
+            unsafe { ffi::IOObjectRelease(self.0) };
+        }
+    }
+}
+
+fn discovery_limits(max_devices: usize, max_text_bytes: usize) -> Result<(), HidError> {
+    if !(1..=4096).contains(&max_devices) || !(1..=16384).contains(&max_text_bytes) {
+        return Err(HidError::Capacity);
+    }
+    Ok(())
+}
+
+fn keyboard_primary_usage(page: Option<u16>, usage: Option<u16>) -> bool {
+    page == Some(1) && matches!(usage, Some(6 | 7))
+}
+
+/// Enumerates primary Generic Desktop keyboard/keypad services. The limit
+/// counts all scanned IOHIDDevice services, including non-keyboards. Overflow
+/// or malformed metadata rejects the whole query, never a partial catalog.
+/// No manager open, callback, runloop scheduling, or input acquisition occurs.
+pub fn keyboard_devices(
+    max_devices: usize,
+    max_text_bytes: usize,
+) -> Result<Vec<KeyboardDevice>, HidError> {
+    discovery_limits(max_devices, max_text_bytes)?;
+    // SAFETY: static NUL-terminated IOKit service class, Create-rule dictionary.
+    let matching = ffi::OwnedRef(unsafe { ffi::IOServiceMatching(c"IOHIDDevice".as_ptr()) });
+    if matching.0.is_null() {
+        return Err(HidError::Capacity);
+    }
+    let dictionary = matching.0;
+    // The next FFI call consumes this reference on every return path.
+    std::mem::forget(matching);
+    let mut iterator = 0u32;
+    // SAFETY: main port0 means default; live owned dictionary is transferred;
+    // iterator is writable uint32. No reference remains for CFRelease here.
+    let status = unsafe { ffi::IOServiceGetMatchingServices(0, dictionary, &mut iterator) };
+    let iterator = DiscoveryObject(iterator);
+    if status != 0 {
+        return Err(HidError::Native(status));
+    }
+    let mut devices = Vec::new();
+    if iterator.0 == 0 {
+        return Ok(devices);
+    }
+    let mut scanned = 0usize;
+    loop {
+        // SAFETY: iterator is an owned live IOKit handle; next service is owned.
+        let service = DiscoveryObject(unsafe { ffi::IOIteratorNext(iterator.0) });
+        if service.0 == 0 {
+            // SAFETY: same live iterator; Apple requires this check after zero.
+            if unsafe { ffi::IOIteratorIsValid(iterator.0) } == 0 {
+                return Err(HidError::InvalidMetadata);
+            }
+            break;
+        }
+        if scanned == max_devices {
+            return Err(HidError::Capacity);
+        }
+        scanned += 1;
+        let page = discovery_number(service.0, c"PrimaryUsagePage")?;
+        let usage = discovery_number(service.0, c"PrimaryUsage")?;
+        if !keyboard_primary_usage(page, usage) {
+            continue;
+        }
+        let mut registry_entry = 0u64;
+        // SAFETY: owned service, writable exact uint64 registry identity.
+        let status =
+            unsafe { ffi::IORegistryEntryGetRegistryEntryID(service.0, &mut registry_entry) };
+        if status != 0 {
+            return Err(HidError::Native(status));
+        }
+        if registry_entry == 0 {
+            return Err(HidError::InvalidMetadata);
+        }
+        let device = KeyboardDevice {
+            registry_entry,
+            name: discovery_string(service.0, c"Product", max_text_bytes)?,
+            vendor_id: discovery_number(service.0, c"VendorID")?,
+            product_id: discovery_number(service.0, c"ProductID")?,
+            transport: discovery_string(service.0, c"Transport", max_text_bytes)?,
+        };
+        devices.try_reserve(1).map_err(|_| HidError::Capacity)?;
+        devices.push(device);
+    }
+    devices.sort_by_key(|device| device.registry_entry);
+    Ok(devices)
+}
+
+fn discovery_property(service: u32, key: &std::ffi::CStr) -> Result<ffi::OwnedRef, HidError> {
+    // SAFETY: bounded static C key; created CFString owned until query returns.
+    let key = ffi::OwnedRef(unsafe {
+        ffi::CFStringCreateWithCString(std::ptr::null(), key.as_ptr(), ffi::UTF8)
+    });
+    if key.0.is_null() {
+        return Err(HidError::Capacity);
+    }
+    // SAFETY: owned service/live key; Create returns a separately owned optional
+    // CF property. Default allocator/null and options0 follow IOKitLib.h.
+    Ok(ffi::OwnedRef(unsafe {
+        ffi::IORegistryEntryCreateCFProperty(service, key.0, std::ptr::null(), 0)
+    }))
+}
+
+fn discovery_number(service: u32, key: &std::ffi::CStr) -> Result<Option<u16>, HidError> {
+    let value = discovery_property(service, key)?;
+    if value.0.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: live owned CF property; inspect type before requesting integer.
+    if unsafe { ffi::CFGetTypeID(value.0) != ffi::CFNumberGetTypeID() } {
+        return Err(HidError::InvalidMetadata);
+    }
+    let mut number = 0i64;
+    // SAFETY: CFNumberSInt64Type4 writes an exact i64, with conversion checked.
+    if unsafe { ffi::CFNumberGetValue(value.0, 4, (&mut number as *mut i64).cast()) } == 0 {
+        return Err(HidError::InvalidMetadata);
+    }
+    Ok(Some(
+        u16::try_from(number).map_err(|_| HidError::InvalidMetadata)?,
+    ))
+}
+
+fn discovery_string(
+    service: u32,
+    key: &std::ffi::CStr,
+    max_bytes: usize,
+) -> Result<Option<String>, HidError> {
+    let value = discovery_property(service, key)?;
+    if value.0.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: live owned property, actual CF type checked before string calls.
+    if unsafe { ffi::CFGetTypeID(value.0) != ffi::CFStringGetTypeID() } {
+        return Err(HidError::InvalidMetadata);
+    }
+    // UTF8 requires at least as many bytes as source UTF16 units. Reject before
+    // allocating; remaining storage is fixed to the selected byte cap plus NUL.
+    let units = usize::try_from(unsafe { ffi::CFStringGetLength(value.0) })
+        .map_err(|_| HidError::InvalidMetadata)?;
+    if units > max_bytes {
+        return Err(HidError::Capacity);
+    }
+    let capacity = max_bytes + 1; // Caller validates max_bytes <=16384.
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(capacity)
+        .map_err(|_| HidError::Capacity)?;
+    bytes.resize(capacity, 0u8);
+    // SAFETY: validated string and fully writable cap+NUL buffer; failure does
+    // not produce a truncated successful string, including multibyte overflow.
+    if unsafe {
+        ffi::CFStringGetCString(
+            value.0,
+            bytes.as_mut_ptr().cast(),
+            capacity as isize,
+            ffi::UTF8,
+        )
+    } == 0
+    {
+        return Err(HidError::Capacity);
+    }
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or(HidError::InvalidMetadata)?;
+    bytes.truncate(end);
+    let text = String::from_utf8(bytes).map_err(|_| HidError::InvalidMetadata)?;
+    // Detect embedded NUL without silently dropping the remainder of a string.
+    if text.encode_utf16().count() != units {
+        return Err(HidError::InvalidMetadata);
+    }
+    Ok(Some(text))
 }
 /// Canonical value plus exact native representation not expressible in f32 axes.
 #[derive(Clone, Debug, PartialEq)]
@@ -81,6 +277,8 @@ pub enum HidInputOptions {
 /// Off-callback acquisition failure; no fake successful input is returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HidError {
+    /// Malformed discovery properties/registry identity, or invalidated iterator.
+    InvalidMetadata,
     /// Input Monitoring/access permission was rejected by IOKit.
     PermissionDenied,
     /// Timestamped report registration API is unavailable; no receipt-time fallback.
@@ -102,7 +300,7 @@ pub enum HidError {
 }
 impl std::fmt::Display for HidError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self { Self::PermissionDenied => f.write_str("IOHID input permission denied; grant Input Monitoring access to the host application"), Self::Native(code) => write!(f, "IOHID failure {code:#x}"), Self::Unsupported => f.write_str("timestamped IOHID report API unavailable"), Self::InvalidReport => f.write_str("invalid native IOHID report"), Self::ReportCapacity => f.write_str("native IOHID report exceeds byte capacity"), Self::Capacity => f.write_str("IOHID acquisition capacity exhausted"), Self::TimestampOverflow => f.write_str("IOHID mach timestamp overflow"), Self::QueueFull => f.write_str("IOHID acquisition queue full"), Self::Closed => f.write_str("IOHID manager is closed") }
+        match self { Self::InvalidMetadata => f.write_str("invalid IOHID discovery metadata or invalidated iterator"), Self::PermissionDenied => f.write_str("IOHID input permission denied; grant Input Monitoring access to the host application"), Self::Native(code) => write!(f, "IOHID failure {code:#x}"), Self::Unsupported => f.write_str("timestamped IOHID report API unavailable"), Self::InvalidReport => f.write_str("invalid native IOHID report"), Self::ReportCapacity => f.write_str("native IOHID report exceeds byte capacity"), Self::Capacity => f.write_str("IOHID acquisition capacity exhausted"), Self::TimestampOverflow => f.write_str("IOHID mach timestamp overflow"), Self::QueueFull => f.write_str("IOHID acquisition queue full"), Self::Closed => f.write_str("IOHID manager is closed") }
     }
 }
 impl std::error::Error for HidError {}
@@ -720,4 +918,23 @@ fn capabilities(device: ffi::Ref) -> DeviceCapabilities {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod discovery_fixtures {
+    use super::*;
+
+    #[test]
+    fn primary_keyboard_keypad_and_discovery_limits_are_explicit() {
+        assert!(keyboard_primary_usage(Some(1), Some(6)));
+        assert!(keyboard_primary_usage(Some(1), Some(7)));
+        assert!(!keyboard_primary_usage(Some(1), Some(2)));
+        assert!(!keyboard_primary_usage(Some(7), Some(6)));
+        assert!(!keyboard_primary_usage(None, Some(6)));
+        assert!(discovery_limits(1, 1).is_ok());
+        assert!(discovery_limits(4096, 16384).is_ok());
+        for (count, bytes) in [(0, 1), (4097, 1), (1, 0), (1, 16385)] {
+            assert_eq!(discovery_limits(count, bytes), Err(HidError::Capacity));
+        }
+    }
 }

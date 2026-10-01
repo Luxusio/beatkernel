@@ -12,7 +12,10 @@ pub use alsa::{
     AlsaAppliedConfig, AlsaCadenceError, AlsaDevice, AlsaNativeTimestamp, AlsaRenderCadence,
     AlsaRequest, AlsaSnapshot, AlsaStatus, AlsaStream, AlsaTimingSnapshot, alsa_output_devices,
 };
-pub use input::{EvdevDevice, EvdevItem, EvdevSnapshot, HidrawDevice, LinuxInputCounters};
+pub use input::{
+    EvdevDevice, EvdevItem, EvdevKeyboardDevice, EvdevSnapshot, HidrawDevice, LinuxInputCounters,
+    evdev_keyboard_devices,
+};
 pub use presentation::alsa_presentation_pair;
 pub use sys::{LinuxError, MonotonicClock};
 

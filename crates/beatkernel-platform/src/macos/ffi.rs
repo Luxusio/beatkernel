@@ -58,6 +58,19 @@ unsafe extern "C" {
 }
 #[link(name = "IOKit", kind = "framework")]
 unsafe extern "C" {
+    // IOKitLib.h: io_object_t/io_iterator_t are user-space mach_port_t (uint32);
+    // GetMatchingServices consumes one CF dictionary reference even on error.
+    pub fn IOServiceMatching(name: *const c_char) -> Ref;
+    pub fn IOServiceGetMatchingServices(port: u32, matching: Ref, iterator: *mut u32) -> i32;
+    pub fn IOIteratorNext(iterator: u32) -> u32;
+    pub fn IOIteratorIsValid(iterator: u32) -> u32;
+    pub fn IOObjectRelease(object: u32) -> i32;
+    pub fn IORegistryEntryCreateCFProperty(
+        service: u32,
+        key: Ref,
+        allocator: Ref,
+        options: u32,
+    ) -> Ref;
     pub fn IOHIDManagerCreate(allocator: Ref, options: u32) -> Ref;
     pub fn IOHIDManagerSetDeviceMatching(manager: Ref, matching: Ref);
     pub fn IOHIDManagerOpen(manager: Ref, options: u32) -> i32;
