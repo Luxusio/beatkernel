@@ -17,6 +17,8 @@ use beatkernel_bms_runtime::ui::{
     text_input::LineEditor,
 };
 use beatkernel_bms_runtime::{
+    bga::BgaState,
+    bga_render::{BgaFrame, BgaTextureCache},
     competition::OpponentKind,
     device_catalog::{DeviceCatalog, DeviceRequest},
     font_atlas::FontAtlas,
@@ -527,6 +529,7 @@ pub(super) fn run(
         painted_reactive: None,
         window: None,
         renderer: None,
+        bga_cache: BgaTextureCache::default(),
         instance: None,
         scene: Scene::new(WIDTH as u32, HEIGHT as u32),
         game: None,
@@ -926,6 +929,7 @@ struct Desktop {
     painted_reactive: Option<ScreenInstanceId>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    bga_cache: BgaTextureCache,
     instance: Option<wgpu::Instance>,
     scene: Scene,
     game: Option<Game>,
@@ -1052,6 +1056,12 @@ impl Desktop {
             ScreenRoute::Play { .. } | ScreenRoute::Results { .. } | ScreenRoute::Closing
         ) {
             self.game = None;
+        }
+        if !matches!(
+            self.navigator.route(),
+            ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
+        ) {
+            self.release_backgrounds();
         }
     }
     fn navigate(&mut self, to: ScreenRoute) -> Result<(), String> {
@@ -1837,6 +1847,7 @@ impl Desktop {
                 self.commit_route(next);
                 self.game = Some(game);
                 self.failure = None;
+                self.release_backgrounds();
             }
             Err(error) => {
                 if let Some(records) = &mut self.records {
@@ -2651,6 +2662,7 @@ impl Desktop {
                 self.commit_route(next);
                 self.game = Some(game);
                 self.failure = None;
+                self.release_backgrounds();
             }
             Err(error) => {
                 if let Some(game) = &mut self.game {
@@ -3441,6 +3453,7 @@ impl Desktop {
             return Ok(());
         }
         let route = self.navigator.route();
+        let backgrounds = self.background_frames(route)?;
         if route == ScreenRoute::Selection {
             return self.draw_selection();
         }
@@ -3486,7 +3499,7 @@ impl Desktop {
                 .game
                 .as_ref()
                 .ok_or("session screen data unavailable")?;
-            draw_game(pixels, game, self.options.lookahead)?;
+            draw_game_with_background(pixels, game, self.options.lookahead, &backgrounds)?;
             let count = game.snapshot.as_ref().map_or(0, |s| s.players.len());
             if count > organisms::LOCAL_PLAYERS_PER_PAGE {
                 if game.local_page > 0 {
@@ -3729,6 +3742,40 @@ impl Desktop {
         }
         Ok(())
     }
+
+    fn release_backgrounds(&mut self) {
+        if let Some(renderer) = &mut self.renderer {
+            if let Err(error) = self.bga_cache.clear(renderer) {
+                self.failure = Some(error);
+            }
+        } else {
+            self.bga_cache = BgaTextureCache::default();
+        }
+    }
+
+    /// Only UI-owned renderer operations occur here; banks were prepared by
+    /// the native game owner. Exact member clocks determine visible selections.
+    fn background_frames(&mut self, route: ScreenRoute) -> Result<[BgaFrame; 4], String> {
+        let Some(renderer) = &mut self.renderer else {
+            self.bga_cache = BgaTextureCache::default();
+            return Ok([BgaFrame::default(); 4]);
+        };
+        if !matches!(
+            route,
+            ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
+        ) {
+            return self.bga_cache.sync(None, &[], renderer);
+        }
+        let Some(game) = &self.game else {
+            return self.bga_cache.sync(None, &[], renderer);
+        };
+        let Some(snapshot) = &game.snapshot else {
+            return self.bga_cache.sync(None, &[], renderer);
+        };
+        let (states, count) = background_states(snapshot, game.local_page)?;
+        self.bga_cache
+            .sync(snapshot.images.as_ref(), &states[..count], renderer)
+    }
 }
 impl ApplicationHandler for Desktop {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -3806,6 +3853,7 @@ impl ApplicationHandler for Desktop {
         self.invalidate_hits();
         self.cancel();
         self.renderer = None;
+        self.bga_cache = BgaTextureCache::default();
         self.instance = None;
     }
     fn window_event(&mut self, _event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
@@ -3820,6 +3868,7 @@ impl ApplicationHandler for Desktop {
             WindowEvent::Destroyed => {
                 self.request_close();
                 self.renderer = None;
+                self.bga_cache = BgaTextureCache::default();
                 self.window = None;
             }
             WindowEvent::Focused(active) => {
@@ -4019,6 +4068,7 @@ impl ApplicationHandler for Desktop {
         self.request_close();
         // Unexpected OS exit still joins native owners through Game::drop.
         self.game = None;
+        self.release_backgrounds();
         self.profile_io = None;
     }
 }
@@ -4221,7 +4271,46 @@ fn local_page(count: usize, current: usize, forward: bool) -> usize {
     }
 }
 
+fn background_states(
+    snapshot: &player::PlayerSnapshot,
+    page: usize,
+) -> Result<([BgaState; 4], usize), String> {
+    if snapshot.players.len() > 64 {
+        return Err("local background roster exceeds capacity".into());
+    }
+    let mut states = [BgaState::default(); 4];
+    let count = if snapshot.players.len() >= 2 {
+        let first = page
+            .checked_mul(4)
+            .filter(|first| *first < snapshot.players.len())
+            .ok_or("local background page exceeds roster")?;
+        let members = &snapshot.players[first..(first + 4).min(snapshot.players.len())];
+        for (slot, member) in members.iter().enumerate() {
+            if let (Some(chart), Some(now)) = (&member.chart, member.song_time) {
+                states[slot] = chart.bga_state(now);
+            }
+        }
+        members.len()
+    } else {
+        if let (Some(chart), Some(now)) = (&snapshot.chart, snapshot.song_time) {
+            states[0] = chart.bga_state(now);
+        }
+        1
+    };
+    Ok((states, count))
+}
+
+#[cfg(test)]
 fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), String> {
+    draw_game_with_background(pixels, game, lookahead, &[BgaFrame::default(); 4])
+}
+
+fn draw_game_with_background(
+    pixels: &mut Scene,
+    game: &Game,
+    lookahead: i64,
+    backgrounds: &[BgaFrame; 4],
+) -> Result<(), String> {
     let Some(snapshot) = &game.snapshot else {
         text(pixels, 24, 80, "LOADING - ESC CANCEL", 2, 0x9bb1cf);
         return Ok(());
@@ -4257,13 +4346,17 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
         }
     };
     text(pixels, 24, 65, status, 2, 0x9bb1cf);
+    if backgrounds.iter().any(|frame| frame.unavailable != 0) {
+        text(pixels, 750, 96, "BACKGROUND UNAVAILABLE", 1, 0xd8b36b);
+    }
     if snapshot.players.len() >= 2 {
-        organisms::local_players_with_competition(
+        organisms::local_players_with_background(
             pixels,
             &snapshot.players,
             lookahead,
             game.local_page,
             game.local_comparisons,
+            backgrounds,
         )?;
         text(
             pixels,
@@ -4298,7 +4391,7 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
         organisms::scoreboard(pixels, &snapshot.score, &snapshot.recent_results);
     }
     if let (Some(chart), Some(now)) = (&snapshot.chart, snapshot.song_time) {
-        organisms::playfield_with_progress(
+        organisms::playfield_with_background(
             pixels,
             chart,
             now,
@@ -4306,6 +4399,7 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
             &snapshot.recent_results,
             snapshot.pressed_lanes,
             snapshot.note_progress.as_ref(),
+            backgrounds[0],
         )?;
         text(
             pixels,
@@ -4328,6 +4422,128 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn desktop_game_composes_background_and_rejects_invalid_sprite_frame() {
+        use beatkernel::time::Timestamp;
+        use beatkernel_bms_runtime::{bga_render::BgaSprite, texture::TextureId};
+        let source = beatkernel_bms::parse(
+            "#BPM 120\n#WAV01 tap.wav\n#00011:01\n#00004:01\n",
+            beatkernel_bms::ParseOptions::default(),
+        )
+        .unwrap();
+        let chart = Arc::new(
+            player_chart::PlayerChart::from_compiled(&source, &source.compile().unwrap().chart)
+                .unwrap(),
+        );
+        let mut game = retry_fixture();
+        game.snapshot = Some(player::PlayerSnapshot {
+            chart: Some(chart),
+            song_time: Some(Timestamp::ZERO),
+            status: player::PlayerStatus::Playing,
+            ..Default::default()
+        });
+        let mut scene = Scene::new(WIDTH as u32, HEIGHT as u32);
+        draw_game(&mut scene, &game, 1_000_000_000).unwrap();
+        scene.clear();
+        // Pure geometry fixture uses an available builtin texture identity;
+        // GPU upload/pixel correctness is deliberately not claimed here.
+        let mut frames = [BgaFrame::default(); 4];
+        frames[0] = BgaFrame {
+            active: true,
+            base: Some(BgaSprite {
+                texture: TextureId::FONT,
+                width: 2,
+                height: 1,
+            }),
+            ..Default::default()
+        };
+        draw_game_with_background(&mut scene, &game, 1_000_000_000, &frames).unwrap();
+        assert!(scene.status().is_ok());
+        scene.clear();
+        frames[0].base.as_mut().unwrap().height = 0;
+        assert!(draw_game_with_background(&mut scene, &game, 1_000_000_000, &frames).is_err());
+        scene.clear();
+        frames[0] = BgaFrame {
+            active: true,
+            unavailable: 1,
+            ..Default::default()
+        };
+        draw_game_with_background(&mut scene, &game, 1_000_000_000, &frames).unwrap();
+    }
+
+    #[test]
+    fn visible_background_states_use_exact_member_clock_and_page_without_wall_time() {
+        use beatkernel::time::Timestamp;
+        use beatkernel_bms::ImageId;
+        let source = beatkernel_bms::parse(
+            "#BPM 120\n#WAV01 tap.wav\n#00011:01\n#00004:01\n#00104:02\n#00107:03\n",
+            beatkernel_bms::ParseOptions::default(),
+        )
+        .unwrap();
+        let chart = Arc::new(
+            player_chart::PlayerChart::from_compiled(&source, &source.compile().unwrap().chart)
+                .unwrap(),
+        );
+        let mut snapshot = player::PlayerSnapshot {
+            players: [7, u32::MAX, 2, 900, 41]
+                .into_iter()
+                .zip([
+                    0,
+                    2_000_000_000,
+                    1_999_999_999,
+                    3_000_000_000,
+                    1_000_000_000,
+                ])
+                .map(|(id, ns)| player::LocalPlayerSnapshot {
+                    player: PlayerId(id),
+                    chart: Some(Arc::clone(&chart)),
+                    song_time: Some(Timestamp::from_nanos(ns)),
+                    score: Default::default(),
+                    last_judge: None,
+                    recent_results: vec![],
+                    pressed_lanes: 0,
+                    note_progress: None,
+                    competition: None,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let (states, count) = background_states(&snapshot, 0).unwrap();
+        assert_eq!(count, 4);
+        assert_eq!(
+            states.map(|s| s.base),
+            [
+                Some(ImageId(1)),
+                Some(ImageId(2)),
+                Some(ImageId(1)),
+                Some(ImageId(2))
+            ]
+        );
+        assert_eq!(
+            states.map(|s| s.layer),
+            [None, Some(ImageId(3)), None, Some(ImageId(3))]
+        );
+        snapshot.pause = player::PauseState::Paused;
+        assert_eq!(background_states(&snapshot, 0).unwrap().0, states);
+        let (next, count) = background_states(&snapshot, 1).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(next[0].base, Some(ImageId(1)));
+        assert_eq!(next[1..], [BgaState::default(); 3]);
+        assert!(background_states(&snapshot, usize::MAX).is_err());
+        snapshot.players[1].song_time = Some(Timestamp::ZERO);
+        assert_eq!(
+            background_states(&snapshot, 0).unwrap().0[1].base,
+            Some(ImageId(1))
+        );
+        snapshot.players.clear();
+        snapshot.chart = Some(chart);
+        snapshot.song_time = Some(Timestamp::from_nanos(2_000_000_000));
+        assert_eq!(
+            background_states(&snapshot, 0).unwrap().0[0].layer,
+            Some(ImageId(3))
+        );
+    }
+
     #[test]
     fn title_font_option_is_ui_owned_and_rejects_empty_or_duplicate_paths() {
         let args = [
@@ -4461,6 +4677,7 @@ mod tests {
             painted_reactive: None,
             window: None,
             renderer: None,
+            bga_cache: BgaTextureCache::default(),
             instance: None,
             scene: Scene::new(WIDTH as u32, HEIGHT as u32),
             game: None,

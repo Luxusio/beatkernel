@@ -271,7 +271,8 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             );
         }
     }
-    beatkernel_bms_runtime::player::publish_local_chart(
+    beatkernel_bms_runtime::player::publish_native_chart(
+        &options.chart,
         &prepared.source,
         &prepared.compiled.chart,
         &options.local_players,

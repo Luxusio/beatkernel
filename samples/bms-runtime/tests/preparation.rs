@@ -1731,13 +1731,18 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
             ClockMappingQuality::Exact
         }
     }
-    let source = beatkernel_bms::parse(
-        "#BPM 120\n#WAV01 tap.wav\n#00111:01\n#STOP01 48\n#00109:01\n\
+    let text = "#BPM 120\n#WAV01 tap.wav\n#00111:01\n#STOP01 48\n#00109:01\n\
          #BMP00 poor.png\n#BMP01 first.png\n#BMP02 second.png\n#BMP03 third.png\n\
-         #BMP04 layer.png\n#00004:01\n#00104:0203\n#00107:04\n#00106:ZZ\n",
-        beatkernel_bms::ParseOptions::default(),
-    )
-    .unwrap();
+         #BMP04 layer.png\n#00004:01\n#00104:0203\n#00107:04\n#00106:ZZ\n";
+    let source = beatkernel_bms::parse(text, beatkernel_bms::ParseOptions::default()).unwrap();
+    let image_dir = Directory::new();
+    let chart_path = image_dir.write("chart.bms", text.as_bytes());
+    for (index, name) in ["first.png", "second.png", "third.png", "layer.png"]
+        .into_iter()
+        .enumerate()
+    {
+        image_dir.write(name, &raster_bmp_pixel([index as u8 + 1, 0, 0]));
+    }
     let compiled = source.compile().unwrap();
     let chart = player_chart::PlayerChart::from_compiled(&source, &compiled.chart).unwrap();
     let expected = bga::BgaState {
@@ -1831,19 +1836,38 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
     let mut replay = replay_visual::ReplayVisual::new(&source, &file, limits).unwrap();
     let (publisher, viewer) = player::channel();
     player::with_publisher(publisher, || {
-        player::publish_chart(&source, &compiled.chart).map_err(|e| e.to_string())?;
+        player::publish_native_chart(
+            &chart_path,
+            &source,
+            &compiled.chart,
+            &[local_players::PlayerId(1)],
+        )
+        .map_err(|e| e.to_string())?;
         for report in [&hit, &during_stop, &later] {
             player::publish_report(report).map_err(|e| e.to_string())?;
+            // Force the coalescing bridge without sleeps; this unit acknowledgment
+            // does not claim real native-device pause behavior.
+            player::publish_pause(player::PauseState::Running);
             let shown = viewer.take_latest().unwrap();
             let now = shown.song_time.unwrap();
             let live_state = shown.chart.as_ref().unwrap().bga_state(now);
+            let base = live_state.base.unwrap();
+            assert_eq!(
+                shown.images.as_ref().unwrap().get(base).unwrap().pixels(),
+                &[base.0 as u8, 0, 0, 255]
+            );
             assert_eq!(
                 shown.players[0].chart.as_ref().unwrap().bga_state(now),
                 live_state
             );
             let events = replay.advance_to(now).unwrap();
             player::publish_replay_prefix(now, &events).map_err(|e| e.to_string())?;
+            player::publish_pause(player::PauseState::Paused);
             let replay_shown = viewer.take_latest().unwrap();
+            assert!(std::sync::Arc::ptr_eq(
+                shown.images.as_ref().unwrap(),
+                replay_shown.images.as_ref().unwrap()
+            ));
             assert_eq!(
                 replay_shown
                     .chart
@@ -1853,6 +1877,7 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
                 live_state
             );
         }
+        player::publish_pause(player::PauseState::Running);
         player::publish_pause(player::PauseState::Paused);
         let paused = viewer.take_latest().unwrap();
         assert_eq!(
@@ -2057,4 +2082,129 @@ fn image_preparation_caps_and_unsafe_paths_reject_without_partial_bank() {
     ] {
         assert!(ImageAssets::prepare(&dir.0, &source, cap).is_err());
     }
+}
+
+#[test]
+fn native_chart_publication_is_atomic_shares_assets_and_resets_fresh_sessions() {
+    use beatkernel_bms::ImageId;
+    use local_players::PlayerId;
+    let dir = Directory::new();
+    dir.write("tap.wav", &wav(1, &[100, -100]));
+    dir.write("image.bmp", &raster_bmp_pixel([240, 20, 80]));
+    let path = dir.write("chart.bms", b"#BPM 120\n#WAV01 tap.wav\n#00011:01\n#BMP01 image.bmp\n#BMP02 ./image.bmp\n#00004:01\n#00007:02\n");
+    let prepared = load_prepared(
+        &path,
+        AudioFormat::new(24_000, 2).unwrap(),
+        limits(),
+        ChannelPolicy::MonoToStereo,
+    )
+    .unwrap();
+    let absent = dir.0.join("absent-chart.bms");
+    // Unattached native audio-only execution retains the legacy no-image-IO path.
+    player::publish_native_chart(
+        &absent,
+        &prepared.source,
+        &prepared.compiled.chart,
+        &[PlayerId(1)],
+    )
+    .unwrap();
+    assert!(
+        player::publish_native_chart(
+            &absent,
+            &prepared.source,
+            &prepared.compiled.chart,
+            &[PlayerId(0)]
+        )
+        .is_err()
+    );
+    let (publisher, viewer) = player::channel();
+    let retained = player::with_publisher(publisher, || {
+        let mut unsafe_source = prepared.source.clone();
+        unsafe_source
+            .images
+            .insert(ImageId(1), "../escape.bmp".into());
+        assert!(
+            player::publish_native_chart(
+                &path,
+                &unsafe_source,
+                &prepared.compiled.chart,
+                &[PlayerId(7), PlayerId(u32::MAX)]
+            )
+            .is_err()
+        );
+        let rejected = viewer.take_latest().unwrap();
+        assert!(
+            rejected.chart.is_none() && rejected.images.is_none() && rejected.players.is_empty()
+        );
+        player::publish_native_chart(
+            &path,
+            &prepared.source,
+            &prepared.compiled.chart,
+            &[PlayerId(7), PlayerId(u32::MAX)],
+        )
+        .map_err(|e| e.to_string())?;
+        let shown = viewer.take_latest().unwrap();
+        assert_eq!(
+            shown.players.iter().map(|p| p.player).collect::<Vec<_>>(),
+            [PlayerId(7), PlayerId(u32::MAX)]
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            shown.players[0].chart.as_ref().unwrap(),
+            shown.players[1].chart.as_ref().unwrap()
+        ));
+        let images = shown.images.clone().unwrap();
+        assert_eq!((images.unique_images(), images.decoded_bytes()), (1, 4));
+        assert!(std::sync::Arc::ptr_eq(
+            images.get(ImageId(1)).unwrap(),
+            images.get(ImageId(2)).unwrap()
+        ));
+        assert_eq!(
+            images.get(ImageId(1)).unwrap().pixels(),
+            &[240, 20, 80, 255]
+        );
+        // Re-registration rejects before trying to open the absent chart.
+        assert!(
+            player::publish_native_chart(
+                &absent,
+                &prepared.source,
+                &prepared.compiled.chart,
+                &[PlayerId(7), PlayerId(u32::MAX)]
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("already registered")
+        );
+        player::publish_pause(player::PauseState::Running);
+        let running = viewer.take_latest().unwrap();
+        player::publish_pause(player::PauseState::Paused);
+        let paused = viewer.take_latest().unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            running.images.as_ref().unwrap(),
+            paused.images.as_ref().unwrap()
+        ));
+        viewer.cancel();
+        Ok(images)
+    })
+    .unwrap();
+    let terminal = viewer.take_latest().unwrap();
+    assert!(terminal.cancelled);
+    assert!(std::sync::Arc::ptr_eq(
+        &retained,
+        terminal.images.as_ref().unwrap()
+    ));
+    let (publisher, fresh_viewer) = player::channel();
+    player::with_publisher(publisher, || {
+        let fresh = fresh_viewer.take_latest().unwrap();
+        assert!(fresh.chart.is_none() && fresh.images.is_none());
+        player::publish_chart(&prepared.source, &prepared.compiled.chart)
+            .map_err(|e| e.to_string())?;
+        assert!(fresh_viewer.take_latest().unwrap().images.is_none());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        retained.get(ImageId(1)).unwrap().pixels(),
+        &[240, 20, 80, 255]
+    );
 }

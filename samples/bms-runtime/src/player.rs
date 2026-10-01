@@ -169,6 +169,8 @@ pub struct PlayerSnapshot {
     /// All registered local members, bounded to 64 with 128 recent results each.
     pub players: Vec<LocalPlayerSnapshot>,
     pub chart: Option<Arc<PlayerChart>>,
+    /// One immutable CPU image bank shared by the registered local roster.
+    pub images: Option<Arc<crate::image_assets::ImageAssets>>,
     pub song_time: Option<Timestamp>,
     pub score: ScoreSummary,
     pub last_judge: Option<JudgeEvent>,
@@ -188,6 +190,7 @@ impl Default for PlayerSnapshot {
         Self {
             players: Vec::new(),
             chart: None,
+            images: None,
             song_time: None,
             score: ScoreSummary::default(),
             last_judge: None,
@@ -394,6 +397,27 @@ pub fn publish_local_chart(
     chart: &CompiledChart,
     players: &[PlayerId],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    register_chart(source, chart, players, None)
+}
+
+/// Registers an attached native chart and referenced images before play starts.
+/// Audio-only invocations do not open image files. Registration validation and
+/// all preparation finish before any chart, roster or bank is published.
+pub fn publish_native_chart(
+    chart_path: &std::path::Path,
+    source: &BmsChart,
+    chart: &CompiledChart,
+    players: &[PlayerId],
+) -> Result<(), Box<dyn std::error::Error>> {
+    register_chart(source, chart, players, Some(chart_path))
+}
+
+fn register_chart(
+    source: &BmsChart,
+    chart: &CompiledChart,
+    players: &[PlayerId],
+    native_path: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
     validate_players(players)?;
     SESSION.with(|session| {
         let mut session = session.borrow_mut();
@@ -415,6 +439,17 @@ pub fn publish_local_chart(
         }
         let prepared = Arc::new(PlayerChart::from_compiled(source, chart)?);
         let progress = NoteProgress::new(Arc::clone(&prepared))?;
+        let images = native_path
+            .map(|path| -> Result<_, Box<dyn std::error::Error>> {
+                let path = std::fs::canonicalize(path)?;
+                let root = path.parent().ok_or("native chart has no directory")?;
+                Ok(Arc::new(crate::image_assets::ImageAssets::prepare(
+                    root,
+                    source,
+                    crate::image_assets::ImageAssetLimits::default(),
+                )?))
+            })
+            .transpose()?;
         let mut members = if current.snapshot.players.is_empty() {
             players
                 .iter()
@@ -436,6 +471,7 @@ pub fn publish_local_chart(
         }
         current.snapshot.players = members;
         current.snapshot.chart = Some(prepared);
+        current.snapshot.images = images;
         current.chart_published = true;
         current.observe_cancellation(false);
         current.publish_latest(true);

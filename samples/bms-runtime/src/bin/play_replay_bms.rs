@@ -853,7 +853,12 @@ fn run(options: Options) -> Result<()> {
         timestamp: Timestamp::ZERO,
     };
     let mut visual = ReplayVisual::new(&prepared.source, &file, limits)?;
-    player::publish_chart(&prepared.source, &prepared.compiled.chart)?;
+    player::publish_native_chart(
+        &options.chart,
+        &prepared.source,
+        &prepared.compiled.chart,
+        &[beatkernel_bms_runtime::local_players::PlayerId(1)],
+    )?;
     let mut completion = ReplayCompletion::new(OUTPUT, options.format.sample_rate());
     let plan = plan_audio(&prepared, file, limits, origin, options.preroll)?;
     println!(

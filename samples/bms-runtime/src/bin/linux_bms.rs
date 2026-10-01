@@ -719,7 +719,12 @@ mod native {
                 physical: PhysicalControlId::keyboard(key),
                 game_control: GameControlId(u32::from(channel)),
             }))?;
-        beatkernel_bms_runtime::player::publish_chart(&prepared.source, &prepared.compiled.chart)?;
+        beatkernel_bms_runtime::player::publish_native_chart(
+            &options.chart,
+            &prepared.source,
+            &prepared.compiled.chart,
+            &[beatkernel_bms_runtime::local_players::PlayerId(1)],
+        )?;
         if beatkernel_bms_runtime::player::cancelled() {
             return Ok(());
         }
