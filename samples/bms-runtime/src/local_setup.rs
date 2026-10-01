@@ -38,8 +38,11 @@ impl LocalSetup {
                 roster: LocalPlayers::new(host, MAX_LOCAL_PLAYERS)?,
             });
         }
-        if host != SettingsHost::Linux {
-            return Err("multiple native local players currently require Linux".into());
+        if !raw.is_empty() && host != SettingsHost::Linux {
+            return Err("legacy local-input assignments require Linux".into());
+        }
+        if host == SettingsHost::Macos {
+            return Err("multiple native local players currently require Windows or Linux".into());
         }
         if !(2..=MAX_LOCAL_PLAYERS).contains(&count) {
             return Err("local assignments require 2..64 players".into());
@@ -47,9 +50,9 @@ impl LocalSetup {
         if settings
             .fields()
             .iter()
-            .any(|field| field.flag == "--evdev" && !field.value.is_empty())
+            .any(|field| field.flag == solo_override(host) && !field.value.is_empty())
         {
-            return Err("local assignments cannot be mixed with a solo evdev override".into());
+            return Err("local assignments cannot be mixed with a solo keyboard override".into());
         }
         let assignments = if !raw.is_empty() {
             raw.into_iter()
@@ -76,8 +79,8 @@ impl LocalSetup {
     /// Retains surviving IDs; newly grown members never reuse retired IDs.
     /// Unsupported native hosts reject group growth before changing the roster.
     pub fn resize(&mut self, count: usize) -> Result<(), String> {
-        if count > 1 && self.host != SettingsHost::Linux {
-            return Err("multiple native local players currently require Linux".into());
+        if count > 1 && self.host == SettingsHost::Macos {
+            return Err("multiple native local players currently require Windows or Linux".into());
         }
         self.roster.resize(count)
     }
@@ -109,7 +112,7 @@ impl LocalSetup {
     }
 
     /// Seals assignments and returns a new validated settings draft.
-    /// Groups remove solo evdev and export stable ID:path pairs in roster order;
+    /// Groups remove the host solo override and export stable ID:path pairs in roster order;
     /// solo removes local groups and preserves any advanced solo override.
     /// Unrelated options remain exact. Failure cannot change the supplied base.
     pub fn settings(&self, base: &NativeSettings) -> Result<NativeSettings, String> {
@@ -121,7 +124,7 @@ impl LocalSetup {
             .chunks_exact(2)
             .filter(|pair| {
                 !matches!(pair[0].as_str(), "--local-input" | "--local-player")
-                    && !(group && pair[0] == "--evdev")
+                    && !(group && pair[0] == solo_override(self.host))
             })
             .flat_map(|pair| pair.iter().cloned())
             .collect();
@@ -143,6 +146,13 @@ fn validate_settings_host(settings: &NativeSettings, host: SettingsHost) -> Resu
     }
     NativeSettings::from_args(&settings.native_args(), host)?;
     Ok(())
+}
+fn solo_override(host: SettingsHost) -> &'static str {
+    match host {
+        SettingsHost::Windows => "--keyboard-path",
+        SettingsHost::Linux => "--evdev",
+        SettingsHost::Macos => "--keyboard-registry",
+    }
 }
 fn keyboard_request(host: SettingsHost) -> DeviceRequest {
     match host {
@@ -468,7 +478,7 @@ mod fixtures {
                 .settings(&NativeSettings::from_args(&[], SettingsHost::Windows).unwrap())
                 .is_err()
         );
-        for host in [SettingsHost::Windows, SettingsHost::Macos] {
+        for host in [SettingsHost::Macos] {
             let base = NativeSettings::from_args(&[], host).unwrap();
             let mut setup = LocalSetup::from_settings(&base, host).unwrap();
             let before = setup.players().to_vec();
@@ -476,5 +486,189 @@ mod fixtures {
             assert_eq!(setup.players(), before);
             assert!(setup.settings(&base).is_ok());
         }
+    }
+
+    fn windows_settings(values: &[&str]) -> NativeSettings {
+        NativeSettings::from_args(
+            &values
+                .iter()
+                .map(|value| (*value).into())
+                .collect::<Vec<_>>(),
+            SettingsHost::Windows,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn windows_four_members_use_exact_typed_paths_and_preserve_other_options() {
+        let base = windows_settings(&["--device", "endpoint:1", "--input-offset-ns", "-123"]);
+        let mut setup = LocalSetup::from_settings(&base, SettingsHost::Windows).unwrap();
+        setup.resize(4).unwrap();
+        let rows = catalog(
+            DeviceRequest::WindowsKeyboard,
+            &[
+                (r"\\?\kbd:a", true),
+                (r"\\?\kbd:b", true),
+                (r"\\?\kbd:c", true),
+                (r"\\?\kbd:d", true),
+            ],
+        );
+        for index in 0..4 {
+            setup
+                .assign(setup.players()[index].id, &rows, index)
+                .unwrap();
+        }
+        let exported = setup.settings(&base).unwrap();
+        assert_eq!(
+            LocalSetup::from_settings(&exported, SettingsHost::Windows)
+                .unwrap()
+                .players(),
+            setup.players()
+        );
+        assert!(
+            exported
+                .native_args()
+                .windows(2)
+                .any(|pair| pair == ["--device", "endpoint:1"])
+        );
+        assert!(
+            exported
+                .native_args()
+                .windows(2)
+                .any(|pair| pair == ["--input-offset-ns", "-123"])
+        );
+        let before = setup.players().to_vec();
+        let first = before[0].id;
+        assert!(setup.assign(before[1].id, &rows, 0).is_err());
+        assert!(setup.assign(first, &rows, 4).is_err());
+        assert!(setup.assign(PlayerId(999), &rows, 0).is_err());
+        for request in [
+            DeviceRequest::LinuxKeyboard,
+            DeviceRequest::MacosKeyboard,
+            DeviceRequest::Alsa,
+        ] {
+            assert!(
+                setup
+                    .assign(first, &catalog(request, &[("foreign", true)]), 0)
+                    .is_err()
+            );
+        }
+        assert!(
+            setup
+                .assign(
+                    first,
+                    &catalog(DeviceRequest::WindowsKeyboard, &[("disabled", false)]),
+                    0
+                )
+                .is_err()
+        );
+        assert_eq!(setup.players(), before);
+        setup.clear(first).unwrap();
+        let base_before = base.native_args();
+        assert!(setup.settings(&base).is_err());
+        assert_eq!(base.native_args(), base_before);
+    }
+
+    #[test]
+    fn windows_sparse_max_ids_and_colon_paths_roundtrip_without_id_reassignment() {
+        let base = windows_settings(&[
+            "--local-player",
+            r"4294967295:\\?\kbd:path:with:colons",
+            "--local-player",
+            r"7:\\?\kbd:other",
+        ]);
+        let mut setup = LocalSetup::from_settings(&base, SettingsHost::Windows).unwrap();
+        assert_eq!(setup.players()[0].id, PlayerId(u32::MAX));
+        assert_eq!(
+            setup.players()[0].input(),
+            Some(r"\\?\kbd:path:with:colons")
+        );
+        assert_eq!(setup.players()[1].id, PlayerId(7));
+        assert_eq!(
+            setup.settings(&base).unwrap().native_args(),
+            base.native_args()
+        );
+        let before = setup.players().to_vec();
+        assert!(setup.resize(3).is_err());
+        assert_eq!(setup.players(), before);
+        setup.resize(1).unwrap();
+        let solo = setup.settings(&base).unwrap();
+        assert!(!solo.native_args().iter().any(|arg| arg == "--local-player"));
+        assert_eq!(setup.players()[0].id, PlayerId(u32::MAX));
+        assert_eq!(setup.players()[0].input(), None);
+        for values in [
+            vec!["--local-player", "1:a"],
+            vec!["--local-player", "1:a", "--local-player", "1:b"],
+            vec!["--local-player", "1:a", "--local-player", "2:a"],
+            vec!["--local-player", "0:a", "--local-player", "2:b"],
+            vec!["--local-player", "1:", "--local-player", "2:b"],
+            vec!["--local-player", "4294967296:a", "--local-player", "2:b"],
+        ] {
+            assert!(
+                LocalSetup::from_settings(&windows_settings(&values), SettingsHost::Windows)
+                    .is_err()
+            );
+        }
+        assert!(
+            NativeSettings::from_args(
+                &[
+                    "--local-input".into(),
+                    "a".into(),
+                    "--local-input".into(),
+                    "b".into()
+                ],
+                SettingsHost::Windows,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn windows_group_removes_solo_override_but_solo_retains_it_and_import_rejects_mixing() {
+        let base = windows_settings(&[
+            "--keyboard-path",
+            r"\\?\advanced:keyboard",
+            "--device",
+            "endpoint",
+        ]);
+        let mut setup = LocalSetup::from_settings(&base, SettingsHost::Windows).unwrap();
+        assert_eq!(
+            setup.settings(&base).unwrap().native_args(),
+            base.native_args()
+        );
+        setup.resize(2).unwrap();
+        let rows = catalog(
+            DeviceRequest::WindowsKeyboard,
+            &[("a:b", true), ("c:d", true)],
+        );
+        for index in 0..2 {
+            setup
+                .assign(setup.players()[index].id, &rows, index)
+                .unwrap();
+        }
+        let group = setup.settings(&base).unwrap();
+        assert!(
+            !group
+                .native_args()
+                .iter()
+                .any(|arg| arg == "--keyboard-path")
+        );
+        let mut mixed = group.native_args();
+        mixed.extend(["--keyboard-path".into(), "solo".into()]);
+        let mixed = NativeSettings::from_args(&mixed, SettingsHost::Windows).unwrap();
+        let before = mixed.native_args();
+        assert!(LocalSetup::from_settings(&mixed, SettingsHost::Windows).is_err());
+        assert_eq!(mixed.native_args(), before);
+        setup.resize(1).unwrap();
+        assert_eq!(
+            setup.settings(&base).unwrap().native_args(),
+            base.native_args()
+        );
+        assert!(setup.settings(&settings(&[])).is_err());
+        let mac = NativeSettings::from_args(&[], SettingsHost::Macos).unwrap();
+        let mut unsupported = LocalSetup::from_settings(&mac, SettingsHost::Macos).unwrap();
+        let before = unsupported.players().to_vec();
+        assert!(unsupported.resize(2).is_err());
+        assert_eq!(unsupported.players(), before);
     }
 }

@@ -29,22 +29,16 @@ pub fn overlay_native_args(
         .chunks_exact(2)
         .map(|pair| pair[0].as_str())
         .collect();
-    let replaces_input = host == SettingsHost::Linux
-        && overrides.chunks_exact(2).any(|pair| {
-            matches!(
-                pair[0].as_str(),
-                "--evdev" | "--local-input" | "--local-player"
-            )
-        });
+    let input_family = |flag: &str| match host {
+        SettingsHost::Linux => matches!(flag, "--evdev" | "--local-input" | "--local-player"),
+        SettingsHost::Windows => matches!(flag, "--keyboard-path" | "--local-player"),
+        SettingsHost::Macos => false,
+    };
+    let replaces_input = overrides.chunks_exact(2).any(|pair| input_family(&pair[0]));
     let merged: Vec<_> = base
         .chunks_exact(2)
         .filter(|pair| {
-            !replaced.contains(pair[0].as_str())
-                && !(replaces_input
-                    && matches!(
-                        pair[0].as_str(),
-                        "--evdev" | "--local-input" | "--local-player"
-                    ))
+            !replaced.contains(pair[0].as_str()) && !(replaces_input && input_family(&pair[0]))
         })
         .chain(overrides.chunks_exact(2))
         .flat_map(|pair| pair.iter().cloned())
@@ -149,6 +143,16 @@ const COMMON: &[Spec] = &[
     ),
 ];
 const WINDOWS: &[Spec] = &[
+    (
+        "--local-player",
+        "LOCAL PLAYER ID:KEYBOARD PATH",
+        "Repeat stable positive ID:exact interface path for 2..64 players; omit keyboard-path.",
+    ),
+    (
+        "--advance-lag-ns",
+        "LOCAL ADVANCE LAG (NS)",
+        "0..1000000000ns; default 2000000ns, shared local input frontier margin.",
+    ),
     (
         "--keyboard-path",
         "KEYBOARD INTERFACE PATH",
@@ -412,6 +416,35 @@ fn valid_value(value: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn windows_input_mode_overrides_replace_the_assignment_family() {
+        let group = args(&[
+            "--device",
+            "output",
+            "--local-player",
+            "3:path:A",
+            "--local-player",
+            "9:path:B",
+        ]);
+        let solo = overlay_native_args(
+            &group,
+            &args(&["--keyboard-path", "path:C"]),
+            SettingsHost::Windows,
+        )
+        .unwrap();
+        assert!(!solo.iter().any(|arg| arg == "--local-player"));
+        assert!(
+            solo.chunks_exact(2)
+                .any(|pair| pair == ["--device", "output"])
+        );
+        let restored = overlay_native_args(&solo, &group[2..], SettingsHost::Windows).unwrap();
+        assert!(!restored.iter().any(|arg| arg == "--keyboard-path"));
+        assert_eq!(restored, group);
+        assert!(
+            NativeSettings::from_args(&args(&["--local-input", "path:A"]), SettingsHost::Windows)
+                .is_err()
+        );
+    }
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).into()).collect()
     }
