@@ -10,13 +10,13 @@ use beatkernel::{
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
     transport::{Rate, Transport},
 };
-use beatkernel_bms::{parse, ParseOptions};
+use beatkernel_bms::{ParseOptions, parse};
 use beatkernel_bms_runtime::{
+    PreparedBms,
     offline::{OfflineError, OfflineOptions},
     replay_audio::plan_audio,
     replay_capture::LiveReplayCapture,
     replay_render::render_replay,
-    PreparedBms,
 };
 use std::{
     collections::BTreeMap,
@@ -136,6 +136,15 @@ fn captured(
     skip_control: Option<u32>,
     finish: Option<i64>,
 ) -> ReplayFile {
+    captured_at(prepared, offset, skip_control, finish, Timestamp::ZERO)
+}
+fn captured_at(
+    prepared: &PreparedBms,
+    offset: i64,
+    skip_control: Option<u32>,
+    finish: Option<i64>,
+    start: Timestamp,
+) -> ReplayFile {
     let profile = JudgeProfile::new(
         vec![JudgeWindow {
             grade: JudgeGrade(2),
@@ -151,7 +160,7 @@ fn captured(
         profile,
     )
     .unwrap();
-    let mut capture = LiveReplayCapture::new(&judge, DOMAIN, limits()).unwrap();
+    let mut capture = LiveReplayCapture::new_at(&judge, DOMAIN, limits(), start).unwrap();
     let controls: BTreeMap<_, _> = prepared
         .source
         .notes
@@ -223,6 +232,88 @@ fn floats(bytes: &[u8]) -> Vec<f32> {
         .chunks_exact(4)
         .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
         .collect()
+}
+
+#[test]
+fn recorded_section_restores_original_pcm_tail_and_subtracts_start_once() {
+    use beatkernel::replay::{ReplayOperation, ReplayRecord};
+    use beatkernel_bms_runtime::section_start::{prepare_at, prepare_replay};
+    let text = "#BPM 120\n#WAV01 music.wav\n#00001:01\n#00111:01\n";
+    let pcm: Vec<_> = (0..16).map(|frame| frame as f32 / 16.0).collect();
+    let original = || prepared(text, 8, &[(1, &pcm)]);
+    let start = Timestamp::from_nanos(550_000_000);
+    let pcm_limits = PcmLimits::new(4096, 16384, 8).unwrap();
+    let (section, _) = prepare_at(original(), start, pcm_limits).unwrap();
+    let judge = JudgeEngine::new(
+        section.compiled.chart.clone(),
+        section.source.rules(),
+        JudgeProfile::new(
+            vec![JudgeWindow {
+                grade: JudgeGrade(1),
+                early: Duration::ZERO,
+                late: Duration::ZERO,
+            }],
+            Duration::ZERO,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let capture = LiveReplayCapture::new_at(&judge, DOMAIN, limits(), start).unwrap();
+    let file = ReplayFile::new(
+        capture.header().clone(),
+        vec![ReplayRecord {
+            ordinal: 0,
+            song_time: Timestamp::from_nanos(1_500_000_000),
+            operation: ReplayOperation::Advance,
+        }],
+    );
+    let restored = prepare_replay(original(), &file, limits(), pcm_limits).unwrap();
+    let plan = plan_audio(
+        &restored,
+        file.clone(),
+        limits(),
+        point(100),
+        Duration::ZERO,
+    )
+    .unwrap();
+    assert_eq!(plan.commands.len(), 1);
+    assert_eq!(plan.commands[0].at().as_nanos(), 75_000_100);
+    assert_eq!(
+        plan.recorded_until,
+        Some(Timestamp::from_nanos(1_500_000_000))
+    );
+    for block in [1, 3] {
+        let mut bytes = Vec::new();
+        let report = render_replay(
+            original(),
+            file.clone(),
+            limits(),
+            options(4, block),
+            Duration::ZERO,
+            &mut bytes,
+        )
+        .unwrap();
+        assert_eq!(floats(&bytes), [0.0, 5.0 / 16.0, 6.0 / 16.0, 7.0 / 16.0]);
+        assert_eq!(report.final_judge_hash, plan.final_judge_hash);
+    }
+    let with_hits = captured_at(&section, 100_000_000, None, None, start);
+    let restored = prepare_replay(original(), &with_hits, limits(), pcm_limits).unwrap();
+    let plan = plan_audio(
+        &restored,
+        with_hits,
+        limits(),
+        point(100),
+        Duration::from_nanos(200_000_000),
+    )
+    .unwrap();
+    assert_eq!(
+        plan.commands
+            .iter()
+            .map(|command| command.at().as_nanos())
+            .collect::<Vec<_>>(),
+        [275_000_100, 1_550_000_100]
+    );
+    assert_eq!(plan.judge_events[0].at.as_nanos(), 2_000_000_000);
 }
 
 #[test]

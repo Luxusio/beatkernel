@@ -607,6 +607,12 @@ fn run(options: Options) -> Result<()> {
         PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
         ChannelPolicy::Exact,
     )?;
+    let prepared = beatkernel_bms_runtime::section_start::prepare_replay(
+        prepared,
+        &file,
+        limits,
+        PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
+    )?;
     for warning in &prepared.source.warnings {
         eprintln!("BMS warning line {}: {}", warning.line, warning.message);
     }

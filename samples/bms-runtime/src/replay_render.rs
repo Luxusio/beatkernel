@@ -1,11 +1,11 @@
 //! Offline recorded-sound rendering through the shared planner and actual Mixer.
 use crate::{
-    offline::{render_block, OfflineError, OfflineOptions, OfflineReport},
-    replay_audio::plan_audio,
     PreparedBms,
+    offline::{OfflineError, OfflineOptions, OfflineReport, render_block},
+    replay_audio::plan_audio,
 };
 use beatkernel::{
-    audio::{command_queue, AudioFormat, AudioLimits, Mixer, MixerConfig, RenderReport},
+    audio::{AudioFormat, AudioLimits, Mixer, MixerConfig, RenderReport, command_queue},
     judge::JudgeOutcome,
     replay::codec::{ReplayCodecLimits, ReplayFile},
     time::{ClockDomainId, ClockPoint, Duration, Timestamp},
@@ -57,6 +57,8 @@ fn target_frame(at: Timestamp, origin: Timestamp, rate: u32) -> Result<u64, Box<
 /// Actual core execution and writer errors retain shared OfflineError evidence.
 /// Zero frames validates without admission/output; the sink is never flushed.
 /// This cannot reproduce original native scheduling or dropped audio admissions.
+/// Supply freshly loaded original assets; recorded section metadata selects PCM
+/// with the application's 64 MiB asset / 256 MiB bank preparation caps.
 pub fn render_replay(
     prepared: PreparedBms,
     file: ReplayFile,
@@ -65,6 +67,12 @@ pub fn render_replay(
     preroll: Duration,
     output: &mut dyn Write,
 ) -> Result<ReplayRenderReport, Box<dyn Error>> {
+    let prepared = crate::section_start::prepare_replay(
+        prepared,
+        &file,
+        limits,
+        beatkernel::audio::PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
+    )?;
     let format = prepared.bank.format();
     let rate = format.sample_rate();
     let channels = usize::from(format.channels());

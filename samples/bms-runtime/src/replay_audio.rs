@@ -1,6 +1,9 @@
 //! Song-time audio planning from actual reconstructed BMS judge results.
 
-use crate::{replay_playback::reconstruct, PreparedBms};
+use crate::{
+    PreparedBms,
+    replay_playback::{decode_setup, reconstruct},
+};
 use beatkernel::{
     audio::{AudioCommand, RenderReport, SampleId},
     judge::{JudgeEvent, JudgeOutcome},
@@ -70,10 +73,11 @@ pub struct ReplayAudioPlan {
 
 fn output_time(
     song: i128,
+    start: Timestamp,
     origin: ClockPoint,
     preroll: Duration,
 ) -> Result<Timestamp, ReplayAudioError> {
-    let elapsed = song + i128::from(preroll.as_nanos());
+    let elapsed = song - i128::from(start.as_nanos()) + i128::from(preroll.as_nanos());
     if elapsed < 0 {
         return Err(ReplayAudioError::InvalidConfiguration(
             "sound precedes output origin; increase explicit preroll",
@@ -91,6 +95,8 @@ fn output_time(
 /// profile offset once. Native scheduling points and past queue failures were
 /// not recorded, so this cannot reproduce their physical sound/delay semantics.
 /// Empty logs have no BGM; prefixes admit no BGM beyond their last operation.
+/// For section recordings supply original assets through `section_start::prepare_replay`
+/// first; output scheduling removes the recorded start once, then adds preroll.
 pub fn plan_audio(
     prepared: &PreparedBms,
     file: ReplayFile,
@@ -102,6 +108,7 @@ pub fn plan_audio(
         return Err(ReplayAudioError::InvalidConfiguration("negative preroll").into());
     }
     let session = reconstruct(&prepared.source, file, limits)?;
+    let (_, start) = decode_setup(&session.header().options)?;
     if session.engine().chart() != &prepared.compiled.chart {
         return Err(ReplayAudioError::InvalidConfiguration(
             "prepared chart differs from reconstructed chart",
@@ -146,7 +153,7 @@ pub fn plan_audio(
         if recorded_until.is_none_or(|end| song > end) {
             continue;
         }
-        let at = output_time(i128::from(song.as_nanos()), output_origin, preroll)?;
+        let at = output_time(i128::from(song.as_nanos()), start, output_origin, preroll)?;
         scheduled
             .try_reserve(1)
             .map_err(|_| ReplayAudioError::AllocationFailed)?;
@@ -170,7 +177,7 @@ pub fn plan_audio(
             continue;
         };
         let song = i128::from(event.at.as_nanos()) - i128::from(offset);
-        let at = output_time(song, output_origin, preroll)?;
+        let at = output_time(song, start, output_origin, preroll)?;
         for sound in group {
             let command = sound
                 .command_for(event, at)
