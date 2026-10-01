@@ -44,6 +44,7 @@ pub struct PlayerChart {
     endpoint_tree: Vec<i64>,
     tree_leaves: usize,
     object_index: Vec<(ObjectId, usize)>,
+    bga: crate::bga::BgaTimeline,
 }
 
 /// A chart/catalog preparation failure with a user-visible explanation.
@@ -135,7 +136,13 @@ impl PlayerChart {
             endpoint_tree,
             tree_leaves,
             object_index,
+            bga: crate::bga::BgaTimeline::from_chart(source).map_err(PlayerChartError)?,
         })
+    }
+
+    /// Image selections at the original song time, shared by every session mode.
+    pub fn bga_state(&self, now: Timestamp) -> crate::bga::BgaState {
+        self.bga.state_at(now)
     }
 
     /// Looks up a prepared object identity without scanning notes. A changed
@@ -544,6 +551,7 @@ mod tests {
             endpoint_tree,
             tree_leaves,
             object_index,
+            bga: crate::bga::BgaTimeline::default(),
         }
     }
 

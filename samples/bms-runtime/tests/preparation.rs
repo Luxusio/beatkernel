@@ -1708,3 +1708,185 @@ fn actual_early_late_and_timeout_results_match_full_and_visual_replay_timing() {
     .unwrap();
     assert_eq!(viewer.take_latest().unwrap().score.timing, live.timing);
 }
+
+#[test]
+fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
+    use beatkernel::{
+        input::{
+            Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector, EventMeta,
+            GameControlId, PhysicalControlId, PhysicalInputEvent,
+        },
+        judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
+        runtime::Runtime,
+        time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
+        transport::{Rate, Transport},
+    };
+    use beatkernel_bms::ImageId;
+    struct Identity;
+    impl ClockMapper for Identity {
+        fn map(&self, from: ClockPoint, to: ClockDomainId) -> Option<Timestamp> {
+            (from.domain == to).then_some(from.timestamp)
+        }
+        fn quality(&self) -> ClockMappingQuality {
+            ClockMappingQuality::Exact
+        }
+    }
+    let source = beatkernel_bms::parse(
+        "#BPM 120\n#WAV01 tap.wav\n#00111:01\n#STOP01 48\n#00109:01\n\
+         #BMP00 poor.png\n#BMP01 first.png\n#BMP02 second.png\n#BMP03 third.png\n\
+         #BMP04 layer.png\n#00004:01\n#00104:0203\n#00107:04\n#00106:ZZ\n",
+        beatkernel_bms::ParseOptions::default(),
+    )
+    .unwrap();
+    let compiled = source.compile().unwrap();
+    let chart = player_chart::PlayerChart::from_compiled(&source, &compiled.chart).unwrap();
+    let expected = bga::BgaState {
+        base: Some(ImageId(2)),
+        layer: Some(ImageId(4)),
+        poor: Some(ImageId(1295)),
+    };
+    assert_eq!(
+        chart.bga_state(Timestamp::from_nanos(2_000_000_000)),
+        expected
+    );
+    assert_eq!(
+        chart.bga_state(Timestamp::from_nanos(3_499_999_999)),
+        expected
+    );
+    assert_eq!(
+        chart.bga_state(Timestamp::from_nanos(3_500_000_000)).base,
+        Some(ImageId(3))
+    );
+    let profile = JudgeProfile::new(
+        vec![JudgeWindow {
+            grade: JudgeGrade(1),
+            early: Duration::from_nanos(100_000_000),
+            late: Duration::from_nanos(100_000_000),
+        }],
+        Duration::ZERO,
+    )
+    .unwrap();
+    let judge = JudgeEngine::new(compiled.chart.clone(), source.rules(), profile.clone()).unwrap();
+    let limits = competition_live::replay_limits().unwrap();
+    let mut capture =
+        replay_capture::LiveReplayCapture::new(&judge, ClockDomainId(17), limits).unwrap();
+    let binding = || {
+        BindingMap::from_bindings([Binding {
+            device: DeviceSelector::Exact(DeviceId(3)),
+            physical: PhysicalControlId::keyboard(4),
+            game_control: GameControlId(0x11),
+        }])
+        .unwrap()
+    };
+    let (producer, _consumer) = command_queue(1).unwrap();
+    let mut runtime = Runtime::new(
+        ClockDomainId(17),
+        ClockDomainId(17),
+        Transport::new(Timestamp::ZERO, Timestamp::ZERO, Rate::NORMAL),
+        binding(),
+        judge,
+        producer,
+        vec![],
+        0,
+    )
+    .unwrap();
+    let point = |ns| ClockPoint {
+        domain: ClockDomainId(17),
+        timestamp: Timestamp::from_nanos(ns),
+    };
+    let hit = runtime
+        .process_input(
+            PhysicalInputEvent::Button(ButtonEvent {
+                meta: EventMeta::new(DeviceId(3), point(2_000_000_000), 0),
+                control: PhysicalControlId::keyboard(4),
+                state: ButtonState::Down,
+            }),
+            &Identity,
+            point(2_000_000_000),
+        )
+        .unwrap();
+    assert!(hit.judge_error.is_none());
+    assert_eq!(hit.judge_events.len(), 1);
+    capture.record_report(&hit).unwrap();
+    let during_stop = runtime
+        .advance_to(point(2_250_000_000), &Identity, point(2_250_000_000))
+        .unwrap();
+    capture.record_report(&during_stop).unwrap();
+    let later = runtime
+        .advance_to(point(3_500_000_000), &Identity, point(3_500_000_000))
+        .unwrap();
+    capture.record_report(&later).unwrap();
+    let file = capture.into_file();
+    let file = beatkernel::replay::codec::decode_replay(
+        &beatkernel::replay::codec::encode_replay(&file, limits).unwrap(),
+        limits,
+    )
+    .unwrap();
+    let mut restored = replay_playback::reconstruct(&source, file.clone(), limits).unwrap();
+    restored.seek_cursor(file.records.len()).unwrap();
+    assert_eq!(
+        restored.engine().stable_hash().unwrap(),
+        runtime.judge().stable_hash().unwrap()
+    );
+    let mut replay = replay_visual::ReplayVisual::new(&source, &file, limits).unwrap();
+    let (publisher, viewer) = player::channel();
+    player::with_publisher(publisher, || {
+        player::publish_chart(&source, &compiled.chart).map_err(|e| e.to_string())?;
+        for report in [&hit, &during_stop, &later] {
+            player::publish_report(report).map_err(|e| e.to_string())?;
+            let shown = viewer.take_latest().unwrap();
+            let now = shown.song_time.unwrap();
+            let live_state = shown.chart.as_ref().unwrap().bga_state(now);
+            assert_eq!(
+                shown.players[0].chart.as_ref().unwrap().bga_state(now),
+                live_state
+            );
+            let events = replay.advance_to(now).unwrap();
+            player::publish_replay_prefix(now, &events).map_err(|e| e.to_string())?;
+            let replay_shown = viewer.take_latest().unwrap();
+            assert_eq!(
+                replay_shown
+                    .chart
+                    .as_ref()
+                    .unwrap()
+                    .bga_state(replay_shown.song_time.unwrap()),
+                live_state
+            );
+        }
+        player::publish_pause(player::PauseState::Paused);
+        let paused = viewer.take_latest().unwrap();
+        assert_eq!(
+            paused
+                .chart
+                .as_ref()
+                .unwrap()
+                .bga_state(paused.song_time.unwrap()),
+            chart.bga_state(later.song_time)
+        );
+        Ok(())
+    })
+    .unwrap();
+
+    // A fresh native-style transport starts at the original song position;
+    // image state does not replay elapsed host time or reuse a forward cursor.
+    let (producer, _fresh_consumer) = command_queue(1).unwrap();
+    let mut fresh = Runtime::new(
+        ClockDomainId(17),
+        ClockDomainId(17),
+        Transport::new(
+            Timestamp::ZERO,
+            Timestamp::from_nanos(2_250_000_000),
+            Rate::NORMAL,
+        ),
+        binding(),
+        JudgeEngine::new(compiled.chart.clone(), source.rules(), profile).unwrap(),
+        producer,
+        vec![],
+        0,
+    )
+    .unwrap();
+    let restarted = fresh.advance_to(point(0), &Identity, point(0)).unwrap();
+    assert_eq!(restarted.song_time, during_stop.song_time);
+    assert_eq!(chart.bga_state(restarted.song_time), expected);
+    assert_eq!(chart.bga_state(Timestamp::ZERO).base, Some(ImageId(1)));
+}

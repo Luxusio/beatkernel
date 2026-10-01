@@ -4,6 +4,8 @@
 pub mod asio_replay;
 /// Contained exact or compatible asset filename lookup during preparation.
 pub mod asset_paths;
+/// Prepared original-song image selections shared by live and replay presentation.
+pub mod bga;
 /// Rolling BGM admission on an explicitly configured output frame grid.
 pub mod bgm;
 /// Strict bounded application chart decoding before the UTF-8 parser.
