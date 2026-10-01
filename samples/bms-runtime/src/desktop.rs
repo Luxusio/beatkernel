@@ -2,9 +2,11 @@
 use beatkernel::judge::JudgeOutcome;
 use beatkernel_bms_runtime::ui::{
     atoms::{rect, text},
+    devices::{DevicesFrame, DevicesView},
     display::{BUTTONS as DISPLAY_BUTTONS, DisplayFrame, DisplayView},
     interaction::{Bounds, ControlId, Gesture, logical_point},
     molecules, organisms,
+    players::{PlayersFrame, PlayersView},
     practice::{PracticeFrame, PracticeView},
     records::{RecordsFrame, RecordsView},
     selection::{SelectionFrame, SelectionItem, SelectionView},
@@ -322,6 +324,8 @@ pub(super) fn run(
         active_backend,
         display: None,
         display_view: None,
+        players_view: None,
+        devices_view: None,
         practice: None,
         records: None,
         records_view: None,
@@ -675,6 +679,8 @@ struct Desktop {
     active_backend: BackendChoice,
     display: Option<PanelScope<DisplayDraft>>,
     display_view: Option<DisplayView>,
+    players_view: Option<PlayersView>,
+    devices_view: Option<DevicesView>,
     practice: Option<PanelScope<PracticeDraft>>,
     records: Option<PanelScope<RecordsDraft>>,
     records_view: Option<RecordsView>,
@@ -753,6 +759,13 @@ impl Desktop {
         self.pointer = None;
         // Children leave before their retained parent state.
         release_panel(&mut self.picker, &self.navigator);
+        if self
+            .devices_view
+            .as_ref()
+            .is_some_and(|view| !self.navigator.retains(view.id()))
+        {
+            self.devices_view = None;
+        }
         release_panel(&mut self.records, &self.navigator);
         if self
             .records_view
@@ -771,6 +784,13 @@ impl Desktop {
         }
         release_panel(&mut self.practice, &self.navigator);
         release_panel(&mut self.local_setup, &self.navigator);
+        if self
+            .players_view
+            .as_ref()
+            .is_some_and(|view| !self.navigator.retains(view.id()))
+        {
+            self.players_view = None;
+        }
         release_panel(&mut self.settings, &self.navigator);
         if self
             .settings_view
@@ -2422,6 +2442,8 @@ impl Desktop {
                 | ScreenRoute::Settings
                 | ScreenRoute::Display
                 | ScreenRoute::Records
+                | ScreenRoute::Players
+                | ScreenRoute::Devices { .. }
         ) && self.navigator.phase() == ScreenPhase::Active
             && !self.occluded
             && self.profile_io.is_none()
@@ -2579,6 +2601,78 @@ impl Desktop {
         }
         self.render_scene()
     }
+    fn draw_players_view(&mut self) -> Result<(), String> {
+        let id = self
+            .navigator
+            .active_id()
+            .ok_or("players instance unavailable")?;
+        if self
+            .players_view
+            .as_ref()
+            .is_none_or(|view| view.id() != id)
+        {
+            self.players_view = Some(PlayersView::new(id, WIDTH as u32, HEIGHT as u32)?);
+            self.painted_reactive = None;
+        }
+        let local = self
+            .local_setup
+            .as_ref()
+            .ok_or("players data unavailable")?;
+        let settings = self
+            .settings
+            .as_ref()
+            .ok_or("players settings unavailable")?;
+        let mut frame = players_frame(local, settings, self.profile_io.is_some());
+        frame.hovered = beatkernel_bms_runtime::ui::players::hit(&frame, self.point());
+        frame.armed = (30..=37)
+            .chain(20000..20064)
+            .map(ControlId)
+            .find(|&id| self.gesture.is_armed(id));
+        let view = self
+            .players_view
+            .as_ref()
+            .ok_or("players view unavailable")?;
+        view.update(frame)?;
+        if view.dirty() || self.painted_reactive != Some(id) {
+            view.compose(&mut self.scene, &mut self.hits)?;
+            self.painted_reactive = Some(id);
+        }
+        self.render_scene()
+    }
+    fn draw_devices_view(&mut self) -> Result<(), String> {
+        let id = self
+            .navigator
+            .active_id()
+            .ok_or("devices instance unavailable")?;
+        if self
+            .devices_view
+            .as_ref()
+            .is_none_or(|view| view.id() != id)
+        {
+            self.devices_view = Some(DevicesView::new(id, WIDTH as u32, HEIGHT as u32)?);
+            self.painted_reactive = None;
+        }
+        let picker = self.picker.as_ref().ok_or("devices data unavailable")?;
+        let settings = self
+            .settings
+            .as_ref()
+            .ok_or("devices settings unavailable")?;
+        let mut frame = devices_frame(picker, settings, self.profile_io.is_some());
+        frame.hovered = beatkernel_bms_runtime::ui::devices::hit(&frame, self.point());
+        frame.armed = (20..=24)
+            .map(ControlId)
+            .find(|&id| self.gesture.is_armed(id));
+        let view = self
+            .devices_view
+            .as_ref()
+            .ok_or("devices view unavailable")?;
+        view.update(frame)?;
+        if view.dirty() || self.painted_reactive != Some(id) {
+            view.compose(&mut self.scene, &mut self.hits)?;
+            self.painted_reactive = Some(id);
+        }
+        self.render_scene()
+    }
     fn draw_records_view(&mut self) -> Result<(), String> {
         let id = self
             .navigator
@@ -2658,6 +2752,12 @@ impl Desktop {
         if route == ScreenRoute::Records {
             return self.draw_records_view();
         }
+        if route == ScreenRoute::Players {
+            return self.draw_players_view();
+        }
+        if matches!(route, ScreenRoute::Devices { .. }) {
+            return self.draw_devices_view();
+        }
         self.painted_reactive = None;
         let point = self.point();
         self.invalidate_hits();
@@ -2674,35 +2774,7 @@ impl Desktop {
         }) {
             text(pixels, 450, 26, "PRACTICE", 2, 0xd8b36b);
         }
-        if matches!(route, ScreenRoute::Devices { .. }) {
-            let picker = self
-                .picker
-                .as_ref()
-                .ok_or("devices screen data unavailable")?;
-            draw_devices(
-                pixels,
-                picker,
-                self.settings.as_ref().expect("picker has draft"),
-                &mut self.hits,
-                &self.gesture,
-                point,
-                self.profile_io.is_some(),
-            );
-        } else if route == ScreenRoute::Players {
-            let local = self
-                .local_setup
-                .as_ref()
-                .ok_or("players screen data unavailable")?;
-            draw_local(
-                pixels,
-                local,
-                self.settings.as_ref().expect("local has draft"),
-                &mut self.hits,
-                &self.gesture,
-                point,
-                self.profile_io.is_some(),
-            );
-        } else if matches!(
+        if matches!(
             route,
             ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
         ) {
@@ -3091,6 +3163,39 @@ impl ApplicationHandler for Desktop {
     }
 }
 
+fn players_frame<'a>(
+    local: &'a LocalDraft,
+    draft: &'a SettingsDraft,
+    pending: bool,
+) -> PlayersFrame<'a> {
+    PlayersFrame {
+        model: &local.model,
+        selected: local.selected,
+        first: local.first,
+        pending,
+        error: draft.error.as_deref(),
+        message: draft.message.as_deref(),
+        hovered: None,
+        armed: None,
+    }
+}
+fn devices_frame<'a>(
+    picker: &'a DevicePicker,
+    draft: &'a SettingsDraft,
+    pending: bool,
+) -> DevicesFrame<'a> {
+    DevicesFrame {
+        catalog: &picker.catalog,
+        player: picker.player,
+        selected: picker.selected,
+        first: picker.first,
+        pending,
+        error: draft.error.as_deref(),
+        hovered: None,
+        armed: None,
+    }
+}
+#[cfg(test)]
 fn draw_local(
     scene: &mut Scene,
     local: &LocalDraft,
@@ -3100,227 +3205,15 @@ fn draw_local(
     point: Option<(f64, f64)>,
     pending: bool,
 ) {
-    text(
-        scene,
-        24,
-        65,
-        "PLAYERS - +/- COUNT - SPACE ASSIGN - ENTER DONE - ESC BACK",
-        1,
-        0x9bb1cf,
-    );
-    let players = local.model.players();
-    let solo = players.len() == 1;
-    text(
-        scene,
-        24,
-        91,
-        &format!(
-            "{} PLAYERS  ROWS {}-{} OF {}",
-            players.len(),
-            local.first + 1,
-            (local.first + SETTINGS_ROWS).min(players.len()),
-            players.len()
-        ),
-        1,
-        0xd8b36b,
-    );
-    for (index, player) in players
-        .iter()
-        .enumerate()
-        .skip(local.first)
-        .take(SETTINGS_ROWS)
-    {
-        let bounds = Bounds {
-            x: 24,
-            y: 120 + (index - local.first) as i64 * 39,
-            width: 906,
-            height: 34,
-        };
-        let label = if solo {
-            "SOLO - INPUT AUTOMATIC".to_owned()
-        } else {
-            format!(
-                "P{}  {}",
-                player.id.0,
-                player.input().unwrap_or("NO KEYBOARD ASSIGNED")
-            )
-        };
-        if local.selected == index {
-            rect(scene, bounds.x - 4, bounds.y, 4, bounds.height, 0x74e5c5);
-        }
-        if pending {
-            molecules::button(scene, bounds, &label, false, false);
-        } else {
-            control(
-                scene,
-                hits,
-                gesture,
-                point,
-                ControlId(20000 + index as u64),
-                bounds,
-                &label,
-            );
-        }
-    }
-    text(
-        scene,
-        24,
-        535,
-        if solo {
-            "SOLO STARTS WITHOUT DEVICE SELECTION"
-        } else {
-            "ASSIGN A DISTINCT KEYBOARD TO EACH PLAYER"
-        },
-        1,
-        0x9bb1cf,
-    );
-    for (id, x, label) in [(36, 620, "PREVIOUS"), (37, 780, "NEXT")] {
-        let available = if id == 36 {
-            local.first > 0
-        } else {
-            local.first + SETTINGS_ROWS < players.len()
-        };
-        if available {
-            let bounds = Bounds {
-                x,
-                y: 550,
-                width: 150,
-                height: 34,
-            };
-            if pending {
-                molecules::button(scene, bounds, label, false, false);
-            } else {
-                control(scene, hits, gesture, point, ControlId(id), bounds, label);
-            }
-        }
-    }
-    for (id, x, label) in [
-        (30, 24, "DONE"),
-        (31, 174, "BACK"),
-        (32, 324, "REMOVE"),
-        (33, 474, "ADD"),
-        (34, 624, "ASSIGN KEYBOARD"),
-        (35, 784, "CLEAR"),
-    ] {
-        if solo && matches!(id, 34 | 35) {
-            continue;
-        }
-        let bounds = Bounds {
-            x,
-            y: 620,
-            width: if id >= 34 { 150 } else { 140 },
-            height: 34,
-        };
-        let unavailable = pending
-            || (id == 32 && solo)
-            || (id == 33
-                && players.len() == beatkernel_bms_runtime::local_players::MAX_LOCAL_PLAYERS);
-        if unavailable {
-            molecules::button(scene, bounds, label, false, false);
-        } else {
-            control(scene, hits, gesture, point, ControlId(id), bounds, label);
-        }
-    }
-    if pending {
-        text(scene, 24, 590, "LOADING KEYBOARDS", 1, 0xd8b36b);
-    }
-    if let Some(error) = &draft.error {
-        text(scene, 24, 690, error, 1, 0xff8e8e);
-    } else if let Some(message) = &draft.message {
-        text(scene, 24, 690, message, 1, 0x74e5c5);
-    }
-}
-
-fn draw_devices(
-    scene: &mut Scene,
-    picker: &DevicePicker,
-    draft: &SettingsDraft,
-    hits: &mut Vec<(ControlId, Bounds)>,
-    gesture: &Gesture,
-    point: Option<(f64, f64)>,
-    pending: bool,
-) {
-    text(
-        scene,
-        24,
-        65,
-        if picker.catalog.request().is_keyboard() {
-            "KEYBOARD DEVICES - UP/DOWN SELECT - ENTER USE - ESC BACK"
-        } else {
-            "AUDIO OUTPUT DEVICES - UP/DOWN SELECT - ENTER USE - ESC BACK"
-        },
-        1,
-        0x9bb1cf,
-    );
-    if let Some(player) = picker.player {
-        text(scene, 690, 65, &format!("FOR P{}", player.0), 1, 0x74e5c5);
-    }
-    let first = picker.first;
-    text(
-        scene,
-        24,
-        91,
-        &format!(
-            "{} DEVICE ENTRIES - NO AUTOMATIC SELECTION",
-            picker.catalog.choices().len()
-        ),
-        1,
-        0xd8b36b,
-    );
-    organisms::device_list(
-        scene,
-        &picker.catalog,
-        picker.selected,
-        first,
-        SETTINGS_ROWS,
-    );
-    if !pending {
-        for (index, choice) in picker
-            .catalog
-            .choices()
-            .iter()
-            .enumerate()
-            .skip(first)
-            .take(SETTINGS_ROWS)
-        {
-            if choice.selectable {
-                hits.push((
-                    ControlId(10000 + index as u64),
-                    Bounds {
-                        x: 24,
-                        y: 120 + (index - first) as i64 * 39,
-                        width: 906,
-                        height: 34,
-                    },
-                ));
-            }
-        }
-    }
-    for (id, x, label) in [
-        (20, 24, "USE DEVICE"),
-        (21, 212, "BACK"),
-        (22, 400, "REFRESH"),
-        (23, 588, "PREV"),
-        (24, 776, "NEXT"),
-    ] {
-        let bounds = Bounds {
-            x,
-            y: 620,
-            width: 170,
-            height: 34,
-        };
-        if pending || (id == 20 && picker.selected.is_none()) {
-            molecules::button(scene, bounds, label, false, false);
-        } else {
-            control(scene, hits, gesture, point, ControlId(id), bounds, label);
-        }
-    }
-    if pending {
-        text(scene, 24, 665, "LOADING DEVICES", 1, 0xd8b36b);
-    }
-    if let Some(error) = &draft.error {
-        text(scene, 24, 690, error, 1, 0xff8e8e);
-    }
+    let view = PlayersView::new(ScreenInstanceId(1), WIDTH as u32, HEIGHT as u32).unwrap();
+    let mut frame = players_frame(local, draft, pending);
+    frame.hovered = beatkernel_bms_runtime::ui::players::hit(&frame, point);
+    frame.armed = (30..=37)
+        .chain(20000..20064)
+        .map(ControlId)
+        .find(|&id| gesture.is_armed(id));
+    view.update(frame).unwrap();
+    view.compose(scene, hits).unwrap();
 }
 
 #[cfg(test)]
@@ -3566,6 +3459,8 @@ mod tests {
             active_backend: BackendChoice::Auto,
             display: None,
             display_view: None,
+            players_view: None,
+            devices_view: None,
             practice: None,
             records: None,
             records_view: None,
@@ -3665,6 +3560,65 @@ mod tests {
         assert!(app.settings_view.is_none());
         assert!(app.settings.is_none());
         assert_eq!(app.navigator.route(), ScreenRoute::Selection);
+    }
+
+    #[test]
+    fn retained_player_view_survives_device_child_and_close_disposes_both() {
+        let mut app = lifecycle_fixture();
+        app.open_settings();
+        app.open_local();
+        app.local_setup.as_mut().unwrap().model.resize(2).unwrap();
+        app.local_setup.as_mut().unwrap().selected = 1;
+        app.draw().unwrap();
+        let parent = app.players_view.as_ref().unwrap().id();
+        assert!(app.reactive_waits_for_events());
+        let attach_child = |app: &mut Desktop| {
+            let next = app
+                .prepare_route(ScreenRoute::Devices { players: true })
+                .unwrap();
+            app.commit_route(next);
+            let id = app.navigator.active_id().unwrap();
+            let catalog = DeviceCatalog::new(
+                DeviceRequest::LinuxKeyboard,
+                vec![beatkernel_bms_runtime::device_catalog::DeviceChoice {
+                    id: "/dev/input/fixture".into(),
+                    label: "FIXTURE KEYBOARD".into(),
+                    detail: "METADATA ONLY".into(),
+                    selectable: true,
+                }],
+            )
+            .unwrap();
+            let player = app.local_setup.as_ref().unwrap().model.players()[1].id;
+            app.picker = Some(PanelScope::new(
+                id,
+                DevicePicker {
+                    catalog,
+                    player: Some(player),
+                    first: 0,
+                    selected: None,
+                },
+            ));
+        };
+        attach_child(&mut app);
+        app.draw().unwrap();
+        assert!(app.reactive_waits_for_events());
+        assert_eq!(app.players_view.as_ref().unwrap().id(), parent);
+        assert!(app.hits.iter().any(|(id, _)| *id == ControlId(10000)));
+        assert!(!app.hits.iter().any(|(id, _)| *id == ControlId(20)));
+        app.back();
+        assert_eq!(app.navigator.active_id(), Some(parent));
+        assert!(app.devices_view.is_none());
+        assert_eq!(app.local_setup.as_ref().unwrap().selected, 1);
+        app.draw().unwrap();
+        assert!(!app.players_view.as_ref().unwrap().dirty());
+        assert!(app.hits.iter().any(|(id, _)| *id == ControlId(20001)));
+        attach_child(&mut app);
+        app.draw().unwrap();
+        app.request_close();
+        assert!(app.players_view.is_none());
+        assert!(app.devices_view.is_none());
+        assert!(app.picker.is_none());
+        assert!(app.local_setup.is_none());
     }
 
     #[test]
