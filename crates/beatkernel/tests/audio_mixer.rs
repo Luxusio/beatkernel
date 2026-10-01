@@ -67,6 +67,222 @@ fn seek(at: i64) -> AudioCommand {
 }
 
 #[test]
+fn pause_preserves_fractional_voices_future_commands_and_song_anchor() {
+    fn setup() -> (CommandProducer, Mixer) {
+        let (mut producer, mixer) = mono(&[0.0, 0.2, 0.4, 0.6, 0.8, 0.9]);
+        for command in [
+            seek(0),
+            set_rate(Rate::new(1, 2).unwrap(), 0),
+            play(1, 0, 1.0),
+            play(2, 5_000_000, 0.5),
+            stop(1, 6_000_000),
+        ] {
+            producer.try_push(command).unwrap();
+        }
+        (producer, mixer)
+    }
+    let (_baseline_producer, mut baseline) = setup();
+    let mut expected = [0.0; 7];
+    baseline.render(&mut expected).unwrap();
+    let (mut producer, mut mixer) = setup();
+    let mut actual = [0.0; 7];
+    let before = mixer.render(&mut actual[..3]).unwrap();
+    assert_eq!(before.pending_commands, 2);
+    assert_eq!(before.song_position, ts(-123));
+    assert_eq!(mixer.playback_frame_cursor(), 3);
+    let admissions = producer.counters();
+    producer.request_pause(true);
+    assert_eq!(producer.counters(), admissions);
+    assert!(!mixer.is_paused());
+    let mut silence = [99.0; 11];
+    let paused = mixer.render(&mut silence).unwrap();
+    assert_eq!(silence, [0.0; 11]);
+    assert_eq!((paused.start_frame, paused.frames), (3, 11));
+    assert_eq!(
+        (
+            paused.playback_start_frame,
+            paused.playback_frames,
+            paused.paused
+        ),
+        (3, 0, true)
+    );
+    assert_eq!(paused.active_voices, before.active_voices);
+    assert_eq!(paused.pending_commands, before.pending_commands);
+    assert_eq!(paused.song_position, before.song_position);
+    assert_eq!(
+        paused.counters.commands_consumed,
+        before.counters.commands_consumed
+    );
+    assert_eq!(
+        paused.counters.commands_applied,
+        before.counters.commands_applied
+    );
+    assert_eq!(paused.counters.late_commands, before.counters.late_commands);
+    assert_eq!(mixer.rate(), Rate::new(1, 2).unwrap());
+    producer.request_pause(false);
+    let resumed = mixer.render(&mut actual[3..]).unwrap();
+    assert_eq!(actual, expected);
+    assert_eq!(
+        (
+            resumed.start_frame,
+            resumed.playback_start_frame,
+            resumed.playback_frames,
+            resumed.paused
+        ),
+        (14, 3, 4, false)
+    );
+    assert_eq!(mixer.frame_cursor(), 18);
+    assert_eq!(mixer.playback_frame_cursor(), 7);
+    assert_eq!(resumed.counters.late_commands, 0);
+}
+
+#[test]
+fn independent_pause_and_resume_remain_reachable_with_a_full_ring() {
+    let limits = AudioLimits::new(1, 2, 2, 16, 1).unwrap();
+    let (mut producer, mut mixer) = rig(
+        AudioFormat::new(1000, 1).unwrap(),
+        1000,
+        &[0.25; 8],
+        limits,
+        0,
+    );
+    producer.try_push(play(1, 0, 1.0)).unwrap();
+    producer.request_pause(true);
+    assert_eq!(
+        producer.try_push(stop(1, 1_000_000)).unwrap_err().reason,
+        QueuePushError::Full
+    );
+    let counters = producer.counters();
+    let paused = mixer.render(&mut [99.0; 4]).unwrap();
+    assert_eq!(paused.counters.commands_consumed, 0);
+    assert_eq!(paused.active_voices, 0);
+    producer.request_pause(false);
+    assert_eq!(producer.counters(), counters);
+    let mut output = [99.0];
+    let resumed = mixer.render(&mut output).unwrap();
+    assert_eq!(output, [0.25]);
+    assert_eq!(resumed.counters.commands_consumed, 1);
+    assert_eq!((resumed.start_frame, resumed.playback_start_frame), (4, 0));
+    producer.try_push(stop(1, 1_000_000)).unwrap();
+    producer.request_pause(true);
+    mixer.render(&mut [99.0; 3]).unwrap();
+    producer.request_pause(false);
+    let resumed = mixer.render(&mut output).unwrap();
+    assert_eq!(output, [0.0]);
+    assert_eq!(resumed.counters.commands_applied, 2);
+    assert_eq!(resumed.counters.late_commands, 0);
+}
+
+#[test]
+fn rate_zero_keeps_playback_scheduling_active_and_pause_requests_can_coalesce() {
+    let (mut producer, mut mixer) = mono(&[0.25; 8]);
+    for command in [set_rate(Rate::ZERO, 0), play(1, 0, 1.0), stop(1, 2_000_000)] {
+        producer.try_push(command).unwrap();
+    }
+    producer.request_pause(true);
+    producer.request_pause(false);
+    let mut output = [99.0; 3];
+    let report = mixer.render(&mut output).unwrap();
+    assert_eq!(output, [0.0; 3]);
+    assert!(!report.paused);
+    assert_eq!(report.playback_frames, 3);
+    assert_eq!(mixer.playback_frame_cursor(), 3);
+    assert_eq!(report.active_voices, 0);
+    assert_eq!(report.counters.commands_applied, 3);
+    assert_eq!(mixer.rate(), Rate::ZERO);
+}
+
+#[test]
+fn invalid_and_empty_blocks_preserve_output_queue_state_and_pending_requests() {
+    let limits = AudioLimits::new(4, 2, 4, 2, 4).unwrap();
+    let (mut producer, mut mixer) = rig(
+        AudioFormat::new(1000, 2).unwrap(),
+        1000,
+        &[0.25; 8],
+        limits,
+        0,
+    );
+    producer.try_push(play(1, 0, 1.0)).unwrap();
+    let original = mixer.render(&mut []).unwrap();
+    producer.request_pause(true);
+    let mut misaligned = [99.0; 3];
+    assert_eq!(
+        mixer.render(&mut misaligned),
+        Err(AudioError::InvalidBuffer)
+    );
+    assert_eq!(misaligned, [99.0; 3]);
+    let mut large = [99.0; 6];
+    assert_eq!(mixer.render(&mut large), Err(AudioError::RenderCapacity));
+    assert_eq!(large, [99.0; 6]);
+    assert_eq!(mixer.render(&mut []).unwrap(), original);
+    assert!(!mixer.is_paused());
+    let mut output = [99.0; 2];
+    let paused = mixer.render(&mut output).unwrap();
+    assert!(mixer.is_paused());
+    assert_eq!(paused.counters.commands_consumed, 0);
+    producer.request_pause(false);
+    let empty = mixer.render(&mut []).unwrap();
+    assert!(empty.paused);
+    assert_eq!(empty.counters, paused.counters);
+    assert_eq!(empty.pending_commands, paused.pending_commands);
+    assert_eq!(
+        mixer.render(&mut misaligned),
+        Err(AudioError::InvalidBuffer)
+    );
+    assert!(mixer.is_paused());
+    let resumed = mixer.render(&mut output).unwrap();
+    assert_eq!(output, [0.25; 2]);
+    assert!(!resumed.paused);
+    assert_eq!(resumed.counters.commands_consumed, 1);
+    assert_eq!(
+        (mixer.frame_cursor(), mixer.playback_frame_cursor()),
+        (2, 1)
+    );
+}
+
+#[test]
+fn pause_silence_and_active_pcm_are_partition_invariant_on_the_playback_grid() {
+    fn render(parts: &[usize], pauses: &[usize]) -> (Vec<f32>, AudioCounters, u64, u64) {
+        let (mut producer, mut mixer) = mono(&[0.0, 0.2, 0.4, 0.6, 0.8, 0.9]);
+        for command in [
+            set_rate(Rate::new(1, 2).unwrap(), 0),
+            play(1, 0, 1.0),
+            play(2, 5_000_000, 0.5),
+            stop(1, 6_000_000),
+        ] {
+            producer.try_push(command).unwrap();
+        }
+        let mut active = vec![0.0; 3];
+        mixer.render(&mut active).unwrap();
+        producer.request_pause(true);
+        for &frames in pauses {
+            let mut silence = vec![99.0; frames];
+            let report = mixer.render(&mut silence).unwrap();
+            assert_eq!(silence, vec![0.0; frames]);
+            assert_eq!(report.playback_start_frame, 3);
+            assert_eq!(report.playback_frames, 0);
+        }
+        producer.request_pause(false);
+        for &frames in parts {
+            let mut output = vec![99.0; frames];
+            mixer.render(&mut output).unwrap();
+            active.extend(output);
+        }
+        (
+            active,
+            mixer.counters(),
+            mixer.frame_cursor(),
+            mixer.playback_frame_cursor(),
+        )
+    }
+    let whole = render(&[4], &[11]);
+    let split = render(&[1, 2, 1], &[2, 3, 6]);
+    assert_eq!(whole, split);
+    assert_eq!((whole.2, whole.3), (18, 7));
+    assert_eq!(whole.1.late_commands, 0);
+}
+
+#[test]
 fn constructor_requires_exact_bank_format_and_queue_capacity() {
     let limits = bounds();
     let output = AudioFormat::new(48_000, 2).unwrap();
@@ -104,6 +320,9 @@ fn empty_output_preserves_queue_cursor_rate_and_initial_report() {
         RenderReport {
             start_frame: 0,
             frames: 0,
+            playback_start_frame: 0,
+            playback_frames: 0,
+            paused: false,
             active_voices: 0,
             pending_commands: 0,
             song_position: Timestamp::ZERO,

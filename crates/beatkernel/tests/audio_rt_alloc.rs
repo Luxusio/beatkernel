@@ -259,3 +259,33 @@ fn bounded_consume_budget_and_empty_render_do_not_allocate_or_free() {
     drop(producer);
     drop(mixer);
 }
+
+#[test]
+fn requested_pause_silence_and_resume_preserve_rt_storage_and_voice_phase() {
+    let (mut producer, mut mixer) = rig(AudioLimits::new(2, 1, 2, 8, 2).unwrap());
+    producer.try_push(play(1, 0)).unwrap();
+    let mut one = [99.0];
+    render(&mut mixer, &mut one);
+    assert_eq!(one, [0.25]);
+    // Keep both the ring and a live asset owned across the paused callback.
+    producer.try_push(play(1, 10_000_000)).unwrap();
+    producer.try_push(play(1, 11_000_000)).unwrap();
+    let ((), counts) = track(|| producer.request_pause(true));
+    assert_eq!(counts, [0, 0, 0]);
+    let mut silence = [99.0; 3];
+    let paused = render(&mut mixer, &mut silence);
+    assert_eq!(silence, [0.0; 3]);
+    assert!(paused.paused);
+    assert_eq!(paused.playback_start_frame, 1);
+    assert_eq!(paused.playback_frames, 0);
+    assert_eq!(paused.counters.commands_consumed, 1);
+    let ((), counts) = track(|| producer.request_pause(false));
+    assert_eq!(counts, [0, 0, 0]);
+    let resumed = render(&mut mixer, &mut one);
+    assert_eq!(one, [0.5]);
+    assert_eq!(resumed.start_frame, 4);
+    assert_eq!(resumed.playback_start_frame, 1);
+    assert_eq!(resumed.playback_frames, 1);
+    assert!(!resumed.paused);
+    assert_eq!(resumed.pending_commands, 2);
+}

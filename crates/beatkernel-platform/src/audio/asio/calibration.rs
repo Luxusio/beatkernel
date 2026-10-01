@@ -191,6 +191,9 @@ mod fixtures {
             RenderReport {
                 start_frame: frame,
                 frames: 1,
+                playback_start_frame: frame,
+                playback_frames: 1,
+                paused: false,
                 active_voices: 0,
                 pending_commands: 0,
                 song_position: Timestamp::ZERO,
@@ -265,14 +268,16 @@ mod fixtures {
         let second = observation(10, 120, 124);
         let mut forged = second;
         forged.output.timestamp = Timestamp::from_nanos(11);
-        assert!(AsioPresentationClock::from_observations(
-            first,
-            forged,
-            validity(),
-            ExtrapolationPolicy::Forbid,
-            None
-        )
-        .is_err());
+        assert!(
+            AsioPresentationClock::from_observations(
+                first,
+                forged,
+                validity(),
+                ExtrapolationPolicy::Forbid,
+                None
+            )
+            .is_err()
+        );
         let mut changed = second;
         changed.sample_rate = 500_000_000;
         changed.output.timestamp = Timestamp::from_nanos(20);
@@ -288,14 +293,16 @@ mod fixtures {
         );
         let mut overlapping = first;
         overlapping.render.frames = 11;
-        assert!(AsioPresentationClock::from_observations(
-            overlapping,
-            second,
-            validity(),
-            ExtrapolationPolicy::Forbid,
-            None
-        )
-        .is_err());
+        assert!(
+            AsioPresentationClock::from_observations(
+                overlapping,
+                second,
+                validity(),
+                ExtrapolationPolicy::Forbid,
+                None
+            )
+            .is_err()
+        );
     }
     #[test]
     fn origin_and_host_queries_obey_finite_validity() {

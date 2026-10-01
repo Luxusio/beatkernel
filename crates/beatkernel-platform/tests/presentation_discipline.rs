@@ -600,6 +600,9 @@ mod asio_observations {
         RenderReport {
             start_frame,
             frames: 64,
+            playback_start_frame: start_frame,
+            playback_frames: 64,
+            paused: false,
             active_voices: 0,
             pending_commands: 0,
             song_position: Timestamp::ZERO,

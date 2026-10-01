@@ -15,6 +15,8 @@ pub struct Mixer {
     voices: Vec<Option<Voice>>,
     pending: Vec<Pending>,
     frame_cursor: u64,
+    playback_frame_cursor: u64,
+    paused: bool,
     counters: AudioCounters,
     rate: Rate,
     song_position: Timestamp,
@@ -143,6 +145,8 @@ impl Mixer {
             voices,
             pending,
             frame_cursor: 0,
+            playback_frame_cursor: 0,
+            paused: false,
             counters: AudioCounters::default(),
             rate: Rate::NORMAL,
             song_position: Timestamp::ZERO,
@@ -164,6 +168,11 @@ impl Mixer {
     /// Rate can form a new head. A later rate change can be rejected when the
     /// checked common denominator with a live fractional head exceeds i128;
     /// such rejection leaves the rate and all voices unchanged.
+    ///
+    /// A requested pause is adopted only after nonempty render preflight. It
+    /// emits silence on the physical output grid while preserving the playback
+    /// cursor, voices, rational heads and all queued or pending commands.
+    /// Command targets use the playback grid, excluding paused output frames.
     pub fn render(&mut self, output: &mut [f32]) -> Result<RenderReport, AudioError> {
         let channels = usize::from(self.config.format().channels());
         if !output.len().is_multiple_of(channels) {
@@ -179,8 +188,19 @@ impl Mixer {
             .checked_add(extent)
             .ok_or(AudioError::Overflow)?;
         let start = self.frame_cursor;
+        let playback_start = self.playback_frame_cursor;
+        let playback_end = playback_start
+            .checked_add(extent)
+            .ok_or(AudioError::Overflow)?;
         if frames == 0 {
-            return Ok(self.report(start, 0));
+            return Ok(self.report(start, playback_start, 0));
+        }
+        self.paused = self.consumer.pause_requested();
+        if self.paused {
+            output.fill(0.0);
+            self.frame_cursor = end;
+            self.counters.rendered_frames = self.counters.rendered_frames.saturating_add(extent);
+            return Ok(self.report(start, playback_start, frames));
         }
 
         let budget = self
@@ -216,20 +236,22 @@ impl Mixer {
             while self
                 .pending
                 .first()
-                .is_some_and(|pending| pending.target <= i128::from(self.frame_cursor))
+                .is_some_and(|pending| pending.target <= i128::from(self.playback_frame_cursor))
             {
                 let pending = self.pending.remove(0);
-                if pending.preroll || pending.target < i128::from(self.frame_cursor) {
+                if pending.preroll || pending.target < i128::from(self.playback_frame_cursor) {
                     increment(&mut self.counters.late_commands);
                 }
                 self.apply(pending.command);
             }
             self.mix_frame(frame);
             self.frame_cursor += 1;
+            self.playback_frame_cursor += 1;
         }
         debug_assert_eq!(self.frame_cursor, end);
+        debug_assert_eq!(self.playback_frame_cursor, playback_end);
         self.counters.rendered_frames = self.counters.rendered_frames.saturating_add(extent);
-        Ok(self.report(start, frames))
+        Ok(self.report(start, playback_start, frames))
     }
 
     /// Immutable format, clock origin and capacity contract.
@@ -240,6 +262,15 @@ impl Mixer {
     /// Absolute next output frame; Seek does not rewind it.
     pub const fn frame_cursor(&self) -> u64 {
         self.frame_cursor
+    }
+    /// Next scheduling frame, excluding output frames emitted while paused.
+    /// Seek and SetRate ZERO do not rewind or freeze this cursor.
+    pub const fn playback_frame_cursor(&self) -> u64 {
+        self.playback_frame_cursor
+    }
+    /// Pause state adopted by the most recent valid nonempty render.
+    pub const fn is_paused(&self) -> bool {
+        self.paused
     }
 
     /// Fixed cumulative telemetry snapshot.
@@ -395,10 +426,13 @@ impl Mixer {
         }
     }
 
-    fn report(&self, start_frame: u64, frames: usize) -> RenderReport {
+    fn report(&self, start_frame: u64, playback_start_frame: u64, frames: usize) -> RenderReport {
         RenderReport {
             start_frame,
             frames,
+            playback_start_frame,
+            playback_frames: if self.paused { 0 } else { frames },
+            paused: self.paused,
             active_voices: self.voices.iter().filter(|slot| slot.is_some()).count(),
             pending_commands: self.pending.len(),
             song_position: self.song_position,

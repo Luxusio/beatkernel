@@ -1,8 +1,8 @@
 use super::{AudioCommand, AudioError, AudioLimits, SampleId, VoiceId};
 use crate::{time::Timestamp, transport::Rate};
 use std::sync::{
-    atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicU8, Ordering},
     Arc,
+    atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicU64, Ordering},
 };
 
 /// Producer-local saturating admission counters.
@@ -60,6 +60,7 @@ struct Shared {
     slots: Vec<Slot>,
     producer_alive: AtomicBool,
     consumer_alive: AtomicBool,
+    pause_requested: AtomicBool,
 }
 
 struct Slot {
@@ -182,6 +183,7 @@ pub fn command_queue(capacity: usize) -> Result<(CommandProducer, CommandConsume
         slots,
         producer_alive: AtomicBool::new(true),
         consumer_alive: AtomicBool::new(true),
+        pause_requested: AtomicBool::new(false),
     });
     Ok((
         CommandProducer {
@@ -194,6 +196,12 @@ pub fn command_queue(capacity: usize) -> Result<(CommandProducer, CommandConsume
 }
 
 impl CommandProducer {
+    /// Requests silence with playback scheduling frozen on a subsequent valid
+    /// nonempty render. This independent desired state uses no queue slot and
+    /// does not change admission counters; requests may coalesce before render.
+    pub fn request_pause(&mut self, paused: bool) {
+        self.shared.pause_requested.store(paused, Ordering::Release);
+    }
     /// Publishes one unmodified command or returns it on full/disconnect.
     ///
     /// Queue admission does not validate gains, sample IDs, timing or rates.
@@ -235,6 +243,9 @@ impl CommandProducer {
 }
 
 impl CommandConsumer {
+    pub(crate) fn pause_requested(&self) -> bool {
+        self.shared.pause_requested.load(Ordering::Acquire)
+    }
     /// Retrieves one command; published commands drain after producer drop.
     pub fn try_pop(&mut self) -> Result<AudioCommand, QueuePopError> {
         let slot = &self.shared.slots[self.cursor];

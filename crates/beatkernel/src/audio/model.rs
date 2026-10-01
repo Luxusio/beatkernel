@@ -237,6 +237,9 @@ impl MixerConfig {
 ///
 /// `at` is in [`MixerConfig::domain`], relative to its immutable output origin.
 /// It is not song time unless the caller has explicitly mapped the clocks.
+/// After an explicit queue pause, this scheduling grid excludes inserted silent
+/// frames. Map physical output times through the reported playback cursor before
+/// admitting commands; pending targets stay on their original playback grid.
 /// Commands are validated on admission/execution; the queue can preserve even
 /// rejected scalar payloads. Equal-frame commands retain submission order.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -324,6 +327,15 @@ pub struct RenderReport {
     pub start_frame: u64,
     /// Number of contiguous frames produced.
     pub frames: usize,
+    /// First frame on the scheduling grid, excluding explicit paused silence.
+    /// Equal to `start_frame` until the first queue pause.
+    pub playback_start_frame: u64,
+    /// Scheduling frames processed by this block; zero during explicit pause.
+    /// A zero sample-head Rate still advances this scheduling grid.
+    pub playback_frames: usize,
+    /// Applied queue-pause state. Only a valid nonempty render adopts requests.
+    /// This is render evidence, not proof of native/acoustic presentation.
+    pub paused: bool,
     /// Number of active voices after this block.
     pub active_voices: usize,
     /// Number of pending commands after this block.

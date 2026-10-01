@@ -2,8 +2,8 @@ use super::*;
 use crate::audio::AudioClockReadingQuality;
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Barrier,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::{Duration as WallDuration, Instant},
@@ -37,6 +37,9 @@ fn snapshot() -> AudioStreamSnapshot {
         render: Some(RenderReport {
             start_frame: u64::MAX,
             frames: 4,
+            playback_start_frame: u64::MAX - 17,
+            playback_frames: 0,
+            paused: true,
             active_voices: 3,
             pending_commands: 2,
             song_position: Timestamp::from_nanos(-17),
@@ -141,9 +144,39 @@ fn production_publication_preserves_literal_scalar_widths_signed_times_and_all_c
             7,
             8,
             9,
-            10
+            10,
+            u64::MAX - 17,
+            0,
+            1
         ]
     );
+}
+
+#[test]
+fn pause_and_resume_publication_preserve_distinct_physical_and_playback_grids() {
+    let telemetry = Telemetry::new();
+    let mut generation = 0;
+    let mut expected = snapshot();
+    expected.status = AudioStreamStatus::Running;
+    let render = expected.render.as_mut().unwrap();
+    render.start_frame = 48;
+    render.frames = 16;
+    render.playback_start_frame = 32;
+    render.playback_frames = 0;
+    render.paused = true;
+    render.counters.rendered_frames = 64;
+    telemetry.publish(expected, &mut generation);
+    assert_eq!(telemetry.read(), expected);
+
+    let render = expected.render.as_mut().unwrap();
+    render.start_frame = 64;
+    render.playback_start_frame = 32;
+    render.playback_frames = 16;
+    render.paused = false;
+    render.counters.rendered_frames = 80;
+    telemetry.publish(expected, &mut generation);
+    assert_eq!(telemetry.read(), expected);
+    assert_eq!(generation, 4);
 }
 
 #[test]

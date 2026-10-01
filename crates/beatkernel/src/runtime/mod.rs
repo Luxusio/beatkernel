@@ -292,6 +292,14 @@ impl Runtime {
         admit_audio(&mut self.producer, self.telemetry.counters_mut(), command)
     }
 
+    /// Request audio scheduling pause through the same producer as keysounds.
+    /// This does not pause Transport or judging. The session owner must fence
+    /// input/admission and coordinate them with actual render/presentation evidence.
+    /// A full command ring cannot prevent a pause or resume request.
+    pub fn request_audio_pause(&mut self, paused: bool) {
+        self.producer.request_pause(paused);
+    }
+
     fn publish(&mut self, report: &mut RuntimeReport) {
         let counters = self.telemetry.counters_mut();
         counters.judge_results = counters

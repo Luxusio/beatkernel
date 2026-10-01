@@ -314,6 +314,9 @@ mod tests {
         RenderReport {
             start_frame: start,
             frames: 10,
+            playback_start_frame: start,
+            playback_frames: 10,
+            paused: false,
             active_voices: active,
             pending_commands: pending,
             song_position: Timestamp::ZERO,

@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) struct Telemetry {
     version: AtomicU64,
     pub(crate) status: AtomicU64,
-    values: [AtomicU64; 33],
+    values: [AtomicU64; 36],
 }
 
 /// Observes one running deadline interval; Ready/prefill is not an interval.
@@ -106,8 +106,8 @@ fn decode_status(value: u64) -> AudioStreamStatus {
     }
 }
 
-fn encode_snapshot(snapshot: AudioStreamSnapshot) -> [u64; 33] {
-    let mut values = [0u64; 33];
+fn encode_snapshot(snapshot: AudioStreamSnapshot) -> [u64; 36] {
+    let mut values = [0u64; 36];
     let counters = snapshot.counters;
     values[..7].copy_from_slice(&[
         status_code(snapshot.status),
@@ -150,7 +150,7 @@ fn encode_snapshot(snapshot: AudioStreamSnapshot) -> [u64; 33] {
             u64::from(render.producer_disconnected),
         ]);
         let counters = render.counters;
-        values[22..].copy_from_slice(&[
+        values[22..33].copy_from_slice(&[
             counters.rendered_frames,
             counters.commands_consumed,
             counters.commands_applied,
@@ -163,11 +163,16 @@ fn encode_snapshot(snapshot: AudioStreamSnapshot) -> [u64; 33] {
             counters.invalid_rates,
             counters.invalid_times,
         ]);
+        values[33..].copy_from_slice(&[
+            render.playback_start_frame,
+            render.playback_frames as u64,
+            u64::from(render.paused),
+        ]);
     }
     values
 }
 
-fn decode_snapshot(values: [u64; 33]) -> AudioStreamSnapshot {
+fn decode_snapshot(values: [u64; 36]) -> AudioStreamSnapshot {
     AudioStreamSnapshot {
         telemetry_available: true,
         status: decode_status(values[0]),
@@ -203,6 +208,9 @@ fn decode_snapshot(values: [u64; 33]) -> AudioStreamSnapshot {
         render: (values[15] != 0).then(|| RenderReport {
             start_frame: values[16],
             frames: values[17] as usize,
+            playback_start_frame: values[33],
+            playback_frames: values[34] as usize,
+            paused: values[35] != 0,
             active_voices: values[18] as usize,
             pending_commands: values[19] as usize,
             song_position: Timestamp::from_nanos(values[20] as i64),
