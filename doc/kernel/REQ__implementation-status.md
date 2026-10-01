@@ -8,7 +8,9 @@ implements own/other saved opponents and two-peer TCP progress exchange within
 the existing app crate. The main binary dispatches all modes; native play owns
 input/judging on a game thread, with separate native output and network owners.
 The product UI uses winit/wgpu, with actual chart, score and local-player
-snapshots. Competition prefixes are connected to that same bridge. Peer progress
+snapshots. Competition prefixes are connected to that same bridge. Display
+drafts and version 2 player profiles include GPU backend, presentation, FPS and
+lookahead; version 1 loads with display defaults. Peer progress
 is unauthenticated with independent local starts. Source checks exist;
 actual socket exchange, gameplay and fixture execution remain deferred.
 It records implementation locations, not independent review or phase acceptance.

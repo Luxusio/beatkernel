@@ -1,5 +1,26 @@
 # BMS desktop player
 
+## Presentation settings and combined profiles
+
+Settings → Display edits GPU backend, presentation mode, UI FPS (30..240)
+and note lookahead (100..10000ms). Done validates into the settings draft;
+Back discards display edits. Apply validates native and display configuration
+before committing between sessions. FPS/lookahead and supported presentation
+mode update on the UI owner; changing GPU backend requires saving the profile
+and restarting with that profile (or an explicit backend CLI argument).
+The display never changes acquisition timestamps, judging or song transport.
+
+Player profile version 2 stores native options and all four display fields in
+the existing bounded same-host file format. Load replaces the complete draft;
+Save stores the draft, and Apply stays separate. Version 1 loads with default
+display values. Explicit display CLI arguments override stored display fields;
+omitted arguments retain the profile. Limits are 128 native + four display
+records and 72KiB encoded bytes. Unknown/duplicate/missing display records,
+wrong host, invalid ranges and malformed records reject the whole replacement.
+Native-only version 1 APIs remain strict and refuse combined-profile replacement.
+Both formats use the existing bounded regular-file, synced temporary and guarded
+publication protocol; file/GPU execution acceptance remains deferred.
+
 Competition views retain per-player actual saved-record prefixes (up to eight)
 and one peer-reported prefix with its independent song time. Network lifecycle
 is visible during play and results; loss of connection preserves the last prefix
@@ -177,7 +198,8 @@ Native settings profiles are explicit user-selected files. `--profile PATH`
 loads a host-tagged versioned UTF-8 profile before opening the window; explicit
 native CLI values replace the matching profile flag group, including all
 repeated bindings/opponents for that flag. Profiles contain native options
-only; chart/library selection and GPU/UI presentation settings stay separate.
+in version 1. Player profile version 2 also stores display settings;
+chart/library selection stays separate.
 Load/Save in Settings use an editable path. Load replaces the draft, Save
 persists the syntax-validated draft, and Apply separately changes the next
 session. No profile is written automatically. Errors preserve the previous
@@ -227,8 +249,8 @@ replay/network execution and independent reviews/QA remain required later.
 This presentation increment does not by itself prove the full player complete.
 Graphical native settings and audio output metadata selectors now have source
 integration, including Linux local-player assignment. Windows/macOS multi-input,
-persistence of GPU/UI presentation settings and expanded transport/practice
-controls remain player work. Native profiles have source
+expanded transport/practice controls remain player work. Native and display
+profiles have source
 integration with file-I/O and interruption acceptance still pending. Existing
 casual multiplayer has independent local starts and unauthenticated progress;
 this screen does not establish ranked online play.

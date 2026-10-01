@@ -128,10 +128,14 @@ its exact ID into the draft. Apply remains separate. ASIO discovery requires an
 explicit registry view. Keyboard metadata discovery is source-integrated for
 automatic preparation and Linux per-player assignment. Clipboard and IME
 composition remain pending. `--profile PATH` loads saved
-native options; explicit native arguments replace matching profile entries.
+native and display options; explicit arguments replace matching profile entries.
 Settings Load/Save use an editable path and the same serialized settings worker. Save stores
 the draft; Apply remains separate. Profiles retain the OS identity and exclude
-chart selection and GPU/UI settings. Actual file-I/O acceptance remains pending.
+chart selection. Version 2 includes GPU backend, presentation mode, FPS and note
+lookahead; version 1 loads with display defaults. Settings → Display edits these
+values. GPU backend changes require saving and restarting with that profile;
+other display changes apply
+between play sessions. Actual file-I/O and GPU acceptance remain pending.
 See the [player contract](doc/kernel/REQ__bms-player.md) for lifecycle and scope.
 Source compilation does not establish executed GUI, multiplayer or playback.
 
