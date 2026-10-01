@@ -5,12 +5,12 @@ use beatkernel_bms_runtime::ui::{
     catalog_search::CatalogSearch,
     devices::{DevicesFrame, DevicesView},
     display::{BUTTONS as DISPLAY_BUTTONS, DisplayFrame, DisplayView},
-    interaction::{Bounds, ControlId, Gesture, logical_point},
+    interaction::{Bounds, ControlId, Gesture, WheelSteps, logical_point},
     molecules, organisms,
     players::{PlayersFrame, PlayersView},
     practice::{PracticeFrame, PracticeView},
     records::{RecordsFrame, RecordsView},
-    selection::{SelectionFrame, SelectionItem, SelectionView},
+    selection::{ROW_HEIGHT, SelectionFrame, SelectionItem, SelectionView, VISIBLE_ROWS},
     settings::{BUTTONS as SETTINGS_BUTTONS, SettingsFrame, SettingsView},
     text_input::LineEditor,
 };
@@ -44,7 +44,7 @@ use std::{
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::{ElementState, MouseButton, WindowEvent},
+    event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, KeyCode, PhysicalKey},
     window::{Window, WindowId},
@@ -52,6 +52,15 @@ use winit::{
 
 const WIDTH: usize = 960;
 const HEIGHT: usize = 720;
+fn catalog_scroll_lines(delta: MouseScrollDelta, physical_height: u32) -> f64 {
+    match delta {
+        MouseScrollDelta::LineDelta(_, y) => f64::from(y),
+        MouseScrollDelta::PixelDelta(position) if physical_height != 0 => {
+            position.y * (HEIGHT as f64 / f64::from(physical_height)) / ROW_HEIGHT as f64
+        }
+        MouseScrollDelta::PixelDelta(_) => f64::NAN,
+    }
+}
 const PAUSE_BOUNDS: Bounds = Bounds {
     x: 740,
     y: 680,
@@ -473,6 +482,7 @@ pub(super) fn run(
         catalog_search,
         search_editor,
         search_focused: false,
+        catalog_wheel: WheelSteps::default(),
         selection_diagnostics,
         selection_view: None,
         painted_reactive: None,
@@ -850,6 +860,7 @@ struct Desktop {
     catalog_search: CatalogSearch,
     search_editor: LineEditor,
     search_focused: bool,
+    catalog_wheel: WheelSteps,
     selection_diagnostics: Arc<[String]>,
     selection_view: Option<SelectionView>,
     painted_reactive: Option<ScreenInstanceId>,
@@ -914,6 +925,7 @@ impl Desktop {
     /// Only this boundary changes the active route and releases screen scopes.
     /// Native owners are drained separately and survive application Closing.
     fn commit_route(&mut self, next: ScreenNavigator) {
+        self.catalog_wheel.reset();
         self.navigator = next;
         self.set_search_focus(false);
         self.gesture.cancel();
@@ -2626,6 +2638,7 @@ impl Desktop {
     }
     fn set_search_focus(&mut self, focused: bool) {
         if self.search_focused != focused {
+            self.catalog_wheel.reset();
             self.search_focused = focused;
             if let Some(window) = &self.window {
                 window.set_ime_allowed(focused);
@@ -2640,6 +2653,7 @@ impl Desktop {
             return;
         }
         let mut editor = self.search_editor.clone();
+        self.catalog_wheel.reset();
         let result = edit_line(&mut editor, key, value)
             .and_then(|()| self.catalog_search.set_query(editor.value()));
         match result {
@@ -2653,6 +2667,37 @@ impl Desktop {
             Err(error) => self.failure = Some(error),
         }
         self.invalidate_hits();
+    }
+    /// Menu navigation only: wheel events never enter native gameplay input.
+    fn scroll_catalog(&mut self, lines: f64, over_catalog: bool) {
+        if !self.ui_ready() || self.navigator.route() != ScreenRoute::Selection || !over_catalog {
+            self.catalog_wheel.reset();
+            return;
+        }
+        if lines == 0.0 {
+            return; // Horizontal-only movement does not consume vertical remainder.
+        }
+        self.gesture.cancel();
+        let steps = self.catalog_wheel.push(lines);
+        if steps == 0 {
+            return;
+        }
+        let previous = self.catalog_search.selected();
+        self.catalog_search
+            .step_by(steps < 0, steps.unsigned_abs() as usize);
+        if let Some(index) = self.catalog_search.selected() {
+            self.selected = index;
+        }
+        if self.catalog_search.selected() != previous {
+            self.invalidate_hits();
+        }
+    }
+    fn over_catalog(&self, point: Option<(f64, f64)>) -> bool {
+        self.navigator.route() == ScreenRoute::Selection
+            && self.selection_view.as_ref().is_some_and(|view| {
+                Some(view.id()) == self.navigator.active_id()
+                    && point.is_some_and(|point| view.contains_chart(point))
+            })
     }
     fn key(&mut self, key: KeyCode, repeat: bool) {
         self.gesture.cancel();
@@ -2809,7 +2854,21 @@ impl Desktop {
                 KeyCode::F2 if !repeat => self.open_settings(),
                 KeyCode::Escape if !repeat => self.request_close(),
                 KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                    self.catalog_wheel.reset();
                     self.catalog_search.step(key == KeyCode::ArrowDown);
+                    if let Some(index) = self.catalog_search.selected() {
+                        self.selected = index;
+                    }
+                    self.invalidate_hits();
+                }
+                KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End => {
+                    self.catalog_wheel.reset();
+                    if matches!(key, KeyCode::Home | KeyCode::End) {
+                        self.catalog_search.edge(key == KeyCode::End);
+                    } else {
+                        self.catalog_search
+                            .step_by(key == KeyCode::PageDown, VISIBLE_ROWS);
+                    }
                     if let Some(index) = self.catalog_search.selected() {
                         self.selected = index;
                     }
@@ -3507,6 +3566,7 @@ impl ApplicationHandler for Desktop {
         }
     }
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.catalog_wheel.reset();
         self.navigator.suspend();
         self.synchronize_panel_lifecycles();
         self.active = false;
@@ -3532,6 +3592,7 @@ impl ApplicationHandler for Desktop {
                 self.window = None;
             }
             WindowEvent::Focused(active) => {
+                self.catalog_wheel.reset();
                 self.active = active;
                 if !active {
                     self.pointer = None;
@@ -3539,12 +3600,14 @@ impl ApplicationHandler for Desktop {
                 }
             }
             WindowEvent::Occluded(occluded) => {
+                self.catalog_wheel.reset();
                 self.occluded = occluded;
                 if occluded {
                     self.gesture.cancel();
                 }
             }
             WindowEvent::Resized(size) => {
+                self.catalog_wheel.reset();
                 self.painted_reactive = None;
                 self.gesture.cancel();
                 self.pointer = None;
@@ -3556,7 +3619,10 @@ impl ApplicationHandler for Desktop {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.pointer = Some((position.x, position.y))
+                self.pointer = Some((position.x, position.y));
+                if !self.over_catalog(self.point()) {
+                    self.catalog_wheel.reset();
+                }
             }
             WindowEvent::Ime(winit::event::Ime::Commit(value)) => {
                 if self.navigator.route() == ScreenRoute::Selection && self.search_focused {
@@ -3564,14 +3630,33 @@ impl ApplicationHandler for Desktop {
                 }
             }
             WindowEvent::CursorLeft { .. } => {
+                self.catalog_wheel.reset();
                 self.pointer = None;
                 self.gesture.cancel();
+            }
+            WindowEvent::MouseWheel { delta, phase, .. } => {
+                if matches!(phase, TouchPhase::Started | TouchPhase::Cancelled) {
+                    self.catalog_wheel.reset();
+                }
+                if phase != TouchPhase::Cancelled {
+                    let height = self
+                        .window
+                        .as_ref()
+                        .map_or(0, |window| window.inner_size().height);
+                    let lines = catalog_scroll_lines(delta, height);
+                    let over_catalog = self.over_catalog(self.point());
+                    self.scroll_catalog(lines, over_catalog);
+                }
+                if phase == TouchPhase::Ended {
+                    self.catalog_wheel.reset();
+                }
             }
             WindowEvent::MouseInput {
                 state,
                 button: MouseButton::Left,
                 ..
             } => {
+                self.catalog_wheel.reset();
                 let hit = self.hit();
                 match state {
                     ElementState::Pressed => self.gesture.press(hit),
@@ -4037,6 +4122,7 @@ mod tests {
             .unwrap(),
             search_editor: LineEditor::new("", 256).unwrap(),
             search_focused: false,
+            catalog_wheel: WheelSteps::default(),
             selection_diagnostics: Arc::from([]),
             selection_view: None,
             painted_reactive: None,
@@ -4055,6 +4141,154 @@ mod tests {
             gesture: Gesture::default(),
             hits: Vec::new(),
         }
+    }
+    #[test]
+    fn catalog_pages_and_edges_preserve_filtered_chart_and_search_caret() {
+        let mut app = catalog_navigation_fixture();
+        let projection = app.catalog_search.indices();
+        app.key(KeyCode::PageDown, false);
+        assert_eq!(app.selected, 30);
+        app.key(KeyCode::End, false);
+        assert_eq!(app.selected, 38);
+        app.key(KeyCode::PageUp, true);
+        assert_eq!(app.selected, 8);
+        app.key(KeyCode::Home, false);
+        assert_eq!(app.selected, 0);
+        app.set_search_focus(true);
+        app.key(KeyCode::End, false);
+        assert_eq!(app.search_editor.cursor(), 4);
+        assert_eq!(app.selected, 0);
+        app.key(KeyCode::Home, false);
+        assert_eq!(app.search_editor.cursor(), 0);
+        assert_eq!(app.selected, 0);
+        assert!(Arc::ptr_eq(&projection, &app.catalog_search.indices()));
+        app.catalog_search.set_query("absent").unwrap();
+        app.set_search_focus(false);
+        for key in [
+            KeyCode::Home,
+            KeyCode::End,
+            KeyCode::PageDown,
+            KeyCode::PageUp,
+        ] {
+            app.key(key, false);
+            assert_eq!(app.catalog_search.selected(), None);
+        }
+        assert!(app.game.is_none());
+    }
+    fn catalog_navigation_fixture() -> Desktop {
+        let mut app = lifecycle_fixture();
+        app.entries = (0..40)
+            .map(|index| Entry {
+                path: format!("chart{index}.bms").into(),
+                title: format!("CHART {index}"),
+                artist: if index % 2 == 0 { "even" } else { "odd" }.into(),
+            })
+            .collect();
+        app.selection_items = app
+            .entries
+            .iter()
+            .map(|entry| SelectionItem {
+                title: entry.title.clone(),
+                artist: entry.artist.clone(),
+            })
+            .collect::<Vec<_>>()
+            .into();
+        app.catalog_search = CatalogSearch::new(&app.selection_items).unwrap();
+        app.catalog_search.set_query("even").unwrap();
+        app.search_editor = LineEditor::new("even", 256).unwrap();
+        app
+    }
+    #[test]
+    fn catalog_wheel_admission_fraction_reset_and_click_cancellation() {
+        let mut app = catalog_navigation_fixture();
+        let projection = app.catalog_search.indices();
+        app.gesture.press(Some(ControlId(100)));
+        app.scroll_catalog(-0.75, true);
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.gesture.release(Some(ControlId(100))), None);
+        app.scroll_catalog(-0.25, true);
+        assert_eq!(app.selected, 2);
+        app.scroll_catalog(1.0, true);
+        assert_eq!(app.selected, 0);
+        for admission in 0..5 {
+            app.scroll_catalog(-0.75, true);
+            match admission {
+                0 => app.scroll_catalog(-1.0, false),
+                1 => {
+                    app.active = false;
+                    app.scroll_catalog(-1.0, true);
+                    app.active = true;
+                }
+                2 => {
+                    app.occluded = true;
+                    app.scroll_catalog(-1.0, true);
+                    app.occluded = false;
+                }
+                3 => {
+                    app.open_settings();
+                    app.back();
+                }
+                _ => {
+                    app.set_search_focus(true);
+                    app.set_search_focus(false);
+                }
+            }
+            app.scroll_catalog(-0.25, true);
+            assert_eq!(app.selected, 0);
+            app.catalog_wheel.reset();
+        }
+        app.scroll_catalog(-0.75, true);
+        app.scroll_catalog(f64::NAN, true);
+        app.scroll_catalog(-0.25, true);
+        assert_eq!(app.selected, 0);
+        app.catalog_wheel.reset();
+        app.scroll_catalog(-f64::MAX, true);
+        assert_eq!(app.selected, 30); // At most one displayed page per event.
+        app.scroll_catalog(0.0, true);
+        assert_eq!(app.selected, 30);
+        assert!(Arc::ptr_eq(&projection, &app.catalog_search.indices()));
+        assert!(app.game.is_none());
+    }
+    #[test]
+    fn consecutive_catalog_wheels_keep_admission_while_click_hits_wait_for_redraw() {
+        let mut app = catalog_navigation_fixture();
+        app.draw().unwrap();
+        let point = Some((28.0, 140.0));
+        for index in [2, 4, 6] {
+            assert!(app.over_catalog(point));
+            app.scroll_catalog(-1.0, app.over_catalog(point));
+            assert_eq!(app.selected, index);
+            assert!(app.hits.is_empty());
+        }
+        assert!(!app.over_catalog(Some((500.0, 134.0))));
+        app.open_settings();
+        assert!(!app.over_catalog(point));
+        assert!(app.game.is_none());
+    }
+    #[test]
+    fn catalog_pixel_scroll_uses_render_stretch_and_rejects_zero_extent() {
+        use winit::dpi::PhysicalPosition;
+        assert_eq!(
+            catalog_scroll_lines(MouseScrollDelta::LineDelta(99.0, -2.0), 0),
+            -2.0
+        );
+        for height in [360, 720, 1440] {
+            let pixel = ROW_HEIGHT as f64 * f64::from(height) / HEIGHT as f64;
+            assert_eq!(
+                catalog_scroll_lines(
+                    MouseScrollDelta::PixelDelta(PhysicalPosition::new(999.0, pixel)),
+                    height
+                ),
+                1.0
+            );
+        }
+        assert!(
+            catalog_scroll_lines(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 1.0)),
+                0
+            )
+            .is_nan()
+        );
     }
     #[test]
     fn filtered_selection_preserves_catalog_identity_and_empty_results_cannot_play_or_open_records()

@@ -10,6 +10,9 @@ use crate::{scene::Scene, screen_lifecycle::ScreenInstanceId};
 use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
 use std::sync::Arc;
 
+pub const VISIBLE_ROWS: usize = 15;
+pub const ROW_HEIGHT: usize = 34;
+
 pub struct SelectionItem {
     pub title: String,
     pub artist: String,
@@ -83,7 +86,15 @@ impl SelectionView {
                 scene,
                 24,
                 65,
-                "UP/DOWN SELECT  ENTER PLAY  F2 SETTINGS  F3 SEARCH",
+                "ARROWS/PAGE SELECT  ENTER PLAY  F2 SETTINGS  F3 SEARCH",
+                1,
+                0x9bb1cf,
+            );
+            text(
+                scene,
+                24,
+                86,
+                "HOME/END FIRST/LAST  WHEEL OVER CHARTS",
                 1,
                 0x9bb1cf,
             )
@@ -102,7 +113,7 @@ impl SelectionView {
                 0xd8b36b,
             );
         });
-        for slot in 0..15 {
+        for slot in 0..VISIBLE_ROWS {
             let cursor = view.cursor;
             let projection = view.projection;
             let memo = scope.create_memo(move |_| {
@@ -115,7 +126,7 @@ impl SelectionView {
             let rows = Arc::clone(&items);
             view.nodes.bind(scope, memo, move |value, scene, hits| {
                 if let Some((index, selected)) = value {
-                    let y = 140 + slot * 34;
+                    let y = 140 + slot * ROW_HEIGHT;
                     let bounds = Bounds {
                         x: 18,
                         y: y as i64 - 6,
@@ -314,6 +325,9 @@ impl SelectionView {
     pub fn dirty(&self) -> bool {
         self.nodes.dirty()
     }
+    pub fn contains_chart(&self, point: (f64, f64)) -> bool {
+        self.nodes.hit(point).is_some_and(|id| id.0 >= 100)
+    }
     /// Reuses retained packets in painter order, including forced scene restore.
     /// Failure leaves the view dirty so the coordinator cannot cache partial output.
     pub fn compose(
@@ -382,6 +396,39 @@ mod fixtures {
     }
     fn paints(view: &SelectionView) -> Vec<usize> {
         view.nodes.paints()
+    }
+    #[test]
+    fn retained_chart_admission_matches_painter_order_before_recomposition() {
+        let view = view(30);
+        let mut scene = Scene::with_capacity(960, 720, 64);
+        let mut hits = Vec::new();
+        view.compose(&mut scene, &mut hits).unwrap();
+        for point in [
+            (28.0, 140.0),
+            (500.0, 134.0),
+            (28.0, 166.0),
+            (28.0, 700.0),
+            (960.0, 140.0),
+            (f64::NAN, 140.0),
+        ] {
+            let hit = hits
+                .iter()
+                .rev()
+                .find(|(_, bounds)| bounds.contains(point))
+                .map(|(id, _)| *id);
+            assert_eq!(
+                view.contains_chart(point),
+                hit.is_some_and(|id| id.0 >= 100)
+            );
+        }
+        assert!(!view.contains_chart((500.0, 134.0))); // Search paints above the first row.
+        hits.clear();
+        assert!(view.contains_chart((28.0, 140.0)));
+        view.set_projection(vec![2, 8].into(), Some(0)).unwrap();
+        assert!(view.contains_chart((28.0, 174.0)));
+        assert!(!view.contains_chart((28.0, 208.0)));
+        view.set_projection(Arc::from([]), None).unwrap();
+        assert!(!view.contains_chart((28.0, 140.0)));
     }
     #[test]
     fn unchanged_state_and_unrelated_status_do_not_repaint_rows_or_buttons() {

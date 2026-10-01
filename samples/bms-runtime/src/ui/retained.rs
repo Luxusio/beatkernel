@@ -82,6 +82,19 @@ impl RetainedNodes {
     pub(crate) fn dirty(&self) -> bool {
         self.dirty.get()
     }
+    /// Retained packets remain valid when the coordinator clears click hits
+    /// pending redraw. Respect the same painter order as composition.
+    pub(crate) fn hit(&self, point: (f64, f64)) -> Option<ControlId> {
+        self.packets.iter().rev().find_map(|packet| {
+            packet
+                .borrow()
+                .hits
+                .iter()
+                .rev()
+                .find(|(_, bounds)| bounds.contains(point))
+                .map(|(id, _)| *id)
+        })
+    }
     /// Reuses existing packets for normal composition or forced scene restoration.
     /// Only successful complete composition clears dirty; errors remain explicit.
     pub(crate) fn compose(
