@@ -415,8 +415,9 @@ crossing holds, are excluded rather than fabricate prior input. Automatic BGM
 that still overlaps the position resumes from explicit original PCM ceiling
 frames; old gameplay keysound voices are not reconstructed.
 
-Recordings identify the filtered pristine section judge. Current standalone
-replay loading/rendering does not yet automatically infer that section from a
-full chart; matching section preparation is required, and full-chart ghost
-identity mismatches fail. Bounded loops, live scrubbing, pause/resume and historical
+Recordings identify the filtered pristine section judge and store positive
+original-song starts in v2 options. Standalone logical replay and recorded audio
+output reconstruct that section automatically from the original chart/assets.
+Ghosts require the same start; full-song and different-section identities fail.
+Zero-start v1 recordings remain supported. Bounded loops, live scrubbing, pause/resume and historical
 hold-state restoration remain player work. Acoustic restart acceptance is deferred.

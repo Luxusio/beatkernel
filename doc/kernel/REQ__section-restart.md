@@ -64,6 +64,23 @@ play-state restoration still requires the coordinated PCM/judge/anchor operation
 above. Each fresh native composition retains its actual presentation calibration,
 whose acoustic accuracy and repeatability remain deferred acceptance work.
 
+## Recorded practice sections
+
+Positive practice starts are stored as original song nanoseconds in versioned
+replay options. Logical replay reconstructs the same head-filtered chart from
+the original BMS; operation timestamps and judge offsets retain their original
+meaning. Zero-start recordings retain the existing v1 encoding. Competition
+requires identical section starts as well as identical chart and profile.
+Offline audio rendering selects overlapping music from original PCM and maps
+song time to output time by subtracting the recorded start exactly once before
+adding preroll. This restores fresh practice, not historical held-key state.
+Native recorded output uses the same preparation. Audio entrypoints require
+fresh original assets; the public preparation helper accepts explicit PCM caps,
+while app render/native output use 64 MiB per asset, 256 MiB total and 1295
+original assets, with the bounded section suffix allowance. Already selected
+PCM suffixes must not be passed as original assets. Execution acceptance remains
+deferred.
+
 ## BMS fresh practice start
 
 A nonnegative --start-ns in graphical native settings begins a fresh practice

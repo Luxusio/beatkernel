@@ -16,8 +16,9 @@ is unauthenticated with independent local starts. Source checks exist;
 actual socket exchange, gameplay and fixture execution remain deferred.
 Graphical retry source retains accepted invocation state and starts a fresh native
 session after cleanup, with independent recording stems. Configured fresh practice starts now retain original targets and select overlapping
-BGM suffixes; live scrubbing/loops, automatic section replay reconstruction and
-acoustic restart acceptance remain unfinished.
+BGM suffixes. Section recordings now store their original-song start and restore
+logical replay, matching ghosts and audio preparation from original assets in
+source. Live scrubbing/loops and acoustic restart acceptance remain unfinished.
 It records implementation locations, not independent review or phase acceptance.
 The [full-plan acceptance evidence](REQ__plan-acceptance-evidence.md) maps every
 §24 completion condition and §17 verification category to current source and

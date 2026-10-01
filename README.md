@@ -125,8 +125,9 @@ finished cleanup. The accepted chart/device/timing/roster options stay pinned;
 recorded retries use distinct .retry<N>.bkr stems and create-new saves.
 Settings PRACTICE START (NS) selects an original song position for fresh practice;
 F5 retries the selected start. Earlier note heads/crossing holds are excluded, and
-overlapping automatic BGM resumes from original PCM frames. Live scrubbing/loops
-and automatic standalone reconstruction of section recordings remain work.
+overlapping automatic BGM resumes from original PCM frames. Section recordings
+store their start for logical replay, matching ghosts and recorded audio output.
+Live scrubbing/loops remain work.
 F2 or Settings opens a bounded advanced draft editor for devices, buffers, timing,
 bindings and competition options. Apply validates through the existing native
 parser and updates the next session; Back discards. Missing device/binding
