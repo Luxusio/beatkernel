@@ -679,9 +679,22 @@ Selection rows show a nonempty artist below its title while retaining the same
 catalog identity, row hit bounds and projection-driven repaint. Empty artists
 retain one-line layout. Bitmap mode uses a smaller artist line; supplied-font
 mode uses two fixed-scale line origins within the existing row spacing.
-Known ceiling: arbitrary supplied fonts can overhang their declared metrics;
-text still clips to the viewport rather than each row. Per-row clipping and
-font shaping remain future widget work.
+Each selection title and artist clips to its own 15-pixel line band with
+10-pixel horizontal row padding; a title without artist uses the full 30-pixel
+row. Cropping adjusts texture UVs rather than stretching the glyph. Long text
+and font overhang cannot paint into the next line, row or outside row padding.
+The row's original hit bounds and retained repaint dependencies stay unchanged.
+Known ceiling: overhanging glyphs can be visibly cut at a line boundary; ellipsis,
+wrapping, shaping and fallback fonts remain future widget work.
+
+Portable sprite clipping uses an immutable checked rectangle with positive
+extents and representable endpoints, intersected with the scene viewport.
+Clip scope is explicit per draw, with no mutable renderer/scissor stack that can
+leak between sibling components. Original sprite/rect/glyph viewport behavior
+remains available. Prepared-font text checks cached metrics/positions before
+geometry writes and stops at the clip's right edge. Bitmap text uses the same
+cropped-UV path, including partial final glyphs. Rejected clips/UVs preserve
+geometry; the existing sticky scene capacity limit remains authoritative.
 
 Desktop `--title-font PATH` selects a caller-provided font for catalog titles and artists.
 Preparation reads at most 32 MiB, caches the first 1024 scalars of each title and artist

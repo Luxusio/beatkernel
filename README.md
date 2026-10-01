@@ -132,6 +132,9 @@ Native IME input supports search, settings values and profile paths. Composition
 previews stay separate from saved drafts; switching fields or leaving the active
 screen discards them. Existing bitmap glyph fallback still applies.
 Selection rows show artist metadata below the title when available.
+Titles and artists clip to separate line bands within the row, including
+cropped glyph textures at the edges. Long text stays inside the row padding;
+overhanging glyphs may be cut rather than wrapped or shortened with an ellipsis.
 Use `player --library DIR --title-font PATH` to draw catalog titles and artists with a
 caller-provided TrueType/OpenType font. Both use a fixed 14-pixel prepared
 atlas, uploaded once per renderer and rebuilt with its texture binding on
