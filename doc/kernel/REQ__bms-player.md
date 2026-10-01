@@ -781,7 +781,7 @@ missing relation. Once the physical marker is known, the observer retains the
 latest actual pair strictly below it for checked interpolation.
 This observer does not itself mutate Transport, drain inputs or restart owners;
 native lifecycle integration remains required.
-Linux solo playback may explicitly configure --end-ns strictly after --start-ns.
+Linux solo and local 2..64 playback may configure --end-ns strictly after --start-ns.
 It installs matching immutable logical/audio ends before gameplay. Rendered end
 stops additional BGM supply; actual native crossing, drained input and a safe lag
 watermark reaching the logical end are all required for finite prefix completion.
@@ -789,7 +789,12 @@ Original pre-boundary input remains valid; events at/after the terminal native
 host boundary cannot enter gameplay. Pending manual resume is reconciled first.
 Endpoint completion does not fabricate remaining holds, misses or full scores.
 Initial clock observation after an already-presented endpoint fails explicitly.
-Local groups/network and other platform endpoint connections remain required.
+For local groups every assigned device must drain, and the actual committed
+global input frontier must pass the terminal host boundary. A single backlogged
+device blocks advancement and completion. All members share one immutable end,
+output owner and Transport; independent player IDs/captures/scores remain intact.
+Remaining queued input strictly after the terminal frontier cannot enter gameplay.
+Network and other platform endpoint connections remain required.
 
 Directly unverifiable implementation paths need portable regression fixture
 source for later execution: exercise actual mixer/runtime/capture components,

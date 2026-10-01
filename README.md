@@ -155,10 +155,11 @@ The mixer now also accepts an immutable exclusive playback-frame end: a block
 crossing it renders only the active prefix and emits silence afterward. Checked
 loop-end mapping and native acknowledgement models support that boundary;
 live loop owners and judging still need to be connected to this exact fence.
-Linux solo owners can now explicitly opt into `--end-ns N`, strictly after
+Linux solo and local 2..64 owners can opt into `--end-ns N`, strictly after
 `--start-ns`, to use the immutable audio/judging ends and wait for actual native
 presentation plus drained input before finite-prefix completion. Manual pause
-and short resume retain their physical gaps. Local/network endpoint support and
+and short resume retain their physical gaps. Every assigned keyboard must drain
+and every member must reach the same logical end. Network endpoint support and
 Windows/macOS/UI practice-region wiring remain unfinished; loops above retain
 their observed-position ceiling. Portable regression fixtures are prepared for
 later execution, while native hardware/GUI/acoustic checks remain unverified.

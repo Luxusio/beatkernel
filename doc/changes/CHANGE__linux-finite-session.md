@@ -16,8 +16,8 @@ frozen voices/commands to drain nor fabricates remaining notes or full scores.
 Default playback still uses whole-song completion. Diagnostic cutoff and cancel
 can end earlier with a valid prefix.
 
-Known ceiling: this connection currently covers Linux solo without network
-competition; local cohorts, Windows/macOS and UI practice-region intent still
+Known ceiling: Linux solo and local cohorts now support finite playback without
+network competition; Windows/macOS and UI practice-region intent still
 need corresponding endpoint ownership. Those combinations reject the new finite
 option instead of silently ignoring it. A first actual clock observation after
 the endpoint was already presented cannot supply a missing lower bracket and
