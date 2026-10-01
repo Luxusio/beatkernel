@@ -57,6 +57,11 @@ type Spec = (&'static str, &'static str, &'static str);
 
 const COMMON: &[Spec] = &[
     (
+        "--start-ns",
+        "PRACTICE START (NS)",
+        "Empty starts the full song. Nonnegative original song position; earlier note heads are excluded.",
+    ),
+    (
         "--bind",
         "KEY BINDING",
         "Lane hex:HID usage hex, e.g. 11:04. Add one row per used lane.",

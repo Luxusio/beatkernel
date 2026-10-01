@@ -1521,6 +1521,13 @@ impl Desktop {
         let pixels = &mut self.scene;
         rect(pixels, 0, 0, WIDTH as i64, HEIGHT as i64, 0x10151e);
         text(pixels, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
+        if self.game.as_ref().is_some_and(|game| {
+            game.launch.args().chunks_exact(2).any(|pair| {
+                pair[0] == "--start-ns" && pair[1].parse::<i64>().is_ok_and(|start| start > 0)
+            })
+        }) {
+            text(pixels, 450, 26, "PRACTICE", 2, 0xd8b36b);
+        }
         if let Some(display) = &self.display {
             draw_display(
                 pixels,

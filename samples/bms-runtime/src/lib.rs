@@ -47,6 +47,8 @@ pub mod replay_render;
 /// Bounded platform-independent geometry for GPU presentation.
 #[cfg(feature = "graphics")]
 pub mod scene;
+/// Original-timeline chart and PCM preparation for fresh practice starts.
+pub mod section_start;
 /// Immutable native invocations and fresh-session retry naming.
 pub mod session_launch;
 /// Bounded native option drafts for off-thread application configuration.
