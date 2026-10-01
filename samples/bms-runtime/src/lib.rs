@@ -6,6 +6,9 @@ pub mod bgm;
 pub mod competition;
 /// Application competition options and native runtime observation.
 pub mod competition_live;
+/// Original bitmap glyph atlas data, prepared outside rendering callbacks.
+#[cfg(feature = "graphics")]
+pub mod font;
 /// Reusable asynchronous native/Web GPU presentation, separate from game I/O.
 #[cfg(feature = "graphics")]
 pub mod graphics;
@@ -28,6 +31,9 @@ pub mod replay_render;
 /// Bounded platform-independent geometry for GPU presentation.
 #[cfg(feature = "graphics")]
 pub mod scene;
+/// Validated portable raw texture resources.
+#[cfg(feature = "graphics")]
+pub mod texture;
 /// Atomic Design-style presentation compositions, independent of native I/O.
 #[cfg(feature = "graphics")]
 pub mod ui;
