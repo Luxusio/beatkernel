@@ -432,6 +432,7 @@ mod native {
         if let Some(capture) = capture.as_mut() {
             capture.record_report(&report)?;
         }
+        beatkernel_bms_runtime::player::publish_report(&report)?;
         if let Some(competition) = competition.as_mut() {
             competition.observe(&report)?;
         }
@@ -481,6 +482,10 @@ mod native {
                 physical: PhysicalControlId::keyboard(key),
                 game_control: GameControlId(u32::from(channel)),
             }))?;
+        beatkernel_bms_runtime::player::publish_chart(&prepared.source, &prepared.compiled.chart)?;
+        if beatkernel_bms_runtime::player::cancelled() {
+            return Ok(());
+        }
         let judge = JudgeEngine::new(
             prepared.compiled.chart,
             prepared.source.rules(),
@@ -603,7 +608,7 @@ mod native {
             let mut last_operation = host_origin;
             let mut last_progress = None;
             let pump_outcome = (|| -> Result<()> {
-                while Instant::now() < deadline {
+                while Instant::now() < deadline && !beatkernel_bms_runtime::player::cancelled() {
                     if let Some(pair) = observe(&stream, false)? {
                         discipline.observe_clock_pair(pair)?;
                     }

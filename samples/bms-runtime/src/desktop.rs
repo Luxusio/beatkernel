@@ -1,0 +1,678 @@
+//! Native main-thread presentation of snapshots from the actual gameplay owner.
+use beatkernel::judge::JudgeOutcome;
+use beatkernel_bms_runtime::ui::{
+    atoms::{rect, text},
+    organisms,
+};
+use beatkernel_bms_runtime::{
+    graphics::{self, BackendChoice, Presentation, Renderer},
+    scene::Scene,
+};
+use beatkernel_bms_runtime::{player, player_chart};
+use std::{
+    error::Error,
+    path::PathBuf,
+    sync::Arc,
+    thread::{self, JoinHandle},
+    time::{Duration, Instant},
+};
+use winit::{
+    application::ApplicationHandler,
+    dpi::LogicalSize,
+    event::{ElementState, WindowEvent},
+    event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
+    window::{Window, WindowId},
+};
+
+const WIDTH: usize = 960;
+const HEIGHT: usize = 720;
+type Native = fn(&[String]) -> Result<(), Box<dyn Error>>;
+
+struct Options {
+    native: Vec<String>,
+    library: Option<PathBuf>,
+    chart: Option<PathBuf>,
+    lookahead: i64,
+    fps: usize,
+    backend: BackendChoice,
+    presentation: Presentation,
+}
+impl Options {
+    fn parse(args: &[String]) -> Result<Self, Box<dyn Error>> {
+        let mut options = Self {
+            native: Vec::new(),
+            library: None,
+            chart: None,
+            lookahead: 2_000_000_000,
+            fps: 120,
+            backend: BackendChoice::Auto,
+            presentation: Presentation::Fifo,
+        };
+        let mut index = 0;
+        let mut seen_fps = false;
+        let mut seen_lookahead = false;
+        let mut seen_backend = false;
+        let mut seen_present = false;
+        while index < args.len() {
+            let flag = args[index].as_str();
+            let value = args
+                .get(index + 1)
+                .ok_or("desktop/native option requires a value")?;
+            if matches!(
+                flag,
+                "--library" | "--ui-lookahead-ms" | "--ui-fps" | "--gpu-backend" | "--present"
+            ) {
+                match flag {
+                    "--library" => {
+                        if value.is_empty() {
+                            return Err("--library path cannot be empty".into());
+                        }
+                        if options.library.replace(PathBuf::from(value)).is_some() {
+                            return Err("duplicate --library".into());
+                        }
+                    }
+                    "--ui-lookahead-ms" => {
+                        if seen_lookahead {
+                            return Err("duplicate --ui-lookahead-ms".into());
+                        }
+                        seen_lookahead = true;
+                        let millis: i64 = value.parse()?;
+                        if !(100..=10_000).contains(&millis) {
+                            return Err("--ui-lookahead-ms must be 100..10000".into());
+                        }
+                        options.lookahead = millis * 1_000_000;
+                    }
+                    "--gpu-backend" => {
+                        if seen_backend {
+                            return Err("duplicate --gpu-backend".into());
+                        }
+                        seen_backend = true;
+                        options.backend = value.parse()?;
+                    }
+                    "--present" => {
+                        if seen_present {
+                            return Err("duplicate --present".into());
+                        }
+                        seen_present = true;
+                        options.presentation = value.parse()?;
+                    }
+                    _ => {
+                        if seen_fps {
+                            return Err("duplicate --ui-fps".into());
+                        }
+                        seen_fps = true;
+                        options.fps = value.parse()?;
+                        if !(30..=240).contains(&options.fps) {
+                            return Err("--ui-fps must be 30..240".into());
+                        }
+                    }
+                }
+                index += 2;
+            } else {
+                if flag == "--chart" {
+                    if value.is_empty() {
+                        return Err("--chart path cannot be empty".into());
+                    }
+                    if options.chart.replace(PathBuf::from(value)).is_some() {
+                        return Err("duplicate --chart".into());
+                    }
+                }
+                options.native.extend_from_slice(&args[index..index + 2]);
+                index += 2;
+            }
+        }
+        if options.library.is_some() == options.chart.is_some() {
+            return Err("choose exactly one of --library DIR or --chart PATH".into());
+        }
+        Ok(options)
+    }
+}
+
+struct Entry {
+    path: PathBuf,
+    title: String,
+    artist: String,
+}
+struct Game {
+    viewer: player::PlayerViewer,
+    worker: Option<JoinHandle<Result<(), String>>>,
+    snapshot: Option<player::PlayerSnapshot>,
+    cancelling: bool,
+    joined: bool,
+}
+
+impl Drop for Game {
+    fn drop(&mut self) {
+        if let Some(worker) = self.worker.take() {
+            self.viewer.cancel();
+            let _ = worker.join();
+        }
+    }
+}
+
+pub(super) fn run(args: &[String], native: Native) -> Result<(), Box<dyn Error>> {
+    if args.len() == 1 && args[0] == "--help" {
+        println!("player (--library DIR | --chart PATH) [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nPass explicit native backend/device/rate/buffer/binding options as flag-value pairs.\nUp/Down: select; Enter: play/return; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options.");
+        return Ok(());
+    }
+    let options = Options::parse(args)?;
+    let (entries, diagnostics) = if let Some(root) = &options.library {
+        let library = match player_chart::scan_library(root) {
+            Ok(library) => library,
+            Err(error) => player_chart::ChartLibrary {
+                entries: Vec::new(),
+                diagnostics: vec![error.to_string()],
+            },
+        };
+        (
+            library
+                .entries
+                .into_iter()
+                .map(|entry| Entry {
+                    path: entry.path,
+                    title: entry.title,
+                    artist: entry.artist,
+                })
+                .collect::<Vec<_>>(),
+            library.diagnostics,
+        )
+    } else {
+        let path = options
+            .chart
+            .as_ref()
+            .expect("validated chart selection")
+            .clone();
+        let title = path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy()
+            .into_owned();
+        (
+            vec![Entry {
+                path,
+                title,
+                artist: String::new(),
+            }],
+            Vec::<String>::new(),
+        )
+    };
+    let event_loop = EventLoop::new()?;
+    let mut app = Desktop {
+        options,
+        native,
+        entries,
+        diagnostics,
+        selected: 0,
+        window: None,
+        renderer: None,
+        instance: None,
+        scene: Scene::new(WIDTH as u32, HEIGHT as u32),
+        game: None,
+        closing: false,
+        active: false,
+        occluded: false,
+        suspended: false,
+        failure: None,
+        fatal: None,
+        next_frame: Instant::now(),
+    };
+    event_loop.run_app(&mut app)?;
+    if let Some(error) = app.fatal {
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+struct Desktop {
+    options: Options,
+    native: Native,
+    entries: Vec<Entry>,
+    diagnostics: Vec<String>,
+    selected: usize,
+    window: Option<Arc<Window>>,
+    renderer: Option<Renderer>,
+    instance: Option<wgpu::Instance>,
+    scene: Scene,
+    game: Option<Game>,
+    closing: bool,
+    active: bool,
+    occluded: bool,
+    suspended: bool,
+    failure: Option<String>,
+    fatal: Option<String>,
+    next_frame: Instant,
+}
+impl Desktop {
+    fn cancel(&mut self) {
+        if let Some(game) = &mut self.game {
+            if !game.joined {
+                game.viewer.cancel();
+                game.cancelling = true;
+            }
+        }
+    }
+    fn fail(&mut self, error: impl ToString) {
+        self.fatal = Some(error.to_string());
+        self.closing = true;
+        self.cancel();
+    }
+    fn collect_game(&mut self) {
+        if let Some(game) = &mut self.game {
+            if let Some(snapshot) = game.viewer.take_latest() {
+                if let (Some(window), Some(chart)) = (&self.window, &snapshot.chart) {
+                    window.set_title(&window_title(&chart.title, &chart.artist));
+                }
+                game.snapshot = Some(snapshot);
+            }
+            if !game.joined
+                && game
+                    .worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.is_finished())
+            {
+                let result = game
+                    .worker
+                    .take()
+                    .expect("active game worker")
+                    .join()
+                    .unwrap_or_else(|_| Err("game worker panicked".into()));
+                if let Some(snapshot) = game.viewer.take_latest() {
+                    game.snapshot = Some(snapshot);
+                }
+                if let Err(error) = result {
+                    self.failure = Some(error);
+                }
+                game.joined = true;
+            }
+        }
+    }
+    fn key(&mut self, key: KeyCode, repeat: bool) {
+        if !self.active || self.closing {
+            return;
+        }
+        if self.game.as_ref().is_some_and(|game| game.joined) {
+            if !repeat && matches!(key, KeyCode::Enter | KeyCode::Escape) {
+                self.game = None;
+                self.failure = None;
+                if let Some(window) = &self.window {
+                    window.set_title("BeatKernel BMS player");
+                }
+            }
+        } else if self.game.is_some() {
+            if key == KeyCode::Escape && !repeat {
+                self.cancel();
+            }
+        } else {
+            match key {
+                KeyCode::Escape if !repeat => self.closing = true,
+                KeyCode::ArrowUp => self.selected = self.selected.saturating_sub(1),
+                KeyCode::ArrowDown if !self.entries.is_empty() => {
+                    self.selected = (self.selected + 1).min(self.entries.len() - 1)
+                }
+                KeyCode::Enter if !repeat && !self.entries.is_empty() => {
+                    if let Err(error) = self.start() {
+                        self.failure = Some(error);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    fn start(&mut self) -> Result<(), String> {
+        let entry = &self.entries[self.selected];
+        let mut args = self.options.native.clone();
+        if self.options.library.is_some() {
+            args.push("--chart".into());
+            args.push(
+                entry
+                    .path
+                    .to_str()
+                    .ok_or("native chart path must be UTF-8")?
+                    .into(),
+            );
+        }
+        let (publisher, viewer) = player::channel();
+        let native = self.native;
+        let worker = thread::Builder::new()
+            .name("bms-game".into())
+            .spawn(move || {
+                player::with_publisher(publisher, || {
+                    native(&args).map_err(|error| error.to_string())
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        if let Some(window) = &self.window {
+            window.set_title(&window_title(&entry.title, &entry.artist));
+        }
+        self.failure = None;
+        self.game = Some(Game {
+            viewer,
+            worker: Some(worker),
+            snapshot: None,
+            cancelling: false,
+            joined: false,
+        });
+        Ok(())
+    }
+    fn draw(&mut self) -> Result<(), String> {
+        self.scene.clear();
+        let pixels = &mut self.scene;
+        rect(pixels, 0, 0, WIDTH as i64, HEIGHT as i64, 0x10151e);
+        text(pixels, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
+        if let Some(game) = &self.game {
+            draw_game(pixels, game, self.options.lookahead)?;
+        } else {
+            text(
+                pixels,
+                24,
+                65,
+                "UP/DOWN SELECT   ENTER PLAY   ESC EXIT",
+                2,
+                0x9bb1cf,
+            );
+            text(
+                pixels,
+                24,
+                96,
+                &format!(
+                    "{} CHARTS   {} SCAN DIAGNOSTICS",
+                    self.entries.len(),
+                    self.diagnostics.len()
+                ),
+                2,
+                0xd8b36b,
+            );
+            let first = self.selected.saturating_sub(8);
+            for (row, entry) in self.entries.iter().enumerate().skip(first).take(15) {
+                let y = 140 + (row - first) * 34;
+                if row == self.selected {
+                    rect(pixels, 18, y as i64 - 6, 924, 30, 0x263d59);
+                }
+                text(pixels, 28, y, &entry.title, 2, 0xf0f4ff);
+            }
+            for (index, diagnostic) in self.diagnostics.iter().take(2).enumerate() {
+                text(pixels, 24, 654 + index * 22, diagnostic, 1, 0xd8b36b);
+            }
+            if self.entries.is_empty() {
+                text(pixels, 24, 150, "NO SUPPORTED CHARTS FOUND", 2, 0xff8e8e);
+            }
+        }
+        if let Some(error) = &self.failure {
+            text(
+                pixels,
+                24,
+                650,
+                "ERROR - ENTER RETURNS TO SELECTION",
+                2,
+                0xff8e8e,
+            );
+            text(pixels, 24, 682, error, 1, 0xffaaaa);
+        }
+        if let Some(renderer) = &mut self.renderer {
+            renderer.render(&self.scene)?;
+            if renderer.needs_surface_recreation() {
+                let instance = self.instance.as_ref().ok_or("missing GPU instance")?;
+                let window = self
+                    .window
+                    .as_ref()
+                    .ok_or("missing window for surface recreation")?;
+                let surface = instance
+                    .create_surface(window.clone())
+                    .map_err(|error| error.to_string())?;
+                renderer.replace_surface(surface)?;
+            }
+        }
+        Ok(())
+    }
+}
+impl ApplicationHandler for Desktop {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.closing {
+            return;
+        }
+        self.suspended = false;
+        if self.window.is_none() {
+            match event_loop.create_window(
+                Window::default_attributes()
+                    .with_title("BeatKernel BMS player")
+                    .with_inner_size(LogicalSize::new(WIDTH as f64, HEIGHT as f64)),
+            ) {
+                Ok(window) => self.window = Some(Arc::new(window)),
+                Err(error) => {
+                    self.fail(error);
+                    return;
+                }
+            }
+        }
+        if self.renderer.is_none() {
+            let window = self.window.as_ref().expect("created window").clone();
+            // Native startup only. Reusable Renderer::new stays async for WASM hosts.
+            let result = (|| -> Result<(wgpu::Instance, Renderer), String> {
+                let instance = graphics::instance(self.options.backend)?;
+                let surface = instance
+                    .create_surface(window.clone())
+                    .map_err(|error| error.to_string())?;
+                let mut renderer = pollster::block_on(Renderer::new(
+                    surface,
+                    &instance,
+                    self.options.presentation,
+                ))?;
+                let size = window.inner_size();
+                renderer.resize(size.width, size.height)?;
+                Ok((instance, renderer))
+            })();
+            match result {
+                Ok((instance, renderer)) => {
+                    self.instance = Some(instance);
+                    self.renderer = Some(renderer);
+                }
+                Err(error) => {
+                    self.fail(error);
+                    return;
+                }
+            }
+        }
+        self.next_frame = Instant::now();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.suspended = true;
+        self.active = false;
+        self.cancel();
+        self.renderer = None;
+        self.instance = None;
+    }
+    fn window_event(&mut self, _event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        if self.window.as_ref().is_none_or(|window| window.id() != id) {
+            return;
+        }
+        match event {
+            WindowEvent::CloseRequested => {
+                self.closing = true;
+                self.cancel();
+            }
+            WindowEvent::Destroyed => {
+                self.closing = true;
+                self.cancel();
+                self.renderer = None;
+                self.window = None;
+            }
+            WindowEvent::Focused(active) => {
+                self.active = active;
+                if !active {
+                    self.cancel();
+                }
+            }
+            WindowEvent::Occluded(occluded) => self.occluded = occluded,
+            WindowEvent::Resized(size) => {
+                if let Some(renderer) = &mut self.renderer {
+                    if let Err(error) = renderer.resize(size.width, size.height) {
+                        self.fail(error);
+                    }
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                if let PhysicalKey::Code(key) = event.physical_key {
+                    self.key(key, event.repeat);
+                }
+            }
+            WindowEvent::RedrawRequested if !self.suspended && !self.closing && !self.occluded => {
+                self.collect_game();
+                if let Err(error) = self.draw() {
+                    self.fail(error);
+                }
+                self.next_frame =
+                    Instant::now() + Duration::from_secs_f64(1.0 / self.options.fps as f64);
+            }
+            _ => {}
+        }
+    }
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.collect_game();
+        if self.closing && self.game.as_ref().is_none_or(|game| game.joined) {
+            event_loop.exit();
+            return;
+        }
+        if self.closing || self.suspended || self.occluded {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + Duration::from_millis(4),
+            ));
+        } else {
+            if Instant::now() >= self.next_frame {
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                // Avoid a busy event loop before the queued redraw is dispatched.
+                self.next_frame =
+                    Instant::now() + Duration::from_secs_f64(1.0 / self.options.fps as f64);
+            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+        }
+    }
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.cancel();
+        // Unexpected OS exit still joins native owners through Game::drop.
+        self.game = None;
+    }
+}
+
+fn window_title(title: &str, artist: &str) -> String {
+    format!("{title} — {artist} — BeatKernel")
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(256)
+        .collect()
+}
+
+fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), String> {
+    let Some(snapshot) = &game.snapshot else {
+        text(pixels, 24, 80, "LOADING - ESC CANCEL", 2, 0x9bb1cf);
+        return Ok(());
+    };
+    let status = if game.cancelling && !game.joined {
+        "STOPPING"
+    } else if game.joined {
+        "RESULTS - ENTER RETURNS TO SELECTION"
+    } else {
+        match &snapshot.status {
+            player::PlayerStatus::Loading => "LOADING",
+            player::PlayerStatus::Playing => "PLAYING - ESC CANCEL",
+            player::PlayerStatus::Stopping => "STOPPING",
+            player::PlayerStatus::Finished => "FINISHING CLEANUP",
+            player::PlayerStatus::Failed(_) => "FAILED - CLEANING UP",
+        }
+    };
+    text(pixels, 24, 65, status, 2, 0x9bb1cf);
+    organisms::scoreboard(pixels, &snapshot.score, &snapshot.recent_results);
+    if let (Some(chart), Some(now)) = (&snapshot.chart, snapshot.song_time) {
+        organisms::playfield(pixels, chart, now, lookahead)?;
+        text(
+            pixels,
+            24,
+            665,
+            &format!("SONG {:.3} S", now.as_nanos() as f64 / 1e9),
+            2,
+            0x9bb1cf,
+        );
+        if let Some(event) = snapshot.last_judge {
+            if (i128::from(now.as_nanos()) - i128::from(event.at.as_nanos())).abs() <= 700_000_000 {
+                let (label, color) = match event.outcome {
+                    JudgeOutcome::Hit { grade, delta } => (
+                        format!("HIT G{} {:+.2} MS", grade.0, delta.as_nanos() as f64 / 1e6),
+                        0x74e5c5,
+                    ),
+                    JudgeOutcome::Miss { .. } => ("MISS".into(), 0xff8e8e),
+                };
+                text(pixels, 160, 550, &label, 2, color);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn ui_options_leave_native_device_configuration_intact() {
+        let args = [
+            "--library",
+            "charts",
+            "--ui-fps",
+            "60",
+            "--device",
+            "17",
+            "--buffer",
+            "128",
+            "--bind",
+            "A:1",
+        ]
+        .map(String::from);
+        let options = Options::parse(&args).unwrap();
+        assert_eq!(
+            options.native,
+            ["--device", "17", "--buffer", "128", "--bind", "A:1"]
+        );
+        assert_eq!(options.fps, 60);
+        let reserved_value = ["--chart", "--ui-fps", "--device", "--library"].map(String::from);
+        assert_eq!(
+            Options::parse(&reserved_value).unwrap().native,
+            reserved_value
+        );
+        for args in [
+            vec!["--chart", ""],
+            vec!["--library", ""],
+            vec!["--chart", "a", "--ui-fps", "60", "--ui-fps", "120"],
+            vec![
+                "--chart",
+                "a",
+                "--ui-lookahead-ms",
+                "100",
+                "--ui-lookahead-ms",
+                "200",
+            ],
+        ] {
+            assert!(
+                Options::parse(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err()
+            );
+        }
+        assert!(Options::parse(&[
+            "--library".into(),
+            "charts".into(),
+            "--chart".into(),
+            "song.bms".into()
+        ])
+        .is_err());
+    }
+    #[test]
+    fn native_title_keeps_unicode_but_removes_control_characters_and_bounds_size() {
+        assert!(window_title("곡\0제목", "아티스트").contains("곡제목"));
+        assert!(!window_title("bad\nname", "\0")
+            .chars()
+            .any(char::is_control));
+        assert_eq!(window_title(&"A".repeat(1024), "").chars().count(), 256);
+    }
+}

@@ -1,5 +1,7 @@
 //! Unified BMS application; legacy positional arguments retain offline rendering.
 mod app;
+#[cfg(feature = "desktop")]
+mod desktop;
 #[allow(dead_code)]
 #[path = "bin/linux_bms.rs"]
 mod linux_play;

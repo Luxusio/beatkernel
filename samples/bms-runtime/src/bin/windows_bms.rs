@@ -590,21 +590,17 @@ mod native {
 
     impl Window {
         fn new() -> Result<Self> {
-            Self::with_visibility(true)
+            Self::with_visibility(!beatkernel_bms_runtime::player::attached(), "Input")
         }
         #[cfg(feature = "asio-sdk")]
         pub(super) fn hidden() -> Result<Self> {
-            Self::with_visibility(false)
+            Self::with_visibility(false, "AsioSysref")
         }
-        fn with_visibility(visible: bool) -> Result<Self> {
-            let class: Vec<u16> = format!(
-                "BeatKernelBms{}{}",
-                std::process::id(),
-                if visible { "Input" } else { "AsioSysref" }
-            )
-            .encode_utf16()
-            .chain(Some(0))
-            .collect();
+        fn with_visibility(visible: bool, role: &str) -> Result<Self> {
+            let class: Vec<u16> = format!("BeatKernelBms{}{}", std::process::id(), role)
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
             // SAFETY: documented null query gets this executable's module.
             let instance = unsafe { GetModuleHandleW(ptr::null()) };
             if instance.is_null() {
@@ -843,6 +839,7 @@ mod native {
         if let Some(capture) = capture.as_mut() {
             capture.record_report(&report)?;
         }
+        beatkernel_bms_runtime::player::publish_report(&report)?;
         if let Some(competition) = competition.as_mut() {
             competition.observe(&report)?;
         }
@@ -905,6 +902,10 @@ mod native {
                 physical: PhysicalControlId::keyboard(usage),
                 game_control: GameControlId(u32::from(channel)),
             }))?;
+        beatkernel_bms_runtime::player::publish_chart(&prepared.source, &prepared.compiled.chart)?;
+        if beatkernel_bms_runtime::player::cancelled() {
+            return Ok(());
+        }
         let rules = prepared.source.rules();
         let judge = JudgeEngine::new(
             prepared.compiled.chart,
@@ -1021,7 +1022,7 @@ mod native {
             )?;
             let deadline = Instant::now() + WallDuration::from_secs(options.seconds);
             let mut last_progress_second = None;
-            'pump: while Instant::now() < deadline {
+            'pump: while Instant::now() < deadline && !beatkernel_bms_runtime::player::cancelled() {
                 // Missing/degraded readings can skip only while real progressing
                 // observations stay fresh. Terminal/native chronology errors stop.
                 let _admission = stream.observe(&mut discipline)?;

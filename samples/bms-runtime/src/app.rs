@@ -10,8 +10,7 @@ use std::{fs::File, path::Path};
 
 pub(super) fn run(args: &[String]) -> Result<()> {
     let Some(command) = args.first() else {
-        help();
-        return Ok(());
+        return desktop(&["--library".into(), ".".into()]);
     };
     let rest = &args[1..];
     match command.as_str() {
@@ -20,6 +19,7 @@ pub(super) fn run(args: &[String]) -> Result<()> {
             Ok(())
         }
         "play" => play(rest),
+        "player" => desktop(rest),
         "replay" => crate::replay_tool::run_args(rest),
         "play-replay" => crate::replay_player::run_args(rest),
         "render-replay" => crate::replay_renderer::run_args(rest),
@@ -35,6 +35,7 @@ pub(super) fn run(args: &[String]) -> Result<()> {
 fn help() {
     println!("BeatKernel BMS application\n\
 play [native options] [--ghost-self REPLAY] [--ghost-other REPLAY] [--mp-host IP:PORT | --mp-join IP:PORT] [--mp-timeout-ms N]\n\
+player [--library DIR | --chart PATH] [native options] [--ui-lookahead-ms N] [--ui-fps N]  Graphical player\n\
 replay [--chart PATH --replay PATH ...]                  Inspect recorded play\n\
 play-replay [native replay output options]             Play recorded sounds\n\
 render CHART NEW_OUTPUT SECONDS RATE [CHANNELS]         Offline synthetic render\n\
@@ -42,6 +43,18 @@ render-replay [recorded PCM output options]            Render recorded sounds\n\
 compete --chart PATH --local-replay PATH [--ghost-self PATH] [--ghost-other PATH] [--song-ns N]\n\
 Use MODE --help for mode options. play selects this OS's native backend options.\n\
 Saved opponents require the same compiled chart and judging profile. Multiplayer is two-peer casual progress exchange; song starts are local and scores are self-reported.");
+}
+
+fn desktop(args: &[String]) -> Result<()> {
+    #[cfg(feature = "desktop")]
+    {
+        crate::desktop::run(args, native)
+    }
+    #[cfg(not(feature = "desktop"))]
+    {
+        let _ = args;
+        Err("graphical player requires the desktop Cargo feature; use --features desktop or select --help for headless modes".into())
+    }
 }
 
 fn play(args: &[String]) -> Result<()> {
