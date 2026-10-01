@@ -86,6 +86,53 @@ impl PracticeStart {
             .map_err(|_| "practice start exceeds nonnegative i64 nanoseconds")?;
         Ok(Self(nanos))
     }
+    /// Reads the optional original-song end. Empty retains unlimited playback.
+    pub fn section_end(settings: &NativeSettings) -> Result<Option<Self>, String> {
+        let value = &settings
+            .fields()
+            .iter()
+            .find(|field| field.flag == "--end-ns")
+            .ok_or("practice end setting unavailable")?
+            .value;
+        if value.is_empty() {
+            return Ok(None);
+        }
+        let nanos = i64::try_from(decimal(value)?)
+            .map_err(|_| "practice end exceeds nonnegative i64 nanoseconds")?;
+        Self::from_nanoseconds(nanos).map(Some)
+    }
+    /// Validates and commits both section fields together; no partial draft write.
+    pub fn apply_section(
+        self,
+        end: Option<Self>,
+        settings: &mut NativeSettings,
+    ) -> Result<(), String> {
+        if let Some(end) = end {
+            crate::practice_loop::PracticeLoop::new(self, end)?;
+        }
+        let mut candidate = settings.clone();
+        let start_index = candidate
+            .fields()
+            .iter()
+            .position(|field| field.flag == "--start-ns")
+            .ok_or("practice start setting unavailable")?;
+        let index = candidate
+            .fields()
+            .iter()
+            .position(|field| field.flag == "--end-ns")
+            .ok_or("practice end setting unavailable")?;
+        // Release both old values first so only the final section is subject to
+        // the byte ceiling; replacing a full draft must not fail transiently.
+        candidate.set_value(start_index, "")?;
+        candidate.set_value(index, "")?;
+        self.apply_to(&mut candidate)?;
+        candidate.set_value(
+            index,
+            &end.map_or_else(String::new, |end| end.nanoseconds().to_string()),
+        )?;
+        *settings = candidate;
+        Ok(())
+    }
     pub const fn nanoseconds(self) -> i64 {
         self.0
     }
@@ -132,6 +179,151 @@ fn decimal(value: &str) -> Result<u64, String> {
 mod fixtures {
     use super::*;
     use crate::settings::{MAX_VALUE_BYTES, SettingsHost};
+    #[test]
+    fn section_updates_both_endpoints_and_preserves_unrelated_settings_on_every_host() {
+        for host in [
+            SettingsHost::Linux,
+            SettingsHost::Windows,
+            SettingsHost::Macos,
+        ] {
+            let mut settings = NativeSettings::from_args(
+                &[
+                    "--bind".into(),
+                    "11:04".into(),
+                    "--bind".into(),
+                    "12:05".into(),
+                    "--preroll-ns".into(),
+                    "1000000000".into(),
+                ],
+                host,
+            )
+            .unwrap();
+            let unrelated = |settings: &NativeSettings| {
+                settings
+                    .native_args()
+                    .chunks_exact(2)
+                    .filter(|p| !matches!(p[0].as_str(), "--start-ns" | "--end-ns"))
+                    .flat_map(|p| p.iter().cloned())
+                    .collect::<Vec<_>>()
+            };
+            let original = unrelated(&settings);
+            assert_eq!(PracticeStart::section_end(&settings).unwrap(), None);
+            for (start, end) in [
+                (1, 2),
+                (72_000_000_000_000, 72_000_000_000_001),
+                (604_800_000_000_000, 604_800_000_000_001),
+                (i64::MAX - 1, i64::MAX),
+            ] {
+                let start = PracticeStart::from_nanoseconds(start).unwrap();
+                let end = PracticeStart::from_nanoseconds(end).unwrap();
+                start.apply_section(Some(end), &mut settings).unwrap();
+                assert_eq!(PracticeStart::from_settings(&settings).unwrap(), start);
+                assert_eq!(PracticeStart::section_end(&settings).unwrap(), Some(end));
+                assert_eq!(unrelated(&settings), original);
+            }
+            PracticeStart::from_nanoseconds(7)
+                .unwrap()
+                .apply_section(None, &mut settings)
+                .unwrap();
+            assert_eq!(PracticeStart::section_end(&settings).unwrap(), None);
+            assert_eq!(
+                PracticeStart::from_settings(&settings)
+                    .unwrap()
+                    .nanoseconds(),
+                7
+            );
+            assert_eq!(unrelated(&settings), original);
+        }
+    }
+    #[test]
+    fn section_replacement_reuses_old_endpoint_bytes_at_full_draft_capacity() {
+        let mut settings = NativeSettings::from_args(
+            &["--end-ns".into(), i64::MAX.to_string()],
+            SettingsHost::Linux,
+        )
+        .unwrap();
+        for i in 0..16 {
+            let row = settings.add_binding().unwrap();
+            settings
+                .set_value(
+                    row,
+                    &"x".repeat(MAX_VALUE_BYTES - if i == 15 { 19 } else { 0 }),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            settings
+                .fields()
+                .iter()
+                .map(|field| field.value.len())
+                .sum::<usize>(),
+            crate::settings::MAX_TOTAL_BYTES
+        );
+        PracticeStart::from_nanoseconds(i64::MAX)
+            .unwrap()
+            .apply_section(None, &mut settings)
+            .unwrap();
+        assert_eq!(PracticeStart::section_end(&settings).unwrap(), None);
+        assert_eq!(
+            PracticeStart::from_settings(&settings)
+                .unwrap()
+                .nanoseconds(),
+            i64::MAX
+        );
+        assert_eq!(
+            settings
+                .fields()
+                .iter()
+                .map(|field| field.value.len())
+                .sum::<usize>(),
+            crate::settings::MAX_TOTAL_BYTES
+        );
+    }
+    #[test]
+    fn section_rejection_and_second_field_byte_failure_are_atomic() {
+        let mut settings = NativeSettings::from_args(&[], SettingsHost::Linux).unwrap();
+        let start = PracticeStart::from_nanoseconds(10).unwrap();
+        let before = settings.native_args();
+        for end in [0, 9, 10] {
+            assert!(
+                start
+                    .apply_section(
+                        Some(PracticeStart::from_nanoseconds(end).unwrap()),
+                        &mut settings
+                    )
+                    .is_err()
+            );
+            assert_eq!(settings.native_args(), before);
+        }
+        let end_index = settings
+            .fields()
+            .iter()
+            .position(|field| field.flag == "--end-ns")
+            .unwrap();
+        for value in ["-1", "+1", "1.0", "9223372036854775808"] {
+            settings.set_value(end_index, value).unwrap();
+            assert!(PracticeStart::section_end(&settings).is_err());
+        }
+        settings.set_value(end_index, "").unwrap();
+        for index in 0..16 {
+            let row = settings.add_binding().unwrap();
+            settings
+                .set_value(row, &"x".repeat(MAX_VALUE_BYTES - usize::from(index == 15)))
+                .unwrap();
+        }
+        let before = settings.native_args();
+        assert!(
+            PracticeStart::from_nanoseconds(1)
+                .unwrap()
+                .apply_section(
+                    Some(PracticeStart::from_nanoseconds(2).unwrap()),
+                    &mut settings
+                )
+                .is_err()
+        );
+        assert_eq!(settings.native_args(), before); // First field would fit; second does not.
+    }
+
     #[test]
     fn observed_integer_positions_remain_exact_through_display_and_settings() {
         let mut settings = NativeSettings::from_args(&[], SettingsHost::Linux).unwrap();
