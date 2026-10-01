@@ -38,6 +38,8 @@ pub mod player;
 pub mod player_chart;
 #[cfg(feature = "graphics")]
 mod playfield_gpu;
+/// Exact original-song practice positions and native-setting draft updates.
+pub mod practice;
 /// Portable display configuration shared by CLI, graphical drafts and profiles.
 pub mod presentation_settings;
 /// Bounded saved-record discovery and chart/profile-compatible prefix previews.

@@ -6,6 +6,7 @@ pub enum ScreenRoute {
     Selection,
     Settings,
     Display,
+    Practice,
     Records,
     Players,
     Devices { players: bool },
@@ -19,6 +20,7 @@ pub enum ScreenKind {
     Selection,
     Settings,
     Display,
+    Practice,
     Records,
     Players,
     Devices,
@@ -30,9 +32,11 @@ impl ScreenRoute {
     /// retry requires its explicit edge and a joined game owner.
     pub const fn parent(self) -> Option<Self> {
         match self {
-            Self::Display | Self::Records | Self::Players | Self::Devices { players: false } => {
-                Some(Self::Settings)
-            }
+            Self::Display
+            | Self::Practice
+            | Self::Records
+            | Self::Players
+            | Self::Devices { players: false } => Some(Self::Settings),
             Self::Settings => Some(Self::Selection),
             Self::Devices { players: true } => Some(Self::Players),
             Self::Results { replay } => Some(Self::Play { replay }),
@@ -48,6 +52,7 @@ impl ScreenRoute {
             Self::Selection => Some(ScreenKind::Selection),
             Self::Settings => Some(ScreenKind::Settings),
             Self::Display => Some(ScreenKind::Display),
+            Self::Practice => Some(ScreenKind::Practice),
             Self::Records => Some(ScreenKind::Records),
             Self::Players => Some(ScreenKind::Players),
             Self::Devices { .. } => Some(ScreenKind::Devices),
@@ -176,12 +181,14 @@ impl ScreenNavigator {
                 ScreenRoute::Settings,
                 ScreenRoute::Selection
                 | ScreenRoute::Display
+                | ScreenRoute::Practice
                 | ScreenRoute::Records
                 | ScreenRoute::Players
                 | ScreenRoute::Devices { players: false },
             )
             | (
                 ScreenRoute::Display
+                | ScreenRoute::Practice
                 | ScreenRoute::Records
                 | ScreenRoute::Players
                 | ScreenRoute::Devices { players: false },
@@ -277,6 +284,7 @@ mod fixtures {
     fn immediate_parents_and_retained_ancestry_are_exact() {
         for child in [
             ScreenRoute::Display,
+            ScreenRoute::Practice,
             ScreenRoute::Records,
             ScreenRoute::Players,
             ScreenRoute::Devices { players: false },
@@ -310,6 +318,7 @@ mod fixtures {
             ScreenKind::Selection,
             ScreenKind::Settings,
             ScreenKind::Display,
+            ScreenKind::Practice,
             ScreenKind::Records,
             ScreenKind::Players,
             ScreenKind::Devices,
@@ -334,6 +343,7 @@ mod fixtures {
         );
         for child in [
             ScreenRoute::Display,
+            ScreenRoute::Practice,
             ScreenRoute::Records,
             ScreenRoute::Players,
             ScreenRoute::Devices { players: false },
