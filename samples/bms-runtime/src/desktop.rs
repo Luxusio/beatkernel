@@ -173,7 +173,7 @@ struct Game {
 
 impl Game {
     fn pause_target(&self) -> Option<bool> {
-        if self.replay || self.joined || self.cancelling || self.prepared_retry.is_some() {
+        if self.joined || self.cancelling || self.prepared_retry.is_some() {
             return None;
         }
         let snapshot = self.snapshot.as_ref()?;
@@ -2280,7 +2280,7 @@ impl Desktop {
         self.invalidate_hits();
     }
     fn toggle_pause(&mut self) {
-        if !self.ui_ready() || self.navigator.route() != (ScreenRoute::Play { replay: false }) {
+        if !self.ui_ready() || !matches!(self.navigator.route(), ScreenRoute::Play { .. }) {
             return;
         }
         if let Some(game) = &self.game {
@@ -2575,7 +2575,7 @@ impl Desktop {
         }
         if !repeat
             && key == KeyCode::F9
-            && self.navigator.route() == (ScreenRoute::Play { replay: false })
+            && matches!(self.navigator.route(), ScreenRoute::Play { .. })
         {
             self.toggle_pause();
             return;
@@ -3065,23 +3065,23 @@ impl Desktop {
                     },
                 );
             }
+            if let Some(paused) = game.pause_target() {
+                control(
+                    pixels,
+                    &mut self.hits,
+                    &self.gesture,
+                    point,
+                    ControlId(62),
+                    Bounds {
+                        x: 740,
+                        y: 65,
+                        width: 190,
+                        height: 34,
+                    },
+                    if paused { "PAUSE F9" } else { "RESUME F9" },
+                );
+            }
             if !game.replay {
-                if let Some(paused) = game.pause_target() {
-                    control(
-                        pixels,
-                        &mut self.hits,
-                        &self.gesture,
-                        point,
-                        ControlId(62),
-                        Bounds {
-                            x: 740,
-                            y: 65,
-                            width: 190,
-                            height: 34,
-                        },
-                        if paused { "PAUSE F9" } else { "RESUME F9" },
-                    );
-                }
                 let mark_bounds = Bounds {
                     x: 550,
                     y: 20,
@@ -3663,7 +3663,6 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
             player::PlayerStatus::Playing if game.replay && snapshot.song_time.is_none() => {
                 "NATIVE PRESENTATION UNAVAILABLE - ESC CANCEL"
             }
-            player::PlayerStatus::Playing if game.replay => "WATCHING RECORD - ESC CANCEL",
             player::PlayerStatus::Playing if snapshot.pause == player::PauseState::Pausing => {
                 "PAUSING - NATIVE WAIT"
             }
@@ -3673,6 +3672,7 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
             player::PlayerStatus::Playing if snapshot.pause == player::PauseState::Resuming => {
                 "RESUMING - NATIVE WAIT"
             }
+            player::PlayerStatus::Playing if game.replay => "WATCHING RECORD - ESC CANCEL",
             player::PlayerStatus::Playing => "PLAYING - ESC CANCEL",
             player::PlayerStatus::Stopping => "STOPPING",
             player::PlayerStatus::Finished => "FINISHING CLEANUP",
@@ -4308,7 +4308,7 @@ mod tests {
     }
 
     #[test]
-    fn pause_control_requires_stable_live_native_ack_and_never_reaches_retry_or_replay() {
+    fn pause_control_requires_stable_native_ack_for_live_or_replay_and_fences_cleanup() {
         let mut game = retry_fixture();
         for (phase, expected) in [
             (player::PauseState::Unavailable, None),
@@ -4326,7 +4326,12 @@ mod tests {
         }
         game.snapshot.as_mut().unwrap().pause = player::PauseState::Running;
         game.replay = true;
+        assert_eq!(game.pause_target(), Some(true));
+        game.snapshot.as_mut().unwrap().pause = player::PauseState::Paused;
+        assert_eq!(game.pause_target(), Some(false));
+        game.snapshot.as_mut().unwrap().pause = player::PauseState::Unavailable;
         assert_eq!(game.pause_target(), None);
+        game.snapshot.as_mut().unwrap().pause = player::PauseState::Running;
         game.replay = false;
         game.prepared_retry = Some(game.launch.retry().unwrap());
         assert_eq!(game.pause_target(), None);
