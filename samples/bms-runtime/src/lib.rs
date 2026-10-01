@@ -6,6 +6,8 @@ pub mod bgm;
 pub mod competition;
 /// Application competition options and native runtime observation.
 pub mod competition_live;
+/// Actual judge completion and native output drain for full-song play.
+pub mod completion;
 /// Original bitmap glyph atlas data, prepared outside rendering callbacks.
 #[cfg(feature = "graphics")]
 pub mod font;

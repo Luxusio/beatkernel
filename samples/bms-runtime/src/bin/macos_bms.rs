@@ -21,7 +21,7 @@ struct Options {
     keyboard_registry: u64,
     format: AudioFormat,
     buffer: u32,
-    seconds: u64,
+    seconds: Option<u64>,
     bindings: BTreeMap<u8, u16>,
     early: i64,
     late: i64,
@@ -156,7 +156,7 @@ fn parse(args: &[String]) -> Result<Options> {
             channels.ok_or("explicit --channels required")?,
         )?,
         buffer,
-        seconds: seconds.ok_or("explicit --seconds required")?,
+        seconds,
         bindings,
         early,
         late,
@@ -339,7 +339,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
     let (competition_options, args) =
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
-        println!("macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N --seconds N --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Exact one-registry attachment, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown.");
+        println!("macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact one-registry attachment, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown.");
         return Ok(());
     }
     let options = parse(&args)?;
@@ -544,6 +544,13 @@ mod native {
                 ChannelPolicy::Exact
             },
         )?;
+        let mut completion = beatkernel_bms_runtime::completion::SongCompletion::prepare(
+            &prepared,
+            options.late,
+            options.offset,
+            options.preroll,
+            OUTPUT,
+        )?;
         for warning in &prepared.source.warnings {
             eprintln!("BMS warning line {}: {}", warning.line, warning.message);
         }
@@ -701,12 +708,17 @@ mod native {
                 prepared.sounds,
                 4096,
             )?;
-            let deadline = Instant::now() + WallDuration::from_secs(options.seconds);
+            let deadline = options
+                .seconds
+                .map(|seconds| Instant::now() + WallDuration::from_secs(seconds));
+            let mut last_song = Timestamp::from_nanos(-options.preroll);
             let mut last_operation = origin;
             let mut last_progress = None;
             let mut waiting_logged = false;
             let pump = (|| -> Result<()> {
-                while Instant::now() < deadline && !beatkernel_bms_runtime::player::cancelled() {
+                while deadline.is_none_or(|deadline| Instant::now() < deadline)
+                    && !beatkernel_bms_runtime::player::cancelled()
+                {
                     input.poll(WallDuration::from_millis(1))?;
                     check_hid(&input, selected_id, options.keyboard_registry)?;
                     if let Some(pair) = observe(&audio, &clock)? {
@@ -779,7 +791,8 @@ mod native {
                     {
                         let report = runtime.advance_to(at, &ExplicitDomains, schedule(&audio)?)?;
                         last_operation = at;
-                        let nanos = report.song_time.as_nanos();
+                        last_song = report.song_time;
+                        let nanos = last_song.as_nanos();
                         let second = nanos.div_euclid(1_000_000_000);
                         if last_progress != Some(second) {
                             if nanos < 0 {
@@ -793,6 +806,16 @@ mod native {
                             last_progress = Some(second);
                         }
                         print_report(report, &mut capture, &mut competition)?;
+                    }
+                    if completion.observe(
+                        runtime.judge(),
+                        last_song,
+                        bgm.report(),
+                        audio.last_render_report(),
+                        discipline.latest_pair().map(|pair| pair.source),
+                    )? {
+                        println!("full song completed: terminal judge, drained BGM/mixer and native presentation frontier");
+                        break;
                     }
                 }
                 Ok(())
@@ -840,6 +863,19 @@ mod fixtures {
         ClockPoint {
             domain: ClockDomainId(2),
             timestamp: Timestamp::from_nanos(n),
+        }
+    }
+    #[test]
+    fn full_song_is_default_and_explicit_seconds_remains_a_cutoff() {
+        let mut supplied = args();
+        assert_eq!(parse(&supplied).unwrap().seconds, Some(10));
+        let index = supplied.iter().position(|arg| arg == "--seconds").unwrap();
+        supplied.drain(index..index + 2);
+        assert_eq!(parse(&supplied).unwrap().seconds, None);
+        for value in ["0", "3601", "-1"] {
+            let mut invalid = supplied.clone();
+            invalid.extend(["--seconds".into(), value.into()]);
+            assert!(parse(&invalid).is_err());
         }
     }
     #[test]

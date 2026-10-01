@@ -45,7 +45,7 @@ struct Options {
     replay_max_bytes: usize,
     device: String,
     exclusive: bool,
-    seconds: u64,
+    seconds: Option<u64>,
     bindings: BTreeMap<u8, u16>,
     early: i64,
     late: i64,
@@ -354,7 +354,7 @@ fn parse(args: &[String]) -> Result<Options> {
         chart: chart.ok_or("explicit --chart required")?,
         device,
         exclusive,
-        seconds: seconds.ok_or("explicit --seconds required")?,
+        seconds,
         bindings,
         early,
         late,
@@ -494,7 +494,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
     let (competition_options, args) =
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
-        println!("windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive --seconds N --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Seconds is loop duration after calibration, including remaining preroll. Bind every used BMS lane explicitly; Any physical keyboard, focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured.");
+        println!("windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Any physical keyboard, focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured.");
         return Ok(());
     }
     let options = parse(&args)?;
@@ -881,6 +881,13 @@ mod native {
                 ChannelPolicy::Exact
             },
         )?;
+        let mut completion = beatkernel_bms_runtime::completion::SongCompletion::prepare(
+            &prepared,
+            options.late,
+            options.offset,
+            options.preroll,
+            OUTPUT,
+        )?;
         for warning in &prepared.source.warnings {
             eprintln!(
                 "BMS parser warning line {}: {}",
@@ -990,7 +997,10 @@ mod native {
             stream.start()?;
             let (mut transport, quality) = stream.calibrate(
                 &options,
-                calibration_extent(options.seconds, options.preroll)?,
+                calibration_extent(
+                    options.seconds.unwrap_or(completion.calibration_seconds()),
+                    options.preroll,
+                )?,
                 &mut bgm,
                 &mut producer,
             )?;
@@ -1020,9 +1030,13 @@ mod native {
                 prepared.sounds,
                 4096,
             )?;
-            let deadline = Instant::now() + WallDuration::from_secs(options.seconds);
+            let deadline = options
+                .seconds
+                .map(|seconds| Instant::now() + WallDuration::from_secs(seconds));
             let mut last_progress_second = None;
-            'pump: while Instant::now() < deadline && !beatkernel_bms_runtime::player::cancelled() {
+            'pump: while deadline.is_none_or(|deadline| Instant::now() < deadline)
+                && !beatkernel_bms_runtime::player::cancelled()
+            {
                 // Missing/degraded readings can skip only while real progressing
                 // observations stay fresh. Terminal/native chronology errors stop.
                 let _admission = stream.observe(&mut discipline)?;
@@ -1038,7 +1052,7 @@ mod native {
                     && unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) } != 0
                 {
                     processed_messages += 1;
-                    if Instant::now() >= deadline
+                    if deadline.is_some_and(|deadline| Instant::now() >= deadline)
                         || message.message == WM_QUIT
                         || message.message == WM_CLOSE
                     {
@@ -1139,7 +1153,8 @@ mod native {
                     stream.schedule(pcm.sample_rate())?,
                 )?;
                 last_accepted_host = host.timestamp;
-                let nanos = report.song_time.as_nanos();
+                let last_song = report.song_time;
+                let nanos = last_song.as_nanos();
                 let second = nanos.div_euclid(1_000_000_000);
                 if last_progress_second != Some(second) {
                     if nanos < 0 {
@@ -1151,6 +1166,16 @@ mod native {
                     last_progress_second = Some(second);
                 }
                 print_report(report, &mut capture, &mut competition)?;
+                if completion.observe(
+                    runtime.judge(),
+                    last_song,
+                    bgm.report(),
+                    stream.render_report()?,
+                    discipline.latest_pair().map(|pair| pair.source),
+                )? {
+                    println!("full song completed: terminal judge, drained BGM/mixer and native presentation frontier");
+                    break;
+                }
                 std::thread::sleep(WallDuration::from_millis(1));
             }
             println!(
@@ -1197,6 +1222,19 @@ mod native {
 mod preroll_fixtures {
     use super::*;
     use beatkernel::audio::{SampleId, VoiceId};
+    #[test]
+    fn full_song_is_default_and_explicit_seconds_remains_a_cutoff() {
+        let mut supplied = arguments(None);
+        assert_eq!(parse(&supplied).unwrap().seconds, Some(1));
+        let index = supplied.iter().position(|arg| arg == "--seconds").unwrap();
+        supplied.drain(index..index + 2);
+        assert_eq!(parse(&supplied).unwrap().seconds, None);
+        for value in ["0", "3601", "-1"] {
+            let mut invalid = supplied.clone();
+            invalid.extend(["--seconds".into(), value.into()]);
+            assert!(parse(&invalid).is_err());
+        }
+    }
     #[test]
     fn bgm_lookahead_cli_is_explicit_positive_and_checked() {
         let base = arguments(None);
