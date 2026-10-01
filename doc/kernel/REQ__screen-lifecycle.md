@@ -85,8 +85,9 @@ is introduced into the ASIO-free MIT distribution by this requirement.
 
 The confirmed decision is update semantics; framework adoption is not complete.
 The desktop now uses the typed Navigator and retained instance back stack for
-draw/input/transition routing. Actual GUI lifecycle acceptance remains unfinished. Selection has the retained
-binding described below; other menu/widget toolkit migration remains unfinished.
+draw/input/transition routing. Actual GUI lifecycle acceptance remains unfinished.
+Selection and six menu panels have the retained bindings described below;
+full widget-host migration remains unfinished.
 
 
 ## Scoped reusable panels
@@ -96,6 +97,39 @@ state and task-cancellation scope. Small controls and the GPU playfield inherit
 the containing screen lifetime. There is no lifecycle state machine per button
 or note. Panels request navigation from the single Navigator; they do not own
 separate global navigation stacks.
+
+The confirmed composition follows Android Fragment's useful boundary: split
+stateful UI regions into reusable panels when they need their own draft or
+asynchronous work lifetime. A full screen owns its panels; a panel owns its
+controls. Split by independent state and cleanup responsibility, rather than
+creating a navigation entry for every visual region. The current menu panels
+are routed children; an embedded control region does not need its own Back
+entry. Native play sessions remain application resources outside this hierarchy.
+
+PanelScope and its cloned TaskPermits expose a shared PanelPhase derived from
+the Navigator, with no second navigation or lifecycle state machine:
+
+| Phase | Observable rule |
+| --- | --- |
+| Active | Retained owner is the Navigator's active instance; metadata admission is permitted. |
+| Retained | Owner is hidden beneath a child; retain draft and view, reject new metadata admission. |
+| Suspended | Application is suspended; retain all existing panels and defer completion presentation. |
+| Disposed | Owner has left the Navigator or scope was dropped; cancel permits permanently. |
+
+Route commits synchronize surviving scopes and dispose exiting children before
+parents. Application suspend/resume synchronizes all retained scopes. Back
+reactivates the original parent identity and subscriptions. A disposed permit
+can never become active again, including after a fresh entry of the same route.
+Only Active permits with matching Navigator admission may start metadata work
+or present a completed result. Previously admitted cooperative work may finish
+while Retained or Suspended; those phases do not cancel the task. Suspension
+holds its completion until resume, and disposal discards it while draining its
+worker. These phases describe UI ownership, not audio transport pause.
+
+Phase synchronization runs on navigation and application suspend/resume, not
+at gameplay frame cadence. A task permit reads one shared atomic phase; no
+per-note signals, lifecycle callbacks or polling worker are added. This bounds
+the mechanism's work but does not establish measured performance.
 
 The Navigator retains actual screen entries with stable, non-reused instance
 IDs. Opening a child hides its parent without recreating the parent's draft.
@@ -120,8 +154,9 @@ Native owners remain application session resources and publish their final
 snapshot after join before Results, retry or return to Selection.
 
 This lifecycle boundary is independent of the UI toolkit. Selection now uses
-the standalone reactive engine below; other menu/widget binding remains a
-separate implementation step.
+the standalone reactive engine below, as do Settings, Practice, Display,
+Records, Players and Devices. Full widget-host integration remains a separate
+implementation step.
 
 
 ## Retained reactive selection screen
@@ -150,8 +185,9 @@ wgpu27/winit0.30.13. Its separately released MIT reactive engine depends only on
 smallvec and is used without introducing that host. See the
 [published Floem manifest](https://docs.rs/crate/floem/0.2.0/source/Cargo.toml) and
 [reactive engine documentation](https://docs.rs/floem_reactive/latest/floem_reactive/).
-This is actual dependency tracking and retained node rendering for Selection;
-other menu screens and full existing-widget toolkit migration remain pending.
+This is actual dependency tracking and retained node rendering for Selection
+and the six menu panels documented below; full existing-widget toolkit
+migration remains pending.
 Source checks do not prove GUI behavior or performance; execution remains deferred.
 
 Event-driven Selection retries drawing at the configured cadence after transient
@@ -208,8 +244,8 @@ Display uses a reusable retained node/immutable packet primitive on the UI
 thread. The primitive handles ordered geometry and dirty composition; the view
 still owns Floem scope disposal. It has no native I/O, gameplay clock, navigation
 stack or custom signal/batch scheduler. Pending state disables all hits and idle
-Display follows the existing event-driven/surface-retry rules. Other menu
-migrations and GUI/performance acceptance remain unfinished and user-deferred.
+Display follows the existing event-driven/surface-retry rules. Full widget-host
+migration and GUI/performance acceptance remain unfinished and user-deferred.
 
 
 ## Shared retained node composition
