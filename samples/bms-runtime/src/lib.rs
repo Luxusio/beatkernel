@@ -1,5 +1,7 @@
 //! Off-thread bounded BMS preparation shared by offline and native compositions.
 #![forbid(unsafe_code)]
+/// Actual ASIO replay presentation observations retained until their host upper frontier.
+pub mod asio_replay;
 /// Rolling BGM admission on an explicitly configured output frame grid.
 pub mod bgm;
 /// Saved-record opponents and actual judgment summaries.
