@@ -174,7 +174,12 @@ Linux solo and local 2..64 owners can opt into `--end-ns N`, strictly after
 `--start-ns`, to use the immutable audio/judging ends and wait for actual native
 presentation plus drained input before finite-prefix completion. Manual pause
 and short resume retain their physical gaps. Every assigned keyboard must drain
-and every member must reach the same logical end. Network endpoint support remains unfinished. Portable regression fixtures are prepared for
+and every member must reach the same logical end. SDK-enabled Windows ASIO
+solo/local owners also accept finite prefixes, using actual rendered block and
+assessed latency intervals. Completion waits for the upper host frontier of a
+block starting at or after the endpoint and drained input; prepared frames alone
+do not finish a session. Physical accuracy remains unknown and ASIO pause is
+still unsupported. Network endpoint support remains unfinished. Portable regression fixtures are prepared for
 later execution, while native hardware/GUI/acoustic checks remain unverified.
 Windows WASAPI shared/exclusive and macOS CoreAudio solo and local 2..64 owners also accept
 `--end-ns`, using their actual PCM grid and native output/host clock relation.

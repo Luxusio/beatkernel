@@ -758,10 +758,30 @@ browser host and full native timing acceptance remain unfinished.
 
 ## Native finite practice loop
 
+SDK-enabled Windows ASIO live solo and local 2..64-player sessions also admit
+an exact original-song `--end-ns`. The common Mixer fence and runtime/group end
+cap remain the audio and judging authority. ASIO completion observes actual
+rendered blocks through the established multimedia-clock and assessed output
+latency interval. It requires a real lower observation and a block starting
+at or after the retained physical endpoint, then waits for that block's upper
+host interval and drained keyboard/member frontiers. Prepared frame counts and
+raw native sample position never establish audible completion. The upper host
+point is a conservative admission frontier under the supplied estimates, not
+an exact physical endpoint timestamp; physical accuracy remains unknown.
+Invalid or regressing ASIO endpoint observations fail without changing retained
+evidence. ASIO pause remains unsupported and network finite sessions still
+reject before acquisition. SDK-free launch rejection and conditional ASIO build
+licensing remain unchanged. Driver/MSVC execution and physical acceptance are
+deferred; portable composition fixtures are prepared for later execution.
+Progressing ASIO blocks with equal conservative upper host points remain valid
+on a coarse timer; completion uses the observed upper point directly and does
+not require strict host progress for endpoint interpolation.
+
 F7 marks an exact observed original-song start; F10 marks a strictly later end.
 F11 enable preflights a fresh pinned SessionLaunch with both --start-ns and
 --end-ns, then cancels/drains/joins the current owner before replacement. Native
-parsers admit supported solo/local modes and reject ASIO/network finite playback.
+parsers admit supported solo/local modes, including SDK-enabled ASIO, and reject
+network finite playback.
 The region remains scalar; notes acquire no per-frame reactive state.
 Each native owner configures immutable audio/logical ends before gameplay and
 records completed_end only after native presentation and drained input/resume
@@ -826,7 +846,7 @@ global input frontier must pass the terminal host boundary. A single backlogged
 device blocks advancement and completion. All members share one immutable end,
 output owner and Transport; independent player IDs/captures/scores remain intact.
 Remaining queued input strictly after the terminal frontier cannot enter gameplay.
-Windows WASAPI shared/exclusive and macOS CoreAudio solo and local 2..64 owners use the same finite audio/judging/presentation contract. Their local groups additionally require the actually committed InputMerger frontier and every member at the logical end. All network/ASIO endpoint connections remain required. Windows uses the actually negotiated PCM rate and QPC receipt ordering; all pending WM input must drain before completion. macOS uses the configured native PCM rate and HID collection frontier; its pending resume parking must reconcile before completion. These owners reject unsupported finite modes before session resources open. Omitting --end-ns retains full-song behavior.
+Windows WASAPI shared/exclusive and macOS CoreAudio solo and local 2..64 owners use the same finite audio/judging/presentation contract. Their local groups additionally require the actually committed InputMerger frontier and every member at the logical end. Network endpoint connections remain required; SDK-enabled ASIO uses the upper-interval admission frontier described above. Windows uses the actually negotiated PCM rate and QPC receipt ordering; all pending WM input must drain before completion. macOS uses the configured native PCM rate and HID collection frontier; its pending resume parking must reconcile before completion. These owners reject unsupported finite modes before session resources open. Omitting --end-ns retains full-song behavior.
 
 Directly unverifiable implementation paths need portable regression fixture
 source for later execution: exercise actual mixer/runtime/capture components,
@@ -958,10 +978,10 @@ gapless loops/browser/full widget host and full native/GUI/replay acceptance rem
 unfinished. Source compilation and authored fixtures are not execution proof.
 
 ### Native finite solo expansion
-Windows WASAPI shared/exclusive and macOS CoreAudio solo or local 2..64 commands accept a strictly later unsigned `--end-ns`. Derive the endpoint on the actual PCM grid, freeze audio at that exclusive frame, cap judging at the logical end, and finish only after native presentation and drained input/resume reconciliation. Unlimited sessions retain full-song completion. Network and ASIO finite modes remain explicitly rejected here pending their owners. Author portable argument/frontier and model fixtures for later execution; compilation is not native acceptance.
+Windows WASAPI shared/exclusive and macOS CoreAudio solo or local 2..64 commands accept a strictly later unsigned `--end-ns`. Derive the endpoint on the actual PCM grid, freeze audio at that exclusive frame, cap judging at the logical end, and finish only after native presentation and drained input/resume reconciliation. Unlimited sessions retain full-song completion. Network finite modes remain explicitly rejected pending their owners; SDK-enabled Windows ASIO uses the actual block upper-interval completion frontier described above. Author portable argument/frontier and model fixtures for later execution; compilation is not native acceptance.
 
 ### Native finite UI practice intent
 Enabling a marked practice loop preflights a fresh pinned invocation with exact --start-ns/--end-ns, then cancels and joins the previous owner. Each native session ends only at its immutable PCM/logical endpoint and native/drained frontier. Automatic repeat requires the old worker joined, successful noncancelled Finished publication and its exact completed endpoint. Observed UI song time never authorizes an audio stop/repeat; diagnostic seconds and failures cannot repeat. Disabling repetition leaves the current immutable section fence until it finishes; F5 returns to the pinned original. Fresh repeated owners preserve replay filename ordinals and one preroll. Restart may leave a device reopening gap; no gapless claim. Prepare fixtures for later execution; native GUI/acoustic acceptance remains deferred.
 
 ### Precise practice section editor
-F6 Practice edits retained start and optional end fields independently, with Tab/click focus and exact seconds/M:SS/H:MM:SS up to nine decimal places. Empty end plays through song end; a configured end must be strictly later than start. Done atomically updates both original-song nanosecond fields in the parent settings draft, preserving unrelated options. Invalid range/capacity preserves that draft and child error state. Apply remains separate; Back discards. Full Song sets start zero and clears end; Through End clears only end. Views repaint only changed dependencies and dispose with screen scope. Native mode validation remains authoritative on Apply/start; ASIO/network finite configurations are unsupported. Prepare focused regression fixtures for later execution; GUI/device execution remains deferred.
+F6 Practice edits retained start and optional end fields independently, with Tab/click focus and exact seconds/M:SS/H:MM:SS up to nine decimal places. Empty end plays through song end; a configured end must be strictly later than start. Done atomically updates both original-song nanosecond fields in the parent settings draft, preserving unrelated options. Invalid range/capacity preserves that draft and child error state. Apply remains separate; Back discards. Full Song sets start zero and clears end; Through End clears only end. Views repaint only changed dependencies and dispose with screen scope. Native mode validation remains authoritative on Apply/start; Network finite configurations are unsupported; SDK-enabled Windows ASIO admits finite prefixes. Prepare focused regression fixtures for later execution; GUI/device execution remains deferred.
