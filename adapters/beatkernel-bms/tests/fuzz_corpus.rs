@@ -175,7 +175,7 @@ fn seeded_arbitrary_bytes_and_valid_document_mutations_stay_bounded() {
 fn structured_parser_failures_have_selected_categories_and_lines() {
     let cases = [
         ("#BPM 60\n#00011:ZZ", 2, "missing"),
-        ("#BPM 60\n#SWITCH 2", 2, "unsupported"),
+        ("#BPM 60\n#SCROLL 2", 2, "unsupported"),
         ("#WAV01 a.wav\n#00051:01", 2, "hold"),
         ("#WAV01 a.wav\n#00011:01\n#00011:01", 3, "duplicate"),
         ("#BPM 0", 1, "syntax"),

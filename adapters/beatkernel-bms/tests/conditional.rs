@@ -47,7 +47,7 @@ fn first_match_else_case_and_nested_restore() {
 }
 #[test]
 fn inactive_scopes_do_not_consume_draws_or_parse_payload() {
-    let text = "#SETRANDOM 1\n#IF 2\n#RANDOM 2\n#IF 1\n#RANDOM 100\n#IF 99\n#SWITCH unsupported\n#00011:not-pairs\n#ENDIF\n#ENDRANDOM\n#ENDIF\n#ENDRANDOM\n#WAV01 unused.wav\n#BPM invalid\n#ENDIF\n#ENDRANDOM\n#RANDOM 2\n#IF 2\n#TITLE first-draw\n#ELSE\n#TITLE wrong\n#ENDIF";
+    let text = "#SETRANDOM 1\n#IF 2\n#RANDOM 2\n#IF 1\n#RANDOM 100\n#IF 99\n#SCROLL unsupported\n#00011:not-pairs\n#ENDIF\n#ENDRANDOM\n#ENDIF\n#ENDRANDOM\n#WAV01 unused.wav\n#BPM invalid\n#ENDIF\n#ENDRANDOM\n#RANDOM 2\n#IF 2\n#TITLE first-draw\n#ELSE\n#TITLE wrong\n#ENDIF";
     let parsed = parse_seeded(text, ParseOptions::default(), 0).unwrap();
     assert_eq!(parsed.metadata["TITLE"], "first-draw");
     assert!(parsed.samples.is_empty());

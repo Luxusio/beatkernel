@@ -1,4 +1,4 @@
-//! Streaming preparation-only RANDOM/IF scopes, retaining physical diagnostics.
+//! Streaming preparation-only RANDOM/IF/SWITCH scopes with physical diagnostics.
 use crate::{BmsError, BmsErrorKind};
 
 enum Scope {
@@ -14,11 +14,23 @@ enum Scope {
         saw_else: bool,
         line: usize,
     },
+    Switch {
+        choice: Option<u32>,
+        parent: bool,
+        matched: bool,
+        active: bool,
+        skipped: bool,
+        saw_def: bool,
+        has_label: bool,
+        line: usize,
+    },
 }
 impl Scope {
     fn active(&self) -> bool {
         match self {
-            Self::Random { active, .. } | Self::If { active, .. } => *active,
+            Self::Random { active, .. } | Self::If { active, .. } | Self::Switch { active, .. } => {
+                *active
+            }
         }
     }
 }
@@ -47,7 +59,7 @@ impl Conditional {
         }
     }
     fn active(&self) -> bool {
-        self.scopes.last().is_none_or(Scope::active)
+        self.scopes.iter().all(Scope::active)
     }
     fn room(&self, line: usize) -> Result<(), BmsError> {
         if self.scopes.len() >= 128 {
@@ -86,6 +98,107 @@ impl Conditional {
                 Some(n)
             };
             self.scopes.push(Scope::Random { choice, active });
+        } else if command.eq_ignore_ascii_case("SWITCH")
+            || command.eq_ignore_ascii_case("SETSWITCH")
+        {
+            let n = positive(value, line)?;
+            self.room(line)?;
+            let parent = self.active();
+            let choice = if !parent {
+                None
+            } else if command.eq_ignore_ascii_case("SWITCH") {
+                Some(self.draw(n))
+            } else {
+                Some(n)
+            };
+            self.scopes.push(Scope::Switch {
+                choice,
+                parent,
+                matched: false,
+                active: false,
+                skipped: false,
+                saw_def: false,
+                has_label: false,
+                line,
+            });
+        } else if command.eq_ignore_ascii_case("CASE") {
+            let n = positive(value, line)?;
+            let Some(Scope::Switch {
+                choice,
+                parent,
+                matched,
+                active,
+                skipped,
+                saw_def,
+                has_label,
+                ..
+            }) = self.scopes.last_mut()
+            else {
+                return Err(syntax(line, "CASE requires current SWITCH scope"));
+            };
+            if *saw_def {
+                return Err(syntax(line, "CASE after DEF"));
+            }
+            *has_label = true;
+            *matched |= *choice == Some(n);
+            *active = *parent && *matched && !*skipped;
+        } else if command.eq_ignore_ascii_case("DEF") {
+            if !value.is_empty() {
+                return Err(syntax(line, "DEF takes no operand"));
+            }
+            let Some(Scope::Switch {
+                parent,
+                matched,
+                active,
+                skipped,
+                saw_def,
+                has_label,
+                ..
+            }) = self.scopes.last_mut()
+            else {
+                return Err(syntax(line, "DEF requires current SWITCH scope"));
+            };
+            if *saw_def {
+                return Err(syntax(line, "duplicate DEF"));
+            }
+            *saw_def = true;
+            *has_label = true;
+            *matched = true;
+            *active = *parent && !*skipped;
+        } else if command.eq_ignore_ascii_case("SKIP") {
+            if !value.is_empty() {
+                return Err(syntax(line, "SKIP takes no operand"));
+            }
+            let admitted = self.active();
+            let switch = self
+                .scopes
+                .iter_mut()
+                .rev()
+                .find(|scope| matches!(scope, Scope::Switch { .. }))
+                .ok_or_else(|| syntax(line, "SKIP requires SWITCH scope"))?;
+            if let Scope::Switch {
+                has_label,
+                skipped,
+                active,
+                ..
+            } = switch
+            {
+                if !*has_label {
+                    return Err(syntax(line, "SKIP requires prior CASE or DEF"));
+                }
+                if admitted {
+                    *skipped = true;
+                    *active = false;
+                }
+            }
+        } else if command.eq_ignore_ascii_case("ENDSW") {
+            if !value.is_empty() {
+                return Err(syntax(line, "ENDSW takes no operand"));
+            }
+            if !matches!(self.scopes.last(), Some(Scope::Switch { .. })) {
+                return Err(syntax(line, "ENDSW crosses or lacks SWITCH scope"));
+            }
+            self.scopes.pop();
         } else if command.eq_ignore_ascii_case("IF") {
             let n = positive(value, line)?;
             self.room(line)?;
@@ -169,11 +282,12 @@ impl Conditional {
         Ok(false)
     }
     pub(crate) fn finish(&self) -> Result<(), BmsError> {
-        if let Some(line) = self.scopes.iter().find_map(|s| match s {
-            Scope::If { line, .. } => Some(*line),
+        if let Some((line, message)) = self.scopes.iter().find_map(|s| match s {
+            Scope::If { line, .. } => Some((*line, "IF scope missing ENDIF")),
+            Scope::Switch { line, .. } => Some((*line, "SWITCH scope missing ENDSW")),
             _ => None,
         }) {
-            Err(syntax(line, "IF scope missing ENDIF"))
+            Err(syntax(line, message))
         } else {
             Ok(())
         }

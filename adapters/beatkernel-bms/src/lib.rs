@@ -1,6 +1,6 @@
 //! Bounded deterministic BMS text/profile adapter with no native dependencies.
 //! Supports documented timing, lane, keysound, paired LNTYPE1 and LNOBJ features.
-//! Seeded RANDOM/SETRANDOM branches are resolved before payload interpretation.
+//! Seeded RANDOM/SETRANDOM and SWITCH flow resolve before payload interpretation.
 //! Long-note tail tokens are metadata only and never automatic sounds.
 //! Asset paths are opaque references; loading/decoding belongs to the application.
 #![forbid(unsafe_code)]
