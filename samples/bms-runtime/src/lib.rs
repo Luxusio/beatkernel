@@ -38,6 +38,10 @@ pub mod font_text;
 /// Reusable asynchronous native/Web GPU presentation, separate from game I/O.
 #[cfg(feature = "graphics")]
 pub mod graphics;
+/// Contained immutable visual assets prepared outside playback callbacks.
+pub mod image_assets;
+/// Bounded raster decoding during preparation, independent of GPU ownership.
+pub mod image_decode;
 /// Fixed-capacity lane feedback from actual local judge results and song time.
 pub mod judge_feedback;
 /// Bounded native input merging on one common host clock.
@@ -105,7 +109,6 @@ pub mod settings;
 /// Versioned native settings profiles and bounded off-thread file storage.
 pub mod settings_profile;
 /// Validated portable raw texture resources.
-#[cfg(feature = "graphics")]
 pub mod texture;
 /// Atomic Design-style presentation compositions, independent of native I/O.
 #[cfg(feature = "graphics")]

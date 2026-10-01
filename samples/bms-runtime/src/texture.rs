@@ -1,10 +1,14 @@
 //! Bounded RGBA8 resource data. GPU ownership belongs to the renderer.
+#[cfg(feature = "graphics")]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "graphics")]
 pub const MAX_TEXTURES: usize = 64;
 pub const MAX_TEXTURE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg(feature = "graphics")]
 pub struct TextureId(u64);
+#[cfg(feature = "graphics")]
 impl TextureId {
     pub const WHITE: Self = Self(0);
     pub const FONT: Self = Self(1);
@@ -50,6 +54,7 @@ impl RgbaImage {
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
     }
+    #[cfg(feature = "graphics")]
     pub(crate) fn pixels_mut(&mut self) -> &mut [u8] {
         &mut self.pixels
     }
@@ -69,6 +74,7 @@ mod tests {
         assert!(RgbaImage::new(1, 1, vec![255; 4]).is_ok());
     }
     #[test]
+    #[cfg(feature = "graphics")]
     fn custom_ids_are_distinct_from_builtins_and_each_other() {
         let a = TextureId::allocate().unwrap();
         let b = TextureId::allocate().unwrap();

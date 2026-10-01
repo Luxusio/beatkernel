@@ -1890,3 +1890,171 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
     assert_eq!(chart.bga_state(restarted.song_time), expected);
     assert_eq!(chart.bga_state(Timestamp::ZERO).base, Some(ImageId(1)));
 }
+
+fn raster_bmp_pixel(rgb: [u8; 3]) -> Vec<u8> {
+    // Original one-pixel 24-bit BMP with its four-byte padded row.
+    let mut bytes = vec![0; 58];
+    bytes[..2].copy_from_slice(b"BM");
+    bytes[2..6].copy_from_slice(&58u32.to_le_bytes());
+    bytes[10..14].copy_from_slice(&54u32.to_le_bytes());
+    bytes[14..18].copy_from_slice(&40u32.to_le_bytes());
+    bytes[18..22].copy_from_slice(&1i32.to_le_bytes());
+    bytes[22..26].copy_from_slice(&1i32.to_le_bytes());
+    bytes[26..28].copy_from_slice(&1u16.to_le_bytes());
+    bytes[28..30].copy_from_slice(&24u16.to_le_bytes());
+    bytes[34..38].copy_from_slice(&4u32.to_le_bytes());
+    bytes[54..57].copy_from_slice(&[rgb[2], rgb[1], rgb[0]]);
+    bytes
+}
+
+#[test]
+fn prepared_audio_and_image_bank_share_real_chart_selection_without_frame_io() {
+    use beatkernel::{audio::AudioFormat, time::Timestamp};
+    use beatkernel_bms::ImageId;
+    use image_assets::{ImageAssetLimits, ImageAssets, ImageUnavailable};
+    let dir = Directory::new();
+    dir.write("tap.wav", &wav(1, &[100, -100]));
+    dir.write("背景.BMP", &raster_bmp_pixel([255, 64, 0]));
+    dir.write("video.mpg", b"unsupported video bytes");
+    dir.write("broken.png", b"\x89PNG\r\n\x1a\nbad");
+    let path = dir.write(
+        "chart.bms",
+        b"#BPM 120\n#WAV01 tap.wav\n#00011:01\n\
+        #BMP00 missing-poor.png\n#BMP01 \xe8\x83\x8c\xe6\x99\xaf.BMP\n\
+        #BMP02 ./\xe8\x83\x8c\xe6\x99\xaf.BMP\n#BMP03 video.mpg\n#BMP04 broken.png\n\
+        #BMP05 ../unused-escape.bmp\n#BMP06 missing.jpg\n#00004:0102030406ZZ\n",
+    );
+    let prepared = load_prepared(
+        &path,
+        AudioFormat::new(24_000, 2).unwrap(),
+        limits(),
+        ChannelPolicy::MonoToStereo,
+    )
+    .unwrap();
+    let bank = ImageAssets::prepare(
+        &dir.0,
+        &prepared.source,
+        ImageAssetLimits {
+            max_decoded_bytes: 4,
+            ..ImageAssetLimits::default()
+        },
+    )
+    .unwrap(); // Canonical aliases consume the exact four-byte budget once.
+    assert_eq!(
+        (bank.len(), bank.unique_images(), bank.decoded_bytes()),
+        (7, 1, 4)
+    );
+    assert!(std::sync::Arc::ptr_eq(
+        bank.get(ImageId(1)).unwrap(),
+        bank.get(ImageId(2)).unwrap()
+    ));
+    assert_eq!(bank.get(ImageId(1)).unwrap().pixels(), &[255, 64, 0, 255]);
+    assert_eq!(
+        bank.unavailable(ImageId(0)),
+        Some(&ImageUnavailable::Missing)
+    );
+    assert_eq!(
+        bank.unavailable(ImageId(3)),
+        Some(&ImageUnavailable::Unsupported)
+    );
+    assert!(matches!(
+        bank.unavailable(ImageId(4)),
+        Some(ImageUnavailable::InvalidData(_))
+    ));
+    assert_eq!(
+        bank.unavailable(ImageId(6)),
+        Some(&ImageUnavailable::Missing)
+    );
+    assert_eq!(
+        bank.unavailable(ImageId(1295)),
+        Some(&ImageUnavailable::Undefined)
+    );
+    assert_eq!(bank.unavailable(ImageId(5)), None); // Unused unsafe definition never opened.
+    let chart =
+        player_chart::PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart)
+            .unwrap();
+    let selected = chart.bga_state(Timestamp::ZERO).base.unwrap();
+    assert_eq!(selected, ImageId(1));
+    assert_eq!(bank.get(selected).unwrap().width(), 1);
+    // Removing the source file after preparation cannot affect stored selections or pixels.
+    std::fs::remove_file(dir.0.join("背景.BMP")).unwrap();
+    assert_eq!(bank.get(selected).unwrap().pixels(), &[255, 64, 0, 255]);
+    assert_eq!(chart.bga_state(Timestamp::ZERO).base, Some(selected));
+}
+
+#[test]
+fn image_preparation_caps_and_unsafe_paths_reject_without_partial_bank() {
+    use beatkernel_bms::ImageId;
+    use image_assets::{ImageAssetLimits, ImageAssets};
+    let dir = Directory::new();
+    dir.write("first.bmp", &raster_bmp_pixel([1, 2, 3]));
+    dir.write("second.bmp", &raster_bmp_pixel([4, 5, 6]));
+    let source = beatkernel_bms::parse(
+        "#BMP01 first.bmp\n#BMP02 second.bmp\n#00004:0102",
+        beatkernel_bms::ParseOptions::default(),
+    )
+    .unwrap();
+    let accepted = ImageAssets::prepare(&dir.0, &source, ImageAssetLimits::default()).unwrap();
+    assert_eq!(accepted.decoded_bytes(), 8);
+    let cap = ImageAssetLimits {
+        max_images: 1,
+        ..ImageAssetLimits::default()
+    };
+    assert!(
+        ImageAssets::prepare(&dir.0, &source, cap)
+            .err()
+            .unwrap()
+            .contains("capacity")
+    );
+    let cap = ImageAssetLimits {
+        max_decoded_bytes: 7,
+        ..ImageAssetLimits::default()
+    };
+    assert!(
+        ImageAssets::prepare(&dir.0, &source, cap)
+            .err()
+            .unwrap()
+            .contains("budget")
+    );
+    let cap = ImageAssetLimits {
+        decode: image_decode::ImageDecodeLimits {
+            max_encoded_bytes: 57,
+            ..image_decode::ImageDecodeLimits::default()
+        },
+        ..ImageAssetLimits::default()
+    };
+    assert!(
+        ImageAssets::prepare(&dir.0, &source, cap)
+            .err()
+            .unwrap()
+            .contains("limit")
+    );
+    assert_eq!(accepted.get(ImageId(2)).unwrap().pixels(), &[4, 5, 6, 255]);
+    let mut escaped = source.clone();
+    escaped.images.insert(ImageId(1), "../outside.bmp".into());
+    assert!(ImageAssets::prepare(&dir.0, &escaped, ImageAssetLimits::default()).is_err());
+    std::fs::create_dir(dir.0.join("directory.bmp")).unwrap();
+    escaped.images.insert(ImageId(1), "directory.bmp".into());
+    assert!(ImageAssets::prepare(&dir.0, &escaped, ImageAssetLimits::default()).is_err());
+    #[cfg(unix)]
+    {
+        let outside = Directory::new();
+        outside.write("outside.bmp", &raster_bmp_pixel([7, 8, 9]));
+        std::os::unix::fs::symlink(outside.0.join("outside.bmp"), dir.0.join("escape.bmp"))
+            .unwrap();
+        escaped.images.insert(ImageId(1), "escape.bmp".into());
+        assert!(ImageAssets::prepare(&dir.0, &escaped, ImageAssetLimits::default()).is_err());
+    }
+    for cap in [
+        ImageAssetLimits {
+            max_images: 0,
+            ..ImageAssetLimits::default()
+        },
+        ImageAssetLimits {
+            max_decoded_bytes: image_assets::MAX_IMAGE_BANK_BYTES + 1,
+            ..ImageAssetLimits::default()
+        },
+    ] {
+        assert!(ImageAssets::prepare(&dir.0, &source, cap).is_err());
+    }
+}
