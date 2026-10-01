@@ -19,7 +19,6 @@ use beatkernel::{
 use beatkernel_bms::{BmsChart, ParseOptions, parse};
 use std::{
     fs::File,
-    io::Read,
     net::SocketAddr,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -163,21 +162,11 @@ pub fn replay_limits() -> Result<ReplayCodecLimits> {
     )?)
 }
 
-/// Read a bounded UTF-8 BMS chart without loading its sound assets.
+/// Read a bounded UTF-8 or Shift-JIS BMS chart without loading its sound assets.
 pub fn load_chart(path: &Path) -> Result<BmsChart> {
     let options = ParseOptions::default();
-    let mut bytes = Vec::new();
-    File::open(path)?
-        .take(
-            u64::try_from(options.max_bytes)?
-                .checked_add(1)
-                .ok_or("chart extent overflow")?,
-        )
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > options.max_bytes {
-        return Err("BMS text exceeds parser byte cap".into());
-    }
-    Ok(parse(std::str::from_utf8(&bytes)?, options)?)
+    let text = crate::chart_text::read_chart_text(&mut File::open(path)?, options.max_bytes)?;
+    Ok(parse(&text, options)?)
 }
 
 /// Per-play competition state. Socket work never runs on the gameplay thread.

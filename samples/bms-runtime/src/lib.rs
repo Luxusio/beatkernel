@@ -4,6 +4,8 @@
 pub mod asio_replay;
 /// Rolling BGM admission on an explicitly configured output frame grid.
 pub mod bgm;
+/// Strict bounded application chart decoding before the UTF-8 parser.
+pub mod chart_text;
 /// Saved-record opponents and actual judgment summaries.
 pub mod competition;
 /// Application competition options and native runtime observation.
@@ -157,7 +159,7 @@ impl AssetDecoder for WavDecoder {
     }
 }
 
-/// Prepare a bounded UTF-8 BMS chart and its referenced WAV assets off-thread.
+/// Prepare a bounded UTF-8 or Shift-JIS BMS chart and its referenced WAV assets off-thread.
 pub fn load_prepared(
     path: &Path,
     format: AudioFormat,
@@ -182,7 +184,12 @@ pub fn load_prepared_with_decoder(
     let root = chart_path.parent().ok_or("chart has no parent")?;
     let options = ParseOptions::default();
     let encoded_chart = bounded_read(&chart_path, options.max_bytes)?;
-    let source = parse(std::str::from_utf8(&encoded_chart)?, options)?;
+    let text = chart_text::decode_chart_text(
+        &encoded_chart,
+        chart_text::ChartTextEncoding::Auto,
+        options.max_bytes,
+    )?;
+    let source = parse(&text, options)?;
     let compiled = source.compile()?;
     let referenced: BTreeSet<_> = source
         .notes

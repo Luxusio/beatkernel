@@ -1,14 +1,11 @@
 //! Bounded logical BMS replay reconstruction; no assets, devices or output files.
 use beatkernel::{input::CodecLimits, replay::codec::ReplayCodecLimits, time::Timestamp};
-use beatkernel_bms::{parse as parse_chart, ParseOptions};
-use beatkernel_bms_runtime::replay_playback::{read_replay, reconstruct};
-use std::{
-    collections::HashSet,
-    error::Error,
-    fs::File,
-    io::{self, Read},
-    path::PathBuf,
+use beatkernel_bms::{ParseOptions, parse as parse_chart};
+use beatkernel_bms_runtime::{
+    chart_text::read_chart_text,
+    replay_playback::{read_replay, reconstruct},
 };
+use std::{collections::HashSet, error::Error, fs::File, path::PathBuf};
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
@@ -77,36 +74,6 @@ fn parse(args: &[String]) -> Result<Options> {
     })
 }
 
-// Enforce the byte bound while reading, including growing files; metadata is not
-// used as evidence of extent. The scratch buffer is fixed and UTF-8 is explicit.
-fn read_chart_text(reader: &mut impl Read, max_bytes: usize) -> Result<String> {
-    let mut bytes = Vec::new();
-    let mut scratch = [0u8; 8192];
-    loop {
-        let count = match reader.read(&mut scratch) {
-            Ok(0) => break,
-            Ok(count) => count,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let extent = bytes
-            .len()
-            .checked_add(count)
-            .ok_or("chart byte extent overflow")?;
-        if extent > max_bytes {
-            return Err(format!("BMS text exceeds {max_bytes} bytes").into());
-        }
-        if extent > bytes.capacity() {
-            let capacity = extent
-                .max(bytes.capacity().saturating_mul(2))
-                .min(max_bytes);
-            bytes.try_reserve_exact(capacity - bytes.len())?;
-        }
-        bytes.extend_from_slice(&scratch[..count]);
-    }
-    Ok(String::from_utf8(bytes)?)
-}
-
 fn run(options: Options) -> Result<()> {
     let limits = ReplayCodecLimits::new(
         options.max_bytes,
@@ -127,7 +94,9 @@ fn run(options: Options) -> Result<()> {
     } else if let Some(nanos) = options.song_ns {
         session.seek(Timestamp::from_nanos(nanos))?;
     }
-    println!("logical BMS replay reconstruction only; no asset loading, native audio or physical timing claim");
+    println!(
+        "logical BMS replay reconstruction only; no asset loading, native audio or physical timing claim"
+    );
     println!(
         "cursor={} records={} judge_results={} engine_hash={:#018x} effective_time={:?}",
         session.cursor(),
@@ -149,7 +118,9 @@ fn main() -> Result<()> {
 
 pub(crate) fn run_args(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
-        println!("replay_bms --chart PATH --replay PATH [--max-records N] [--max-bytes N] [--cursor N | --song-ns N]\nLogical replay inspection through the same BMS JudgeEngine; no PCM assets, native devices or output writes.\nDefaults: max records 1000000, max bytes 67108864 (64 MiB); limits require positive usize values. Chart uses bounded default BMS parser limits (8 MiB text).\nCursor is an exact operation boundary including zero; song-ns is signed nanoseconds and may produce the core's explicit boundary timeout advance.\nRequires matching chart, stored profile, rules and runtime version; setup hash is noncryptographic. Physical input-to-sound timing remains unknown.");
+        println!(
+            "replay_bms --chart PATH --replay PATH [--max-records N] [--max-bytes N] [--cursor N | --song-ns N]\nLogical replay inspection through the same BMS JudgeEngine; no PCM assets, native devices or output writes.\nDefaults: max records 1000000, max bytes 67108864 (64 MiB); limits require positive usize values. Chart uses shared UTF-8/strict Shift-JIS decoding and default BMS parser limits (8 MiB raw and decoded text).\nCursor is an exact operation boundary including zero; song-ns is signed nanoseconds and may produce the core's explicit boundary timeout advance.\nRequires matching chart, stored profile, rules and runtime version; setup hash is noncryptographic. Physical input-to-sound timing remains unknown."
+        );
         return Ok(());
     }
     run(parse(args)?)
@@ -224,14 +195,15 @@ mod fixtures {
     }
 
     #[test]
-    fn chart_reader_checks_stream_extent_utf8_and_errors() {
+    fn chart_reader_uses_shared_decoding_and_stream_limits() {
+        use std::io::{self, Read};
         let text = b"#BPM 120\n";
         assert_eq!(
             read_chart_text(&mut &text[..], text.len()).unwrap(),
             "#BPM 120\n"
         );
         assert!(read_chart_text(&mut &text[..], text.len() - 1).is_err());
-        assert!(read_chart_text(&mut &[0xff][..], 1).is_err());
+        assert!(read_chart_text(&mut &[0x82][..], 1).is_err());
         struct Broken;
         impl Read for Broken {
             fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {

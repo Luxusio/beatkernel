@@ -61,6 +61,66 @@ fn wav(channels: u16, samples: &[i16]) -> Vec<u8> {
 }
 
 #[test]
+fn shift_jis_catalog_and_asset_loaders_preserve_unicode_paths_and_pcm() {
+    let dir = Directory::new();
+    dir.write("日本.wav", &wav(1, &[16384, -8192]));
+    let utf8 = "#TITLE 日本\n#ARTIST 日本\n#BPM 60\n#LNOBJ ZZ\n#WAV01 日本.wav\n#00011:01ZZ\n";
+    let mut legacy = Vec::new();
+    for (index, ascii) in utf8.split("日本").enumerate() {
+        if index != 0 {
+            legacy.extend_from_slice(&[0x93, 0xfa, 0x96, 0x7b]);
+        }
+        legacy.extend_from_slice(ascii.as_bytes());
+    }
+    let path = dir.write("chart.bms", &legacy);
+    let source = competition_live::load_chart(&path).unwrap();
+    assert_eq!(source.metadata["TITLE"], "日本");
+    assert_eq!(source.metadata["ARTIST"], "日本");
+    let library = player_chart::scan_library(&dir.0).unwrap();
+    assert!(library.diagnostics.is_empty());
+    assert_eq!(library.entries.len(), 1);
+    assert_eq!(library.entries[0].path, path);
+    assert_eq!(library.entries[0].title, "日本");
+    assert_eq!(library.entries[0].artist, "日本");
+    let format = AudioFormat::new(48_000, 2).unwrap();
+    let prepared = load_prepared(&path, format, limits(), ChannelPolicy::MonoToStereo).unwrap();
+    assert_eq!(prepared.bank.len(), 1);
+    assert_eq!(
+        prepared.bank.get(SampleId(1)).unwrap().samples(),
+        &[0.5, 0.5, -0.25, -0.25]
+    );
+    assert_eq!(prepared.source.samples[&1], "日本.wav");
+    let utf8_path = dir.write("utf8.bms", utf8.as_bytes());
+    let reference =
+        load_prepared(&utf8_path, format, limits(), ChannelPolicy::MonoToStereo).unwrap();
+    let profile = beatkernel::judge::JudgeProfile::new(
+        vec![beatkernel::judge::JudgeWindow {
+            grade: beatkernel::judge::JudgeGrade(7),
+            early: beatkernel::time::Duration::ZERO,
+            late: beatkernel::time::Duration::ZERO,
+        }],
+        beatkernel::time::Duration::ZERO,
+    )
+    .unwrap();
+    let actual = beatkernel::judge::JudgeEngine::new(
+        prepared.compiled.chart,
+        prepared.source.rules(),
+        profile.clone(),
+    )
+    .unwrap();
+    let expected = beatkernel::judge::JudgeEngine::new(
+        reference.compiled.chart,
+        reference.source.rules(),
+        profile,
+    )
+    .unwrap();
+    assert_eq!(
+        actual.stable_hash().unwrap(),
+        expected.stable_hash().unwrap()
+    );
+}
+
+#[test]
 fn real_wav_bpm_stop_hold_bgm_and_explicit_mono_expansion() {
     let dir = Directory::new();
     dir.write("head.wav", &wav(1, &[16384, -8192]));
@@ -100,14 +160,18 @@ fn real_wav_bpm_stop_hold_bgm_and_explicit_mono_expansion() {
         .find(|object| object.time.end.is_none())
         .unwrap();
     assert_eq!(instant.time.start.as_nanos(), 3_500_000_000);
-    assert!(prepared
-        .sounds
-        .iter()
-        .any(|sound| sound.object == hold.id && sound.stage == JudgeStage::HoldHead));
-    assert!(prepared
-        .sounds
-        .iter()
-        .all(|sound| sound.voice == VoiceId(sound.object.0)));
+    assert!(
+        prepared
+            .sounds
+            .iter()
+            .any(|sound| sound.object == hold.id && sound.stage == JudgeStage::HoldHead)
+    );
+    assert!(
+        prepared
+            .sounds
+            .iter()
+            .all(|sound| sound.voice == VoiceId(sound.object.0))
+    );
     assert_eq!(prepared.bgm_commands.len(), 2);
     let maximum = prepared
         .compiled
@@ -133,27 +197,33 @@ fn real_wav_bpm_stop_hold_bgm_and_explicit_mono_expansion() {
             _ => panic!("preparation emitted a non-Play BGM command"),
         }
     }
-    assert!(load_prepared(
-        &chart,
-        AudioFormat::new(48_000, 2).unwrap(),
-        limits(),
-        ChannelPolicy::Exact
-    )
-    .is_err());
-    assert!(load_prepared(
-        &chart,
-        AudioFormat::new(48_000, 3).unwrap(),
-        limits(),
-        ChannelPolicy::MonoToStereo
-    )
-    .is_err());
-    assert!(load_prepared(
-        &chart,
-        AudioFormat::new(48_000, 2).unwrap(),
-        PcmLimits::new(8, 64, 8).unwrap(),
-        ChannelPolicy::MonoToStereo
-    )
-    .is_err());
+    assert!(
+        load_prepared(
+            &chart,
+            AudioFormat::new(48_000, 2).unwrap(),
+            limits(),
+            ChannelPolicy::Exact
+        )
+        .is_err()
+    );
+    assert!(
+        load_prepared(
+            &chart,
+            AudioFormat::new(48_000, 3).unwrap(),
+            limits(),
+            ChannelPolicy::MonoToStereo
+        )
+        .is_err()
+    );
+    assert!(
+        load_prepared(
+            &chart,
+            AudioFormat::new(48_000, 2).unwrap(),
+            PcmLimits::new(8, 64, 8).unwrap(),
+            ChannelPolicy::MonoToStereo
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -185,13 +255,15 @@ fn exact_channels_empty_chart_and_malformed_wav_are_explicit() {
     assert!(prepared.bgm_commands.is_empty());
     assert_eq!(prepared.bank.format(), AudioFormat::new(96_000, 2).unwrap());
     dir.write("mono.wav", b"not RIFF WAVE");
-    assert!(load_prepared(
-        &chart,
-        AudioFormat::new(44_100, 1).unwrap(),
-        limits(),
-        ChannelPolicy::Exact
-    )
-    .is_err());
+    assert!(
+        load_prepared(
+            &chart,
+            AudioFormat::new(44_100, 1).unwrap(),
+            limits(),
+            ChannelPolicy::Exact
+        )
+        .is_err()
+    );
 }
 
 struct TestDecoder;
@@ -229,13 +301,15 @@ fn explicit_custom_decoder_receives_contained_bytes_and_keeps_amplitudes() {
         prepared.bank.get(SampleId(1)).unwrap().samples(),
         &[1.25, 1.25, -2.0, -2.0]
     );
-    assert!(load_prepared(
-        &chart,
-        AudioFormat::new(48_000, 2).unwrap(),
-        limits(),
-        ChannelPolicy::MonoToStereo
-    )
-    .is_err());
+    assert!(
+        load_prepared(
+            &chart,
+            AudioFormat::new(48_000, 2).unwrap(),
+            limits(),
+            ChannelPolicy::MonoToStereo
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -268,13 +342,15 @@ fn portable_absolute_parent_drive_and_symlink_escape_names_reject() {
         let asset = outside.write("outside.wav", &wav(1, &[0]));
         std::os::unix::fs::symlink(asset, dir.0.join("escaped.wav")).unwrap();
         let chart = dir.write("chart.bms", b"#WAV01 escaped.wav\n#00011:01");
-        assert!(load_prepared(
-            &chart,
-            AudioFormat::new(48_000, 1).unwrap(),
-            limits(),
-            ChannelPolicy::Exact
-        )
-        .is_err());
+        assert!(
+            load_prepared(
+                &chart,
+                AudioFormat::new(48_000, 1).unwrap(),
+                limits(),
+                ChannelPolicy::Exact
+            )
+            .is_err()
+        );
     }
 }
 
