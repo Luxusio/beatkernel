@@ -11,14 +11,14 @@ package. Sharing a workspace does not merge these crate boundaries.
 
 `samples/bms-runtime` is a final composition package depending on adapter, core and
 platform. Neither adapter nor core depends on platform. Its default offline binary loads an actual UTF-8 or strict Shift-JIS
-BMS file through the shared bounded chart decoder and bounded RIFF WAV assets, supplies synthetic button input at compiled note times
+BMS file through the shared bounded chart decoder and bounded RIFF WAV/native FLAC assets, supplies synthetic button input at compiled note times
 through BindingMap/Runtime, schedules BGM and accepted note head sounds, and renders PCM using Mixer and platform encoding. It does not acquire
 native input or output through a device and cannot establish native playback or
 physical latency. This is an executable composition example, not a game UI.
 
 Asset resolution is relative to the canonical chart parent. Absolute paths,
 parent traversal and symlink escapes are rejected. Referenced assets must exist
-and be WAV PCM supported by the core decoder. Source channels must agree; source
+and be supported strict WAV or native FLAC data decoded during shared app preparation. Source channels must agree; source
 sample rates are resampled by Mixer to the explicitly selected output rate.
 Files and decoded bank bytes are bounded, and render length is explicitly chosen
 by the caller. Output is raw interleaved little-endian float32 PCM created at an

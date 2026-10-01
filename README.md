@@ -840,8 +840,10 @@ progressing device/host observations during playback and applies bounded,
 continuous transport rate corrections. Stale observations or excessive clock
 disagreement fail explicitly; this does not establish a physical timing bound.
 [Shared preparation](doc/kernel/REQ__bms-preparation.md) provides bounded asset
-loading with a WAV default and an injected off-thread decoder boundary; compressed
-formats are not implemented by that default. Explicit mono-to-stereo conversion
+loading with a native FLAC/strict WAV default and an injected off-thread decoder
+boundary. FLAC decoding preserves source rate/channels, checks decoded storage
+and surfaces corrupt/unsupported streams before playback. OGG/Vorbis, MP3 and
+other compressed formats remain unfinished. Asset extensions are not substituted. Explicit mono-to-stereo conversion
 is available without changing source frame positions.
 
 [Rolling BGM admission](doc/kernel/REQ__bms-bgm-admission.md) keeps native command
