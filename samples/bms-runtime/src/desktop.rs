@@ -6,6 +6,7 @@ use beatkernel_bms_runtime::ui::{
     interaction::{Bounds, ControlId, Gesture, logical_point},
     molecules, organisms,
     practice::{PracticeFrame, PracticeView},
+    records::{RecordsFrame, RecordsView},
     selection::{SelectionFrame, SelectionItem, SelectionView},
     settings::{BUTTONS as SETTINGS_BUTTONS, SettingsFrame, SettingsView},
     text_input::LineEditor,
@@ -323,6 +324,7 @@ pub(super) fn run(
         display_view: None,
         practice: None,
         records: None,
+        records_view: None,
         native,
         validate,
         query_devices,
@@ -675,6 +677,7 @@ struct Desktop {
     display_view: Option<DisplayView>,
     practice: Option<PanelScope<PracticeDraft>>,
     records: Option<PanelScope<RecordsDraft>>,
+    records_view: Option<RecordsView>,
     native: Native,
     validate: Native,
     query_devices: QueryDevices,
@@ -751,6 +754,13 @@ impl Desktop {
         // Children leave before their retained parent state.
         release_panel(&mut self.picker, &self.navigator);
         release_panel(&mut self.records, &self.navigator);
+        if self
+            .records_view
+            .as_ref()
+            .is_some_and(|view| !self.navigator.retains(view.id()))
+        {
+            self.records_view = None;
+        }
         release_panel(&mut self.display, &self.navigator);
         if self
             .display_view
@@ -2411,6 +2421,7 @@ impl Desktop {
                 | ScreenRoute::Practice
                 | ScreenRoute::Settings
                 | ScreenRoute::Display
+                | ScreenRoute::Records
         ) && self.navigator.phase() == ScreenPhase::Active
             && !self.occluded
             && self.profile_io.is_none()
@@ -2568,6 +2579,40 @@ impl Desktop {
         }
         self.render_scene()
     }
+    fn draw_records_view(&mut self) -> Result<(), String> {
+        let id = self
+            .navigator
+            .active_id()
+            .ok_or("records instance unavailable")?;
+        if self
+            .records_view
+            .as_ref()
+            .is_none_or(|view| view.id() != id)
+        {
+            self.records_view = Some(RecordsView::new(id, WIDTH as u32, HEIGHT as u32)?);
+            self.painted_reactive = None;
+        }
+        let records = self.records.as_ref().ok_or("records data unavailable")?;
+        let opponents = self
+            .settings
+            .as_ref()
+            .map_or(0, |draft| saved_opponents(&draft.values));
+        let mut frame = records_frame(records, self.profile_io.is_some(), opponents);
+        frame.hovered = beatkernel_bms_runtime::ui::records::hit(&frame, self.point());
+        frame.armed = (50..=59)
+            .map(ControlId)
+            .find(|&id| self.gesture.is_armed(id));
+        let view = self
+            .records_view
+            .as_ref()
+            .ok_or("records view unavailable")?;
+        view.update(frame)?;
+        if view.dirty() || self.painted_reactive != Some(id) {
+            view.compose(&mut self.scene, &mut self.hits)?;
+            self.painted_reactive = Some(id);
+        }
+        self.render_scene()
+    }
     fn draw_practice(&mut self) -> Result<(), String> {
         let id = self
             .navigator
@@ -2610,6 +2655,9 @@ impl Desktop {
         if route == ScreenRoute::Display {
             return self.draw_display_view();
         }
+        if route == ScreenRoute::Records {
+            return self.draw_records_view();
+        }
         self.painted_reactive = None;
         let point = self.point();
         self.invalidate_hits();
@@ -2626,23 +2674,7 @@ impl Desktop {
         }) {
             text(pixels, 450, 26, "PRACTICE", 2, 0xd8b36b);
         }
-        if route == ScreenRoute::Records {
-            let records = self
-                .records
-                .as_ref()
-                .ok_or("records screen data unavailable")?;
-            draw_records(
-                pixels,
-                records,
-                &mut self.hits,
-                &self.gesture,
-                point,
-                self.profile_io.is_some(),
-                self.settings
-                    .as_ref()
-                    .map_or(0, |draft| saved_opponents(&draft.values)),
-            );
-        } else if matches!(route, ScreenRoute::Devices { .. }) {
+        if matches!(route, ScreenRoute::Devices { .. }) {
             let picker = self
                 .picker
                 .as_ref()
@@ -3333,6 +3365,24 @@ fn saved_opponents(settings: &NativeSettings) -> usize {
         })
         .count()
 }
+fn records_frame(records: &RecordsDraft, pending: bool, opponents: usize) -> RecordsFrame<'_> {
+    RecordsFrame {
+        directory: &records.directory,
+        directory_focused: records.directory_focused,
+        catalog: records.catalog.as_ref(),
+        selected: records.selected,
+        first: records.first,
+        preview: records.valid_preview(),
+        pending,
+        opponents,
+        message: records.message.as_deref(),
+        error: records.error.as_deref(),
+        hovered: None,
+        armed: None,
+    }
+}
+
+#[cfg(test)]
 fn draw_records(
     scene: &mut Scene,
     records: &RecordsDraft,
@@ -3342,250 +3392,13 @@ fn draw_records(
     pending: bool,
     opponents: usize,
 ) {
-    text(scene, 24, 65, "RECORDS - RECORDED PREFIX", 2, 0x9bb1cf);
-    text(scene, 24, 120, "DIRECTORY", 1, 0xf0f4ff);
-    let directory_bounds = Bounds {
-        x: 160,
-        y: 108,
-        width: 770,
-        height: 34,
-    };
-    molecules::text_field(
-        scene,
-        &records.directory,
-        directory_bounds,
-        records.directory_focused && !pending,
-    );
-    if !pending {
-        hits.push((ControlId(58), directory_bounds));
-    }
-    text(
-        scene,
-        24,
-        151,
-        "TAB DIRECTORY/LIST   ENTER SCAN/PREVIEW   PGUP/PGDN PAGE",
-        1,
-        0x9bb1cf,
-    );
-    if let Some(catalog) = &records.catalog {
-        for (index, path) in catalog
-            .entries
-            .iter()
-            .enumerate()
-            .skip(records.first)
-            .take(SETTINGS_ROWS)
-        {
-            let bounds = Bounds {
-                x: 24,
-                y: 170 + (index - records.first) as i64 * 30,
-                width: 906,
-                height: 28,
-            };
-            rect(
-                scene,
-                bounds.x,
-                bounds.y,
-                bounds.width,
-                bounds.height,
-                if records.selected == Some(index) {
-                    0x29475e
-                } else {
-                    0x1d2734
-                },
-            );
-            let label = path
-                .file_name()
-                .unwrap_or(path.as_os_str())
-                .to_string_lossy();
-            // Existing text-field renderer clips Unicode scalar labels to bounds.
-            molecules::text_field_value(
-                scene,
-                &label,
-                Bounds {
-                    height: 30,
-                    ..bounds
-                },
-            );
-            if records.selected == Some(index) {
-                rect(scene, bounds.x, bounds.y, 4, bounds.height, 0x74e5c5);
-            }
-            if !pending {
-                hits.push((ControlId(50000 + index as u64), bounds));
-            }
-        }
-        if catalog.entries.is_empty() {
-            text(scene, 24, 180, "NO DIRECT .BKR RECORDS", 1, 0x9bb1cf);
-        }
-        text(
-            scene,
-            24,
-            485,
-            &format!(
-                "{} RECORDS{}",
-                catalog.entries.len(),
-                if catalog.truncated {
-                    " - DIRECTORY LIMIT REACHED"
-                } else {
-                    ""
-                }
-            ),
-            1,
-            0xd8b36b,
-        );
-        if !pending {
-            for (id, x, label, available) in [
-                (56, 620, "PREVIOUS", records.first > 0),
-                (
-                    57,
-                    780,
-                    "NEXT",
-                    records.first + SETTINGS_ROWS < catalog.entries.len(),
-                ),
-            ] {
-                if available {
-                    control(
-                        scene,
-                        hits,
-                        gesture,
-                        point,
-                        ControlId(id),
-                        Bounds {
-                            x,
-                            y: 475,
-                            width: 150,
-                            height: 30,
-                        },
-                        label,
-                    );
-                }
-            }
-        }
-    }
-    if pending {
-        text(scene, 24, 520, "LOADING RECORDS", 2, 0xd8b36b);
-    } else if let Some(preview) = records.valid_preview() {
-        text(
-            scene,
-            24,
-            518,
-            &format!(
-                "OPERATIONS {}   START {:.3} S",
-                preview.records,
-                preview.start.as_nanos() as f64 / 1e9
-            ),
-            1,
-            0xb6cce6,
-        );
-        text(
-            scene,
-            24,
-            534,
-            &format!(
-                "UNTIL {}",
-                preview
-                    .recorded_until
-                    .map_or("UNKNOWN".into(), |at| format!(
-                        "{:.3} S",
-                        at.as_nanos() as f64 / 1e9
-                    ))
-            ),
-            1,
-            0xb6cce6,
-        );
-        text(
-            scene,
-            24,
-            550,
-            &format!(
-                "HITS {} MISSES {}",
-                preview.score.hits, preview.score.misses
-            ),
-            1,
-            0x9bb1cf,
-        );
-        text(
-            scene,
-            24,
-            566,
-            &format!(
-                "COMBO {} MAX {}",
-                preview.score.combo, preview.score.max_combo
-            ),
-            1,
-            0x9bb1cf,
-        );
-    } else {
-        text(
-            scene,
-            24,
-            520,
-            "PREVIEW A COMPATIBLE RECORD BEFORE WATCH / ADD",
-            1,
-            0x9bb1cf,
-        );
-    }
-    text(
-        scene,
-        24,
-        592,
-        &format!("SAVED GHOSTS {opponents}/8 - DRAFT ONLY"),
-        1,
-        0x9bb1cf,
-    );
-    for (id, x, width, label, available) in [
-        (50, 24, 130, "SCAN", true),
-        (51, 164, 130, "PREVIEW", records.selected_path().is_some()),
-        (52, 304, 130, "ADD OWN", records.valid_preview().is_some()),
-        (53, 444, 140, "ADD OTHER", records.valid_preview().is_some()),
-        (54, 594, 140, "CLEAR ALL", true),
-        (55, 754, 176, "BACK", true),
-    ] {
-        let bounds = Bounds {
-            x,
-            y: 620,
-            width,
-            height: 34,
-        };
-        if pending || !available {
-            molecules::button(scene, bounds, label, false, false);
-        } else {
-            control(scene, hits, gesture, point, ControlId(id), bounds, label);
-        }
-    }
-    let watch = Bounds {
-        x: 754,
-        y: 575,
-        width: 176,
-        height: 34,
-    };
-    if pending || records.valid_preview().is_none() {
-        molecules::button(scene, watch, "WATCH (W)", false, false);
-    } else {
-        control(
-            scene,
-            hits,
-            gesture,
-            point,
-            ControlId(59),
-            watch,
-            "WATCH (W)",
-        );
-    }
-    if let Some(message) = &records.message {
-        text(scene, 24, 665, message, 1, 0x74e5c5);
-    }
-    if let Some(error) = &records.error {
-        molecules::text_field_value(
-            scene,
-            error,
-            Bounds {
-                x: 24,
-                y: 682,
-                width: 906,
-                height: 30,
-            },
-        );
-    }
+    let id = ScreenNavigator::default().active_id().unwrap();
+    let view = RecordsView::new(id, WIDTH as u32, HEIGHT as u32).unwrap();
+    let mut frame = records_frame(records, pending, opponents);
+    frame.hovered = beatkernel_bms_runtime::ui::records::hit(&frame, point);
+    frame.armed = (50..=59).map(ControlId).find(|&id| gesture.is_armed(id));
+    view.update(frame).unwrap();
+    view.compose(scene, hits).unwrap();
 }
 
 fn control(
@@ -3755,6 +3568,7 @@ mod tests {
             display_view: None,
             practice: None,
             records: None,
+            records_view: None,
             native: native_unavailable,
             validate: validate_only,
             query_devices: query_unavailable,
@@ -3851,6 +3665,36 @@ mod tests {
         assert!(app.settings_view.is_none());
         assert!(app.settings.is_none());
         assert_eq!(app.navigator.route(), ScreenRoute::Selection);
+    }
+
+    #[test]
+    fn retained_records_back_restores_parent_and_closing_releases_child() {
+        let mut app = lifecycle_fixture();
+        app.open_settings();
+        app.draw().unwrap();
+        let parent = app.navigator.active_id().unwrap();
+        app.open_records();
+        app.draw().unwrap();
+        let child = app.records_view.as_ref().unwrap().id();
+        assert!(app.reactive_waits_for_events());
+        assert_eq!(app.painted_reactive, Some(child));
+        app.invalidate_hits();
+        app.draw().unwrap();
+        assert!(!app.records_view.as_ref().unwrap().dirty());
+        assert!(app.hits.iter().any(|(id, _)| *id == ControlId(58)));
+        assert!(app.hits.iter().any(|(id, _)| *id == ControlId(50)));
+        app.back();
+        assert_eq!(app.navigator.active_id(), Some(parent));
+        assert!(app.records_view.is_none());
+        assert!(app.records.is_none());
+        assert_eq!(app.settings_view.as_ref().unwrap().id(), parent);
+        app.open_records();
+        app.draw().unwrap();
+        assert_ne!(app.records_view.as_ref().unwrap().id(), child);
+        app.request_close();
+        assert!(app.records_view.is_none());
+        assert!(app.records.is_none());
+        assert!(!app.reactive_waits_for_events());
     }
 
     #[test]
