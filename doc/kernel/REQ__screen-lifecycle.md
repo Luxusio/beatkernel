@@ -210,3 +210,15 @@ still owns Floem scope disposal. It has no native I/O, gameplay clock, navigatio
 stack or custom signal/batch scheduler. Pending state disables all hits and idle
 Display follows the existing event-driven/surface-retry rules. Other menu
 migrations and GUI/performance acceptance remain unfinished and user-deferred.
+
+
+## Shared retained node composition
+
+Selection, Practice, Settings and Display use one RetainedNodes implementation
+for packet construction, dependency binding, dirty state and ordered composition.
+Views still own their Floem scope, signal graph and Navigator instance identity;
+only the containing view disposes its scope. The shared primitive never owns
+navigation, native sessions, clocks or a batching scheduler. It checks initial
+packet errors before a view is published; later composition errors remain
+explicit and cannot clear dirty status. Scope disposal and retained Back behavior
+must preserve the existing dependency and geometry/hit order contracts.

@@ -643,3 +643,18 @@ still require profile save/restart. Idle Display uses the same event-driven
 redraw, hit invalidation and surface retry policy as the other retained menus.
 Source compilation cannot establish actual GPU capability, GUI behavior or
 performance; execution remains user-deferred.
+
+
+## Shared retained UI component base
+
+All four migrated views (Selection, Practice, Settings and Display) use the same
+RetainedNodes geometry storage/binding/composition implementation. Individual
+views retain their signal dependencies, data model and explicit scope disposal;
+sharing packets does not introduce shared navigation state or native owners.
+Initial geometry errors are checked before a view is returned. Composition
+errors preserve dirty state and stop partial presentation. Existing selectivity,
+retained instance, pending-hit and Back/disposal behavior remain required.
+
+This removes the earlier per-view packet helper duplication. Records, Players
+and Devices still require reactive migration. There is no full widget host,
+custom signal engine or batching scheduler, and no measured performance claim.
