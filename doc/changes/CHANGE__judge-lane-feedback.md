@@ -1,0 +1,13 @@
+# Judge-driven lane feedback
+
+The solo playfield and each local player's panel show a short cyan hit or red miss strip above the judgement line from that player's actual runtime or reconstructed replay events. The effect uses reported song time, retains known instant/hold stages, chooses the newest event per lane and expires at 150,000,000 song nanoseconds. Equal reported time keeps the same effect during pause. Future events are suppressed after a backward seek; remote summaries and ghost scores do not drive local feedback.
+
+An object-ID index prepared with PlayerChart resolves lanes without a chart-wide redraw scan. The projection uses a fixed 18-lane array and at most 128 retained results; invalid capacities/mappings reject before feedback geometry. Feedback strips draw after the note layer and before the white judgement line. Existing empty-feedback playfield wrappers remain available. GPU note instances, visibility scratch, audio/input owners, judging and replay codecs are unchanged.
+
+## Known ceiling
+
+This is bounded recent visual feedback, not an authoritative object-state history; it does not hide notes or infer all completed objects. It follows the engine's effective event timestamp: input calibration can place an event ahead of reported song time, in which case the effect waits, or behind the 150-ms window, in which case it does not flash. The existing score/recent-result HUD still shows the actual result. Native rendering, colors/timing appearance and performance measurement remain unverified.
+
+Six authored fixture groups cover real scratch/double/hold object mapping and stale-index safety, exact lifetime/future/extreme song times, pause/seek, newest/tie ordering, unknown/custom/mismatched stages and capacity rejection, actual Scene colors/half-fade/expiry/painter order, and independent sparse/MAX-ID local panels. Existing pure organism fixtures gained missing WAV definitions and moved an overlapping tap to a separate lane. The real bound-input Runtime/live-capture/replay-codec/reconstruction fixture now compares actual live/replay feedback, unchanged time during pause, empty seek prefix and exact expiry. Fixtures are compiled for later execution.
+
+Linux workspace/all targets, Windows GNU/all targets, macOS/all targets, graphics-disabled/all targets and WASM graphics/library source checks completed with exit code zero. Scoped formatting and whitespace checks completed; existing macOS `block` and WASM cadence warnings remain. Tests were compiled without execution. Native/shader/performance/formal acceptance remains pending and the full player task stays open.
