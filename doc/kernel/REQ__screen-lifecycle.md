@@ -190,9 +190,9 @@ Wait, including load/save failures with no user input. Clearing cached hit regio
 forces restoration even when no signal changed. Child Back restores the retained
 Settings scope and scene; branch exit disposes subscriptions.
 
-Display and Records use the retained panels below. Players and Devices remain
-on the previous rendering path; full widget-host migration and actual GUI/performance acceptance
-remain unfinished and user-deferred.
+Display, Records, Players and Devices use the retained panels below. Full
+widget-host migration and actual GUI/performance acceptance remain unfinished
+and user-deferred.
 
 
 ## Retained Display child
@@ -214,7 +214,7 @@ migrations and GUI/performance acceptance remain unfinished and user-deferred.
 
 ## Shared retained node composition
 
-Selection, Practice, Settings, Display and Records use one RetainedNodes
+Selection, Practice, Settings, Display, Records, Players and Devices use one RetainedNodes
 implementation for packet construction, dependency binding, dirty state and ordered composition.
 Views still own their Floem scope, signal graph and Navigator instance identity;
 only the containing view disposes its scope. The shared primitive never owns
@@ -232,3 +232,22 @@ starting Watch releases the Records scope; metadata workers still belong to
 the coordinator and carry its existing cancellation permits. Pending operations
 disable every hit region. Accepted completion requests redraw before idle Wait.
 No filesystem scan, preview reconstruction or native playback runs in view effects.
+
+## Retained player and device setup panels
+
+Players and Devices retain their UI node trees per Navigator instance. Players
+keeps its identity and state while its keyboard device child is open. Back drops
+the child before restoring its parent; Closing drops both. Row labels, selection,
+paging, button interaction and metadata status update their own retained nodes.
+Pending metadata disables every hit region. Effects own geometry only; device
+discovery, assignment validation and native input attachment stay external.
+
+Solo retains automatic input without assignment/clear controls. Multiple players
+retain distinct keyboard assignment with stable positive player IDs and the
+existing 64-player bound. Device entries marked unselectable remain visible but
+admit no row click. The existing external Use admission still validates drafts.
+
+Known ceiling: ten visible rows per panel and the fixed logical viewport remain.
+Changed packets are concatenated and the full rectangle buffer uploads. Native
+execution, live practice controls, browser adapters and complete acceptance are
+still unfinished. No measured performance or GUI execution is claimed.

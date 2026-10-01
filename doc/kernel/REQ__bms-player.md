@@ -562,7 +562,7 @@ GPU playfield uniforms.
 This introduces only the MIT standalone Floem reactive engine, not its released
 wgpu22/forked-winit host. The existing wgpu27/winit0.30 host and native resource
 owners remain. Settings, Display and Records use the retained bindings below.
-Players and Devices still use the previous drawing path. A changed node
+Players and Devices use the retained setup panels below. A changed node
 currently causes full composed rectangle
 buffer upload, not a partial GPU update; concatenation and fill cost remain
 proportional to visible geometry. GUI execution, dependency disposal behavior
@@ -623,7 +623,7 @@ including errors and Save completion. Clearing hit regions invalidates retained
 composition even if every signal compares equal. Button hover uses the shared
 layout so it remains valid after hit-cache invalidation. The obsolete immediate
 Settings renderer is removed; Display and Records use retained children.
-Players and Devices retain the previous path. Actual GUI, performance and
+Players and Devices use retained setup panels. Actual GUI, performance and
 dependency-disposal execution
 remain user-deferred; source compilation is not acceptance evidence.
 
@@ -649,16 +649,16 @@ performance; execution remains user-deferred.
 
 ## Shared retained UI component base
 
-All five migrated views (Selection, Practice, Settings, Display and Records) use the same
-RetainedNodes geometry storage/binding/composition implementation. Individual
+All seven migrated views (Selection, Practice, Settings, Display, Records,
+Players and Devices) use the same RetainedNodes geometry storage/binding/composition implementation. Individual
 views retain their signal dependencies, data model and explicit scope disposal;
 sharing packets does not introduce shared navigation state or native owners.
 Initial geometry errors are checked before a view is returned. Composition
 errors preserve dirty state and stop partial presentation. Existing selectivity,
 retained instance, pending-hit and Back/disposal behavior remain required.
 
-This removes the earlier per-view packet helper duplication. Players and
-Devices still require reactive migration. There is no full widget host,
+This removes the earlier per-view packet helper duplication. All implemented
+menu routes now use retained UI components. There is no full widget host,
 custom signal engine or batching scheduler, and no measured performance claim.
 
 ## Retained Records UI
@@ -676,6 +676,24 @@ not prevent the user from correcting that draft.
 
 Known ceiling: only ten catalog rows are drawn; catalog comparison and visible
 row projection still run on UI events. Changed packets are concatenated and
-the complete rectangle buffer is uploaded. Players and Devices reactive
-migration, live practice controls, browser adapters and full acceptance remain
-unfinished. Compilation alone does not prove GUI, native or timing behavior.
+the complete rectangle buffer is uploaded. Live practice controls, browser
+adapters and full acceptance remain unfinished. Compilation alone does not prove GUI, native or timing behavior.
+
+## Retained player and device setup panels
+
+Players and Devices retain their UI node trees per Navigator instance. Players
+keeps its identity and state while its keyboard device child is open. Back drops
+the child before restoring its parent; Closing drops both. Row labels, selection,
+paging, button interaction and metadata status update their own retained nodes.
+Pending metadata disables every hit region. Effects own geometry only; device
+discovery, assignment validation and native input attachment stay external.
+
+Solo retains automatic input without assignment/clear controls. Multiple players
+retain distinct keyboard assignment with stable positive player IDs and the
+existing 64-player bound. Device entries marked unselectable remain visible but
+admit no row click. The existing external Use admission still validates drafts.
+
+Known ceiling: ten visible rows per panel and the fixed logical viewport remain.
+Changed packets are concatenated and the full rectangle buffer uploads. Native
+execution, live practice controls, browser adapters and complete acceptance are
+still unfinished. No measured performance or GUI execution is claimed.
