@@ -89,3 +89,34 @@ before another operation, including on failure/unwind. CommandProducer remains
 a unique endpoint; exchanging it does not clone it or create another publisher.
 This is control-thread setup/composition, never an audio callback operation.
 The BMS group provides the RAII transaction and failure fence.
+
+## Immutable original-song end boundary
+
+Runtime optionally configures a nonnegative song end before its first committed
+operation. Default sessions remain unlimited. Invalid negative ends, a second
+configuration or configuration after committed chronology fail without changing
+the limit, judge, transport, sequences or audio queue. Replacing/restoring the
+session clears the end for explicit fresh configuration; ownership exchanges
+preserve it. The boundary is exclusive for physical-input admission.
+
+Clock normalization, host/song monotonicity, reverse-segment rejection and source
+sequence checks still apply before fencing. Strictly earlier input follows the
+ordinary binding/judge/keysound path with original native provenance. An input
+whose mapped original-song position is at or after the end cannot bind, hit or
+generate a new input keysound. It validates acquired chronology and advances the
+same JudgeEngine to the capped end, with report.input absent so actual capture
+records an Advance rather than a fabricated input. Timers use the same cap.
+Validated acquisition is counted, but deliberate end fencing is not unbound input.
+Repeated late operations remain at the end and produce no duplicate judge results.
+
+RuntimeReport.song_end_reached labels a capped logical boundary; judge_error and
+partial-result/audio-failure evidence still need inspection. It never proves
+native output completion. Capture/reconstruction uses original judging semantics
+and existing wire records; hold state is not fabricated and unfinished notes are
+not forced into completed scores. Transport history, pause and clock discipline
+remain authoritative and are not rewritten by this limit.
+
+Known ceiling: callers still own native audio end-frame mapping, presentation
+crossing, input backlog/frontier draining and cleanup. This logical component
+alone does not implement complete native/gapless looping. Pure fixture source
+and compilation are not execution proof; runtime/native acceptance remains deferred.

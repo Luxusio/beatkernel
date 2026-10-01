@@ -126,6 +126,10 @@ Native boundary models derive a straddling pause from the reported playback end,
 not its block start, and still wait for actual presentation crossing. Repeated
 coalesced partial reports cannot advance a frozen prefix. This adds no callback
 allocation, deallocation, lock, queue command or telemetry wire field.
+Runtime's separate immutable original-song end caps input admission and judging
+without changing the physical or playback grids. Its song_end_reached report is
+logical evidence only; actual native presentation must still cross the audio
+boundary before an owner acknowledges completion or disposes the session.
 Known ceiling: the fence is an audio component. Native BMS owners still need
 explicit endpoint intent, Transport/input/judging/capture admission and cleanup
 integration before graphical loops can claim an exact native endpoint. Playback

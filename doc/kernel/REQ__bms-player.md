@@ -759,6 +759,17 @@ accept the actual active-prefix/silent-tail report and acknowledge its playback
 end only after presentation crossing. This primitive is not yet wired into live
 loop owner/judging admission; the observed UI loop retains the ceiling above.
 
+The shared runtime also supports a setup-only immutable original-song end.
+Solo and local 1..64 members install the same scalar boundary before processing;
+group configuration validates all setup conditions before changing any member.
+Earlier input keeps original acquisition metadata and judging behavior. Input
+mapped at/after the end cannot hit or bind; the existing judge advances only to
+the capped end and capture records its actual Advance prefix. Shared Transport,
+pause/discipline, source validation and independent player identities remain.
+Logical end reports do not acknowledge native presentation or complete remaining
+hold/notes. Native owner/config/UI/frontier/cleanup integration still remains;
+the observed loop retains its current ceiling until that connection is made.
+
 ## Catalog search and filtered selection
 
 Selection exposes a 256-byte single-line search field (F3 or click). Whitespace
