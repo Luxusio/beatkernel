@@ -656,6 +656,157 @@ mod fixtures {
     }
 
     #[test]
+    fn native_pause_pipeline_keeps_pcm_judging_and_recorded_replay_on_one_playback_grid() {
+        use crate::{
+            playback_pause::{NativePause, PauseKeyboard},
+            replay_capture::LiveReplayCapture,
+        };
+        use beatkernel::{
+            audio::{
+                AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, PcmSample, SampleBank,
+            },
+            replay::{ReplaySession, codec::ReplayCodecLimits},
+            time::ClockPair,
+        };
+        let output = |ns| ClockPoint {
+            domain: ClockDomainId(2),
+            timestamp: Timestamp::from_nanos(ns),
+        };
+        let pair = |ns| ClockPair {
+            source: output(ns),
+            target: point(ns + 100),
+        };
+        let member = config(1);
+        let mut capture = LiveReplayCapture::new(
+            &member.judge,
+            ClockDomainId(1),
+            ReplayCodecLimits::new(
+                65536,
+                128,
+                4096,
+                beatkernel::input::CodecLimits::new(4096, 4096).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let format = AudioFormat::new(1000, 1).unwrap();
+        let limits = AudioLimits::new(8, 2, 8, 16, 8).unwrap();
+        let pcm_limits = PcmLimits::new(4096, 4096, 2).unwrap();
+        let mut bank = SampleBank::new(format, pcm_limits).unwrap();
+        bank.insert(
+            SampleId(1),
+            PcmSample::new(format, vec![0.5, 0.25], pcm_limits).unwrap(),
+        )
+        .unwrap();
+        let (producer, consumer) = command_queue(8).unwrap();
+        let mut mixer = Mixer::new(
+            MixerConfig::new(format, ClockDomainId(2), Timestamp::ZERO, limits),
+            bank,
+            consumer,
+        )
+        .unwrap();
+        let mut solo = SoloRuntime::new(
+            ClockDomainId(1),
+            ClockDomainId(2),
+            Transport::new(Timestamp::from_nanos(100), Timestamp::ZERO, Rate::NORMAL),
+            member.bindings,
+            member.judge,
+            producer,
+            member.sounds,
+            8,
+        )
+        .unwrap();
+        let mut pause = NativePause::new(output(0), ClockDomainId(1), 1000).unwrap();
+        let mut keyboard = PauseKeyboard::new();
+        let initial = mixer.render(&mut [0.0]).unwrap();
+        assert!(pause.observe(Some(initial), pair(0)).unwrap().is_none());
+        let early = input(1, 500_100);
+        assert!(keyboard.accept(&early).unwrap());
+        let report = solo
+            .process_input(early, &Identity, pause.scheduling_point(initial).unwrap())
+            .unwrap();
+        capture.record_report(&report).unwrap();
+        assert!(report.judge_events.is_empty());
+        assert!(pause.request(true, pair(0)).unwrap());
+        solo.request_audio_pause(true);
+        let mut silence = [1.0; 4];
+        let paused = mixer.render(&mut silence).unwrap();
+        assert_eq!(silence, [0.0; 4]);
+        let boundary = pause
+            .observe(Some(paused), pair(1_000_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(boundary.host, point(1_000_100));
+        solo.transport_mut().pause(boundary.host.timestamp).unwrap();
+        let report = solo
+            .advance_to(
+                boundary.host,
+                &Identity,
+                pause.scheduling_point(paused).unwrap(),
+            )
+            .unwrap();
+        capture.record_report(&report).unwrap();
+        assert_eq!(report.song_time, Timestamp::from_nanos(1_000_000));
+        let before_idle = capture.records().len();
+        let mut released = input(1, 2_000_100);
+        if let PhysicalInputEvent::Button(event) = &mut released {
+            event.state = ButtonState::Up;
+        }
+        keyboard.observe_paused(released).unwrap();
+        assert_eq!(capture.records().len(), before_idle);
+        assert!(pause.request(false, pair(4_000_000)).unwrap());
+        solo.request_audio_pause(false);
+        let resumed = mixer.render(&mut [0.0]).unwrap();
+        let boundary = pause
+            .observe(Some(resumed), pair(5_000_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(boundary.host, point(5_000_100));
+        assert_eq!(
+            pause.song_origin_after_pause(Timestamp::ZERO).unwrap(),
+            Timestamp::from_nanos(-4_000_000)
+        );
+        solo.transport_mut()
+            .resume(boundary.host.timestamp)
+            .unwrap();
+        let releases = keyboard.resume(boundary.host).unwrap();
+        assert_eq!(releases.len(), 1);
+        assert_eq!(
+            releases[0].meta().original_clock_point,
+            Some(point(2_000_100))
+        );
+        for event in releases {
+            let report = solo
+                .process_input(event, &Identity, pause.scheduling_point(resumed).unwrap())
+                .unwrap();
+            assert_eq!(report.song_time, Timestamp::from_nanos(1_000_000));
+            capture.record_report(&report).unwrap();
+        }
+        let hit = input(1, 6_000_100);
+        assert!(keyboard.accept(&hit).unwrap());
+        let report = solo
+            .process_input(hit, &Identity, pause.scheduling_point(resumed).unwrap())
+            .unwrap();
+        assert_eq!(report.song_time, Timestamp::from_nanos(2_000_000));
+        assert_eq!(report.judge_events.len(), 1);
+        assert!(report.audio_failures.is_empty());
+        capture.record_report(&report).unwrap();
+        let mut audible = [0.0; 2];
+        let final_render = mixer.render(&mut audible).unwrap();
+        assert_eq!(audible, [0.5, 0.25]);
+        assert_eq!(final_render.playback_start_frame, 2);
+        assert_eq!(final_render.start_frame, 6);
+        let file = capture.into_file();
+        let replay =
+            ReplaySession::from_records(file.header, config(1).judge, file.records).unwrap();
+        assert_eq!(
+            replay.engine().stable_hash().unwrap(),
+            solo.judge().stable_hash().unwrap()
+        );
+        assert_eq!(replay.results(), report.judge_events);
+    }
+
+    #[test]
     fn solo_returns_committed_partial_report_before_fencing_next_operation() {
         let member = config(1);
         let (producer, _consumer) = command_queue(1).unwrap();
