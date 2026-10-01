@@ -19,6 +19,7 @@ struct Options {
     replay_max_bytes: usize,
     evdev: PathBuf,
     local_inputs: Vec<PathBuf>,
+    local_players: Vec<beatkernel_bms_runtime::local_players::PlayerId>,
     alsa: String,
     format: AudioFormat,
     period: u32,
@@ -39,6 +40,8 @@ fn parse(args: &[String]) -> Result<Options> {
     let (mut rate, mut channels, mut period, mut buffer, mut seconds) =
         (None, None, None, None, None);
     let mut local_inputs = Vec::new();
+    let mut local_players = Vec::new();
+    let mut local_form = None;
     let mut bindings = BTreeMap::new();
     let mut keys = HashSet::new();
     let mut seen = HashSet::new();
@@ -54,7 +57,9 @@ fn parse(args: &[String]) -> Result<Options> {
     let mut args = args.iter();
     while let Some(flag) = args.next() {
         let value = args.next().ok_or("every option requires a value")?;
-        if !matches!(flag.as_str(), "--bind" | "--local-input") && !seen.insert(flag.as_str()) {
+        if !matches!(flag.as_str(), "--bind" | "--local-input" | "--local-player")
+            && !seen.insert(flag.as_str())
+        {
             return Err(format!("duplicate option {flag}").into());
         }
         match flag.as_str() {
@@ -79,12 +84,44 @@ fn parse(args: &[String]) -> Result<Options> {
             "--chart" if !value.is_empty() => chart = Some(PathBuf::from(value)),
             "--evdev" if !value.is_empty() => evdev = Some(PathBuf::from(value)),
             "--local-input" if !value.is_empty() => {
+                if local_form == Some(true) {
+                    return Err("--local-input and --local-player cannot be mixed".into());
+                }
                 let path = PathBuf::from(value);
                 if local_inputs.len() == beatkernel_bms_runtime::local_players::MAX_LOCAL_PLAYERS
                     || local_inputs.contains(&path)
                 {
                     return Err("local input devices must be distinct, at most 64".into());
                 }
+                local_form = Some(false);
+                local_players.push(beatkernel_bms_runtime::local_players::PlayerId(
+                    u32::try_from(local_inputs.len() + 1)?,
+                ));
+                local_inputs.push(path);
+            }
+            "--local-player" => {
+                if local_form == Some(false) {
+                    return Err("--local-input and --local-player cannot be mixed".into());
+                }
+                let (id, path) = value
+                    .split_once(':')
+                    .ok_or("local player must be ID:PATH")?;
+                if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err("local player ID must be positive u32 decimal".into());
+                }
+                let player = beatkernel_bms_runtime::local_players::PlayerId(id.parse::<u32>()?);
+                let path = PathBuf::from(path);
+                if player.0 == 0
+                    || path.as_os_str().is_empty()
+                    || local_inputs.len()
+                        == beatkernel_bms_runtime::local_players::MAX_LOCAL_PLAYERS
+                    || local_inputs.contains(&path)
+                    || local_players.contains(&player)
+                {
+                    return Err("local players require unique positive u32 IDs and nonempty distinct paths, at most 64".into());
+                }
+                local_form = Some(true);
+                local_players.push(player);
                 local_inputs.push(path);
             }
             "--alsa" if !value.is_empty() => alsa = Some(value.clone()),
@@ -154,10 +191,11 @@ fn parse(args: &[String]) -> Result<Options> {
         );
     }
     if !local_inputs.is_empty() && (local_inputs.len() < 2 || evdev.is_some()) {
-        return Err("use 2..64 --local-input devices, mutually exclusive with --evdev".into());
+        return Err("use 2..64 --local-input or --local-player assignments, mutually exclusive with --evdev".into());
     }
-    let evdev = evdev.or_else(|| local_inputs.first().cloned())
-        .ok_or("explicit --evdev or multiple --local-input required")?;
+    let evdev = evdev
+        .or_else(|| local_inputs.first().cloned())
+        .ok_or("explicit --evdev or multiple local assignments required")?;
     Ok(Options {
         record_replay,
         replay_max_records,
@@ -165,6 +203,7 @@ fn parse(args: &[String]) -> Result<Options> {
         chart: chart.ok_or("explicit --chart required")?,
         evdev,
         local_inputs,
+        local_players,
         alsa: alsa.ok_or("explicit --alsa required")?,
         format: AudioFormat::new(
             rate.ok_or("explicit --rate required")?,
@@ -343,7 +382,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
     let (competition_options, args) =
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
-        println!("linux_bms --chart PATH (--evdev NODE | --local-input NODE --local-input NODE [...]) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns 2..64 players in order, sharing lane bindings and output. Local replay paths gain .p<ID>.bkr; Graphical local panels share the same game owner; network competition is not yet supported for local groups. Native float32 ALSA, no fallback. Physical timing Unknown.");
+        println!("linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; network competition is not yet supported for local groups. Native float32 ALSA, no fallback. Physical timing Unknown.");
         return Ok(());
     }
     let options = parse(&args)?;
@@ -974,6 +1013,12 @@ mod fixtures {
             supplied.extend(["--local-input".into(), format!("/dev/input/event{index}")]);
         }
         assert_eq!(parse(&supplied).unwrap().local_inputs.len(), 4);
+        assert_eq!(
+            parse(&supplied).unwrap().local_players,
+            (1..=4)
+                .map(beatkernel_bms_runtime::local_players::PlayerId)
+                .collect::<Vec<_>>()
+        );
         let mut duplicate = supplied.clone();
         duplicate.extend(["--local-input".into(), "/dev/input/event0".into()]);
         assert!(parse(&duplicate).is_err());
@@ -990,6 +1035,61 @@ mod fixtures {
         }
         assert_eq!(parse(&maximum).unwrap().local_inputs.len(), 64);
         maximum.extend(["--local-input".into(), "/dev/input/event64".into()]);
+        assert!(parse(&maximum).is_err());
+    }
+    #[test]
+    fn tagged_local_players_preserve_sparse_ids_colon_paths_and_strict_roster_rules() {
+        use beatkernel_bms_runtime::local_players::PlayerId;
+        let mut base = args();
+        base.drain(2..4);
+        let mut configured = base.clone();
+        configured.extend([
+            "--local-player".into(),
+            "7:/dev/input/by-id/keyboard:a".into(),
+            "--local-player".into(),
+            "1000:/dev/input/event9".into(),
+            "--local-player".into(),
+            "4294967295:/dev/input/event10".into(),
+        ]);
+        let parsed = parse(&configured).unwrap();
+        assert_eq!(
+            parsed.local_players,
+            vec![PlayerId(7), PlayerId(1000), PlayerId(u32::MAX)]
+        );
+        assert_eq!(
+            parsed.local_inputs[0],
+            PathBuf::from("/dev/input/by-id/keyboard:a")
+        );
+        for (flag, value) in [
+            ("--local-player", "0:/dev/input/event11"),
+            ("--local-player", "7:/dev/input/event11"),
+            ("--local-player", "8:/dev/input/event9"),
+            ("--local-player", "8:"),
+            ("--local-player", "4294967296:/dev/input/event11"),
+            ("--local-input", "/dev/input/event11"),
+            ("--evdev", "/dev/input/event11"),
+        ] {
+            let mut invalid = configured.clone();
+            invalid.extend([flag.into(), value.into()]);
+            assert!(parse(&invalid).is_err());
+        }
+        let mut reverse_mixed = base.clone();
+        reverse_mixed.extend([
+            "--local-input".into(),
+            "/dev/input/event0".into(),
+            "--local-player".into(),
+            "7:/dev/input/event1".into(),
+        ]);
+        assert!(parse(&reverse_mixed).is_err());
+        let mut maximum = base;
+        for index in 0..64 {
+            maximum.extend([
+                "--local-player".into(),
+                format!("{}:/dev/input/event{index}", index + 1000),
+            ]);
+        }
+        assert_eq!(parse(&maximum).unwrap().local_players.len(), 64);
+        maximum.extend(["--local-player".into(), "9999:/dev/input/event64".into()]);
         assert!(parse(&maximum).is_err());
     }
     #[test]

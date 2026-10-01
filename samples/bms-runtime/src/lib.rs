@@ -20,6 +20,8 @@ pub mod graphics;
 pub mod local_input;
 /// Collection-based local player identity and unique native input assignment.
 pub mod local_players;
+/// Graphical local-player draft using typed keyboard metadata and stable IDs.
+pub mod local_setup;
 /// Shared-transport/output execution over independent actual core runtimes.
 pub mod local_runtime;
 /// Bounded two-player progress exchange on a dedicated socket worker.

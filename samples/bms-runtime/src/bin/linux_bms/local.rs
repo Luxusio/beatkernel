@@ -54,7 +54,7 @@ fn admit_mode(count: usize, network: bool) -> Result<()> {
 /// Uses the base stem, preserves its directory/OS encoding, and adds a player
 /// suffix. Actual save still uses the parent's create-new/no-overwrite boundary.
 fn replay_path(base: &Path, player: PlayerId) -> Result<PathBuf> {
-    if !(1..=MAX_LOCAL_PLAYERS as u32).contains(&player.0) {
+    if player.0 == 0 {
         return Err("invalid local replay player identity".into());
     }
     let mut stem = base
@@ -148,9 +148,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     beatkernel_bms_runtime::player::publish_local_chart(
         &prepared.source,
         &prepared.compiled.chart,
-        &(1..=count)
-            .map(|id| PlayerId(id as u32))
-            .collect::<Vec<_>>(),
+        &options.local_players,
     )?;
     let reserved: Vec<_> = prepared
         .bgm_commands
@@ -172,7 +170,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     let mut states = Vec::with_capacity(count);
     let mut save_paths = Vec::with_capacity(count);
     for index in 0..count {
-        let player = PlayerId(u32::try_from(index + 1)?);
+        let player = options.local_players[index];
         let device = DeviceId(u64::try_from(index + 1)?);
         let judge = JudgeEngine::new(
             prepared.compiled.chart.clone(),
@@ -511,7 +509,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     for (index, input) in inputs.iter().enumerate() {
         println!(
             "player{} final evdev counters={:?}",
-            index + 1,
+            options.local_players[index].0,
             input.counters()
         );
     }
@@ -557,6 +555,12 @@ mod fixtures {
         );
         assert!(replay_path(Path::new("/"), PlayerId(1)).is_err());
         assert!(replay_path(Path::new("run.bkr"), PlayerId(0)).is_err());
+        for id in [7, 1000, u32::MAX] {
+            assert_eq!(
+                replay_path(Path::new("run.bkr"), PlayerId(id)).unwrap(),
+                PathBuf::from(format!("run.p{id}.bkr"))
+            );
+        }
     }
     #[test]
     fn unsupported_local_modes_reject_before_resource_preparation() {

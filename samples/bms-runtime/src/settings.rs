@@ -29,9 +29,23 @@ pub fn overlay_native_args(
         .chunks_exact(2)
         .map(|pair| pair[0].as_str())
         .collect();
+    let replaces_input = host == SettingsHost::Linux
+        && overrides.chunks_exact(2).any(|pair| {
+            matches!(
+                pair[0].as_str(),
+                "--evdev" | "--local-input" | "--local-player"
+            )
+        });
     let merged: Vec<_> = base
         .chunks_exact(2)
-        .filter(|pair| !replaced.contains(pair[0].as_str()))
+        .filter(|pair| {
+            !replaced.contains(pair[0].as_str())
+                && !(replaces_input
+                    && matches!(
+                        pair[0].as_str(),
+                        "--evdev" | "--local-input" | "--local-player"
+                    ))
+        })
         .chain(overrides.chunks_exact(2))
         .flat_map(|pair| pair.iter().cloned())
         .collect();
@@ -208,6 +222,11 @@ const WINDOWS: &[Spec] = &[
 ];
 const LINUX: &[Spec] = &[
     (
+        "--local-player",
+        "LOCAL PLAYER ID:KEYBOARD PATH",
+        "Repeat stable positive player ID:path for 2..64 local players; exclusive with --local-input/--evdev.",
+    ),
+    (
         "--local-input",
         "LOCAL PLAYER KEYBOARD PATH",
         "Repeat for 2..64 local players in order; mutually exclusive with --evdev.",
@@ -376,7 +395,7 @@ fn field(spec: Spec, value: String) -> SettingsField {
 fn repeatable(flag: &str) -> bool {
     matches!(
         flag,
-        "--bind" | "--ghost-self" | "--ghost-other" | "--local-input"
+        "--bind" | "--ghost-self" | "--ghost-other" | "--local-input" | "--local-player"
     )
 }
 fn valid_value(value: &str) -> Result<(), String> {
@@ -395,6 +414,36 @@ mod tests {
     use super::*;
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).into()).collect()
+    }
+    #[test]
+    fn input_mode_overrides_replace_the_entire_linux_assignment_family() {
+        let raw = args(&[
+            "--alsa",
+            "default",
+            "--local-input",
+            "/dev/input/event1",
+            "--local-input",
+            "/dev/input/event2",
+        ]);
+        let stable = args(&[
+            "--local-player",
+            "7:/dev/input/event3",
+            "--local-player",
+            "99:/dev/input/event4",
+        ]);
+        let replaced = overlay_native_args(&raw, &stable, SettingsHost::Linux).unwrap();
+        assert!(!replaced.iter().any(|arg| arg == "--local-input"));
+        assert!(replaced.chunks_exact(2).any(|p| p == ["--alsa", "default"]));
+        let solo = overlay_native_args(
+            &replaced,
+            &args(&["--evdev", "/dev/input/event5"]),
+            SettingsHost::Linux,
+        )
+        .unwrap();
+        assert!(!solo.iter().any(|arg| arg == "--local-player"));
+        let again = overlay_native_args(&solo, &stable, SettingsHost::Linux).unwrap();
+        assert!(!again.iter().any(|arg| arg == "--evdev"));
+        assert_eq!(again, replaced);
     }
     #[test]
     fn cli_overrides_replace_whole_repeat_groups_and_can_clear_optional_values() {

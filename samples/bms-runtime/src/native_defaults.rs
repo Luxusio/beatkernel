@@ -48,7 +48,7 @@ pub fn complete(
         }
         SettingsHost::Linux => {
             add("--alsa", "default".into());
-            if get("--local-input").is_none() {
+            if get("--local-input").is_none() && get("--local-player").is_none() {
                 add("--evdev", defaults.keyboard.clone());
             }
             add("--rate", defaults.rate.to_string());
@@ -71,6 +71,30 @@ pub fn complete(
 #[cfg(test)]
 mod fixtures {
     use super::*;
+    #[test]
+    fn stable_local_devices_do_not_add_a_solo_input_override() {
+        let args = [
+            "--local-player",
+            "7:/dev/input/event1",
+            "--local-player",
+            "1000:/dev/input/event2",
+        ]
+        .map(String::from);
+        let completed = complete(
+            &args,
+            SettingsHost::Linux,
+            &NativeDefaults::for_validation(),
+        )
+        .unwrap();
+        assert!(!completed.iter().any(|s| s == "--evdev"));
+        assert_eq!(
+            completed
+                .chunks_exact(2)
+                .filter(|p| p[0] == "--local-player")
+                .count(),
+            2
+        );
+    }
     #[test]
     fn local_devices_suppress_solo_default_and_preserve_all_assignments() {
         let args = [

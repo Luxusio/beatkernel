@@ -19,7 +19,7 @@ impl LocalPlayer {
 pub struct LocalPlayers {
     host: SettingsHost,
     capacity: usize,
-    next_id: u32,
+    next_id: Option<u32>,
     players: Vec<LocalPlayer>,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,11 +35,51 @@ impl LocalPlayers {
         Ok(Self {
             host,
             capacity,
-            next_id: 2,
+            next_id: Some(2),
             players: vec![LocalPlayer {
                 id: PlayerId(1),
                 input: None,
             }],
+        })
+    }
+    /// Restores 2..=64 unique positive player identities and exact assignments.
+    /// Exhausted ID space is retained explicitly; existing u32::MAX IDs remain valid.
+    pub fn from_assignments(
+        host: SettingsHost,
+        capacity: usize,
+        assignments: Vec<(PlayerId, String)>,
+    ) -> Result<Self, String> {
+        if !(1..=MAX_LOCAL_PLAYERS).contains(&capacity)
+            || !(2..=capacity).contains(&assignments.len())
+        {
+            return Err("invalid assigned local player count or capacity".into());
+        }
+        let mut max_id = 0;
+        for (index, (player, identity)) in assignments.iter().enumerate() {
+            if player.0 == 0
+                || !valid_identity(identity)
+                || assignments[..index]
+                    .iter()
+                    .any(|(prior, path)| prior == player || path == identity)
+            {
+                return Err("invalid or duplicate local player identity/assignment".into());
+            }
+            max_id = max_id.max(player.0);
+        }
+        let next_id = max_id.checked_add(1);
+        let mut players = Vec::new();
+        players
+            .try_reserve_exact(assignments.len())
+            .map_err(|_| "local roster allocation failed")?;
+        players.extend(assignments.into_iter().map(|(id, identity)| LocalPlayer {
+            id,
+            input: Some(identity),
+        }));
+        Ok(Self {
+            host,
+            capacity,
+            next_id,
+            players,
         })
     }
     pub fn players(&self) -> &[LocalPlayer] {
@@ -54,20 +94,29 @@ impl LocalPlayers {
             return Err("local player count exceeds capacity".into());
         }
         let added = count.saturating_sub(self.players.len());
-        let next = self
-            .next_id
-            .checked_add(u32::try_from(added).map_err(|_| "player count overflow")?)
-            .ok_or("player identity overflow")?;
+        let allocation = if added == 0 {
+            None
+        } else {
+            let start = self
+                .next_id
+                .ok_or("local player identity space exhausted")?;
+            let last = start
+                .checked_add(u32::try_from(added - 1).map_err(|_| "player count overflow")?)
+                .ok_or("player identity overflow")?;
+            Some((start, last))
+        };
         self.players
             .try_reserve(added)
             .map_err(|_| "local roster allocation failed")?;
-        for id in self.next_id..next {
-            self.players.push(LocalPlayer {
-                id: PlayerId(id),
-                input: None,
-            });
+        if let Some((start, last)) = allocation {
+            for id in start..=last {
+                self.players.push(LocalPlayer {
+                    id: PlayerId(id),
+                    input: None,
+                });
+            }
+            self.next_id = last.checked_add(1);
         }
-        self.next_id = next;
         self.players.truncate(count);
         if count == 1 {
             self.players[0].input = None;
@@ -83,13 +132,7 @@ impl LocalPlayers {
         if !self.needs_assignment() {
             return Err("solo input is automatic; assignment is unnecessary".into());
         }
-        if host != self.host
-            || identity.is_empty()
-            || identity.len() > MAX_VALUE_BYTES
-            || identity
-                .chars()
-                .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
-        {
+        if host != self.host || !valid_identity(identity) {
             return Err("invalid native keyboard identity".into());
         }
         let index = self
@@ -133,6 +176,13 @@ impl LocalPlayers {
             .map(InputPlan::Assigned)
     }
 }
+fn valid_identity(identity: &str) -> bool {
+    !identity.is_empty()
+        && identity.len() <= MAX_VALUE_BYTES
+        && !identity
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+}
 impl InputPlan {
     /// Resolve fresh attachments off-thread; different native aliases may not share a source.
     pub fn resolve(
@@ -148,11 +198,7 @@ impl InputPlan {
         let mut resolved = Vec::with_capacity(assignments.len());
         let mut identities = std::collections::BTreeSet::new();
         for (player, identity) in assignments {
-            if identity.is_empty()
-                || identity.len() > MAX_VALUE_BYTES
-                || identity
-                    .chars()
-                    .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+            if !valid_identity(identity)
                 || !identities.insert(identity.as_str())
                 || resolved.iter().any(|(existing, _)| existing == player)
             {
@@ -172,6 +218,95 @@ impl InputPlan {
 #[cfg(test)]
 mod fixtures {
     use super::*;
+    #[test]
+    fn restored_assignments_keep_order_and_allocate_after_maximum_retired_id() {
+        let mut roster = LocalPlayers::from_assignments(
+            SettingsHost::Linux,
+            64,
+            vec![
+                (PlayerId(9), "/dev/input/event0".into()),
+                (PlayerId(3), "/dev/input/event1".into()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            roster
+                .players()
+                .iter()
+                .map(|player| player.id)
+                .collect::<Vec<_>>(),
+            vec![PlayerId(9), PlayerId(3)]
+        );
+        roster.resize(1).unwrap();
+        roster.resize(4).unwrap();
+        assert_eq!(
+            roster
+                .players()
+                .iter()
+                .map(|player| player.id)
+                .collect::<Vec<_>>(),
+            vec![PlayerId(9), PlayerId(10), PlayerId(11), PlayerId(12)]
+        );
+        let accepted = roster.players().to_vec();
+        assert!(roster.resize(65).is_err());
+        assert_eq!(roster.players(), accepted);
+        for assignments in [
+            vec![(PlayerId(0), "a".into()), (PlayerId(2), "b".into())],
+            vec![(PlayerId(1), "a".into()), (PlayerId(1), "b".into())],
+            vec![(PlayerId(1), "a".into()), (PlayerId(2), "a".into())],
+            vec![(PlayerId(1), "".into()), (PlayerId(2), "b".into())],
+            vec![(PlayerId(1), "bad\npath".into()), (PlayerId(2), "b".into())],
+        ] {
+            assert!(LocalPlayers::from_assignments(SettingsHost::Linux, 64, assignments).is_err());
+        }
+        assert!(
+            LocalPlayers::from_assignments(
+                SettingsHost::Linux,
+                1,
+                vec![(PlayerId(1), "a".into()), (PlayerId(2), "b".into())]
+            )
+            .is_err()
+        );
+        assert!(
+            LocalPlayers::from_assignments(
+                SettingsHost::Linux,
+                64,
+                vec![(PlayerId(1), "a".into())]
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn maximum_restored_id_remains_valid_but_exhausted_growth_never_reuses_it() {
+        let mut exhausted = LocalPlayers::from_assignments(
+            SettingsHost::Linux,
+            64,
+            vec![(PlayerId(5), "a".into()), (PlayerId(u32::MAX), "b".into())],
+        )
+        .unwrap();
+        assert_eq!(exhausted.next_id, None);
+        exhausted.resize(2).unwrap();
+        exhausted.resize(1).unwrap();
+        let before = exhausted.players().to_vec();
+        assert!(exhausted.resize(2).is_err());
+        assert_eq!(exhausted.players(), before);
+        assert_eq!(exhausted.next_id, None);
+        let mut last_slot = LocalPlayers::from_assignments(
+            SettingsHost::Linux,
+            64,
+            vec![
+                (PlayerId(5), "a".into()),
+                (PlayerId(u32::MAX - 1), "b".into()),
+            ],
+        )
+        .unwrap();
+        last_slot.resize(3).unwrap();
+        assert_eq!(last_slot.players()[2].id, PlayerId(u32::MAX));
+        assert_eq!(last_slot.next_id, None);
+        let before = last_slot.players().to_vec();
+        assert!(last_slot.resize(4).is_err());
+        assert_eq!(last_slot.players(), before);
+    }
     #[test]
     fn solo_and_four_player_routes_preserve_identity_and_reject_aliases() {
         let mut roster = LocalPlayers::new(SettingsHost::Windows, 8).unwrap();
