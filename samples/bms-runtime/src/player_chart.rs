@@ -142,12 +142,17 @@ impl PlayerChart {
     /// public note vector cannot turn a stale prepared index into a panic or
     /// an unrelated object's mapping.
     pub fn note_by_object(&self, object: ObjectId) -> Option<&PlayerNote> {
-        let index = self
+        self.notes.get(self.note_index_by_object(object)?)
+    }
+
+    /// Looks up a prepared note index with the same stale-index identity guard.
+    pub fn note_index_by_object(&self, object: ObjectId) -> Option<usize> {
+        let entry = self
             .object_index
             .binary_search_by_key(&object, |entry| entry.0)
             .ok()?;
-        let note = self.notes.get(self.object_index[index].1)?;
-        (note.object == object).then_some(note)
+        let index = self.object_index[entry].1;
+        (self.notes.get(index)?.object == object).then_some(index)
     }
 
     /// Returns bounded head/body overlaps in the inclusive requested time window.
@@ -192,7 +197,23 @@ impl PlayerChart {
         behind_ns: i64,
         output: &mut Vec<usize>,
     ) -> Result<(), String> {
+        self.visible_note_indices_with_progress_checked(now, lookahead_ns, behind_ns, None, output)
+    }
+
+    /// Filters authoritative completed objects before the visible-note budget.
+    /// Foreign progress is rejected; output is cleared on every rejection.
+    pub fn visible_note_indices_with_progress_checked(
+        &self,
+        now: Timestamp,
+        lookahead_ns: i64,
+        behind_ns: i64,
+        progress: Option<&crate::note_progress::NoteProgress>,
+        output: &mut Vec<usize>,
+    ) -> Result<(), String> {
         output.clear();
+        if progress.is_some_and(|state| !state.matches_chart(self)) {
+            return Err("note progress belongs to another prepared chart".into());
+        }
         let Some((lower, end)) = self.visible_bounds(now, lookahead_ns, behind_ns) else {
             return Ok(());
         };
@@ -202,8 +223,14 @@ impl PlayerChart {
                 .try_reserve_exact(capacity)
                 .map_err(|_| "playfield visibility allocation failed".to_string())?;
         }
-        self.visit_visible(lower, end, MAX_VISIBLE_NOTES + 1, |index| {
-            output.push(index)
+        self.visit_visible(lower, end, MAX_VISIBLE_NOTES + 1, progress, |index| {
+            if progress.is_some_and(|state| {
+                state.state(index) == Some(crate::note_progress::NoteState::Completed)
+            }) {
+                return false;
+            }
+            output.push(index);
+            true
         });
         if output.len() > MAX_VISIBLE_NOTES {
             output.clear();
@@ -245,11 +272,21 @@ impl PlayerChart {
             return Vec::new();
         };
         let mut visible = Vec::with_capacity(max.min(end));
-        self.visit_visible(lower, end, max, |index| visible.push(&self.notes[index]));
+        self.visit_visible(lower, end, max, None, |index| {
+            visible.push(&self.notes[index]);
+            true
+        });
         visible
     }
 
-    fn visit_visible(&self, lower: i128, end: usize, max: usize, mut emit: impl FnMut(usize)) {
+    fn visit_visible(
+        &self,
+        lower: i128,
+        end: usize,
+        max: usize,
+        progress: Option<&crate::note_progress::NoteProgress>,
+        mut emit: impl FnMut(usize) -> bool,
+    ) {
         let mut emitted = 0;
         self.collect_visible(
             1,
@@ -258,6 +295,7 @@ impl PlayerChart {
             end,
             lower,
             max,
+            progress,
             &mut emitted,
             &mut emit,
         );
@@ -271,22 +309,49 @@ impl PlayerChart {
         end: usize,
         lower: i128,
         max: usize,
+        progress: Option<&crate::note_progress::NoteProgress>,
         emitted: &mut usize,
-        emit: &mut impl FnMut(usize),
+        emit: &mut impl FnMut(usize) -> bool,
     ) {
         if first >= end || *emitted >= max || i128::from(self.endpoint_tree[node]) < lower {
             return;
         }
+        if progress
+            .is_some_and(|state| state.all_completed(first, last.min(end).min(self.notes.len())))
+        {
+            return;
+        }
         if last - first == 1 {
             if first < self.notes.len() {
-                emit(first);
-                *emitted += 1;
+                if emit(first) {
+                    *emitted += 1;
+                }
             }
             return;
         }
         let middle = first + (last - first) / 2;
-        self.collect_visible(node * 2, first, middle, end, lower, max, emitted, emit);
-        self.collect_visible(node * 2 + 1, middle, last, end, lower, max, emitted, emit);
+        self.collect_visible(
+            node * 2,
+            first,
+            middle,
+            end,
+            lower,
+            max,
+            progress,
+            emitted,
+            emit,
+        );
+        self.collect_visible(
+            node * 2 + 1,
+            middle,
+            last,
+            end,
+            lower,
+            max,
+            progress,
+            emitted,
+            emit,
+        );
     }
 }
 
@@ -480,6 +545,150 @@ mod tests {
             tree_leaves,
             object_index,
         }
+    }
+
+    #[test]
+    fn completed_long_hold_subtrees_skip_leaf_callbacks_and_preserve_unfinished_neighbors() {
+        use crate::note_progress::NoteProgress;
+        use beatkernel::judge::{JudgeEvent, JudgeGrade, JudgeOutcome, JudgeStage};
+        use beatkernel::time::Duration;
+        use std::sync::Arc;
+        let count = 4096 * 2 + 17;
+        let chart = Arc::new(indexed_model(
+            (0..count)
+                .map(|index| PlayerNote {
+                    object: ObjectId(index as u64 + 1),
+                    lane_index: 0,
+                    start: Timestamp::ZERO,
+                    end: Some(Timestamp::from_nanos(604_800_000_000_000)),
+                })
+                .collect(),
+        ));
+        let mut progress = NoteProgress::new(chart.clone()).unwrap();
+        let event = |index: usize| JudgeEvent {
+            object: chart.notes[index].object,
+            stage: JudgeStage::HoldTail,
+            outcome: JudgeOutcome::Hit {
+                grade: JudgeGrade(1),
+                delta: Duration::ZERO,
+            },
+            at: Timestamp::ZERO,
+            input: None,
+        };
+        progress.apply(&(0..4096).map(event).collect::<Vec<_>>());
+        let retained = progress.clone();
+        let mut callbacks = Vec::new();
+        chart.visit_visible(0, 4100, usize::MAX, Some(&progress), |index| {
+            callbacks.push(index);
+            true
+        });
+        assert_eq!(callbacks, vec![4096, 4097, 4098, 4099]);
+        progress.apply(&(4096..count).map(event).collect::<Vec<_>>());
+        let mut callbacks = 0;
+        chart.visit_visible(0, count, usize::MAX, Some(&progress), |_| {
+            callbacks += 1;
+            true
+        });
+        assert_eq!(callbacks, 0);
+        assert!(progress.all_completed(0, count));
+        assert!(!retained.all_completed(0, count));
+        let mut visible = Vec::new();
+        chart
+            .visible_note_indices_with_progress_checked(
+                Timestamp::ZERO,
+                i64::MAX,
+                0,
+                Some(&progress),
+                &mut visible,
+            )
+            .unwrap();
+        assert!(visible.is_empty());
+        let mut legacy = 0;
+        chart.visit_visible(0, count, 3, None, |_| {
+            legacy += 1;
+            true
+        });
+        assert_eq!(legacy, 3);
+    }
+
+    #[test]
+    fn completed_filter_precedes_budget_and_foreign_progress_clears_output() {
+        use crate::note_progress::NoteProgress;
+        use beatkernel::judge::{JudgeEvent, JudgeGrade, JudgeOutcome, JudgeStage};
+        use beatkernel::time::Duration;
+        use std::sync::Arc;
+        let chart = Arc::new(indexed_model(
+            (0..MAX_VISIBLE_NOTES + 2)
+                .map(|index| PlayerNote {
+                    object: ObjectId(index as u64 + 1),
+                    lane_index: 0,
+                    start: Timestamp::ZERO,
+                    end: None,
+                })
+                .collect(),
+        ));
+        let mut progress = NoteProgress::new(chart.clone()).unwrap();
+        let mut output = vec![99];
+        assert!(
+            chart
+                .visible_note_indices_with_progress_checked(
+                    Timestamp::ZERO,
+                    0,
+                    0,
+                    Some(&progress),
+                    &mut output
+                )
+                .is_err()
+        );
+        assert!(output.is_empty());
+        let event = |index: usize| JudgeEvent {
+            object: chart.notes[index].object,
+            stage: JudgeStage::Instant,
+            outcome: JudgeOutcome::Hit {
+                grade: JudgeGrade(1),
+                delta: Duration::ZERO,
+            },
+            at: Timestamp::from_nanos(i64::MAX),
+            input: None,
+        };
+        progress.apply(&[event(0), event(1)]);
+        chart
+            .visible_note_indices_with_progress_checked(
+                Timestamp::ZERO,
+                0,
+                0,
+                Some(&progress),
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(output, (2..MAX_VISIBLE_NOTES + 2).collect::<Vec<_>>());
+        let pointer = output.as_ptr();
+        let capacity = output.capacity();
+        chart
+            .visible_note_indices_with_progress_checked(
+                Timestamp::ZERO,
+                0,
+                0,
+                Some(&progress),
+                &mut output,
+            )
+            .unwrap();
+        assert_eq!(output.as_ptr(), pointer);
+        assert_eq!(output.capacity(), capacity);
+        let foreign = NoteProgress::new(Arc::new(chart.as_ref().clone())).unwrap();
+        assert!(
+            chart
+                .visible_note_indices_with_progress_checked(
+                    Timestamp::ZERO,
+                    0,
+                    0,
+                    Some(&foreign),
+                    &mut output
+                )
+                .is_err()
+        );
+        assert!(output.is_empty());
+        assert_eq!(chart.note_index_by_object(chart.notes[2].object), Some(2));
     }
 
     #[test]

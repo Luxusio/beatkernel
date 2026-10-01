@@ -3,6 +3,7 @@ use crate::{
     competition::{OpponentKind, ScoreSummary},
     local_players::PlayerId,
     local_runtime::PlayerReport,
+    note_progress::NoteProgress,
     player_chart::PlayerChart,
     pressed_keys::{PressedKeys, validate_mask},
 };
@@ -89,6 +90,8 @@ pub struct LocalPlayerSnapshot {
     pub recent_results: Vec<JudgeEvent>,
     /// Actual admitted button ownership, masked during native pause transitions.
     pub pressed_lanes: u32,
+    /// Authoritative full-prefix state for the exact prepared chart, if available.
+    pub note_progress: Option<NoteProgress>,
     pub competition: Option<CompetitionSnapshot>,
 }
 impl LocalPlayerSnapshot {
@@ -101,6 +104,7 @@ impl LocalPlayerSnapshot {
             last_judge: None,
             recent_results: Vec::new(),
             pressed_lanes: 0,
+            note_progress: None,
             competition: None,
         }
     }
@@ -109,6 +113,9 @@ impl LocalPlayerSnapshot {
     }
     fn update_results(&mut self, song: Timestamp, events: &[JudgeEvent]) {
         self.song_time = Some(song);
+        if let Some(progress) = &mut self.note_progress {
+            progress.apply(events);
+        }
         if let Some(last) = events.last() {
             self.last_judge = Some(*last);
         }
@@ -168,6 +175,8 @@ pub struct PlayerSnapshot {
     pub recent_results: Vec<JudgeEvent>,
     /// Actual admitted button ownership, masked during native pause transitions.
     pub pressed_lanes: u32,
+    /// Authoritative full-prefix state for the exact prepared chart, if available.
+    pub note_progress: Option<NoteProgress>,
     pub status: PlayerStatus,
     pub cancelled: bool,
     pub pause: PauseState,
@@ -184,6 +193,7 @@ impl Default for PlayerSnapshot {
             last_judge: None,
             recent_results: Vec::new(),
             pressed_lanes: 0,
+            note_progress: None,
             status: PlayerStatus::Loading,
             cancelled: false,
             pause: PauseState::Unavailable,
@@ -404,6 +414,7 @@ pub fn publish_local_chart(
             return Err("game presentation roster cannot be replaced".into());
         }
         let prepared = Arc::new(PlayerChart::from_compiled(source, chart)?);
+        let progress = NoteProgress::new(Arc::clone(&prepared))?;
         let mut members = if current.snapshot.players.is_empty() {
             players
                 .iter()
@@ -414,6 +425,11 @@ pub fn publish_local_chart(
         };
         for member in &mut members {
             member.chart = Some(Arc::clone(&prepared));
+            member.note_progress = if member.last_judge.is_none() {
+                Some(progress.clone())
+            } else {
+                None
+            };
         }
         if current.pressed.is_empty() {
             current.pressed = players.iter().map(|_| PressedState::default()).collect();
@@ -621,12 +637,14 @@ impl PlayerSnapshot {
     fn sync_legacy(&mut self) {
         if self.players.len() == 1 {
             let member = &self.players[0];
+            self.note_progress = member.note_progress.clone();
             self.pressed_lanes = member.pressed_lanes;
             self.song_time = member.song_time;
             self.score = member.score.clone();
             self.last_judge = member.last_judge;
             self.recent_results = member.recent_results.clone();
         } else {
+            self.note_progress = None;
             self.pressed_lanes = 0;
             self.song_time = None;
             self.score = ScoreSummary::default();
@@ -1284,5 +1302,68 @@ mod fixtures {
         );
         assert_eq!(failed.pressed_lanes, 0);
         assert_eq!(failed.players[0].pressed_lanes, 0);
+    }
+    #[test]
+    fn progress_keeps_full_prefix_and_independent_members_through_pause_and_cleanup() {
+        use crate::note_progress::NoteState;
+        let (source, chart) = chart_fixture();
+        let (publisher, viewer) = channel();
+        with_publisher(publisher, || {
+            publish_local_chart(&source, &chart, &[PlayerId(3), PlayerId(u32::MAX)]).unwrap();
+            let prepared = SESSION.with(|s| {
+                s.borrow().as_ref().unwrap().snapshot.players[0]
+                    .chart
+                    .clone()
+                    .unwrap()
+            });
+            let old = SESSION.with(|s| {
+                s.borrow().as_ref().unwrap().snapshot.players[0]
+                    .note_progress
+                    .clone()
+                    .unwrap()
+            });
+            let mut many = report(3, 100, 129, 0);
+            many.report.judge_events[0].object = prepared.notes[0].object;
+            publish_local_reports(&[many]).unwrap();
+            publish_pause(PauseState::Paused);
+            let snapshot = viewer.take_latest().unwrap();
+            assert_eq!(snapshot.players[0].recent_results.len(), 128);
+            assert_eq!(
+                snapshot.players[0].note_progress.as_ref().unwrap().state(0),
+                Some(NoteState::Completed)
+            );
+            assert_eq!(
+                snapshot.players[1].note_progress.as_ref().unwrap().state(0),
+                Some(NoteState::Pending)
+            );
+            assert_eq!(old.state(0), Some(NoteState::Pending));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            viewer.take_latest().unwrap().players[0]
+                .note_progress
+                .as_ref()
+                .unwrap()
+                .state(0),
+            Some(NoteState::Completed)
+        );
+    }
+    #[test]
+    fn chart_after_results_cannot_reconstruct_history_but_empty_reports_allow_fresh_state() {
+        let (source, chart) = chart_fixture();
+        for prior_results in [false, true] {
+            let (publisher, viewer) = channel();
+            with_publisher(publisher, || {
+                let actual = report(1, 0, usize::from(prior_results), 0);
+                publish_report(&actual.report).unwrap();
+                publish_chart(&source, &chart).unwrap();
+                let snapshot = viewer.take_latest().unwrap();
+                assert_eq!(snapshot.players[0].note_progress.is_some(), !prior_results);
+                assert_eq!(snapshot.note_progress.is_some(), !prior_results);
+                Ok(())
+            })
+            .unwrap();
+        }
     }
 }
