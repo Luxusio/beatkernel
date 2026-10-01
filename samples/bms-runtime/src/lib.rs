@@ -16,8 +16,12 @@ pub mod font;
 /// Reusable asynchronous native/Web GPU presentation, separate from game I/O.
 #[cfg(feature = "graphics")]
 pub mod graphics;
+/// Collection-based local player identity and unique native input assignment.
+pub mod local_players;
 /// Bounded two-player progress exchange on a dedicated socket worker.
 pub mod multiplayer;
+/// Omitted solo option defaults, independent of native discovery.
+pub mod native_defaults;
 /// Synthetic offline composition using the same runtime and mixer as native apps.
 pub mod offline;
 /// Actual game-to-UI presentation and cancellation outside audio callbacks.
