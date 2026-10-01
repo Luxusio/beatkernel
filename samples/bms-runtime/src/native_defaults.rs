@@ -48,7 +48,9 @@ pub fn complete(
         }
         SettingsHost::Linux => {
             add("--alsa", "default".into());
-            add("--evdev", defaults.keyboard.clone());
+            if get("--local-input").is_none() {
+                add("--evdev", defaults.keyboard.clone());
+            }
             add("--rate", defaults.rate.to_string());
             add("--channels", defaults.channels.to_string());
             add("--period-frames", "256".into());
@@ -69,6 +71,57 @@ pub fn complete(
 #[cfg(test)]
 mod fixtures {
     use super::*;
+    #[test]
+    fn local_devices_suppress_solo_default_and_preserve_all_assignments() {
+        let args = [
+            "--local-input",
+            "/dev/input/event1",
+            "--local-input",
+            "/dev/input/event2",
+            "--local-input",
+            "/dev/input/event3",
+            "--local-input",
+            "/dev/input/event4",
+        ]
+        .map(String::from);
+        let completed = complete(
+            &args,
+            SettingsHost::Linux,
+            &NativeDefaults::for_validation(),
+        )
+        .unwrap();
+        assert!(!completed.iter().any(|s| s == "--evdev"));
+        let devices: Vec<_> = completed
+            .chunks_exact(2)
+            .filter(|p| p[0] == "--local-input")
+            .map(|p| p[1].as_str())
+            .collect();
+        assert_eq!(
+            devices,
+            [
+                "/dev/input/event1",
+                "/dev/input/event2",
+                "/dev/input/event3",
+                "/dev/input/event4"
+            ]
+        );
+        assert!(
+            complete(
+                &args,
+                SettingsHost::Windows,
+                &NativeDefaults::for_validation()
+            )
+            .is_err()
+        );
+        assert!(
+            complete(
+                &args,
+                SettingsHost::Macos,
+                &NativeDefaults::for_validation()
+            )
+            .is_err()
+        );
+    }
     #[test]
     fn automatic_defaults_preserve_explicit_overrides_and_leave_draft_unmodified() {
         let args = [

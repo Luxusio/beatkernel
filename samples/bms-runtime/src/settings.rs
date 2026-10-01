@@ -208,6 +208,11 @@ const WINDOWS: &[Spec] = &[
 ];
 const LINUX: &[Spec] = &[
     (
+        "--local-input",
+        "LOCAL PLAYER KEYBOARD PATH",
+        "Repeat for 2..64 local players in order; mutually exclusive with --evdev.",
+    ),
+    (
         "--evdev",
         "KEYBOARD DEVICE PATH",
         "Empty chooses a readable keyboard automatically. Advanced override: exact evdev node.",
@@ -369,7 +374,10 @@ fn field(spec: Spec, value: String) -> SettingsField {
     }
 }
 fn repeatable(flag: &str) -> bool {
-    matches!(flag, "--bind" | "--ghost-self" | "--ghost-other")
+    matches!(
+        flag,
+        "--bind" | "--ghost-self" | "--ghost-other" | "--local-input"
+    )
 }
 fn valid_value(value: &str) -> Result<(), String> {
     if value.len() > MAX_VALUE_BYTES

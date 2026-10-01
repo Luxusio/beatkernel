@@ -194,6 +194,42 @@ mod tests {
         NativeSettings::from_args(&args, SettingsHost::Linux).unwrap()
     }
     #[test]
+    fn local_device_group_round_trips_and_overlays_as_one_ordered_group() {
+        let original = [
+            "--local-input",
+            "/dev/input/event1",
+            "--local-input",
+            "/dev/input/event2",
+            "--local-input",
+            "/dev/input/event3",
+            "--local-input",
+            "/dev/input/event4",
+        ]
+        .map(String::from)
+        .to_vec();
+        let draft = NativeSettings::from_args(&original, SettingsHost::Linux).unwrap();
+        let encoded = encode_profile(&draft, SettingsHost::Linux).unwrap();
+        assert_eq!(
+            decode_profile(&encoded, SettingsHost::Linux)
+                .unwrap()
+                .native_args(),
+            original
+        );
+        let replacement = [
+            "--local-input",
+            "/dev/input/event5",
+            "--local-input",
+            "/dev/input/event6",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            crate::settings::overlay_native_args(&original, &replacement, SettingsHost::Linux)
+                .unwrap(),
+            replacement
+        );
+    }
+    #[test]
     fn utf8_pairs_and_repeat_order_roundtrip_with_lf_and_crlf() {
         let model = values();
         let encoded = encode_profile(&model, SettingsHost::Linux).unwrap();
@@ -228,11 +264,13 @@ mod tests {
                     .is_err()
             );
         }
-        assert!(decode_profile(
-            b"BEATKERNEL-NATIVE-PROFILE\t2\tlinux\n",
-            SettingsHost::Linux
-        )
-        .is_err());
+        assert!(
+            decode_profile(
+                b"BEATKERNEL-NATIVE-PROFILE\t2\tlinux\n",
+                SettingsHost::Linux
+            )
+            .is_err()
+        );
         assert!(decode_profile(&[255, b'\n'], SettingsHost::Linux).is_err());
         assert!(decode_profile(&vec![b'x'; MAX_PROFILE_BYTES + 1], SettingsHost::Linux).is_err());
     }
@@ -300,9 +338,11 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         assert!(load_profile(&link, SettingsHost::Linux).is_err());
         assert!(save_profile(&link, &values(), SettingsHost::Linux).is_err());
-        assert!(fs::symlink_metadata(&link)
-            .unwrap()
-            .file_type()
-            .is_symlink());
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 }

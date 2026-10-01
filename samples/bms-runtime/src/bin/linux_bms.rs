@@ -1,4 +1,4 @@
-//! Actual BMS/WAV assets, one explicit evdev source and exact native ALSA output.
+//! Actual BMS/WAV assets, explicit evdev sources and exact native ALSA output.
 #[cfg(any(target_os = "linux", test))]
 use beatkernel::audio::AudioCommand;
 use beatkernel::{
@@ -18,6 +18,7 @@ struct Options {
     replay_max_records: usize,
     replay_max_bytes: usize,
     evdev: PathBuf,
+    local_inputs: Vec<PathBuf>,
     alsa: String,
     format: AudioFormat,
     period: u32,
@@ -37,6 +38,7 @@ fn parse(args: &[String]) -> Result<Options> {
     let (mut chart, mut evdev, mut alsa) = (None, None, None);
     let (mut rate, mut channels, mut period, mut buffer, mut seconds) =
         (None, None, None, None, None);
+    let mut local_inputs = Vec::new();
     let mut bindings = BTreeMap::new();
     let mut keys = HashSet::new();
     let mut seen = HashSet::new();
@@ -52,7 +54,7 @@ fn parse(args: &[String]) -> Result<Options> {
     let mut args = args.iter();
     while let Some(flag) = args.next() {
         let value = args.next().ok_or("every option requires a value")?;
-        if flag != "--bind" && !seen.insert(flag.as_str()) {
+        if !matches!(flag.as_str(), "--bind" | "--local-input") && !seen.insert(flag.as_str()) {
             return Err(format!("duplicate option {flag}").into());
         }
         match flag.as_str() {
@@ -76,6 +78,15 @@ fn parse(args: &[String]) -> Result<Options> {
             }
             "--chart" if !value.is_empty() => chart = Some(PathBuf::from(value)),
             "--evdev" if !value.is_empty() => evdev = Some(PathBuf::from(value)),
+            "--local-input" if !value.is_empty() => {
+                let path = PathBuf::from(value);
+                if local_inputs.len() == beatkernel_bms_runtime::local_players::MAX_LOCAL_PLAYERS
+                    || local_inputs.contains(&path)
+                {
+                    return Err("local input devices must be distinct, at most 64".into());
+                }
+                local_inputs.push(path);
+            }
             "--alsa" if !value.is_empty() => alsa = Some(value.clone()),
             "--rate" => rate = Some(value.parse::<u32>()?),
             "--channels" => channels = Some(value.parse::<u16>()?),
@@ -142,12 +153,18 @@ fn parse(args: &[String]) -> Result<Options> {
             "nonnegative windows, preroll 0..10000000000 ns, and voices 1..4096 required".into(),
         );
     }
+    if !local_inputs.is_empty() && (local_inputs.len() < 2 || evdev.is_some()) {
+        return Err("use 2..64 --local-input devices, mutually exclusive with --evdev".into());
+    }
+    let evdev = evdev.or_else(|| local_inputs.first().cloned())
+        .ok_or("explicit --evdev or multiple --local-input required")?;
     Ok(Options {
         record_replay,
         replay_max_records,
         replay_max_bytes,
         chart: chart.ok_or("explicit --chart required")?,
-        evdev: evdev.ok_or("explicit --evdev required")?,
+        evdev,
+        local_inputs,
         alsa: alsa.ok_or("explicit --alsa required")?,
         format: AudioFormat::new(
             rate.ok_or("explicit --rate required")?,
@@ -326,13 +343,17 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
     let (competition_options, args) =
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
-        println!("linux_bms --chart PATH --evdev NODE --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact one-node keyboard bindings; native float32 ALSA, no fallback. Physical timing Unknown.");
+        println!("linux_bms --chart PATH (--evdev NODE | --local-input NODE --local-input NODE [...]) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns 2..64 players in order, sharing lane bindings and output. Local replay paths gain .p<ID>.bkr; GUI and network competition are not yet supported for local groups. Native float32 ALSA, no fallback. Physical timing Unknown.");
         return Ok(());
     }
     let options = parse(&args)?;
     #[cfg(target_os = "linux")]
     {
-        native::run(options, competition_options)
+        if options.local_inputs.is_empty() {
+            native::run(options, competition_options)
+        } else {
+            local_native::run(options, competition_options)
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -340,6 +361,10 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
         Err("linux_bms native playback requires Linux".into())
     }
 }
+
+#[cfg(target_os = "linux")]
+#[path = "linux_bms/local.rs"]
+mod local_native;
 
 #[cfg(target_os = "linux")]
 mod native {
@@ -367,10 +392,10 @@ mod native {
         },
     };
     use std::time::{Duration as WallDuration, Instant};
-    const HOST: ClockDomainId = ClockDomainId(1);
-    const OUTPUT: ClockDomainId = ClockDomainId(2);
+    pub(super) const HOST: ClockDomainId = ClockDomainId(1);
+    pub(super) const OUTPUT: ClockDomainId = ClockDomainId(2);
     const DEVICE: DeviceId = DeviceId(1);
-    struct ExplicitDomains;
+    pub(super) struct ExplicitDomains;
     impl ClockMapper for ExplicitDomains {
         fn map(&self, _: ClockPoint, _: ClockDomainId) -> Option<Timestamp> {
             None
@@ -379,13 +404,13 @@ mod native {
             ClockMappingQuality::Unknown
         }
     }
-    fn output_origin() -> ClockPoint {
+    pub(super) fn output_origin() -> ClockPoint {
         ClockPoint {
             domain: OUTPUT,
             timestamp: Timestamp::ZERO,
         }
     }
-    fn observe(stream: &AlsaStream, startup: bool) -> Result<Option<ClockPair>> {
+    pub(super) fn observe(stream: &AlsaStream, startup: bool) -> Result<Option<ClockPair>> {
         match stream.snapshot().status {
             AlsaStatus::Ready if startup => return Ok(None),
             AlsaStatus::Running => {}
@@ -400,7 +425,7 @@ mod native {
             stream.configuration().format.sample_rate(),
         )?)
     }
-    fn seed(
+    pub(super) fn seed(
         stream: &AlsaStream,
         discipline: &mut PresentationDiscipline,
         bgm: &mut BgmSession,
@@ -420,7 +445,7 @@ mod native {
         }
         Err("no valid native ALSA presentation pair within two seconds".into())
     }
-    fn schedule(stream: &AlsaStream) -> Result<ClockPoint> {
+    pub(super) fn schedule(stream: &AlsaStream) -> Result<ClockPoint> {
         let snapshot = stream.snapshot();
         if snapshot.status != AlsaStatus::Running {
             return Err(format!("ALSA terminated: {:?}", snapshot.status).into());
@@ -940,6 +965,32 @@ mod fixtures {
         let mut missing = args();
         missing.drain(8..10);
         assert!(parse(&missing).is_err()); // missing rate
+    }
+    #[test]
+    fn local_input_roster_accepts_four_and_rejects_ambiguous_or_excess_assignments() {
+        let mut supplied = args();
+        supplied.drain(2..4); // Replace solo assignment with local collection.
+        for index in 0..4 {
+            supplied.extend(["--local-input".into(), format!("/dev/input/event{index}")]);
+        }
+        assert_eq!(parse(&supplied).unwrap().local_inputs.len(), 4);
+        let mut duplicate = supplied.clone();
+        duplicate.extend(["--local-input".into(), "/dev/input/event0".into()]);
+        assert!(parse(&duplicate).is_err());
+        let mut mixed = supplied.clone();
+        mixed.extend(["--evdev".into(), "/dev/input/event9".into()]);
+        assert!(parse(&mixed).is_err());
+        let mut single = args();
+        single[2] = "--local-input".into();
+        assert!(parse(&single).is_err());
+        let mut maximum = args();
+        maximum.drain(2..4);
+        for index in 0..64 {
+            maximum.extend(["--local-input".into(), format!("/dev/input/event{index}")]);
+        }
+        assert_eq!(parse(&maximum).unwrap().local_inputs.len(), 64);
+        maximum.extend(["--local-input".into(), "/dev/input/event64".into()]);
+        assert!(parse(&maximum).is_err());
     }
     #[test]
     fn checked_bgm_preroll_preserves_identity_and_rejects_overflow() {

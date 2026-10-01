@@ -49,7 +49,7 @@ pub(super) fn prepare(args: &[String]) -> Result<Vec<String>> {
             .0;
     }
     #[cfg(target_os = "linux")]
-    if get("--evdev").is_none() {
+    if get("--evdev").is_none() && get("--local-input").is_none() {
         defaults.keyboard = beatkernel_platform::linux::evdev_keyboard_devices(1024, 4096)?
             .into_iter()
             .find(|d| d.selectable)
