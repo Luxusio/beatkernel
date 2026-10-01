@@ -736,20 +736,57 @@ Known ceiling: normalized title/artist text is cached once, adding catalog-sized
 memory. Matching is linear per query edit; Unicode lowercase substring matching
 is not locale collation, full case folding, accent removal or fuzzy ranking.
 
-## Live pause integration boundary
+## Presentation-derived live pause
 
-The mixer now supports explicit queue pause that preserves PCM heads and future
-commands while physical output advances with silence. Solo and local runtime
-owners can request it through their shared producer; native BGM feeders use
-reported playback progress and hold admission on paused reports. The audio
-contract defines the separate physical and playback frame grids.
+F9 or the Pause/Resume button requests live pause when the native owner announces
+support. The current implemented flow is Linux solo without network competition;
+saved-record ghosts remain supported. Windows, macOS, local multi-player cohorts
+and replay Watch announce no pause capability until their owners are integrated.
+The full cross-platform/cohort pause requirement remains open.
+When extended to local multi-player play, all members must use the same
+acknowledged boundary, shared Transport and output; independent per-player
+pause clocks are prohibited.
 
-This foundation does not expose a pause hotkey or freeze UI song time. Before
-live pause is enabled, the native session coordinator must confirm the actual
-presentation boundary, pause/resume its shared Transport, fence paused input and
-automatic judging, map resumed keysound scheduling onto the playback grid and
-preserve capture/replay determinism. All local members must share that boundary;
-no per-player audio pause or independent transport is introduced. Cancellation
-must still drain/join a paused output owner. Existing live playback is unchanged
-until a coordinator requests pause. Complete live pause, loops and native timing
-acceptance remain unfinished.
+UI requests change desired state only. The owner publishes Running, Pausing,
+Paused and Resuming; controls are disabled during pending transitions, cancellation,
+cleanup/retry and replay. The mixer freezes its original scheduling grid. The
+owner retries acknowledgement publication after transient UI-slot contention,
+so an idle paused session cannot strand the UI in Pausing. Successful delivery
+clears that retry without continuously cloning unchanged paused snapshots. The
+owner recovers the first pause/resume output frame from coalesced render reports
+and waits for the actual native output frontier to cross it. Host boundary time
+is interpolated from request and crossing output/host observations; its physical
+mapping error remains Unknown. UI wall time never substitutes for this relation.
+
+While waiting for a boundary the owner fences judging, correction updates and
+input collection. After pause acknowledgement it appends a shared Transport
+pause, drains pre-boundary input, and commits one judge advance at the boundary
+before announcing Paused. During pause it drains native input into bounded key
+levels without generating scoring input or repeated frozen capture operations.
+After resume acknowledgement it resumes Transport, reconstructs presentation
+discipline using the cumulative paused-frame gap, and drains the paused prefix
+before admitting post-boundary original input. Native keysounds use the mixer
+playback grid; buffered physical output and clock observations retain their grid.
+A transient unavailable render read reuses the last validated report; initial
+input waits until real render evidence exists. It never invents a frame cursor.
+
+Keys logically held before pause remain held if their final physical level is
+down. If released, synthesize only an Up at the resume boundary through the same
+actual Runtime and capture path, preserving native provenance and the original
+physical clock point. New keys held during pause stay suppressed until Up;
+paused taps cannot score. Ordinary unpaired Up/Repeat outside pause retain
+previous runtime handling and do not establish tracked presses. Reconciliation
+is bounded to 65536 tracked controls and ordered by device/acquisition sequence.
+Capture records accepted judge operations in monotonic song time; paused idle
+wall time adds no replay operation or new wire-format command. Resume release
+operations are recorded and reconstructed by the existing judge logic.
+
+Cancellation still stops and joins the native owner while pending or paused.
+Explicit diagnostic --seconds remains a wall-time cutoff including pause.
+Known ceiling: boundary interpolation has no acoustic accuracy guarantee.
+Missing/regressing/unrepresentable clock relations, native device failure and
+raw queue SYN_DROPPED/resync terminate and drain the session with its valid
+recorded prefix. Waiting for output presentation can grow a raw-input backlog;
+input loss is never silently repaired. Windows/macOS/cohort/network policy,
+loops/browser/full widget host and full native/GUI/replay acceptance remain
+unfinished. Source compilation and authored fixtures are not execution proof.

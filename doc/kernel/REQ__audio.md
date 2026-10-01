@@ -96,9 +96,10 @@ be converted to this playback grid by the session coordinator. Rolling native
 BGM admission uses completed playback frames and waits during paused reports;
 native physical clock/presentation observations retain their output grid.
 
-Known ceiling: this is the audio scheduling primitive. The BMS native owner still
-needs presentation-confirmed pause boundaries, Transport/input fencing and
-replay policy before exposing live pause in the UI. Output already buffered in
+Known ceiling: this is the audio scheduling primitive. The Linux solo BMS owner
+now coordinates observed presentation boundaries, Transport/input fencing and
+song-time capture. Other native/cohort owners still require that integration;
+complete native/GUI timing acceptance remains unfinished. Output already buffered in
 a native device may continue to present after a render pause begins. Paused
 queue storage remains bounded; callers must stop generating gameplay commands
 until coordinated resume. No callback allocation, lock, rate rewrite or worker

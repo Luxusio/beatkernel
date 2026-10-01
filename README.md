@@ -139,7 +139,10 @@ F8/Restart Mark preflights that exact start and waits for native cleanup before
 creating a fresh session. The mark survives retries of this session, including
 Results. F5 keeps the original pinned start. Replay Watch cannot override its
 recorded start. Snapshot delivery is coalesced, so marks use the latest observed
-position, not the physical key event timestamp. Live scrubbing/pause/loops remain work.
+position, not the physical key event timestamp. Linux solo without network
+competition exposes F9/Pause with native-frontier acknowledgement, shared
+Transport fencing and paused-key reconciliation. Other platform/cohort pause,
+live scrubbing and loops remain work; native/GUI execution is still unverified.
 Settings Records browses an explicit directory and previews a selected recording
 against the current chart, judging profile and practice start before attaching
 it as My Record or Other Record. Changes stay in the settings draft until Apply.
