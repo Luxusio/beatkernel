@@ -553,8 +553,8 @@ silently shortened note list. All gameplay members keep independent judging.
 Known ceiling: CPU selection and membership comparison still cost work per
 frame; visible geometry and GPU fill remain proportional to displayed content.
 The desktop Navigator is integrated by the scoped-panel implementation below;
-Selection now uses retained reactive nodes as described below; other menus and
-full widget toolkit migration remain unfinished.
+all seven migrated menu views use retained nodes as described below. A full
+widget host remains unfinished.
 Cargo compilation is source evidence only; shader execution, native rendering
 and frame-time/upload benchmarks remain deferred by the user. This trial does
 not establish that this architecture is fastest on any device.
@@ -1067,6 +1067,12 @@ Native/live/replay/offline default preparation resolves an existing literal asse
 ## Declared MP3 timing
 
 Shared preparation uses tagged MP3 timing before native/offline/live/replay stream startup. Valid Xing/Info frame counts and LAME/Lavc delay/padding trim decoded PCM before it enters the immutable bank. Missing metadata leaves raw decoded frames; no guessed encoder delay is introduced. Explicit raw timing is available at the codec API. Original chart/compiled/replay identity and playback-start mapping remain unchanged. Actual source format stays fixed and malformed, incomplete, resynchronized or over-limit input fails setup. Fixtures are prepared for later execution; source checks are not acoustic synchronization or native acceptance evidence.
+
+## Reusable playfield visibility storage
+
+The playfield's visibility query also exposes ordered chart-local indices into caller-owned scratch storage. After that storage reaches the bounded query capacity, successful queries reuse its allocation across forward frames, backward seeks, empty windows and chart replacement. An over-budget result clears scratch and rejects presentation rather than admitting a truncated note set. Exact inclusive compiled head/body overlaps, i128 time bounds and endpoint-tree pruning remain shared with the existing reference-returning APIs.
+
+Each Scene owns one initially empty scratch vector, filled lazily and shared sequentially by its at-most-four playfields. Clear retains its capacity. It stores indices rather than references that could outlive a chart. Lane checks and visibility admission precede frame/batch insertion. GPU caches consume indexed borrowed notes without building a temporary reference vector, retain immutable instances on steady membership and invalidate on backward seek, geometry or local epoch changes. This removes the successful visibility-list allocation after warmup; membership/epoch rebuilds and other scene geometry can still allocate. No whole-renderer zero-allocation or measured performance claim is made. Regression fixtures must cover the actual scene path, exact boundaries, long holds, chart changes and rejection; native/GPU and benchmark execution remain pending.
 
 ## Finite solo network sections
 
