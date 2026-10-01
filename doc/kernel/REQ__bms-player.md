@@ -660,6 +660,19 @@ performance; execution remains user-deferred.
 
 ## Shared retained UI component base
 
+Desktop `--title-font PATH` selects a caller-provided font for catalog titles.
+Preparation reads at most 32 MiB, caches the first 1024 scalars of each title
+in a fixed 14-pixel, 1024-square atlas with 4096 cached-character capacity, and
+fails explicitly before window/native startup on invalid or excessive data.
+The immutable font cache is uploaded once per renderer; retained title rows
+use actual advances, baseline offsets and normalized sprite UVs without raster
+work on redraw. Full renderer recovery creates a new texture identity and
+rebuilds the Selection view; surface-only recovery retains the resource.
+The option stays outside native invocation/replay/profile arguments. Controls,
+search fields and other screens keep their existing bitmap font for now.
+Font fallback/shaping, broader widget integration and actual native visual
+acceptance remain unfinished; source fixtures are prepared for later execution.
+
 Portable font preparation accepts caller-provided TrueType/OpenType bytes and
 a fixed pixel scale, preparing glyphs into a bounded RGBA atlas for the existing
 GPU texture path. Font bytes, dimensions, scale and cached glyph count have
@@ -667,7 +680,7 @@ explicit limits. Cache hits reuse metrics/UVs; rejected glyphs preserve prior
 pixels, allocations and cache entries. Baseline bounds and advances are retained,
 whitespace needs no pixels, and missing glyphs are explicitly reported. Raster
 and packing run outside input/audio callbacks. No font is bundled; native font
-selection, retained text integration, fallback/shaping and actual multilingual
+discovery, broader widget integration, fallback/shaping and actual multilingual
 GUI acceptance remain unfinished. Self-authored font fixtures are prepared for
 later execution; compilation alone does not establish visual behavior.
 

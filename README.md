@@ -131,8 +131,11 @@ Focused search Home/End moves its text cursor.
 Native IME input supports search, settings values and profile paths. Composition
 previews stay separate from saved drafts; switching fields or leaving the active
 screen discards them. Existing bitmap glyph fallback still applies.
-The reusable graphics library now includes bounded caller-supplied font atlas
-preparation; desktop font selection and retained text integration remain pending.
+Use `player --library DIR --title-font PATH` to draw catalog titles with a
+caller-provided TrueType/OpenType font. Titles use a fixed 14-pixel prepared
+atlas, uploaded once per renderer and rebuilt with its texture binding on
+renderer recovery. Invalid or excessive font data fails before window startup.
+Other controls retain the bitmap font; shaping and fallback remain pending.
 F5 or Retry starts the same chart again after the previous native session has
 finished cleanup. The accepted chart/device/timing/roster options stay pinned;
 recorded retries use distinct .retry<N>.bkr stems and create-new saves.
