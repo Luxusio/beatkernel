@@ -280,3 +280,15 @@ CoreAudio output and BGM. Missing, ambiguous or removed assignments and HID queu
 loss fail the cohort without automatic retargeting. Group plus network admission
 is rejected before native resources. Output stop and HID close precede every
 member replay save attempt. Native execution acceptance remains deferred.
+
+## Fresh practice preparation
+
+All three native solo and local compositions accept singleton --start-ns as
+strict unsigned ASCII decimal within nonnegative i64. The GUI exposes the same
+native setting. Source preparation preserves original future chart targets and
+retains automatic overlapping BGM using original PCM suffixes; output command
+mapping subtracts the selected start exactly once before existing preroll.
+Fresh output calibration retains its measured/unknown native quality. Selecting
+before zero, beyond remaining content or beyond PCM capacities fails explicitly.
+Default zero retains the original full-song path. No preceding keysound/held-key
+state is inferred. See the section-restart contract for policy and pending limits.

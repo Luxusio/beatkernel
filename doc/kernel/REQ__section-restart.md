@@ -52,13 +52,34 @@ sample position and enforces finite calibration validity, as described in
 origin rather than restoring an imported recording. This source-level native
 composition does not replace pending native timing and restart measurements.
 
-## Graphical retry lifecycle prerequisite
+## Graphical retry lifecycle
 
-The BMS graphical player provides a whole-song retry action. It pins the chart
+The BMS graphical player provides a fresh-session retry action. It pins the chart
 and native options, validates a fresh invocation before cancellation, waits for
 the prior native owner to finish cleanup, and starts with a new publisher and
 native output session. Capture filenames derive from the original configured
-stem with .retry<N>.bkr. This action starts at the original song beginning;
-arbitrary section start still requires the coordinated PCM/judge/anchor operation
+stem with .retry<N>.bkr. The default starts at the original song beginning;
+configured fresh practice starts use the preparation policy below. Historical
+play-state restoration still requires the coordinated PCM/judge/anchor operation
 above. Each fresh native composition retains its actual presentation calibration,
 whose acoustic accuracy and repeatability remain deferred acceptance work.
+
+## BMS fresh practice start
+
+A nonnegative --start-ns in graphical native settings begins a fresh practice
+session at the original song position and continues to the song end. Start zero
+retains full-song behavior. Objects whose heads precede the requested position,
+including crossing holds, are excluded from fresh practice; no prior successful
+play or held input is invented. Retained target times and tempo/STOP/scroll
+markers stay on the original timeline, and the new transport anchors start minus
+preroll to observed native output zero. Pristine section judge identities make
+recordings section-specific; incompatible full-chart ghosts fail explicitly.
+
+Future BGM cues map original time minus start. Earlier cues still containing PCM
+select a suffix from the original asset using explicit ceiling frame selection,
+retain the selected frame/correction report, and begin at its original applied
+time minus start. Each retained tail owns a distinct sample identity. Expired
+cues retire. Fresh bank/queue/output contain no preceding session voices. This
+policy adds bounded frame selection and device-grid scheduling corrections;
+native physical presentation uncertainty remains visible. It is a fresh practice
+start, not restoration of a previously played hold state or a loop boundary.

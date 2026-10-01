@@ -386,10 +386,10 @@ operations fence underlying text/menu editing. Stable player IDs survive group
 resize/profile import and reach the real native runtime/replay filenames.
 Current multi-input source preparation supports Linux, Windows and macOS. Developer native/terminal commands do not replace graphical play.
 
-## Graphical whole-song retry
+## Graphical fresh-session retry
 
-F5 or Retry restarts the current chart from its beginning with the invocation
-accepted for that session. Prepare and validate the next invocation before
+F5 or Retry restarts the accepted session from its configured original-song
+position (default beginning), retaining its invocation. Prepare and validate the next invocation before
 cancelling; invalid requests leave ongoing play intact. Wait for the old game
 owner to finish native cleanup and join before creating a fresh publisher and
 native game owner. Old cleanup failure prevents automatic retry. Focus loss,
@@ -398,7 +398,25 @@ no gameplay timestamps. Solo and local cohorts follow the same lifecycle.
 
 Recorded retry filenames derive from the original configured stem using
 .retry<N>.bkr, with a checked increasing ordinal. Existing create-new semantics
-still reject collisions. This whole-song action does not implement arbitrary
-section selection or establish acoustic restart accuracy; section restart still
-requires coordinated original-PCM selection, judge reconstruction and fresh
-native presentation calibration under the section-restart contract.
+still reject collisions. Retry keeps the configured practice start. Live scrubbing or restoration of
+historical play state remains separate work. Acoustic restart accuracy still
+requires native acceptance under the section-restart contract.
+
+## Configured fresh practice start
+
+Nonzero practice sessions display PRACTICE in the graphical header.
+The existing Settings editor exposes PRACTICE START (NS), stored in native
+profiles as --start-ns. Empty or zero starts the full song. A nonnegative i64
+original song position starts fresh practice through the song end on Windows,
+Linux and macOS, for solo or local cohorts. F5 retries that pinned start.
+The whole song transport retains original song times; the output is newly
+calibrated with start minus preroll at output zero. Earlier note heads, including
+crossing holds, are excluded rather than fabricate prior input. Automatic BGM
+that still overlaps the position resumes from explicit original PCM ceiling
+frames; old gameplay keysound voices are not reconstructed.
+
+Recordings identify the filtered pristine section judge. Current standalone
+replay loading/rendering does not yet automatically infer that section from a
+full chart; matching section preparation is required, and full-chart ghost
+identity mismatches fail. Bounded loops, live scrubbing, pause/resume and historical
+hold-state restoration remain player work. Acoustic restart acceptance is deferred.
