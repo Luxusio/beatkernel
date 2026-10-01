@@ -6,6 +6,7 @@ use beatkernel_bms_runtime::ui::{
     molecules, organisms,
     practice::{PracticeFrame, PracticeView},
     selection::{SelectionFrame, SelectionItem, SelectionView},
+    settings::{BUTTONS as SETTINGS_BUTTONS, SettingsFrame, SettingsView},
     text_input::LineEditor,
 };
 use beatkernel_bms_runtime::{
@@ -329,6 +330,7 @@ pub(super) fn run(
         local_setup: None,
         accepted_local: None,
         settings: None,
+        settings_view: None,
         profile_io: None,
         entries,
         selected: 0,
@@ -679,6 +681,7 @@ struct Desktop {
     local_setup: Option<PanelScope<LocalDraft>>,
     accepted_local: Option<LocalSetup>,
     settings: Option<PanelScope<SettingsDraft>>,
+    settings_view: Option<SettingsView>,
     profile_io: Option<ProfileOperation>,
     entries: Vec<Entry>,
     selected: usize,
@@ -702,6 +705,11 @@ struct Desktop {
     hits: Vec<(ControlId, Bounds)>,
 }
 impl Desktop {
+    fn invalidate_hits(&mut self) {
+        self.hits.clear();
+        // A retained scene must restore hit regions even if its signals are equal.
+        self.painted_reactive = None;
+    }
     fn closing(&self) -> bool {
         self.navigator.phase() == ScreenPhase::Exiting
     }
@@ -735,7 +743,7 @@ impl Desktop {
     fn commit_route(&mut self, next: ScreenNavigator) {
         self.navigator = next;
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
         self.pointer = None;
         // Children leave before their retained parent state.
         release_panel(&mut self.picker, &self.navigator);
@@ -744,6 +752,13 @@ impl Desktop {
         release_panel(&mut self.practice, &self.navigator);
         release_panel(&mut self.local_setup, &self.navigator);
         release_panel(&mut self.settings, &self.navigator);
+        if self
+            .settings_view
+            .as_ref()
+            .is_some_and(|view| !self.navigator.retains(view.id()))
+        {
+            self.settings_view = None;
+        }
         if self
             .selection_view
             .as_ref()
@@ -849,7 +864,7 @@ impl Desktop {
             Err(error) => self.failure = Some(error),
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn open_local(&mut self) {
         if !self.ui_ready() || self.navigator.route() != ScreenRoute::Settings {
@@ -887,7 +902,7 @@ impl Desktop {
             Err(error) => self.local_error(Some(error)),
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn local_error(&mut self, error: Option<String>) {
         if let Some(draft) = &mut self.settings {
@@ -911,7 +926,7 @@ impl Desktop {
         })();
         self.local_error(result.err());
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn clear_local(&mut self) {
         let result = (|| {
@@ -961,7 +976,7 @@ impl Desktop {
             _ => {}
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn finish_local(&mut self) {
         let result = (|| {
@@ -992,7 +1007,7 @@ impl Desktop {
             Err(error) => self.local_error(Some(error)),
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn validate_settings(&self, values: &NativeSettings) -> Result<Vec<String>, String> {
         let args = without_chart(&values.native_args());
@@ -1083,7 +1098,7 @@ impl Desktop {
             }
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn use_device(&mut self) {
         let result = (|| {
@@ -1133,7 +1148,7 @@ impl Desktop {
             }
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn picker_page(&mut self, forward: bool) {
         let picker = self.picker.as_mut().expect("picker page routing");
@@ -1144,7 +1159,7 @@ impl Desktop {
             picker.first.saturating_sub(SETTINGS_ROWS)
         };
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn picker_key(&mut self, key: KeyCode, repeat: bool) {
         match key {
@@ -1173,7 +1188,7 @@ impl Desktop {
                     picker.selected = Some(index);
                     picker.first = index / SETTINGS_ROWS * SETTINGS_ROWS;
                 }
-                self.hits.clear();
+                self.invalidate_hits();
             }
             _ => {}
         }
@@ -1243,7 +1258,7 @@ impl Desktop {
             }
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn collect_profile(&mut self) {
         // Retain completed work while suspended; Closing still drains it.
@@ -1266,6 +1281,10 @@ impl Desktop {
             .unwrap_or_else(|_| Err("profile worker panicked".into()));
         if operation.permit.is_cancelled() || !self.navigator.accepts(operation.owner) {
             return;
+        }
+        // Completion must wake event-driven menus before polling switches to Wait.
+        if let Some(window) = &self.window {
+            window.request_redraw();
         }
         if self.navigator.route() == ScreenRoute::Records {
             if let Some(records) = &mut self.records {
@@ -1353,7 +1372,7 @@ impl Desktop {
             }
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn apply_settings(&mut self) {
         if !self.ui_ready() || self.navigator.route() != ScreenRoute::Settings {
@@ -1400,7 +1419,7 @@ impl Desktop {
             }
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn records_admitted(&self) -> bool {
         self.ui_ready()
@@ -1436,7 +1455,7 @@ impl Desktop {
             }
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn records_request(&mut self, preview: bool) {
         if !self.records_admitted() {
@@ -1504,7 +1523,7 @@ impl Desktop {
             }
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn watch_record(&mut self) {
         if !self.records_admitted() {
@@ -1545,7 +1564,7 @@ impl Desktop {
             }
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn attach_record(&mut self, kind: OpponentKind) {
         if !self.records_admitted() {
@@ -1575,7 +1594,7 @@ impl Desktop {
             }
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn clear_records(&mut self) {
         if !self.records_admitted() {
@@ -1592,7 +1611,7 @@ impl Desktop {
             records.message = Some("GHOSTS CLEARED FROM DRAFT - APPLY IS SEPARATE".into());
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn records_key(&mut self, key: KeyCode, repeat: bool) {
         match key {
@@ -1653,7 +1672,7 @@ impl Desktop {
             _ => {}
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn open_practice(&mut self) {
         if !self.ui_ready() || self.navigator.route() != ScreenRoute::Settings {
@@ -1759,7 +1778,7 @@ impl Desktop {
             Err(error) => self.local_error(Some(error)),
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn finish_display(&mut self) {
         let result = self.prepare_route(ScreenRoute::Settings).and_then(|next| {
@@ -1785,7 +1804,7 @@ impl Desktop {
             }
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn display_key(&mut self, key: KeyCode, repeat: bool) {
         match key {
@@ -1812,7 +1831,7 @@ impl Desktop {
             }
             _ => {}
         }
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn settings_key(&mut self, key: KeyCode, repeat: bool) {
         match key {
@@ -1831,13 +1850,13 @@ impl Desktop {
                         if let Err(error) = draft.select(next) {
                             draft.error = Some(error);
                         }
-                        self.hits.clear();
+                        self.invalidate_hits();
                         return;
                     }
                     let length = draft.values.fields().len();
                     if key == KeyCode::Tab && draft.selected + 1 == length {
                         draft.profile_focused = true;
-                        self.hits.clear();
+                        self.invalidate_hits();
                         return;
                     }
                     let next = if key == KeyCode::ArrowUp {
@@ -1850,7 +1869,7 @@ impl Desktop {
                     if let Err(error) = draft.select(next) {
                         draft.error = Some(error);
                     }
-                    self.hits.clear();
+                    self.invalidate_hits();
                 }
             }
             KeyCode::ArrowLeft
@@ -1918,7 +1937,7 @@ impl Desktop {
                 _ => {}
             }
             self.gesture.cancel();
-            self.hits.clear();
+            self.invalidate_hits();
             return;
         }
         if self.navigator.route() == ScreenRoute::Practice {
@@ -1946,7 +1965,7 @@ impl Desktop {
                 _ => {}
             }
             self.gesture.cancel();
-            self.hits.clear();
+            self.invalidate_hits();
             return;
         }
         if matches!(self.navigator.route(), ScreenRoute::Devices { .. }) {
@@ -1970,7 +1989,7 @@ impl Desktop {
                         picker.selected = Some(index);
                     }
                     self.gesture.cancel();
-                    self.hits.clear();
+                    self.invalidate_hits();
                 }
                 _ => {}
             }
@@ -1997,7 +2016,7 @@ impl Desktop {
                 _ => {}
             }
             self.gesture.cancel();
-            self.hits.clear();
+            self.invalidate_hits();
             return;
         }
         if self.navigator.route() == ScreenRoute::Settings {
@@ -2015,7 +2034,7 @@ impl Desktop {
                         draft.profile_focused = true;
                     }
                     self.gesture.cancel();
-                    self.hits.clear();
+                    self.invalidate_hits();
                 }
                 10 => self.apply_settings(),
                 11 => {
@@ -2036,7 +2055,7 @@ impl Desktop {
                         }
                     }
                     self.gesture.cancel();
-                    self.hits.clear();
+                    self.invalidate_hits();
                 }
                 row if row >= 1000 => {
                     if let Some(draft) = &mut self.settings {
@@ -2045,7 +2064,7 @@ impl Desktop {
                         }
                     }
                     self.gesture.cancel();
-                    self.hits.clear();
+                    self.invalidate_hits();
                 }
                 _ => {}
             }
@@ -2107,7 +2126,7 @@ impl Desktop {
             let count = game.snapshot.as_ref().map_or(0, |s| s.players.len());
             game.local_page = local_page(count, game.local_page, forward);
             self.gesture.cancel();
-            self.hits.clear();
+            self.invalidate_hits();
         }
     }
     fn toggle_local_comparisons(&mut self) {
@@ -2119,7 +2138,7 @@ impl Desktop {
             {
                 game.local_comparisons = !game.local_comparisons;
                 self.gesture.cancel();
-                self.hits.clear();
+                self.invalidate_hits();
             }
         }
     }
@@ -2162,7 +2181,7 @@ impl Desktop {
             Err(error) => self.failure = Some(format!("retry preflight: {error}")),
         }
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
     }
     fn replace_joined_game(&mut self, launch: SessionLaunch) {
         let Some(old) = &self.game else {
@@ -2197,7 +2216,7 @@ impl Desktop {
     }
     fn cancel(&mut self) {
         self.gesture.cancel();
-        self.hits.clear();
+        self.invalidate_hits();
         if let Some(game) = &mut self.game {
             game.cancel();
         }
@@ -2378,7 +2397,7 @@ impl Desktop {
     fn reactive_waits_for_events(&self) -> bool {
         matches!(
             self.navigator.route(),
-            ScreenRoute::Selection | ScreenRoute::Practice
+            ScreenRoute::Selection | ScreenRoute::Practice | ScreenRoute::Settings
         ) && self.navigator.phase() == ScreenPhase::Active
             && !self.occluded
             && self.profile_io.is_none()
@@ -2426,6 +2445,63 @@ impl Desktop {
         }
         self.render_scene()
     }
+    fn draw_settings_view(&mut self) -> Result<(), String> {
+        let id = self
+            .navigator
+            .active_id()
+            .ok_or("settings instance unavailable")?;
+        if self
+            .settings_view
+            .as_ref()
+            .is_none_or(|view| view.id() != id)
+        {
+            self.settings_view = Some(SettingsView::new(id, WIDTH as u32, HEIGHT as u32)?);
+            self.painted_reactive = None;
+        }
+        let pending = self.profile_io.is_some();
+        let point = self.point();
+        let hovered = if pending {
+            None
+        } else {
+            point.and_then(|point| {
+                SETTINGS_BUTTONS
+                    .iter()
+                    .rev()
+                    .find(|(_, bounds, _)| bounds.contains(point))
+                    .map(|(id, _, _)| *id)
+            })
+        };
+        let armed = if pending {
+            None
+        } else {
+            SETTINGS_BUTTONS
+                .iter()
+                .map(|(id, _, _)| *id)
+                .find(|&id| self.gesture.is_armed(id))
+        };
+        let settings = self.settings.as_ref().ok_or("settings data unavailable")?;
+        let view = self
+            .settings_view
+            .as_ref()
+            .ok_or("settings view unavailable")?;
+        view.update(SettingsFrame {
+            fields: settings.values.fields(),
+            selected: settings.selected,
+            editor: &settings.editor,
+            profile: &settings.profile,
+            profile_focused: settings.profile_focused,
+            message: settings.message.as_deref(),
+            error: settings.error.as_deref(),
+            pending,
+            hovered,
+            armed,
+        })?;
+        if view.dirty() || self.painted_reactive != Some(id) {
+            view.compose(&mut self.scene, &mut self.hits)?;
+            self.painted_reactive = Some(id);
+        }
+        self.render_scene()
+    }
     fn draw_practice(&mut self) -> Result<(), String> {
         let id = self
             .navigator
@@ -2462,9 +2538,12 @@ impl Desktop {
         if route == ScreenRoute::Practice {
             return self.draw_practice();
         }
+        if route == ScreenRoute::Settings {
+            return self.draw_settings_view();
+        }
         self.painted_reactive = None;
         let point = self.point();
-        self.hits.clear();
+        self.invalidate_hits();
         self.scene.clear();
         let pixels = &mut self.scene;
         rect(pixels, 0, 0, WIDTH as i64, HEIGHT as i64, 0x10151e);
@@ -2535,19 +2614,6 @@ impl Desktop {
                 point,
                 self.profile_io.is_some(),
             );
-        } else if route == ScreenRoute::Settings {
-            let draft = self
-                .settings
-                .as_ref()
-                .ok_or("settings screen data unavailable")?;
-            draw_settings(
-                pixels,
-                draft,
-                &mut self.hits,
-                &self.gesture,
-                point,
-                self.profile_io.is_some(),
-            )?;
         } else if matches!(
             route,
             ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
@@ -2795,7 +2861,7 @@ impl ApplicationHandler for Desktop {
                 self.painted_reactive = None;
                 self.gesture.cancel();
                 self.pointer = None;
-                self.hits.clear();
+                self.invalidate_hits();
                 if let Some(renderer) = &mut self.renderer {
                     if let Err(error) = renderer.resize(size.width, size.height) {
                         self.fail(error);
@@ -3498,135 +3564,6 @@ fn draw_records(
     }
 }
 
-fn draw_settings(
-    scene: &mut Scene,
-    draft: &SettingsDraft,
-    hits: &mut Vec<(ControlId, Bounds)>,
-    gesture: &Gesture,
-    point: Option<(f64, f64)>,
-    pending: bool,
-) -> Result<(), String> {
-    text(scene, 24, 65, "F4 RECORDS / F6 PRACTICE", 1, 0x9bb1cf);
-    for (id, x, label) in [
-        (74, 265, "PRACTICE"),
-        (19, 401, "RECORDS"),
-        (18, 537, "DISPLAY"),
-        (17, 673, "PLAYERS"),
-        (16, 809, "AUDIO"),
-    ] {
-        let bounds = Bounds {
-            x,
-            y: 60,
-            width: 125,
-            height: 34,
-        };
-        if !pending {
-            control(scene, hits, gesture, point, ControlId(id), bounds, label);
-        } else {
-            molecules::button(scene, bounds, label, false, false);
-        }
-    }
-    let first = draft.selected / SETTINGS_ROWS * SETTINGS_ROWS;
-    text(
-        scene,
-        24,
-        102,
-        &format!(
-            "FIELDS {}-{} OF {}   UP/DOWN OR TAB SELECT",
-            first + 1,
-            (first + SETTINGS_ROWS).min(draft.values.fields().len()),
-            draft.values.fields().len()
-        ),
-        1,
-        0xd8b36b,
-    );
-    for (index, field) in draft
-        .values
-        .fields()
-        .iter()
-        .enumerate()
-        .skip(first)
-        .take(SETTINGS_ROWS)
-    {
-        let y = 120 + (index - first) as i64 * 39;
-        text(scene, 24, (y + 10) as usize, field.label, 1, 0xf0f4ff);
-        let bounds = Bounds {
-            x: 280,
-            y,
-            width: 650,
-            height: 32,
-        };
-        if index == draft.selected {
-            molecules::text_field(scene, &draft.editor, bounds, !draft.profile_focused);
-        } else {
-            molecules::text_field_value(scene, &field.value, bounds);
-        }
-        if !pending {
-            hits.push((ControlId(1000 + index as u64), bounds));
-        }
-    }
-    if let Some(field) = draft.values.fields().get(draft.selected) {
-        text(scene, 24, 525, field.hint, 1, 0x9bb1cf);
-    }
-    let profile_bounds = Bounds {
-        x: 160,
-        y: 558,
-        width: 770,
-        height: 34,
-    };
-    text(scene, 24, 570, "PROFILE PATH", 1, 0xf0f4ff);
-    molecules::text_field(scene, &draft.profile, profile_bounds, draft.profile_focused);
-    if !pending {
-        hits.push((ControlId(15), profile_bounds));
-    }
-    for (id, x, label) in [
-        (10, 24, "APPLY"),
-        (11, 212, "BACK"),
-        (12, 400, "ADD BINDING"),
-        (13, 588, "LOAD"),
-        (14, 776, "SAVE"),
-    ] {
-        if pending {
-            molecules::button(
-                scene,
-                Bounds {
-                    x,
-                    y: 620,
-                    width: 170,
-                    height: 34,
-                },
-                label,
-                false,
-                false,
-            );
-            continue;
-        }
-        control(
-            scene,
-            hits,
-            gesture,
-            point,
-            ControlId(id),
-            Bounds {
-                x,
-                y: 620,
-                width: 170,
-                height: 34,
-            },
-            label,
-        );
-    }
-    if pending {
-        text(scene, 24, 665, "LOADING DEVICES", 1, 0xd8b36b);
-    } else if let Some(message) = &draft.message {
-        text(scene, 24, 665, message, 1, 0x74e5c5);
-    }
-    if let Some(error) = &draft.error {
-        text(scene, 24, 690, error, 1, 0xff8e8e);
-    }
-    Ok(())
-}
-
 fn control(
     scene: &mut Scene,
     hits: &mut Vec<(ControlId, Bounds)>,
@@ -3802,6 +3739,7 @@ mod tests {
             local_setup: None,
             accepted_local: None,
             settings: None,
+            settings_view: None,
             profile_io: None,
             entries: vec![Entry {
                 path: PathBuf::from("fixture.bms"),
@@ -3843,7 +3781,7 @@ mod tests {
         assert_eq!(app.painted_reactive, Some(selection_id));
         assert!(!app.selection_view.as_ref().unwrap().dirty());
         app.open_settings();
-        assert!(!app.reactive_waits_for_events());
+        assert!(app.reactive_waits_for_events());
         assert_eq!(app.selection_view.as_ref().unwrap().id(), selection_id);
         app.draw().unwrap();
         app.back();
@@ -3858,6 +3796,36 @@ mod tests {
         app.request_close();
         assert!(app.selection_view.is_none());
         assert!(!app.reactive_waits_for_events());
+    }
+
+    #[test]
+    fn settings_view_is_retained_through_child_and_cleared_hits_restore_without_state_change() {
+        let mut app = lifecycle_fixture();
+        app.open_settings();
+        app.draw().unwrap();
+        let id = app.settings_view.as_ref().unwrap().id();
+        assert!(app.reactive_waits_for_events());
+        assert_eq!(app.painted_reactive, Some(id));
+        assert!(!app.settings_view.as_ref().unwrap().dirty());
+        // Up at the first row leaves every signal equal but invalidates hit regions.
+        app.settings_key(KeyCode::ArrowUp, false);
+        assert!(app.hits.is_empty());
+        assert!(app.painted_reactive.is_none());
+        app.draw().unwrap();
+        assert!(app.hits.iter().any(|(id, _)| *id == ControlId(10)));
+        assert!(!app.settings_view.as_ref().unwrap().dirty());
+        app.open_practice();
+        assert_eq!(app.settings_view.as_ref().unwrap().id(), id);
+        app.draw().unwrap();
+        app.back();
+        assert_eq!(app.navigator.active_id(), Some(id));
+        assert_eq!(app.settings_view.as_ref().unwrap().id(), id);
+        app.draw().unwrap();
+        assert!(app.hits.iter().any(|(id, _)| *id == ControlId(74)));
+        app.back();
+        assert!(app.settings_view.is_none());
+        assert!(app.settings.is_none());
+        assert_eq!(app.navigator.route(), ScreenRoute::Selection);
     }
 
     #[test]
