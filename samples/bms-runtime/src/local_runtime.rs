@@ -1390,6 +1390,314 @@ mod fixtures {
     }
 
     #[test]
+    fn shared_finite_resume_drains_all_sources_and_reconstructs_independent_prefixes() {
+        use crate::{
+            local_input::InputMerger,
+            native_end::NativeEnd,
+            playback_pause::{NativePause, PauseKeyboard},
+            replay_capture::LiveReplayCapture,
+        };
+        use beatkernel::{
+            audio::{
+                AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, PcmSample, SampleBank,
+            },
+            replay::{ReplaySession, codec::ReplayCodecLimits},
+            time::ClockPair,
+        };
+        for count in [2, 3, 4, 64] {
+            let ids = (0..count)
+                .map(|index| {
+                    if index == count - 1 {
+                        u32::MAX
+                    } else {
+                        7 + index as u32 * 999
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut configs = ids.iter().copied().map(boundary_config).collect::<Vec<_>>();
+            for (index, member) in configs.iter_mut().enumerate() {
+                let device = DeviceId(index as u64 + 1);
+                member.device = Some(device);
+                member.bindings = BindingMap::from_bindings([Binding {
+                    device: DeviceSelector::Exact(device),
+                    physical: PhysicalControlId::keyboard(4),
+                    game_control: GameControlId(1),
+                }])
+                .unwrap();
+                for sound in &mut member.sounds {
+                    sound.gain = 1.0 / count as f32;
+                }
+            }
+            let limits = ReplayCodecLimits::new(
+                65536,
+                128,
+                4096,
+                beatkernel::input::CodecLimits::new(4096, 4096).unwrap(),
+            )
+            .unwrap();
+            let mut captures = configs
+                .iter()
+                .map(|member| {
+                    (
+                        member.player,
+                        LiveReplayCapture::new(&member.judge, ClockDomainId(1), limits).unwrap(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let output = |ns| ClockPoint {
+                domain: ClockDomainId(2),
+                timestamp: Timestamp::from_nanos(ns),
+            };
+            let pair = |ns| ClockPair {
+                source: output(ns),
+                target: point(ns + 100),
+            };
+            let format = AudioFormat::new(1000, 1).unwrap();
+            let pcm_limits = PcmLimits::new(4096, 4096, 2).unwrap();
+            let mut bank = SampleBank::new(format, pcm_limits).unwrap();
+            bank.insert(
+                SampleId(1),
+                PcmSample::new(format, vec![0.5; 8], pcm_limits).unwrap(),
+            )
+            .unwrap();
+            let (producer, consumer) = command_queue(128).unwrap();
+            let mut mixer = Mixer::new(
+                MixerConfig::new(
+                    format,
+                    ClockDomainId(2),
+                    Timestamp::ZERO,
+                    AudioLimits::new(128, 64, 128, 16, 128).unwrap(),
+                )
+                .with_playback_end_frame(2),
+                bank,
+                consumer,
+            )
+            .unwrap();
+            let mut group = RuntimeGroup::new(
+                ClockDomainId(1),
+                ClockDomainId(2),
+                Transport::new(Timestamp::from_nanos(100), Timestamp::ZERO, Rate::NORMAL),
+                producer,
+                configs,
+                8,
+                &[],
+            )
+            .unwrap();
+            group
+                .set_song_end(Timestamp::from_nanos(2_000_000))
+                .unwrap();
+            let mut merger = InputMerger::new(
+                ClockDomainId(1),
+                point(100),
+                (1..=count).map(|index| DeviceId(index as u64)).collect(),
+                256,
+            )
+            .unwrap();
+            let mut pause = NativePause::new(output(0), ClockDomainId(1), 1000)
+                .unwrap()
+                .with_playback_end_frame(2)
+                .unwrap();
+            let mut end = NativeEnd::new(output(0), ClockDomainId(1), 1000, 2).unwrap();
+            let mut keys = PauseKeyboard::new();
+            let first = mixer.render(&mut [0.0]).unwrap();
+            pause.observe(Some(first), pair(0)).unwrap();
+            end.observe(Some(first), pair(0)).unwrap();
+            for index in (1..=count).rev() {
+                merger
+                    .admit(input(index as u64, 1_000_100), point(1_100_100))
+                    .unwrap();
+            }
+            while let Some(event) = merger.pop_ready(point(1_000_100)).unwrap() {
+                let source = event.meta().source.0;
+                assert!(keys.accept(&event).unwrap());
+                let InputResult::Processed(reports) = group
+                    .process_input(event, &Identity, output(1_000_000))
+                    .unwrap()
+                else {
+                    panic!("assigned source ignored");
+                };
+                assert_eq!(reports[0].player, PlayerId(ids[source as usize - 1]));
+                assert_eq!(reports[0].report.judge_events.len(), 1);
+                for tagged in reports {
+                    captures
+                        .get_mut(&tagged.player)
+                        .unwrap()
+                        .record_report(&tagged.report)
+                        .unwrap();
+                }
+            }
+            for tagged in group
+                .advance_to(point(1_000_100), &Identity, output(1_000_000))
+                .unwrap()
+            {
+                captures
+                    .get_mut(&tagged.player)
+                    .unwrap()
+                    .record_report(&tagged.report)
+                    .unwrap();
+            }
+            merger.commit(point(1_000_100)).unwrap();
+            pause.request(true, pair(0)).unwrap();
+            group.request_audio_pause(true);
+            let paused = mixer.render(&mut [0.0; 3]).unwrap();
+            let boundary = pause
+                .observe(Some(paused), pair(1_000_000))
+                .unwrap()
+                .unwrap();
+            group
+                .transport_mut()
+                .pause(boundary.host.timestamp)
+                .unwrap();
+            assert!(
+                end.observe(Some(paused), pair(1_000_000))
+                    .unwrap()
+                    .is_none()
+            );
+            for index in (1..=count).rev() {
+                let mut up = input(index as u64, 2_000_100);
+                if let PhysicalInputEvent::Button(button) = &mut up {
+                    button.state = ButtonState::Up;
+                    button.meta.sequence = 2;
+                }
+                merger.admit(up, point(3_000_100)).unwrap();
+            }
+            while let Some(event) = merger.pop_ready(point(3_000_100)).unwrap() {
+                keys.observe_paused(event).unwrap();
+            }
+            pause.request(false, pair(3_000_000)).unwrap();
+            group.request_audio_pause(false);
+            let mut samples = [1.0; 4];
+            let crossing = mixer.render(&mut samples).unwrap();
+            assert!((samples[0] - 0.5).abs() < 0.00001);
+            assert_eq!(&samples[1..], &[0.0; 3]);
+            assert_eq!(crossing.playback_end_physical_frame, Some(5));
+            let latest = mixer.render(&mut [0.0]).unwrap();
+            let resumed = pause
+                .observe(Some(latest), pair(4_000_000))
+                .unwrap()
+                .unwrap();
+            group
+                .transport_mut()
+                .resume(resumed.host.timestamp)
+                .unwrap();
+            let releases = keys.resume(resumed.host).unwrap();
+            assert_eq!(releases.len(), count);
+            for event in releases {
+                assert_eq!(event.meta().original_clock_point, Some(point(2_000_100)));
+                let InputResult::Processed(reports) = group
+                    .process_input(event, &Identity, output(2_000_000))
+                    .unwrap()
+                else {
+                    panic!("resume source ignored");
+                };
+                for tagged in reports {
+                    captures
+                        .get_mut(&tagged.player)
+                        .unwrap()
+                        .record_report(&tagged.report)
+                        .unwrap();
+                }
+            }
+            assert!(
+                end.observe(Some(latest), pair(4_000_000))
+                    .unwrap()
+                    .is_none()
+            );
+            let terminal = end.observe(None, pair(6_000_000)).unwrap().unwrap();
+            assert_eq!(terminal.host, point(5_000_100));
+            let mut earlier = input(1, 4_500_100);
+            earlier.meta_mut().sequence = 3;
+            merger.admit(earlier, point(6_000_100)).unwrap();
+            for index in (1..=count).rev() {
+                let mut at_end = input(index as u64, 5_000_100);
+                at_end.meta_mut().sequence = if index == 1 { 4 } else { 3 };
+                merger.admit(at_end, point(6_000_100)).unwrap();
+            }
+            let pending = merger.pending();
+            assert!(
+                merger
+                    .watermark(point(6_000_100), 0, true)
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(merger.pending(), pending); // One backlogged source prevents any release/deadline.
+            let frontier = merger
+                .watermark(point(6_000_100), 0, false)
+                .unwrap()
+                .unwrap();
+            let mut excluded = 0;
+            while let Some(event) = merger.pop_ready(frontier).unwrap() {
+                if event.meta().timestamp >= terminal.host.timestamp {
+                    excluded += 1;
+                    continue;
+                }
+                assert_eq!(event.meta().timestamp, Timestamp::from_nanos(4_500_100));
+                assert!(keys.accept(&event).unwrap());
+                let InputResult::Processed(reports) = group
+                    .process_input(event, &Identity, output(2_000_000))
+                    .unwrap()
+                else {
+                    panic!("pre-boundary source ignored");
+                };
+                assert_eq!(
+                    reports[0].report.song_time,
+                    Timestamp::from_nanos(1_500_000)
+                );
+                assert!(reports[0].report.judge_events.is_empty());
+                for tagged in reports {
+                    captures
+                        .get_mut(&tagged.player)
+                        .unwrap()
+                        .record_report(&tagged.report)
+                        .unwrap();
+                }
+            }
+            assert_eq!(excluded, count);
+            for tagged in group
+                .advance_to(frontier, &Identity, output(2_000_000))
+                .unwrap()
+            {
+                assert!(tagged.report.song_end_reached);
+                assert_eq!(tagged.report.song_time, Timestamp::from_nanos(2_000_000));
+                assert!(tagged.report.judge_events.is_empty());
+                captures
+                    .get_mut(&tagged.player)
+                    .unwrap()
+                    .record_report(&tagged.report)
+                    .unwrap();
+            }
+            merger.commit(frontier).unwrap();
+            assert!(frontier.timestamp >= terminal.host.timestamp);
+            assert_eq!(merger.pending(), 0);
+            for (player, capture) in captures {
+                let file = capture.into_file();
+                assert!(
+                    file.records
+                        .iter()
+                        .all(|record| record.song_time <= Timestamp::from_nanos(2_000_000))
+                );
+                let replay = ReplaySession::from_records(
+                    file.header,
+                    boundary_config(player.0).judge,
+                    file.records,
+                )
+                .unwrap();
+                assert_eq!(replay.results().len(), 1);
+                assert_eq!(
+                    replay.engine().stable_hash().unwrap(),
+                    group.member_judge(player).unwrap().stable_hash().unwrap()
+                );
+                let counters = group.member_telemetry(player).unwrap().counters();
+                assert_eq!(counters.audio_commands, 1);
+                assert_eq!(
+                    counters.inputs,
+                    if player == PlayerId(ids[0]) { 3 } else { 2 }
+                );
+            }
+        }
+    }
+
+    #[test]
     fn solo_adapter_uses_the_same_immutable_end_and_capture_operation() {
         let member = boundary_config(1);
         let (producer, mut consumer) = command_queue(8).unwrap();
