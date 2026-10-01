@@ -78,3 +78,14 @@ and Transport by ownership transfer after replay reconstruction. It returns the
 previous owners, clears source sequences, and preserves bindings and telemetry.
 It does not flush queued audio: the final app must separately synchronize or
 replace its audio queue/output when restoring a timeline.
+
+## Explicit control-owner exchange
+
+Runtime exposes explicit exchange of Transport and CommandProducer for a
+single-owner composition using shared song/output owners. Exchanges preserve
+judge/sequence/chronology state and do not reset the session or remap timestamps.
+The caller must install the correct mapping/output domain and restore owners
+before another operation, including on failure/unwind. CommandProducer remains
+a unique endpoint; exchanging it does not clone it or create another publisher.
+This is control-thread setup/composition, never an audio callback operation.
+The BMS group provides the RAII transaction and failure fence.

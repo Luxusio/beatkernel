@@ -329,6 +329,25 @@ impl Runtime {
         }
     }
 
+    /// Exchanges the unique output endpoint for a control-owner composition.
+    ///
+    /// The caller must install the intended output queue before processing and
+    /// restore ownership on every return or unwind. This does not clone a
+    /// producer, reset chronology, or rewrite queued commands. Never call it
+    /// from an audio callback; the installed queue uses this runtime's audio domain.
+    pub fn exchange_audio_producer(&mut self, producer: &mut CommandProducer) {
+        std::mem::swap(&mut self.producer, producer);
+    }
+
+    /// Exchanges the authoritative song mapping without resetting judge state.
+    ///
+    /// The caller coordinates forward chronology and restoration on every
+    /// return/unwind. Shared control-owner compositions can thereby use one
+    /// mapping without cloning its history for each operation.
+    pub fn exchange_transport(&mut self, transport: &mut Transport) {
+        std::mem::swap(&mut self.transport, transport);
+    }
+
     /// Read-only transport mapping and history.
     pub const fn transport(&self) -> &Transport {
         &self.transport
