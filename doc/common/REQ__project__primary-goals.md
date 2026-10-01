@@ -1,6 +1,6 @@
 # BeatKernel primary goals
 
-BeatKernel is a low-latency, cross-platform Rust runtime for rhythm games. Project-authored source and builds without ASIO are distributed under the [MIT license](../../LICENSE), preserving applicable third-party notices. ASIO SDK combined builds follow the [GPLv3 distribution policy](../platform/REQ__asio-distribution.md).
+BeatKernel is a Rust cross-platform rhythm-game engine built on a low-latency runtime kernel. The BMS player is the first application composed from its shared components. Project-authored source and builds without ASIO are distributed under the [MIT license](../../LICENSE), preserving applicable third-party notices. ASIO SDK combined builds follow the [GPLv3 distribution policy](../platform/REQ__asio-distribution.md).
 
 ## Required behavior and boundaries
 

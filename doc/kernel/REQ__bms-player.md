@@ -69,6 +69,21 @@ non-finite/outside positions and zero-sized windows cannot activate controls.
 Clicking a catalog row selects it. Start, Cancel, Return and Exit buttons use
 the existing session commands, with cleanup still required before another run.
 Pointer events are menu commands only and never produce gameplay timestamps.
+The next primitives are validated RGBA8 texture resources and clipped sprite
+quads. Solid, glyph and custom texture quads preserve painter order through
+contiguous draw batches; they must not be reordered globally by texture.
+Custom texture resources have typed unique IDs, explicit removal and finite
+count/byte budgets; invalid or stale IDs fail before drawing. Built-in white
+and ASCII glyph atlas resources are immutable and cannot be removed. Text
+uses atlas glyph quads with the existing metrics, replacing one rectangle per
+lit glyph pixel. This is a bitmap font foundation; multilingual fonts and
+shaping are still pending. Texture preparation/upload never runs on native
+input or audio callbacks.
+The renderer uses nearest sampling, straight-alpha blending and RGBA8 UNORM
+resources. Upload accepts validated raw pixels; image-file decoding is a
+separate preparation step. Normalized sprite UV rectangles crop with viewport
+clipping. The 64-resource/64-MiB admission budget includes built-ins and counts
+RGBA source bytes; custom removal releases the resource's budget.
 Backend and presentation options must reject unavailable explicit selections;
 queue-depth settings are hints, not measured latency guarantees.
 
@@ -145,3 +160,7 @@ warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warni
   when aspect-preserving presentation is required.
 - Shader validation and native/browser rendering remain unexecuted — verify
   when the user's execution deferral is lifted.
+- Alternating textures create separate contiguous draw batches — use texture
+  arrays only when observed draw-call cost justifies that design.
+- Texture admission counts raw RGBA bytes, excluding driver allocation overhead
+  — add backend memory accounting if a hard VRAM budget is required.

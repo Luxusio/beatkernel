@@ -114,6 +114,12 @@ adapters. Check the reusable library with:
 cargo check -p beatkernel-bms-runtime --lib --no-default-features --features graphics --target wasm32-unknown-unknown --locked
 ```
 
+The graphics foundation supports raw RGBA8 texture upload/removal and clipped
+sprite quads. Contiguous texture batches preserve painter order; ASCII text uses
+one atlas quad per glyph. Texture resources have finite count/byte admission,
+and stale handles are rejected. Image decoding and multilingual font shaping
+remain separate preparation work.
+
 Headless commands build with `--no-default-features`. Project-authored code is
 MIT; preserve the [graphics dependency notices](samples/bms-runtime/THIRD_PARTY_NOTICES.md),
 including winit's Apache-2.0 license, when distributing binaries.
