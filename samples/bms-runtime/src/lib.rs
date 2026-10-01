@@ -50,6 +50,7 @@ pub mod record_catalog;
 pub mod replay_audio;
 /// Bounded capture of the actual native runtime's accepted judgment operations.
 pub mod replay_capture;
+pub mod replay_pause;
 /// Checked durable replay reconstruction through the same builtin BMS judge.
 pub mod replay_playback;
 /// Bounded PCM rendering of captured BMS play through the actual core Mixer.

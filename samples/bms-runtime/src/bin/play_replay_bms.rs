@@ -1,18 +1,21 @@
 //! Checked recorded BMS sounds on the explicit host output backend; no input.
 use beatkernel::{
-    audio::{command_queue, AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, RenderReport},
+    audio::{AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, RenderReport, command_queue},
     input::CodecLimits,
     replay::codec::ReplayCodecLimits,
-    time::{ClockDomainId, ClockPoint, Duration, Timestamp},
+    time::{ClockDomainId, ClockPair, ClockPoint, Duration, Timestamp},
 };
 use beatkernel_bms_runtime::{
+    ChannelPolicy,
     bgm::{BgmConfig, BgmFeeder},
     completion::ReplayCompletion,
-    load_prepared, player,
+    load_prepared,
+    playback_pause::PausePhase,
+    player,
     replay_audio::{completed_render_cursor, plan_audio},
+    replay_pause::ReplayPause,
     replay_playback::read_replay,
     replay_visual::ReplayVisual,
-    ChannelPolicy,
 };
 use beatkernel_platform::audio::{DeviceFormat, SampleEncoding, SharedPeriodPolicy};
 use std::{
@@ -24,7 +27,6 @@ use std::{
 };
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const OUTPUT: ClockDomainId = ClockDomainId(0x4252504c);
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
 const HOST: ClockDomainId = ClockDomainId(0x42525048);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -372,6 +374,11 @@ trait NativeOutput {
     /// Reported native presentation in this fresh stream's zero-origin OUTPUT
     /// domain. Missing associations cannot be replaced by software render time.
     fn presented(&mut self) -> Result<Option<ClockPoint>>;
+    /// Optional actual native output/associated host observation for pause.
+    /// A source-only point cannot establish a pause boundary relation.
+    fn presentation_pair(&mut self) -> Result<Option<ClockPair>> {
+        Ok(None)
+    }
     fn last_render(&mut self) -> Option<RenderReport>;
     fn final_check(&mut self) -> Result<()>;
     fn print_native(&mut self);
@@ -405,6 +412,22 @@ fn presentation_song(point: ClockPoint, start: Timestamp, preroll: Duration) -> 
     Ok(Timestamp::from_nanos(i64::try_from(song).map_err(
         |_| "replay presentation song exceeds timestamp range",
     )?))
+}
+
+fn playback_render_cursor(report: &RenderReport) -> Result<u64> {
+    let physical = completed_render_cursor(report)?;
+    let end = report
+        .playback_start_frame
+        .checked_add(u64::try_from(report.playback_frames)?)
+        .ok_or("replay playback frame overflow")?;
+    if report.playback_start_frame > report.start_frame
+        || end > physical
+        || (report.paused && report.playback_frames != 0)
+        || (!report.paused && report.playback_frames != report.frames)
+    {
+        return Err("replay physical/playback render grids differ".into());
+    }
+    Ok(end)
 }
 
 #[cfg(target_os = "windows")]
@@ -465,6 +488,28 @@ mod native {
             // A newly initialized one-start IAudioClient has its own position-zero
             // epoch. Native clock units are frequency units, not assumed frames.
             Ok(Some(output_position(clock.position, clock.frequency)?))
+        }
+        fn presentation_pair(&mut self) -> Result<Option<ClockPair>> {
+            let snapshot = self.0.snapshot();
+            Self::check(snapshot, false)?;
+            let Some(clock) = snapshot.clock else {
+                return Ok(None);
+            };
+            if clock.reading_quality
+                != beatkernel_platform::audio::AudioClockReadingQuality::Accurate
+            {
+                return Ok(None);
+            }
+            let Some(target) = clock.host_point else {
+                return Ok(None);
+            };
+            if target.domain != HOST {
+                return Err("WASAPI replay host domain differs".into());
+            }
+            Ok(Some(ClockPair {
+                source: output_position(clock.position, clock.frequency)?,
+                target,
+            }))
         }
         fn last_render(&mut self) -> Option<RenderReport> {
             self.0.snapshot().render
@@ -558,6 +603,9 @@ mod native {
             Ok(self.0.last_render_report())
         }
         fn presented(&mut self) -> Result<Option<ClockPoint>> {
+            Ok(self.presentation_pair()?.map(|pair| pair.source))
+        }
+        fn presentation_pair(&mut self) -> Result<Option<ClockPair>> {
             self.check(false)?;
             let Some(timing) = self.0.timing_snapshot() else {
                 return Ok(None);
@@ -569,8 +617,7 @@ mod native {
                     timestamp: Timestamp::ZERO,
                 },
                 self.0.configuration().format.sample_rate(),
-            )?
-            .map(|pair| pair.source))
+            )?)
         }
         fn last_render(&mut self) -> Option<RenderReport> {
             self.0.last_render_report()
@@ -640,6 +687,9 @@ mod native {
             Ok(self.0.last_render_report())
         }
         fn presented(&mut self) -> Result<Option<ClockPoint>> {
+            Ok(self.presentation_pair()?.map(|pair| pair.source))
+        }
+        fn presentation_pair(&mut self) -> Result<Option<ClockPair>> {
             self.check()?;
             let Some(presentation) = self.0.snapshot().presentation else {
                 return Ok(None);
@@ -650,8 +700,7 @@ mod native {
                     self.0.configuration(),
                     HOST,
                     &self.1,
-                )?
-                .map(|pair| pair.source),
+                )?,
             )
         }
         fn last_render(&mut self) -> Option<RenderReport> {
@@ -780,6 +829,14 @@ fn run(options: Options) -> Result<()> {
     if player::cancelled() {
         return Ok(());
     }
+    let mut pause = ReplayPause::new(
+        origin,
+        HOST,
+        options.format.sample_rate(),
+        visual.start(),
+        options.preroll,
+    )?;
+    let mut pause_available = false;
     let mut stream = match native::open(&options, mixer) {
         Ok(stream) => stream,
         Err(error) => {
@@ -815,17 +872,63 @@ fn run(options: Options) -> Result<()> {
                 break;
             }
             let rendered = stream.poll()?;
-            if let Some(report) = rendered {
-                let cursor = completed_render_cursor(&report)?;
-                feeder.feed(cursor, 256, |command| producer.try_push(command))?;
+            let cursor = rendered.as_ref().map(playback_render_cursor).transpose()?;
+            player::retry_pause_publication();
+            let pair = stream.presentation_pair()?;
+            let presented = if let Some(pair) = pair {
+                Some(pair.source)
+            } else {
+                stream.presented()?
+            };
+            if let Some(pair) = pair {
+                if !pause_available {
+                    pause_available = true;
+                    player::publish_pause(player::PauseState::Running);
+                }
+                if pause.request(player::pause_requested(), pair)? {
+                    let desired = pause.phase() == PausePhase::Pausing;
+                    producer.request_pause(desired);
+                    player::publish_pause(if desired {
+                        player::PauseState::Pausing
+                    } else {
+                        player::PauseState::Resuming
+                    });
+                }
+                if let Some(boundary) = pause.observe(rendered, pair)? {
+                    if boundary.paused {
+                        let events = visual.advance_to(boundary.song)?;
+                        player::publish_replay_prefix(boundary.song, &events)?;
+                    }
+                    player::publish_pause(if boundary.paused {
+                        player::PauseState::Paused
+                    } else {
+                        player::PauseState::Running
+                    });
+                }
             }
-            let presented = stream.presented()?;
-            if let Some(point) = presented {
-                let song = presentation_song(point, visual.start(), options.preroll)?;
-                let events = visual.advance_to(song)?;
-                player::publish_replay_prefix(song, &events)?;
+            if !matches!(
+                pause.phase(),
+                PausePhase::Pausing | PausePhase::Paused | PausePhase::Resuming
+            ) {
+                if let (Some(report), Some(cursor)) = (rendered, cursor) {
+                    if !report.paused {
+                        feeder.feed(cursor, 256, |command| producer.try_push(command))?;
+                    }
+                }
+                if let Some(point) = presented {
+                    let song = if pause_available {
+                        pause.presentation_song(point)?
+                    } else {
+                        Some(presentation_song(point, visual.start(), options.preroll)?)
+                    };
+                    if let Some(song) = song {
+                        let events = visual.advance_to(song)?;
+                        player::publish_replay_prefix(song, &events)?;
+                    }
+                }
             }
-            if deadline.is_none()
+            if pause.phase() == PausePhase::Running
+                && deadline.is_none()
                 && completion.observe(visual.finished(), feeder.report(), rendered, presented)?
             {
                 break;
@@ -891,6 +994,33 @@ pub(crate) fn validate_args(args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod fixtures {
     use super::*;
+    #[test]
+    fn feeder_credit_uses_playback_frames_and_still_rejects_core_execution_failures() {
+        use beatkernel::audio::AudioCounters;
+        let mut report = RenderReport {
+            start_frame: 100,
+            frames: 10,
+            playback_start_frame: 40,
+            playback_frames: 0,
+            paused: true,
+            active_voices: 1,
+            pending_commands: 2,
+            song_position: Timestamp::ZERO,
+            producer_disconnected: false,
+            counters: AudioCounters::default(),
+        };
+        assert_eq!(completed_render_cursor(&report).unwrap(), 110);
+        assert_eq!(playback_render_cursor(&report).unwrap(), 40);
+        report.start_frame = 110;
+        report.paused = false;
+        report.playback_frames = 10;
+        assert_eq!(playback_render_cursor(&report).unwrap(), 50);
+        report.playback_frames = 1;
+        assert!(playback_render_cursor(&report).is_err());
+        report.playback_frames = 10;
+        report.counters.unknown_samples = 1;
+        assert!(playback_render_cursor(&report).is_err());
+    }
     fn args(extra: &[&str]) -> Vec<String> {
         [
             "--chart",
@@ -928,45 +1058,57 @@ mod fixtures {
                 .shared,
             SharedPeriodPolicy::DeviceDefault
         );
-        assert!(parse(
-            &args(&["--mode", "exclusive", "--shared-policy", "engine-period"]),
-            Backend::Windows
-        )
-        .is_err());
+        assert!(
+            parse(
+                &args(&["--mode", "exclusive", "--shared-policy", "engine-period"]),
+                Backend::Windows
+            )
+            .is_err()
+        );
         assert!(parse(&args(&[]), Backend::Linux).is_err());
-        assert!(parse(
-            &args(&["--buffer-frames", "256", "--period-frames", "64"]),
-            Backend::Linux
-        )
-        .is_ok());
-        assert!(parse(
-            &args(&["--buffer-frames", "64", "--period-frames", "64"]),
-            Backend::Linux
-        )
-        .is_err());
-        assert!(parse(
-            &args(&[
-                "--buffer-frames",
-                "256",
-                "--period-frames",
-                "64",
-                "--mode",
-                "shared"
-            ]),
-            Backend::Linux
-        )
-        .is_err());
-        assert!(parse(
-            &args(&["--buffer-frames", "256", "--shared-policy", "legacy"]),
-            Backend::Macos
-        )
-        .is_err());
+        assert!(
+            parse(
+                &args(&["--buffer-frames", "256", "--period-frames", "64"]),
+                Backend::Linux
+            )
+            .is_ok()
+        );
+        assert!(
+            parse(
+                &args(&["--buffer-frames", "64", "--period-frames", "64"]),
+                Backend::Linux
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                &args(&[
+                    "--buffer-frames",
+                    "256",
+                    "--period-frames",
+                    "64",
+                    "--mode",
+                    "shared"
+                ]),
+                Backend::Linux
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                &args(&["--buffer-frames", "256", "--shared-policy", "legacy"]),
+                Backend::Macos
+            )
+            .is_err()
+        );
         assert!(parse(&args(&["--buffer-frames", "256"]), Backend::Macos).is_ok());
-        assert!(parse(
-            &args(&["--buffer-frames", "256", "--period-frames", "64"]),
-            Backend::Macos
-        )
-        .is_err());
+        assert!(
+            parse(
+                &args(&["--buffer-frames", "256", "--period-frames", "64"]),
+                Backend::Macos
+            )
+            .is_err()
+        );
         assert!(parse(&args(&[]), Backend::Unsupported).is_err());
     }
     #[test]
@@ -1060,16 +1202,18 @@ mod fixtures {
             Some(2)
         );
         assert!(parse(&args(&["--channel-policy", "automatic"]), Backend::Windows).is_err());
-        assert!(parse(
-            &args(&[
-                "--channel-policy",
-                "exact",
-                "--channel-policy",
-                "mono-stereo"
-            ]),
-            Backend::Windows
-        )
-        .is_err());
+        assert!(
+            parse(
+                &args(&[
+                    "--channel-policy",
+                    "exact",
+                    "--channel-policy",
+                    "mono-stereo"
+                ]),
+                Backend::Windows
+            )
+            .is_err()
+        );
         let seconds = i64::MAX as u64 / 1_000_000_000;
         let mut bounded = args(&[]);
         let index = bounded
@@ -1094,10 +1238,12 @@ mod fixtures {
         assert!(parse(&asio, Backend::Windows).is_ok());
         let seconds = asio.iter().position(|value| value == "--seconds").unwrap();
         asio.drain(seconds..seconds + 2);
-        assert!(parse(&asio, Backend::Windows)
-            .unwrap_err()
-            .to_string()
-            .contains("output-zero presentation epoch"));
+        assert!(
+            parse(&asio, Backend::Windows)
+                .unwrap_err()
+                .to_string()
+                .contains("output-zero presentation epoch")
+        );
     }
 
     #[test]
@@ -1152,15 +1298,17 @@ mod fixtures {
                 .as_nanos(),
             6_000_000_000
         );
-        assert!(presentation_song(
-            ClockPoint {
-                domain: ClockDomainId(0),
-                timestamp: Timestamp::ZERO
-            },
-            start,
-            preroll
-        )
-        .is_err());
+        assert!(
+            presentation_song(
+                ClockPoint {
+                    domain: ClockDomainId(0),
+                    timestamp: Timestamp::ZERO
+                },
+                start,
+                preroll
+            )
+            .is_err()
+        );
         assert!(presentation_song(point(-1), start, preroll).is_err());
         assert!(
             presentation_song(point(i64::MAX), Timestamp::from_nanos(1), Duration::ZERO).is_err()
@@ -1179,10 +1327,10 @@ mod asio_native {
     use beatkernel_platform::{
         audio::asio::AsioBufferRequest,
         windows::asio::{
+            AsioEnumerationLimits, AsioRegistryView,
             control::AsioControl,
             enumerate_asio_drivers,
             stream::{AsioStream, AsioStreamPhase, AsioStreamSnapshot},
-            AsioEnumerationLimits, AsioRegistryView,
         },
     };
     use std::{io, ptr};
@@ -1190,8 +1338,8 @@ mod asio_native {
         Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM},
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
-            RegisterClassW, TranslateMessage, UnregisterClassW, MSG, PM_REMOVE, WM_CLOSE, WM_QUIT,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, MSG, PM_REMOVE,
+            PeekMessageW, RegisterClassW, TranslateMessage, UnregisterClassW, WM_CLOSE, WM_QUIT,
             WNDCLASSW,
         },
     };
