@@ -468,3 +468,7 @@ fn prepare_channels(
 pub mod timing;
 /// Integer-only timing presentation labels.
 pub mod timing_display;
+
+/// UI-owned bounded GPU background cache and ordered static image composition.
+#[cfg(feature = "graphics")]
+pub mod bga_render;

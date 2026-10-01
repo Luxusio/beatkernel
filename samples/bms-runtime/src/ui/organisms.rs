@@ -78,7 +78,30 @@ pub fn playfield_with_progress(
     pressed_lanes: u32,
     progress: Option<&crate::note_progress::NoteProgress>,
 ) -> Result<(), String> {
-    playfield_in_with_progress(
+    playfield_with_background(
+        pixels,
+        chart,
+        now,
+        lookahead,
+        recent,
+        pressed_lanes,
+        progress,
+        crate::bga_render::BgaFrame::default(),
+    )
+}
+
+/// Actual prepared static-image frame composed below notes and judgement layers.
+pub fn playfield_with_background(
+    pixels: &mut Scene,
+    chart: &PlayerChart,
+    now: Timestamp,
+    lookahead: i64,
+    recent: &[JudgeEvent],
+    pressed_lanes: u32,
+    progress: Option<&crate::note_progress::NoteProgress>,
+    frame: crate::bga_render::BgaFrame,
+) -> Result<(), String> {
+    playfield_in_with_background(
         pixels,
         chart,
         now,
@@ -92,6 +115,7 @@ pub fn playfield_with_progress(
         recent,
         pressed_lanes,
         progress,
+        frame,
     )
 }
 
@@ -153,6 +177,32 @@ pub fn playfield_in_with_progress(
     pressed_lanes: u32,
     progress: Option<&crate::note_progress::NoteProgress>,
 ) -> Result<(), String> {
+    playfield_in_with_background(
+        pixels,
+        chart,
+        now,
+        lookahead,
+        bounds,
+        recent,
+        pressed_lanes,
+        progress,
+        crate::bga_render::BgaFrame::default(),
+    )
+}
+
+/// Validates a background frame before any playfield geometry is painted.
+pub fn playfield_in_with_background(
+    pixels: &mut Scene,
+    chart: &PlayerChart,
+    now: Timestamp,
+    lookahead: i64,
+    bounds: Bounds,
+    recent: &[JudgeEvent],
+    pressed_lanes: u32,
+    progress: Option<&crate::note_progress::NoteProgress>,
+    frame: crate::bga_render::BgaFrame,
+) -> Result<(), String> {
+    frame.validate()?;
     if progress.is_some_and(|state| !state.matches_chart(chart)) {
         return Err("note progress belongs to another prepared chart".into());
     }
@@ -199,6 +249,16 @@ pub fn playfield_in_with_progress(
             0xa9bdd5,
         );
     }
+    crate::bga_render::paint(
+        pixels,
+        frame,
+        Bounds {
+            x: bounds.x,
+            y: top,
+            width: bounds.width,
+            height: line - top,
+        },
+    )?;
     pixels.playfield_with_progress(chart, now, lookahead, bounds, progress)?;
     for lane in 0..lanes {
         let (left, right) = partition_lane(lane, lanes, bounds.x, bounds.width);
@@ -396,6 +456,25 @@ pub fn local_players_with_competition(
     page: usize,
     show: bool,
 ) -> Result<(), String> {
+    local_players_with_background(
+        scene,
+        players,
+        lookahead,
+        page,
+        show,
+        &[crate::bga_render::BgaFrame::default(); 4],
+    )
+}
+
+/// Visible member slots share the bounded image cache without mixing clocks.
+pub fn local_players_with_background(
+    scene: &mut Scene,
+    players: &[LocalPlayerSnapshot],
+    lookahead: i64,
+    page: usize,
+    show: bool,
+    frames: &[crate::bga_render::BgaFrame; 4],
+) -> Result<(), String> {
     let visible = page_range(players.len(), page)?;
     if lookahead <= 0 {
         return Err("local playfield lookahead must be positive".into());
@@ -412,6 +491,9 @@ pub fn local_players_with_competition(
         }
     }
     let count = visible.len();
+    for frame in &frames[..count] {
+        frame.validate()?;
+    }
     for player in &players[visible.clone()] {
         if let (Some(chart), Some(now)) = (&player.chart, player.song_time) {
             if player
@@ -488,7 +570,7 @@ pub fn local_players_with_competition(
         }
         let field_offset = 72 + summary_height;
         match (player.chart.as_ref(), player.song_time) {
-            (Some(chart), Some(now)) => playfield_in_with_progress(
+            (Some(chart), Some(now)) => playfield_in_with_background(
                 scene,
                 chart,
                 now,
@@ -502,6 +584,7 @@ pub fn local_players_with_competition(
                 &player.recent_results,
                 player.pressed_lanes,
                 player.note_progress.as_ref(),
+                frames[index],
             )?,
             _ => clipped_text(
                 scene,
@@ -1081,6 +1164,88 @@ mod tests {
         assert!(local_players(&mut scene, &players, 1_000_000_000, 0).is_err());
         assert!(scene.rectangles().is_empty());
     }
+    #[test]
+    fn backgrounds_precede_notes_and_follow_current_visible_sparse_member_slots() {
+        use crate::bga_render::{BgaFrame, BgaSprite};
+        use crate::texture::TextureId;
+        let chart = std::sync::Arc::new(chart());
+        let frames: [BgaFrame; 4] = std::array::from_fn(|_| BgaFrame {
+            active: true,
+            base: Some(BgaSprite {
+                texture: TextureId::allocate().unwrap(),
+                width: 2,
+                height: 1,
+            }),
+            layer: None,
+            unavailable: 0,
+        });
+        let mut scene = Scene::new(960, 720);
+        playfield_with_background(
+            &mut scene,
+            &chart,
+            Timestamp::ZERO,
+            1_000_000_000,
+            &[],
+            0,
+            None,
+            frames[0],
+        )
+        .unwrap();
+        let image = scene
+            .batches()
+            .iter()
+            .position(|batch| batch.texture == frames[0].base.unwrap().texture)
+            .unwrap();
+        let notes = scene
+            .batches()
+            .iter()
+            .position(|batch| batch.playfield.is_some())
+            .unwrap();
+        assert!(image < notes);
+        let image_rectangle = &scene.rectangles()[scene.batches()[image].first as usize];
+        assert!(image_rectangle.bounds[1] >= TOP as f32);
+        assert!(image_rectangle.bounds[1] + image_rectangle.bounds[3] <= LINE as f32);
+        let players: Vec<_> = (0..64)
+            .map(|index| LocalPlayerSnapshot {
+                player: crate::local_players::PlayerId(if index == 63 {
+                    u32::MAX
+                } else {
+                    index * 3 + 1
+                }),
+                chart: Some(chart.clone()),
+                song_time: Some(Timestamp::ZERO),
+                score: Default::default(),
+                last_judge: None,
+                recent_results: vec![],
+                competition: None,
+                pressed_lanes: 0,
+                note_progress: None,
+            })
+            .collect();
+        scene.clear();
+        local_players_with_background(&mut scene, &players, 1_000_000_000, 15, false, &frames)
+            .unwrap();
+        assert_eq!(scene.playfields().len(), 4);
+        for frame in frames {
+            assert_eq!(
+                scene
+                    .batches()
+                    .iter()
+                    .filter(|batch| batch.texture == frame.base.unwrap().texture)
+                    .count(),
+                1
+            );
+        }
+        let mut invalid = frames;
+        invalid[3].base.as_mut().unwrap().width = 0;
+        scene.clear();
+        assert!(
+            local_players_with_background(&mut scene, &players, 1_000_000_000, 15, false, &invalid)
+                .is_err()
+        );
+        assert!(scene.rectangles().is_empty());
+    }
+
     #[test]
     fn accepted_timing_sidebar_stays_inside_normal_and_competition_bounds() {
         let chart = chart();
