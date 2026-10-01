@@ -41,9 +41,26 @@ struct PlayerState {
     player: PlayerId,
     capture: Option<LiveReplayCapture>,
     competition: Option<LiveCompetition>,
-    completion: SongCompletion,
+    completion: Option<SongCompletion>,
     score: ScoreSummary,
     last_song: Timestamp,
+}
+
+/// A candidate watermark is insufficient: every member requires the same
+/// actually committed acquisition frontier and acknowledged native endpoint.
+fn finite_cohort_done(
+    end: Option<i64>,
+    presented: Option<ClockPoint>,
+    committed: Option<ClockPoint>,
+    states: &[PlayerState],
+    backlog: bool,
+    resuming: bool,
+) -> bool {
+    committed.is_some_and(|frontier| {
+        states.iter().all(|state| {
+            finite_session_done(end, presented, frontier, state.last_song, backlog, resuming)
+        })
+    })
 }
 
 fn admit_mode(count: usize, network: bool) -> Result<()> {
@@ -284,6 +301,25 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     let selected = resolve_keyboards(&options.local_players, &attached)?;
     let setup = super::live_output::Setup::new(&options, clock)?;
     let pcm = setup.format();
+    let output_origin = ClockPoint {
+        domain: OUTPUT,
+        timestamp: Timestamp::ZERO,
+    };
+    let playback_end = options.playback_end(pcm.sample_rate())?;
+    let mut pause = NativePause::new(output_origin, HOST, pcm.sample_rate())?;
+    if let Some(end) = playback_end {
+        pause = pause.with_playback_end_frame(end)?;
+    }
+    let mut native_end = playback_end
+        .map(|end| {
+            beatkernel_bms_runtime::native_end::NativeEnd::new(
+                output_origin,
+                HOST,
+                pcm.sample_rate(),
+                end,
+            )
+        })
+        .transpose()?;
     let prepared = load_prepared(
         &options.chart,
         pcm,
@@ -395,13 +431,17 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 HOST,
                 Timestamp::from_nanos(options.start_ns),
             )?,
-            completion: SongCompletion::prepare(
-                &prepared,
-                options.late,
-                options.offset,
-                options.preroll,
-                OUTPUT,
-            )?,
+            completion: if options.end_ns.is_none() {
+                Some(SongCompletion::prepare(
+                    &prepared,
+                    options.late,
+                    options.offset,
+                    options.preroll,
+                    OUTPUT,
+                )?)
+            } else {
+                None
+            },
             score: ScoreSummary::default(),
             last_song: options.song_origin()?,
         });
@@ -435,18 +475,21 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     )?);
     bgm.feed(0, capacity - SLACK, |command| producer.try_push(command))?;
     let mixer = Mixer::new(
-        MixerConfig::new(
-            pcm,
-            OUTPUT,
-            Timestamp::ZERO,
-            AudioLimits::new(
-                capacity,
-                options.voices,
-                capacity,
-                AudioLimits::MAX_RENDER_FRAMES,
-                capacity,
-            )?,
-        ),
+        {
+            let config = MixerConfig::new(
+                pcm,
+                OUTPUT,
+                Timestamp::ZERO,
+                AudioLimits::new(
+                    capacity,
+                    options.voices,
+                    capacity,
+                    AudioLimits::MAX_RENDER_FRAMES,
+                    capacity,
+                )?,
+            );
+            playback_end.map_or(config, |end| config.with_playback_end_frame(end))
+        },
         prepared.bank,
         consumer,
     )?;
@@ -470,9 +513,12 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         let (mut transport, quality) = stream.calibrate(
             &options,
             calibration_extent(
-                options
-                    .seconds
-                    .unwrap_or(states[0].completion.calibration_seconds()),
+                options.seconds.unwrap_or_else(|| {
+                    states[0]
+                        .completion
+                        .as_ref()
+                        .map_or(2, |c| c.calibration_seconds())
+                }),
                 options.preroll,
             )?,
             &mut bgm,
@@ -489,6 +535,21 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         );
         let mut group =
             RuntimeGroup::new(HOST, OUTPUT, transport, producer, configs, 4096, &reserved)?;
+        if let Some(end) = options.end_ns {
+            group.set_song_end(Timestamp::from_nanos(end))?;
+        }
+        let mut end_boundary = if let Some(end) = &mut native_end {
+            end.observe(
+                stream.render_report()?,
+                discipline
+                    .latest_pair()
+                    .ok_or("finite local playback requires native clock relation")?,
+            )?
+        } else {
+            None
+        };
+        let mut end_rendered = false;
+        let mut committed_frontier = None;
         let mut merger = InputMerger::new(
             HOST,
             host_origin,
@@ -499,11 +560,6 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             .seconds
             .map(|seconds| Instant::now() + WallDuration::from_secs(seconds));
         let mut last_progress = None;
-        let output_origin = ClockPoint {
-            domain: OUTPUT,
-            timestamp: Timestamp::ZERO,
-        };
-        let mut pause = NativePause::new(output_origin, HOST, pcm.sample_rate())?;
         let mut keyboard = PauseKeyboard::new();
         let mut paused_boundary: Option<ClockPoint> = None;
         let mut resume_boundary: Option<ClockPoint> = None;
@@ -518,11 +574,25 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             {
                 let _admission = stream.observe(&mut discipline)?;
                 player::retry_pause_publication();
+                let rendered = stream.render_report()?;
+                if let Some(end) = &mut native_end {
+                    end_rendered |=
+                        rendered.is_some_and(|report| report.playback_end_physical_frame.is_some());
+                    if let Some(boundary) = end.observe(
+                        rendered,
+                        discipline
+                            .latest_pair()
+                            .ok_or("finite local playback requires native clock relation")?,
+                    )? {
+                        end_boundary = Some(boundary);
+                    }
+                }
                 if pause_supported {
                     let reference = discipline
                         .latest_pair()
                         .ok_or("local pause requires native clock relation")?;
-                    if (pause.phase() == PausePhase::Running || pause_committed)
+                    if !end_rendered
+                        && (pause.phase() == PausePhase::Running || pause_committed)
                         && resume_boundary.is_none()
                         && pause.request(player::pause_requested(), reference)?
                     {
@@ -534,12 +604,14 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                             PauseState::Resuming
                         });
                     }
-                    if let Some(boundary) = pause.observe(stream.render_report()?, reference)? {
+                    if let Some(boundary) = pause.observe(rendered, reference)? {
                         if boundary.paused {
-                            group.transport_mut().pause(boundary.host.timestamp)?;
-                            paused_boundary = Some(boundary.host);
-                            pause_committed = false;
-                            pause_lag_reached = false;
+                            if !end_rendered {
+                                group.transport_mut().pause(boundary.host.timestamp)?;
+                                paused_boundary = Some(boundary.host);
+                                pause_committed = false;
+                                pause_lag_reached = false;
+                            }
                         } else {
                             group.transport_mut().resume(boundary.host.timestamp)?;
                             resume_boundary = Some(boundary.host);
@@ -670,7 +742,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                     std::thread::sleep(WallDuration::from_millis(1));
                     continue;
                 }
-                if pause_supported && pause.phase() == PausePhase::Paused {
+                if pause_supported && pause.phase() == PausePhase::Paused && !end_rendered {
                     if !pause_committed && !backlog {
                         let at = paused_boundary.ok_or("local paused boundary unavailable")?;
                         while let Some(event) = merger.pop_ready(at)? {
@@ -701,6 +773,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                             &mut states,
                         )?;
                         merger.commit(at)?;
+                        committed_frontier = Some(at);
                         pause_committed = true;
                         player::publish_pause(PauseState::Paused);
                     }
@@ -766,6 +839,11 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                             resume_boundary = None;
                             player::publish_pause(PauseState::Running);
                         }
+                        if end_boundary
+                            .is_some_and(|boundary| host.timestamp >= boundary.host.timestamp)
+                        {
+                            continue;
+                        }
                         if !pause_supported || keyboard.accept(&event)? {
                             process_event(
                                 event,
@@ -801,6 +879,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                         &mut states,
                     )?;
                     merger.commit(frontier)?;
+                    committed_frontier = Some(frontier);
                     let second = states[0].last_song.as_nanos().div_euclid(1_000_000_000);
                     if last_progress != Some(second) {
                         println!(
@@ -814,18 +893,33 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                         last_progress = Some(second);
                     }
                 }
-                let mut finished = true;
+                if finite_cohort_done(
+                    options.end_ns,
+                    end_boundary.map(|boundary| boundary.host),
+                    committed_frontier,
+                    &states,
+                    backlog,
+                    resume_boundary.is_some(),
+                ) {
+                    println!(
+                        "all Windows local finite prefixes complete: native endpoint presented and committed input frontier drained"
+                    );
+                    break;
+                }
+                let mut finished = options.end_ns.is_none();
                 for state in &mut states {
-                    let judge = group
-                        .member_judge(state.player)
-                        .ok_or("local judge unavailable")?;
-                    finished &= state.completion.observe(
-                        judge,
-                        state.last_song,
-                        bgm.report(),
-                        stream.render_report()?,
-                        discipline.latest_pair().map(|pair| pair.source),
-                    )?;
+                    if let Some(completion) = &mut state.completion {
+                        let judge = group
+                            .member_judge(state.player)
+                            .ok_or("local judge unavailable")?;
+                        finished &= completion.observe(
+                            judge,
+                            state.last_song,
+                            bgm.report(),
+                            stream.render_report()?,
+                            discipline.latest_pair().map(|pair| pair.source),
+                        )?;
+                    }
                 }
                 if finished {
                     println!(
@@ -899,11 +993,151 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
 #[cfg(test)]
 mod fixtures {
     use super::*;
+    use beatkernel::input::ButtonState;
     fn host(ns: i64) -> ClockPoint {
         ClockPoint {
             domain: HOST,
             timestamp: Timestamp::from_nanos(ns),
         }
+    }
+    fn button(
+        device: u64,
+        state: beatkernel::input::ButtonState,
+        ns: i64,
+        sequence: u64,
+    ) -> beatkernel::input::PhysicalInputEvent {
+        beatkernel::input::PhysicalInputEvent::Button(beatkernel::input::ButtonEvent {
+            meta: beatkernel::input::EventMeta::new(DeviceId(device), host(ns), sequence),
+            control: PhysicalControlId::keyboard(4),
+            state,
+        })
+    }
+    fn finite_states(ids: &[PlayerId], song: i64) -> Vec<PlayerState> {
+        ids.iter()
+            .map(|&player| PlayerState {
+                player,
+                capture: None,
+                competition: None,
+                completion: None,
+                score: ScoreSummary::default(),
+                last_song: Timestamp::from_nanos(song),
+            })
+            .collect()
+    }
+    #[test]
+    fn finite_cohort_needs_every_member_actual_commit_native_ack_and_all_source_drain() {
+        for count in [2, 3, 4, 64] {
+            let mut ids: Vec<_> = (0..count).map(|i| PlayerId(1000 + i as u32 * 7)).collect();
+            *ids.last_mut().unwrap() = PlayerId(u32::MAX);
+            let mut states = finite_states(&ids, 10);
+            assert!(finite_cohort_done(
+                Some(10),
+                Some(host(20)),
+                Some(host(20)),
+                &states,
+                false,
+                false
+            ));
+            for (boundary, committed, backlog, resuming) in [
+                (None, Some(host(20)), false, false),
+                (Some(host(20)), None, false, false),
+                (Some(host(20)), Some(host(19)), false, false),
+                (Some(host(20)), Some(host(20)), true, false),
+                (Some(host(20)), Some(host(20)), false, true),
+            ] {
+                assert!(!finite_cohort_done(
+                    Some(10),
+                    boundary,
+                    committed,
+                    &states,
+                    backlog,
+                    resuming
+                ));
+            }
+            states.last_mut().unwrap().last_song = Timestamp::from_nanos(9);
+            assert!(!finite_cohort_done(
+                Some(10),
+                Some(host(20)),
+                Some(host(21)),
+                &states,
+                false,
+                false
+            ));
+            states.last_mut().unwrap().last_song = Timestamp::from_nanos(10);
+            assert!(!finite_cohort_done(
+                None,
+                Some(host(20)),
+                Some(host(21)),
+                &states,
+                false,
+                false
+            ));
+            assert_eq!(states.last().unwrap().player, PlayerId(u32::MAX));
+            assert!(states.iter().all(|state| state.completion.is_none()));
+        }
+    }
+    #[test]
+    fn finite_global_pop_keeps_preboundary_order_and_only_real_commit_finishes() {
+        let states = finite_states(
+            &[
+                PlayerId(7),
+                PlayerId(1000),
+                PlayerId(u32::MAX),
+                PlayerId(42),
+            ],
+            10,
+        );
+        let mut merger =
+            InputMerger::new(HOST, host(0), (1..=4).map(DeviceId).collect(), 16).unwrap();
+        for event in [
+            button(4, ButtonState::Down, 9, 1),
+            button(2, ButtonState::Down, 9, 1),
+            button(1, ButtonState::Down, 10, 1),
+            button(3, ButtonState::Down, 11, 1),
+            button(2, ButtonState::Up, 21, 2),
+        ] {
+            merger.admit(event, host(30)).unwrap();
+        }
+        assert_eq!(merger.watermark(host(20), 2, true).unwrap(), None);
+        let frontier = merger.watermark(host(20), 2, false).unwrap().unwrap();
+        let mut gameplay = Vec::new();
+        let mut acquired = Vec::new();
+        while let Some(event) = merger.pop_ready(frontier).unwrap() {
+            acquired.push(event.meta().source);
+            if event.meta().timestamp < host(10).timestamp {
+                gameplay.push(event.meta().source);
+            }
+        }
+        assert_eq!(gameplay, vec![DeviceId(2), DeviceId(4)]);
+        assert_eq!(
+            acquired,
+            vec![DeviceId(2), DeviceId(4), DeviceId(1), DeviceId(3)]
+        );
+        assert!(!finite_cohort_done(
+            Some(10),
+            Some(host(10)),
+            None,
+            &states,
+            false,
+            false
+        ));
+        merger.commit(frontier).unwrap();
+        assert!(finite_cohort_done(
+            Some(10),
+            Some(host(10)),
+            Some(frontier),
+            &states,
+            false,
+            false
+        ));
+        // Future post-end acquisition is retained by the bounded merger until
+        // owner cleanup; it neither blocks this prefix nor invents gameplay.
+        assert_eq!(merger.pending(), 1);
+        assert!(
+            merger
+                .admit(button(1, ButtonState::Up, 17, 2), host(30))
+                .is_err()
+        );
     }
     #[test]
     fn pending_raw_receipts_preserve_merge_order_and_pause_key_provenance() {
