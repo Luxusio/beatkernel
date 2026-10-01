@@ -99,7 +99,8 @@ native physical clock/presentation observations retain their output grid.
 Known ceiling: this is the audio scheduling primitive. Linux ALSA, Windows WASAPI
 shared/exclusive and macOS CoreAudio solo/local 2..64 BMS owners coordinate observed
 presentation boundaries, Transport/input fencing and song-time capture. ASIO,
-network and replay owners still require that integration;
+and network owners still require that integration. Output-only replay Watch
+also uses the same native/mixer pause boundaries and cumulative playback gap;
 complete native/GUI timing acceptance remains unfinished. Output already buffered in
 a native device may continue to present after a render pause begins. Paused
 queue storage remains bounded; callers must stop generating gameplay commands

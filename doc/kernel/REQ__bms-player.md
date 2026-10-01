@@ -742,7 +742,11 @@ F9 or the Pause/Resume button requests live pause when the native owner announce
 support. Linux ALSA, Windows WASAPI shared/exclusive and macOS CoreAudio
 solo/local 2..64 without network competition implement the same acknowledged
 boundary and key reconciliation flow; saved-record ghosts remain supported.
-ASIO and replay Watch announce no pause capability. ASIO requires a validated
+Replay Watch uses the same native/mixer boundary coordinator to stop recorded
+operation progress and sound together, preserving the playback cursor and
+recorded start. It acquires no keyboard or network and does not mutate recordings.
+Capability is announced only from an actual native output/host relation. ASIO
+announces no pause capability and requires a validated
 presentation relation; backend selection cannot invent that relation.
 Cross-platform native acceptance remains open.
 Local cohorts use one native pause coordinator, one shared Transport and
@@ -770,7 +774,7 @@ without advancing the committed judge frontier past the shared pause boundary.
 
 UI requests change desired state only. The owner publishes Running, Pausing,
 Paused and Resuming; controls are disabled during pending transitions, cancellation,
-cleanup/retry and replay. The mixer freezes its original scheduling grid. The
+cleanup/retry and unsupported output modes. The mixer freezes its original scheduling grid. The
 owner retries acknowledgement publication after transient UI-slot contention,
 so an idle paused session cannot strand the UI in Pausing. Successful delivery
 clears that retry without continuously cloning unchanged paused snapshots. The
@@ -820,6 +824,6 @@ Known ceiling: boundary interpolation has no acoustic accuracy guarantee.
 Missing/regressing/unrepresentable clock relations, native device failure and
 raw queue SYN_DROPPED/resync terminate and drain the session with its valid
 recorded prefix. Waiting for output presentation can grow a raw-input backlog;
-input loss is never silently repaired. Local-cohort/network/replay pause policy,
+input loss is never silently repaired. ASIO/network pause policy,
 loops/browser/full widget host and full native/GUI/replay acceptance remain
 unfinished. Source compilation and authored fixtures are not execution proof.

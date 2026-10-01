@@ -96,6 +96,27 @@ the full log precedes audio start. F5 retains the selected chart/record/output
 invocation and waits for prior-owner cleanup. Stop and final checks are attempted
 on cancellation and errors, including start failures.
 
+F9 and Pause/Resume are available for Watch when the native owner obtains an
+actual output/associated-host ClockPair. ALSA and CoreAudio retain the full checked
+native pair; WASAPI pairs accurate position/frequency units with the associated
+host point from the same snapshot. Source-only presentation remains usable for
+ordinary viewing but cannot grant pause capability. ASIO keeps no capability.
+
+The owner uses the same NativePause coordinator as live play and controls the
+sole command producer. Pending boundaries fence command admission, recorded
+operation advancement and completion while native polling, failure checks and
+cancellation remain active. Actual presentation crossing acknowledges Paused;
+one frozen prefix update consumes only recorded operations through that boundary.
+Paused idle periods do not create repeated prefix/result updates. Resume uses the
+cumulative once-rounded paused-frame gap to project physical presentation back
+onto the original song grid, including recorded start and preroll exactly once.
+Feeder credit uses completed playback frames; final physical render diagnostics
+remain separate. Equal-time recorded operations retain ordinal order and are not
+reapplied by pause/resume. Keyboard acquisition, capture and network stay absent.
+F5 restarts the selected recording after cleanup; live F7/F8 bookmarks remain
+unavailable. Optional seconds includes paused wall time. Native boundary mapping
+quality remains Unknown, and native/GUI/timing acceptance remains unexecuted.
+
 Known ceiling: ASIO recorded output has no validated native-output-zero epoch
 association. Its presentation is unavailable and omitted seconds rejects during
 preflight; explicit seconds permits diagnostic audio only. This differs from

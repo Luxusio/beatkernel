@@ -42,6 +42,13 @@ past dropped audio. BGM and PCM use the supplied prepared audio setup; the logic
 judge fingerprint does not authenticate them. The
 [native replay player](REQ__bms-native-replay.md) connects this plan to existing
 output backends; actual native replay execution evidence remains pending.
+
+Native Replay Watch pause keeps these planned command timestamps on the original
+playback grid. Mixer silence advances only physical frames; rolling admission
+uses completed playback frames and stops during pending/paused transitions.
+Recorded operation progress stops at the acknowledged playback boundary and
+resumes through the same ReplayVisual/JudgeEngine operations. No pause command
+is added to the recording, and original live wall-pause history is not reproduced.
 Assets are preloaded and
 the finite command plan is allocated off-thread; source/log limits do not bound
 all process memory. Tests, examples, native execution, reviews and QA stay deferred.

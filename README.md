@@ -142,7 +142,9 @@ recorded start. Snapshot delivery is coalesced, so marks use the latest observed
 position, not the physical key event timestamp. Linux ALSA, Windows WASAPI
 shared/exclusive and macOS CoreAudio support solo/local 2..64 F9/Pause without
 network competition, using native-frontier acknowledgement, shared Transport
-fencing and paused-key reconciliation. ASIO and replay Watch pause,
+fencing and paused-key reconciliation. Replay Watch supports the same F9 control
+when an actual output/host clock pair is available, freezing recorded progress
+and sounds together. ASIO and network pause,
 live scrubbing and loops remain work; native/GUI execution is still unverified.
 Settings Records browses an explicit directory and previews a selected recording
 against the current chart, judging profile and practice start before attaching
