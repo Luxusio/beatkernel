@@ -677,9 +677,6 @@ pub(crate) fn validate_args(args: &[String]) -> Result<()> {
     let (competition, native) =
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     let options = parse(&native)?;
-    if !options.local_players.is_empty() && competition.network.is_some() {
-        return Err("network competition currently supports one local participant only".into());
-    }
     validate_finite_modes(&options, &competition)
 }
 
@@ -687,8 +684,8 @@ fn validate_finite_modes(
     options: &Options,
     competition: &beatkernel_bms_runtime::competition_live::CompetitionOptions,
 ) -> Result<()> {
-    if options.end_ns.is_some() && competition.network.is_some() {
-        return Err("end-ns is unavailable with network competition".into());
+    if !options.local_players.is_empty() && competition.network.is_some() {
+        return Err("network competition currently supports one local participant only".into());
     }
     Ok(())
 }
@@ -718,7 +715,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
             "Local play: repeat --local-player ID:EXACT_INTERFACE_PATH for 2..64 distinct keyboards, without --keyboard-path. Stable positive u32 IDs are preserved in GUI scores and .p<ID>.bkr replay files. --advance-lag-ns 0..1000000000 (default 2000000) controls the common input frontier. Network + local groups is unsupported; saved ghosts are per-player. Native commands compose the graphical player's actual runtime."
         );
         println!(
-            "windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --start-ns N --end-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Optional --end-ns unsigned strictly after start completes a native-presented, input-drained finite prefix for solo or local WASAPI/SDK-enabled ASIO; ASIO waits for the actual crossing block upper presentation interval. Network finite sessions are pending. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Optional --keyboard-path EXACT_INTERFACE_PATH selects one physical keyboard; omitted accepts any physical keyboard. Explicit device removal fails the session. Focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured."
+            "windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --start-ns N --end-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Optional --end-ns unsigned strictly after start completes a native-presented, input-drained finite prefix for solo or local WASAPI/SDK-enabled ASIO; ASIO waits for the actual crossing block upper presentation interval. Solo network peers must agree on the same finite section endpoint; local groups remain offline. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Optional --keyboard-path EXACT_INTERFACE_PATH selects one physical keyboard; omitted accepts any physical keyboard. Explicit device removal fails the session. Focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured."
         );
         return Ok(());
     }
@@ -1245,13 +1242,14 @@ mod native {
             )?,
         )?;
         let mut competition =
-            beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_at_with_chart_seed(
+            beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_section_at_with_chart_seed(
                 &competition_options,
                 &prepared.source,
                 &judge,
                 HOST,
                 Timestamp::from_nanos(options.start_ns),
                 options.chart_seed,
+                options.end_ns.map(Timestamp::from_nanos),
             )?;
         const LIVE_SLACK: usize = 1024;
         let capacity = AudioLimits::MAX_COMMANDS;
@@ -1829,11 +1827,13 @@ mod preroll_fixtures {
         network.extend(["--mp-host".into(), "127.0.0.1:39001".into()]);
         assert!(validate_args(&network).is_ok());
         network.extend(["--end-ns".into(), "2".into()]);
+        assert!(validate_args(&network).is_ok());
+        local.extend(["--mp-host".into(), "127.0.0.1:39001".into()]);
         assert!(
-            validate_args(&network)
+            validate_args(&local)
                 .unwrap_err()
                 .to_string()
-                .contains("network")
+                .contains("one local participant")
         );
         let mut asio = parse(&base).unwrap();
         asio.backend = Backend::Asio;

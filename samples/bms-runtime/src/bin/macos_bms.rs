@@ -504,10 +504,8 @@ fn main() -> Result<()> {
 
 fn finite_mode(options: &Options, network: bool) -> Result<()> {
     options.playback_end()?;
-    if options.end_ns.is_some() && network {
-        return Err(
-            "end-ns currently requires CoreAudio playback without network competition".into(),
-        );
+    if !options.local_players.is_empty() && network {
+        return Err("network competition currently supports one local participant only".into());
     }
     Ok(())
 }
@@ -545,9 +543,6 @@ pub(crate) fn validate_args(args: &[String]) -> Result<()> {
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     let options = parse(&native)?;
     finite_mode(&options, competition.network.is_some())?;
-    if !options.local_players.is_empty() && competition.network.is_some() {
-        return Err("network competition currently supports one local participant only".into());
-    }
     Ok(())
 }
 
@@ -559,15 +554,12 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
             "Graphical player is bms-player; this is a native developer composition. Local mode: replace --keyboard-registry with repeated --local-player ID:REGISTRY (2..64 distinct keyboards).\n"
         );
         println!(
-            "macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned and strictly after start; solo or local nonnetwork CoreAudio completes a finite prefix only after native presentation and input drain, without forcing remaining notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact solo or assigned local registry attachments, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown."
+            "macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned and strictly after start; solo network CoreAudio with the same section endpoint or offline local CoreAudio completes a finite prefix only after native presentation and input drain, without forcing remaining notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact solo or assigned local registry attachments, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown."
         );
         return Ok(());
     }
     let options = parse(&args)?;
     finite_mode(&options, competition_options.network.is_some())?;
-    if !options.local_players.is_empty() && competition_options.network.is_some() {
-        return Err("network competition currently supports one local participant only".into());
-    }
     #[cfg(target_os = "macos")]
     {
         native::run(options, competition_options)
@@ -845,13 +837,14 @@ mod native {
             )?,
         )?;
         let mut competition =
-            beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_at_with_chart_seed(
+            beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_section_at_with_chart_seed(
                 &competition_options,
                 &prepared.source,
                 &judge,
                 HOST,
                 Timestamp::from_nanos(options.start_ns),
                 options.chart_seed,
+                options.end_ns.map(Timestamp::from_nanos),
             )?;
         const SLACK: usize = 1024;
         let capacity = AudioLimits::MAX_COMMANDS;
@@ -1400,7 +1393,7 @@ mod fixtures {
             "--mp-host".into(),
             "127.0.0.1:34567".into(),
         ]);
-        assert!(validate_args(&network).is_err());
+        assert!(validate_args(&network).is_ok());
         let mut local = args();
         local.drain(4..6);
         local.extend([
@@ -1413,6 +1406,13 @@ mod fixtures {
         ]);
         assert!(parse(&local).is_ok());
         assert!(validate_args(&local).is_ok());
+        local.extend(["--mp-host".into(), "127.0.0.1:34567".into()]);
+        assert!(
+            validate_args(&local)
+                .unwrap_err()
+                .to_string()
+                .contains("one local participant")
+        );
     }
     #[test]
     fn finite_frontier_is_exclusive_and_requires_real_drain_resume_and_logical_end() {
