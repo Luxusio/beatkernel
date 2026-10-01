@@ -12,6 +12,7 @@ use beatkernel_bms_runtime::{
     local_setup::LocalSetup,
     player, player_chart,
     presentation_settings::PresentationSettings,
+    session_launch::SessionLaunch,
     settings::{NativeSettings, SettingsHost},
     settings_profile::PlayerProfile,
 };
@@ -151,6 +152,67 @@ struct Game {
     joined: bool,
     local_page: usize,
     local_comparisons: bool,
+    launch: SessionLaunch,
+    prepared_retry: Option<SessionLaunch>,
+}
+
+impl Game {
+    fn accept_snapshot(&mut self, snapshot: player::PlayerSnapshot) {
+        let count = snapshot.players.len();
+        if count > 0 {
+            self.local_page = self.local_page.min(
+                count
+                    .div_ceil(organisms::LOCAL_PLAYERS_PER_PAGE)
+                    .saturating_sub(1),
+            );
+        }
+        self.snapshot = Some(snapshot);
+    }
+    fn retry_available(&self) -> bool {
+        self.prepared_retry.is_none() && (self.joined || !self.cancelling)
+    }
+    fn cancel(&mut self) {
+        self.prepared_retry = None;
+        if !self.joined {
+            self.viewer.cancel();
+            self.cancelling = true;
+        }
+    }
+    /// Called only after the finished native worker has joined and its final
+    /// snapshot has been drained. Cleanup failure discards automatic retry.
+    fn owner_finished(&mut self, succeeded: bool) -> Option<SessionLaunch> {
+        self.joined = true;
+        let prepared = self.prepared_retry.take();
+        if succeeded { prepared } else { None }
+    }
+}
+fn spawn_game(
+    native: Native,
+    launch: SessionLaunch,
+    local_page: usize,
+    local_comparisons: bool,
+) -> Result<Game, String> {
+    let args = launch.args().to_vec();
+    let (publisher, viewer) = player::channel();
+    let worker = thread::Builder::new()
+        .name("bms-game".into())
+        .spawn(move || {
+            player::with_publisher(publisher, || {
+                native(&args).map_err(|error| error.to_string())
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(Game {
+        viewer,
+        worker: Some(worker),
+        snapshot: None,
+        cancelling: false,
+        joined: false,
+        local_page,
+        local_comparisons,
+        launch,
+        prepared_retry: None,
+    })
 }
 
 impl Drop for Game {
@@ -170,7 +232,7 @@ pub(super) fn run(
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
-            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry after cleanup; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
         );
         return Ok(());
     }
@@ -1226,6 +1288,7 @@ impl Desktop {
             6 if self.game.is_some() => self.change_local_page(false),
             7 if self.game.is_some() => self.change_local_page(true),
             8 if self.game.is_some() => self.toggle_local_comparisons(),
+            9 if self.game.is_some() => self.request_retry(),
             5 if self.game.is_none() => self.open_settings(),
             1 if self.game.is_none() && !self.entries.is_empty() => self.key(KeyCode::Enter, false),
             2 if self.game.as_ref().is_some_and(|game| !game.joined) => self.cancel(),
@@ -1267,13 +1330,62 @@ impl Desktop {
             }
         }
     }
+    fn request_retry(&mut self) {
+        if !self.active
+            || self.closing
+            || self.suspended
+            || self.occluded
+            || self.profile_io.is_some()
+        {
+            return;
+        }
+        let Some(game) = &self.game else {
+            return;
+        };
+        if !game.retry_available() {
+            return;
+        }
+        // Preflight the exact retained invocation before signalling cancellation.
+        let prepared = game.launch.retry().and_then(|launch| {
+            (self.validate)(launch.args()).map_err(|error| error.to_string())?;
+            Ok(launch)
+        });
+        match prepared {
+            Ok(launch) => {
+                if self.game.as_ref().is_some_and(|game| game.joined) {
+                    self.replace_joined_game(launch);
+                } else if let Some(game) = &mut self.game {
+                    game.prepared_retry = Some(launch);
+                    game.viewer.cancel();
+                    game.cancelling = true;
+                    self.failure = None;
+                }
+            }
+            Err(error) => self.failure = Some(format!("retry preflight: {error}")),
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn replace_joined_game(&mut self, launch: SessionLaunch) {
+        let Some(old) = &self.game else {
+            return;
+        };
+        if !old.joined || old.worker.is_some() {
+            return;
+        }
+        // Spawn is the only fallible step; retain joined results on failure.
+        match spawn_game(self.native, launch, old.local_page, old.local_comparisons) {
+            Ok(game) => {
+                self.game = Some(game);
+                self.failure = None;
+            }
+            Err(error) => self.failure = Some(format!("retry spawn: {error}")),
+        }
+    }
     fn cancel(&mut self) {
         self.gesture.cancel();
         if let Some(game) = &mut self.game {
-            if !game.joined {
-                game.viewer.cancel();
-                game.cancelling = true;
-            }
+            game.cancel();
         }
     }
     fn fail(&mut self, error: impl ToString) {
@@ -1282,12 +1394,13 @@ impl Desktop {
         self.cancel();
     }
     fn collect_game(&mut self) {
+        let mut retry = None;
         if let Some(game) = &mut self.game {
             if let Some(snapshot) = game.viewer.take_latest() {
                 if let (Some(window), Some(chart)) = (&self.window, &snapshot.chart) {
                     window.set_title(&window_title(&chart.title, &chart.artist));
                 }
-                game.snapshot = Some(snapshot);
+                game.accept_snapshot(snapshot);
             }
             if !game.joined
                 && game
@@ -1301,13 +1414,21 @@ impl Desktop {
                     .expect("active game worker")
                     .join()
                     .unwrap_or_else(|_| Err("game worker panicked".into()));
+                // The old owner can publish during cleanup. Drain once more only
+                // after joining; fresh channels cannot replace this evidence.
                 if let Some(snapshot) = game.viewer.take_latest() {
-                    game.snapshot = Some(snapshot);
+                    game.accept_snapshot(snapshot);
                 }
+                let succeeded = result.is_ok();
                 if let Err(error) = result {
                     self.failure = Some(error);
                 }
-                game.joined = true;
+                retry = game.owner_finished(succeeded);
+            }
+        }
+        if let Some(launch) = retry {
+            if self.active && !self.closing && !self.suspended && !self.occluded {
+                self.replace_joined_game(launch);
             }
         }
     }
@@ -1338,6 +1459,10 @@ impl Desktop {
         }
         if self.game.is_some() && !repeat && key == KeyCode::KeyC {
             self.toggle_local_comparisons();
+            return;
+        }
+        if self.game.is_some() && !repeat && key == KeyCode::F5 {
+            self.request_retry();
             return;
         }
         if self.game.as_ref().is_some_and(|game| game.joined) {
@@ -1380,29 +1505,13 @@ impl Desktop {
             .ok_or("native chart path must be UTF-8")?;
         let args = with_chart(&self.options.native, path);
         (self.validate)(&args).map_err(|error| error.to_string())?;
-        let (publisher, viewer) = player::channel();
-        let native = self.native;
-        let worker = thread::Builder::new()
-            .name("bms-game".into())
-            .spawn(move || {
-                player::with_publisher(publisher, || {
-                    native(&args).map_err(|error| error.to_string())
-                })
-            })
-            .map_err(|error| error.to_string())?;
+        let launch = SessionLaunch::new(args)?;
+        let game = spawn_game(self.native, launch, 0, false)?;
         if let Some(window) = &self.window {
             window.set_title(&window_title(&entry.title, &entry.artist));
         }
         self.failure = None;
-        self.game = Some(Game {
-            viewer,
-            worker: Some(worker),
-            snapshot: None,
-            cancelling: false,
-            joined: false,
-            local_page: 0,
-            local_comparisons: false,
-        });
+        self.game = Some(game);
         Ok(())
     }
     fn draw(&mut self) -> Result<(), String> {
@@ -1510,6 +1619,25 @@ impl Desktop {
                         "COMPARISONS"
                     },
                 );
+            }
+            let retry_bounds = Bounds {
+                x: 410,
+                y: 65,
+                width: 130,
+                height: 34,
+            };
+            if game.retry_available() {
+                control(
+                    pixels,
+                    &mut self.hits,
+                    &self.gesture,
+                    point,
+                    ControlId(9),
+                    retry_bounds,
+                    "RETRY F5",
+                );
+            } else {
+                molecules::button(pixels, retry_bounds, "RETRY F5", false, false);
             }
             if game.joined {
                 control(
@@ -1649,7 +1777,7 @@ impl Desktop {
                 pixels,
                 24,
                 650,
-                "ERROR - ENTER RETURNS TO SELECTION",
+                game_error_caption(self.game.as_ref()),
                 2,
                 0xff8e8e,
             );
@@ -2332,6 +2460,13 @@ fn window_title(title: &str, artist: &str) -> String {
         .collect()
 }
 
+fn game_error_caption(game: Option<&Game>) -> &'static str {
+    match game {
+        Some(game) if !game.joined && game.cancelling => "ERROR - WAITING FOR CLEANUP",
+        Some(game) if !game.joined => "ERROR - SESSION CONTINUES",
+        _ => "ERROR - ENTER RETURNS TO SELECTION",
+    }
+}
 fn local_comparisons_available(players: &[player::LocalPlayerSnapshot]) -> bool {
     players.len() >= 2
         && players.iter().any(|player| {
@@ -2357,10 +2492,12 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
         text(pixels, 24, 80, "LOADING - ESC CANCEL", 2, 0x9bb1cf);
         return Ok(());
     };
-    let status = if game.cancelling && !game.joined {
+    let status = if game.prepared_retry.is_some() && !game.joined {
+        "RETRY WAITING FOR CLEANUP"
+    } else if game.cancelling && !game.joined {
         "STOPPING"
     } else if game.joined {
-        "RESULTS - ENTER RETURNS TO SELECTION"
+        "RESULTS - ENTER RETURN"
     } else {
         match &snapshot.status {
             player::PlayerStatus::Loading => "LOADING",
@@ -2440,6 +2577,85 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn retry_fixture() -> Game {
+        let (_publisher, viewer) = player::channel();
+        Game {
+            viewer,
+            worker: None,
+            snapshot: None,
+            cancelling: false,
+            joined: false,
+            local_page: 3,
+            local_comparisons: true,
+            launch: SessionLaunch::new(vec![
+                "--chart".into(),
+                "pinned.bms".into(),
+                "--record-replay".into(),
+                "run.bkr".into(),
+            ])
+            .unwrap(),
+            prepared_retry: None,
+        }
+    }
+    #[test]
+    fn retry_admission_waits_for_owner_success_and_cancel_discards_prepared_launch() {
+        let mut game = retry_fixture();
+        assert!(game.retry_available());
+        game.prepared_retry = Some(game.launch.retry().unwrap());
+        game.cancelling = true;
+        assert!(!game.retry_available());
+        let launch = game.owner_finished(true).unwrap();
+        assert!(game.joined);
+        assert_eq!(launch.attempt(), 1);
+        assert_eq!(launch.args()[1], "pinned.bms");
+        assert_eq!(launch.args()[3], "run.retry1.bkr");
+        assert_eq!(game.local_page, 3);
+        assert!(game.local_comparisons);
+        let mut failed = retry_fixture();
+        failed.prepared_retry = Some(failed.launch.retry().unwrap());
+        assert!(failed.owner_finished(false).is_none());
+        assert!(failed.prepared_retry.is_none());
+        assert!(failed.retry_available()); // Explicit joined-results retry remains possible.
+        let mut cancelled = retry_fixture();
+        cancelled.prepared_retry = Some(cancelled.launch.retry().unwrap());
+        cancelled.cancel();
+        assert!(cancelled.prepared_retry.is_none());
+        assert!(!cancelled.retry_available());
+        assert!(cancelled.owner_finished(true).is_none());
+    }
+    #[test]
+    fn retry_snapshot_paging_survives_loading_and_clamps_final_results() {
+        let mut game = retry_fixture();
+        game.accept_snapshot(player::PlayerSnapshot::default());
+        assert_eq!(game.local_page, 3);
+        assert_eq!(game_error_caption(Some(&game)), "ERROR - SESSION CONTINUES");
+        let snapshot = player::PlayerSnapshot {
+            players: (1..=5)
+                .map(|id| player::LocalPlayerSnapshot {
+                    player: PlayerId(id),
+                    chart: None,
+                    song_time: None,
+                    score: Default::default(),
+                    last_judge: None,
+                    recent_results: Vec::new(),
+                    competition: None,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        game.accept_snapshot(snapshot);
+        assert_eq!(game.local_page, 1);
+        game.cancelling = true;
+        assert_eq!(
+            game_error_caption(Some(&game)),
+            "ERROR - WAITING FOR CLEANUP"
+        );
+        game.owner_finished(false);
+        assert_eq!(
+            game_error_caption(Some(&game)),
+            "ERROR - ENTER RETURNS TO SELECTION"
+        );
+    }
     #[test]
     fn display_modal_isolated_edits_back_and_pending_controls() {
         let original = PresentationSettings::default();
