@@ -1,5 +1,19 @@
 # BMS desktop player
 
+Competition views retain per-player actual saved-record prefixes (up to eight)
+and one peer-reported prefix with its independent song time. Network lifecycle
+is visible during play and results; loss of connection preserves the last prefix
+while local play continues. The latest-state bridge retains these through native
+cleanup. Compact comparison rows reuse existing drawing components; their labels
+use bounded file basenames, never full replay paths. Rendering acceptance is
+still deferred.
+
+Local play keeps normal lane space by default. A view-only Comparisons button
+or C key shows/hides all retained comparison rows for the visible local panels;
+the toggle never changes gameplay state or provides a gameplay timestamp. Solo
+comparisons use the sidebar. Showing many rows explicitly trades local lane
+space for comparison detail; the default local view preserves its lane geometry.
+
 The native Goal is to develop a BMS player. Keep all application features in
 the existing `beatkernel-bms-runtime` crate, with internal modules, and retain
 the core/platform/BMS adapter boundaries. Graphical presentation must use
@@ -227,6 +241,12 @@ native or browser graphics/audio/input. WASM has existing unused native cadence
 warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warning.
 
 ## Known ceiling
+
+- Comparison views retain eight records and one peer; local panels show this
+  detail only when toggled. A four-player panel with eight records has a 72px
+  lane region while comparisons are open (44px if a future native group+peer
+  mode is enabled). Default local lanes retain normal geometry; richer detailed
+  comparisons need a larger view. Rendering acceptance remains deferred.
 
 - Settings validation checks syntax and cross-option constraints, not resource
   availability — actual device/file checks remain in native preparation.

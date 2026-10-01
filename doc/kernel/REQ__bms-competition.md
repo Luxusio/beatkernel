@@ -6,8 +6,20 @@ adapter crates. Existing diagnostic binaries remain available. Native play,
 offline rendering, replay inspection/output, saved-record competition and
 live multiplayer are modes of this application. The graphical `player` mode
 uses the [desktop presentation contract](REQ__bms-player.md); terminal modes
-remain available. Saved/remote opponent summaries currently remain terminal
-output rather than graphical opponent panels.
+remain available. Saved/remote opponent summaries use the graphical snapshot
+bridge, retaining up to eight ghost prefixes and one peer-reported prefix per
+local player. Own/other records and peer progress are labeled separately;
+remote song time remains independent and implies no final ranking. Waiting,
+connected, disconnected and stopped states survive cleanup. Graphical/native
+execution acceptance remains deferred.
+
+Comparison snapshots contain scalar hit/miss/combo counters rather than copied
+grade maps. Ghost labels use at most 64 Unicode scalars (256 UTF-8 bytes) of a
+sanitized basename. Game-owner publication is limited to once per 50ms of wall
+time during ordinary reports; preparation, disconnect and cleanup bypass that
+limit. It uses the existing 8ms latest-state bridge and never enters the audio
+callback. Coalescing affects display only; the final snapshot retains the exact
+last prefixes. Full u64 counters remain exact in the view.
 
 ## Saved-record opponents
 

@@ -1,5 +1,11 @@
 # Local player roster and input ownership
 
+Each stable local member owns its competition presentation: at most eight
+recorded ghost prefixes and one peer-reported prefix, with connection lifecycle
+retained through cleanup. Group reports update the matching PlayerId only.
+Saved opponents may be compared for each local member; combining a local group
+with the existing two-peer network mode still fails before resources start.
+
 A solo player starts without input-device selection. Two or more local players
 assign distinct input devices to prevent one physical event from playing every
 chart. Support a collection of players, including three and four; do not encode

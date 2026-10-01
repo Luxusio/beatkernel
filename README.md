@@ -101,6 +101,12 @@ for unsupported explicit choices. `--ui-fps` and `--ui-lookahead-ms` control dra
 Native input/judging stays on the game thread, audio keeps its output
 worker/callback, and socket I/O has its own worker. The graphical player is the product interface; native `play` commands remain
 available as developer compositions. Ranked online services are not implemented.
+Saved own/other replay prefixes and peer-reported progress feed the graphical
+comparison view for each local player. Connection state and the last received
+peer prefix survive cleanup; peer song time stays independent. Display updates
+are coalesced and never change judging or audio scheduling.
+Local panels keep their normal lane space until Comparisons/C is toggled;
+solo comparisons use the sidebar.
 See the [competition contract](doc/kernel/REQ__bms-competition.md) for limits.
 Solo play resolves omitted devices automatically: system/default audio output
 and a usable keyboard. Device assignment is reserved for multiple local players;
