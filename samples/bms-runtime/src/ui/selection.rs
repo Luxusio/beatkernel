@@ -6,7 +6,7 @@ use super::{
     retained::RetainedNodes,
     text_input::LineEditor,
 };
-use crate::{scene::Scene, screen_lifecycle::ScreenInstanceId};
+use crate::{font_text::FontText, scene::Scene, screen_lifecycle::ScreenInstanceId};
 use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
 use std::sync::Arc;
 
@@ -49,6 +49,16 @@ impl SelectionView {
         diagnostics: Arc<[String]>,
         width: u32,
         height: u32,
+    ) -> Result<Self, String> {
+        Self::new_with_font(id, items, diagnostics, width, height, None)
+    }
+    pub fn new_with_font(
+        id: ScreenInstanceId,
+        items: Arc<[SelectionItem]>,
+        diagnostics: Arc<[String]>,
+        width: u32,
+        height: u32,
+        font: Option<FontText>,
     ) -> Result<Self, String> {
         if (width, height) != (960, 720) {
             return Err("Selection requires the 960x720 logical viewport".into());
@@ -124,6 +134,7 @@ impl SelectionView {
                     .map(|index| (index, cursor == Some(position)))
             });
             let rows = Arc::clone(&items);
+            let font = font.clone();
             view.nodes.bind(scope, memo, move |value, scene, hits| {
                 if let Some((index, selected)) = value {
                     let y = 140 + slot * ROW_HEIGHT;
@@ -143,7 +154,15 @@ impl SelectionView {
                             0x263d59,
                         );
                     }
-                    text(scene, 28, y, &rows[index].title, 2, 0xf0f4ff);
+                    if let Some(font) = &font {
+                        if let Err(error) =
+                            font.draw(scene, 28, y as i64, &rows[index].title, 0xf0f4ff)
+                        {
+                            scene.reject(error);
+                        }
+                    } else {
+                        text(scene, 28, y, &rows[index].title, 2, 0xf0f4ff);
+                    }
                     hits.push((ControlId(100 + index as u64), bounds));
                 }
             });

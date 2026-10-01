@@ -86,6 +86,9 @@ impl FontAtlas {
     pub fn image(&self) -> &RgbaImage {
         &self.image
     }
+    pub fn ascent(&self) -> f32 {
+        self.font.as_scaled(self.pixels).ascent()
+    }
     /// Returns a cached glyph or prepares it once. Any returned error preserves
     /// existing cache entries, pixels and shelf placement. Controls are rejected.
     pub fn prepare(&mut self, character: char) -> Result<Glyph, String> {

@@ -36,6 +36,7 @@ pub struct Scene {
     rectangles: Vec<Rectangle>,
     batches: Vec<DrawBatch>,
     overflow: bool,
+    error: Option<String>,
     playfields: Vec<PlayfieldFrame>,
     playfield_caches: Vec<PlayfieldCache>,
     geometry_identity: Arc<()>,
@@ -56,6 +57,7 @@ impl Scene {
             rectangles: Vec::with_capacity(capacity.min(MAX_RECTANGLES)),
             batches: Vec::with_capacity(capacity.min(MAX_RECTANGLES)),
             overflow: false,
+            error: None,
             playfields: Vec::with_capacity(MAX_PLAYFIELDS),
             playfield_caches: (0..MAX_PLAYFIELDS)
                 .map(|_| PlayfieldCache::default())
@@ -70,6 +72,7 @@ impl Scene {
         self.rectangles.clear();
         self.batches.clear();
         self.overflow = false;
+        self.error = None;
         self.playfields.clear();
     }
 
@@ -263,7 +266,15 @@ impl Scene {
         });
     }
 
+    pub(crate) fn reject(&mut self, error: String) {
+        if self.error.is_none() {
+            self.error = Some(error);
+        }
+    }
     pub fn status(&self) -> Result<(), String> {
+        if let Some(error) = &self.error {
+            return Err(error.clone());
+        }
         if self.width == 0 || self.height == 0 {
             Err("scene logical extent must be nonzero".into())
         } else if self.overflow {

@@ -18,6 +18,9 @@ pub mod font;
 pub mod font_atlas;
 #[cfg(all(feature = "graphics", test))]
 mod font_atlas_fixtures;
+/// Cached font glyphs composed through the existing ordered sprite path.
+#[cfg(feature = "graphics")]
+pub mod font_text;
 /// Reusable asynchronous native/Web GPU presentation, separate from game I/O.
 #[cfg(feature = "graphics")]
 pub mod graphics;

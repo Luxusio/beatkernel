@@ -4,7 +4,7 @@ use crate::font_atlas::FontAtlas;
 // Three glyphs: an original triangle, another triangle and an empty space.
 // The same triangle is mapped to Latin A and Hangul GA to exercise Unicode
 // lookup without distributing any third-party font.
-fn font_bytes() -> Vec<u8> {
+pub(crate) fn font_bytes() -> Vec<u8> {
     fn u16_at(bytes: &mut [u8], offset: usize, value: u16) {
         bytes[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
     }
@@ -220,4 +220,181 @@ fn font_and_config_reject_invalid_or_unbounded_preparation() {
     ] {
         assert!(FontAtlas::new(font_bytes(), 32.0, width, height, count).is_err());
     }
+}
+
+#[test]
+fn cached_font_text_uses_real_advances_and_preflights_uncached_visible_text() {
+    use crate::{font_text::FontText, scene::Scene, texture::TextureId};
+    use std::sync::Arc;
+    let mut atlas = FontAtlas::new(font_bytes(), 14.0, 128, 128, 16).unwrap();
+    let first = atlas.prepare('A').unwrap();
+    let space = atlas.prepare(' ').unwrap();
+    atlas.prepare('가').unwrap();
+    let atlas = Arc::new(atlas);
+    let texture = TextureId::allocate().unwrap();
+    let font = FontText::new(Arc::clone(&atlas), texture).unwrap();
+    let mut scene = Scene::new(128, 64);
+    font.draw(&mut scene, 4, 2, "A 가", 0xabcdef).unwrap();
+    assert_eq!(scene.rectangles().len(), 2);
+    assert_eq!(scene.batches()[0].texture, texture);
+    assert_eq!(
+        scene.rectangles()[1].bounds[0],
+        (4.0 + f64::from(first.advance) + f64::from(space.advance)).round() as f32
+            + atlas.get('가').unwrap().bounds[0] as f32
+    );
+    assert_eq!(
+        scene.rectangles()[0].bounds[1],
+        2.0 + atlas.ascent().ceil() + first.bounds[1] as f32
+    );
+    let before: Vec<_> = scene
+        .rectangles()
+        .iter()
+        .map(|r| (r.bounds, r.uv, r.color))
+        .collect();
+    assert!(font.draw(&mut scene, 4, 2, "A未", 0xffffff).is_err());
+    assert_eq!(
+        scene
+            .rectangles()
+            .iter()
+            .map(|r| (r.bounds, r.uv, r.color))
+            .collect::<Vec<_>>(),
+        before
+    );
+    assert!(font.draw(&mut scene, -1, 2, "A", 0xffffff).is_err());
+    font.draw(&mut scene, 128, 2, "未", 0xffffff).unwrap();
+    assert_eq!(
+        scene
+            .rectangles()
+            .iter()
+            .map(|r| (r.bounds, r.uv, r.color))
+            .collect::<Vec<_>>(),
+        before
+    );
+    assert_eq!(atlas.len(), 3);
+}
+
+#[test]
+fn cached_font_text_does_not_require_glyphs_beyond_clip_or_scalar_budget() {
+    use crate::{
+        font_text::{FontText, MAX_TEXT_GLYPHS},
+        scene::Scene,
+        texture::TextureId,
+    };
+    use std::sync::Arc;
+    let mut atlas = FontAtlas::new(font_bytes(), 14.0, 128, 128, 16).unwrap();
+    atlas.prepare('A').unwrap();
+    let font = FontText::new(Arc::new(atlas), TextureId::allocate().unwrap()).unwrap();
+    let mut narrow = Scene::new(1, 64);
+    font.draw(&mut narrow, 0, 2, "A未", 0xffffff).unwrap();
+    assert_eq!(narrow.rectangles().len(), 1);
+    assert_eq!(narrow.rectangles()[0].bounds[2], 1.0);
+    let mut wide = Scene::new(16384, 64);
+    let value = "A".repeat(MAX_TEXT_GLYPHS) + "未";
+    font.draw(&mut wide, 0, 2, &value, 0xffffff).unwrap();
+    assert_eq!(wide.rectangles().len(), MAX_TEXT_GLYPHS);
+    assert!(wide.status().is_ok());
+}
+
+#[test]
+fn retained_selection_uses_prepared_title_texture_and_recovers_with_new_identity() {
+    use crate::{
+        font_text::FontText,
+        scene::Scene,
+        screen_lifecycle::ScreenInstanceId,
+        texture::TextureId,
+        ui::selection::{SelectionFrame, SelectionItem, SelectionView},
+    };
+    use std::sync::Arc;
+    let mut atlas = FontAtlas::new(font_bytes(), 14.0, 128, 128, 16).unwrap();
+    atlas.prepare('A').unwrap();
+    atlas.prepare('가').unwrap();
+    let atlas = Arc::new(atlas);
+    let items: Arc<[SelectionItem]> = vec![
+        SelectionItem {
+            title: "A".into(),
+            artist: String::new(),
+        },
+        SelectionItem {
+            title: "가".into(),
+            artist: String::new(),
+        },
+    ]
+    .into();
+    let old_texture = TextureId::allocate().unwrap();
+    let new_texture = TextureId::allocate().unwrap();
+    let mut scene = Scene::new(960, 720);
+    let mut hits = Vec::new();
+    for texture in [old_texture, new_texture] {
+        let view = SelectionView::new_with_font(
+            ScreenInstanceId(7),
+            Arc::clone(&items),
+            Arc::from([]),
+            960,
+            720,
+            Some(FontText::new(Arc::clone(&atlas), texture).unwrap()),
+        )
+        .unwrap();
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert_eq!(
+            scene
+                .batches()
+                .iter()
+                .filter(|b| b.texture == texture)
+                .map(|b| b.count)
+                .sum::<u32>(),
+            2
+        );
+        view.update(SelectionFrame {
+            selected: 0,
+            hovered: None,
+            armed: None,
+            error: None,
+            backend_pending: false,
+        });
+        assert!(!view.dirty());
+        view.set_projection(Arc::from([1]), Some(0)).unwrap();
+        assert!(view.dirty());
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert_eq!(
+            scene
+                .batches()
+                .iter()
+                .filter(|b| b.texture == texture)
+                .map(|b| b.count)
+                .sum::<u32>(),
+            1
+        );
+        assert!(hits.iter().any(|(id, _)| id.0 == 101));
+        assert!(!hits.iter().any(|(id, _)| id.0 == 100));
+        if texture == new_texture {
+            assert!(scene.batches().iter().all(|b| b.texture != old_texture));
+        }
+    }
+    let uncached = Arc::new(FontAtlas::new(font_bytes(), 14.0, 128, 128, 16).unwrap());
+    assert!(
+        SelectionView::new_with_font(
+            ScreenInstanceId(8),
+            items,
+            Arc::from([]),
+            960,
+            720,
+            Some(FontText::new(uncached, new_texture).unwrap())
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn retained_paint_rejection_prevents_snapshot_until_scene_clear() {
+    use crate::scene::Scene;
+    let mut scene = Scene::new(64, 64);
+    scene.reject("uncached title".into());
+    scene.reject("later failure".into());
+    assert_eq!(scene.status().unwrap_err(), "uncached title");
+    scene.clear();
+    assert!(scene.status().is_ok());
+    assert!(scene.geometry_snapshot().is_ok());
+    let mut rejected = Scene::new(64, 64);
+    rejected.reject("uncached title".into());
+    assert!(rejected.geometry_snapshot().is_err());
 }
