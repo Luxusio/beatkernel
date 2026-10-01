@@ -739,10 +739,12 @@ is not locale collation, full case folding, accent removal or fuzzy ranking.
 ## Presentation-derived live pause
 
 F9 or the Pause/Resume button requests live pause when the native owner announces
-support. The current implemented flow is Linux solo without network competition;
-saved-record ghosts remain supported. Windows, macOS, local multi-player cohorts
-and replay Watch announce no pause capability until their owners are integrated.
-The full cross-platform/cohort pause requirement remains open.
+support. Linux ALSA, Windows WASAPI shared/exclusive and macOS CoreAudio solo
+without network competition implement the same acknowledged boundary and key
+reconciliation flow; saved-record ghosts remain supported. ASIO, local
+multi-player cohorts and replay Watch announce no pause capability. ASIO requires
+a validated presentation relation; backend selection cannot invent that
+relation. Cross-platform native acceptance and cohort integration remain open.
 When extended to local multi-player play, all members must use the same
 acknowledged boundary, shared Transport and output; independent per-player
 pause clocks are prohibited.
@@ -758,14 +760,23 @@ and waits for the actual native output frontier to cross it. Host boundary time
 is interpolated from request and crossing output/host observations; its physical
 mapping error remains Unknown. UI wall time never substitutes for this relation.
 
-While waiting for a boundary the owner fences judging, correction updates and
-input collection. After pause acknowledgement it appends a shared Transport
+While waiting for a boundary all owners fence judging and correction updates.
+Linux and macOS hold gameplay input collection. Windows continues its native
+message pump and Raw Input acquisition, parking at most65536 events in receipt
+order before judge admission; timestamps remain actual QPC receipts rather than
+historical hardware key times. Close and device-change messages still run.
+After pause acknowledgement the owner appends a shared Transport
 pause, drains pre-boundary input, and commits one judge advance at the boundary
 before announcing Paused. During pause it drains native input into bounded key
 levels without generating scoring input or repeated frozen capture operations.
 After resume acknowledgement it resumes Transport, reconstructs presentation
 discipline using the cumulative paused-frame gap, and drains the paused prefix
-before admitting post-boundary original input. Native keysounds use the mixer
+before admitting post-boundary original input. macOS parks at most4096
+post-resume HID events until the collector is actually empty, preserving their
+original timestamps and admitting reconciliation releases first. Hitting a
+collection iteration budget does not count as an empty collector. Windows
+suppresses automatic judge advances while the message pump remains backlogged.
+Native keysounds use the mixer
 playback grid; buffered physical output and clock observations retain their grid.
 A transient unavailable render read reuses the last validated report; initial
 input waits until real render evidence exists. It never invents a frame cursor.
@@ -787,6 +798,6 @@ Known ceiling: boundary interpolation has no acoustic accuracy guarantee.
 Missing/regressing/unrepresentable clock relations, native device failure and
 raw queue SYN_DROPPED/resync terminate and drain the session with its valid
 recorded prefix. Waiting for output presentation can grow a raw-input backlog;
-input loss is never silently repaired. Windows/macOS/cohort/network policy,
+input loss is never silently repaired. Local-cohort/network/replay pause policy,
 loops/browser/full widget host and full native/GUI/replay acceptance remain
 unfinished. Source compilation and authored fixtures are not execution proof.
