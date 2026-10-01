@@ -201,6 +201,10 @@ pub fn channel() -> (PlayerPublisher, PlayerViewer) {
     (PlayerPublisher(shared.clone()), PlayerViewer(shared))
 }
 impl PlayerViewer {
+    /// UI-side desired state; actual boundaries remain native-owner authority.
+    pub fn pause_requested(&self) -> bool {
+        self.0.pause_requested.load(Ordering::Acquire)
+    }
     /// Desired state only; native snapshots acknowledge actual boundaries.
     pub fn request_pause(&self, paused: bool) {
         if !self.0.cancel.load(Ordering::Acquire) {
