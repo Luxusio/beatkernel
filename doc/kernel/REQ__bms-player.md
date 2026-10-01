@@ -739,20 +739,19 @@ is not locale collation, full case folding, accent removal or fuzzy ranking.
 ## Presentation-derived live pause
 
 F9 or the Pause/Resume button requests live pause when the native owner announces
-support. Linux ALSA solo/local 2..64, Windows WASAPI shared/exclusive solo and
-macOS CoreAudio solo without network competition implement the same acknowledged
+support. Linux ALSA, Windows WASAPI shared/exclusive and macOS CoreAudio
+solo/local 2..64 without network competition implement the same acknowledged
 boundary and key reconciliation flow; saved-record ghosts remain supported.
-Windows/macOS local multi-player cohorts, ASIO and replay Watch announce no
-pause capability. ASIO requires
-a validated presentation relation; backend selection cannot invent that
-relation. Cross-platform native acceptance and cohort integration remain open.
-Linux local cohorts use one native pause coordinator, one shared Transport and
+ASIO and replay Watch announce no pause capability. ASIO requires a validated
+presentation relation; backend selection cannot invent that relation.
+Cross-platform native acceptance remains open.
+Local cohorts use one native pause coordinator, one shared Transport and
 one mixer. Each source still maps to its original player, including sparse IDs
 and u32::MAX. Partial group failures retain the already committed member reports
 before terminating the whole cohort. Paused idle periods add no member advance
 or capture records, and group completion remains disabled until resume input
 reconciliation finishes.
-When extended to local multi-player play, all members must use the same
+In local multi-player play, all members use the same
 acknowledged boundary, shared Transport and output; independent per-player
 pause clocks are prohibited.
 Local input retains its fair acquisition and global timestamp ordering.
@@ -761,6 +760,11 @@ levels remain per device, with independent judges, scores and captures. Resume
 must wait for the configured input-lag frontier to reach the acknowledged resume
 boundary before reconciling releases and admitting subsequent original events;
 pause must not bypass the merger's chronology or late-input policy.
+Windows WASAPI and macOS CoreAudio local owners adopt this same shared
+boundary, lag and per-member policy. Windows continues QPC receipt acquisition
+and native owner messages during pending acknowledgements; macOS preserves
+normalized native HID timestamps and attachment/loss checks. ASIO remains
+unsupported for pause until presentation evidence establishes a usable relation.
 While paused, ordered input is removed through the lag frontier into key levels,
 without advancing the committed judge frontier past the shared pause boundary.
 
@@ -777,7 +781,7 @@ mapping error remains Unknown. UI wall time never substitutes for this relation.
 
 While waiting for a boundary all owners fence judging and correction updates.
 Linux and macOS hold gameplay input collection. Windows continues its native
-message pump and Raw Input acquisition, parking at most65536 events in receipt
+message pump and Raw Input acquisition, parking at most 65536 events in receipt
 order before judge admission; timestamps remain actual QPC receipts rather than
 historical hardware key times. Close and device-change messages still run.
 After pause acknowledgement the owner appends a shared Transport
@@ -786,9 +790,12 @@ before announcing Paused. During pause it drains native input into bounded key
 levels without generating scoring input or repeated frozen capture operations.
 After resume acknowledgement it resumes Transport, reconstructs presentation
 discipline using the cumulative paused-frame gap, and drains the paused prefix
-before admitting post-boundary original input. macOS parks at most4096
+before admitting post-boundary original input. macOS solo parks at most 4096
 post-resume HID events until the collector is actually empty, preserving their
-original timestamps and admitting reconciliation releases first. Hitting a
+original timestamps and admitting reconciliation releases first. Local cohorts
+on all three platforms use the existing bounded 65536-entry shared InputMerger
+for original events during pause and resume; release reconciliation runs outside
+that native-event merger through the actual member Runtime. Hitting a
 collection iteration budget does not count as an empty collector. Windows
 suppresses automatic judge advances while the message pump remains backlogged.
 Native keysounds use the mixer

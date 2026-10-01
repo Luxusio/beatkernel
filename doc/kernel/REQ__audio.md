@@ -96,11 +96,10 @@ be converted to this playback grid by the session coordinator. Rolling native
 BGM admission uses completed playback frames and waits during paused reports;
 native physical clock/presentation observations retain their output grid.
 
-Known ceiling: this is the audio scheduling primitive. Linux ALSA solo/local 2..64,
-Windows WASAPI shared/exclusive solo and macOS CoreAudio solo BMS owners coordinate
-observed
+Known ceiling: this is the audio scheduling primitive. Linux ALSA, Windows WASAPI
+shared/exclusive and macOS CoreAudio solo/local 2..64 BMS owners coordinate observed
 presentation boundaries, Transport/input fencing and song-time capture. ASIO,
-Windows/macOS local-cohort, network and replay owners still require that integration;
+network and replay owners still require that integration;
 complete native/GUI timing acceptance remains unfinished. Output already buffered in
 a native device may continue to present after a render pause begins. Paused
 queue storage remains bounded; callers must stop generating gameplay commands
