@@ -137,6 +137,18 @@ first nonempty render; empty/invalid buffers do not adopt a marker. Once reached
 the marker survives silent callbacks and resume requests, so latest-only native
 telemetry cannot lose the boundary or substitute a later silent block. Native
 scalar publication preserves presence separately from its full u64 value.
+Finite NativePause sessions opt into an expected playback end during setup.
+Only matching retained endpoint evidence may coexist with manual pause/resume;
+a short resume ending in the same rendered block derives its physical pause gap
+from the immutable marker, excluding the later terminal silent suffix. Resume
+acknowledgement still waits for actual native presentation. Unlimited sessions
+keep rejecting unsolicited paused reports. Endpoint completion remains distinct
+from manual pause and requires the finite native owner's input/capture cleanup.
+After observing an immutable endpoint, further manual pause/resume requests are
+no-ops; a fresh owner is required to play again.
+ReplayPause forwards the same setup-only finite endpoint option for composed
+finite output, preserving its recorded-song projection and strict unlimited
+default. Native Watch owners remain unlimited unless explicitly configured.
 Known ceiling: the fence is an audio component. Native BMS owners still need
 explicit endpoint intent, Transport/input/judging/capture admission and cleanup
 integration before graphical loops can claim an exact native endpoint. Playback

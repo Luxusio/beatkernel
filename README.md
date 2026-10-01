@@ -155,6 +155,13 @@ The mixer now also accepts an immutable exclusive playback-frame end: a block
 crossing it renders only the active prefix and emits silence afterward. Checked
 loop-end mapping and native acknowledgement models support that boundary;
 live loop owners and judging still need to be connected to this exact fence.
+Linux solo owners can now explicitly opt into `--end-ns N`, strictly after
+`--start-ns`, to use the immutable audio/judging ends and wait for actual native
+presentation plus drained input before finite-prefix completion. Manual pause
+and short resume retain their physical gaps. Local/network endpoint support and
+Windows/macOS/UI practice-region wiring remain unfinished; loops above retain
+their observed-position ceiling. Portable regression fixtures are prepared for
+later execution, while native hardware/GUI/acoustic checks remain unverified.
 Settings Records browses an explicit directory and previews a selected recording
 against the current chart, judging profile and practice start before attaching
 it as My Record or Other Record. Changes stay in the settings draft until Apply.
