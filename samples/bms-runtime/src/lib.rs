@@ -36,16 +36,18 @@ pub mod player;
 pub mod player_chart;
 /// Portable display configuration shared by CLI, graphical drafts and profiles.
 pub mod presentation_settings;
-/// Song-time command planning from actual recorded BMS judgment.
-pub mod replay_audio;
 /// Bounded saved-record discovery and chart/profile-compatible prefix previews.
 pub mod record_catalog;
+/// Song-time command planning from actual recorded BMS judgment.
+pub mod replay_audio;
 /// Bounded capture of the actual native runtime's accepted judgment operations.
 pub mod replay_capture;
 /// Checked durable replay reconstruction through the same builtin BMS judge.
 pub mod replay_playback;
 /// Bounded PCM rendering of captured BMS play through the actual core Mixer.
 pub mod replay_render;
+/// Incremental presentation of validated recorded judging operations.
+pub mod replay_visual;
 /// Bounded platform-independent geometry for GPU presentation.
 #[cfg(feature = "graphics")]
 pub mod scene;

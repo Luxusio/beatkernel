@@ -1,6 +1,6 @@
 //! Full-song completion from actual judge, mixer and native presentation evidence.
 //! Preparation and observation belong to the game owner, never audio callbacks.
-use crate::{bgm::BgmFeedReport, PreparedBms};
+use crate::{PreparedBms, bgm::BgmFeedReport};
 use beatkernel::{
     audio::RenderReport,
     chart::ObjectId,
@@ -128,6 +128,35 @@ impl SongCompletion {
         }
         self.drain.observe(
             self.judged && bgm.remaining == 0 && bgm.outstanding == 0,
+            rendered,
+            presented,
+        )
+    }
+}
+
+/// Recorded-prefix completion after actual operations, BGM admission and native drain.
+/// No judge advancement is added to finish a recording.
+pub struct ReplayCompletion {
+    drain: OutputDrain,
+}
+impl ReplayCompletion {
+    pub fn new(domain: ClockDomainId, rate: u32) -> Self {
+        Self {
+            drain: OutputDrain::new(domain, rate),
+        }
+    }
+    pub fn observe(
+        &mut self,
+        records_finished: bool,
+        bgm: BgmFeedReport,
+        rendered: Option<RenderReport>,
+        presented: Option<ClockPoint>,
+    ) -> Result<bool, CompletionError> {
+        if self.drain.rate == 0 {
+            return Err(CompletionError("replay completion rate must be positive"));
+        }
+        self.drain.observe(
+            records_finished && bgm.remaining == 0 && bgm.outstanding == 0,
             rendered,
             presented,
         )
@@ -301,28 +330,42 @@ mod tests {
     #[test]
     fn completion_requires_later_idle_render_and_native_presentation() {
         let mut drain = OutputDrain::new(ClockDomainId(7), 10);
-        assert!(!drain
-            .observe(false, Some(report(0, 0, 0)), point(9_000_000_000))
-            .unwrap());
-        assert!(!drain
-            .observe(true, Some(report(0, 0, 0)), point(9_000_000_000))
-            .unwrap());
-        assert!(!drain
-            .observe(true, Some(report(0, 0, 0)), point(9_000_000_000))
-            .unwrap());
-        assert!(!drain
-            .observe(true, Some(report(10, 1, 0)), point(9_000_000_000))
-            .unwrap());
-        assert!(!drain
-            .observe(true, Some(report(20, 0, 1)), point(9_000_000_000))
-            .unwrap());
-        assert!(!drain
-            .observe(true, Some(report(30, 0, 0)), point(3_999_999_999))
-            .unwrap());
+        assert!(
+            !drain
+                .observe(false, Some(report(0, 0, 0)), point(9_000_000_000))
+                .unwrap()
+        );
+        assert!(
+            !drain
+                .observe(true, Some(report(0, 0, 0)), point(9_000_000_000))
+                .unwrap()
+        );
+        assert!(
+            !drain
+                .observe(true, Some(report(0, 0, 0)), point(9_000_000_000))
+                .unwrap()
+        );
+        assert!(
+            !drain
+                .observe(true, Some(report(10, 1, 0)), point(9_000_000_000))
+                .unwrap()
+        );
+        assert!(
+            !drain
+                .observe(true, Some(report(20, 0, 1)), point(9_000_000_000))
+                .unwrap()
+        );
+        assert!(
+            !drain
+                .observe(true, Some(report(30, 0, 0)), point(3_999_999_999))
+                .unwrap()
+        );
         // The target stays at40 even when the mixer renders more buffered silence.
-        assert!(drain
-            .observe(true, Some(report(50, 0, 0)), point(4_000_000_000))
-            .unwrap());
+        assert!(
+            drain
+                .observe(true, Some(report(50, 0, 0)), point(4_000_000_000))
+                .unwrap()
+        );
     }
     #[test]
     fn missing_evidence_and_host_domain_cannot_finish_play() {
@@ -330,18 +373,91 @@ mod tests {
         assert!(!drain.observe(true, None, point(i64::MAX)).unwrap());
         assert!(!drain.observe(true, Some(report(0, 0, 0)), None).unwrap());
         assert!(!drain.observe(true, Some(report(10, 0, 0)), None).unwrap());
-        assert!(drain
-            .observe(
-                true,
-                Some(report(20, 0, 0)),
-                Some(ClockPoint {
-                    domain: ClockDomainId(8),
-                    timestamp: Timestamp::from_nanos(i64::MAX)
-                })
-            )
-            .is_err());
-        assert!(drain
-            .observe(true, Some(report(u64::MAX, 0, 0)), point(0))
-            .is_err());
+        assert!(
+            drain
+                .observe(
+                    true,
+                    Some(report(20, 0, 0)),
+                    Some(ClockPoint {
+                        domain: ClockDomainId(8),
+                        timestamp: Timestamp::from_nanos(i64::MAX)
+                    })
+                )
+                .is_err()
+        );
+        assert!(
+            drain
+                .observe(true, Some(report(u64::MAX, 0, 0)), point(0))
+                .is_err()
+        );
+    }
+    #[test]
+    fn replay_completion_waits_for_records_bgm_and_actual_output_drain() {
+        let mut completion = ReplayCompletion::new(ClockDomainId(7), 10);
+        let clear = BgmFeedReport::default();
+        assert!(
+            !completion
+                .observe(false, clear, Some(report(0, 0, 0)), point(i64::MAX))
+                .unwrap()
+        );
+        for bgm in [
+            BgmFeedReport {
+                remaining: 1,
+                ..clear
+            },
+            BgmFeedReport {
+                outstanding: 1,
+                ..clear
+            },
+        ] {
+            assert!(
+                !completion
+                    .observe(true, bgm, Some(report(0, 0, 0)), point(i64::MAX))
+                    .unwrap()
+            );
+        }
+        assert!(
+            !completion
+                .observe(true, clear, Some(report(0, 0, 0)), point(i64::MAX))
+                .unwrap()
+        );
+        assert!(
+            !completion
+                .observe(true, clear, Some(report(10, 1, 0)), point(i64::MAX))
+                .unwrap()
+        );
+        assert!(
+            !completion
+                .observe(true, clear, Some(report(20, 0, 0)), None)
+                .unwrap()
+        );
+        assert!(
+            !completion
+                .observe(true, clear, Some(report(30, 0, 0)), point(2_999_999_999))
+                .unwrap()
+        );
+        assert!(
+            completion
+                .observe(true, clear, Some(report(40, 0, 0)), point(3_000_000_000))
+                .unwrap()
+        );
+        assert!(
+            ReplayCompletion::new(ClockDomainId(7), 0)
+                .observe(true, clear, None, None)
+                .is_err()
+        );
+        assert!(
+            ReplayCompletion::new(ClockDomainId(7), 10)
+                .observe(
+                    true,
+                    clear,
+                    None,
+                    Some(ClockPoint {
+                        domain: ClockDomainId(8),
+                        timestamp: Timestamp::ZERO
+                    })
+                )
+                .is_err()
+        );
     }
 }

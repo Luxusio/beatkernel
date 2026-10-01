@@ -89,18 +89,17 @@ impl LocalPlayerSnapshot {
         }
     }
     fn update_report(&mut self, report: &RuntimeReport) {
-        self.song_time = Some(report.song_time);
-        if let Some(last) = report.judge_events.last() {
+        self.update_results(report.song_time, &report.judge_events);
+    }
+    fn update_results(&mut self, song: Timestamp, events: &[JudgeEvent]) {
+        self.song_time = Some(song);
+        if let Some(last) = events.last() {
             self.last_judge = Some(*last);
         }
-        if report.judge_events.len() >= 128 {
+        if events.len() >= 128 {
             self.recent_results.clear();
         }
-        for event in report
-            .judge_events
-            .iter()
-            .skip(report.judge_events.len().saturating_sub(128))
-        {
+        for event in events.iter().skip(events.len().saturating_sub(128)) {
             if self.recent_results.len() == 128 {
                 self.recent_results.remove(0);
             }
@@ -329,6 +328,16 @@ pub fn publish_local_chart(
 /// Summarize one actual solo report once, preserving the existing call shape.
 /// Coalescing affects display only. This API cannot modify a local group roster.
 pub fn publish_report(report: &RuntimeReport) -> Result<(), Box<dyn std::error::Error>> {
+    publish_replay_prefix(report.song_time, &report.judge_events)
+}
+
+/// Publishes actual incremental replay results through the existing solo bridge.
+/// The supplied song is presentation progress, not a fabricated runtime report.
+/// Group rejection precedes any score, history or lifecycle mutation.
+pub fn publish_replay_prefix(
+    song: Timestamp,
+    events: &[JudgeEvent],
+) -> Result<(), Box<dyn std::error::Error>> {
     SESSION.with(|session| {
         let mut session = session.borrow_mut();
         let Some(current) = session.as_mut() else {
@@ -342,17 +351,17 @@ pub fn publish_report(report: &RuntimeReport) -> Result<(), Box<dyn std::error::
         }
         if current.snapshot.players.is_empty() {
             let mut member = LocalPlayerSnapshot::new(PlayerId(1), current.snapshot.chart.clone());
-            if !report.judge_events.is_empty() {
-                member.score.observe(&report.judge_events)?;
+            if !events.is_empty() {
+                member.score.observe(events)?;
             }
-            member.update_report(report);
+            member.update_results(song, events);
             current.snapshot.players.push(member);
         } else {
             let member = &mut current.snapshot.players[0];
-            if !report.judge_events.is_empty() {
-                member.score.observe(&report.judge_events)?;
+            if !events.is_empty() {
+                member.score.observe(events)?;
             }
-            member.update_report(report);
+            member.update_results(song, events);
         }
         current.observe_cancellation(true);
         current.publish_latest(false);
@@ -802,5 +811,37 @@ mod fixtures {
             PlayerStatus::Failed("device rejected".into())
         );
         assert!(!attached());
+    }
+    #[test]
+    fn replay_prefix_bridge_counts_once_bounds_history_and_rejects_groups_atomically() {
+        let (source, chart) = chart_fixture();
+        let (publisher, viewer) = channel();
+        with_publisher(publisher, || {
+            publish_chart(&source, &chart).unwrap();
+            let actual = report(1, 150_000_000, 300, 1).report.judge_events;
+            publish_replay_prefix(Timestamp::from_nanos(150_000_000), &actual).unwrap();
+            publish_replay_prefix(Timestamp::from_nanos(200_000_000), &[]).unwrap();
+            viewer.cancel();
+            Ok(())
+        })
+        .unwrap();
+        let terminal = viewer.take_latest().unwrap();
+        assert_eq!((terminal.score.hits, terminal.score.misses), (300, 1));
+        assert_eq!(terminal.song_time, Some(Timestamp::from_nanos(200_000_000)));
+        assert_eq!(terminal.recent_results.len(), 128);
+        assert_eq!(terminal.last_judge, terminal.recent_results.last().copied());
+        assert!(terminal.cancelled);
+        let (publisher, _) = channel();
+        with_publisher(publisher, || {
+            publish_local_chart(&source, &chart, &[PlayerId(1), PlayerId(2)]).unwrap();
+            let before = member_state();
+            assert!(
+                publish_replay_prefix(Timestamp::ZERO, &report(1, 0, 1, 0).report.judge_events)
+                    .is_err()
+            );
+            assert_eq!(member_state(), before);
+            Ok(())
+        })
+        .unwrap();
     }
 }
