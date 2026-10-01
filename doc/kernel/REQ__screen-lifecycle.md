@@ -52,8 +52,34 @@ Rust toolkit where integration is clearer than retaining custom widget plumbing.
 A toolkit's widget/event lifecycle does not own BeatKernel audio/input clocks,
 game-owner cancellation/joins or record compatibility. Keep navigation/back-stack
 and domain models independent of toolkit and use wgpu for the timed playfield.
-Framework selection is not decided yet: egui is a candidate for integration into
-the existing winit/wgpu host; iced is a candidate if adopting its app/state/message
-architecture. No framework dependency or host migration is authorized solely by
-this candidate comparison. The current typed route model is a foundation;
-desktop integration and back-stack acceptance remain unfinished.
+The user confirms Svelte-like, fine-grained updates as the primary UI policy.
+Keep the view/widget tree alive across normal frames. A state change invalidates
+its dependent bindings and the necessary layout/paint work; it must not rebuild
+the complete menu tree merely because the playfield renders another frame.
+For example, a changed selected chart updates its dependent title/metadata and
+selection appearance; an unrelated audio counter does not rebuild the settings
+form. Geometry changes may require ancestor layout and repaint, so this rule
+is not a claim that only one widget or pixel can ever be processed.
+
+Runtime signals/effects satisfy this policy when dependency updates are scoped;
+the implementation need not copy Svelte's compiler. Audio/input callbacks do not
+write UI signals directly. The main thread adapts immutable game-owner snapshots,
+updates changed presentation values and keeps native gameplay timestamps intact.
+Navigation/back-stack state and lifetime fences remain independent of toolkit.
+
+An immediate-mode egui menu refreshed at playfield cadence is not the primary UI
+architecture. Floem is the leading candidate because its official documentation
+specifies a retained, constructed-once view tree with fine-grained signals and
+effects, and Windows/macOS/Linux rendering over wgpu. Floem is MIT-licensed.
+[Official Floem documentation](https://docs.rs/floem/latest/floem/) and
+[upstream repository](https://github.com/lapce/floem) describe these capabilities.
+Its runtime reactivity is not identical to Svelte's compiled updates and gives
+no performance guarantee for this app. Released-package custom playfield/host,
+WASM and build compatibility still need inspection before dependency migration.
+Slint's tracked property bindings also fit the update semantics, but its
+licensing needs a separate distribution decision; no default GPL UI dependency
+is introduced into the ASIO-free MIT distribution by this requirement.
+
+The confirmed decision is update semantics; framework adoption is not complete.
+The current typed route model is a foundation; desktop integration, back-stack
+and reactive-UI acceptance remain unfinished.

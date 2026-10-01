@@ -483,3 +483,8 @@ hold-state restoration remain player work. Acoustic restart acceptance is deferr
 The MVP-like desktop coordinator follows the typed navigation and enter/exit,
 suspend/resume and owner-cleanup requirements in [screen lifecycle](REQ__screen-lifecycle.md).
 Draft presence must not decide active-screen input or drawing.
+
+The primary menu UI must retain its view tree and update dependent bindings on
+state changes (Svelte-like semantics), independently of the playfield render
+cadence. Full-menu reconstruction each gameplay frame is not the chosen model.
+Toolkit selection and migration remain subject to the screen-lifecycle contract.
