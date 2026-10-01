@@ -1,5 +1,6 @@
 //! Bounded deterministic BMS text/profile adapter with no native dependencies.
-//! Supports documented timing, lane, keysound and paired LNTYPE1 features.
+//! Supports documented timing, lane, keysound, paired LNTYPE1 and LNOBJ features.
+//! Long-note tail tokens are metadata only and never automatic sounds.
 //! Asset paths are opaque references; loading/decoding belongs to the application.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -88,7 +89,7 @@ pub struct BmsNote {
     pub lane: BmsLane,
     /// Head/instant keysound identity, equal to the base36 WAV index.
     pub sample: SampleId,
-    /// Unsounded LNTYPE1 endpoint token, retained even if WAV is undefined.
+    /// Unsounded LNTYPE1 or LNOBJ endpoint token, even if WAV is undefined.
     pub tail_sample: Option<SampleId>,
     /// Source line of the head/instant token, for diagnostics.
     pub line: usize,

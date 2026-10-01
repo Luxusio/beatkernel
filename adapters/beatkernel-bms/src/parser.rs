@@ -1,5 +1,5 @@
 use crate::{
-    rational::{decimal, gcd, Ratio},
+    rational::{Ratio, decimal, gcd},
     *,
 };
 use beatkernel::{audio::SampleId, chart::*, time::Duration};
@@ -133,6 +133,7 @@ pub fn parse(text: &str, options: ParseOptions) -> Result<BmsChart, BmsError> {
     let mut stops = BTreeMap::new();
     let mut lengths = BTreeMap::<usize, (Ratio, usize)>::new();
     let mut metadata = BTreeMap::new();
+    let mut lnobj = None;
     let mut warnings = Vec::new();
     let mut rows = Vec::new();
     let mut raw_count = 0usize;
@@ -272,6 +273,23 @@ pub fn parse(text: &str, options: ParseOptions) -> Result<BmsChart, BmsError> {
                 "STOP definition",
                 options.duplicates,
             )?;
+        } else if command == "LNOBJ" {
+            let marker = code(value, 36, line)?;
+            if marker == 0 {
+                return Err(fail(
+                    line,
+                    BmsErrorKind::Syntax("LNOBJ marker must be nonzero"),
+                ));
+            }
+            define(
+                &mut metadata,
+                command,
+                value.to_owned(),
+                line,
+                "LNOBJ",
+                options.duplicates,
+            )?;
+            lnobj = Some(marker);
         } else if command == "LNTYPE" {
             if value != "1" && value != "01" {
                 return Err(fail(
@@ -426,6 +444,7 @@ pub fn parse(text: &str, options: ParseOptions) -> Result<BmsChart, BmsError> {
     let mut bpm_events = BTreeMap::<i64, (Bpm, usize)>::new();
     let mut stop_events = BTreeMap::<i64, (Ratio, usize)>::new();
     let mut notes = Vec::new();
+    let mut visible_events = BTreeMap::<BmsLane, Vec<TimedEvent>>::new();
     let mut long_events = BTreeMap::<BmsLane, Vec<TimedEvent>>::new();
     for event in merged.into_values() {
         match event.channel {
@@ -469,14 +488,50 @@ pub fn parse(text: &str, options: ParseOptions) -> Result<BmsChart, BmsError> {
                 }
             }
             channel if long(channel) => long_events.entry(lane(channel)).or_default().push(event),
-            _ => notes.push(Note {
-                lane: lane(event.channel),
-                head: event,
-                end: None,
-            }),
+            _ => visible_events
+                .entry(lane(event.channel))
+                .or_default()
+                .push(event),
         }
     }
-    let mut ranges = BTreeMap::<BmsLane, Vec<(i64, i64)>>::new();
+    for (lane, mut events) in visible_events {
+        events.sort_by_key(|event| (event.tick, event.ordinal));
+        let mut pending: Option<TimedEvent> = None;
+        for event in events {
+            if Some(event.value) == lnobj {
+                let head = pending.take().ok_or_else(|| {
+                    fail(
+                        event.line,
+                        BmsErrorKind::LongNote("LNOBJ endpoint has no preceding head"),
+                    )
+                })?;
+                if event.tick <= head.tick {
+                    return Err(fail(
+                        event.line,
+                        BmsErrorKind::LongNote("endpoint must follow head"),
+                    ));
+                }
+                notes.push(Note {
+                    head,
+                    end: Some(event),
+                    lane,
+                });
+            } else if let Some(head) = pending.replace(event) {
+                notes.push(Note {
+                    head,
+                    end: None,
+                    lane,
+                });
+            }
+        }
+        if let Some(head) = pending {
+            notes.push(Note {
+                head,
+                end: None,
+                lane,
+            });
+        }
+    }
     for (lane, mut markers) in long_events {
         markers.sort_by_key(|event| (event.tick, event.ordinal));
         if markers.len() % 2 != 0 {
@@ -492,15 +547,31 @@ pub fn parse(text: &str, options: ParseOptions) -> Result<BmsChart, BmsError> {
                     BmsErrorKind::LongNote("endpoint must follow head"),
                 ));
             }
-            ranges
-                .entry(lane)
-                .or_default()
-                .push((pair[0].tick, pair[1].tick));
             notes.push(Note {
                 head: pair[0].clone(),
                 end: Some(pair[1].clone()),
                 lane,
             });
+        }
+    }
+    let mut ranges = BTreeMap::<BmsLane, Vec<(i64, i64, usize)>>::new();
+    for note in &notes {
+        if let Some(end) = &note.end {
+            ranges
+                .entry(note.lane)
+                .or_default()
+                .push((note.head.tick, end.tick, end.line));
+        }
+    }
+    for ranges in ranges.values_mut() {
+        ranges.sort_unstable();
+        for pair in ranges.windows(2) {
+            if pair[1].0 <= pair[0].1 {
+                return Err(fail(
+                    pair[1].2,
+                    BmsErrorKind::LongNote("held lane ranges overlap or touch"),
+                ));
+            }
         }
     }
     for note in &notes {
@@ -509,10 +580,10 @@ pub fn parse(text: &str, options: ParseOptions) -> Result<BmsChart, BmsError> {
                 ranges
                     .get(
                         ranges
-                            .partition_point(|&(start, _)| start <= note.head.tick)
+                            .partition_point(|&(start, _, _)| start <= note.head.tick)
                             .wrapping_sub(1),
                     )
-                    .is_some_and(|&(_, end)| note.head.tick <= end)
+                    .is_some_and(|&(_, end, _)| note.head.tick <= end)
             })
         {
             return Err(fail(

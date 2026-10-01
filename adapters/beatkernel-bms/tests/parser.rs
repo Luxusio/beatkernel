@@ -114,6 +114,279 @@ fn long_notes_pair_across_measures_preserving_unsounded_tail_and_lane_rules() {
     assert!(JudgeEngine::new(compiled.chart, parsed.rules(), profile).is_ok());
 }
 #[test]
+fn lnobj_pairs_nearest_head_across_measures_after_exact_sort_and_keeps_other_instants() {
+    let parsed = parse(
+        "#BPM 60\n#lnobj zz\n#WAV01 a.wav\n#WAV02 b.wav\n#00111:00ZZ0002\n#00011:0102",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(parsed.notes.len(), 3);
+    let positions: Vec<_> = parsed
+        .source
+        .objects
+        .iter()
+        .map(|object| (object.start.ticks(), object.end.map(|end| end.ticks())))
+        .collect();
+    assert_eq!(positions, [(0, None), (2, Some(5)), (7, None)]);
+    assert_eq!(
+        parsed
+            .notes
+            .iter()
+            .map(|note| note.sample.0)
+            .collect::<Vec<_>>(),
+        [1, 2, 2]
+    );
+    assert_eq!(parsed.notes[1].tail_sample.map(|id| id.0), Some(1295));
+    assert_eq!(parsed.notes[1].line, 6);
+    assert_eq!(parsed.source.objects[1].interaction.0, 0x51);
+    assert!(!parsed.samples.contains_key(&1295));
+    assert!(parsed.bgm.is_empty());
+    let compiled = parsed.compile().unwrap();
+    assert_eq!(
+        compiled.chart.objects()[1].time.end.unwrap().as_nanos(),
+        5_000_000_000
+    );
+    let forward = parse(
+        "#BPM 60\n#LNOBJ ZZ\n#WAV01 a.wav\n#WAV02 b.wav\n#00011:0102\n#00111:00ZZ0002",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        forward
+            .source
+            .objects
+            .iter()
+            .map(|object| (object.start.ticks(), object.end.map(|end| end.ticks())))
+            .collect::<Vec<_>>(),
+        positions
+    );
+    let profile = JudgeProfile::new(
+        vec![JudgeWindow {
+            grade: JudgeGrade(1),
+            early: Duration::from_nanos(1),
+            late: Duration::from_nanos(1),
+        }],
+        Duration::ZERO,
+    )
+    .unwrap();
+    assert!(JudgeEngine::new(compiled.chart, parsed.rules(), profile).is_ok());
+}
+
+#[test]
+fn lnobj_lanes_and_scratch_are_independent_and_zero_tokens_do_not_close_notes() {
+    let parsed = parse(
+        "#LNOBJ ZZ\n#WAV01 a.wav\n#00011:01ZZ0001\n#00021:0001ZZ00\n#00016:01ZZ",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(parsed.notes.len(), 4);
+    let holds: Vec<_> = parsed
+        .source
+        .objects
+        .iter()
+        .zip(&parsed.notes)
+        .filter_map(|(object, note)| {
+            object
+                .end
+                .map(|end| (note.lane.channel(), object.start.ticks(), end.ticks()))
+        })
+        .collect();
+    assert_eq!(holds, [(0x11, 0, 1), (0x16, 0, 2), (0x21, 1, 2)]);
+    assert!(
+        parsed
+            .notes
+            .iter()
+            .any(|note| note.lane.is_scratch() && note.tail_sample.is_some())
+    );
+    let zeros = parse(
+        "#LNOBJ ZZ\n#WAV01 a.wav\n#00011:000001ZZ",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(zeros.source.objects[0].start.ticks(), 2);
+    assert_eq!(zeros.source.objects[0].end.unwrap().ticks(), 3);
+}
+
+#[test]
+fn lnobj_headers_and_endpoints_have_explicit_validation_and_duplicate_policy() {
+    for marker in ["", "0", "000", "00", "Z!", "字", "ZZ extra"] {
+        let error = parse(&format!("#LNOBJ {marker}"), ParseOptions::default()).unwrap_err();
+        assert_eq!(error.line, 1);
+        assert!(matches!(error.kind, BmsErrorKind::Syntax(_)));
+    }
+    for second in ["zz", "02"] {
+        let error = parse(
+            &format!("#LNOBJ ZZ\n#lnobj {second}"),
+            ParseOptions::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.line, 2);
+        assert_eq!(error.kind, BmsErrorKind::Duplicate("LNOBJ"));
+    }
+    let options = ParseOptions {
+        duplicates: DuplicatePolicy::LastWins,
+        ..ParseOptions::default()
+    };
+    let parsed = parse(
+        "#LNOBJ ZZ\n#LNOBJ 02\n#WAV01 a.wav\n#WAVZZ z.wav\n#00011:01ZZ02",
+        options,
+    )
+    .unwrap();
+    assert_eq!(parsed.metadata["LNOBJ"], "02");
+    assert_eq!(parsed.notes.len(), 2);
+    assert_eq!(parsed.notes[0].tail_sample, None);
+    assert_eq!(parsed.notes[1].sample.0, 1295);
+    assert_eq!(parsed.notes[1].tail_sample.unwrap().0, 2);
+    for (rows, line) in [
+        ("#00011:ZZ", 3),
+        ("#00011:01ZZZZ", 3),
+        ("#00011:01ZZ\n#00111:ZZ", 4),
+        ("#00011:01\n#00012:ZZ", 4),
+    ] {
+        let error = parse(
+            &format!("#LNOBJ ZZ\n#WAV01 a.wav\n{rows}"),
+            ParseOptions::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.line, line);
+        assert!(matches!(error.kind, BmsErrorKind::LongNote(_)));
+    }
+    // Same-tick conflicts retain ordinary merge policy before LNOBJ pairing.
+    let text = "#LNOBJ ZZ\n#WAV01 a.wav\n#00011:01\n#00011:ZZ";
+    assert!(matches!(
+        parse(text, ParseOptions::default()).unwrap_err().kind,
+        BmsErrorKind::Duplicate(_)
+    ));
+    let error = parse(text, options).unwrap_err();
+    assert_eq!(error.line, 4);
+    assert!(matches!(error.kind, BmsErrorKind::LongNote(_)));
+}
+
+#[test]
+fn mixed_lnobj_lntype_ranges_sort_together_and_reject_inclusive_lane_conflicts() {
+    let prefix = "#LNOBJ ZZ\n#LNTYPE 1\n#WAV01 a.wav\n";
+    for rows in [
+        "#00011:01ZZ0000\n#00051:00000102",
+        "#00051:00000102\n#00011:01ZZ0000",
+    ] {
+        let parsed = parse(&format!("{prefix}{rows}"), ParseOptions::default()).unwrap();
+        assert_eq!(
+            parsed
+                .source
+                .objects
+                .iter()
+                .map(|object| (object.start.ticks(), object.end.unwrap().ticks()))
+                .collect::<Vec<_>>(),
+            [(0, 1), (2, 3)]
+        );
+        assert_eq!(parsed.notes[0].tail_sample.unwrap().0, 1295);
+        assert_eq!(parsed.notes[1].tail_sample.unwrap().0, 2);
+    }
+    for rows in [
+        "#00011:01ZZ0000\n#00051:00010200", // Touch at LNOBJ tail.
+        "#00011:0001ZZ00\n#00051:01000002", // LNTYPE encloses LNOBJ.
+        "#00011:010000ZZ\n#00051:00010200", // LNOBJ encloses LNTYPE.
+        "#00011:00010000\n#00051:01000002", // Instant inside LNTYPE.
+        "#00011:01\n#00051:0102",           // Instant at head.
+        "#00011:0001\n#00051:0102",         // Instant at tail.
+    ] {
+        assert!(
+            matches!(
+                parse(&format!("{prefix}{rows}"), ParseOptions::default())
+                    .unwrap_err()
+                    .kind,
+                BmsErrorKind::LongNote(_)
+            ),
+            "{rows}"
+        );
+    }
+    let different = parse(
+        &format!("{prefix}#00011:01ZZ\n#00052:0102"),
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(different.notes.len(), 2);
+}
+
+#[test]
+fn lnobj_uses_exact_tempo_stop_grid_and_counts_raw_endpoints_before_pairing() {
+    let text = "#BPM 60\n#BPM01 120\n#STOP01 48\n#LNOBJ ZZ\n#WAV01 a.wav\n#00011:010000ZZ\n#00008:00010000\n#00009:00000100";
+    let parsed = parse(text, ParseOptions::default()).unwrap();
+    assert_eq!(parsed.source.objects[0].end.unwrap().ticks(), 3);
+    assert_eq!(parsed.source.stops[0].duration.as_nanos(), 500_000_000);
+    assert_eq!(
+        parsed.compile().unwrap().chart.objects()[0]
+            .time
+            .end
+            .unwrap()
+            .as_nanos(),
+        2_500_000_000
+    );
+    let fractional = parse(
+        "#BPM 60\n#LNOBJ ZZ\n#WAV01 a.wav\n#00002:0.125\n#00011:0100ZZ",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(fractional.source.ticks_per_beat, 6);
+    assert_eq!(fractional.source.objects[0].end.unwrap().ticks(), 2);
+    assert_eq!(
+        fractional.compile().unwrap().chart.objects()[0]
+            .time
+            .end
+            .unwrap()
+            .as_nanos(),
+        333_333_333
+    );
+    let options = ParseOptions {
+        max_objects: 1,
+        ..ParseOptions::default()
+    };
+    let error = parse("#LNOBJ ZZ\n#WAV01 a.wav\n#00011:01ZZ", options).unwrap_err();
+    assert_eq!(error.line, 3);
+    assert_eq!(error.kind, BmsErrorKind::Limit("nonzero tokens"));
+    let options = ParseOptions {
+        max_objects: 2,
+        ..options
+    };
+    assert_eq!(
+        parse("#LNOBJ ZZ\n#WAV01 a.wav\n#00011:01ZZ", options)
+            .unwrap()
+            .notes
+            .len(),
+        1
+    );
+    let options = ParseOptions {
+        max_resolution: 2,
+        ..ParseOptions::default()
+    };
+    assert_eq!(
+        parse("#LNOBJ ZZ\n#WAV01 a.wav\n#00011:0100ZZ", options)
+            .unwrap_err()
+            .kind,
+        BmsErrorKind::Resolution
+    );
+}
+
+#[test]
+fn lnobj_marker_is_unsounded_optional_wav_only_for_gameplay_endpoint() {
+    let text = "#LNOBJ ZZ\n#WAV01 a.wav\n#00011:01ZZ\n#00001:ZZ";
+    let error = parse(text, ParseOptions::default()).unwrap_err();
+    assert_eq!(error.line, 4);
+    assert_eq!(
+        error.kind,
+        BmsErrorKind::MissingDefinition {
+            kind: "WAV",
+            index: 1295
+        }
+    );
+    let defined = parse(&format!("#WAVZZ tail.wav\n{text}"), ParseOptions::default()).unwrap();
+    assert_eq!(defined.source.objects.len(), 1);
+    assert_eq!(defined.notes[0].sample.0, 1);
+    assert_eq!(defined.notes[0].tail_sample.unwrap().0, 1295);
+    assert_eq!(defined.bgm.len(), 1); // Only explicit channel01 schedules a sound.
+    assert_eq!(defined.bgm[0].sample.0, 1295);
+}
+#[test]
 fn duplicate_nonzero_positions_have_explicit_policy_and_zeros_never_delete() {
     let merged = parse(
         "#WAV01 a.wav\n#WAV02 b.wav\n#00011:0100\n#00011:00000200",
@@ -154,7 +427,6 @@ fn stops_ignore_measure_length_and_use_same_beat_new_tempo() {
 fn unsupported_and_missing_definitions_are_line_specific() {
     for command in [
         "#RANDOM 2",
-        "#LNOBJ ZZ",
         "#LNTYPE 2",
         "#STP 001.0 100",
         "#00031:01",
