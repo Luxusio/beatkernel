@@ -794,7 +794,7 @@ global input frontier must pass the terminal host boundary. A single backlogged
 device blocks advancement and completion. All members share one immutable end,
 output owner and Transport; independent player IDs/captures/scores remain intact.
 Remaining queued input strictly after the terminal frontier cannot enter gameplay.
-Network and other platform endpoint connections remain required.
+Windows WASAPI shared/exclusive and macOS CoreAudio solo owners use the same finite audio/judging/presentation contract. Their local groups and all network/ASIO endpoint connections remain required. Windows uses the actually negotiated PCM rate and QPC receipt ordering; all pending WM input must drain before completion. macOS uses the configured native PCM rate and HID collection frontier; its pending resume parking must reconcile before completion. These owners reject unsupported finite modes before session resources open. Omitting --end-ns retains full-song behavior.
 
 Directly unverifiable implementation paths need portable regression fixture
 source for later execution: exercise actual mixer/runtime/capture components,
@@ -910,3 +910,6 @@ recorded prefix. Waiting for output presentation can grow a raw-input backlog;
 input loss is never silently repaired. ASIO/network pause policy,
 sample-exact native loops/browser/full widget host and full native/GUI/replay acceptance remain
 unfinished. Source compilation and authored fixtures are not execution proof.
+
+### Native finite solo expansion
+Windows WASAPI shared/exclusive and macOS CoreAudio solo commands accept a strictly later unsigned `--end-ns`. Derive the endpoint on the actual PCM grid, freeze audio at that exclusive frame, cap judging at the logical end, and finish only after native presentation and drained input/resume reconciliation. Unlimited sessions retain full-song completion. Windows/macOS finite local groups, network and ASIO remain explicitly rejected here pending their owners. Author portable argument/frontier and model fixtures for later execution; compilation is not native acceptance.
