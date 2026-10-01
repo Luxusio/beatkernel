@@ -477,6 +477,12 @@ The [runtime](doc/kernel/REQ__runtime.md) shares JudgeEngine with
 operations without another judge. The [bounded input codec](doc/kernel/REQ__input-codec.md)
 preserves complete canonical events/native provenance and raw IEEE float bits.
 The separate BMS runtime's three native executables support optional
+full-song completion using actual judge, mixer and native presentation state.
+Live play defaults to the whole song; optional `--seconds 1..3600` retains a
+diagnostic cutoff. Final keysound and BGM tails drain before normal completion;
+source compilation does not establish native or acoustic acceptance. See the
+[player contract](doc/kernel/REQ__bms-player.md).
+They also support optional
 [live replay capture](doc/kernel/REQ__bms-replay-capture.md) with
 `--record-replay NEW_PATH`, `--replay-max-records N` and `--replay-max-bytes N`.
 Defaults are 1,000,000 accepted operations and 64 MiB of encoded data. Inputs

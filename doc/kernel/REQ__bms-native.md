@@ -1,7 +1,8 @@
 # Native Windows BMS sample composition
 
-`windows_bms` is a separate binary in `beatkernel-bms-runtime`. The default binary
-remains the offline renderer. This native sample loads an actual supported BMS chart
+`windows_bms` is a separate binary in `beatkernel-bms-runtime`; the unified
+application exposes the same native composition through `play` and `player`.
+This native sample loads an actual supported BMS chart
 and bounded WAV bank through the shared preparation library, then composes BMS rules,
 the same core JudgeEngine/Runtime, real Windows Raw Input keyboard events and an
 explicit native output backend. WASAPI is the default; optional ASIO follows the
@@ -10,14 +11,18 @@ No synthetic hits, tones, automatic gameplay input or GPU UI are supplied. BGM a
 is automatic; accepted head/instant stages publish preloaded keysounds. Parser warnings
 are printed, and unsupported parser features remain explicit errors.
 
-Required options are `--chart PATH`, `--device EXACT_ENDPOINT_ID`, `--mode shared|exclusive`,
-`--seconds 1..3600`, and repeated `--bind CHANNEL_HEX:HID_USAGE_HEX` for every used visible
+Required WASAPI options are `--chart PATH`, `--device EXACT_ENDPOINT_ID`, `--mode shared|exclusive`,
+and repeated `--bind CHANNEL_HEX:HID_USAGE_HEX` for every used visible
 BMS lane, including scratch. Channels retain BMS visible identities (11..19/21..29),
 with hexadecimal spelling and no inferred game layout. Duplicate channels or key usages,
 unsupported channels and missing used lanes fail before playback. Bindings explicitly
 use `DeviceSelector::Any`: any acquired physical keyboard can play the chosen keys.
 The sample does not infer a specific keyboard identity. The native window must have
 focus for foreground keyboard acquisition; console results report actual grades/misses.
+Omitting optional `--seconds 1..3600` plays the full song. Normal completion uses
+the shared [player completion contract](REQ__bms-player.md): terminal judging,
+retired BGM, a later idle mixer block and its native presentation frontier.
+Explicit `--seconds` remains a diagnostic cutoff and may capture only a prefix.
 
 ## Optional live ASIO backend
 
@@ -141,13 +146,14 @@ that headroom; smaller or zero preroll can allow initial BGM/notes to advance be
 the gameplay pump. Choose larger explicit preroll when that bounded headroom is needed.
 Progress prints remaining countdown or current song nanoseconds and a focus prompt.
 Calibration failure ends the session instead of inventing receipt-time observations.
-The initial finite affine interval covers requested loop duration + preroll + three
+The initial finite affine interval covers the explicit cutoff, or a prepared
+chart/PCM-tail extent for full-song play, plus preroll and three
 seconds startup/slack only to construct the origin; ongoing queries are guarded by
 fresh presentation discipline, not the lifetime of that initial slope. Startup
 observations and ongoing correction still do not establish physical first-presentation
 accuracy or repeatable long-run hardware synchronization. Keysounds use coherent
 submitted-frame scheduling on their separate output grid with Unknown physical
-presentation relation; Mixer reports lateness. `--seconds` is the finite monotonic
+presentation relation; Mixer reports lateness. Optional `--seconds` is the finite monotonic
 wall duration after initial calibration and discipline seeding, including remaining
 preroll countdown. Queued native messages keep their actual acquisition metadata;
 no synthetic input substitutes for startup messages. Initial rolling admission supplies cues within its finite horizon before native

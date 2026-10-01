@@ -36,6 +36,29 @@ must be shown as an error; do not silently substitute a device, mode or keys.
 The app must keep selection, loading, gameplay, cancellation, result and failure
 states visible and support another attempt after owner cleanup.
 
+Native play defaults to the full song on Windows, Linux and macOS. An optional
+`--seconds 1..3600` imposes the existing wall-clock diagnostic cutoff after
+startup; a cutoff or cancellation still describes the actual captured prefix.
+Normal completion requires all builtin BMS interactions to be terminal after
+their inclusive late deadlines (with input offset applied once), all BGM cues
+admitted and retired, and a later nonempty mixer block with no active voices or
+pending commands. The completion component establishes a frame barrier after
+the last admission, then waits for native output-domain presentation to reach
+the first subsequent idle block's end. Newer buffered silence does not move
+that finish line. The native compositions drain the entire bounded queue
+capacity per render; that property is a prerequisite of this barrier. Native
+presentation telemetry remains an estimate, not proof of acoustic delivery.
+Neither wall time nor the last note timestamp substitutes for output progress.
+Cancellation and timing/native errors still use the existing owner cleanup.
+
+Preparation uses checked wide arithmetic for chart deadlines and source PCM
+frame/rate durations. Windows initial calibration derives a finite extent from
+the chart and PCM tails when no cutoff is supplied, preserving preroll and its
+existing extrapolation margin. Long charts are not limited to one hour; an
+unrepresentable timestamp/calibration extent fails explicitly. PCM preparation
+budgets remain independent limits. `completion.rs` is a portable game-owner
+component; it neither reads devices nor executes on audio callbacks.
+
 The user approved `winit` window/event ownership and `wgpu` GPU rendering,
 prioritizing native performance with future WASM reuse. Keep bounded reusable
 geometry/instance buffers;
@@ -151,9 +174,10 @@ warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warni
 - In-scene text currently uses ASCII glyphs; Unicode title/artist survive in
   native window titles — add a font atlas when multilingual in-scene text is
   implemented.
-- Native playback remains bounded by the existing `--seconds` session control;
-  results describe the actual played prefix, not guaranteed full-song completion
-  — implement chart/audio-tail completion before calling this a complete player.
+- Full-song completion now has source integration; native presentation and
+  full-queue admission behavior remain unexecuted — verify these boundaries,
+  final keysound/BGM tails and long-chart cancellation during deferred native
+  acceptance before claiming complete playback.
 - WASM renderer compilation is source evidence only; browser startup, adapters
   and actual browser rendering/audio/input remain future work.
 - Logical geometry stretches to the physical surface — introduce letterboxing

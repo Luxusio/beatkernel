@@ -8,7 +8,7 @@ accepted instant/head stages trigger actual referenced WAV keysounds. Parser war
 are printed. The existing offline and Windows binaries remain independent.
 
 Required CLI options are `--chart PATH --evdev NODE --alsa ENDPOINT --rate HZ
---channels N --period-frames N --buffer-frames N --seconds 1..3600`, and repeated
+--channels N --period-frames N --buffer-frames N`, and repeated
 `--bind CHANNEL_HEX:HID_USAGE_HEX` covering every used BMS lane including scratch.
 Channel codes are explicitly 11..19/21..29; nonzero physical keyboard HID usages
 are hexadecimal. Duplicate lane/key bindings, missing used lanes, unknown options
@@ -18,6 +18,10 @@ keyboards are not implicitly selected. evdev acquisition does not require a GUI
 focus window or exclusive device grab. Device permissions and native capabilities
 remain explicit errors. Applications must choose an appropriate node and manage
 its relationship to desktop input themselves.
+Optional `--seconds 1..3600` sets a diagnostic cutoff. Without it the session
+plays the full song through terminal judging, retired BGM, a later idle mixer
+block and native presentation of that block; see the shared
+[completion contract](REQ__bms-player.md). PCM tails are retained before cleanup.
 
 Defaults mirror Windows: early/late windows 150000000 ns, signed input offset0,
 preroll3000000000 ns (allowed0..10000000000), voices256 (allowed1..4096 concurrent),
@@ -92,7 +96,7 @@ is separate from native presentation; aggregate ALSA snapshot fields are indepen
 atomic readings, not one coherent presentation snapshot. A running worker can still
 advance before admission, so Mixer lateness and physical timing remain unverified.
 
-Seconds is the finite wall duration after startup seeding, including remaining preroll.
+Optional seconds is the finite wall cutoff after startup seeding, including remaining preroll.
 Countdown/current logical song and grades/misses are printed. Zero preroll can allow
 startup to consume initial BGM/notes; default3s provides logical startup headroom rather
 than physical sync guarantees. Native status/xruns/suspends/errors and runtime software

@@ -7,16 +7,20 @@ No synthetic gameplay, automatic vendor mapping or GPU interface is supplied.
 The shared loader retains its path/asset/PCM bounds; parser warnings are printed.
 
 Required CLI options are `--chart PATH --device AUDIO_DEVICE_ID --keyboard-registry
-IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N --seconds N`, plus repeated
+IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N`, plus repeated
 `--bind CHANNEL_HEX:HID_USAGE_HEX` covering every used BMS lane (11..19/21..29),
 including scratch. Native device IDs are positive decimal integers; visible channel
 and nonzero keyboard usages are hexadecimal. Duplicate lane/key/options, missing
 used lanes and unknown/invalid requests fail explicitly. Buffer is 1..1,048,576 frames,
-seconds is 1..3600. Defaults are early/late150000000 ns, signed input offset0,
+optional seconds is 1..3600. Defaults are early/late150000000 ns, signed input offset0,
 preroll3000000000 ns (0..10000000000), voices256 (1..4096 concurrent), channel-policy
 exact, and deadline advance lag2000000 ns (0..1000000000). `mono-stereo` is an explicit
 loader option permitting only mono-to-stereo WAV duplication. Input offset applies
 once in JudgeProfile; compiled Judge targets remain unchanged.
+Without `--seconds`, full-song play waits for terminal judging, retired BGM,
+a later idle mixer block and native presentation of that block, preserving
+keysound/BGM tails before cleanup. See the shared
+[completion contract](REQ__bms-player.md); explicit seconds remains a diagnostic cutoff.
 
 The keyboard registry entry must resolve exactly one active button-capable HidDevice.
 The caller chooses a keyboard-capable native entry: current descriptor capability
@@ -102,7 +106,7 @@ error propagation; None report is explicitly unavailable. Queue admission, succe
 core mixing, native buffer delivery and acoustic output remain distinct observations.
 See [retained core telemetry](../platform/REQ__coreaudio-render-telemetry.md).
 
-Seconds is the finite gameplay-loop wall duration after seeding, including remaining
+Optional seconds is the finite gameplay-loop wall cutoff after seeding, including remaining
 preroll/wait for estimated origin. Countdown/current logical song is printed. Startup
 can exhaust small/zero preroll; the default supplies logical headroom, not physical sync.
 All start/loop failures attempt both audio.stop and input.close before returning; stop
