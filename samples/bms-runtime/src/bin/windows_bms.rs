@@ -548,10 +548,10 @@ fn feed_rendered(
     report: Option<beatkernel::audio::RenderReport>,
     admit: impl FnMut(AudioCommand) -> std::result::Result<(), beatkernel::audio::CommandPushError>,
 ) -> Result<()> {
-    if let Some(report) = report {
+    if let Some(report) = report.filter(|report| !report.paused) {
         let end = report
-            .start_frame
-            .checked_add(u64::try_from(report.frames)?)
+            .playback_start_frame
+            .checked_add(u64::try_from(report.playback_frames)?)
             .ok_or("BGM render cursor overflow")?;
         bgm.feed(end, 256, admit)?;
     }

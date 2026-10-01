@@ -314,6 +314,11 @@ impl RuntimeGroup {
     pub fn enqueue_audio(&mut self, command: AudioCommand) -> Result<(), CommandPushError> {
         self.producer.try_push(command)
     }
+    /// Shared output control only; acknowledged Transport/input coordination
+    /// remains the native session owner's responsibility for the whole cohort.
+    pub fn request_audio_pause(&mut self, paused: bool) {
+        self.producer.request_pause(paused);
+    }
 }
 
 /// Production solo adapter uses exactly the same cohort execution path.
@@ -391,6 +396,10 @@ impl SoloRuntime {
     }
     pub fn transport_mut(&mut self) -> &mut Transport {
         self.0.transport_mut()
+    }
+    /// Uses the same shared output control as a multi-player cohort.
+    pub fn request_audio_pause(&mut self, paused: bool) {
+        self.0.request_audio_pause(paused);
     }
     pub fn judge(&self) -> &JudgeEngine {
         self.0.members[0].runtime.judge()
