@@ -28,6 +28,7 @@ struct Options {
     late: i64,
     offset: i64,
     preroll: i64,
+    start_ns: i64,
     bgm_lookahead: i64,
     advance_lag: i64,
     voices: usize,
@@ -54,6 +55,16 @@ fn local_assignment(value: &str) -> Result<(beatkernel_bms_runtime::local_player
         registry,
     ))
 }
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl Options {
+    fn song_origin(&self) -> Result<beatkernel::time::Timestamp> {
+        Ok(beatkernel::time::Timestamp::from_nanos(
+            self.start_ns
+                .checked_sub(self.preroll)
+                .ok_or("section start minus preroll overflows song time")?,
+        ))
+    }
+}
 fn parse(args: &[String]) -> Result<Options> {
     let (mut chart, mut device, mut keyboard_registry) = (None, None, None);
     let (mut rate, mut channels, mut buffer, mut seconds) = (None, None, None, None);
@@ -67,6 +78,7 @@ fn parse(args: &[String]) -> Result<Options> {
     let (mut early, mut late, mut offset, mut preroll) =
         (150_000_000i64, 150_000_000i64, 0i64, 3_000_000_000i64);
     let mut advance_lag = 2_000_000i64;
+    let mut start_ns = 0i64;
     let mut bgm_lookahead = 3_000_000_000i64;
     let mut voices = 256usize;
     let mut mono_stereo = false;
@@ -145,6 +157,12 @@ fn parse(args: &[String]) -> Result<Options> {
                     return Err("BGM lookahead must be positive i64 nanoseconds".into());
                 }
             }
+            "--start-ns" => {
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err("start-ns must be unsigned decimal nanoseconds".into());
+                }
+                start_ns = value.parse::<i64>()?;
+            }
             "--preroll-ns" => preroll = value.parse()?,
             "--advance-lag-ns" => advance_lag = value.parse()?,
             "--voices" => voices = value.parse()?,
@@ -208,6 +226,7 @@ fn parse(args: &[String]) -> Result<Options> {
         late,
         offset,
         preroll,
+        start_ns,
         bgm_lookahead,
         advance_lag,
         voices,
@@ -423,7 +442,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
             "Graphical player is bms-player; this is a native developer composition. Local mode: replace --keyboard-registry with repeated --local-player ID:REGISTRY (2..64 distinct keyboards).\n"
         );
         println!(
-            "macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact solo or assigned local registry attachments, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown."
+            "macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --start-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact solo or assigned local registry attachments, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown."
         );
         return Ok(());
     }
@@ -636,6 +655,12 @@ mod native {
                 ChannelPolicy::Exact
             },
         )?;
+        let (prepared, section) = beatkernel_bms_runtime::section_start::prepare_at(
+            prepared,
+            Timestamp::from_nanos(options.start_ns),
+            PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
+        )?;
+        println!("prepared practice section={section:?}");
         let mut completion = beatkernel_bms_runtime::completion::SongCompletion::prepare(
             &prepared,
             options.late,
@@ -680,7 +705,10 @@ mod native {
         let capacity = AudioLimits::MAX_COMMANDS;
         let (mut producer, consumer) = command_queue(capacity)?;
         let mut bgm = BgmSession(beatkernel_bms_runtime::bgm::BgmFeeder::new(
-            prepared.bgm_commands,
+            beatkernel_bms_runtime::section_start::relative_commands(
+                prepared.bgm_commands,
+                Timestamp::from_nanos(options.start_ns),
+            )?,
             beatkernel_bms_runtime::bgm::BgmConfig {
                 output_origin: beatkernel::time::ClockPoint {
                     domain: OUTPUT,
@@ -780,7 +808,7 @@ mod native {
                 DisciplineConfig::default(),
                 output_origin(),
                 HOST,
-                Timestamp::from_nanos(-options.preroll),
+                options.song_origin()?,
             )?;
             let pair = seed(
                 &audio,
@@ -796,11 +824,7 @@ mod native {
                 domain: HOST,
                 timestamp: estimated_origin(pair, output_origin())?,
             };
-            let transport = Transport::new(
-                origin.timestamp,
-                Timestamp::from_nanos(-options.preroll),
-                Rate::NORMAL,
-            );
+            let transport = Transport::new(origin.timestamp, options.song_origin()?, Rate::NORMAL);
             println!(
                 "estimated output-zero host={origin:?}; actual seed={pair:?}; config={:?}; quality={:?}; future presentation retained, physical latency unmeasured",
                 discipline.config(),
@@ -822,7 +846,7 @@ mod native {
             let deadline = options
                 .seconds
                 .map(|seconds| Instant::now() + WallDuration::from_secs(seconds));
-            let mut last_song = Timestamp::from_nanos(-options.preroll);
+            let mut last_song = options.song_origin()?;
             let mut last_operation = origin;
             let mut last_progress = None;
             let mut waiting_logged = false;
@@ -1006,6 +1030,34 @@ mod fixtures {
             domain: ClockDomainId(2),
             timestamp: Timestamp::from_nanos(n),
         }
+    }
+    #[test]
+    fn practice_start_is_unsigned_bounded_singleton_and_retains_checked_song_origin() {
+        let base = args();
+        assert_eq!(parse(&base).unwrap().start_ns, 0);
+        for start in [0, i64::MAX] {
+            let mut configured = base.clone();
+            configured.extend(["--start-ns".into(), start.to_string()]);
+            let options = parse(&configured).unwrap();
+            assert_eq!(options.start_ns, start);
+            assert_eq!(
+                options.song_origin().unwrap().as_nanos(),
+                start.checked_sub(options.preroll).unwrap()
+            );
+        }
+        for value in ["", "-1", "+1", "1.5", "9223372036854775808"] {
+            let mut invalid = base.clone();
+            invalid.extend(["--start-ns".into(), value.into()]);
+            assert!(parse(&invalid).is_err());
+        }
+        let mut duplicate = base;
+        duplicate.extend([
+            "--start-ns".into(),
+            "1".into(),
+            "--start-ns".into(),
+            "2".into(),
+        ]);
+        assert!(parse(&duplicate).is_err());
     }
     #[test]
     fn settings_validation_preserves_native_and_competition_constraints() {

@@ -30,10 +30,21 @@ struct Options {
     late: i64,
     offset: i64,
     preroll: i64,
+    start_ns: i64,
     bgm_lookahead: i64,
     advance_lag: i64,
     voices: usize,
     mono_stereo: bool,
+}
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl Options {
+    fn song_origin(&self) -> Result<beatkernel::time::Timestamp> {
+        Ok(beatkernel::time::Timestamp::from_nanos(
+            self.start_ns
+                .checked_sub(self.preroll)
+                .ok_or("section start minus preroll overflows song time")?,
+        ))
+    }
 }
 fn parse(args: &[String]) -> Result<Options> {
     let (mut chart, mut evdev, mut alsa) = (None, None, None);
@@ -51,6 +62,7 @@ fn parse(args: &[String]) -> Result<Options> {
     let (mut early, mut late, mut offset, mut preroll) =
         (150_000_000i64, 150_000_000i64, 0i64, 3_000_000_000i64);
     let mut advance_lag = 2_000_000i64;
+    let mut start_ns = 0i64;
     let mut bgm_lookahead = 3_000_000_000i64;
     let mut voices = 256usize;
     let mut mono_stereo = false;
@@ -160,6 +172,12 @@ fn parse(args: &[String]) -> Result<Options> {
                     return Err("BGM lookahead must be positive i64 nanoseconds".into());
                 }
             }
+            "--start-ns" => {
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err("start-ns must be unsigned decimal nanoseconds".into());
+                }
+                start_ns = value.parse::<i64>()?;
+            }
             "--preroll-ns" => preroll = value.parse()?,
             "--advance-lag-ns" => advance_lag = value.parse()?,
             "--voices" => voices = value.parse()?,
@@ -217,6 +235,7 @@ fn parse(args: &[String]) -> Result<Options> {
         late,
         offset,
         preroll,
+        start_ns,
         bgm_lookahead,
         advance_lag,
         voices,
@@ -303,7 +322,11 @@ impl std::ops::DerefMut for BgmSession {
 #[cfg(target_os = "linux")]
 impl Drop for BgmSession {
     fn drop(&mut self) {
-        println!("BGM feeder config={:?}; final admission summary={:?}; admission does not prove execution/native delivery/acoustic output", self.config(), self.report());
+        println!(
+            "BGM feeder config={:?}; final admission summary={:?}; admission does not prove execution/native delivery/acoustic output",
+            self.config(),
+            self.report()
+        );
     }
 }
 #[cfg(target_os = "linux")]
@@ -342,8 +365,19 @@ impl Drop for DeliverySession {
     fn drop(&mut self) {
         let observed = self.observed_events();
         match self.summary() {
-            Some(summary) => println!("kernel-event-to-runtime delivery age: observed_events={observed}; retained samples={} p50={}ns p95={}ns p99={}ns max={}ns; HOST={:?}, capacity={}; separate from CPU processing; physical input-to-sound unknown", summary.samples, summary.p50_ns, summary.p95_ns, summary.p99_ns, summary.max_ns, self.domain(), self.capacity()),
-            None => println!("kernel-event-to-runtime delivery age: observed_events={observed}; retained summary unavailable; no zero observation substituted; separate from CPU processing; physical input-to-sound unknown"),
+            Some(summary) => println!(
+                "kernel-event-to-runtime delivery age: observed_events={observed}; retained samples={} p50={}ns p95={}ns p99={}ns max={}ns; HOST={:?}, capacity={}; separate from CPU processing; physical input-to-sound unknown",
+                summary.samples,
+                summary.p50_ns,
+                summary.p95_ns,
+                summary.p99_ns,
+                summary.max_ns,
+                self.domain(),
+                self.capacity()
+            ),
+            None => println!(
+                "kernel-event-to-runtime delivery age: observed_events={observed}; retained summary unavailable; no zero observation substituted; separate from CPU processing; physical input-to-sound unknown"
+            ),
         }
     }
 }
@@ -360,7 +394,14 @@ fn save_capture(
     let path = path.ok_or("enabled replay capture missing save path")?;
     let records = capture.records().len();
     let bytes = capture.encoded_bytes();
-    println!("replay capture: records={records}, encoded_bytes={bytes}, status={}, path={path:?}; accepted judge operations, physical output unverified", if failed_session { "valid prefix of failed session" } else { "complete recorded session" });
+    println!(
+        "replay capture: records={records}, encoded_bytes={bytes}, status={}, path={path:?}; accepted judge operations, physical output unverified",
+        if failed_session {
+            "valid prefix of failed session"
+        } else {
+            "complete recorded session"
+        }
+    );
     let written = capture.save_new(path)?;
     println!("replay create_new saved {written} bytes to {path:?}");
     Ok(())
@@ -382,7 +423,9 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
     let (competition_options, args) =
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
-        println!("linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; network competition is not yet supported for local groups. Native float32 ALSA, no fallback. Physical timing Unknown.");
+        println!(
+            "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --start-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; network competition is not yet supported for local groups. Native float32 ALSA, no fallback. Physical timing Unknown."
+        );
         return Ok(());
     }
     let options = parse(&args)?;
@@ -409,7 +452,7 @@ mod local_native;
 mod native {
     use super::*;
     use beatkernel::{
-        audio::{command_queue, Mixer, MixerConfig, PcmLimits},
+        audio::{Mixer, MixerConfig, PcmLimits, command_queue},
         input::{Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId},
         judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
         runtime::RuntimeReport,
@@ -417,17 +460,17 @@ mod native {
         transport::{Rate, Transport},
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
-    use beatkernel_bms_runtime::{load_prepared, ChannelPolicy};
+    use beatkernel_bms_runtime::{ChannelPolicy, load_prepared};
     use beatkernel_platform::{
         audio::{
+            DeviceFormat, SampleEncoding,
             presentation::discipline::{
                 DisciplineConfig, DisciplineUpdate, PresentationDiscipline,
             },
-            DeviceFormat, SampleEncoding,
         },
         linux::{
-            alsa_presentation_pair, AlsaRequest, AlsaStatus, AlsaStream, EvdevDevice, EvdevItem,
-            MonotonicClock,
+            AlsaRequest, AlsaStatus, AlsaStream, EvdevDevice, EvdevItem, MonotonicClock,
+            alsa_presentation_pair,
         },
     };
     use std::time::{Duration as WallDuration, Instant};
@@ -528,6 +571,7 @@ mod native {
         let mut delivery = DeliverySession(beatkernel::telemetry::InputDeliveryTelemetry::new(
             4096, HOST,
         )?);
+        let song_origin = options.song_origin()?;
         let prepared = load_prepared(
             &options.chart,
             options.format,
@@ -538,6 +582,12 @@ mod native {
                 ChannelPolicy::Exact
             },
         )?;
+        let (prepared, section) = beatkernel_bms_runtime::section_start::prepare_at(
+            prepared,
+            Timestamp::from_nanos(options.start_ns),
+            PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
+        )?;
+        println!("prepared practice section={section:?}");
         let mut completion = beatkernel_bms_runtime::completion::SongCompletion::prepare(
             &prepared,
             options.late,
@@ -587,7 +637,10 @@ mod native {
         let capacity = AudioLimits::MAX_COMMANDS;
         let (mut producer, consumer) = command_queue(capacity)?;
         let mut bgm = BgmSession(beatkernel_bms_runtime::bgm::BgmFeeder::new(
-            prepared.bgm_commands,
+            beatkernel_bms_runtime::section_start::relative_commands(
+                prepared.bgm_commands,
+                Timestamp::from_nanos(options.start_ns),
+            )?,
             beatkernel_bms_runtime::bgm::BgmConfig {
                 output_origin: beatkernel::time::ClockPoint {
                     domain: OUTPUT,
@@ -633,9 +686,25 @@ mod native {
             monotonic_domain: HOST,
         };
         let mut stream = AlsaStream::open(request, mixer)?;
-        println!("requested/applied ALSA={:?}; evdev={:?}; exact source={:?}; bindings={:?}; windows={}/{}ns offset={}ns preroll={}ns advance_lag={}ns voices={} channel_policy={} queue/pending={} live_slack={SLACK}",
-            stream.configuration(),input.descriptor(),DEVICE,options.bindings,options.early,options.late,options.offset,options.preroll,options.advance_lag,options.voices,
-            if options.mono_stereo { "mono-stereo" } else { "exact" },capacity);
+        println!(
+            "requested/applied ALSA={:?}; evdev={:?}; exact source={:?}; bindings={:?}; windows={}/{}ns offset={}ns preroll={}ns advance_lag={}ns voices={} channel_policy={} queue/pending={} live_slack={SLACK}",
+            stream.configuration(),
+            input.descriptor(),
+            DEVICE,
+            options.bindings,
+            options.early,
+            options.late,
+            options.offset,
+            options.preroll,
+            options.advance_lag,
+            options.voices,
+            if options.mono_stereo {
+                "mono-stereo"
+            } else {
+                "exact"
+            },
+            capacity
+        );
         let mut before_origin = 0u64;
         let mut capture = None;
         let outcome = (|| -> Result<()> {
@@ -657,19 +726,19 @@ mod native {
                 DisciplineConfig::default(),
                 output_origin(),
                 HOST,
-                Timestamp::from_nanos(-options.preroll),
+                song_origin,
             )?;
             let pair = seed(&stream, &mut discipline, &mut bgm, &mut producer)?;
             let host_origin = ClockPoint {
                 domain: HOST,
                 timestamp: estimated_origin(pair, output_origin())?,
             };
-            let transport = Transport::new(
-                host_origin.timestamp,
-                Timestamp::from_nanos(-options.preroll),
-                Rate::NORMAL,
+            let transport = Transport::new(host_origin.timestamp, song_origin, Rate::NORMAL);
+            println!(
+                "estimated output-zero host={host_origin:?}; actual seed={pair:?}; discipline={:?}; quality={:?}; physical latency unmeasured",
+                discipline.config(),
+                discipline.quality()
             );
-            println!("estimated output-zero host={host_origin:?}; actual seed={pair:?}; discipline={:?}; quality={:?}; physical latency unmeasured",discipline.config(),discipline.quality());
             if options.preroll == 0 {
                 println!("zero preroll permits startup consumption of initial BGM/notes");
             }
@@ -686,7 +755,7 @@ mod native {
             let deadline = options
                 .seconds
                 .map(|seconds| Instant::now() + WallDuration::from_secs(seconds));
-            let mut last_song = Timestamp::from_nanos(-options.preroll);
+            let mut last_song = song_origin;
             let mut last_operation = host_origin;
             let mut last_progress = None;
             let pump_outcome = (|| -> Result<()> {
@@ -711,13 +780,13 @@ mod native {
                             EvdevItem::Dropped => {
                                 return Err(
                                     "evdev SYN_DROPPED: explicit cleanup/restart required".into()
-                                )
+                                );
                             }
                             EvdevItem::Resync(_) => {
                                 return Err(
                                     "evdev Resync barrier: explicit cleanup/restart required"
                                         .into(),
-                                )
+                                );
                             }
                             EvdevItem::Event(event) => {
                                 let host = ClockPoint {
@@ -735,7 +804,9 @@ mod native {
                                 if host.domain == HOST && host.timestamp < host_origin.timestamp {
                                     before_origin = before_origin.saturating_add(1);
                                     if before_origin == 1 {
-                                        eprintln!("ignoring pre-output-origin acquired input (original timestamp retained): {host:?}");
+                                        eprintln!(
+                                            "ignoring pre-output-origin acquired input (original timestamp retained): {host:?}"
+                                        );
                                     }
                                     continue;
                                 }
@@ -764,7 +835,10 @@ mod native {
                         limited,
                     } = discipline.update(now, runtime.transport_mut())?
                     {
-                        println!("discipline measured={base_rate_ppm:+}ppm correction={correction_ppm:+}ppm applied={applied_rate_ppm:+}ppm phase={phase_error_ns}ns limited={limited} quality={:?}",discipline.quality());
+                        println!(
+                            "discipline measured={base_rate_ppm:+}ppm correction={correction_ppm:+}ppm applied={applied_rate_ppm:+}ppm phase={phase_error_ns}ns limited={limited} quality={:?}",
+                            discipline.quality()
+                        );
                     }
                     if let Some(at) = watermark(
                         host_origin,
@@ -799,23 +873,38 @@ mod native {
                         stream.last_render_report(),
                         discipline.latest_pair().map(|pair| pair.source),
                     )? {
-                        println!("full song completed: terminal judge, drained BGM/mixer and native presentation frontier");
+                        println!(
+                            "full song completed: terminal judge, drained BGM/mixer and native presentation frontier"
+                        );
                         break;
                     }
                     std::thread::sleep(WallDuration::from_millis(1));
                 }
                 Ok(())
             })();
-            println!("runtime processing={:?} counters={:?}; pre-origin ignored={before_origin}; evdev={:?}",runtime.telemetry().processing(),runtime.telemetry().counters(),input.counters());
+            println!(
+                "runtime processing={:?} counters={:?}; pre-origin ignored={before_origin}; evdev={:?}",
+                runtime.telemetry().processing(),
+                runtime.telemetry().counters(),
+                input.counters()
+            );
             pump_outcome
         })();
         let timing = stream.timing_snapshot();
         let stop = stream.stop(); // joins and tears down native handles before evdev drop
         match stream.last_render_report() {
-            Some(report) => println!("last successful Mixer render report={report:?}; execution counters distinct from queue admission/native writes; physical delivery unverified"),
-            None => println!("last successful Mixer render report unavailable; no render observation substituted"),
+            Some(report) => println!(
+                "last successful Mixer render report={report:?}; execution counters distinct from queue admission/native writes; physical delivery unverified"
+            ),
+            None => println!(
+                "last successful Mixer render report unavailable; no render observation substituted"
+            ),
         }
-        println!("final independent ALSA counters={:?}; last separately coherent timing={timing:?}; evdev={:?}; pre-origin ignored={before_origin}; physical latency=unmeasured",stream.snapshot(),input.counters());
+        println!(
+            "final independent ALSA counters={:?}; last separately coherent timing={timing:?}; evdev={:?}; pre-origin ignored={before_origin}; physical latency=unmeasured",
+            stream.snapshot(),
+            input.counters()
+        );
         if let Err(error) = &stop {
             eprintln!("ALSA stop/join error: {error}");
         }
@@ -830,7 +919,9 @@ mod native {
             outcome.is_err() || stop.is_err(),
         );
         if let Err(error) = &save {
-            eprintln!("replay save error after cleanup (valid captured prefix retained until save): {error}");
+            eprintln!(
+                "replay save error after cleanup (valid captured prefix retained until save): {error}"
+            );
         }
         outcome?;
         stop?;
@@ -851,6 +942,34 @@ mod fixtures {
             domain: ClockDomainId(1),
             timestamp: Timestamp::from_nanos(n),
         }
+    }
+    #[test]
+    fn practice_start_is_unsigned_bounded_singleton_and_retains_checked_song_origin() {
+        let base = args();
+        assert_eq!(parse(&base).unwrap().start_ns, 0);
+        for start in [0, i64::MAX] {
+            let mut configured = base.clone();
+            configured.extend(["--start-ns".into(), start.to_string()]);
+            let options = parse(&configured).unwrap();
+            assert_eq!(options.start_ns, start);
+            assert_eq!(
+                options.song_origin().unwrap().as_nanos(),
+                start.checked_sub(options.preroll).unwrap()
+            );
+        }
+        for value in ["", "-1", "+1", "1.5", "9223372036854775808"] {
+            let mut invalid = base.clone();
+            invalid.extend(["--start-ns".into(), value.into()]);
+            assert!(parse(&invalid).is_err());
+        }
+        let mut duplicate = base;
+        duplicate.extend([
+            "--start-ns".into(),
+            "1".into(),
+            "--start-ns".into(),
+            "2".into(),
+        ]);
+        assert!(parse(&duplicate).is_err());
     }
     #[test]
     fn settings_validation_preserves_native_and_competition_constraints() {
@@ -1104,16 +1223,18 @@ mod fixtures {
         assert!(
             matches!(shift_bgm(command,3_000_000_000).unwrap(),AudioCommand::Play{at,..} if at.as_nanos()==3_000_000_012)
         );
-        assert!(shift_bgm(
-            AudioCommand::Play {
-                voice: VoiceId(1),
-                sample: SampleId(1),
-                at: Timestamp::from_nanos(i64::MAX),
-                gain: 1.0
-            },
-            1
-        )
-        .is_err());
+        assert!(
+            shift_bgm(
+                AudioCommand::Play {
+                    voice: VoiceId(1),
+                    sample: SampleId(1),
+                    at: Timestamp::from_nanos(i64::MAX),
+                    gain: 1.0
+                },
+                1
+            )
+            .is_err()
+        );
     }
     #[test]
     fn finite_lag_deadline_watermark_and_backlog_keep_original_event_floor() {
@@ -1148,17 +1269,19 @@ mod fixtures {
             watermark(point(0), point(i64::MAX), point(i64::MAX), 0, false).unwrap(),
             Some(point(i64::MAX))
         );
-        assert!(watermark(
-            point(0),
-            point(0),
-            ClockPoint {
-                domain: ClockDomainId(2),
-                timestamp: Timestamp::ZERO
-            },
-            0,
-            false
-        )
-        .is_err());
+        assert!(
+            watermark(
+                point(0),
+                point(0),
+                ClockPoint {
+                    domain: ClockDomainId(2),
+                    timestamp: Timestamp::ZERO
+                },
+                0,
+                false
+            )
+            .is_err()
+        );
     }
     #[test]
     fn estimated_origin_uses_supplied_pair_and_checks_domain_and_range() {
@@ -1173,24 +1296,28 @@ mod fixtures {
             estimated_origin(pair, point(0)).unwrap(),
             Timestamp::from_nanos(900)
         );
-        assert!(estimated_origin(
-            pair,
-            ClockPoint {
-                domain: ClockDomainId(3),
-                timestamp: Timestamp::ZERO
-            }
-        )
-        .is_err());
-        assert!(estimated_origin(
-            ClockPair {
-                source: point(i64::MAX),
-                target: ClockPoint {
-                    domain: ClockDomainId(2),
-                    timestamp: Timestamp::from_nanos(i64::MIN)
+        assert!(
+            estimated_origin(
+                pair,
+                ClockPoint {
+                    domain: ClockDomainId(3),
+                    timestamp: Timestamp::ZERO
                 }
-            },
-            point(0)
-        )
-        .is_err());
+            )
+            .is_err()
+        );
+        assert!(
+            estimated_origin(
+                ClockPair {
+                    source: point(i64::MAX),
+                    target: ClockPoint {
+                        domain: ClockDomainId(2),
+                        timestamp: Timestamp::from_nanos(i64::MIN)
+                    }
+                },
+                point(0)
+            )
+            .is_err()
+        );
     }
 }

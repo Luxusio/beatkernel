@@ -4,9 +4,11 @@ use super::native::OUTPUT;
 #[cfg(feature = "asio-sdk")]
 use super::native::Window;
 use super::*;
+#[cfg(feature = "asio-sdk")]
+use beatkernel::time::Timestamp;
 use beatkernel::{
     audio::{AudioFormat, CommandProducer, Mixer, RenderReport},
-    time::{ClockMappingQuality, ClockPoint, Timestamp},
+    time::{ClockMappingQuality, ClockPoint},
     transport::Transport,
 };
 #[cfg(feature = "asio-sdk")]
@@ -261,7 +263,7 @@ impl Output {
             Self::Wasapi(s) => {
                 let relation = super::native::presentation_wasapi(s, extent, bgm, producer)?;
                 Ok((
-                    relation.transport(Timestamp::from_nanos(-options.preroll))?,
+                    relation.transport(options.song_origin()?)?,
                     relation.quality(),
                 ))
             }
@@ -304,7 +306,7 @@ impl Output {
                                     None,
                                 )?;
                                 return Ok((
-                                    relation.transport(Timestamp::from_nanos(-options.preroll))?,
+                                    relation.transport(options.song_origin()?)?,
                                     relation.quality(),
                                 ));
                             }

@@ -135,6 +135,12 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             ChannelPolicy::Exact
         },
     )?;
+    let (prepared, section) = beatkernel_bms_runtime::section_start::prepare_at(
+        prepared,
+        Timestamp::from_nanos(options.start_ns),
+        PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
+    )?;
+    println!("prepared practice section={section:?}");
     for warning in &prepared.source.warnings {
         eprintln!("BMS warning line{}: {}", warning.line, warning.message);
     }
@@ -229,7 +235,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 OUTPUT,
             )?,
             score: ScoreSummary::default(),
-            last_song: Timestamp::from_nanos(-options.preroll),
+            last_song: options.song_origin()?,
         });
         save_paths.push(path);
         configs.push(MemberConfig {
@@ -244,7 +250,10 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     let capacity = AudioLimits::MAX_COMMANDS;
     let (mut producer, consumer) = command_queue(capacity)?;
     let mut bgm = BgmSession(beatkernel_bms_runtime::bgm::BgmFeeder::new(
-        prepared.bgm_commands,
+        beatkernel_bms_runtime::section_start::relative_commands(
+            prepared.bgm_commands,
+            Timestamp::from_nanos(options.start_ns),
+        )?,
         beatkernel_bms_runtime::bgm::BgmConfig {
             output_origin: output_origin(),
             sample_rate: options.format.sample_rate(),
@@ -309,7 +318,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             DisciplineConfig::default(),
             output_origin(),
             HOST,
-            Timestamp::from_nanos(-options.preroll),
+            options.song_origin()?,
         )?;
         let pair = seed(&stream, &mut discipline, &mut bgm, &mut producer)?;
         let host_origin = ClockPoint {
@@ -319,11 +328,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         let mut group = RuntimeGroup::new(
             HOST,
             OUTPUT,
-            Transport::new(
-                host_origin.timestamp,
-                Timestamp::from_nanos(-options.preroll),
-                Rate::NORMAL,
-            ),
+            Transport::new(host_origin.timestamp, options.song_origin()?, Rate::NORMAL),
             producer,
             configs,
             4096,

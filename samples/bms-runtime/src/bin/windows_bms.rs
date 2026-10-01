@@ -54,6 +54,7 @@ struct Options {
     late: i64,
     offset: i64,
     preroll: i64,
+    start_ns: i64,
     bgm_lookahead: i64,
     voices: usize,
     mono_stereo: bool,
@@ -129,6 +130,16 @@ fn local_assignment(
         path.to_owned(),
     ))
 }
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+impl Options {
+    fn song_origin(&self) -> Result<beatkernel::time::Timestamp> {
+        Ok(beatkernel::time::Timestamp::from_nanos(
+            self.start_ns
+                .checked_sub(self.preroll)
+                .ok_or("section start minus preroll overflows song time")?,
+        ))
+    }
+}
 fn parse(args: &[String]) -> Result<Options> {
     let mut backend = Backend::Wasapi;
     let mut asio_view = None;
@@ -149,6 +160,7 @@ fn parse(args: &[String]) -> Result<Options> {
     let mut late = 150_000_000i64;
     let mut offset = 0i64;
     let mut preroll = 3_000_000_000i64;
+    let mut start_ns = 0i64;
     let mut bgm_lookahead = 3_000_000_000i64;
     let mut voices = 256usize;
     let mut mono_stereo = false;
@@ -314,6 +326,12 @@ fn parse(args: &[String]) -> Result<Options> {
                     return Err("BGM lookahead must be positive i64 nanoseconds".into());
                 }
             }
+            "--start-ns" => {
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err("start-ns must be unsigned decimal nanoseconds".into());
+                }
+                start_ns = value.parse::<i64>()?;
+            }
             "--preroll-ns" => {
                 preroll = value.parse()?;
                 if !(0..=10_000_000_000).contains(&preroll) {
@@ -454,6 +472,7 @@ fn parse(args: &[String]) -> Result<Options> {
         late,
         offset,
         preroll,
+        start_ns,
         bgm_lookahead,
         voices,
         mono_stereo,
@@ -626,7 +645,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
             "Local play: repeat --local-player ID:EXACT_INTERFACE_PATH for 2..64 distinct keyboards, without --keyboard-path. Stable positive u32 IDs are preserved in GUI scores and .p<ID>.bkr replay files. --advance-lag-ns 0..1000000000 (default 2000000) controls the common input frontier. Network + local groups is unsupported; saved ghosts are per-player. Native commands compose the graphical player's actual runtime."
         );
         println!(
-            "windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Optional --keyboard-path EXACT_INTERFACE_PATH selects one physical keyboard; omitted accepts any physical keyboard. Explicit device removal fails the session. Focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured."
+            "windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --start-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Optional --keyboard-path EXACT_INTERFACE_PATH selects one physical keyboard; omitted accepts any physical keyboard. Explicit device removal fails the session. Focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured."
         );
         return Ok(());
     }
@@ -1018,6 +1037,12 @@ mod native {
                 ChannelPolicy::Exact
             },
         )?;
+        let (prepared, section) = beatkernel_bms_runtime::section_start::prepare_at(
+            prepared,
+            Timestamp::from_nanos(options.start_ns),
+            PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
+        )?;
+        println!("prepared practice section={section:?}");
         let mut completion = beatkernel_bms_runtime::completion::SongCompletion::prepare(
             &prepared,
             options.late,
@@ -1099,7 +1124,10 @@ mod native {
         )?;
         let (mut producer, consumer) = command_queue(capacity)?;
         let mut bgm = BgmSession(beatkernel_bms_runtime::bgm::BgmFeeder::new(
-            prepared.bgm_commands,
+            beatkernel_bms_runtime::section_start::relative_commands(
+                prepared.bgm_commands,
+                Timestamp::from_nanos(options.start_ns),
+            )?,
             beatkernel_bms_runtime::bgm::BgmConfig {
                 output_origin: beatkernel::time::ClockPoint {
                     domain: OUTPUT,
@@ -1139,8 +1167,10 @@ mod native {
             "Focus the BeatKernel BMS native window and play the explicitly bound physical keys. Console prints actual grades and misses."
         );
         println!(
-            "preroll={}ns; output zero maps to song -preroll; short startup pairs do not establish long-run clock stability",
-            options.preroll
+            "section start={}ns preroll={}ns; output zero maps to song={:?}; short startup pairs do not establish long-run clock stability",
+            options.start_ns,
+            options.preroll,
+            options.song_origin()?
         );
         if options.preroll == 0 {
             println!(
@@ -1181,7 +1211,7 @@ mod native {
                     timestamp: Timestamp::ZERO,
                 },
                 HOST,
-                Timestamp::from_nanos(-options.preroll),
+                options.song_origin()?,
             )?;
             stream.seed(&mut discipline, &mut bgm, &mut producer)?;
             discipline.validate_host(clock.sample()?.normalized)?;
@@ -1192,7 +1222,7 @@ mod native {
                 discipline.quality()
             );
             println!(
-                "observed output-zero/song-minus-preroll anchor={:?}; mapping quality={:?}; keysound scheduling=backend software output frontier/Unknown; physical latency=unmeasured",
+                "observed output-zero/practice-song anchor={:?}; mapping quality={:?}; keysound scheduling=backend software output frontier/Unknown; physical latency=unmeasured",
                 transport.anchor(),
                 quality
             );
@@ -1419,6 +1449,34 @@ mod native {
 mod preroll_fixtures {
     use super::*;
     use beatkernel::audio::{SampleId, VoiceId};
+    #[test]
+    fn practice_start_is_unsigned_bounded_singleton_and_retains_checked_song_origin() {
+        let base = arguments(None);
+        assert_eq!(parse(&base).unwrap().start_ns, 0);
+        for start in [0, i64::MAX] {
+            let mut configured = base.clone();
+            configured.extend(["--start-ns".into(), start.to_string()]);
+            let options = parse(&configured).unwrap();
+            assert_eq!(options.start_ns, start);
+            assert_eq!(
+                options.song_origin().unwrap().as_nanos(),
+                start.checked_sub(options.preroll).unwrap()
+            );
+        }
+        for value in ["", "-1", "+1", "1.5", "9223372036854775808"] {
+            let mut invalid = base.clone();
+            invalid.extend(["--start-ns".into(), value.into()]);
+            assert!(parse(&invalid).is_err());
+        }
+        let mut duplicate = base;
+        duplicate.extend([
+            "--start-ns".into(),
+            "1".into(),
+            "--start-ns".into(),
+            "2".into(),
+        ]);
+        assert!(parse(&duplicate).is_err());
+    }
     #[test]
     fn local_assignments_preserve_stable_ids_colons_and_lag_boundaries() {
         let mut configured = arguments(None);
