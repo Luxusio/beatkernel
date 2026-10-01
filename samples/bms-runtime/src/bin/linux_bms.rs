@@ -627,12 +627,14 @@ mod native {
                 Duration::from_nanos(options.offset),
             )?,
         )?;
-        let mut competition = beatkernel_bms_runtime::competition_live::LiveCompetition::prepare(
-            &competition_options,
-            &prepared.source,
-            &judge,
-            HOST,
-        )?;
+        let mut competition =
+            beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_at(
+                &competition_options,
+                &prepared.source,
+                &judge,
+                HOST,
+                Timestamp::from_nanos(options.start_ns),
+            )?;
         const SLACK: usize = 1024;
         let capacity = AudioLimits::MAX_COMMANDS;
         let (mut producer, consumer) = command_queue(capacity)?;
@@ -716,8 +718,11 @@ mod native {
                     beatkernel::input::CodecLimits::new(65536, 32768)?,
                 )?;
                 capture = Some(
-                    beatkernel_bms_runtime::replay_capture::LiveReplayCapture::new(
-                        &judge, HOST, limits,
+                    beatkernel_bms_runtime::replay_capture::LiveReplayCapture::new_at(
+                        &judge,
+                        HOST,
+                        limits,
+                        Timestamp::from_nanos(options.start_ns),
                     )?,
                 );
             }

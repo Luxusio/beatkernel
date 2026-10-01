@@ -336,7 +336,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             .map(|base| replay_path(base, player))
             .transpose()?;
         let capture = if path.is_some() {
-            Some(LiveReplayCapture::new(
+            Some(LiveReplayCapture::new_at(
                 &judge,
                 HOST,
                 ReplayCodecLimits::new(
@@ -345,6 +345,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                     4096,
                     beatkernel::input::CodecLimits::new(65536, 32768)?,
                 )?,
+                Timestamp::from_nanos(options.start_ns),
             )?)
         } else {
             None
@@ -352,12 +353,13 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         states.push(PlayerState {
             player,
             capture,
-            competition: LiveCompetition::prepare_for(
+            competition: LiveCompetition::prepare_for_at(
                 player,
                 &competition_options,
                 &prepared.source,
                 &judge,
                 HOST,
+                Timestamp::from_nanos(options.start_ns),
             )?,
             completion: SongCompletion::prepare(
                 &prepared,

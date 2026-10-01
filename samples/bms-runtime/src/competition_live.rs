@@ -10,8 +10,11 @@ use crate::{
     replay_playback::read_replay,
 };
 use beatkernel::{
-    input::CodecLimits, judge::JudgeEngine, replay::codec::ReplayCodecLimits,
-    runtime::RuntimeReport, time::ClockDomainId,
+    input::CodecLimits,
+    judge::JudgeEngine,
+    replay::codec::ReplayCodecLimits,
+    runtime::RuntimeReport,
+    time::{ClockDomainId, Timestamp},
 };
 use beatkernel_bms::{BmsChart, ParseOptions, parse};
 use std::{
@@ -207,6 +210,29 @@ impl LiveCompetition {
         judge: &JudgeEngine,
         domain: ClockDomainId,
     ) -> Result<Option<Self>> {
+        Self::prepare_for_at(player, options, source, judge, domain, Timestamp::ZERO)
+    }
+
+    /// Prepare comparisons for a fresh recorded practice section.
+    pub fn prepare_at(
+        options: &CompetitionOptions,
+        source: &BmsChart,
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        start: Timestamp,
+    ) -> Result<Option<Self>> {
+        Self::prepare_for_at(PlayerId(1), options, source, judge, domain, start)
+    }
+
+    /// Section identity is shared by local captures, ghosts and network setup.
+    pub fn prepare_for_at(
+        player: PlayerId,
+        options: &CompetitionOptions,
+        source: &BmsChart,
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        start: Timestamp,
+    ) -> Result<Option<Self>> {
         if player.0 == 0 {
             return Err("competition player ID must be nonzero".into());
         }
@@ -214,7 +240,7 @@ impl LiveCompetition {
             return Ok(None);
         }
         let limits = replay_limits()?;
-        let capture = LiveReplayCapture::new(judge, domain, limits)?;
+        let capture = LiveReplayCapture::new_at(judge, domain, limits, start)?;
         let header = capture.header().clone();
         let mut competition = Competition::new(header.clone(), 8)?;
         options.load_opponents(source, &mut competition, limits)?;
