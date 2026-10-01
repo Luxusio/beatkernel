@@ -42,6 +42,7 @@ struct Options {
     fps: usize,
     backend: BackendChoice,
     presentation: Presentation,
+    profile: Option<PathBuf>,
 }
 impl Options {
     fn parse(args: &[String]) -> Result<Self, Box<dyn Error>> {
@@ -53,6 +54,7 @@ impl Options {
             fps: 120,
             backend: BackendChoice::Auto,
             presentation: Presentation::Fifo,
+            profile: None,
         };
         let mut index = 0;
         let mut seen_fps = false;
@@ -66,9 +68,22 @@ impl Options {
                 .ok_or("desktop/native option requires a value")?;
             if matches!(
                 flag,
-                "--library" | "--ui-lookahead-ms" | "--ui-fps" | "--gpu-backend" | "--present"
+                "--library"
+                    | "--profile"
+                    | "--ui-lookahead-ms"
+                    | "--ui-fps"
+                    | "--gpu-backend"
+                    | "--present"
             ) {
                 match flag {
+                    "--profile" => {
+                        if value.is_empty() {
+                            return Err("--profile path cannot be empty".into());
+                        }
+                        if options.profile.replace(PathBuf::from(value)).is_some() {
+                            return Err("duplicate --profile".into());
+                        }
+                    }
                     "--library" => {
                         if value.is_empty() {
                             return Err("--library path cannot be empty".into());
@@ -158,10 +173,19 @@ impl Drop for Game {
 
 pub(super) fn run(args: &[String], native: Native, validate: Native) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
-        println!("player (--library DIR | --chart PATH) [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nPass explicit native backend/device/rate/buffer/binding options as flag-value pairs.\nF2: settings; Up/Down: select; Enter: play/return; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options.");
+        println!("player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nPass explicit native backend/device/rate/buffer/binding options as flag-value pairs.\nF2: settings; Up/Down: select; Enter: play/return; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options.");
         return Ok(());
     }
-    let options = Options::parse(args)?;
+    let mut options = Options::parse(args)?;
+    if let Some(path) = &options.profile {
+        let profile =
+            beatkernel_bms_runtime::settings_profile::load_profile(path, settings_host())?;
+        options.native = beatkernel_bms_runtime::settings::overlay_native_args(
+            &profile.native_args(),
+            &without_chart(&options.native),
+            settings_host(),
+        )?;
+    }
     let (entries, diagnostics) = if let Some(root) = &options.library {
         let library = match player_chart::scan_library(root) {
             Ok(library) => library,
@@ -208,6 +232,7 @@ pub(super) fn run(args: &[String], native: Native, validate: Native) -> Result<(
         native,
         validate,
         settings: None,
+        profile_io: None,
         entries,
         diagnostics,
         selected: 0,
@@ -234,11 +259,14 @@ pub(super) fn run(args: &[String], native: Native, validate: Native) -> Result<(
     Ok(())
 }
 
-const SETTINGS_ROWS: usize = 12;
+const SETTINGS_ROWS: usize = 10;
 struct SettingsDraft {
     values: NativeSettings,
     selected: usize,
     editor: LineEditor,
+    profile: LineEditor,
+    profile_focused: bool,
+    message: Option<String>,
     error: Option<String>,
 }
 impl SettingsDraft {
@@ -250,38 +278,19 @@ impl SettingsDraft {
             .ok_or("settings row unavailable")?;
         self.editor = LineEditor::new(&field.value, 4096)?;
         self.selected = index;
+        self.profile_focused = false;
         Ok(())
     }
     fn edit(&mut self, key: Option<KeyCode>, value: Option<&str>) {
-        let before = self.editor.clone();
-        let result = match key {
-            Some(KeyCode::ArrowLeft) => {
-                self.editor.left();
-                Ok(())
-            }
-            Some(KeyCode::ArrowRight) => {
-                self.editor.right();
-                Ok(())
-            }
-            Some(KeyCode::Home) => {
-                self.editor.home();
-                Ok(())
-            }
-            Some(KeyCode::End) => {
-                self.editor.end();
-                Ok(())
-            }
-            Some(KeyCode::Delete) => {
-                self.editor.delete();
-                Ok(())
-            }
-            Some(KeyCode::Backspace) => {
-                self.editor.backspace();
-                Ok(())
-            }
-            _ => value.map_or(Ok(()), |value| self.editor.insert(value)),
+        self.message = None;
+        if self.profile_focused {
+            self.error = edit_line(&mut self.profile, key, value).err();
+            self.message = None;
+            return;
         }
-        .and_then(|()| self.values.set_value(self.selected, self.editor.value()));
+        let before = self.editor.clone();
+        let result = edit_line(&mut self.editor, key, value)
+            .and_then(|()| self.values.set_value(self.selected, self.editor.value()));
         if let Err(error) = result {
             // Preserve the last accepted bounded draft if an edit exceeds a model limit.
             self.editor = before;
@@ -291,6 +300,35 @@ impl SettingsDraft {
         }
     }
 }
+fn edit_line(
+    editor: &mut LineEditor,
+    key: Option<KeyCode>,
+    value: Option<&str>,
+) -> Result<(), String> {
+    match key {
+        Some(KeyCode::ArrowLeft) => editor.left(),
+        Some(KeyCode::ArrowRight) => editor.right(),
+        Some(KeyCode::Home) => editor.home(),
+        Some(KeyCode::End) => editor.end(),
+        Some(KeyCode::Delete) => editor.delete(),
+        Some(KeyCode::Backspace) => editor.backspace(),
+        _ => return value.map_or(Ok(()), |value| editor.insert(value)),
+    }
+    Ok(())
+}
+enum ProfileResult {
+    Loaded(NativeSettings),
+    Saved,
+}
+struct ProfileOperation(Option<JoinHandle<Result<ProfileResult, String>>>);
+impl Drop for ProfileOperation {
+    fn drop(&mut self) {
+        if let Some(worker) = self.0.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
 fn settings_host() -> SettingsHost {
     if cfg!(target_os = "windows") {
         SettingsHost::Windows
@@ -317,6 +355,7 @@ struct Desktop {
     native: Native,
     validate: Native,
     settings: Option<SettingsDraft>,
+    profile_io: Option<ProfileOperation>,
     entries: Vec<Entry>,
     diagnostics: Vec<String>,
     selected: usize,
@@ -338,7 +377,7 @@ struct Desktop {
 }
 impl Desktop {
     fn open_settings(&mut self) {
-        if self.game.is_some() {
+        if self.game.is_some() || self.profile_io.is_some() {
             return;
         }
         let result = (|| {
@@ -352,6 +391,17 @@ impl Desktop {
                 values,
                 selected: 0,
                 editor,
+                profile: LineEditor::new(
+                    self.options
+                        .profile
+                        .as_ref()
+                        .map(|path| path.to_str().ok_or("profile path must be UTF-8"))
+                        .transpose()?
+                        .unwrap_or(""),
+                    4096,
+                )?,
+                profile_focused: false,
+                message: None,
                 error: None,
             })
         })();
@@ -365,31 +415,134 @@ impl Desktop {
         self.gesture.cancel();
         self.hits.clear();
     }
+    fn validate_settings(&self, values: &NativeSettings) -> Result<Vec<String>, String> {
+        let args = without_chart(&values.native_args());
+        let path = self
+            .entries
+            .get(self.selected)
+            .map(|entry| entry.path.as_path())
+            .unwrap_or_else(|| std::path::Path::new("settings-validation.bms"));
+        let path = path.to_str().ok_or("native chart path must be UTF-8")?;
+        (self.validate)(&with_chart(&args, path)).map_err(|error| error.to_string())?;
+        Ok(args)
+    }
+    fn profile_request(&mut self, save: bool) {
+        if self.profile_io.is_some() || self.game.is_some() {
+            return;
+        }
+        if let Some(draft) = &mut self.settings {
+            draft.message = None;
+        }
+        let result = (|| {
+            let draft = self.settings.as_ref().ok_or("settings unavailable")?;
+            if draft.profile.value().is_empty() {
+                return Err("enter an explicit profile path".into());
+            }
+            if save {
+                self.validate_settings(&draft.values)?;
+            }
+            let path = PathBuf::from(draft.profile.value());
+            let values = draft.values.clone();
+            let host = settings_host();
+            thread::Builder::new()
+                .name("bms-profile".into())
+                .spawn(move || {
+                    if save {
+                        beatkernel_bms_runtime::settings_profile::save_profile(&path, &values, host)
+                            .map(|()| ProfileResult::Saved)
+                            .map_err(|error| error.to_string())
+                    } else {
+                        beatkernel_bms_runtime::settings_profile::load_profile(&path, host)
+                            .map(ProfileResult::Loaded)
+                            .map_err(|error| error.to_string())
+                    }
+                })
+                .map_err(|error| error.to_string())
+        })();
+        match result {
+            Ok(worker) => {
+                self.profile_io = Some(ProfileOperation(Some(worker)));
+                if let Some(draft) = &mut self.settings {
+                    draft.error = None;
+                    draft.message = None;
+                }
+            }
+            Err(error) => {
+                if let Some(draft) = &mut self.settings {
+                    draft.error = Some(error);
+                }
+            }
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn collect_profile(&mut self) {
+        if !self.profile_io.as_ref().is_some_and(|operation| {
+            operation
+                .0
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished())
+        }) {
+            return;
+        }
+        let mut operation = self.profile_io.take().expect("finished profile operation");
+        let result = operation
+            .0
+            .take()
+            .expect("profile worker")
+            .join()
+            .unwrap_or_else(|_| Err("profile worker panicked".into()));
+        if let Some(draft) = &mut self.settings {
+            match result {
+                Ok(ProfileResult::Saved) => {
+                    draft.error = None;
+                    draft.message = Some("PROFILE SAVED - APPLY IS SEPARATE".into());
+                }
+                Ok(ProfileResult::Loaded(values)) => {
+                    let editor = values
+                        .fields()
+                        .first()
+                        .ok_or_else(|| "profile has no fields".to_owned())
+                        .and_then(|field| LineEditor::new(&field.value, 4096));
+                    match editor {
+                        Ok(editor) => {
+                            draft.values = values;
+                            draft.selected = 0;
+                            draft.editor = editor;
+                            draft.profile_focused = false;
+                            draft.error = None;
+                            draft.message = Some("PROFILE LOADED - APPLY TO USE".into());
+                        }
+                        Err(error) => draft.error = Some(error),
+                    }
+                }
+                Err(error) => draft.error = Some(error),
+            }
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
     fn apply_settings(&mut self) {
-        let Some(draft) = &mut self.settings else {
+        if self.profile_io.is_some() {
+            return;
+        }
+        let Some(draft) = &self.settings else {
             return;
         };
-        let result = (|| {
-            draft
-                .values
-                .set_value(draft.selected, draft.editor.value())?;
-            let args = without_chart(&draft.values.native_args());
-            let path = self
-                .entries
-                .get(self.selected)
-                .map(|entry| entry.path.as_path())
-                .unwrap_or_else(|| std::path::Path::new("settings-validation.bms"));
-            let path = path.to_str().ok_or("native chart path must be UTF-8")?;
-            (self.validate)(&with_chart(&args, path)).map_err(|error| error.to_string())?;
-            Ok::<_, String>(args)
-        })();
+        let result = self.validate_settings(&draft.values);
         match result {
             Ok(args) => {
                 self.options.native = args;
+                self.options.profile = (!draft.profile.value().is_empty())
+                    .then(|| PathBuf::from(draft.profile.value()));
                 self.settings = None;
                 self.failure = None;
             }
-            Err(error) => draft.error = Some(error),
+            Err(error) => {
+                if let Some(draft) = &mut self.settings {
+                    draft.error = Some(error);
+                }
+            }
         }
         self.gesture.cancel();
         self.hits.clear();
@@ -403,7 +556,24 @@ impl Desktop {
             KeyCode::Enter if !repeat => self.apply_settings(),
             KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::Tab => {
                 if let Some(draft) = &mut self.settings {
+                    if draft.profile_focused {
+                        let next = if key == KeyCode::Tab {
+                            0
+                        } else {
+                            draft.selected
+                        };
+                        if let Err(error) = draft.select(next) {
+                            draft.error = Some(error);
+                        }
+                        self.hits.clear();
+                        return;
+                    }
                     let length = draft.values.fields().len();
+                    if key == KeyCode::Tab && draft.selected + 1 == length {
+                        draft.profile_focused = true;
+                        self.hits.clear();
+                        return;
+                    }
                     let next = if key == KeyCode::ArrowUp {
                         draft.selected.saturating_sub(1)
                     } else if key == KeyCode::Tab {
@@ -451,8 +621,20 @@ impl Desktop {
             .map(|(id, _)| *id)
     }
     fn activate(&mut self, id: ControlId) {
+        if self.profile_io.is_some() {
+            return;
+        }
         if self.settings.is_some() {
             match id.0 {
+                13 => self.profile_request(false),
+                14 => self.profile_request(true),
+                15 => {
+                    if let Some(draft) = &mut self.settings {
+                        draft.profile_focused = true;
+                    }
+                    self.gesture.cancel();
+                    self.hits.clear();
+                }
                 10 => self.apply_settings(),
                 11 => {
                     self.settings = None;
@@ -466,7 +648,10 @@ impl Desktop {
                             .add_binding()
                             .and_then(|index| draft.select(index))
                         {
-                            Ok(()) => draft.error = None,
+                            Ok(()) => {
+                                draft.error = None;
+                                draft.message = None;
+                            }
                             Err(error) => draft.error = Some(error),
                         }
                     }
@@ -553,7 +738,7 @@ impl Desktop {
     }
     fn key(&mut self, key: KeyCode, repeat: bool) {
         self.gesture.cancel();
-        if !self.active || self.closing {
+        if !self.active || self.closing || self.profile_io.is_some() {
             return;
         }
         if self.settings.is_some() {
@@ -590,6 +775,9 @@ impl Desktop {
         }
     }
     fn start(&mut self) -> Result<(), String> {
+        if self.profile_io.is_some() {
+            return Err("profile operation is pending".into());
+        }
         let entry = &self.entries[self.selected];
         let path = entry
             .path
@@ -628,7 +816,14 @@ impl Desktop {
         rect(pixels, 0, 0, WIDTH as i64, HEIGHT as i64, 0x10151e);
         text(pixels, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
         if let Some(draft) = &self.settings {
-            draw_settings(pixels, draft, &mut self.hits, &self.gesture, point)?;
+            draw_settings(
+                pixels,
+                draft,
+                &mut self.hits,
+                &self.gesture,
+                point,
+                self.profile_io.is_some(),
+            )?;
         } else if let Some(game) = &self.game {
             draw_game(pixels, game, self.options.lookahead)?;
             if game.joined {
@@ -920,7 +1115,12 @@ impl ApplicationHandler for Desktop {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     self.key(key, event.repeat);
                 }
-                if editing && !navigation && self.active && !self.closing {
+                if editing
+                    && !navigation
+                    && self.active
+                    && !self.closing
+                    && self.profile_io.is_none()
+                {
                     let value = event.text.as_deref().or_else(|| match &event.logical_key {
                         Key::Character(value) => Some(value.as_str()),
                         _ => None,
@@ -943,7 +1143,11 @@ impl ApplicationHandler for Desktop {
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.collect_game();
-        if self.closing && self.game.as_ref().is_none_or(|game| game.joined) {
+        self.collect_profile();
+        if self.closing
+            && self.game.as_ref().is_none_or(|game| game.joined)
+            && self.profile_io.is_none()
+        {
             event_loop.exit();
             return;
         }
@@ -967,6 +1171,7 @@ impl ApplicationHandler for Desktop {
         self.cancel();
         // Unexpected OS exit still joins native owners through Game::drop.
         self.game = None;
+        self.profile_io = None;
     }
 }
 
@@ -976,6 +1181,7 @@ fn draw_settings(
     hits: &mut Vec<(ControlId, Bounds)>,
     gesture: &Gesture,
     point: Option<(f64, f64)>,
+    pending: bool,
 ) -> Result<(), String> {
     text(
         scene,
@@ -1016,20 +1222,50 @@ fn draw_settings(
             height: 32,
         };
         if index == draft.selected {
-            molecules::text_field(scene, &draft.editor, bounds, true);
+            molecules::text_field(scene, &draft.editor, bounds, !draft.profile_focused);
         } else {
             molecules::text_field_value(scene, &field.value, bounds);
         }
-        hits.push((ControlId(1000 + index as u64), bounds));
+        if !pending {
+            hits.push((ControlId(1000 + index as u64), bounds));
+        }
     }
     if let Some(field) = draft.values.fields().get(draft.selected) {
-        text(scene, 24, 605, field.hint, 1, 0x9bb1cf);
+        text(scene, 24, 525, field.hint, 1, 0x9bb1cf);
+    }
+    let profile_bounds = Bounds {
+        x: 160,
+        y: 558,
+        width: 770,
+        height: 34,
+    };
+    text(scene, 24, 570, "PROFILE PATH", 1, 0xf0f4ff);
+    molecules::text_field(scene, &draft.profile, profile_bounds, draft.profile_focused);
+    if !pending {
+        hits.push((ControlId(15), profile_bounds));
     }
     for (id, x, label) in [
         (10, 24, "APPLY"),
-        (11, 230, "BACK"),
-        (12, 436, "ADD BINDING"),
+        (11, 212, "BACK"),
+        (12, 400, "ADD BINDING"),
+        (13, 588, "LOAD"),
+        (14, 776, "SAVE"),
     ] {
+        if pending {
+            molecules::button(
+                scene,
+                Bounds {
+                    x,
+                    y: 620,
+                    width: 170,
+                    height: 34,
+                },
+                label,
+                false,
+                false,
+            );
+            continue;
+        }
         control(
             scene,
             hits,
@@ -1038,12 +1274,24 @@ fn draw_settings(
             ControlId(id),
             Bounds {
                 x,
-                y: 638,
-                width: 190,
+                y: 620,
+                width: 170,
                 height: 34,
             },
             label,
         );
+    }
+    if pending {
+        text(
+            scene,
+            24,
+            665,
+            "PROFILE FILE OPERATION - WAITING FOR WORKER",
+            1,
+            0xd8b36b,
+        );
+    } else if let Some(message) = &draft.message {
+        text(scene, 24, 665, message, 1, 0x74e5c5);
     }
     if let Some(error) = &draft.error {
         text(scene, 24, 690, error, 1, 0xff8e8e);
@@ -1128,6 +1376,44 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
 mod tests {
     use super::*;
     #[test]
+    fn profile_option_is_ui_owned_and_native_overrides_replace_repeated_groups() {
+        let args = [
+            "--library",
+            "charts",
+            "--profile",
+            "native profile.txt",
+            "--bind",
+            "11:04",
+        ]
+        .map(String::from);
+        let options = Options::parse(&args).unwrap();
+        assert_eq!(options.profile, Some(PathBuf::from("native profile.txt")));
+        assert_eq!(options.native, ["--bind", "11:04"]);
+        for args in [
+            vec!["--library", "charts", "--profile", ""],
+            vec![
+                "--library",
+                "charts",
+                "--profile",
+                "one",
+                "--profile",
+                "two",
+            ],
+        ] {
+            assert!(
+                Options::parse(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err()
+            );
+        }
+        let base = ["--alsa", "hw:1", "--bind", "11:04", "--bind", "12:05"].map(String::from);
+        let merged = beatkernel_bms_runtime::settings::overlay_native_args(
+            &base,
+            &options.native,
+            SettingsHost::Linux,
+        )
+        .unwrap();
+        assert_eq!(merged, ["--alsa", "hw:1", "--bind", "11:04"]);
+    }
+    #[test]
     fn settings_edits_update_the_draft_and_rejections_preserve_text_and_caret() {
         let values =
             NativeSettings::from_args(&["--evdev".into(), "device".into()], SettingsHost::Linux)
@@ -1137,6 +1423,9 @@ mod tests {
             values,
             selected: 0,
             editor,
+            profile: LineEditor::new("", 4096).unwrap(),
+            profile_focused: false,
+            message: None,
             error: None,
         };
         draft.edit(Some(KeyCode::Home), None);
@@ -1149,6 +1438,10 @@ mod tests {
             (draft.editor.value().to_owned(), draft.editor.cursor()),
             before
         );
+        assert_eq!(draft.values.fields()[0].value, "별device");
+        draft.profile_focused = true;
+        draft.edit(None, Some("내 설정.txt"));
+        assert_eq!(draft.profile.value(), "내 설정.txt");
         assert_eq!(draft.values.fields()[0].value, "별device");
     }
     #[test]
