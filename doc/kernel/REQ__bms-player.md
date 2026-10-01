@@ -477,3 +477,9 @@ output reconstruct that section automatically from the original chart/assets.
 Ghosts require the same start; full-song and different-section identities fail.
 Zero-start v1 recordings remain supported. Bounded loops, live scrubbing, pause/resume and historical
 hold-state restoration remain player work. Acoustic restart acceptance is deferred.
+
+## Screen lifecycle
+
+The MVP-like desktop coordinator follows the typed navigation and enter/exit,
+suspend/resume and owner-cleanup requirements in [screen lifecycle](REQ__screen-lifecycle.md).
+Draft presence must not decide active-screen input or drawing.

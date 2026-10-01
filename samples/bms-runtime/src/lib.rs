@@ -51,6 +51,8 @@ pub mod replay_visual;
 /// Bounded platform-independent geometry for GPU presentation.
 #[cfg(feature = "graphics")]
 pub mod scene;
+/// Typed screen route and lifecycle admission independent of a UI toolkit.
+pub mod screen_lifecycle;
 /// Original-timeline chart and PCM preparation for fresh practice starts.
 pub mod section_start;
 /// Immutable native invocations and fresh-session retry naming.
