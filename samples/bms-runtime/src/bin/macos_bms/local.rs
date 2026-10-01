@@ -851,6 +851,9 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                     backlog,
                     resume_boundary.is_some(),
                 ) {
+                    player::publish_section_end(Timestamp::from_nanos(
+                        options.end_ns.expect("finite endpoint admitted"),
+                    ));
                     println!(
                         "all local finite prefixes complete: native endpoint presented and committed HID frontier drained; remaining notes are not forced complete"
                     );

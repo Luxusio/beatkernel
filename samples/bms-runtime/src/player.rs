@@ -164,6 +164,8 @@ pub struct PlayerSnapshot {
     pub status: PlayerStatus,
     pub cancelled: bool,
     pub pause: PauseState,
+    /// Native finite endpoint presented and input drained; cleanup status is separate.
+    pub completed_end: Option<Timestamp>,
 }
 impl Default for PlayerSnapshot {
     fn default() -> Self {
@@ -177,6 +179,7 @@ impl Default for PlayerSnapshot {
             status: PlayerStatus::Loading,
             cancelled: false,
             pause: PauseState::Unavailable,
+            completed_end: None,
         }
     }
 }
@@ -316,6 +319,17 @@ pub fn with_publisher<T>(
         }
     });
     result
+}
+
+/// Records an actual native presented/drained finite endpoint. Call only after
+/// the owner completion gate; Finished is published separately after cleanup.
+/// This does not infer completion from UI time or request owner cancellation.
+pub fn publish_section_end(end: Timestamp) {
+    SESSION.with(|session| {
+        if let Some(current) = session.borrow_mut().as_mut() {
+            current.snapshot.completed_end = Some(end);
+        }
+    });
 }
 
 /// Whether this native owner is attached to a graphical player.
@@ -562,6 +576,57 @@ impl Session {
 #[cfg(test)]
 mod fixtures {
     use super::*;
+    #[test]
+    fn native_endpoint_publication_is_independent_of_ui_time_and_cleanup_result() {
+        let end = Timestamp::from_nanos(604_800_000_000_001);
+        let (publisher, viewer) = channel();
+        assert_eq!(viewer.take_latest().unwrap().completed_end, None);
+        with_publisher(publisher, || {
+            assert_eq!(
+                SESSION.with(|session| session.borrow().as_ref().unwrap().snapshot.completed_end),
+                None
+            );
+            publish_section_end(end);
+            assert_eq!(
+                SESSION.with(|session| session.borrow().as_ref().unwrap().snapshot.status.clone()),
+                PlayerStatus::Loading
+            );
+            Ok(())
+        })
+        .unwrap();
+        let final_state = viewer.take_latest().unwrap();
+        assert_eq!(final_state.completed_end, Some(end));
+        assert_eq!(final_state.status, PlayerStatus::Finished);
+        assert!(!final_state.cancelled);
+        let (publisher, viewer) = channel();
+        with_publisher(publisher, || Ok(())).unwrap(); // Diagnostic/ordinary return.
+        assert_eq!(viewer.take_latest().unwrap().completed_end, None);
+        let (publisher, viewer) = channel();
+        assert!(
+            with_publisher::<()>(publisher, || {
+                publish_section_end(end);
+                Err("cleanup fixture".into())
+            })
+            .is_err()
+        );
+        let failed = viewer.take_latest().unwrap();
+        assert_eq!(failed.completed_end, Some(end)); // Keep actual prefix provenance.
+        assert_eq!(
+            failed.status,
+            PlayerStatus::Failed("cleanup fixture".into())
+        );
+        let (publisher, viewer) = channel();
+        with_publisher(publisher, || {
+            publish_section_end(end);
+            viewer.cancel();
+            Ok(())
+        })
+        .unwrap();
+        let cancelled = viewer.take_latest().unwrap();
+        assert!(cancelled.cancelled);
+        assert_eq!(cancelled.completed_end, Some(end));
+    }
+
     #[test]
     fn pause_requests_require_owner_ack_and_cancellation_wins_across_fresh_channels() {
         let (publisher, viewer) = channel();

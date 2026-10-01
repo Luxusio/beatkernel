@@ -901,6 +901,9 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                     backlog,
                     resume_boundary.is_some(),
                 ) {
+                    player::publish_section_end(Timestamp::from_nanos(
+                        options.end_ns.expect("finite endpoint admitted"),
+                    ));
                     println!(
                         "all Windows local finite prefixes complete: native endpoint presented and committed input frontier drained"
                     );

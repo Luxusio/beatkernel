@@ -282,20 +282,21 @@ impl Game {
     }
     fn loop_due(&self) -> bool {
         self.loop_enabled
+            && self.joined
+            && self.worker.is_none()
+            && !self.replay
+            && !self.cancelling
+            && self.prepared_retry.is_none()
             && !self.viewer.pause_requested()
-            && self.loop_controls_available()
             && self.snapshot.as_ref().is_some_and(|snapshot| {
-                matches!(
-                    snapshot.pause,
-                    player::PauseState::Running | player::PauseState::Unavailable
-                )
-            })
-            && self.practice_loop.is_some_and(|region| {
-                region.reached(beatkernel::time::Timestamp::from_nanos(
-                    self.practice_position()
-                        .expect("loop position admission")
-                        .nanoseconds(),
-                ))
+                snapshot.status == player::PlayerStatus::Finished
+                    && !snapshot.cancelled
+                    && self.practice_loop.is_some_and(|region| {
+                        snapshot.completed_end
+                            == Some(beatkernel::time::Timestamp::from_nanos(
+                                region.end().nanoseconds(),
+                            ))
+                    })
             })
     }
     fn practice_restart_available(&self) -> bool {
@@ -373,7 +374,7 @@ pub(super) fn run(
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
-            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F3 in selection: search; F4 in settings: records; F6 in settings: practice; W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry pinned start and disable loop; F7: mark live position/loop start; F8: restart mark after cleanup; F9: pause/resume when native owner supports it; F10: mark loop end; F11: toggle observed loop (live nonnetwork only, may overshoot and reopen with a gap); Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F3 in selection: search; F4 in settings: records; F6 in settings: practice; W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry pinned start and disable loop; F7: mark live position/loop start; F8: restart mark after cleanup; F9: pause/resume when native owner supports it; F10: mark loop end; F11: toggle native finite loop (live nonnetwork only, joins before restart; reopening may leave a gap); Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
         );
         return Ok(());
     }
@@ -2388,6 +2389,14 @@ impl Desktop {
             }
             .err();
         }
+        // A running owner's audio endpoint is immutable. Enabling repetition
+        // preflights a fresh finite invocation before cancelling that owner.
+        if toggle
+            && self.failure.is_none()
+            && self.game.as_ref().is_some_and(|game| game.loop_enabled)
+        {
+            self.request_restart(true);
+        }
         self.gesture.cancel();
         self.invalidate_hits();
     }
@@ -2415,7 +2424,10 @@ impl Desktop {
         } else {
             self.validate
         };
-        let prepared = if from_bookmark {
+        let prepared = if from_bookmark && game.loop_enabled {
+            game.launch
+                .retry_loop(game.practice_loop.expect("enabled loop admission"))
+        } else if from_bookmark {
             game.launch
                 .retry_from(game.practice_bookmark.expect("bookmark admission"))
         } else {
@@ -2516,7 +2528,6 @@ impl Desktop {
                 game.accept_snapshot(snapshot);
             }
         }
-        self.repeat_practice_if_due();
         let mut retry = None;
         if let Some(game) = &mut self.game {
             if !game.joined
@@ -2543,6 +2554,8 @@ impl Desktop {
                 retry = game.owner_finished(succeeded);
             }
         }
+        // Only the joined worker's final native acknowledgement can repeat.
+        self.repeat_practice_if_due();
         if self.navigator.phase() == ScreenPhase::Active {
             if let Some(game) = &self.game {
                 if game.joined && matches!(self.navigator.route(), ScreenRoute::Play { .. }) {
@@ -2562,7 +2575,10 @@ impl Desktop {
     }
     fn repeat_practice_if_due(&mut self) {
         if self.ui_ready()
-            && self.navigator.route() == (ScreenRoute::Play { replay: false })
+            && matches!(
+                self.navigator.route(),
+                ScreenRoute::Play { replay: false } | ScreenRoute::Results { replay: false }
+            )
             && self.game.as_ref().is_some_and(Game::loop_due)
         {
             self.request_restart(true);
@@ -4636,50 +4652,59 @@ mod tests {
         game
     }
     #[test]
-    fn loop_marking_is_atomic_and_pause_network_watch_and_cleanup_fence_repetition() {
+    fn loop_repeat_requires_exact_native_end_successful_cleanup_and_join() {
         let mut game = loop_fixture();
-        assert!(game.loop_due());
-        let region = game.practice_loop;
-        game.snapshot.as_mut().unwrap().song_time =
-            Some(beatkernel::time::Timestamp::from_nanos(10));
-        assert!(game.mark_loop_end().is_err());
-        assert_eq!(game.practice_loop, region);
-        assert!(game.loop_enabled);
-        assert!(!game.loop_due());
-        game.snapshot.as_mut().unwrap().song_time =
+        assert!(!game.loop_due()); // Observed position already equals the region end.
+        game.snapshot.as_mut().unwrap().song_time = Some(beatkernel::time::Timestamp::MAX);
+        assert!(!game.loop_due()); // Coalesced UI time never authorizes stopping audio.
+        game.snapshot.as_mut().unwrap().completed_end =
             Some(beatkernel::time::Timestamp::from_nanos(20));
+        assert!(!game.loop_due()); // Owner is still Playing, not cleaned up.
+        game.snapshot.as_mut().unwrap().status = player::PlayerStatus::Finished;
+        assert!(!game.loop_due()); // Terminal publication alone is not a join.
+        assert!(game.owner_finished(true).is_none());
+        assert!(game.loop_due());
         game.viewer.request_pause(true);
         assert!(!game.loop_due());
         game.viewer.request_pause(false);
-        for pause in [
-            player::PauseState::Pausing,
-            player::PauseState::Paused,
-            player::PauseState::Resuming,
+        for end in [
+            None,
+            Some(beatkernel::time::Timestamp::from_nanos(19)),
+            Some(beatkernel::time::Timestamp::from_nanos(21)),
         ] {
-            game.snapshot.as_mut().unwrap().pause = pause;
+            game.snapshot.as_mut().unwrap().completed_end = end;
             assert!(!game.loop_due());
         }
-        game.snapshot.as_mut().unwrap().pause = player::PauseState::Running;
-        for flag in ["--mp-host", "--mp-join"] {
-            let mut args = game.launch.args().to_vec();
-            args.extend([flag.into(), "127.0.0.1:1".into()]);
-            game.launch = SessionLaunch::new(args).unwrap();
-            assert!(!game.loop_controls_available());
-            assert!(!game.loop_due());
-        }
-        let mut game = loop_fixture();
+        game.snapshot.as_mut().unwrap().completed_end =
+            Some(beatkernel::time::Timestamp::from_nanos(20));
+        game.snapshot.as_mut().unwrap().cancelled = true;
+        assert!(!game.loop_due());
+        game.snapshot.as_mut().unwrap().cancelled = false;
+        game.snapshot.as_mut().unwrap().status =
+            player::PlayerStatus::Failed("cleanup fixture".into());
+        assert!(!game.loop_due());
+        game.snapshot.as_mut().unwrap().status = player::PlayerStatus::Finished;
         game.replay = true;
         assert!(!game.loop_due());
         game.replay = false;
         game.prepared_retry = Some(game.launch.retry().unwrap());
         assert!(!game.loop_due());
         game.prepared_retry = None;
-        game.mark_practice().unwrap();
-        assert!(game.practice_loop.is_none());
+        game.cancel();
+        assert!(!game.loop_due());
         assert!(!game.loop_enabled);
+        let mut marking = loop_fixture();
+        let region = marking.practice_loop;
+        marking.snapshot.as_mut().unwrap().song_time =
+            Some(beatkernel::time::Timestamp::from_nanos(10));
+        assert!(marking.mark_loop_end().is_err());
+        assert_eq!(marking.practice_loop, region);
+        marking.mark_practice().unwrap();
+        assert!(marking.practice_loop.is_none());
+        assert!(!marking.loop_enabled);
     }
     #[test]
-    fn observed_loop_prepares_one_exact_recorded_retry_and_waits_for_owner_cleanup() {
+    fn native_loop_enable_prepares_both_endpoints_and_waits_for_owner_cleanup() {
         let mut app = lifecycle_fixture();
         let next = app
             .prepare_route(ScreenRoute::Play { replay: false })
@@ -4687,29 +4712,22 @@ mod tests {
         app.commit_route(next);
         app.game = Some(loop_fixture());
         app.occluded = true;
-        app.repeat_practice_if_due();
+        app.request_restart(true);
         assert!(app.game.as_ref().unwrap().prepared_retry.is_none());
         app.occluded = false;
-        app.repeat_practice_if_due();
+        app.request_restart(true); // F11 enabling takes this same preflight path.
         let game = app.game.as_ref().unwrap();
-        assert!(game.cancelling);
-        assert!(!game.joined);
-        assert!(game.worker.is_none()); // This pure fixture never acquires a native owner.
+        assert!(game.cancelling && !game.joined);
         let prepared = game.prepared_retry.as_ref().unwrap();
         assert_eq!(prepared.attempt(), 1);
-        assert!(
-            prepared
-                .args()
-                .chunks_exact(2)
-                .any(|p| p == ["--start-ns", "10"])
-        );
-        assert!(
-            prepared
-                .args()
-                .chunks_exact(2)
-                .any(|p| p == ["--record-replay", "run.retry1.bkr"])
-        );
-        app.repeat_practice_if_due();
+        for pair in [
+            ["--start-ns", "10"],
+            ["--end-ns", "20"],
+            ["--record-replay", "run.retry1.bkr"],
+        ] {
+            assert!(prepared.args().chunks_exact(2).any(|p| p == pair));
+        }
+        app.request_restart(true);
         assert_eq!(
             app.game
                 .as_ref()
@@ -4725,16 +4743,13 @@ mod tests {
         assert!(old.joined);
         let mut next = loop_fixture();
         next.launch = launch;
-        next.snapshot.as_mut().unwrap().song_time =
-            Some(beatkernel::time::Timestamp::from_nanos(10));
         assert!(!next.loop_due());
-        next.snapshot.as_mut().unwrap().song_time =
+        next.snapshot.as_mut().unwrap().status = player::PlayerStatus::Finished;
+        next.snapshot.as_mut().unwrap().completed_end =
             Some(beatkernel::time::Timestamp::from_nanos(20));
+        next.owner_finished(true);
         assert!(next.loop_due());
-        let launch = next
-            .launch
-            .retry_from(next.practice_bookmark.unwrap())
-            .unwrap();
+        let launch = next.launch.retry_loop(next.practice_loop.unwrap()).unwrap();
         assert_eq!(launch.attempt(), 2);
         assert!(
             launch
@@ -4742,6 +4757,31 @@ mod tests {
                 .chunks_exact(2)
                 .any(|p| p == ["--record-replay", "run.retry2.bkr"])
         );
+        let pinned = launch.retry().unwrap();
+        assert!(
+            !pinned
+                .args()
+                .iter()
+                .any(|arg| arg == "--start-ns" || arg == "--end-ns")
+        );
+    }
+    #[test]
+    fn rejected_loop_toggle_during_pause_transition_never_cancels_or_prepares_retry() {
+        let mut app = lifecycle_fixture();
+        let next = app
+            .prepare_route(ScreenRoute::Play { replay: false })
+            .unwrap();
+        app.commit_route(next);
+        app.game = Some(loop_fixture());
+        for pause in [player::PauseState::Pausing, player::PauseState::Resuming] {
+            app.game.as_mut().unwrap().snapshot.as_mut().unwrap().pause = pause;
+            app.edit_loop(true);
+            let game = app.game.as_ref().unwrap();
+            assert!(game.loop_enabled);
+            assert!(!game.cancelling);
+            assert!(game.prepared_retry.is_none());
+            assert!(app.failure.is_some());
+        }
     }
     #[test]
     fn loop_preflight_failure_disables_without_cancel_and_f5_or_explicit_cancel_disarms() {
@@ -4755,7 +4795,7 @@ mod tests {
         app.commit_route(next);
         app.game = Some(loop_fixture());
         app.validate = reject;
-        app.repeat_practice_if_due();
+        app.request_restart(true);
         let game = app.game.as_ref().unwrap();
         assert!(!game.loop_enabled);
         assert!(!game.cancelling);

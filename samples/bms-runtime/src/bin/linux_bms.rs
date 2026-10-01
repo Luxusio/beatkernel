@@ -1120,6 +1120,9 @@ mod native {
                         backlog,
                         resume_boundary.is_some(),
                     ) {
+                        player::publish_section_end(Timestamp::from_nanos(
+                            options.end_ns.expect("finite endpoint admitted"),
+                        ));
                         println!(
                             "finite song prefix completed: native endpoint presented and input frontier drained; remaining notes are not forced complete"
                         );
