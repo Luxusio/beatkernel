@@ -45,6 +45,8 @@ struct Options {
     replay_max_bytes: usize,
     device: String,
     keyboard_path: Option<String>,
+    local_players: Vec<(beatkernel_bms_runtime::local_players::PlayerId, String)>,
+    advance_lag: i64,
     exclusive: bool,
     seconds: Option<u64>,
     bindings: BTreeMap<u8, u16>,
@@ -101,6 +103,32 @@ fn size(value: &str) -> Result<Option<(bool, u64)>> {
         _ => Err("size must be default, frames:N or ns:N".into()),
     }
 }
+fn local_assignment(
+    value: &str,
+) -> Result<(beatkernel_bms_runtime::local_players::PlayerId, String)> {
+    let (id, path) = value
+        .split_once(':')
+        .ok_or("local player requires ID:INTERFACE_PATH")?;
+    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("local player ID requires positive ASCII decimal u32".into());
+    }
+    let id: u32 = id.parse()?;
+    if id == 0
+        || path.is_empty()
+        || path.len() > 4096
+        || path
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
+        return Err(
+            "local player requires positive u32 ID and bounded nonempty interface path".into(),
+        );
+    }
+    Ok((
+        beatkernel_bms_runtime::local_players::PlayerId(id),
+        path.to_owned(),
+    ))
+}
 fn parse(args: &[String]) -> Result<Options> {
     let mut backend = Backend::Wasapi;
     let mut asio_view = None;
@@ -111,6 +139,8 @@ fn parse(args: &[String]) -> Result<Options> {
     let mut chart = None;
     let mut device = None;
     let mut keyboard_path = None;
+    let mut local_players = Vec::new();
+    let mut advance_lag = 2_000_000i64;
     let mut exclusive = None;
     let mut seconds = None;
     let mut bindings = BTreeMap::new();
@@ -132,10 +162,32 @@ fn parse(args: &[String]) -> Result<Options> {
     let mut iter = args.iter();
     while let Some(flag) = iter.next() {
         let value = iter.next().ok_or("each option requires a value")?;
-        if flag != "--bind" && !seen.insert(flag.as_str()) {
+        if !matches!(flag.as_str(), "--bind" | "--local-player") && !seen.insert(flag.as_str()) {
             return Err(format!("duplicate option {flag}").into());
         }
         match flag.as_str() {
+            "--local-player" => {
+                if local_players.len() == beatkernel_bms_runtime::local_players::MAX_LOCAL_PLAYERS {
+                    return Err("local player count exceeds 64".into());
+                }
+                let assignment = local_assignment(value)?;
+                if local_players
+                    .iter()
+                    .any(|(id, path)| *id == assignment.0 || *path == assignment.1)
+                {
+                    return Err("local player IDs and interface paths must be distinct".into());
+                }
+                local_players.push(assignment);
+            }
+            "--advance-lag-ns" => {
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err("advance lag requires unsigned ASCII decimal nanoseconds".into());
+                }
+                advance_lag = value.parse()?;
+                if !(0..=1_000_000_000).contains(&advance_lag) {
+                    return Err("advance lag must be 0..1000000000ns".into());
+                }
+            }
             "--keyboard-path" => {
                 if value.is_empty()
                     || value.len() > 4096
@@ -374,8 +426,15 @@ fn parse(args: &[String]) -> Result<Options> {
     if early < 0 || late < 0 || !(1..=AudioLimits::MAX_VOICES).contains(&voices) {
         return Err("windows must be nonnegative; voices must be 1..4096".into());
     }
+    if !local_players.is_empty() && (local_players.len() < 2 || keyboard_path.is_some()) {
+        return Err(
+            "local play requires 2..64 assignments and no solo keyboard-path override".into(),
+        );
+    }
     Ok(Options {
         keyboard_path,
+        local_players,
+        advance_lag,
         backend,
         asio_view,
         output_channels,
@@ -550,14 +609,22 @@ fn main() -> Result<()> {
 /// Validate settings through the same parsers as play, without opening any resources.
 #[allow(dead_code)] // Standalone native binaries have no settings screen.
 pub(crate) fn validate_args(args: &[String]) -> Result<()> {
-    let (_, native) = beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
-    parse(&native).map(|_| ())
+    let (competition, native) =
+        beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
+    let options = parse(&native)?;
+    if !options.local_players.is_empty() && competition.network.is_some() {
+        return Err("network competition currently supports one local participant only".into());
+    }
+    Ok(())
 }
 
 pub(crate) fn run_args(args: &[String]) -> Result<()> {
     let (competition_options, args) =
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
+        println!(
+            "Local play: repeat --local-player ID:EXACT_INTERFACE_PATH for 2..64 distinct keyboards, without --keyboard-path. Stable positive u32 IDs are preserved in GUI scores and .p<ID>.bkr replay files. --advance-lag-ns 0..1000000000 (default 2000000) controls the common input frontier. Network + local groups is unsupported; saved ghosts are per-player. Native commands compose the graphical player's actual runtime."
+        );
         println!(
             "windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Optional --keyboard-path EXACT_INTERFACE_PATH selects one physical keyboard; omitted accepts any physical keyboard. Explicit device removal fails the session. Focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured."
         );
@@ -621,7 +688,7 @@ mod native {
     };
     pub(super) const HOST: ClockDomainId = ClockDomainId(1);
     pub(super) const OUTPUT: ClockDomainId = ClockDomainId(2);
-    struct ExplicitDomains;
+    pub(super) struct ExplicitDomains;
     impl ClockMapper for ExplicitDomains {
         fn map(&self, _: ClockPoint, _: ClockDomainId) -> Option<Timestamp> {
             None
@@ -870,12 +937,12 @@ mod native {
     }
     // Own registration and its target together. Created before stream, so early
     // returns drop/join audio before this guard unregisters and destroys Window.
-    struct AcquisitionWindow {
-        registration: RawInputRegistration,
+    pub(super) struct AcquisitionWindow {
+        pub(super) registration: RawInputRegistration,
         window: Option<Window>,
     }
     impl AcquisitionWindow {
-        fn new() -> Result<Self> {
+        pub(super) fn new() -> Result<Self> {
             let window = Window::new()?;
             let registration =
                 RawInputRegistration::register(window.hwnd as usize, &[RawInputUsage::KEYBOARD])?;
@@ -884,7 +951,7 @@ mod native {
                 window: Some(window),
             })
         }
-        fn hwnd(&self) -> HWND {
+        pub(super) fn hwnd(&self) -> HWND {
             self.window.as_ref().expect("live window owner").hwnd
         }
     }
@@ -928,6 +995,9 @@ mod native {
         options: Options,
         competition_options: beatkernel_bms_runtime::competition_live::CompetitionOptions,
     ) -> Result<()> {
+        if !options.local_players.is_empty() {
+            return super::local_native::run(options, competition_options);
+        }
         let clock = QpcClock::new(HOST)?;
         // Declared before device owners so every exit reports after their cleanup.
         let mut delivery = DeliverySession(beatkernel::telemetry::InputDeliveryTelemetry::new(
@@ -1350,6 +1420,57 @@ mod preroll_fixtures {
     use super::*;
     use beatkernel::audio::{SampleId, VoiceId};
     #[test]
+    fn local_assignments_preserve_stable_ids_colons_and_lag_boundaries() {
+        let mut configured = arguments(None);
+        for id in [3, 9, 17, u32::MAX] {
+            configured.extend(["--local-player".into(), format!("{id}:path:{id}")]);
+        }
+        let options = parse(&configured).unwrap();
+        assert_eq!(options.local_players.len(), 4);
+        assert_eq!(options.local_players[3].0.0, u32::MAX);
+        assert_eq!(options.local_players[0].1, "path:3");
+        assert_eq!(options.advance_lag, 2_000_000);
+        for value in ["0", "1000000000"] {
+            let mut args = configured.clone();
+            args.extend(["--advance-lag-ns".into(), value.into()]);
+            assert!(parse(&args).is_ok());
+        }
+        configured.extend(["--mp-host".into(), "127.0.0.1:34567".into()]);
+        assert!(validate_args(&configured).is_err());
+    }
+    #[test]
+    fn local_cli_rejects_missing_duplicate_mixed_and_oversized_assignments() {
+        for values in [
+            vec!["--local-player", "1:path"],
+            vec!["--local-player", "0:path", "--local-player", "2:other"],
+            vec!["--local-player", "+1:path", "--local-player", "2:other"],
+            vec!["--local-player", "1:path", "--local-player", "1:other"],
+            vec!["--local-player", "1:path", "--local-player", "2:path"],
+            vec![
+                "--local-player",
+                "1:path",
+                "--local-player",
+                "2:other",
+                "--keyboard-path",
+                "solo",
+            ],
+            vec!["--advance-lag-ns", "-1"],
+            vec!["--advance-lag-ns", "+1"],
+            vec!["--advance-lag-ns", "1000000001"],
+        ] {
+            let mut configured = arguments(None);
+            configured.extend(values.into_iter().map(String::from));
+            assert!(parse(&configured).is_err());
+        }
+        let mut configured = arguments(None);
+        for id in 1..=64 {
+            configured.extend(["--local-player".into(), format!("{id}:path:{id}")]);
+        }
+        assert_eq!(parse(&configured).unwrap().local_players.len(), 64);
+        configured.extend(["--local-player".into(), "65:path:65".into()]);
+        assert!(parse(&configured).is_err());
+    }
+    #[test]
     fn settings_validation_preserves_native_and_competition_constraints() {
         let mut configured = arguments(None);
         configured.extend([
@@ -1523,6 +1644,10 @@ mod asio_fixtures;
 #[cfg(target_os = "windows")]
 #[path = "windows_bms/output.rs"]
 mod live_output;
+
+#[cfg(target_os = "windows")]
+#[path = "windows_bms/local.rs"]
+mod local_native;
 
 #[cfg(test)]
 #[test]
