@@ -42,6 +42,7 @@ pub mod player_chart;
 mod playfield_gpu;
 /// Exact original-song practice positions and native-setting draft updates.
 pub mod practice;
+pub mod practice_loop;
 /// Portable display configuration shared by CLI, graphical drafts and profiles.
 pub mod presentation_settings;
 /// Bounded saved-record discovery and chart/profile-compatible prefix previews.
