@@ -74,9 +74,6 @@ impl SessionLaunch {
                 "--replay" | "--mp-host" | "--mp-join" => {
                     return Err("finite practice loops require live nonnetwork playback".into());
                 }
-                "--backend" if pair[1] == "asio" => {
-                    return Err("finite practice loops require validated native presentation, unavailable for ASIO".into());
-                }
                 "--start-ns" | "--end-ns" => {
                     let slot = usize::from(pair[0] == "--end-ns");
                     if indices[slot].replace(index * 2 + 1).is_some() {
@@ -254,7 +251,6 @@ mod fixtures {
             args(&["--chart", "a", "--replay", "watch.bkr"]),
             args(&["--chart", "a", "--mp-host", "127.0.0.1:34567"]),
             args(&["--chart", "a", "--mp-join", "127.0.0.1:34567"]),
-            args(&["--chart", "a", "--backend", "asio"]),
         ] {
             let launch = SessionLaunch::new(original.clone()).unwrap();
             assert!(launch.retry_loop(region(0, 1)).is_err());
@@ -291,6 +287,63 @@ mod fixtures {
         let full = SessionLaunch::new(original.clone()).unwrap();
         assert!(full.retry_loop(region(0, 1)).is_err());
         assert_eq!(full.args(), original);
+    }
+    #[test]
+    fn finite_asio_retry_preserves_pinned_driver_clock_and_local_ids_for_native_preflight() {
+        let original = args(&[
+            "--chart",
+            "song.bms",
+            "--backend",
+            "asio",
+            "--buffer",
+            "frames:64",
+            "--device",
+            "driver",
+            "--asio-system-clock",
+            "multimedia",
+            "--asio-timer-error-ns",
+            "100",
+            "--asio-drift-error-ns",
+            "200",
+            "--asio-latency-error-ns",
+            "300",
+            "--output-channels",
+            "3,1",
+            "--local-player",
+            "7:path-a",
+            "--local-player",
+            "4294967295:path-b",
+            "--record-replay",
+            "take.bkr",
+        ]);
+        let pinned = SessionLaunch::new(original.clone()).unwrap();
+        let first = pinned.retry_loop(region(100, 200)).unwrap();
+        for pair in original
+            .chunks_exact(2)
+            .filter(|p| p[0] != "--record-replay")
+        {
+            assert!(first.args().chunks_exact(2).any(|actual| actual == pair));
+        }
+        for pair in [
+            ["--start-ns", "100"],
+            ["--end-ns", "200"],
+            ["--record-replay", "take.retry1.bkr"],
+        ] {
+            assert!(first.args().chunks_exact(2).any(|actual| actual == pair));
+        }
+        let second = first.retry_loop(region(300, 400)).unwrap();
+        assert_eq!(second.attempt(), 2);
+        assert!(
+            second
+                .args()
+                .chunks_exact(2)
+                .any(|p| p == ["--record-replay", "take.retry2.bkr"])
+        );
+        assert_eq!(
+            second.retry().unwrap().args()[..original.len() - 2],
+            original[..original.len() - 2]
+        );
+        assert_eq!(pinned.args(), original);
     }
     #[test]
     fn bookmark_retries_preserve_options_capture_base_and_pinned_f5_start() {
