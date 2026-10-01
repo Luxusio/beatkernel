@@ -475,7 +475,7 @@ Recordings identify the filtered pristine section judge and store positive
 original-song starts in v2 options. Standalone logical replay and recorded audio
 output reconstruct that section automatically from the original chart/assets.
 Ghosts require the same start; full-song and different-section identities fail.
-Zero-start v1 recordings remain supported. Observed practice loops and acknowledged
+Zero-start v1 recordings remain supported. Native finite practice loops and acknowledged
 native pause are described below. Sample-exact loops, live scrubbing and historical
 hold-state restoration remain player work. Acoustic restart acceptance is deferred.
 
@@ -718,37 +718,36 @@ The bookmark is owned by the session, not the settings draft. New chart launches
 start with no bookmark; replay Watch cannot use this live practice override.
 Known ceiling: snapshot delivery is coalesced, so the mark is the latest observed
 position rather than the exact physical key event time. This creates a fresh
-transport rather than seeking/pause-resuming a live driver. Observed loops and
+transport rather than seeking/pause-resuming a live driver. Native finite loops and
 presentation-derived pause are described below; sample-exact native loops,
 browser host and full native timing acceptance remain unfinished.
 
-## Observed practice loop
+## Native finite practice loop
 
-Live practice also permits observed-position repetition. F7 marks the start,
-F10 marks a strictly later end from the latest accepted native song position,
-and F11 enables or disables repetition of that complete region. Changing the
-start clears the old end and disables repetition. Invalid end marks preserve
-the previous region. Watch and network sessions cannot configure repetitions;
-local cohorts repeat through their shared owner and saved ghosts remain usable.
+F7 marks an exact observed original-song start; F10 marks a strictly later end.
+F11 enable preflights a fresh pinned SessionLaunch with both --start-ns and
+--end-ns, then cancels/drains/joins the current owner before replacement. Native
+parsers admit supported solo/local modes and reject ASIO/network finite playback.
+The region remains scalar; notes acquire no per-frame reactive state.
+Each native owner configures immutable audio/logical ends before gameplay and
+records completed_end only after native presentation and drained input/resume
+completion. Finished publishes only after native cleanup returns. Automatic
+repeat requires the worker joined, successful noncancelled Finished, exact
+completed_end matching the region and an enabled loop. UI positions, diagnostic
+seconds, cancelled sessions, failed cleanup and mismatched endpoints cannot
+repeat. Repetition preflights the same pinned original with checked recording
+ordinals, one preroll and preserved independent member identities.
+F5 returns to the pinned original and disables loops; cancel/focus loss also
+disables them. Toggling off stops automatic repetition while the current immutable
+section can finish. Failed preflight never cancels the current owner and disables
+repetition. Hidden/suspended/closing UI cannot initiate restart; joined terminal
+evidence is retained for an active later frame. Pause and loop controls keep
+separate footer hit rectangles and retained screen scopes/backstack lifecycle.
 
-While enabled, the first observed Playing position at or beyond the end requests
-the same checked fresh restart at the start bookmark. Native preflight must
-succeed before cancellation; pending restart prevents duplicate requests. The
-old owner drains and joins before the next attempt acquires audio/input. The
-region follows successful replacements; each attempt derives its recording path
-from the original base and increasing ordinal. F5 disables repetition and keeps
-the original pinned start. Explicit cancel, failed preflight, failed cleanup or
-failed replacement disables repetition. Paused or pending pause phases cannot
-trigger repetition, including a desired pause request awaiting acknowledgement;
-hidden/suspended/closing UI cannot request a restart. Pause and loop controls
-occupy separate footer rectangles and do not overlap Cancel/Return hit targets.
-
-Known ceiling: this initial loop uses coalesced native-position observations
-on the UI cadence. Output and judging may progress beyond the end before the
-request; teardown, reopening and loading introduce a gap. Missing observations
-or native completion before an observed crossing do not trigger another attempt.
-Sample-exact native loop-end fencing, gapless looping and native execution
-acceptance remain unfinished.
+Known ceiling: native owner teardown/reopening/loading can introduce a gap —
+upgrade when a continuous native owner can reset all playback/input/capture state
+without reopening while preserving verified presentation and judging boundaries.
+Native hardware, GUI and acoustic acceptance remain unverified.
 
 The audio foundation supports an immutable exclusive playback frame end supplied
 before Mixer construction. PracticeLoop maps its matching session start, explicit
@@ -756,8 +755,7 @@ preroll and nonzero sample rate to that endpoint using checked integer ceiling
 arithmetic. The first frame at or after the marked end is silent; mapping applies
 original start/preroll once and excludes physical pause gaps. Native pause models
 accept the actual active-prefix/silent-tail report and acknowledge its playback
-end only after presentation crossing. This primitive is not yet wired into live
-loop owner/judging admission; the observed UI loop retains the ceiling above.
+end only after presentation crossing. This primitive is wired into live solo/local loop owner and judging admission.
 
 The shared runtime also supports a setup-only immutable original-song end.
 Solo and local 1..64 members install the same scalar boundary before processing;
@@ -767,8 +765,8 @@ mapped at/after the end cannot hit or bind; the existing judge advances only to
 the capped end and capture records its actual Advance prefix. Shared Transport,
 pause/discipline, source validation and independent player identities remain.
 Logical end reports do not acknowledge native presentation or complete remaining
-hold/notes. Native owner/config/UI/frontier/cleanup integration still remains;
-the observed loop retains its current ceiling until that connection is made.
+hold/notes. Native solo/local owners and UI loop intent install both endpoints and wait for
+the presentation/input frontier and cleanup before repeating.
 The native-end observer consumes a retained physical render endpoint and actual
 associated output/host clock pairs. It validates the expected playback endpoint,
 monotonic grids and clocks, retains evidence across unavailable telemetry and
@@ -908,8 +906,11 @@ Missing/regressing/unrepresentable clock relations, native device failure and
 raw queue SYN_DROPPED/resync terminate and drain the session with its valid
 recorded prefix. Waiting for output presentation can grow a raw-input backlog;
 input loss is never silently repaired. ASIO/network pause policy,
-sample-exact native loops/browser/full widget host and full native/GUI/replay acceptance remain
+gapless loops/browser/full widget host and full native/GUI/replay acceptance remain
 unfinished. Source compilation and authored fixtures are not execution proof.
 
 ### Native finite solo expansion
 Windows WASAPI shared/exclusive and macOS CoreAudio solo or local 2..64 commands accept a strictly later unsigned `--end-ns`. Derive the endpoint on the actual PCM grid, freeze audio at that exclusive frame, cap judging at the logical end, and finish only after native presentation and drained input/resume reconciliation. Unlimited sessions retain full-song completion. Network and ASIO finite modes remain explicitly rejected here pending their owners. Author portable argument/frontier and model fixtures for later execution; compilation is not native acceptance.
+
+### Native finite UI practice intent
+Enabling a marked practice loop preflights a fresh pinned invocation with exact --start-ns/--end-ns, then cancels and joins the previous owner. Each native session ends only at its immutable PCM/logical endpoint and native/drained frontier. Automatic repeat requires the old worker joined, successful noncancelled Finished publication and its exact completed endpoint. Observed UI song time never authorizes an audio stop/repeat; diagnostic seconds and failures cannot repeat. Disabling repetition leaves the current immutable section fence until it finishes; F5 returns to the pinned original. Fresh repeated owners preserve replay filename ordinals and one preroll. Restart may leave a device reopening gap; no gapless claim. Prepare fixtures for later execution; native GUI/acoustic acceptance remains deferred.

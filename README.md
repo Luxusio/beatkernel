@@ -145,23 +145,21 @@ network competition, using native-frontier acknowledgement, shared Transport
 fencing and paused-key reconciliation. Replay Watch supports the same F9 control
 when an actual output/host clock pair is available, freezing recorded progress
 and sounds together. ASIO and network pause,
-live scrubbing and sample-exact native loops remain work; native/GUI execution is
+live scrubbing and gapless repetition remain work; native/GUI execution is
 still unverified. In live nonnetwork play, F7 marks a loop start, F10 marks a later
-end and F11 toggles observed-position repetition. Crossing the observed end
-preflights, cancels, drains and joins the old owner before restarting at the
-exact marked start. Coalesced UI observations can overshoot the end and reopening
-leaves a gap; this is not gapless playback. F5 and explicit cancel disable loops.
-The mixer now also accepts an immutable exclusive playback-frame end: a block
-crossing it renders only the active prefix and emits silence afterward. Checked
-loop-end mapping and native acknowledgement models support that boundary;
-live loop owners and judging still need to be connected to this exact fence.
+end and F11 enables a fresh native finite session with exact start/end options.
+Enabling first preflights, cancels, drains and joins the current owner. Audio
+stops at its immutable exclusive PCM frame end and judging caps at the logical
+end. Repetition waits for the actual native presented/drained endpoint, successful
+cleanup and worker join. Coalesced UI positions do not stop audio or authorize
+repetition. New sessions use one preroll and distinct replay retry filenames.
+F5 and explicit cancel disable loops; toggling off leaves the current finite
+section to finish. Reopening can leave a gap; this is not gapless playback.
 Linux solo and local 2..64 owners can opt into `--end-ns N`, strictly after
 `--start-ns`, to use the immutable audio/judging ends and wait for actual native
 presentation plus drained input before finite-prefix completion. Manual pause
 and short resume retain their physical gaps. Every assigned keyboard must drain
-and every member must reach the same logical end. Network endpoint support and
-UI practice-region wiring remains unfinished; loops above retain
-their observed-position ceiling. Portable regression fixtures are prepared for
+and every member must reach the same logical end. Network endpoint support remains unfinished. Portable regression fixtures are prepared for
 later execution, while native hardware/GUI/acoustic checks remain unverified.
 Windows WASAPI shared/exclusive and macOS CoreAudio solo and local 2..64 owners also accept
 `--end-ns`, using their actual PCM grid and native output/host clock relation.
