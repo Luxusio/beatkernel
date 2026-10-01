@@ -40,9 +40,39 @@ struct Cached {
 }
 
 impl PlayfieldCache {
+    #[cfg(test)]
     pub fn frame(
         &mut self,
         notes: &[&PlayerNote],
+        lanes: usize,
+        bounds: Bounds,
+        now: Timestamp,
+        lookahead: i64,
+    ) -> PlayfieldFrame {
+        self.frame_inner(notes.iter().copied(), lanes, bounds, now, lookahead)
+    }
+
+    pub fn frame_indexed(
+        &mut self,
+        notes: &[PlayerNote],
+        indices: &[usize],
+        lanes: usize,
+        bounds: Bounds,
+        now: Timestamp,
+        lookahead: i64,
+    ) -> PlayfieldFrame {
+        self.frame_inner(
+            indices.iter().map(|&index| &notes[index]),
+            lanes,
+            bounds,
+            now,
+            lookahead,
+        )
+    }
+
+    fn frame_inner<'a>(
+        &mut self,
+        notes: impl ExactSizeIterator<Item = &'a PlayerNote> + Clone,
         lanes: usize,
         bounds: Bounds,
         now: Timestamp,
@@ -61,7 +91,11 @@ impl PlayfieldCache {
                 && i128::from(now.as_nanos()) - i128::from(cached.epoch.as_nanos())
                     <= i128::from(lookahead) / 4
                 && cached.notes.len() == notes.len()
-                && cached.notes.iter().zip(notes).all(|(old, new)| old == *new)
+                && cached
+                    .notes
+                    .iter()
+                    .zip(notes.clone())
+                    .all(|(old, new)| old == new)
         });
         if !reuse {
             let mut instances = Vec::with_capacity(notes.len() * 3);
@@ -74,7 +108,7 @@ impl PlayfieldCache {
                 (line as f64 - delta as f64 * (line - top) as f64 / lookahead as f64)
                     .clamp(top as f64 - margin, line as f64 + 15.0 + margin) as f32
             };
-            for note in notes {
+            for note in notes.clone() {
                 let left = bounds.x
                     + (note.lane_index as i128 * i128::from(bounds.width) / lanes as i128) as i64;
                 let right = bounds.x
@@ -100,7 +134,7 @@ impl PlayfieldCache {
                 push(left + 3, right - left - 6, 2.0, 0x74e5c5);
             }
             self.state = Some(Cached {
-                notes: notes.iter().map(|note| (*note).clone()).collect(),
+                notes: notes.cloned().collect(),
                 lanes,
                 bounds,
                 lookahead,
@@ -141,6 +175,83 @@ mod tests {
             start: Timestamp::from_nanos(start),
             end: end.map(Timestamp::from_nanos),
         }
+    }
+
+    #[test]
+    fn indexed_and_reference_frames_share_geometry_and_keep_cache_semantics() {
+        let notes = vec![
+            note(0, Some(2_000_000_000)),
+            PlayerNote {
+                object: ObjectId(2),
+                ..note(500_000_000, None)
+            },
+        ];
+        let indices = [0, 1];
+        let mut indexed = PlayfieldCache::default();
+        let mut legacy = PlayfieldCache::default();
+        let first = indexed.frame_indexed(
+            &notes,
+            &indices,
+            1,
+            bounds(),
+            Timestamp::ZERO,
+            1_000_000_000,
+        );
+        let reference = legacy.frame(
+            &[&notes[0], &notes[1]],
+            1,
+            bounds(),
+            Timestamp::ZERO,
+            1_000_000_000,
+        );
+        assert_eq!(first.instances.len(), 4);
+        for (a, b) in first.instances.iter().zip(reference.instances.iter()) {
+            assert_eq!(a.geometry, b.geometry);
+            assert_eq!(a.appearance, b.appearance);
+        }
+        let next = indexed.frame_indexed(
+            &notes,
+            &indices,
+            1,
+            bounds(),
+            Timestamp::from_nanos(100_000_000),
+            1_000_000_000,
+        );
+        assert!(Arc::ptr_eq(&first.instances, &next.instances));
+        let replacement = vec![
+            PlayerNote {
+                object: ObjectId(3),
+                ..notes[0].clone()
+            },
+            notes[1].clone(),
+        ];
+        let changed = indexed.frame_indexed(
+            &replacement,
+            &indices,
+            1,
+            bounds(),
+            Timestamp::from_nanos(100_000_000),
+            1_000_000_000,
+        );
+        assert!(!Arc::ptr_eq(&next.instances, &changed.instances));
+        let seek = indexed.frame_indexed(
+            &replacement,
+            &indices,
+            1,
+            bounds(),
+            Timestamp::ZERO,
+            1_000_000_000,
+        );
+        assert!(!Arc::ptr_eq(&changed.instances, &seek.instances));
+        let empty = indexed.frame_indexed(
+            &replacement,
+            &[],
+            1,
+            bounds(),
+            Timestamp::ZERO,
+            1_000_000_000,
+        );
+        assert!(empty.instances.is_empty());
     }
 
     #[test]

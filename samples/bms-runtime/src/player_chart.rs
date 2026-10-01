@@ -161,6 +161,56 @@ impl PlayerChart {
         }
     }
 
+    /// Writes ordered chart-local indices into reusable bounded scratch storage.
+    /// Clears output on every call, including negative windows and rejection.
+    /// Successful warmed queries reuse capacity; this is not a whole-frame
+    /// allocation guarantee for instance rebuilds or error strings.
+    pub fn visible_note_indices_checked(
+        &self,
+        now: Timestamp,
+        lookahead_ns: i64,
+        behind_ns: i64,
+        output: &mut Vec<usize>,
+    ) -> Result<(), String> {
+        output.clear();
+        let Some((lower, end)) = self.visible_bounds(now, lookahead_ns, behind_ns) else {
+            return Ok(());
+        };
+        let capacity = if end == 0 { 0 } else { MAX_VISIBLE_NOTES + 1 };
+        if output.capacity() < capacity {
+            output
+                .try_reserve_exact(capacity)
+                .map_err(|_| "playfield visibility allocation failed".to_string())?;
+        }
+        self.visit_visible(lower, end, MAX_VISIBLE_NOTES + 1, |index| {
+            output.push(index)
+        });
+        if output.len() > MAX_VISIBLE_NOTES {
+            output.clear();
+            return Err(format!(
+                "playfield exceeds {MAX_VISIBLE_NOTES} visible notes"
+            ));
+        }
+        Ok(())
+    }
+
+    fn visible_bounds(
+        &self,
+        now: Timestamp,
+        lookahead_ns: i64,
+        behind_ns: i64,
+    ) -> Option<(i128, usize)> {
+        if lookahead_ns < 0 || behind_ns < 0 {
+            return None;
+        }
+        let lower = i128::from(now.as_nanos()) - i128::from(behind_ns);
+        let upper = i128::from(now.as_nanos()) + i128::from(lookahead_ns);
+        let end = self
+            .notes
+            .partition_point(|note| i128::from(note.start.as_nanos()) <= upper);
+        Some((lower, end))
+    }
+
     fn visible_notes_inner(
         &self,
         now: Timestamp,
@@ -168,41 +218,55 @@ impl PlayerChart {
         behind_ns: i64,
         max: usize,
     ) -> Vec<&PlayerNote> {
-        if lookahead_ns < 0 || behind_ns < 0 || max == 0 {
+        if max == 0 {
             return Vec::new();
         }
-        let lower = i128::from(now.as_nanos()) - i128::from(behind_ns);
-        let upper = i128::from(now.as_nanos()) + i128::from(lookahead_ns);
-        let end = self
-            .notes
-            .partition_point(|note| i128::from(note.start.as_nanos()) <= upper);
+        let Some((lower, end)) = self.visible_bounds(now, lookahead_ns, behind_ns) else {
+            return Vec::new();
+        };
         let mut visible = Vec::with_capacity(max.min(end));
-        self.collect_visible(1, 0, self.tree_leaves, end, lower, max, &mut visible);
+        self.visit_visible(lower, end, max, |index| visible.push(&self.notes[index]));
         visible
     }
 
-    fn collect_visible<'a>(
-        &'a self,
+    fn visit_visible(&self, lower: i128, end: usize, max: usize, mut emit: impl FnMut(usize)) {
+        let mut emitted = 0;
+        self.collect_visible(
+            1,
+            0,
+            self.tree_leaves,
+            end,
+            lower,
+            max,
+            &mut emitted,
+            &mut emit,
+        );
+    }
+
+    fn collect_visible(
+        &self,
         node: usize,
         first: usize,
         last: usize,
         end: usize,
         lower: i128,
         max: usize,
-        visible: &mut Vec<&'a PlayerNote>,
+        emitted: &mut usize,
+        emit: &mut impl FnMut(usize),
     ) {
-        if first >= end || visible.len() >= max || i128::from(self.endpoint_tree[node]) < lower {
+        if first >= end || *emitted >= max || i128::from(self.endpoint_tree[node]) < lower {
             return;
         }
         if last - first == 1 {
-            if let Some(note) = self.notes.get(first) {
-                visible.push(note);
+            if first < self.notes.len() {
+                emit(first);
+                *emitted += 1;
             }
             return;
         }
         let middle = first + (last - first) / 2;
-        self.collect_visible(node * 2, first, middle, end, lower, max, visible);
-        self.collect_visible(node * 2 + 1, middle, last, end, lower, max, visible);
+        self.collect_visible(node * 2, first, middle, end, lower, max, emitted, emit);
+        self.collect_visible(node * 2 + 1, middle, last, end, lower, max, emitted, emit);
     }
 }
 
@@ -370,6 +434,178 @@ pub fn scan_library(root: &Path) -> Result<ChartLibrary, PlayerChartError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn indexed_model(mut notes: Vec<PlayerNote>) -> PlayerChart {
+        notes.sort_by_key(|note| (note.start, note.object));
+        let tree_leaves = notes.len().max(1).next_power_of_two();
+        let mut endpoint_tree = vec![i64::MIN; tree_leaves * 2];
+        for (index, note) in notes.iter().enumerate() {
+            endpoint_tree[tree_leaves + index] = note.end.unwrap_or(note.start).as_nanos();
+        }
+        for index in (1..tree_leaves).rev() {
+            endpoint_tree[index] = endpoint_tree[index * 2].max(endpoint_tree[index * 2 + 1]);
+        }
+        PlayerChart {
+            title: String::new(),
+            artist: String::new(),
+            lanes: vec![0x11],
+            duration_ns: 0,
+            notes,
+            endpoint_tree,
+            tree_leaves,
+        }
+    }
+
+    #[test]
+    fn indexed_query_matches_linear_overlap_oracle_and_reuses_warmed_storage() {
+        let notes = [
+            (i64::MIN, Some(i64::MIN + 1)),
+            (-5, Some(10)),
+            (-1, None),
+            (0, None),
+            (5, Some(i64::MAX)),
+            (i64::MAX, None),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (start, end))| PlayerNote {
+            object: ObjectId(index as u64 + 1),
+            lane_index: 0,
+            start: Timestamp::from_nanos(start),
+            end: end.map(Timestamp::from_nanos),
+        })
+        .collect();
+        let chart = indexed_model(notes);
+        let mut output = Vec::new();
+        chart
+            .visible_note_indices_checked(Timestamp::ZERO, i64::MAX, i64::MAX, &mut output)
+            .unwrap();
+        let pointer = output.as_ptr();
+        let capacity = output.capacity();
+        for now in [
+            i64::MIN,
+            i64::MIN + 1,
+            -1,
+            0,
+            5,
+            10,
+            i64::MAX - 1,
+            i64::MAX,
+            5,
+            0,
+        ] {
+            for lookahead in [0, 10, i64::MAX] {
+                for behind in [0, 10, i64::MAX] {
+                    let lower = i128::from(now) - i128::from(behind);
+                    let upper = i128::from(now) + i128::from(lookahead);
+                    let expected: Vec<_> = chart
+                        .notes
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, note)| {
+                            i128::from(note.start.as_nanos()) <= upper
+                                && i128::from(note.end.unwrap_or(note.start).as_nanos()) >= lower
+                        })
+                        .map(|(index, _)| index)
+                        .collect();
+                    chart
+                        .visible_note_indices_checked(
+                            Timestamp::from_nanos(now),
+                            lookahead,
+                            behind,
+                            &mut output,
+                        )
+                        .unwrap();
+                    assert_eq!(output, expected);
+                    assert_eq!(output.as_ptr(), pointer);
+                    assert_eq!(output.capacity(), capacity);
+                    let references = chart
+                        .visible_notes_checked(Timestamp::from_nanos(now), lookahead, behind)
+                        .unwrap();
+                    assert_eq!(
+                        references
+                            .iter()
+                            .map(|note| note.object)
+                            .collect::<Vec<_>>(),
+                        output
+                            .iter()
+                            .map(|&index| chart.notes[index].object)
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+        for (lookahead, behind) in [(-1, 0), (0, -1)] {
+            chart
+                .visible_note_indices_checked(Timestamp::ZERO, lookahead, behind, &mut output)
+                .unwrap();
+            assert!(output.is_empty());
+            assert_eq!(output.as_ptr(), pointer);
+        }
+        let replacement = indexed_model(vec![PlayerNote {
+            object: ObjectId(99),
+            lane_index: 0,
+            start: Timestamp::ZERO,
+            end: None,
+        }]);
+        replacement
+            .visible_note_indices_checked(Timestamp::ZERO, 0, 0, &mut output)
+            .unwrap();
+        assert_eq!(output, vec![0]);
+        assert_eq!(output.as_ptr(), pointer);
+        assert_eq!(output.capacity(), capacity);
+        indexed_model(vec![])
+            .visible_note_indices_checked(Timestamp::ZERO, 0, 0, &mut output)
+            .unwrap();
+        assert!(output.is_empty());
+        assert_eq!(output.as_ptr(), pointer);
+    }
+
+    #[test]
+    fn indexed_budget_is_exact_and_overflow_clears_without_losing_storage() {
+        let dense = |count| {
+            indexed_model(
+                (0..count)
+                    .map(|index| PlayerNote {
+                        object: ObjectId(index as u64 + 1),
+                        lane_index: 0,
+                        start: Timestamp::ZERO,
+                        end: None,
+                    })
+                    .collect(),
+            )
+        };
+        let exact = dense(MAX_VISIBLE_NOTES);
+        let overflow = dense(MAX_VISIBLE_NOTES + 1);
+        let mut output = vec![usize::MAX];
+        exact
+            .visible_note_indices_checked(Timestamp::ZERO, 0, 0, &mut output)
+            .unwrap();
+        assert_eq!(output.len(), MAX_VISIBLE_NOTES);
+        assert!(
+            overflow
+                .visible_note_indices_checked(Timestamp::ZERO, 0, 0, &mut output)
+                .is_err()
+        );
+        assert!(output.is_empty());
+        let pointer = output.as_ptr();
+        let capacity = output.capacity();
+        exact
+            .visible_note_indices_checked(Timestamp::ZERO, 0, 0, &mut output)
+            .unwrap();
+        assert_eq!(output.as_ptr(), pointer);
+        assert_eq!(output.capacity(), capacity);
+        assert!(
+            overflow
+                .visible_notes_checked(Timestamp::ZERO, 0, 0)
+                .is_err()
+        );
+        assert_eq!(
+            overflow
+                .visible_notes(Timestamp::ZERO, 0, 0, usize::MAX)
+                .len(),
+            MAX_VISIBLE_NOTES
+        );
+    }
     use beatkernel_bms::{ParseOptions, parse};
 
     fn model(text: &str) -> PlayerChart {

@@ -63,6 +63,8 @@ pub struct Scene {
     error: Option<String>,
     playfields: Vec<PlayfieldFrame>,
     playfield_caches: Vec<PlayfieldCache>,
+    // Lazy backing storage: static retained nodes never run a note query.
+    visible_note_indices: Vec<usize>,
     geometry_identity: Arc<()>,
     geometry_epoch: u64,
 }
@@ -86,6 +88,7 @@ impl Scene {
             playfield_caches: (0..MAX_PLAYFIELDS)
                 .map(|_| PlayfieldCache::default())
                 .collect(),
+            visible_note_indices: Vec::new(),
             geometry_identity: Arc::new(()),
             geometry_epoch: 0,
         }
@@ -98,6 +101,7 @@ impl Scene {
         self.overflow = false;
         self.error = None;
         self.playfields.clear();
+        self.visible_note_indices.clear();
     }
 
     fn geometry_changed(&mut self) {
@@ -180,15 +184,27 @@ impl Scene {
                 "scene exceeds {MAX_PLAYFIELDS} displayed playfields"
             ));
         }
-        let notes = chart.visible_notes_checked(now, lookahead, 150_000_000)?;
-        if notes
+        chart.visible_note_indices_checked(
+            now,
+            lookahead,
+            150_000_000,
+            &mut self.visible_note_indices,
+        )?;
+        if self
+            .visible_note_indices
             .iter()
-            .any(|note| note.lane_index >= chart.lanes.len())
+            .any(|&index| chart.notes[index].lane_index >= chart.lanes.len())
         {
             return Err("playfield note references an unavailable lane".into());
         }
-        let frame =
-            self.playfield_caches[slot].frame(&notes, chart.lanes.len(), bounds, now, lookahead);
+        let frame = self.playfield_caches[slot].frame_indexed(
+            &chart.notes,
+            &self.visible_note_indices,
+            chart.lanes.len(),
+            bounds,
+            now,
+            lookahead,
+        );
         self.playfields.push(frame);
         self.batches.push(DrawBatch {
             texture: TextureId::WHITE,
@@ -725,7 +741,7 @@ mod tests {
     #[test]
     fn retained_note_layer_splits_rectangles_and_survives_clear() {
         let source = beatkernel_bms::parse(
-            "#BPM 60\n#00011:01\n",
+            "#BPM 60\n#WAV01 head.wav\n#00011:01\n",
             beatkernel_bms::ParseOptions::default(),
         )
         .unwrap();
@@ -741,6 +757,7 @@ mod tests {
             height: 528,
         };
         let mut scene = Scene::new(960, 720);
+        assert_eq!(scene.visible_note_indices.capacity(), 0);
         scene.rect(0, 0, 1, 1, 0);
         scene
             .playfield(
@@ -756,8 +773,12 @@ mod tests {
         assert_eq!(scene.batches()[1].playfield, Some(0));
         assert_eq!(scene.batches()[2].first, 1);
         let cached = std::sync::Arc::clone(&scene.playfields()[0].instances);
+        let scratch = scene.visible_note_indices.as_ptr();
+        let capacity = scene.visible_note_indices.capacity();
         scene.clear();
         assert!(scene.playfields().is_empty());
+        assert!(scene.visible_note_indices.is_empty());
+        assert_eq!(scene.visible_note_indices.as_ptr(), scratch);
         scene
             .playfield(
                 &chart,
@@ -791,5 +812,125 @@ mod tests {
                 .is_err()
         );
         assert_eq!(scene.playfields().len(), MAX_PLAYFIELDS);
+        assert_eq!(scene.visible_note_indices.as_ptr(), scratch);
+        assert_eq!(scene.visible_note_indices.capacity(), capacity);
+    }
+
+    #[test]
+    fn one_lazy_scratch_serves_growing_membership_four_slots_seek_and_rejection() {
+        use crate::player_chart::{MAX_VISIBLE_NOTES, PlayerChart};
+        use beatkernel::time::Timestamp;
+        use std::sync::Arc;
+        let model = |text: &str| {
+            let source =
+                beatkernel_bms::parse(text, beatkernel_bms::ParseOptions::default()).unwrap();
+            PlayerChart::from_compiled(&source, &source.compile().unwrap().chart).unwrap()
+        };
+        let chart = model("#BPM 120\n#WAV01 head.wav\n#LNTYPE 1\n#00051:0101\n#00012:0001");
+        let bounds = crate::ui::interaction::Bounds {
+            x: 80,
+            y: 106,
+            width: 640,
+            height: 528,
+        };
+        let mut scene = Scene::with_capacity(960, 720, 64);
+        assert_eq!(scene.visible_note_indices.capacity(), 0);
+        scene
+            .playfield(&chart, Timestamp::ZERO, 750_000_000, bounds)
+            .unwrap();
+        assert_eq!(scene.visible_note_indices, vec![0]);
+        let first = Arc::clone(&scene.playfields[0].instances);
+        let pointer = scene.visible_note_indices.as_ptr();
+        let capacity = scene.visible_note_indices.capacity();
+        assert!(capacity >= MAX_VISIBLE_NOTES + 1);
+        scene.clear();
+        scene
+            .playfield(
+                &chart,
+                Timestamp::from_nanos(250_000_000),
+                750_000_000,
+                bounds,
+            )
+            .unwrap();
+        assert_eq!(scene.visible_note_indices, vec![0, 1]);
+        assert_eq!(scene.visible_note_indices.as_ptr(), pointer);
+        assert_eq!(scene.visible_note_indices.capacity(), capacity);
+        assert!(!Arc::ptr_eq(&first, &scene.playfields[0].instances));
+        for _ in 1..MAX_PLAYFIELDS {
+            scene
+                .playfield(
+                    &chart,
+                    Timestamp::from_nanos(250_000_000),
+                    750_000_000,
+                    bounds,
+                )
+                .unwrap();
+        }
+        let frames: Vec<_> = scene
+            .playfields
+            .iter()
+            .map(|frame| Arc::clone(&frame.instances))
+            .collect();
+        scene.clear();
+        for (slot, previous) in frames.iter().enumerate() {
+            scene
+                .playfield(
+                    &chart,
+                    Timestamp::from_nanos(260_000_000),
+                    750_000_000,
+                    bounds,
+                )
+                .unwrap();
+            assert!(Arc::ptr_eq(previous, &scene.playfields[slot].instances));
+            assert_eq!(scene.visible_note_indices.as_ptr(), pointer);
+        }
+        scene.clear();
+        scene
+            .playfield(
+                &chart,
+                Timestamp::from_nanos(250_000_000),
+                750_000_000,
+                bounds,
+            )
+            .unwrap();
+        assert!(!Arc::ptr_eq(&frames[0], &scene.playfields[0].instances));
+        let mut replacement = chart.clone();
+        replacement.notes[0].object = beatkernel::chart::ObjectId(99);
+        let before = Arc::clone(&scene.playfields[0].instances);
+        scene.clear();
+        scene
+            .playfield(
+                &replacement,
+                Timestamp::from_nanos(250_000_000),
+                750_000_000,
+                bounds,
+            )
+            .unwrap();
+        assert!(!Arc::ptr_eq(&before, &scene.playfields[0].instances));
+        let admitted = scene.playfields.len();
+        let batches = scene.batches.len();
+        let mut malformed = chart.clone();
+        malformed.notes[0].lane_index = usize::MAX;
+        assert!(
+            scene
+                .playfield(&malformed, Timestamp::ZERO, 750_000_000, bounds)
+                .is_err()
+        );
+        assert_eq!(scene.playfields.len(), admitted);
+        assert_eq!(scene.batches.len(), batches);
+        let dense = model(&format!(
+            "#BPM 60\n#WAV01 head.wav\n#00011:{}",
+            "01".repeat(MAX_VISIBLE_NOTES + 1)
+        ));
+        assert!(
+            scene
+                .playfield(&dense, Timestamp::ZERO, i64::MAX, bounds)
+                .is_err()
+        );
+        assert!(scene.visible_note_indices.is_empty());
+        assert_eq!(scene.playfields.len(), admitted);
+        assert_eq!(scene.batches.len(), batches);
+        assert_eq!(scene.visible_note_indices.as_ptr(), pointer);
+        assert_eq!(scene.visible_note_indices.capacity(), capacity);
     }
 }
