@@ -32,6 +32,9 @@ pub struct FontAtlas {
     pixels: f32,
     max_glyphs: usize,
     glyphs: BTreeMap<char, Glyph>,
+    // Only nonsuppressed glyphs enter this cache. Character admission remains
+    // independently bounded, including aliases and geometry-free whitespace.
+    placements: BTreeMap<u16, Glyph>,
     image: RgbaImage,
     shelf: Shelf,
 }
@@ -72,6 +75,7 @@ impl FontAtlas {
             pixels,
             max_glyphs,
             glyphs: BTreeMap::new(),
+            placements: BTreeMap::new(),
             image: RgbaImage::new(width, height, rgba)?,
             shelf: Shelf::default(),
         })
@@ -89,8 +93,10 @@ impl FontAtlas {
     pub fn ascent(&self) -> f32 {
         self.font.as_scaled(self.pixels).ascent()
     }
-    /// Returns a cached glyph or prepares it once. Any returned error preserves
-    /// existing cache entries, pixels and shelf placement. Controls are rejected.
+    /// Returns a cached glyph or prepares it once. Non-whitespace aliases share
+    /// the font glyph's placement; each character still consumes a cache slot.
+    /// Any returned error preserves both caches, pixels and shelf placement.
+    /// Controls are rejected and whitespace never acquires drawable geometry.
     pub fn prepare(&mut self, character: char) -> Result<Glyph, String> {
         if character.is_control() {
             return Err("control characters are not drawable font glyphs".into());
@@ -103,6 +109,12 @@ impl FontAtlas {
         }
         let scaled = self.font.as_scaled(self.pixels);
         let id = scaled.glyph_id(character);
+        if !character.is_whitespace() {
+            if let Some(&glyph) = self.placements.get(&id.0) {
+                self.glyphs.insert(character, glyph);
+                return Ok(glyph);
+            }
+        }
         let advance = scaled.h_advance(id);
         if !advance.is_finite() {
             return Err("font glyph advance is not finite".into());
@@ -118,6 +130,7 @@ impl FontAtlas {
             return Ok(glyph);
         }
         let Some(outline) = self.font.outline_glyph(id.with_scale(self.pixels)) else {
+            self.placements.insert(id.0, glyph);
             self.glyphs.insert(character, glyph);
             return Ok(glyph);
         };
@@ -143,6 +156,7 @@ impl FontAtlas {
             .ok_or("font glyph height is invalid")?;
         glyph.bounds = [x, y, width, height];
         if width == 0 || height == 0 {
+            self.placements.insert(id.0, glyph);
             self.glyphs.insert(character, glyph);
             return Ok(glyph);
         }
@@ -188,6 +202,7 @@ impl FontAtlas {
             }
         }
         self.shelf = next_shelf;
+        self.placements.insert(id.0, glyph);
         self.glyphs.insert(character, glyph);
         Ok(glyph)
     }

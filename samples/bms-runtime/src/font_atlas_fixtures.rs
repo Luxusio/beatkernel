@@ -1,123 +1,7 @@
 //! Original minimal TrueType data exercises the real parser and rasterizer.
 use crate::font_atlas::FontAtlas;
 
-// Three glyphs: an original triangle, another triangle and an empty space.
-// The same triangle is mapped to Latin A and Hangul GA to exercise Unicode
-// lookup without distributing any third-party font.
-pub(crate) fn font_bytes() -> Vec<u8> {
-    fn u16_at(bytes: &mut [u8], offset: usize, value: u16) {
-        bytes[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
-    }
-    fn u32_at(bytes: &mut [u8], offset: usize, value: u32) {
-        bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
-    }
-    fn checksum(bytes: &[u8]) -> u32 {
-        bytes.chunks(4).fold(0u32, |sum, part| {
-            let mut word = [0; 4];
-            word[..part.len()].copy_from_slice(part);
-            sum.wrapping_add(u32::from_be_bytes(word))
-        })
-    }
-    let mut head = vec![0; 54];
-    u32_at(&mut head, 0, 0x0001_0000);
-    u32_at(&mut head, 4, 0x0001_0000);
-    u32_at(&mut head, 12, 0x5f0f_3cf5);
-    u16_at(&mut head, 18, 1000);
-    u16_at(&mut head, 40, 500);
-    u16_at(&mut head, 42, 700);
-    u16_at(&mut head, 46, 8);
-    u16_at(&mut head, 48, 2);
-    u16_at(&mut head, 50, 1); // Long loca offsets.
-    let mut hhea = vec![0; 36];
-    u32_at(&mut hhea, 0, 0x0001_0000);
-    u16_at(&mut hhea, 4, 800);
-    u16_at(&mut hhea, 6, (-200i16) as u16);
-    u16_at(&mut hhea, 10, 600);
-    u16_at(&mut hhea, 16, 500);
-    u16_at(&mut hhea, 18, 1);
-    u16_at(&mut hhea, 34, 3);
-    let mut maxp = vec![0; 32];
-    u32_at(&mut maxp, 0, 0x0001_0000);
-    u16_at(&mut maxp, 4, 3);
-    u16_at(&mut maxp, 6, 3);
-    u16_at(&mut maxp, 8, 1);
-    u16_at(&mut maxp, 14, 1);
-    let hmtx = [600u16, 0, 600, 0, 600, 0]
-        .into_iter()
-        .flat_map(u16::to_be_bytes)
-        .collect::<Vec<_>>();
-    let mut triangle = Vec::new();
-    for value in [1i16, 0, 0, 500, 700, 2, 0] {
-        triangle.extend_from_slice(&value.to_be_bytes());
-    }
-    triangle.extend_from_slice(&[1, 1, 1]); // On-curve, signed long coordinates.
-    for value in [0i16, 500, -250, 0, 0, 700] {
-        triangle.extend_from_slice(&value.to_be_bytes());
-    }
-    while triangle.len() % 4 != 0 {
-        triangle.push(0);
-    }
-    let glyf = [triangle.clone(), triangle.clone()].concat();
-    let loca = [
-        0u32,
-        triangle.len() as u32,
-        glyf.len() as u32,
-        glyf.len() as u32,
-    ]
-    .into_iter()
-    .flat_map(u32::to_be_bytes)
-    .collect::<Vec<_>>();
-    let mut cmap = vec![0; 12];
-    u16_at(&mut cmap, 2, 1);
-    u16_at(&mut cmap, 4, 3);
-    u16_at(&mut cmap, 6, 10);
-    u32_at(&mut cmap, 8, 12);
-    let mut format12 = vec![0; 16];
-    u16_at(&mut format12, 0, 12);
-    u32_at(&mut format12, 4, 52);
-    u32_at(&mut format12, 12, 3);
-    for (character, glyph) in [(' ', 2u32), ('A', 1), ('가', 1)] {
-        for value in [character as u32, character as u32, glyph] {
-            format12.extend_from_slice(&value.to_be_bytes());
-        }
-    }
-    cmap.extend_from_slice(&format12);
-    let mut tables = vec![
-        (*b"cmap", cmap),
-        (*b"glyf", glyf),
-        (*b"head", head),
-        (*b"hhea", hhea),
-        (*b"hmtx", hmtx),
-        (*b"loca", loca),
-        (*b"maxp", maxp),
-    ];
-    tables.sort_by_key(|(tag, _)| *tag);
-    let mut font = vec![0; 12 + tables.len() * 16];
-    u32_at(&mut font, 0, 0x0001_0000);
-    u16_at(&mut font, 4, tables.len() as u16);
-    u16_at(&mut font, 6, 64);
-    u16_at(&mut font, 8, 2);
-    u16_at(&mut font, 10, 48);
-    let mut head_offset = 0;
-    for (index, (tag, data)) in tables.into_iter().enumerate() {
-        let row = 12 + index * 16;
-        let offset = font.len();
-        font[row..row + 4].copy_from_slice(&tag);
-        u32_at(&mut font, row + 4, checksum(&data));
-        u32_at(&mut font, row + 8, offset as u32);
-        u32_at(&mut font, row + 12, data.len() as u32);
-        if tag == *b"head" {
-            head_offset = offset;
-        }
-        font.extend_from_slice(&data);
-        while font.len() % 4 != 0 {
-            font.push(0);
-        }
-    }
-    let adjustment = 0xb1b0_afbau32.wrapping_sub(checksum(&font));
-    u32_at(&mut font, head_offset + 8, adjustment);
-    font
-}
+use crate::font_fixture::{font_bytes, font_bytes_with_space};
 
 #[test]
 fn actual_font_unicode_raster_cache_padding_missing_and_space() {
@@ -142,7 +26,8 @@ fn actual_font_unicode_raster_cache_padding_missing_and_space() {
     let hangul = atlas.prepare('가').unwrap();
     assert!(!hangul.missing);
     assert_eq!(hangul.advance, latin.advance);
-    assert_ne!(hangul.uv, latin.uv);
+    assert_eq!(hangul, latin);
+    assert_eq!(atlas.image().pixels(), pixels);
     let space = atlas.prepare(' ').unwrap();
     assert_eq!(space.uv, None);
     assert!(space.advance > 0.0);
@@ -191,14 +76,103 @@ fn actual_atlas_extent_and_cache_capacity_failures_preserve_admitted_glyphs() {
         let mut atlas = FontAtlas::new(font_bytes(), 32.0, width, height, max_glyphs).unwrap();
         let first = atlas.prepare('A').unwrap();
         let before = atlas.image().pixels().to_vec();
-        for character in ['가', '\n', '\t', '\0'] {
+        // Glyph zero is distinct from A even though this font gives both the
+        // same triangle. It still needs a new placement in a full tiny atlas.
+        for character in ['別', '\n', '\t', '\0'] {
             assert!(atlas.prepare(character).is_err());
             assert_eq!(atlas.len(), 1);
             assert_eq!(atlas.get('A'), Some(first));
             assert_eq!(atlas.get(character), None);
             assert_eq!(atlas.image().pixels(), before);
         }
+        if max_glyphs == 1 {
+            assert!(atlas.prepare('가').is_err());
+            assert_eq!(atlas.get('가'), None);
+            assert_eq!(atlas.len(), 1);
+        } else {
+            assert_eq!(atlas.prepare('가').unwrap(), first);
+            assert_eq!(atlas.len(), 2);
+        }
+        assert_eq!(atlas.image().pixels(), before);
         assert_eq!(atlas.prepare('A').unwrap(), first);
+    }
+}
+
+#[test]
+fn aliases_share_exact_fit_atlas_and_missing_zero_placements() {
+    let mut probe = FontAtlas::new(font_bytes(), 32.0, 128, 128, 16).unwrap();
+    let bounds = probe.prepare('A').unwrap().bounds;
+    let mut exact = FontAtlas::new(
+        font_bytes(),
+        32.0,
+        bounds[2] as u32 + 2,
+        bounds[3] as u32 + 2,
+        4,
+    )
+    .unwrap();
+    let first = exact.prepare('A').unwrap();
+    let pixels = exact.image().pixels().to_vec();
+    assert_eq!(exact.prepare('가').unwrap(), first);
+    assert_eq!(exact.image().pixels(), pixels);
+    assert_eq!(exact.len(), 2);
+    assert!(exact.prepare('別').is_err());
+    assert_eq!(exact.len(), 2);
+    assert_eq!(exact.get('別'), None);
+    assert_eq!(exact.image().pixels(), pixels);
+    assert_eq!(exact.prepare('가').unwrap(), first);
+
+    let mut missing = FontAtlas::new(
+        font_bytes(),
+        32.0,
+        bounds[2] as u32 + 2,
+        bounds[3] as u32 + 2,
+        3,
+    )
+    .unwrap();
+    let zero = missing.prepare('別').unwrap();
+    assert!(zero.missing && zero.uv.is_some());
+    let pixels = missing.image().pixels().to_vec();
+    assert_eq!(missing.prepare('未').unwrap(), zero);
+    assert_eq!(missing.image().pixels(), pixels);
+    assert_eq!(missing.len(), 2);
+    assert!(missing.prepare('A').is_err());
+    assert_eq!(missing.len(), 2);
+    assert_eq!(missing.get('A'), None);
+    assert_eq!(missing.image().pixels(), pixels);
+    // The failed distinct glyph must not occupy a cache entry or consume the
+    // remaining character slot: another glyph-zero alias still succeeds.
+    assert_eq!(missing.prepare('知').unwrap(), zero);
+    assert_eq!(missing.len(), 3);
+    assert!(missing.prepare('不').is_err());
+    assert_eq!(missing.get('不'), None);
+    assert_eq!(missing.image().pixels(), pixels);
+}
+
+#[test]
+fn whitespace_suppresses_visible_and_missing_glyphs_before_and_after_real_aliases() {
+    for (space_glyph, character) in [(1, 'A'), (0, '別')] {
+        for whitespace_first in [true, false] {
+            let mut atlas =
+                FontAtlas::new(font_bytes_with_space(space_glyph), 32.0, 24, 32, 4).unwrap();
+            if whitespace_first {
+                let space = atlas.prepare(' ').unwrap();
+                assert_eq!(space.uv, None);
+                assert_eq!(space.bounds, [0; 4]);
+                assert_eq!(space.missing, space_glyph == 0);
+                assert!(atlas.image().pixels().iter().all(|&byte| byte == 0));
+            }
+            let visible = atlas.prepare(character).unwrap();
+            assert!(visible.uv.is_some());
+            assert_eq!(visible.missing, space_glyph == 0);
+            let pixels = atlas.image().pixels().to_vec();
+            let space = atlas.prepare(' ').unwrap();
+            assert_eq!(space.uv, None);
+            assert_eq!(space.bounds, [0; 4]);
+            assert_eq!(space.advance, visible.advance);
+            assert_eq!(atlas.prepare(character).unwrap(), visible);
+            assert_eq!(atlas.image().pixels(), pixels);
+            assert_eq!(atlas.len(), 2);
+        }
     }
 }
 
