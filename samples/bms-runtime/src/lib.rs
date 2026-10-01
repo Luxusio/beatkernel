@@ -72,6 +72,8 @@ pub mod practice;
 pub mod practice_loop;
 /// Portable display configuration shared by CLI, graphical drafts and profiles.
 pub mod presentation_settings;
+/// Ownership of actual admitted BMS lane buttons.
+pub mod pressed_keys;
 /// Bounded saved-record discovery and chart/profile-compatible prefix previews.
 pub mod record_catalog;
 /// Song-time command planning from actual recorded BMS judgment.

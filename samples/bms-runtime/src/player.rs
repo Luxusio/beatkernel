@@ -4,9 +4,11 @@ use crate::{
     local_players::PlayerId,
     local_runtime::PlayerReport,
     player_chart::PlayerChart,
+    pressed_keys::{PressedKeys, validate_mask},
 };
 use beatkernel::{
-    chart::CompiledChart, judge::JudgeEvent, runtime::RuntimeReport, time::Timestamp,
+    chart::CompiledChart, input::GameInputEvent, judge::JudgeEvent, runtime::RuntimeReport,
+    time::Timestamp,
 };
 use beatkernel_bms::BmsChart;
 use std::{
@@ -85,6 +87,8 @@ pub struct LocalPlayerSnapshot {
     pub score: ScoreSummary,
     pub last_judge: Option<JudgeEvent>,
     pub recent_results: Vec<JudgeEvent>,
+    /// Actual admitted button ownership, masked during native pause transitions.
+    pub pressed_lanes: u32,
     pub competition: Option<CompetitionSnapshot>,
 }
 impl LocalPlayerSnapshot {
@@ -96,6 +100,7 @@ impl LocalPlayerSnapshot {
             score: ScoreSummary::default(),
             last_judge: None,
             recent_results: Vec::new(),
+            pressed_lanes: 0,
             competition: None,
         }
     }
@@ -161,6 +166,8 @@ pub struct PlayerSnapshot {
     pub score: ScoreSummary,
     pub last_judge: Option<JudgeEvent>,
     pub recent_results: Vec<JudgeEvent>,
+    /// Actual admitted button ownership, masked during native pause transitions.
+    pub pressed_lanes: u32,
     pub status: PlayerStatus,
     pub cancelled: bool,
     pub pause: PauseState,
@@ -176,6 +183,7 @@ impl Default for PlayerSnapshot {
             score: ScoreSummary::default(),
             last_judge: None,
             recent_results: Vec::new(),
+            pressed_lanes: 0,
             status: PlayerStatus::Loading,
             cancelled: false,
             pause: PauseState::Unavailable,
@@ -229,12 +237,22 @@ impl PlayerViewer {
                 ) {
                     snapshot.status = PlayerStatus::Stopping;
                     snapshot.cancelled = true;
+                    snapshot.pressed_lanes = 0;
+                    for member in &mut snapshot.players {
+                        member.pressed_lanes = 0;
+                    }
                 }
             }
         }
     }
 }
+#[derive(Default)]
+struct PressedState {
+    keys: PressedKeys,
+    mask: u32,
+}
 struct Session {
+    pressed: Vec<PressedState>,
     publisher: PlayerPublisher,
     snapshot: PlayerSnapshot,
     last_publish: Option<Instant>,
@@ -293,6 +311,7 @@ pub fn with_publisher<T>(
         }
         *session.borrow_mut() = Some(Session {
             publisher,
+            pressed: Vec::new(),
             snapshot: PlayerSnapshot::default(),
             last_publish: None,
             chart_published: false,
@@ -310,6 +329,7 @@ pub fn with_publisher<T>(
                 Ok(_) => PlayerStatus::Finished,
                 Err(error) => PlayerStatus::Failed(error.clone()),
             };
+            current.clear_pressed();
             current.snapshot.sync_legacy();
             // Gameplay and audio owners have already stopped. This final tiny
             // handoff can wait for take_latest, which releases before rendering.
@@ -395,6 +415,9 @@ pub fn publish_local_chart(
         for member in &mut members {
             member.chart = Some(Arc::clone(&prepared));
         }
+        if current.pressed.is_empty() {
+            current.pressed = players.iter().map(|_| PressedState::default()).collect();
+        }
         current.snapshot.players = members;
         current.snapshot.chart = Some(prepared);
         current.chart_published = true;
@@ -407,7 +430,12 @@ pub fn publish_local_chart(
 /// Summarize one actual solo report once, preserving the existing call shape.
 /// Coalescing affects display only. This API cannot modify a local group roster.
 pub fn publish_report(report: &RuntimeReport) -> Result<(), Box<dyn std::error::Error>> {
-    publish_replay_prefix(report.song_time, &report.judge_events)
+    publish_solo(
+        report.song_time,
+        &report.judge_events,
+        &report.bound_inputs,
+        None,
+    )
 }
 
 /// Publishes actual incremental replay results through the existing solo bridge.
@@ -416,6 +444,24 @@ pub fn publish_report(report: &RuntimeReport) -> Result<(), Box<dyn std::error::
 pub fn publish_replay_prefix(
     song: Timestamp,
     events: &[JudgeEvent],
+) -> Result<(), Box<dyn std::error::Error>> {
+    publish_replay_prefix_with_pressed(song, events, 0)
+}
+
+/// Publishes an actual replay prefix and its independently reconstructed ownership.
+pub fn publish_replay_prefix_with_pressed(
+    song: Timestamp,
+    events: &[JudgeEvent],
+    mask: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_mask(mask)?;
+    publish_solo(song, events, &[], Some(mask))
+}
+fn publish_solo(
+    song: Timestamp,
+    events: &[JudgeEvent],
+    inputs: &[GameInputEvent],
+    replay_mask: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     SESSION.with(|session| {
         let mut session = session.borrow_mut();
@@ -428,19 +474,39 @@ pub fn publish_replay_prefix(
         {
             return Err("solo report cannot modify a local group presentation".into());
         }
-        if current.snapshot.players.is_empty() {
-            let mut member = LocalPlayerSnapshot::new(PlayerId(1), current.snapshot.chart.clone());
-            if !events.is_empty() {
-                member.score.observe(events)?;
-            }
-            member.update_results(song, events);
-            current.snapshot.players.push(member);
+        let mut fresh = current.snapshot.players.is_empty().then(|| {
+            (
+                LocalPlayerSnapshot::new(PlayerId(1), current.snapshot.chart.clone()),
+                PressedState::default(),
+            )
+        });
+        let (member, pressed) = if let Some((member, pressed)) = fresh.as_mut() {
+            (member, pressed)
         } else {
-            let member = &mut current.snapshot.players[0];
-            if !events.is_empty() {
-                member.score.observe(events)?;
-            }
-            member.update_results(song, events);
+            (&mut current.snapshot.players[0], &mut current.pressed[0])
+        };
+        let score = if events.is_empty() {
+            None
+        } else {
+            let mut score = member.score.clone();
+            score.observe(events)?;
+            Some(score)
+        };
+        let prepared = pressed.keys.prepare(inputs)?;
+        if let Some(mask) = prepared {
+            pressed.keys.commit(mask);
+            pressed.mask = mask;
+        }
+        if let Some(mask) = replay_mask {
+            pressed.mask = mask;
+        }
+        if let Some(score) = score {
+            member.score = score;
+        }
+        member.update_results(song, events);
+        if let Some((member, pressed)) = fresh {
+            current.snapshot.players.push(member);
+            current.pressed.push(pressed);
         }
         current.observe_cancellation(true);
         current.publish_latest(false);
@@ -501,6 +567,25 @@ pub fn publish_local_reports(reports: &[PlayerReport]) -> Result<(), Box<dyn std
             score.observe(&report.report.judge_events)?;
             changed_scores.push((index, score));
         }
+        let mut changed_pressed = Vec::new();
+        for report in reports {
+            let index = current
+                .snapshot
+                .players
+                .iter()
+                .position(|member| member.player == report.player)
+                .expect("validated registered player");
+            if let Some(mask) = current.pressed[index]
+                .keys
+                .prepare(&report.report.bound_inputs)?
+            {
+                changed_pressed.push((index, mask));
+            }
+        }
+        for (index, mask) in changed_pressed {
+            current.pressed[index].keys.commit(mask);
+            current.pressed[index].mask = mask;
+        }
         for (index, score) in changed_scores {
             current.snapshot.players[index].score = score;
         }
@@ -536,11 +621,13 @@ impl PlayerSnapshot {
     fn sync_legacy(&mut self) {
         if self.players.len() == 1 {
             let member = &self.players[0];
+            self.pressed_lanes = member.pressed_lanes;
             self.song_time = member.song_time;
             self.score = member.score.clone();
             self.last_judge = member.last_judge;
             self.recent_results = member.recent_results.clone();
         } else {
+            self.pressed_lanes = 0;
             self.song_time = None;
             self.score = ScoreSummary::default();
             self.last_judge = None;
@@ -549,13 +636,40 @@ impl PlayerSnapshot {
     }
 }
 impl Session {
+    fn clear_pressed(&mut self) {
+        for state in &mut self.pressed {
+            state.keys.clear();
+            state.mask = 0;
+        }
+        self.snapshot.pressed_lanes = 0;
+        for member in &mut self.snapshot.players {
+            member.pressed_lanes = 0;
+        }
+    }
+    fn sync_pressed(&mut self) {
+        let visible = !self.snapshot.cancelled
+            && matches!(
+                self.snapshot.pause,
+                PauseState::Running | PauseState::Unavailable
+            );
+        for (member, state) in self.snapshot.players.iter_mut().zip(&self.pressed) {
+            member.pressed_lanes = if visible { state.mask } else { 0 };
+        }
+        self.snapshot.pressed_lanes = if self.snapshot.players.len() == 1 {
+            self.snapshot.players[0].pressed_lanes
+        } else {
+            0
+        };
+    }
     fn observe_cancellation(&mut self, playing: bool) {
         if self.publisher.0.cancel.load(Ordering::Acquire) {
             self.snapshot.cancelled = true;
             self.snapshot.status = PlayerStatus::Stopping;
+            self.clear_pressed();
         } else if playing {
             self.snapshot.status = PlayerStatus::Playing;
         }
+        self.sync_pressed();
     }
     fn publish_latest(&mut self, force: bool) {
         if force
@@ -1017,5 +1131,158 @@ mod fixtures {
             Ok(())
         })
         .unwrap();
+    }
+    #[test]
+    fn admitted_buttons_are_member_specific_and_pause_preserves_ownership() {
+        use crate::pressed_keys::fixtures::button;
+        use beatkernel::input::ButtonState;
+        let (source, chart) = chart_fixture();
+        let (publisher, viewer) = channel();
+        with_publisher(publisher, || {
+            publish_local_chart(&source, &chart, &[PlayerId(3), PlayerId(u32::MAX)]).unwrap();
+            let mut a = report(3, 10, 0, 0);
+            a.report.bound_inputs = vec![
+                button(1, 4, 0x11, ButtonState::Down),
+                button(2, 4, 0x11, ButtonState::Down),
+            ];
+            let mut b = report(u32::MAX, 10, 0, 0);
+            b.report.bound_inputs = vec![button(1, 4, 0x29, ButtonState::Down)];
+            publish_local_reports(&[a, b]).unwrap();
+            publish_pause(PauseState::Running);
+            let active = viewer.take_latest().unwrap();
+            assert_eq!(
+                active
+                    .players
+                    .iter()
+                    .map(|p| p.pressed_lanes)
+                    .collect::<Vec<_>>(),
+                vec![1, 1 << 17]
+            );
+            assert_eq!(active.pressed_lanes, 0);
+            for phase in [
+                PauseState::Pausing,
+                PauseState::Paused,
+                PauseState::Resuming,
+            ] {
+                publish_pause(phase);
+                assert!(
+                    viewer
+                        .take_latest()
+                        .unwrap()
+                        .players
+                        .iter()
+                        .all(|p| p.pressed_lanes == 0)
+                );
+            }
+            let mut release = report(3, 20, 0, 0);
+            release.report.bound_inputs = vec![button(1, 4, 0x11, ButtonState::Up)];
+            publish_local_reports(&[release]).unwrap();
+            publish_pause(PauseState::Running);
+            assert_eq!(viewer.take_latest().unwrap().players[0].pressed_lanes, 1);
+            viewer.cancel();
+            publish_pause(PauseState::Unavailable);
+            assert!(
+                viewer
+                    .take_latest()
+                    .unwrap()
+                    .players
+                    .iter()
+                    .all(|p| p.pressed_lanes == 0)
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert!(
+            viewer
+                .take_latest()
+                .unwrap()
+                .players
+                .iter()
+                .all(|p| p.pressed_lanes == 0)
+        );
+    }
+    #[test]
+    fn ownership_overflow_is_atomic_across_scores_history_and_members() {
+        use crate::pressed_keys::fixtures::button;
+        use beatkernel::input::ButtonState;
+        let (source, chart) = chart_fixture();
+        let (publisher, _viewer) = channel();
+        with_publisher(publisher, || {
+            publish_local_chart(&source, &chart, &[PlayerId(1), PlayerId(2)]).unwrap();
+            let mut full = report(2, 1, 0, 0);
+            full.report.bound_inputs = (0..4096)
+                .map(|i| button(i, 4, 0x11, ButtonState::Down))
+                .collect();
+            publish_local_reports(&[full]).unwrap();
+            let before = member_state();
+            let mut first = report(1, 2, 1, 0);
+            first.report.bound_inputs = vec![button(1, 4, 0x29, ButtonState::Down)];
+            let mut overflow = report(2, 2, 1, 0);
+            overflow.report.bound_inputs = vec![button(5000, 4, 0x29, ButtonState::Down)];
+            assert!(publish_local_reports(&[first, overflow]).is_err());
+            assert_eq!(member_state(), before);
+            SESSION.with(|s| {
+                let s = s.borrow();
+                let s = s.as_ref().unwrap();
+                assert_eq!(s.pressed[0].keys.mask(), 0);
+                assert_eq!(s.pressed[1].keys.mask(), 1);
+            });
+            Ok(())
+        })
+        .unwrap();
+    }
+    #[test]
+    fn solo_bound_inputs_and_replay_mask_restore_then_terminal_clear() {
+        use crate::pressed_keys::fixtures::button;
+        use beatkernel::input::ButtonState;
+        let (publisher, viewer) = channel();
+        with_publisher(publisher, || {
+            let mut actual = report(1, 1, 0, 0);
+            actual.report.bound_inputs = vec![button(1, 4, 0x21, ButtonState::Down)];
+            publish_report(&actual.report).unwrap();
+            publish_pause(PauseState::Running);
+            assert_eq!(viewer.take_latest().unwrap().pressed_lanes, 1 << 9);
+            publish_replay_prefix_with_pressed(Timestamp::from_nanos(2), &[], 1 << 17).unwrap();
+            publish_pause(PauseState::Paused);
+            assert_eq!(viewer.take_latest().unwrap().pressed_lanes, 0);
+            publish_pause(PauseState::Running);
+            assert_eq!(viewer.take_latest().unwrap().pressed_lanes, 1 << 17);
+            assert!(publish_replay_prefix_with_pressed(Timestamp::ZERO, &[], 1 << 18).is_err());
+            Ok(())
+        })
+        .unwrap();
+        let terminal = viewer.take_latest().unwrap();
+        assert_eq!(terminal.pressed_lanes, 0);
+        assert_eq!(terminal.players[0].pressed_lanes, 0);
+        let (fresh, viewer) = channel();
+        with_publisher(fresh, || {
+            publish_replay_prefix(Timestamp::ZERO, &[]).unwrap();
+            publish_pause(PauseState::Running);
+            assert_eq!(viewer.take_latest().unwrap().pressed_lanes, 0);
+            Ok(())
+        })
+        .unwrap();
+    }
+    #[test]
+    fn failed_owner_return_clears_admitted_presses_after_cleanup() {
+        use crate::pressed_keys::fixtures::button;
+        use beatkernel::input::ButtonState;
+        let (publisher, viewer) = channel();
+        let result = with_publisher::<()>(publisher, || {
+            let mut admitted = report(1, 1, 0, 0);
+            admitted.report.bound_inputs = vec![button(1, 4, 0x11, ButtonState::Down)];
+            publish_report(&admitted.report).unwrap();
+            publish_pause(PauseState::Running);
+            assert_eq!(viewer.take_latest().unwrap().pressed_lanes, 1);
+            Err("owner cleanup failure".into())
+        });
+        assert!(result.is_err());
+        let failed = viewer.take_latest().unwrap();
+        assert_eq!(
+            failed.status,
+            PlayerStatus::Failed("owner cleanup failure".into())
+        );
+        assert_eq!(failed.pressed_lanes, 0);
+        assert_eq!(failed.players[0].pressed_lanes, 0);
     }
 }
