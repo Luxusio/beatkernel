@@ -60,6 +60,68 @@ fn wav(channels: u16, samples: &[i16]) -> Vec<u8> {
     out
 }
 
+#[path = "../src/flac_fixture.rs"]
+mod flac_fixture;
+
+#[test]
+fn default_flac_and_wav_assets_feed_actual_runtime_mixer_without_tail_loading() {
+    let dir = Directory::new();
+    dir.write("head.wav", &wav(1, &[16384, -8192]));
+    let encoded = flac_fixture::flac16(24_000, 1, &[8192, -16384], Some(2));
+    dir.write("music.flac", &encoded);
+    let chart = dir.write("chart.bms", b"#BPM 60\n#LNOBJ ZZ\n#WAV01 head.wav\n#WAV02 music.flac\n#WAV03 unused.flac\n#00011:01ZZ\n#00001:02\n");
+    let format = AudioFormat::new(24_000, 2).unwrap();
+    let prepared = load_prepared(&chart, format, limits(), ChannelPolicy::MonoToStereo).unwrap();
+    assert_eq!(prepared.bank.len(), 2); // Unused samples and undefined tail ZZ are never opened.
+    assert_eq!(prepared.bank.get(SampleId(2)).unwrap().format(), format);
+    assert_eq!(
+        prepared.bank.get(SampleId(2)).unwrap().samples(),
+        &[0.25, 0.25, -0.5, -0.5]
+    );
+    assert_eq!(prepared.sounds.len(), 1);
+    assert_eq!(prepared.sounds[0].stage, JudgeStage::HoldHead);
+    assert_eq!(prepared.bgm_commands.len(), 1);
+    let mut output = Vec::new();
+    let report = offline::render_offline(
+        prepared,
+        offline::OfflineOptions {
+            frames: 2,
+            block_frames: 1,
+            command_capacity: 4,
+            max_voices: 2,
+        },
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(report.frames, 2);
+    assert_eq!(report.hits, 1);
+    let samples: Vec<_> = output
+        .chunks_exact(4)
+        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+        .collect();
+    assert_eq!(samples, [0.75, 0.75, -0.75, -0.75]);
+    // Dispatch follows bytes even when a caller's path suffix describes WAV.
+    let pcm = DefaultAssetDecoder
+        .decode(Path::new("misleading.wav"), &encoded, limits())
+        .unwrap();
+    assert_eq!(pcm.format(), AudioFormat::new(24_000, 1).unwrap());
+    assert_eq!(pcm.samples(), &[0.25, -0.5]);
+    assert!(
+        WavDecoder
+            .decode(Path::new("music.flac"), &encoded, limits())
+            .is_err()
+    );
+    let mut changed = encoded.clone();
+    changed[45] = 0x0c; // Valid frame CRC with a conflicting 24-bit frame header.
+    flac_fixture::refresh_flac16_checksums(&mut changed);
+    dir.write("music.flac", &changed);
+    assert!(load_prepared(&chart, format, limits(), ChannelPolicy::MonoToStereo).is_err());
+    let mut broken = encoded;
+    broken.pop();
+    dir.write("music.flac", &broken);
+    assert!(load_prepared(&chart, format, limits(), ChannelPolicy::MonoToStereo).is_err());
+}
+
 #[test]
 fn shift_jis_catalog_and_asset_loaders_preserve_unicode_paths_and_pcm() {
     let dir = Directory::new();

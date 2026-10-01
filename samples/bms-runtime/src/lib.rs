@@ -14,6 +14,10 @@ pub mod competition_live;
 pub mod completion;
 /// Portable bounded audio device metadata and explicit draft selection.
 pub mod device_catalog;
+/// Native FLAC asset decoding during bounded preparation.
+pub mod flac_decode;
+#[cfg(test)]
+mod flac_fixture;
 /// Original bitmap glyph atlas data, prepared outside rendering callbacks.
 #[cfg(feature = "graphics")]
 pub mod font;
@@ -145,7 +149,7 @@ pub trait AssetDecoder {
     ) -> Result<PcmSample, Box<dyn Error>>;
 }
 
-/// Default strict RIFF WAVE decoder; no additional formats are implied.
+/// Explicit strict RIFF WAVE decoder; no additional formats are implied.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WavDecoder;
 impl AssetDecoder for WavDecoder {
@@ -159,14 +163,33 @@ impl AssetDecoder for WavDecoder {
     }
 }
 
-/// Prepare a bounded UTF-8 or Shift-JIS BMS chart and its referenced WAV assets off-thread.
+/// Default off-thread asset decoding by native FLAC signature or strict WAV.
+/// Other formats reject; neither extension replacement nor resampling occurs here.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DefaultAssetDecoder;
+impl AssetDecoder for DefaultAssetDecoder {
+    fn decode(
+        &self,
+        path: &Path,
+        encoded: &[u8],
+        limits: PcmLimits,
+    ) -> Result<PcmSample, Box<dyn Error>> {
+        if encoded.starts_with(b"fLaC") {
+            flac_decode::FlacDecoder.decode(path, encoded, limits)
+        } else {
+            WavDecoder.decode(path, encoded, limits)
+        }
+    }
+}
+
+/// Prepare a bounded UTF-8 or Shift-JIS BMS chart and its referenced WAV/FLAC assets off-thread.
 pub fn load_prepared(
     path: &Path,
     format: AudioFormat,
     pcm_limits: PcmLimits,
     channels: ChannelPolicy,
 ) -> Result<PreparedBms, Box<dyn Error>> {
-    load_prepared_with_decoder(path, format, pcm_limits, channels, &WavDecoder)
+    load_prepared_with_decoder(path, format, pcm_limits, channels, &DefaultAssetDecoder)
 }
 
 /// Prepare using an explicit codec, retaining the same path and storage policy.
