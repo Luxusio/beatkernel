@@ -60,6 +60,15 @@ and `ui/organisms.rs` for playfield/scoreboard. `graphics.rs` submits the scene;
 `desktop.rs` composes screens and owns native window/session commands. The
 graphics feature exports these components for native and WASM library users.
 Resize, zero-size surfaces, focus loss and close must preserve owner cleanup.
+Menu interaction is built bottom-up from logical hit rectangles and a
+press/release/cancel state, then a button molecule and screen composition.
+A click activates only when press and release hit the same enabled control;
+focus loss, resize, suspension and close cancel an armed gesture. Physical
+pointer positions map through the same logical-to-physical stretch as rendering;
+non-finite/outside positions and zero-sized windows cannot activate controls.
+Clicking a catalog row selects it. Start, Cancel, Return and Exit buttons use
+the existing session commands, with cleanup still required before another run.
+Pointer events are menu commands only and never produce gameplay timestamps.
 Backend and presentation options must reject unavailable explicit selections;
 queue-depth settings are hints, not measured latency guarantees.
 

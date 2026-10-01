@@ -92,6 +92,9 @@ notes, holds, judgment feedback and counters from actual game snapshots.
 Use `player --library DIR` or `player --chart PATH` with the same explicit native
 device/buffer/binding options as `play`. Up/Down select, Enter starts, and
 Escape/focus loss cancels. Device settings currently require command-line options.
+Catalog rows can also be clicked; Start, Cancel, Return and Exit buttons use
+the same session commands. Mouse hit testing follows the rendered logical
+viewport and never contributes gameplay input timestamps.
 `--gpu-backend auto|vulkan|dx12|metal|gl` selects graphics discovery;
 `--present fifo|immediate|mailbox` selects presentation (default FIFO), with errors
 for unsupported explicit choices. `--ui-fps` and `--ui-lookahead-ms` control drawing.
