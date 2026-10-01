@@ -511,5 +511,182 @@ fn parser_caps_bytes_lines_tokens_and_retains_utf8_metadata() {
     assert_eq!(parsed.metadata["TITLE"], "日本語");
     assert_eq!(parsed.samples[&1295], "exact path.ogg");
     assert_eq!(parsed.notes[0].object, ObjectId(1));
-    assert_eq!(parsed.warnings[0].line, 4);
+    assert_eq!(parsed.images[&ImageId(1)], "scene.png");
+    assert!(parsed.warnings.is_empty());
+}
+
+#[test]
+fn image_definitions_and_independent_channel_selections_preserve_opaque_resources() {
+    let chart=parse("#BMP00 初期\\poor image.png\n#bmpAz 背景\\stage.PNG\n#00004:00AZ\n#00006:0001\n#00007:00AZ",ParseOptions::default()).unwrap();
+    assert_eq!(chart.images[&ImageId(0)], "初期\\poor image.png");
+    assert_eq!(chart.images[&ImageId(395)], "背景\\stage.PNG");
+    assert_eq!(chart.bga.len(), 3);
+    assert!(chart.source.objects.is_empty());
+    assert!(chart.bgm.is_empty());
+    assert!(chart.warnings.is_empty());
+    let scheduled = chart.compile_bga().unwrap();
+    assert_eq!(
+        scheduled
+            .iter()
+            .map(|e| (e.at.as_nanos(), e.channel, e.image, e.ordinal))
+            .collect::<Vec<_>>(),
+        vec![
+            (923_076_923, BgaChannel::Base, ImageId(395), 0),
+            (923_076_923, BgaChannel::Poor, ImageId(1), 1),
+            (923_076_923, BgaChannel::Layer, ImageId(395), 2)
+        ]
+    );
+    assert_eq!(chart.compile().unwrap().bga, scheduled);
+    assert!(!chart.images.contains_key(&ImageId(1))); // Undefined selections are admitted.
+}
+
+#[test]
+fn image_definition_and_same_channel_duplicates_obey_explicit_policy() {
+    let text = "#BMP01 first.png\n#bmp01 second.png\n#00004:01\n#00004:02";
+    assert_eq!(parse(text, ParseOptions::default()).unwrap_err().line, 2);
+    let last = ParseOptions {
+        duplicates: DuplicatePolicy::LastWins,
+        ..ParseOptions::default()
+    };
+    let chart = parse(text, last).unwrap();
+    assert_eq!(chart.images[&ImageId(1)], "second.png");
+    assert_eq!(chart.bga.len(), 1);
+    assert_eq!(chart.bga[0].image, ImageId(2));
+    assert_eq!(chart.bga[0].ordinal, 1);
+    let error = parse("#00004:01\n#00004:02", ParseOptions::default()).unwrap_err();
+    assert_eq!(error.line, 2);
+    assert!(matches!(
+        error.kind,
+        BmsErrorKind::Duplicate("BGA channel position")
+    ));
+    for malformed in [
+        "#BMP01",
+        "#BMP01 \0bad",
+        "#BMP$1 bad",
+        "#BMP0 image.png",
+        "#BMP001 image.png",
+    ] {
+        assert!(parse(malformed, ParseOptions::default()).is_err());
+    }
+    let zeros = parse(
+        "#BMP00 poor.png\n#00004:0000\n#00006:00\n#00007:00",
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert!(zeros.bga.is_empty());
+    assert_eq!(zeros.images.len(), 1);
+}
+
+#[test]
+fn visual_only_subdivisions_do_not_change_gameplay_bgm_grid_ordinals_or_rounding() {
+    let prefix = "#BPM 137\n#WAV01 head.wav\n#00011:0101\n";
+    let plain = parse(
+        &format!("{prefix}; ignored visual slot\n#00001:0101"),
+        ParseOptions::default(),
+    )
+    .unwrap();
+    let visual = parse(
+        &format!("{prefix}#00004:00010000000000\n#00001:0101"),
+        ParseOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(plain.source, visual.source);
+    assert_eq!(plain.notes, visual.notes);
+    assert_eq!(plain.bgm, visual.bgm);
+    assert_eq!(plain.measures, visual.measures);
+    assert_eq!(visual.source.ticks_per_beat, 1);
+    assert_eq!(visual.bga_ticks_per_beat, 7);
+    assert_eq!(
+        plain.compile().unwrap().chart,
+        visual.compile().unwrap().chart
+    );
+    assert_eq!(plain.compile().unwrap().bgm, visual.compile().unwrap().bgm);
+    assert_eq!(visual.compile_bga().unwrap()[0].at.as_nanos(), 250_260_688);
+    let limited = ParseOptions {
+        max_resolution: 6,
+        ..ParseOptions::default()
+    };
+    assert!(matches!(
+        parse(&format!("{prefix}#00004:00010000000000"), limited)
+            .unwrap_err()
+            .kind,
+        BmsErrorKind::Resolution
+    ));
+}
+
+#[test]
+fn bga_uses_irregular_measure_bpm_and_pre_stop_core_timing() {
+    let text = "#BPM 120\n#BPM01 240\n#STOP01 48\n#WAV01 head.wav\n#00002:0.75\n#00008:000100\n#00009:000100\n#00011:000001\n#00004:010203\n#00107:01";
+    let parsed = parse(text, ParseOptions::default()).unwrap();
+    assert_eq!(parsed.source.ticks_per_beat, 1);
+    let compiled = parsed.compile().unwrap();
+    assert_eq!(
+        compiled
+            .bga
+            .iter()
+            .map(|e| e.at.as_nanos())
+            .collect::<Vec<_>>(),
+        vec![0, 500_000_000, 1_000_000_000, 1_250_000_000]
+    );
+    assert_eq!(
+        compiled.chart.objects()[0].time.start.as_nanos(),
+        1_000_000_000
+    );
+    assert_eq!(compiled.bga[1].image, ImageId(2));
+    let simultaneous = parse(
+        "#BPM 60\n#STOP01 48\n#00009:01\n#00007:03\n#00004:01\n#00006:02",
+        ParseOptions::default(),
+    )
+    .unwrap()
+    .compile_bga()
+    .unwrap();
+    assert_eq!(
+        simultaneous
+            .iter()
+            .map(|e| (e.at.as_nanos(), e.channel, e.ordinal))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, BgaChannel::Layer, 0),
+            (0, BgaChannel::Base, 1),
+            (0, BgaChannel::Poor, 2)
+        ]
+    );
+}
+
+#[test]
+fn seeded_visual_payloads_and_visual_counts_use_the_same_bounded_parser() {
+    let text = "#RANDOM 2\n#IF 1\n#BMP01 first.png\n#00004:01\n#ELSE\n#BMP02 second.png\n#00007:02\n#ENDIF";
+    let first = parse_seeded(text, ParseOptions::default(), 3).unwrap();
+    let second = parse_seeded(text, ParseOptions::default(), 0).unwrap();
+    assert_eq!(first.bga[0].image, ImageId(1));
+    assert_eq!(second.bga[0].image, ImageId(2));
+    assert_eq!(first.images.len(), 1);
+    assert_eq!(second.images.len(), 1);
+    let limited = ParseOptions {
+        max_objects: 1,
+        ..ParseOptions::default()
+    };
+    assert_eq!(parse("#00004:0101", limited).unwrap_err().line, 1);
+    assert!(parse("#WAV01 head.wav\n#00011:01\n#00007:01", limited).is_err());
+    let chart = parse("#00004:01", limited).unwrap();
+    assert_eq!(chart.bga.len(), 1);
+    let mut bad_grid = chart.clone();
+    bad_grid.bga_ticks_per_beat = 0;
+    assert!(matches!(
+        bad_grid.compile_bga().unwrap_err().kind,
+        BmsErrorKind::Resolution
+    ));
+    let mut overflow = chart;
+    overflow.bga_ticks_per_beat = 2;
+    overflow
+        .source
+        .bpm_changes
+        .push(beatkernel::chart::BpmChange {
+            beat: beatkernel::chart::Beat::new(i64::MAX).unwrap(),
+            bpm: beatkernel::chart::Bpm::new(120, 1).unwrap(),
+        });
+    assert!(matches!(
+        overflow.compile_bga().unwrap_err().kind,
+        BmsErrorKind::Overflow
+    ));
 }

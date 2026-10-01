@@ -135,6 +135,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
     let mut base = Bpm::new(130, 1).expect("valid documented default");
     let mut base_defined = false;
     let mut samples = BTreeMap::new();
+    let mut images = BTreeMap::new();
     let mut tempos = BTreeMap::new();
     let mut stops = BTreeMap::new();
     let mut lengths = BTreeMap::<usize, (Ratio, usize)>::new();
@@ -142,6 +143,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
     let mut lnobj = None;
     let mut warnings = Vec::new();
     let mut rows = Vec::new();
+    let mut visual_rows = Vec::new();
     let mut raw_count = 0usize;
     let mut max_measure = 0usize;
     let mut conditional = crate::conditional::Conditional::new(seed);
@@ -219,19 +221,17 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 }
                 tokens.push(value);
             }
-            if matches!(channel, 4 | 6 | 7) {
-                warnings.push(BmsWarning {
-                    line,
-                    message: format!("BGA channel {channel:02X} is not rendered by this adapter"),
-                });
-                continue;
-            }
-            rows.push(Row {
+            let row = Row {
                 measure,
                 channel,
                 tokens,
                 line,
-            });
+            };
+            if matches!(channel, 4 | 6 | 7) {
+                visual_rows.push(row);
+            } else {
+                rows.push(row);
+            }
             continue;
         }
         let split = command_line
@@ -350,7 +350,23 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 "VOLWAV",
                 options.duplicates,
             )?;
-        } else if (command.len() == 5 && command.starts_with("BMP")) || command.starts_with("BGA") {
+        } else if command.len() == 5 && command.starts_with("BMP") {
+            let id = ImageId(code(&command[3..], 36, line)?);
+            if value.is_empty() || value.contains('\0') {
+                return Err(fail(
+                    line,
+                    BmsErrorKind::Syntax("nonempty BMP path required"),
+                ));
+            }
+            define(
+                &mut images,
+                id,
+                value.to_owned(),
+                line,
+                "BMP definition",
+                options.duplicates,
+            )?;
+        } else if command.starts_with("BGA") {
             warnings.push(BmsWarning {
                 line,
                 message: format!("visual directive #{command} is not rendered by this adapter"),
@@ -407,6 +423,70 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
             ordinal += 1;
         }
     }
+    let mut visual_resolution = resolution;
+    let mut visual_events = Vec::new();
+    let mut visual_ordinal = 0u64;
+    for row in visual_rows {
+        for (index, value) in row
+            .tokens
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, value)| *value != 0)
+        {
+            let offset = arithmetic(
+                row.line,
+                durations[row.measure].mul(Ratio {
+                    n: index as i128,
+                    d: row.tokens.len() as i128,
+                }),
+            )?;
+            let beat = arithmetic(row.line, origins[row.measure].add(offset))?;
+            update_resolution(
+                &mut visual_resolution,
+                beat.d,
+                options.max_resolution,
+                row.line,
+            )?;
+            visual_events.push(Event {
+                beat,
+                channel: row.channel,
+                value,
+                line: row.line,
+                ordinal: visual_ordinal,
+            });
+            visual_ordinal += 1;
+        }
+    }
+    let visual_resolution =
+        u32::try_from(visual_resolution).map_err(|_| fail(0, BmsErrorKind::Resolution))?;
+    let mut visual_merged = BTreeMap::new();
+    for event in visual_events {
+        let tick = arithmetic(event.line, event.beat.ticks(visual_resolution))?;
+        let channel = match event.channel {
+            4 => BgaChannel::Base,
+            6 => BgaChannel::Poor,
+            7 => BgaChannel::Layer,
+            _ => unreachable!("visual row channel"),
+        };
+        let marker = BgaEvent {
+            beat: Beat::new(tick)
+                .map_err(|error| fail(event.line, BmsErrorKind::Compile(error)))?,
+            channel,
+            image: ImageId(event.value),
+            ordinal: event.ordinal,
+        };
+        define(
+            &mut visual_merged,
+            (tick, channel),
+            marker,
+            event.line,
+            "BGA channel position",
+            options.duplicates,
+        )?;
+    }
+    let mut bga: Vec<_> = visual_merged.into_values().collect();
+    bga.sort_by_key(|event| (event.beat, event.ordinal));
     let resolution = u32::try_from(resolution).map_err(|_| fail(0, BmsErrorKind::Resolution))?;
     let mut measures = Vec::with_capacity(max_measure + 1);
     for measure in 0..=max_measure {
@@ -609,6 +689,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
         .checked_add(bpm_events.len())
         .and_then(|count| count.checked_add(stop_events.len()))
         .and_then(|count| count.checked_add(bgm.len()))
+        .and_then(|count| count.checked_add(bga.len()))
         .filter(|count| *count <= options.max_objects && *count <= MAX_SOURCE_ITEMS)
         .ok_or_else(|| fail(0, BmsErrorKind::Limit("source items")))?;
     let mut source = SourceChart::new(resolution, base)
@@ -687,6 +768,9 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
     Ok(BmsChart {
         source,
         samples,
+        images,
+        bga,
+        bga_ticks_per_beat: visual_resolution,
         notes: mapped,
         bgm,
         metadata,

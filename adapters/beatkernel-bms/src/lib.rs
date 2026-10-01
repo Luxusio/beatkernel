@@ -2,6 +2,7 @@
 //! Supports documented timing, lane, keysound, paired LNTYPE1 and LNOBJ features.
 //! Seeded RANDOM/SETRANDOM and SWITCH flow resolve before payload interpretation.
 //! Long-note tail tokens are metadata only and never automatic sounds.
+//! BMP image selections compile separately without changing the gameplay grid.
 //! Asset paths are opaque references; loading/decoding belongs to the application.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -38,7 +39,7 @@ pub struct ParseOptions {
     pub max_lines: usize,
     /// Maximum bytes in one physical line.
     pub max_line_bytes: usize,
-    /// Maximum nonzero tokens and final source objects/markers/BGM combined.
+    /// Maximum nonzero tokens and final gameplay/timing/BGM/BGA items combined.
     pub max_objects: usize,
     /// Maximum exact quarter-beat tick resolution (LCM); never silently rounded.
     pub max_resolution: u32,
@@ -126,6 +127,46 @@ pub struct ScheduledBgm {
     /// Original source acquisition ordinal for equal-time ordering.
     pub ordinal: u64,
 }
+/// Opaque base36 BMP resource identity, including special initial Poor image 00.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ImageId(
+    /// Original numeric base36 image index.
+    pub u16,
+);
+/// Independently selected BMS image layers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BgaChannel {
+    /// Channel 04 base image.
+    Base,
+    /// Channel 06 poor-image selection; activation policy belongs to the app.
+    Poor,
+    /// Channel 07 overlay image.
+    Layer,
+}
+/// Visual selection on its independent exact quarter-beat grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BgaEvent {
+    /// Source position in BmsChart::bga_ticks_per_beat units.
+    pub beat: Beat,
+    /// Selected independent layer.
+    pub channel: BgaChannel,
+    /// Resource selection, even when its BMP definition is absent.
+    pub image: ImageId,
+    /// Visual-only acquisition ordinal for simultaneous ordering.
+    pub ordinal: u64,
+}
+/// Image selection scheduled through the checked core pre-STOP timing compiler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScheduledBga {
+    /// Original absolute song time; no display clock is inferred.
+    pub at: Timestamp,
+    /// Selected independent layer.
+    pub channel: BgaChannel,
+    /// Opaque image resource reference.
+    pub image: ImageId,
+    /// Visual-only source acquisition ordinal.
+    pub ordinal: u64,
+}
 /// Explicitly ignored descriptive/visual feature, never silent timing fallback.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BmsWarning {
@@ -134,13 +175,19 @@ pub struct BmsWarning {
     /// Human-readable unsupported visual feature description.
     pub message: String,
 }
-/// Parsed chart plus adapter-owned samples, lanes, BGM and metadata.
+/// Parsed gameplay plus opaque audio/image resources and independent timelines.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BmsChart {
     /// Actual gameplay SourceChart; no BGM-only fake gameplay notes.
     pub source: SourceChart,
     /// Exact WAV paths by case-insensitive base36 index; assets are not opened.
     pub samples: BTreeMap<u16, String>,
+    /// Exact opaque BMP paths, including optional initial Poor resource 00.
+    pub images: BTreeMap<ImageId, String>,
+    /// Visual selections, kept outside the gameplay and audio grids.
+    pub bga: Vec<BgaEvent>,
+    /// Independent visual tick grid encompassing the gameplay resolution.
+    pub bga_ticks_per_beat: u32,
     /// Lane/keysound mapping by chart-local object identity.
     pub notes: Vec<BmsNote>,
     /// Layered source BGM events in beat/ordinal order.
@@ -152,16 +199,18 @@ pub struct BmsChart {
     /// Exact original measure boundaries.
     pub measures: Vec<BmsMeasure>,
 }
-/// Real compiled gameplay timeline and separately scheduled BGM.
+/// Real compiled gameplay and separately scheduled audio/image selections.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompiledBms {
     /// Actual chart consumed by the same live/replay JudgeEngine.
     pub chart: CompiledChart,
     /// Separately timed automatic keysounds, not judged gameplay objects.
     pub bgm: Vec<ScheduledBgm>,
+    /// Separately compiled visual image selections, never judged objects.
+    pub bga: Vec<ScheduledBga>,
 }
 impl BmsChart {
-    /// Compiles gameplay and BGM with the same checked core BPM/STOP semantics.
+    /// Compiles gameplay, BGM and visual selections with checked core timing.
     pub fn compile(&self) -> Result<CompiledBms, BmsError> {
         let chart = self
             .source
@@ -198,7 +247,71 @@ impl BmsChart {
             });
         }
         bgm.sort_by_key(|event| (event.at, event.ordinal));
-        Ok(CompiledBms { chart, bgm })
+        Ok(CompiledBms {
+            chart,
+            bgm,
+            bga: self.compile_bga()?,
+        })
+    }
+    /// Compiles the visual grid separately, preserving gameplay/BGM rounding.
+    /// Tempo/STOP beats are checked-rescaled; simultaneous events use pre-STOP time.
+    pub fn compile_bga(&self) -> Result<Vec<ScheduledBga>, BmsError> {
+        let original = self.source.ticks_per_beat;
+        if original == 0 || self.bga_ticks_per_beat == 0 || self.bga_ticks_per_beat % original != 0
+        {
+            return Err(BmsError::new(0, BmsErrorKind::Resolution));
+        }
+        let factor = i64::from(self.bga_ticks_per_beat / original);
+        let rescale = |beat: Beat| -> Result<Beat, BmsError> {
+            let tick = beat
+                .ticks()
+                .checked_mul(factor)
+                .ok_or_else(|| BmsError::new(0, BmsErrorKind::Overflow))?;
+            Beat::new(tick).map_err(|error| BmsError::new(0, BmsErrorKind::Compile(error)))
+        };
+        let mut timing = SourceChart::new(self.bga_ticks_per_beat, self.source.initial_bpm)
+            .map_err(|error| BmsError::new(0, BmsErrorKind::Compile(error)))?;
+        for marker in &self.source.bpm_changes {
+            timing.bpm_changes.push(BpmChange {
+                beat: rescale(marker.beat)?,
+                bpm: marker.bpm,
+            });
+        }
+        for marker in &self.source.stops {
+            timing.stops.push(Stop {
+                beat: rescale(marker.beat)?,
+                duration: marker.duration,
+            });
+        }
+        timing.objects.extend(
+            self.bga
+                .iter()
+                .enumerate()
+                .map(|(index, event)| SourceObject {
+                    id: ObjectId(index as u64),
+                    start: event.beat,
+                    end: None,
+                    interaction: InteractionId(0),
+                    visual: VisualId(0),
+                    audio: None,
+                    metadata: ObjectMetadata::default(),
+                }),
+        );
+        let compiled = timing
+            .compile()
+            .map_err(|error| BmsError::new(0, BmsErrorKind::Compile(error)))?;
+        let mut scheduled = Vec::with_capacity(self.bga.len());
+        for object in compiled.objects() {
+            let event = self.bga[object.id.0 as usize];
+            scheduled.push(ScheduledBga {
+                at: object.time.start,
+                channel: event.channel,
+                image: event.image,
+                ordinal: event.ordinal,
+            });
+        }
+        scheduled.sort_by_key(|event| (event.at, event.ordinal));
+        Ok(scheduled)
     }
     /// Creates lane-specific registrations using existing builtin evaluators.
     /// Timing windows/offsets stay caller-controlled; RANK is not guessed.
