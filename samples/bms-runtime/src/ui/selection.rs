@@ -1,12 +1,16 @@
 //! Retained Selection nodes with Floem dependency tracking on the UI thread.
 use super::{
-    atoms::{rect, text},
+    atoms::{rect, text, text_clipped},
     interaction::{Bounds, ControlId},
     molecules::{button, text_field},
     retained::RetainedNodes,
     text_input::LineEditor,
 };
-use crate::{font_text::FontText, scene::Scene, screen_lifecycle::ScreenInstanceId};
+use crate::{
+    font_text::FontText,
+    scene::{ClipRect, Scene},
+    screen_lifecycle::ScreenInstanceId,
+};
 use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
 use std::sync::Arc;
 
@@ -156,18 +160,55 @@ impl SelectionView {
                     }
                     let item = &rows[index];
                     let title_y = if item.artist.is_empty() { y } else { y - 5 };
+                    let title_clip = ClipRect::new([
+                        28,
+                        bounds.y,
+                        904,
+                        if item.artist.is_empty() { 30 } else { 15 },
+                    ])
+                    .expect("fixed selection title bounds");
+                    let artist_clip = ClipRect::new([28, bounds.y + 15, 904, 15])
+                        .expect("fixed selection artist bounds");
                     if let Some(font) = &font {
                         if let Err(error) = font
-                            .draw(scene, 28, title_y as i64, &item.title, 0xf0f4ff)
+                            .draw_clipped(
+                                scene,
+                                28,
+                                title_y as i64,
+                                &item.title,
+                                0xf0f4ff,
+                                title_clip,
+                            )
                             .and_then(|()| {
-                                font.draw(scene, 28, (y + 9) as i64, &item.artist, 0x9bb1cf)
+                                font.draw_clipped(
+                                    scene,
+                                    28,
+                                    (y + 9) as i64,
+                                    &item.artist,
+                                    0x9bb1cf,
+                                    artist_clip,
+                                )
                             })
                         {
                             scene.reject(error);
                         }
                     } else {
-                        text(scene, 28, title_y, &item.title, 2, 0xf0f4ff);
-                        text(scene, 28, y + 14, &item.artist, 1, 0x9bb1cf);
+                        if let Err(error) =
+                            text_clipped(scene, 28, title_y, &item.title, 2, 0xf0f4ff, title_clip)
+                                .and_then(|()| {
+                                    text_clipped(
+                                        scene,
+                                        28,
+                                        y + 14,
+                                        &item.artist,
+                                        1,
+                                        0x9bb1cf,
+                                        artist_clip,
+                                    )
+                                })
+                        {
+                            scene.reject(error);
+                        }
                     }
                     hits.push((ControlId(100 + index as u64), bounds));
                 }
@@ -477,6 +518,82 @@ mod fixtures {
                 .iter()
                 .any(|r| r.bounds == [28.0, 154.0, 5.0, 7.0])
         );
+    }
+    #[test]
+    fn actual_selection_clips_long_prepared_text_and_overhang_to_each_line_band() {
+        use crate::{font_atlas::FontAtlas, texture::TextureId};
+        let mut atlas =
+            FontAtlas::new(crate::font_fixture::font_bytes(), 64.0, 128, 128, 16).unwrap();
+        atlas.prepare('A').unwrap();
+        atlas.prepare('가').unwrap();
+        let texture = TextureId::allocate().unwrap();
+        let font = FontText::new(Arc::new(atlas), texture).unwrap();
+        let mut uncropped = Scene::new(960, 720);
+        font.draw(&mut uncropped, 28, 135, "A", 0xf0f4ff).unwrap();
+        assert!(uncropped.rectangles()[0].bounds[1] + uncropped.rectangles()[0].bounds[3] > 149.0);
+        let view = SelectionView::new_with_font(
+            ScreenInstanceId(7),
+            vec![
+                SelectionItem {
+                    title: "A".repeat(256),
+                    artist: "가".repeat(256),
+                },
+                SelectionItem {
+                    title: "A".repeat(256),
+                    artist: String::new(),
+                },
+            ]
+            .into(),
+            Arc::from([]),
+            960,
+            720,
+            Some(font),
+        )
+        .unwrap();
+        let mut scene = Scene::new(960, 720);
+        let mut hits = Vec::new();
+        view.compose(&mut scene, &mut hits).unwrap();
+        let glyphs = scene
+            .batches()
+            .iter()
+            .filter(|b| b.texture == texture)
+            .flat_map(|b| &scene.rectangles()[b.first as usize..(b.first + b.count) as usize])
+            .collect::<Vec<_>>();
+        assert!(!glyphs.is_empty());
+        let mut bands = [false; 3];
+        for glyph in glyphs {
+            let [x, y, width, height] = glyph.bounds;
+            assert!(x >= 28.0 && x + width <= 932.0);
+            let (index, bottom) = if y < 149.0 {
+                (0, 149.0)
+            } else if y < 164.0 {
+                (1, 164.0)
+            } else {
+                assert!(y >= 168.0);
+                (2, 198.0)
+            };
+            assert!(y >= 134.0 && y + height <= bottom);
+            bands[index] = true;
+        }
+        assert_eq!(bands, [true; 3]);
+        assert_eq!(
+            (hits[0].0, hits[0].1.y, hits[0].1.height),
+            (ControlId(100), 134, 30)
+        );
+        let before = paints(&view);
+        view.update(frame(0));
+        assert_eq!(paints(&view), before);
+        view.set_projection(Arc::from([1]), Some(0)).unwrap();
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert_eq!(hits[0].0, ControlId(101));
+        for glyph in scene
+            .batches()
+            .iter()
+            .filter(|b| b.texture == texture)
+            .flat_map(|b| &scene.rectangles()[b.first as usize..(b.first + b.count) as usize])
+        {
+            assert!(glyph.bounds[1] >= 134.0 && glyph.bounds[1] + glyph.bounds[3] <= 164.0);
+        }
     }
     #[test]
     fn prepared_artist_lines_follow_projection_and_renderer_texture_identity() {

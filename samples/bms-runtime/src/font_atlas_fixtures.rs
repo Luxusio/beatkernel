@@ -270,6 +270,92 @@ fn cached_font_text_does_not_require_glyphs_beyond_clip_or_scalar_budget() {
 }
 
 #[test]
+fn prepared_text_component_clip_crops_real_uvs_and_keeps_cache_preflight_atomic() {
+    use crate::{
+        font_text::FontText,
+        scene::{ClipRect, Scene},
+        texture::TextureId,
+    };
+    use std::sync::Arc;
+    let mut atlas = FontAtlas::new(font_bytes(), 32.0, 128, 128, 16).unwrap();
+    atlas.prepare('A').unwrap();
+    let font = FontText::new(Arc::new(atlas), TextureId::allocate().unwrap()).unwrap();
+    let mut plain = Scene::new(128, 128);
+    font.draw(&mut plain, 4, 20, "A", 0xabcdef).unwrap();
+    let original = plain.rectangles()[0];
+    let [x, y, width, height] = original.bounds;
+    assert!(width > 2.0 && height > 4.0);
+    let clip = ClipRect::new([
+        x as i64 + 1,
+        y as i64 + 2,
+        width as i64 - 2,
+        height as i64 - 4,
+    ])
+    .unwrap();
+    let mut cropped = Scene::new(128, 128);
+    font.draw_clipped(&mut cropped, 4, 20, "A", 0xabcdef, clip)
+        .unwrap();
+    let rectangle = cropped.rectangles()[0];
+    assert_eq!(
+        rectangle.bounds,
+        [x + 1.0, y + 2.0, width - 2.0, height - 4.0]
+    );
+    let uv = original.uv;
+    for (actual, expected) in rectangle.uv.into_iter().zip([
+        uv[0] + uv[2] / width,
+        uv[1] + uv[3] * 2.0 / height,
+        uv[2] * (width - 2.0) / width,
+        uv[3] * (height - 4.0) / height,
+    ]) {
+        assert!((actual - expected).abs() < 0.000001);
+    }
+
+    let mut prefix = Scene::new(128, 128);
+    font.draw_clipped(
+        &mut prefix,
+        4,
+        20,
+        "A未",
+        0xabcdef,
+        ClipRect::new([4, 0, 1, 128]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(prefix.rectangles().len(), 1);
+    assert_eq!(prefix.rectangles()[0].bounds[2], 1.0);
+    let before = prefix.rectangles()[0];
+    let epoch = prefix.geometry_stamp().1;
+    assert!(
+        font.draw_clipped(
+            &mut prefix,
+            4,
+            20,
+            "A未",
+            0xffffff,
+            ClipRect::new([4, 0, 100, 128]).unwrap()
+        )
+        .is_err()
+    );
+    assert_eq!(prefix.rectangles().len(), 1);
+    assert_eq!(prefix.rectangles()[0].bounds, before.bounds);
+    assert_eq!(prefix.rectangles()[0].uv, before.uv);
+    assert_eq!(prefix.geometry_stamp().1, epoch);
+    font.draw_clipped(
+        &mut prefix,
+        4,
+        20,
+        "未",
+        0xffffff,
+        ClipRect::new([128, 0, 4, 128]).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(prefix.geometry_stamp().1, epoch);
+    assert!(
+        font.draw_clipped(&mut prefix, -1, 20, "A", 0xffffff, clip)
+            .is_err()
+    );
+}
+
+#[test]
 fn retained_selection_uses_prepared_title_texture_and_recovers_with_new_identity() {
     use crate::{
         font_text::FontText,

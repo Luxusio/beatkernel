@@ -1,7 +1,7 @@
 //! Immutable prepared-font text geometry; no rasterization or native ownership.
 use crate::{
     font_atlas::{FontAtlas, Glyph},
-    scene::Scene,
+    scene::{ClipRect, Scene},
     texture::TextureId,
 };
 use std::sync::Arc;
@@ -38,21 +38,58 @@ impl FontText {
         value: &str,
         color: u32,
     ) -> Result<(), String> {
+        self.draw_in(scene, x, y, value, color, None)
+    }
+    /// Draws into an explicit component clip, intersected with the viewport.
+    /// Glyphs retain their original metrics; clipping crops texture UVs.
+    /// The same immutable clip applies to both preflight and geometry passes.
+    pub fn draw_clipped(
+        &self,
+        scene: &mut Scene,
+        x: i64,
+        y: i64,
+        value: &str,
+        color: u32,
+        clip: ClipRect,
+    ) -> Result<(), String> {
+        self.draw_in(scene, x, y, value, color, Some(clip))
+    }
+    fn draw_in(
+        &self,
+        scene: &mut Scene,
+        x: i64,
+        y: i64,
+        value: &str,
+        color: u32,
+        clip: Option<ClipRect>,
+    ) -> Result<(), String> {
         if x < 0 || y < 0 {
             return Err("font text origin must be nonnegative".into());
         }
         let [width, height] = scene.dimensions();
-        if x as f64 >= f64::from(width) || y as f64 >= f64::from(height) {
+        let (right, bottom) = if let Some(clip) = clip {
+            let Some([_, _, right, bottom]) = scene.clip_bounds(clip) else {
+                return Ok(());
+            };
+            (right as f64, bottom as f64)
+        } else {
+            (f64::from(width), f64::from(height))
+        };
+        if x as f64 >= right || y as f64 >= bottom {
             return Ok(());
         }
         scene.status()?;
         let baseline = y
             .checked_add(self.ascent)
             .ok_or("font text baseline overflow")?;
-        self.walk(x, baseline, f64::from(width), value, |_, _| Ok(()))?;
-        self.walk(x, baseline, f64::from(width), value, |glyph, bounds| {
+        self.walk(x, baseline, right, value, |_, _| Ok(()))?;
+        self.walk(x, baseline, right, value, |glyph, bounds| {
             if let Some(uv) = glyph.uv {
-                scene.sprite(self.texture, bounds, uv, color)?;
+                if let Some(clip) = clip {
+                    scene.sprite_clipped(self.texture, bounds, uv, color, clip)?;
+                } else {
+                    scene.sprite(self.texture, bounds, uv, color)?;
+                }
             }
             Ok(())
         })
