@@ -44,7 +44,7 @@ use std::{
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::{ElementState, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
+    event::{ElementState, Ime, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, KeyCode, PhysicalKey},
     window::{Window, WindowId},
@@ -483,6 +483,7 @@ pub(super) fn run(
         search_editor,
         search_focused: false,
         catalog_wheel: WheelSteps::default(),
+        ime: ImeDraft::default(),
         selection_diagnostics,
         selection_view: None,
         painted_reactive: None,
@@ -833,6 +834,24 @@ fn record_launch(
     SessionLaunch::new(args)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImeField {
+    Search,
+    Setting(usize),
+    Profile,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ImeTarget {
+    screen: ScreenInstanceId,
+    field: ImeField,
+}
+#[derive(Default)]
+struct ImeDraft {
+    target: Option<ImeTarget>,
+    enabled: bool,
+    composing: bool,
+    preview: Option<LineEditor>,
+}
 struct Desktop {
     options: Options,
     active_backend: BackendChoice,
@@ -861,6 +880,7 @@ struct Desktop {
     search_editor: LineEditor,
     search_focused: bool,
     catalog_wheel: WheelSteps,
+    ime: ImeDraft,
     selection_diagnostics: Arc<[String]>,
     selection_view: Option<SelectionView>,
     painted_reactive: Option<ScreenInstanceId>,
@@ -881,6 +901,7 @@ struct Desktop {
 }
 impl Desktop {
     fn invalidate_hits(&mut self) {
+        self.sync_ime();
         self.hits.clear();
         // A retained scene must restore hit regions even if its signals are equal.
         self.painted_reactive = None;
@@ -2640,10 +2661,119 @@ impl Desktop {
         if self.search_focused != focused {
             self.catalog_wheel.reset();
             self.search_focused = focused;
-            if let Some(window) = &self.window {
-                window.set_ime_allowed(focused);
+            self.sync_ime();
+        }
+    }
+    fn ime_target(&self) -> Option<ImeTarget> {
+        if !self.ui_ready() {
+            return None;
+        }
+        let screen = self.navigator.active_id()?;
+        let field = match self.navigator.route() {
+            ScreenRoute::Selection if self.search_focused => ImeField::Search,
+            ScreenRoute::Settings => {
+                let settings = self.settings.as_ref()?;
+                if settings.profile_focused {
+                    ImeField::Profile
+                } else {
+                    ImeField::Setting(settings.selected)
+                }
+            }
+            _ => return None,
+        };
+        Some(ImeTarget { screen, field })
+    }
+    fn sync_ime(&mut self) {
+        let target = self.ime_target();
+        if target == self.ime.target {
+            return;
+        }
+        self.ime = ImeDraft {
+            target,
+            ..ImeDraft::default()
+        };
+        self.painted_reactive = None;
+        if let Some(window) = &self.window {
+            window.set_ime_allowed(false);
+            if target.is_some() {
+                window.set_ime_allowed(true);
             }
         }
+    }
+    fn ime_owns_keyboard(&self) -> bool {
+        self.ime.enabled
+            && self.ime.composing
+            && self.ime.target.is_some()
+            && self.ime.target == self.ime_target()
+    }
+    fn ime_editor<'a>(&'a self, field: ImeField, editor: &'a LineEditor) -> &'a LineEditor {
+        if self.ime.target.is_some_and(|target| target.field == field)
+            && self.ime.target == self.ime_target()
+        {
+            if let Some(preview) = &self.ime.preview {
+                return preview;
+            }
+        }
+        editor
+    }
+    fn ime_error(&mut self, error: String) {
+        match self.navigator.route() {
+            ScreenRoute::Settings => {
+                if let Some(settings) = &mut self.settings {
+                    settings.error = Some(error);
+                }
+            }
+            ScreenRoute::Selection => self.failure = Some(error),
+            _ => {}
+        }
+    }
+    fn ime_event(&mut self, event: Ime) {
+        self.sync_ime();
+        match event {
+            Ime::Enabled if self.ime.target.is_some() => self.ime.enabled = true,
+            Ime::Disabled => {
+                self.ime.enabled = false;
+                self.ime.composing = false;
+                self.ime.preview = None;
+            }
+            Ime::Preedit(text, cursor) if self.ime.enabled => {
+                self.ime.composing = !text.is_empty();
+                self.ime.preview = None;
+                if !text.is_empty() {
+                    let editor = match self.ime.target.map(|target| target.field) {
+                        Some(ImeField::Search) => Some(&self.search_editor),
+                        Some(ImeField::Setting(_)) => {
+                            self.settings.as_ref().map(|draft| &draft.editor)
+                        }
+                        Some(ImeField::Profile) => {
+                            self.settings.as_ref().map(|draft| &draft.profile)
+                        }
+                        None => None,
+                    };
+                    if let Some(editor) = editor {
+                        match editor.preedit(&text, cursor) {
+                            Ok(preview) => self.ime.preview = Some(preview),
+                            Err(error) => self.ime_error(error),
+                        }
+                    }
+                }
+            }
+            Ime::Commit(text) if self.ime.enabled => {
+                self.ime.preview = None;
+                self.ime.composing = false;
+                match self.ime.target.map(|target| target.field) {
+                    Some(ImeField::Search) => self.edit_search(None, Some(&text)),
+                    Some(ImeField::Setting(_) | ImeField::Profile) => {
+                        if let Some(settings) = &mut self.settings {
+                            settings.edit(None, Some(&text));
+                        }
+                    }
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+        self.invalidate_hits();
     }
     fn edit_search(&mut self, key: Option<KeyCode>, value: Option<&str>) {
         if !self.ui_ready()
@@ -2700,6 +2830,10 @@ impl Desktop {
             })
     }
     fn key(&mut self, key: KeyCode, repeat: bool) {
+        self.sync_ime();
+        if self.ime_owns_keyboard() {
+            return;
+        }
         self.gesture.cancel();
         if !self.ui_ready() {
             return;
@@ -2963,7 +3097,8 @@ impl Desktop {
             .as_ref()
             .ok_or("Selection view unavailable")?;
         view.set_projection(self.catalog_search.indices(), self.catalog_search.cursor())?;
-        view.set_search(&self.search_editor, self.search_focused)?;
+        let editor = self.ime_editor(ImeField::Search, &self.search_editor);
+        view.set_search(editor, self.search_focused)?;
         view.update(frame);
         if view.dirty() || self.painted_reactive != Some(id) {
             view.compose(&mut self.scene, &mut self.hits)?;
@@ -3006,6 +3141,8 @@ impl Desktop {
                 .find(|&id| self.gesture.is_armed(id))
         };
         let settings = self.settings.as_ref().ok_or("settings data unavailable")?;
+        let editor = self.ime_editor(ImeField::Setting(settings.selected), &settings.editor);
+        let profile = self.ime_editor(ImeField::Profile, &settings.profile);
         let view = self
             .settings_view
             .as_ref()
@@ -3013,8 +3150,8 @@ impl Desktop {
         view.update(SettingsFrame {
             fields: settings.values.fields(),
             selected: settings.selected,
-            editor: &settings.editor,
-            profile: &settings.profile,
+            editor,
+            profile,
             profile_focused: settings.profile_focused,
             message: settings.message.as_deref(),
             error: settings.error.as_deref(),
@@ -3624,11 +3761,7 @@ impl ApplicationHandler for Desktop {
                     self.catalog_wheel.reset();
                 }
             }
-            WindowEvent::Ime(winit::event::Ime::Commit(value)) => {
-                if self.navigator.route() == ScreenRoute::Selection && self.search_focused {
-                    self.edit_search(None, Some(&value));
-                }
-            }
+            WindowEvent::Ime(event) => self.ime_event(event),
             WindowEvent::CursorLeft { .. } => {
                 self.catalog_wheel.reset();
                 self.pointer = None;
@@ -3656,6 +3789,13 @@ impl ApplicationHandler for Desktop {
                 button: MouseButton::Left,
                 ..
             } => {
+                if state == ElementState::Pressed && self.ime.composing {
+                    self.ime = ImeDraft::default();
+                    if let Some(window) = &self.window {
+                        window.set_ime_allowed(false);
+                    }
+                    self.sync_ime();
+                }
                 self.catalog_wheel.reset();
                 let hit = self.hit();
                 match state {
@@ -3668,6 +3808,10 @@ impl ApplicationHandler for Desktop {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                self.sync_ime();
+                if self.ime_owns_keyboard() {
+                    return;
+                }
                 let editing = self.navigator.active_id();
                 let navigation = matches!(
                     event.physical_key,
@@ -3741,6 +3885,7 @@ impl ApplicationHandler for Desktop {
             }
             _ => {}
         }
+        self.sync_ime();
         if request_redraw && !self.closing() && !self.is_suspended() && !self.occluded {
             if let Some(window) = &self.window {
                 window.request_redraw();
@@ -3750,6 +3895,7 @@ impl ApplicationHandler for Desktop {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.collect_game();
         self.collect_profile();
+        self.sync_ime();
         if self.closing()
             && self.game.as_ref().is_none_or(|game| game.joined)
             && self.profile_io.is_none()
@@ -4123,6 +4269,7 @@ mod tests {
             search_editor: LineEditor::new("", 256).unwrap(),
             search_focused: false,
             catalog_wheel: WheelSteps::default(),
+            ime: ImeDraft::default(),
             selection_diagnostics: Arc::from([]),
             selection_view: None,
             painted_reactive: None,
@@ -4141,6 +4288,117 @@ mod tests {
             gesture: Gesture::default(),
             hits: Vec::new(),
         }
+    }
+    #[test]
+    fn ime_preview_is_visual_and_commit_updates_only_acknowledged_search_or_setting() {
+        let mut app = lifecycle_fixture();
+        app.set_search_focus(true);
+        let projection = app.catalog_search.indices();
+        app.ime_event(Ime::Commit("ignored".into()));
+        assert_eq!(app.search_editor.value(), "");
+        app.ime_event(Ime::Enabled);
+        app.ime_event(Ime::Preedit("音".into(), Some((3, 3))));
+        assert!(app.ime_owns_keyboard());
+        assert_eq!(
+            app.ime_editor(ImeField::Search, &app.search_editor).value(),
+            "音"
+        );
+        assert_eq!(app.search_editor.value(), "");
+        assert!(Arc::ptr_eq(&projection, &app.catalog_search.indices()));
+        app.key(KeyCode::Enter, false);
+        assert!(app.search_focused);
+        assert!(app.game.is_none());
+        app.ime_event(Ime::Preedit("".into(), None));
+        app.ime_event(Ime::Commit("音".into()));
+        assert_eq!(app.search_editor.value(), "音");
+        assert_eq!(
+            app.ime_editor(ImeField::Search, &app.search_editor).value(),
+            "音"
+        );
+        app.open_settings();
+        let index = app
+            .settings
+            .as_ref()
+            .unwrap()
+            .values
+            .fields()
+            .iter()
+            .position(|field| field.flag == "--record-replay")
+            .unwrap();
+        app.settings.as_mut().unwrap().select(index).unwrap();
+        app.sync_ime();
+        let before = app.settings.as_ref().unwrap().values.native_args();
+        app.ime_event(Ime::Enabled);
+        app.ime_event(Ime::Preedit("별.bkr".into(), Some((3, 3))));
+        assert_eq!(app.settings.as_ref().unwrap().values.native_args(), before);
+        app.key(KeyCode::Enter, false);
+        assert_eq!(app.navigator.route(), ScreenRoute::Settings);
+        app.ime_event(Ime::Commit("별.bkr".into()));
+        let draft = app.settings.as_ref().unwrap();
+        assert_eq!(draft.editor.value(), "별.bkr");
+        assert_eq!(draft.values.fields()[index].value, "별.bkr");
+        assert!(app.options.native.is_empty());
+    }
+    #[test]
+    fn ime_field_and_lifecycle_changes_drop_preview_and_require_fresh_enable() {
+        let mut app = lifecycle_fixture();
+        app.open_settings();
+        app.ime_event(Ime::Enabled);
+        app.ime_event(Ime::Preedit("old".into(), None));
+        app.settings.as_mut().unwrap().profile_focused = true;
+        app.sync_ime();
+        assert!(app.ime.preview.is_none());
+        assert!(!app.ime.enabled);
+        app.ime_event(Ime::Commit("stale".into()));
+        assert_eq!(app.settings.as_ref().unwrap().profile.value(), "");
+        app.ime_event(Ime::Enabled);
+        app.ime_event(Ime::Commit("기록.json".into()));
+        assert_eq!(app.settings.as_ref().unwrap().profile.value(), "기록.json");
+        for inactive in 0..3 {
+            app.ime_event(Ime::Preedit("pending".into(), None));
+            match inactive {
+                0 => app.active = false,
+                1 => app.occluded = true,
+                _ => app.navigator.suspend(),
+            }
+            app.sync_ime();
+            app.ime_event(Ime::Enabled);
+            app.ime_event(Ime::Commit("lost".into()));
+            assert!(app.ime.target.is_none());
+            assert!(app.ime.preview.is_none());
+            app.active = true;
+            app.occluded = false;
+            app.navigator.resume();
+            app.sync_ime();
+            app.ime_event(Ime::Enabled);
+        }
+        assert_eq!(app.settings.as_ref().unwrap().profile.value(), "기록.json");
+        app.back();
+        app.ime_event(Ime::Commit("late".into()));
+        assert!(app.ime.target.is_none());
+        assert!(app.settings.is_none());
+        assert!(app.game.is_none());
+    }
+    #[test]
+    fn ime_invalid_preview_and_commit_preserve_settings_and_show_errors() {
+        let mut app = lifecycle_fixture();
+        app.open_settings();
+        let before = app.settings.as_ref().unwrap().values.native_args();
+        app.ime_event(Ime::Enabled);
+        app.ime_event(Ime::Preedit("音".into(), Some((1, 3))));
+        assert!(app.ime.preview.is_none());
+        assert!(app.settings.as_ref().unwrap().error.is_some());
+        for invalid in ["\n".into(), "x".repeat(4097)] {
+            app.ime_event(Ime::Commit(invalid));
+            assert_eq!(app.settings.as_ref().unwrap().values.native_args(), before);
+            assert!(app.settings.as_ref().unwrap().error.is_some());
+        }
+        app.ime_event(Ime::Preedit("valid".into(), None));
+        app.ime_event(Ime::Disabled);
+        assert!(!app.ime_owns_keyboard());
+        assert!(app.ime.preview.is_none());
+        app.ime_event(Ime::Commit("ignored".into()));
+        assert_eq!(app.settings.as_ref().unwrap().values.native_args(), before);
     }
     #[test]
     fn catalog_pages_and_edges_preserve_filtered_chart_and_search_caret() {
