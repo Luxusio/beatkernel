@@ -154,6 +154,7 @@ struct Game {
     joined: bool,
     local_page: usize,
     local_comparisons: bool,
+    replay: bool,
     launch: SessionLaunch,
     prepared_retry: Option<SessionLaunch>,
 }
@@ -193,6 +194,7 @@ fn spawn_game(
     launch: SessionLaunch,
     local_page: usize,
     local_comparisons: bool,
+    replay: bool,
 ) -> Result<Game, String> {
     let args = launch.args().to_vec();
     let (publisher, viewer) = player::channel();
@@ -212,6 +214,7 @@ fn spawn_game(
         joined: false,
         local_page,
         local_comparisons,
+        replay,
         launch,
         prepared_retry: None,
     })
@@ -231,10 +234,12 @@ pub(super) fn run(
     native: Native,
     validate: Native,
     query_devices: QueryDevices,
+    replay: Native,
+    validate_replay: Native,
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
-            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F4 in settings: records; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry after cleanup; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F4 in settings: records; W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry after cleanup; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
         );
         return Ok(());
     }
@@ -303,6 +308,8 @@ pub(super) fn run(
         native,
         validate,
         query_devices,
+        replay,
+        validate_replay,
         picker: None,
         local_setup: None,
         accepted_local: None,
@@ -569,6 +576,27 @@ fn with_chart(args: &[String], path: &str) -> Vec<String> {
     args
 }
 
+/// Preserve the selected record across retry; watching cannot create captures.
+fn record_launch(
+    values: &NativeSettings,
+    chart: &std::path::Path,
+    record: &std::path::Path,
+) -> Result<SessionLaunch, String> {
+    let mut args: Vec<_> = values
+        .native_args()
+        .chunks_exact(2)
+        .filter(|pair| pair[0] != "--record-replay")
+        .flat_map(|pair| pair.iter().cloned())
+        .collect();
+    args.extend([
+        "--chart".into(),
+        chart.to_str().ok_or("chart path must be UTF-8")?.into(),
+        "--replay".into(),
+        record.to_str().ok_or("record path must be UTF-8")?.into(),
+    ]);
+    SessionLaunch::new(args)
+}
+
 struct Desktop {
     options: Options,
     active_backend: BackendChoice,
@@ -577,6 +605,8 @@ struct Desktop {
     native: Native,
     validate: Native,
     query_devices: QueryDevices,
+    replay: Native,
+    validate_replay: Native,
     picker: Option<DevicePicker>,
     local_setup: Option<LocalDraft>,
     accepted_local: Option<LocalSetup>,
@@ -1243,6 +1273,47 @@ impl Desktop {
         self.gesture.cancel();
         self.hits.clear();
     }
+    fn watch_record(&mut self) {
+        if !self.records_admitted() {
+            return;
+        }
+        let result = (|| {
+            let records = self.records.as_ref().ok_or("records unavailable")?;
+            let preview = records
+                .valid_preview()
+                .ok_or("preview the selected compatible record first")?;
+            let draft = self.settings.as_ref().ok_or("settings unavailable")?;
+            let launch = record_launch(&draft.values, &records.chart, &preview.path)?;
+            (self.validate_replay)(launch.args()).map_err(|error| error.to_string())?;
+            spawn_game(self.replay, launch, 0, false, true)
+        })();
+        match result {
+            Ok(game) => {
+                if let Some(window) = &self.window {
+                    let name = game
+                        .launch
+                        .args()
+                        .chunks_exact(2)
+                        .find(|p| p[0] == "--replay")
+                        .and_then(|p| std::path::Path::new(&p[1]).file_name())
+                        .map(|n| n.to_string_lossy())
+                        .unwrap_or_default();
+                    window.set_title(&window_title(&name, "REPLAY"));
+                }
+                self.game = Some(game);
+                self.records = None;
+                self.settings = None;
+                self.failure = None;
+            }
+            Err(error) => {
+                if let Some(records) = &mut self.records {
+                    records.error = Some(error);
+                }
+            }
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
     fn attach_record(&mut self, kind: OpponentKind) {
         if !self.records_admitted() {
             return;
@@ -1292,6 +1363,11 @@ impl Desktop {
     }
     fn records_key(&mut self, key: KeyCode, repeat: bool) {
         match key {
+            KeyCode::KeyW
+                if !repeat && self.records.as_ref().is_some_and(|r| !r.directory_focused) =>
+            {
+                self.watch_record()
+            }
             KeyCode::Escape if !repeat => self.records = None,
             KeyCode::Enter if !repeat => self.records_request(
                 self.records
@@ -1501,6 +1577,7 @@ impl Desktop {
                 53 => self.attach_record(OpponentKind::Other),
                 54 => self.clear_records(),
                 55 => self.records = None,
+                59 => self.watch_record(),
                 56 => self.records.as_mut().expect("records routing").page(false),
                 57 => self.records.as_mut().expect("records routing").page(true),
                 58 => {
@@ -1701,8 +1778,13 @@ impl Desktop {
             return;
         }
         // Preflight the exact retained invocation before signalling cancellation.
+        let validate = if game.replay {
+            self.validate_replay
+        } else {
+            self.validate
+        };
         let prepared = game.launch.retry().and_then(|launch| {
-            (self.validate)(launch.args()).map_err(|error| error.to_string())?;
+            validate(launch.args()).map_err(|error| error.to_string())?;
             Ok(launch)
         });
         match prepared {
@@ -1729,7 +1811,14 @@ impl Desktop {
             return;
         }
         // Spawn is the only fallible step; retain joined results on failure.
-        match spawn_game(self.native, launch, old.local_page, old.local_comparisons) {
+        let native = if old.replay { self.replay } else { self.native };
+        match spawn_game(
+            native,
+            launch,
+            old.local_page,
+            old.local_comparisons,
+            old.replay,
+        ) {
             Ok(game) => {
                 self.game = Some(game);
                 self.failure = None;
@@ -1874,7 +1963,7 @@ impl Desktop {
         let args = with_chart(&self.options.native, path);
         (self.validate)(&args).map_err(|error| error.to_string())?;
         let launch = SessionLaunch::new(args)?;
-        let game = spawn_game(self.native, launch, 0, false)?;
+        let game = spawn_game(self.native, launch, 0, false, false)?;
         if let Some(window) = &self.window {
             window.set_title(&window_title(&entry.title, &entry.artist));
         }
@@ -1889,7 +1978,9 @@ impl Desktop {
         let pixels = &mut self.scene;
         rect(pixels, 0, 0, WIDTH as i64, HEIGHT as i64, 0x10151e);
         text(pixels, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
-        if self.game.as_ref().is_some_and(|game| {
+        if self.game.as_ref().is_some_and(|game| game.replay) {
+            text(pixels, 450, 26, "REPLAY", 2, 0x74e5c5);
+        } else if self.game.as_ref().is_some_and(|game| {
             game.launch.args().chunks_exact(2).any(|pair| {
                 pair[0] == "--start-ns" && pair[1].parse::<i64>().is_ok_and(|start| start > 0)
             })
@@ -2893,7 +2984,7 @@ fn draw_records(
             scene,
             24,
             520,
-            "PREVIEW A COMPATIBLE RECORD BEFORE ADDING",
+            "PREVIEW A COMPATIBLE RECORD BEFORE WATCH / ADD",
             1,
             0x9bb1cf,
         );
@@ -2925,6 +3016,25 @@ fn draw_records(
         } else {
             control(scene, hits, gesture, point, ControlId(id), bounds, label);
         }
+    }
+    let watch = Bounds {
+        x: 754,
+        y: 575,
+        width: 176,
+        height: 34,
+    };
+    if pending || records.valid_preview().is_none() {
+        molecules::button(scene, watch, "WATCH (W)", false, false);
+    } else {
+        control(
+            scene,
+            hits,
+            gesture,
+            point,
+            ControlId(59),
+            watch,
+            "WATCH (W)",
+        );
     }
     if let Some(message) = &records.message {
         text(scene, 24, 665, message, 1, 0x74e5c5);
@@ -3134,11 +3244,17 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
         "RETRY WAITING FOR CLEANUP"
     } else if game.cancelling && !game.joined {
         "STOPPING"
+    } else if game.joined && game.replay {
+        "RECORD PREFIX RESULTS - ENTER RETURN"
     } else if game.joined {
         "RESULTS - ENTER RETURN"
     } else {
         match &snapshot.status {
             player::PlayerStatus::Loading => "LOADING",
+            player::PlayerStatus::Playing if game.replay && snapshot.song_time.is_none() => {
+                "NATIVE PRESENTATION UNAVAILABLE - ESC CANCEL"
+            }
+            player::PlayerStatus::Playing if game.replay => "WATCHING RECORD - ESC CANCEL",
             player::PlayerStatus::Playing => "PLAYING - ESC CANCEL",
             player::PlayerStatus::Stopping => "STOPPING",
             player::PlayerStatus::Finished => "FINISHING CLEANUP",
@@ -3215,6 +3331,38 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn watching_pins_record_and_retry_never_rewrites_capture_or_live_draft() {
+        let values = NativeSettings::from_args(
+            &["--record-replay".into(), "new.bkr".into()],
+            settings_host(),
+        )
+        .unwrap();
+        let original = values.native_args();
+        let launch = record_launch(
+            &values,
+            std::path::Path::new("song.bms"),
+            std::path::Path::new("old.bkr"),
+        )
+        .unwrap();
+        assert!(!launch.args().iter().any(|s| s == "--record-replay"));
+        let retry = launch.retry().unwrap();
+        assert_eq!(retry.args(), launch.args());
+        assert_eq!(retry.attempt(), 1);
+        assert_eq!(values.native_args(), original);
+        let mut game = retry_fixture();
+        game.replay = true;
+        game.launch = launch;
+        game.prepared_retry = Some(retry);
+        assert!(
+            game.owner_finished(true)
+                .unwrap()
+                .args()
+                .chunks_exact(2)
+                .any(|p| p == ["--replay", "old.bkr"])
+        );
+        assert!(game.replay);
+    }
     fn retry_fixture() -> Game {
         let (_publisher, viewer) = player::channel();
         Game {
@@ -3225,6 +3373,7 @@ mod tests {
             joined: false,
             local_page: 3,
             local_comparisons: true,
+            replay: false,
             launch: SessionLaunch::new(vec![
                 "--chart".into(),
                 "pinned.bms".into(),
@@ -3358,7 +3507,7 @@ mod tests {
             false,
             0,
         );
-        assert!(!hits.iter().any(|(id, _)| matches!(id.0, 52 | 53)));
+        assert!(!hits.iter().any(|(id, _)| matches!(id.0, 52 | 53 | 59)));
         records.preview = Some(record_preview_fixture(PathBuf::from("r.bkr")));
         scene.clear();
         hits.clear();
@@ -3373,9 +3522,10 @@ mod tests {
         );
         assert!(hits.iter().any(|(id, _)| *id == ControlId(52)));
         assert!(hits.iter().any(|(id, _)| *id == ControlId(53)));
+        assert!(hits.iter().any(|(id, _)| *id == ControlId(59)));
         assert!(
             hits.iter()
-                .all(|(id, _)| matches!(id.0,50..=58|50000..=50255))
+                .all(|(id, _)| matches!(id.0,50..=59|50000..=50255))
         );
         scene.clear();
         hits.clear();

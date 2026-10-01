@@ -70,9 +70,188 @@ pub fn complete(
     NativeSettings::from_args(&result, host)?;
     Ok(result)
 }
+/// Project a graphical draft into recorded output options without live acquisition.
+/// The recording owns judging/profile/start; omitted device metadata is supplied
+/// by the game owner. This function never discovers devices or opens files.
+pub fn replay_args(
+    args: &[String],
+    host: SettingsHost,
+    defaults: &NativeDefaults,
+) -> Result<Vec<String>, String> {
+    use crate::settings::{MAX_FIELDS, MAX_TOTAL_BYTES, MAX_VALUE_BYTES};
+    if args.len() % 2 != 0 || args.len() / 2 > MAX_FIELDS + 1 {
+        return Err("replay invocation exceeds bounded flag/value pairs".into());
+    }
+    let mut native = Vec::new();
+    let mut replay = None;
+    let mut chart = None;
+    let mut total = 0usize;
+    for pair in args.chunks_exact(2) {
+        if pair[1].is_empty()
+            || pair[1].len() > MAX_VALUE_BYTES
+            || pair[1]
+                .chars()
+                .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+        {
+            return Err("invalid bounded replay option value".into());
+        }
+        total = total
+            .checked_add(pair[1].len())
+            .ok_or("replay option byte overflow")?;
+        match pair[0].as_str() {
+            "--replay" if replay.is_none() => replay = Some(pair[1].clone()),
+            "--replay" => return Err("duplicate replay path".into()),
+            "--chart" => {
+                if chart.replace(pair[1].clone()).is_some() {
+                    return Err("duplicate chart path".into());
+                }
+                native.extend(pair.iter().cloned());
+            }
+            _ => native.extend(pair.iter().cloned()),
+        }
+    }
+    if total > MAX_TOTAL_BYTES + MAX_VALUE_BYTES {
+        return Err("replay options exceed byte limit".into());
+    }
+    let replay = replay.ok_or("replay path required")?;
+    chart.ok_or("chart path required")?;
+    NativeSettings::from_args(&native, host)?;
+    let mut result = Vec::new();
+    for pair in native.chunks_exact(2) {
+        let flag = match pair[0].as_str() {
+            "--chart" | "--device" | "--backend" | "--mode" | "--shared-policy" | "--asio-view"
+            | "--output-channels" | "--rate" | "--channels" | "--buffer-frames"
+            | "--period-frames" | "--preroll-ns" | "--voices" | "--seconds"
+            | "--channel-policy" => pair[0].as_str(),
+            "--alsa" => "--device",
+            "--bgm-lookahead-ns" => "--lookahead-ns",
+            "--replay-max-records" => "--max-records",
+            "--replay-max-bytes" => "--max-bytes",
+            _ => continue,
+        };
+        result.extend([flag.to_owned(), pair[1].clone()]);
+    }
+    let asio = result.chunks_exact(2).any(|p| p == ["--backend", "asio"]);
+    let mut add = |flag: &str, value: String| {
+        if !result.chunks_exact(2).any(|p| p[0] == flag) {
+            result.extend([flag.to_owned(), value]);
+        }
+    };
+    add(
+        "--device",
+        if host == SettingsHost::Linux {
+            "default".into()
+        } else {
+            defaults.device.clone()
+        },
+    );
+    if host == SettingsHost::Windows && !asio {
+        add("--mode", "shared".into());
+    }
+    add("--rate", defaults.rate.to_string());
+    add("--channels", defaults.channels.to_string());
+    if host != SettingsHost::Windows {
+        add("--buffer-frames", defaults.buffer_frames.to_string());
+    }
+    if host == SettingsHost::Linux {
+        add("--period-frames", "256".into());
+    }
+    add("--channel-policy", "mono-stereo".into());
+    result.extend(["--replay".into(), replay]);
+    Ok(result)
+}
 #[cfg(test)]
 mod fixtures {
     use super::*;
+    #[test]
+    fn recorded_output_projection_omits_live_state_and_preserves_exact_output() {
+        let args = [
+            "--chart",
+            "song.bms",
+            "--replay",
+            "past.bkr",
+            "--local-player",
+            "7:/a",
+            "--local-player",
+            "99:/b",
+            "--record-replay",
+            "new.bkr",
+            "--ghost-other",
+            "ghost.bkr",
+            "--mp-host",
+            "127.0.0.1:1234",
+            "--start-ns",
+            "123",
+            "--input-offset-ns",
+            "9",
+            "--alsa",
+            "hw:2",
+            "--rate",
+            "44100",
+            "--buffer-frames",
+            "2048",
+            "--bgm-lookahead-ns",
+            "9000000",
+            "--replay-max-records",
+            "100",
+        ]
+        .map(String::from);
+        let original = args.clone();
+        let out = replay_args(
+            &args,
+            SettingsHost::Linux,
+            &NativeDefaults::for_validation(),
+        )
+        .unwrap();
+        for flag in [
+            "--local-player",
+            "--record-replay",
+            "--ghost-other",
+            "--mp-host",
+            "--start-ns",
+            "--input-offset-ns",
+        ] {
+            assert!(!out.iter().any(|s| s == flag));
+        }
+        for pair in [
+            ["--device", "hw:2"],
+            ["--rate", "44100"],
+            ["--buffer-frames", "2048"],
+            ["--lookahead-ns", "9000000"],
+            ["--max-records", "100"],
+            ["--replay", "past.bkr"],
+        ] {
+            assert!(out.chunks_exact(2).any(|p| p == pair));
+        }
+        assert_eq!(args, original);
+    }
+    #[test]
+    fn replay_defaults_are_output_only_on_every_host_and_paths_are_bounded() {
+        let args = ["--chart", "song.bms", "--replay", "r.bkr"].map(String::from);
+        for host in [
+            SettingsHost::Windows,
+            SettingsHost::Linux,
+            SettingsHost::Macos,
+        ] {
+            let out = replay_args(&args, host, &NativeDefaults::for_validation()).unwrap();
+            assert!(out.chunks_exact(2).any(|p| p == ["--rate", "48000"]));
+            assert!(out.chunks_exact(2).any(|p| p == ["--channels", "2"]));
+            assert!(!out.iter().any(|s| matches!(
+                s.as_str(),
+                "--evdev" | "--keyboard-path" | "--keyboard-registry"
+            )));
+        }
+        let defaults = NativeDefaults::for_validation();
+        assert!(replay_args(&args[..2], SettingsHost::Linux, &defaults).is_err());
+        let mut duplicate = args.to_vec();
+        duplicate.extend(["--replay".into(), "x".into()]);
+        assert!(replay_args(&duplicate, SettingsHost::Linux, &defaults).is_err());
+        let mut bad = args.to_vec();
+        bad[3] = "x".repeat(crate::settings::MAX_VALUE_BYTES + 1);
+        assert!(replay_args(&bad, SettingsHost::Linux, &defaults).is_err());
+        bad[3] = "bad\npath".into();
+        assert!(replay_args(&bad, SettingsHost::Linux, &defaults).is_err());
+    }
     #[test]
     fn stable_local_devices_do_not_add_a_solo_input_override() {
         let args = [

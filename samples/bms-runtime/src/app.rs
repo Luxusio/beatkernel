@@ -50,7 +50,14 @@ Saved opponents require the same compiled chart and judging profile. Multiplayer
 fn desktop(args: &[String]) -> Result<()> {
     #[cfg(feature = "desktop")]
     {
-        crate::desktop::run(args, native, validate_native, crate::devices_native::query)
+        crate::desktop::run(
+            args,
+            native,
+            validate_native,
+            crate::devices_native::query,
+            native_replay,
+            validate_replay,
+        )
     }
     #[cfg(not(feature = "desktop"))]
     {
@@ -116,6 +123,18 @@ pub(super) fn validate_native(args: &[String]) -> Result<()> {
         let _ = args;
         Err("native BMS play requires Windows, Linux or macOS".into())
     }
+}
+
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+fn native_replay(args: &[String]) -> Result<()> {
+    let projected = crate::auto_native::prepare_replay(args)?;
+    crate::replay_player::run_args(&projected)
+}
+
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(super) fn validate_replay(args: &[String]) -> Result<()> {
+    let projected = crate::auto_native::syntax_replay(args)?;
+    crate::replay_player::validate_args(&projected)
 }
 
 fn compare(args: &[String]) -> Result<()> {
