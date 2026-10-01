@@ -28,7 +28,7 @@ pub(super) fn query(request: DeviceRequest) -> Result<DeviceCatalog> {
         DeviceRequest::Asio { view } => {
             use beatkernel_bms_runtime::device_catalog::{AsioView, MAX_DEVICE_TEXT_BYTES};
             use beatkernel_platform::windows::asio::{
-                enumerate_asio_drivers, AsioEnumerationLimits, AsioRegistryView,
+                AsioEnumerationLimits, AsioRegistryView, enumerate_asio_drivers,
             };
             let registry_view = match view {
                 AsioView::Native => AsioRegistryView::Native,
@@ -88,6 +88,54 @@ pub(super) fn query(request: DeviceRequest) -> Result<DeviceCatalog> {
                 selectable: device.output_channels > 0,
             }).collect()
         }
+        #[cfg(target_os = "windows")]
+        DeviceRequest::WindowsKeyboard => {
+            use beatkernel::time::ClockDomainId;
+            use beatkernel_platform::{
+                raw_input::RawDeviceKind,
+                windows::{clock::QpcClock, input::WindowsInput},
+            };
+            let mut input = WindowsInput::new(QpcClock::new(ClockDomainId(1))?);
+            let devices = input.enumerate_devices()?;
+            check_count(devices.len())?;
+            devices.into_iter().filter(|device| device.kind == RawDeviceKind::Keyboard).map(|device| DeviceChoice {
+                id: device.interface_path.clone(),
+                label: device.descriptor.name.unwrap_or_else(|| device.interface_path.clone()),
+                detail: format!("Raw Input keyboard; vendor {:?}; product {:?}; exact attachment resolved at play. Other keyboards excluded when selected.", device.descriptor.vendor_id, device.descriptor.product_id),
+                selectable: !device.interface_path.is_empty(),
+            }).collect()
+        }
+        #[cfg(target_os = "linux")]
+        DeviceRequest::LinuxKeyboard => {
+            use beatkernel_bms_runtime::device_catalog::MAX_DEVICE_TEXT_BYTES;
+            let devices = beatkernel_platform::linux::evdev_keyboard_devices(
+                MAX_DEVICES,
+                MAX_DEVICE_TEXT_BYTES,
+            )?;
+            devices
+                .into_iter()
+                .map(|device| DeviceChoice {
+                    label: device.name.unwrap_or_else(|| device.path.clone()),
+                    id: device.path,
+                    detail: device.detail,
+                    selectable: device.selectable,
+                })
+                .collect()
+        }
+        #[cfg(target_os = "macos")]
+        DeviceRequest::MacosKeyboard => {
+            use beatkernel_bms_runtime::device_catalog::MAX_DEVICE_TEXT_BYTES;
+            let devices = beatkernel_platform::macos::input::keyboard_devices(
+                MAX_DEVICES,
+                MAX_DEVICE_TEXT_BYTES,
+            )?;
+            devices.into_iter().map(|device| DeviceChoice {
+                id: device.registry_entry.to_string(),
+                label: device.name.unwrap_or_else(|| format!("Keyboard {}", device.registry_entry)),
+                detail: format!("IORegistry {}; vendor {:?}; product {:?}; transport {}. Acquisition access verified at play.", device.registry_entry, device.vendor_id, device.product_id, device.transport.as_deref().unwrap_or("unreported")),
+                selectable: true,
+            }).collect()
+        }
         _ => return Err("requested audio device backend is unavailable on this platform".into()),
     };
     Ok(DeviceCatalog::new(request, entries)?)
@@ -110,11 +158,13 @@ mod tests {
         let request = DeviceRequest::Alsa;
         #[cfg(not(target_os = "windows"))]
         let request = DeviceRequest::Wasapi;
-        assert!(query(request)
-            .err()
-            .expect("foreign backend must fail before discovery")
-            .to_string()
-            .contains("unavailable on this platform"));
+        assert!(
+            query(request)
+                .err()
+                .expect("foreign backend must fail before discovery")
+                .to_string()
+                .contains("unavailable on this platform")
+        );
         assert!(check_count(MAX_DEVICES).is_ok());
         assert!(check_count(MAX_DEVICES + 1).is_err());
     }

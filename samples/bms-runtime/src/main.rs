@@ -1,5 +1,6 @@
 //! Unified BMS application; legacy positional arguments retain offline rendering.
 mod app;
+mod auto_native;
 #[cfg(feature = "desktop")]
 mod desktop;
 #[cfg(feature = "desktop")]
@@ -24,9 +25,8 @@ mod replay_tool;
 mod windows_play;
 use beatkernel::audio::{AudioFormat, PcmLimits};
 use beatkernel_bms_runtime::{
-    load_prepared,
-    offline::{render_offline, OfflineOptions},
-    ChannelPolicy,
+    ChannelPolicy, load_prepared,
+    offline::{OfflineOptions, render_offline},
 };
 use std::{fs::File, io::Write, path::Path};
 
@@ -39,7 +39,9 @@ fn main() -> Result<()> {
 
 fn render_offline_args(args: &[String]) -> Result<()> {
     if args == ["--help"] {
-        println!("beatkernel-bms-runtime CHART.bms NEW_OUTPUT.f32le SECONDS RATE [CHANNELS]\nOffline synthetic input with shared bounded WAV preparation and chronological PCM rendering; no native playback.\nCHANNELS defaults to 2; choose 1 for mono assets. Asset channels must match exactly.\nOutput is newly created raw interleaved f32le; rendering failure may leave a partial file.\nConcurrent voices and outstanding commands are bounded independently from total chart notes.");
+        println!(
+            "beatkernel-bms-runtime CHART.bms NEW_OUTPUT.f32le SECONDS RATE [CHANNELS]\nOffline synthetic input with shared bounded WAV preparation and chronological PCM rendering; no native playback.\nCHANNELS defaults to 2; choose 1 for mono assets. Asset channels must match exactly.\nOutput is newly created raw interleaved f32le; rendering failure may leave a partial file.\nConcurrent voices and outstanding commands are bounded independently from total chart notes."
+        );
         return Ok(());
     }
     if !(4..=5).contains(&args.len()) {
@@ -81,7 +83,11 @@ fn render_offline_args(args: &[String]) -> Result<()> {
     output.flush()?;
     println!(
         "synthetic input: {} hits, {} judge results; {} frames, {} channels at {}Hz; raw f32le output; no native playback",
-        report.hits, report.judge_results, report.frames, report.format.channels(), report.format.sample_rate()
+        report.hits,
+        report.judge_results,
+        report.frames,
+        report.format.channels(),
+        report.format.sample_rate()
     );
     println!("last successful core render={:?}", report.last_render);
     Ok(())

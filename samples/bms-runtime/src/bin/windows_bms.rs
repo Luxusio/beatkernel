@@ -44,6 +44,7 @@ struct Options {
     replay_max_records: usize,
     replay_max_bytes: usize,
     device: String,
+    keyboard_path: Option<String>,
     exclusive: bool,
     seconds: Option<u64>,
     bindings: BTreeMap<u8, u16>,
@@ -57,6 +58,25 @@ struct Options {
     buffer: BufferRequest,
     period: PeriodRequest,
     shared: SharedPeriodPolicy,
+}
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn selected_keyboard<'a>(
+    path: Option<&str>,
+    devices: impl IntoIterator<Item = (&'a str, u64, usize)>,
+) -> Result<Option<(u64, usize)>> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let mut matching = devices
+        .into_iter()
+        .filter(|(candidate, _, _)| *candidate == path);
+    let (_, id, handle) = matching
+        .next()
+        .ok_or("explicit keyboard path is not attached")?;
+    if matching.next().is_some() {
+        return Err("explicit keyboard path matches multiple attachments".into());
+    }
+    Ok(Some((id, handle)))
 }
 fn size(value: &str) -> Result<Option<(bool, u64)>> {
     if value == "default" {
@@ -90,6 +110,7 @@ fn parse(args: &[String]) -> Result<Options> {
     let mut asio_anchor_age = 1_000_000_000u64;
     let mut chart = None;
     let mut device = None;
+    let mut keyboard_path = None;
     let mut exclusive = None;
     let mut seconds = None;
     let mut bindings = BTreeMap::new();
@@ -115,6 +136,19 @@ fn parse(args: &[String]) -> Result<Options> {
             return Err(format!("duplicate option {flag}").into());
         }
         match flag.as_str() {
+            "--keyboard-path" => {
+                if value.is_empty()
+                    || value.len() > 4096
+                    || value
+                        .chars()
+                        .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+                {
+                    return Err(
+                        "keyboard path must be nonempty, bounded and contain no controls".into(),
+                    );
+                }
+                keyboard_path = Some(value.clone());
+            }
             "--backend" => {
                 backend = match value.as_str() {
                     "wasapi" => Backend::Wasapi,
@@ -341,6 +375,7 @@ fn parse(args: &[String]) -> Result<Options> {
         return Err("windows must be nonnegative; voices must be 1..4096".into());
     }
     Ok(Options {
+        keyboard_path,
         backend,
         asio_view,
         output_channels,
@@ -422,7 +457,11 @@ impl std::ops::DerefMut for BgmSession {
 #[cfg(target_os = "windows")]
 impl Drop for BgmSession {
     fn drop(&mut self) {
-        println!("BGM feeder config={:?}; final admission summary={:?}; admission does not prove execution/native delivery/acoustic output", self.config(), self.report());
+        println!(
+            "BGM feeder config={:?}; final admission summary={:?}; admission does not prove execution/native delivery/acoustic output",
+            self.config(),
+            self.report()
+        );
     }
 }
 #[cfg(target_os = "windows")]
@@ -461,8 +500,19 @@ impl Drop for DeliverySession {
     fn drop(&mut self) {
         let observed = self.observed_events();
         match self.summary() {
-            Some(summary) => println!("QPC RECEIPT-to-runtime software delivery age: observed_events={observed}; retained samples={} p50={}ns p95={}ns p99={}ns max={}ns; HOST={:?}, capacity={}; separate from CPU processing; physical input-to-sound unknown", summary.samples, summary.p50_ns, summary.p95_ns, summary.p99_ns, summary.max_ns, self.domain(), self.capacity()),
-            None => println!("QPC RECEIPT-to-runtime software delivery age: observed_events={observed}; retained summary unavailable; no zero observation substituted; separate from CPU processing; physical input-to-sound unknown"),
+            Some(summary) => println!(
+                "QPC RECEIPT-to-runtime software delivery age: observed_events={observed}; retained samples={} p50={}ns p95={}ns p99={}ns max={}ns; HOST={:?}, capacity={}; separate from CPU processing; physical input-to-sound unknown",
+                summary.samples,
+                summary.p50_ns,
+                summary.p95_ns,
+                summary.p99_ns,
+                summary.max_ns,
+                self.domain(),
+                self.capacity()
+            ),
+            None => println!(
+                "QPC RECEIPT-to-runtime software delivery age: observed_events={observed}; retained summary unavailable; no zero observation substituted; separate from CPU processing; physical input-to-sound unknown"
+            ),
         }
     }
 }
@@ -479,7 +529,14 @@ fn save_capture(
     let path = path.ok_or("enabled replay capture missing save path")?;
     let records = capture.records().len();
     let bytes = capture.encoded_bytes();
-    println!("replay capture: records={records}, encoded_bytes={bytes}, status={}, path={path:?}; accepted judge operations, physical output unverified", if failed_session { "valid prefix of failed session" } else { "complete recorded session" });
+    println!(
+        "replay capture: records={records}, encoded_bytes={bytes}, status={}, path={path:?}; accepted judge operations, physical output unverified",
+        if failed_session {
+            "valid prefix of failed session"
+        } else {
+            "complete recorded session"
+        }
+    );
     let written = capture.save_new(path)?;
     println!("replay create_new saved {written} bytes to {path:?}");
     Ok(())
@@ -501,7 +558,9 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
     let (competition_options, args) =
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
-        println!("windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Any physical keyboard, focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured.");
+        println!(
+            "windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Optional --keyboard-path EXACT_INTERFACE_PATH selects one physical keyboard; omitted accepts any physical keyboard. Explicit device removal fails the session. Focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured."
+        );
         return Ok(());
     }
     let options = parse(&args)?;
@@ -520,24 +579,24 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
 mod native {
     use super::*;
     use beatkernel::{
-        audio::{command_queue, Mixer, MixerConfig, PcmLimits},
+        audio::{Mixer, MixerConfig, PcmLimits, command_queue},
         input::{Binding, BindingMap, DeviceSelector, GameControlId, PhysicalControlId},
         judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
         runtime::{Runtime, RuntimeReport},
         time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Timestamp},
         transport::Rate,
     };
-    use beatkernel_bms_runtime::{load_prepared, ChannelPolicy};
+    use beatkernel_bms_runtime::{ChannelPolicy, load_prepared};
     use beatkernel_platform::{
         audio::{
+            AudioOutputStream, AudioStreamStatus,
             presentation::{
+                PresentationError, WasapiPresentationClock,
                 discipline::{
                     DisciplineConfig, DisciplineError, DisciplineUpdate, ObservationAdmission,
                     PresentationDiscipline,
                 },
-                PresentationError, WasapiPresentationClock,
             },
-            AudioOutputStream, AudioStreamStatus,
         },
         windows::{
             audio::WasapiStream,
@@ -553,9 +612,9 @@ mod native {
         Foundation::{HINSTANCE, HWND},
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, PeekMessageW,
-            RegisterClassW, TranslateMessage, UnregisterClassW, GIDC_ARRIVAL, GIDC_REMOVAL, MSG,
-            PM_REMOVE, WM_CLOSE, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_QUIT, WNDCLASSW,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GIDC_ARRIVAL,
+            GIDC_REMOVAL, MSG, PM_REMOVE, PeekMessageW, RegisterClassW, TranslateMessage,
+            UnregisterClassW, WM_CLOSE, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_QUIT, WNDCLASSW,
             WS_OVERLAPPEDWINDOW, WS_VISIBLE,
         },
     };
@@ -910,9 +969,28 @@ mod native {
                 .into());
             }
         }
+        let mut acquisition = AcquisitionWindow::new()?;
+        let mut input = WindowsInput::new(clock);
+        let devices = input.enumerate_devices()?;
+        let selected = selected_keyboard(
+            options.keyboard_path.as_deref(),
+            devices
+                .iter()
+                .filter(|d| d.kind == beatkernel_platform::raw_input::RawDeviceKind::Keyboard)
+                .map(|d| {
+                    (
+                        d.interface_path.as_str(),
+                        d.descriptor.runtime_id.0,
+                        d.handle,
+                    )
+                }),
+        )?;
+        let keyboard_selector = selected.map_or(DeviceSelector::Any, |(id, _)| {
+            DeviceSelector::Exact(beatkernel::input::DeviceId(id))
+        });
         let bindings =
             BindingMap::from_bindings(options.bindings.iter().map(|(&channel, &usage)| Binding {
-                device: DeviceSelector::Any,
+                device: keyboard_selector,
                 physical: PhysicalControlId::keyboard(usage),
                 game_control: GameControlId(u32::from(channel)),
             }))?;
@@ -970,16 +1048,29 @@ mod native {
             prepared.bank,
             consumer,
         )?;
-        println!("explicit Any-keyboard bindings={:?}; windows early={}ns late={}ns offset={}ns; channel_policy={} active_voices={} queue/pending={} reserved_live={LIVE_SLACK}",
-            options.bindings, options.early, options.late, options.offset,
-            if options.mono_stereo { "mono-stereo" } else { "exact" }, options.voices, capacity);
-        let mut acquisition = AcquisitionWindow::new()?;
-        let mut input = WindowsInput::new(clock);
-        input.enumerate_devices()?;
+        println!(
+            "explicit Any-keyboard bindings={:?}; windows early={}ns late={}ns offset={}ns; channel_policy={} active_voices={} queue/pending={} reserved_live={LIVE_SLACK}",
+            options.bindings,
+            options.early,
+            options.late,
+            options.offset,
+            if options.mono_stereo {
+                "mono-stereo"
+            } else {
+                "exact"
+            },
+            options.voices,
+            capacity
+        );
         let mut stream = setup.open(mixer, &options, clock)?;
         println!("requested/applied native output={:?}", stream.description());
-        println!("Focus the BeatKernel BMS native window and play the explicitly bound physical keys. Console prints actual grades and misses.");
-        println!("preroll={}ns; output zero maps to song -preroll; short startup pairs do not establish long-run clock stability", options.preroll);
+        println!(
+            "Focus the BeatKernel BMS native window and play the explicitly bound physical keys. Console prints actual grades and misses."
+        );
+        println!(
+            "preroll={}ns; output zero maps to song -preroll; short startup pairs do not establish long-run clock stability",
+            options.preroll
+        );
         if options.preroll == 0 {
             println!(
                 "zero preroll: calibration can consume initial BGM/notes before the gameplay pump"
@@ -1023,8 +1114,17 @@ mod native {
             )?;
             stream.seed(&mut discipline, &mut bgm, &mut producer)?;
             discipline.validate_host(clock.sample()?.normalized)?;
-            println!("presentation discipline seed={:?} config={:?} quality={:?}; ongoing continuous transport correction, PCM/BGM rate unchanged", discipline.latest_pair(), discipline.config(), discipline.quality());
-            println!("observed output-zero/song-minus-preroll anchor={:?}; mapping quality={:?}; keysound scheduling=backend software output frontier/Unknown; physical latency=unmeasured", transport.anchor(), quality);
+            println!(
+                "presentation discipline seed={:?} config={:?} quality={:?}; ongoing continuous transport correction, PCM/BGM rate unchanged",
+                discipline.latest_pair(),
+                discipline.config(),
+                discipline.quality()
+            );
+            println!(
+                "observed output-zero/song-minus-preroll anchor={:?}; mapping quality={:?}; keysound scheduling=backend software output frontier/Unknown; physical latency=unmeasured",
+                transport.anchor(),
+                quality
+            );
             let initial_host = transport.anchor().host_time;
             let mut last_accepted_host = initial_host;
             let mut runtime = Runtime::new(
@@ -1080,6 +1180,9 @@ mod native {
                             }
                         }
                         for event in acquired?.input.events {
+                            if selected.is_some_and(|(id, _)| event.meta().source.0 != id) {
+                                continue;
+                            }
                             let host = ClockPoint {
                                 domain: event.meta().clock_domain,
                                 timestamp: event.meta().timestamp,
@@ -1127,6 +1230,11 @@ mod native {
                                 input.attach_device(message.lParam as usize)?;
                             }
                             GIDC_REMOVAL => {
+                                if selected
+                                    .is_some_and(|(_, handle)| handle == message.lParam as usize)
+                                {
+                                    return Err("selected keyboard detached; restart with an explicit attached device".into());
+                                }
                                 input.remove_device(message.lParam as usize);
                             }
                             _ => {}
@@ -1152,7 +1260,10 @@ mod native {
                     limited,
                 } = discipline.update(host, runtime.transport_mut())?
                 {
-                    println!("presentation discipline measured={base_rate_ppm:+}ppm correction={correction_ppm:+}ppm applied={applied_rate_ppm:+}ppm phase={phase_error_ns}ns limited={limited} quality={:?}", discipline.quality());
+                    println!(
+                        "presentation discipline measured={base_rate_ppm:+}ppm correction={correction_ppm:+}ppm applied={applied_rate_ppm:+}ppm phase={phase_error_ns}ns limited={limited} quality={:?}",
+                        discipline.quality()
+                    );
                 }
                 let report = runtime.advance_to(
                     host,
@@ -1166,7 +1277,9 @@ mod native {
                 if last_progress_second != Some(second) {
                     if nanos < 0 {
                         let remaining = (-i128::from(nanos) + 999_999_999) / 1_000_000_000;
-                        println!("song countdown={remaining}s, logical song={nanos}ns; focus native window");
+                        println!(
+                            "song countdown={remaining}s, logical song={nanos}ns; focus native window"
+                        );
                     } else {
                         println!("logical song={nanos}ns; focus native window");
                     }
@@ -1180,7 +1293,9 @@ mod native {
                     stream.render_report()?,
                     discipline.latest_pair().map(|pair| pair.source),
                 )? {
-                    println!("full song completed: terminal judge, drained BGM/mixer and native presentation frontier");
+                    println!(
+                        "full song completed: terminal judge, drained BGM/mixer and native presentation frontier"
+                    );
                     break;
                 }
                 std::thread::sleep(WallDuration::from_millis(1));
@@ -1195,7 +1310,9 @@ mod native {
         // Both cleanups run before propagating any start/calibration/pump error.
         let stop = stream.stop(); // closes/drains the selected native backend
         let close = acquisition.registration.close();
-        println!("pre-output-origin physical inputs ignored without retimestamping={pre_origin_inputs}; physical latency remains unmeasured");
+        println!(
+            "pre-output-origin physical inputs ignored without retimestamping={pre_origin_inputs}; physical latency remains unmeasured"
+        );
         println!(
             "final audio snapshot={:?}; physical latency=unmeasured",
             stream.description()
@@ -1215,7 +1332,9 @@ mod native {
             outcome.is_err() || stop.is_err() || close.is_err(),
         );
         if let Err(error) = &save {
-            eprintln!("replay save error after cleanup (valid captured prefix retained until save): {error}");
+            eprintln!(
+                "replay save error after cleanup (valid captured prefix retained until save): {error}"
+            );
         }
         outcome?;
         stop?;
@@ -1377,16 +1496,18 @@ mod preroll_fixtures {
             }
         );
         assert_eq!(shift_bgm(command, 0).unwrap(), command);
-        assert!(shift_bgm(
-            AudioCommand::Play {
-                at: Timestamp::from_nanos(i64::MAX),
-                voice: VoiceId(1),
-                sample: SampleId(1),
-                gain: 1.0
-            },
-            1
-        )
-        .is_err());
+        assert!(
+            shift_bgm(
+                AudioCommand::Play {
+                    at: Timestamp::from_nanos(i64::MAX),
+                    voice: VoiceId(1),
+                    sample: SampleId(1),
+                    gain: 1.0
+                },
+                1
+            )
+            .is_err()
+        );
         assert_eq!(
             calibration_extent(3600, 10_000_000_000).unwrap(),
             3_613_000_000_000
@@ -1401,3 +1522,16 @@ mod asio_fixtures;
 #[cfg(target_os = "windows")]
 #[path = "windows_bms/output.rs"]
 mod live_output;
+
+#[cfg(test)]
+#[test]
+fn exact_keyboard_selection_has_no_attachment_fallback() {
+    let devices = [("path-A", 7, 11), ("path-B", 8, 12)];
+    assert_eq!(selected_keyboard(None, devices).unwrap(), None);
+    assert_eq!(
+        selected_keyboard(Some("path-B"), devices).unwrap(),
+        Some((8, 12))
+    );
+    assert!(selected_keyboard(Some("missing"), devices).is_err());
+    assert!(selected_keyboard(Some("path-A"), [("path-A", 7, 11), ("path-A", 9, 13)]).is_err());
+}

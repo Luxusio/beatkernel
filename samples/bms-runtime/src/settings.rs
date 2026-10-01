@@ -136,9 +136,14 @@ const COMMON: &[Spec] = &[
 ];
 const WINDOWS: &[Spec] = &[
     (
+        "--keyboard-path",
+        "KEYBOARD INTERFACE PATH",
+        "Optional exact Raw Input keyboard path; empty accepts any keyboard.",
+    ),
+    (
         "--device",
         "AUDIO DEVICE ID",
-        "Exact WASAPI endpoint ID or installed ASIO driver CLSID.",
+        "Empty uses the OS default WASAPI output. Advanced override: endpoint ID or ASIO CLSID.",
     ),
     (
         "--backend",
@@ -205,17 +210,17 @@ const LINUX: &[Spec] = &[
     (
         "--evdev",
         "KEYBOARD DEVICE PATH",
-        "Exact evdev node, e.g. /dev/input/eventN.",
+        "Empty chooses a readable keyboard automatically. Advanced override: exact evdev node.",
     ),
     (
         "--alsa",
         "ALSA ENDPOINT",
-        "Exact endpoint; no automatic device fallback.",
+        "Empty uses ALSA default. Advanced override: exact endpoint.",
     ),
     (
         "--rate",
         "SAMPLE RATE (HZ)",
-        "Explicit positive output sample rate.",
+        "Empty uses app/device defaults. Advanced override: positive output sample rate.",
     ),
     (
         "--channels",
@@ -225,12 +230,12 @@ const LINUX: &[Spec] = &[
     (
         "--period-frames",
         "ALSA PERIOD (FRAMES)",
-        "Required positive period frames, below buffer size and at most 1048576.",
+        "Empty uses 256 frames. Advanced override: positive period below buffer.",
     ),
     (
         "--buffer-frames",
         "ALSA BUFFER (FRAMES)",
-        "Required positive buffer frames, greater than the selected period.",
+        "Empty uses 1024 frames. Advanced override: buffer greater than period.",
     ),
     (
         "--advance-lag-ns",
@@ -242,17 +247,17 @@ const MACOS: &[Spec] = &[
     (
         "--device",
         "AUDIO DEVICE ID",
-        "Explicit positive CoreAudio device ID.",
+        "Empty uses the OS default output. Advanced override: CoreAudio device ID.",
     ),
     (
         "--keyboard-registry",
         "KEYBOARD REGISTRY ID",
-        "Explicit positive IORegistry entry ID.",
+        "Empty discovers a keyboard automatically. Advanced override: positive IORegistry ID.",
     ),
     (
         "--rate",
         "SAMPLE RATE (HZ)",
-        "Explicit positive output sample rate.",
+        "Empty uses app/device defaults. Advanced override: positive output sample rate.",
     ),
     (
         "--channels",
@@ -262,7 +267,7 @@ const MACOS: &[Spec] = &[
     (
         "--buffer-frames",
         "AUDIO BUFFER (FRAMES)",
-        "Required explicit buffer size, 1..1048576 output frames.",
+        "Empty uses the current device buffer. Advanced override: 1..1048576 frames.",
     ),
     (
         "--advance-lag-ns",
@@ -440,19 +445,23 @@ mod tests {
         assert!(
             NativeSettings::from_args(&args(&["--device", "17"]), SettingsHost::Linux).is_err()
         );
-        assert!(NativeSettings::from_args(
-            &args(&["--device", "17", "--device", "18"]),
-            SettingsHost::Macos
-        )
-        .is_err());
+        assert!(
+            NativeSettings::from_args(
+                &args(&["--device", "17", "--device", "18"]),
+                SettingsHost::Macos
+            )
+            .is_err()
+        );
         let mut settings = NativeSettings::from_args(&[], SettingsHost::Windows).unwrap();
         settings.set_value(0, "device with spaces").unwrap();
         let before = settings.native_args();
         assert!(settings.set_value(0, "bad\nvalue").is_err());
         assert!(settings.set_value(0, "bad\u{2028}value").is_err());
-        assert!(settings
-            .set_value(0, &"x".repeat(MAX_VALUE_BYTES + 1))
-            .is_err());
+        assert!(
+            settings
+                .set_value(0, &"x".repeat(MAX_VALUE_BYTES + 1))
+                .is_err()
+        );
         assert_eq!(settings.native_args(), before);
         while settings.fields().len() < MAX_FIELDS {
             settings.add_binding().unwrap();

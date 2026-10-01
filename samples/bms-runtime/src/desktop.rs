@@ -181,7 +181,7 @@ pub(super) fn run(
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
-            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nPass explicit native backend/device/rate/buffer/binding options as flag-value pairs.\nF2: settings; Up/Down: select; Enter: play/return; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; Up/Down: select; Enter: play/return; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
         );
         return Ok(());
     }
@@ -445,13 +445,19 @@ impl Desktop {
         (self.validate)(&with_chart(&args, path)).map_err(|error| error.to_string())?;
         Ok(args)
     }
-    fn device_request(&mut self) {
+    fn device_request(&mut self, keyboard: bool) {
         if self.profile_io.is_some() || self.game.is_some() {
             return;
         }
         let result = (|| {
             let draft = self.settings.as_ref().ok_or("settings unavailable")?;
-            let request = DeviceRequest::from_settings(&draft.values, settings_host())?;
+            let request = if let Some(picker) = &self.picker {
+                picker.catalog.request()
+            } else if keyboard {
+                DeviceRequest::keyboard(&draft.values, settings_host())?
+            } else {
+                DeviceRequest::from_settings(&draft.values, settings_host())?
+            };
             let query = self.query_devices;
             thread::Builder::new()
                 .name("bms-devices".into())
@@ -487,11 +493,7 @@ impl Desktop {
             // Prepare editor before changing the accepted draft.
             let editor = LineEditor::new(&picker.catalog.choices()[index].id, 4096)?;
             picker.catalog.apply(index, &mut draft.values)?;
-            let flag = if picker.catalog.request() == DeviceRequest::Alsa {
-                "--alsa"
-            } else {
-                "--device"
-            };
+            let flag = picker.catalog.request().field_flag();
             draft.selected = draft
                 .values
                 .fields()
@@ -774,7 +776,7 @@ impl Desktop {
                     self.gesture.cancel();
                     self.hits.clear();
                 }
-                22 => self.device_request(),
+                22 => self.device_request(false),
                 23 => self.picker_page(false),
                 24 => self.picker_page(true),
                 row if row >= 10000 => {
@@ -797,7 +799,8 @@ impl Desktop {
         }
         if self.settings.is_some() {
             match id.0 {
-                16 => self.device_request(),
+                16 => self.device_request(false),
+
                 13 => self.profile_request(false),
                 14 => self.profile_request(true),
                 15 => {
@@ -1377,7 +1380,11 @@ fn draw_devices(
         scene,
         24,
         65,
-        "AUDIO OUTPUT DEVICES - UP/DOWN SELECT - ENTER USE - ESC BACK",
+        if picker.catalog.request().is_keyboard() {
+            "KEYBOARD DEVICES - UP/DOWN SELECT - ENTER USE - ESC BACK"
+        } else {
+            "AUDIO OUTPUT DEVICES - UP/DOWN SELECT - ENTER USE - ESC BACK"
+        },
         1,
         0x9bb1cf,
     );
@@ -1387,7 +1394,7 @@ fn draw_devices(
         24,
         91,
         &format!(
-            "{} OUTPUT ENTRIES - NO AUTOMATIC SELECTION",
+            "{} DEVICE ENTRIES - NO AUTOMATIC SELECTION",
             picker.catalog.choices().len()
         ),
         1,
@@ -1468,38 +1475,22 @@ fn draw_settings(
         scene,
         24,
         65,
-        "NATIVE SETTINGS - ENTER APPLY - ESC BACK",
+        "SETTINGS - ENTER APPLY - ESC BACK",
         1,
         0x9bb1cf,
     );
-    if !pending {
-        control(
-            scene,
-            hits,
-            gesture,
-            point,
-            ControlId(16),
-            Bounds {
-                x: 730,
-                y: 60,
-                width: 200,
-                height: 34,
-            },
-            "AUDIO DEVICES",
-        );
-    } else {
-        molecules::button(
-            scene,
-            Bounds {
-                x: 730,
-                y: 60,
-                width: 200,
-                height: 34,
-            },
-            "AUDIO DEVICES",
-            false,
-            false,
-        );
+    for (id, x, label) in [(16, 730, "AUDIO OVERRIDE")] {
+        let bounds = Bounds {
+            x,
+            y: 60,
+            width: 200,
+            height: 34,
+        };
+        if !pending {
+            control(scene, hits, gesture, point, ControlId(id), bounds, label);
+        } else {
+            molecules::button(scene, bounds, label, false, false);
+        }
     }
     let first = draft.selected / SETTINGS_ROWS * SETTINGS_ROWS;
     text(

@@ -3,7 +3,7 @@ use crate::Result;
 use beatkernel::time::Timestamp;
 use beatkernel_bms_runtime::{
     competition::Competition,
-    competition_live::{load_chart, replay_limits, CompetitionOptions},
+    competition_live::{CompetitionOptions, load_chart, replay_limits},
     replay_playback::{read_replay, reconstruct},
 };
 use std::{fs::File, path::Path};
@@ -33,7 +33,8 @@ pub(super) fn run(args: &[String]) -> Result<()> {
 }
 
 fn help() {
-    println!("BeatKernel BMS application\n\
+    println!(
+        "BeatKernel BMS application\n\
 play [native options] [--ghost-self REPLAY] [--ghost-other REPLAY] [--mp-host IP:PORT | --mp-join IP:PORT] [--mp-timeout-ms N]\n\
 player [--library DIR | --chart PATH] [native options] [--ui-lookahead-ms N] [--ui-fps N]  Graphical player\n\
 replay [--chart PATH --replay PATH ...]                  Inspect recorded play\n\
@@ -41,8 +42,9 @@ play-replay [native replay output options]             Play recorded sounds\n\
 render CHART NEW_OUTPUT SECONDS RATE [CHANNELS]         Offline synthetic render\n\
 render-replay [recorded PCM output options]            Render recorded sounds\n\
 compete --chart PATH --local-replay PATH [--ghost-self PATH] [--ghost-other PATH] [--song-ns N]\n\
-Use MODE --help for mode options. play selects this OS's native backend options.\n\
-Saved opponents require the same compiled chart and judging profile. Multiplayer is two-peer casual progress exchange; song starts are local and scores are self-reported.");
+Use MODE --help for mode options. Primary play/player resolve omitted devices automatically; standalone native tools keep exact option requirements.\n\
+Saved opponents require the same compiled chart and judging profile. Multiplayer is two-peer casual progress exchange; song starts are local and scores are self-reported."
+    );
 }
 
 fn desktop(args: &[String]) -> Result<()> {
@@ -59,7 +61,9 @@ fn desktop(args: &[String]) -> Result<()> {
 
 fn play(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
-        println!("Competition options: --ghost-self PATH and --ghost-other PATH (up to 8 total); --mp-host IP:PORT or --mp-join IP:PORT, optional --mp-timeout-ms 100..120000 (default10000). Explicit numeric addresses; host port must be nonzero. Peer loss disables multiplayer while local play continues.");
+        println!(
+            "Competition options: --ghost-self PATH and --ghost-other PATH (up to 8 total); --mp-host IP:PORT or --mp-join IP:PORT, optional --mp-timeout-ms 100..120000 (default10000). Explicit numeric addresses; host port must be nonzero. Peer loss disables multiplayer while local play continues."
+        );
         return native(args);
     }
     // Window/input/run-loop objects are created on this game owner. The main
@@ -77,6 +81,13 @@ fn play(args: &[String]) -> Result<()> {
 }
 
 fn native(args: &[String]) -> Result<()> {
+    let prepared;
+    let args = if args.is_empty() || args == ["--help"] {
+        args
+    } else {
+        prepared = crate::auto_native::prepare(args)?;
+        &prepared
+    };
     #[cfg(target_os = "windows")]
     return crate::windows_play::run_args(args);
     #[cfg(target_os = "linux")]
@@ -90,8 +101,10 @@ fn native(args: &[String]) -> Result<()> {
     }
 }
 
-#[cfg(feature = "desktop")]
-fn validate_native(args: &[String]) -> Result<()> {
+#[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+pub(super) fn validate_native(args: &[String]) -> Result<()> {
+    let prepared = crate::auto_native::syntax_args(args)?;
+    let args = &prepared;
     #[cfg(target_os = "windows")]
     return crate::windows_play::validate_args(args);
     #[cfg(target_os = "linux")]
@@ -107,7 +120,9 @@ fn validate_native(args: &[String]) -> Result<()> {
 
 fn compare(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
-        println!("compete --chart PATH --local-replay PATH [--ghost-self PATH] [--ghost-other PATH] [--song-ns N]\nCompare actual recorded result prefixes at the selected song time; defaults to local recording's last operation. No missing tail is fabricated, and grade IDs have no implicit weights. Native competition uses play with the same ghost options.");
+        println!(
+            "compete --chart PATH --local-replay PATH [--ghost-self PATH] [--ghost-other PATH] [--song-ns N]\nCompare actual recorded result prefixes at the selected song time; defaults to local recording's last operation. No missing tail is fabricated, and grade IDs have no implicit weights. Native competition uses play with the same ghost options."
+        );
         return Ok(());
     }
     let (options, rest) = CompetitionOptions::extract(args)?;

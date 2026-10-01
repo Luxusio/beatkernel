@@ -155,7 +155,7 @@ pub fn device_list(
         );
     }
     if catalog.choices().is_empty() {
-        text(scene, 24, 145, "NO OUTPUT DEVICES REPORTED", 2, 0x9bb1cf);
+        text(scene, 24, 145, "NO DEVICES REPORTED", 2, 0x9bb1cf);
     }
     if let Some(choice) = selected.and_then(|index| catalog.choices().get(index)) {
         text(scene, 24, 558, &choice.id, 1, 0xf0f4ff);
