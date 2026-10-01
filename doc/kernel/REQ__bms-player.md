@@ -825,8 +825,8 @@ raw native sample position never establish audible completion. The upper host
 point is a conservative admission frontier under the supplied estimates, not
 an exact physical endpoint timestamp; physical accuracy remains unknown.
 Invalid or regressing ASIO endpoint observations fail without changing retained
-evidence. ASIO pause remains unsupported and network finite sessions still
-reject before acquisition. SDK-free launch rejection and conditional ASIO build
+evidence. ASIO pause remains unsupported; finite solo network sessions use
+the section identity policy below. SDK-free launch rejection and conditional ASIO build
 licensing remain unchanged. Driver/MSVC execution and physical acceptance are
 deferred; portable composition fixtures are prepared for later execution.
 Progressing ASIO blocks with equal conservative upper host points remain valid
@@ -836,8 +836,8 @@ not require strict host progress for endpoint interpolation.
 F7 marks an exact observed original-song start; F10 marks a strictly later end.
 F11 enable preflights a fresh pinned SessionLaunch with both --start-ns and
 --end-ns, then cancels/drains/joins the current owner before replacement. Native
-parsers admit supported solo/local modes, including SDK-enabled ASIO, and reject
-network finite playback.
+parsers admit supported solo/local modes, including SDK-enabled ASIO, and solo
+network finite playback with exact section identity agreement.
 The region remains scalar; notes acquire no per-frame reactive state.
 Each native owner configures immutable audio/logical ends before gameplay and
 records completed_end only after native presentation and drained input/resume
@@ -902,7 +902,7 @@ global input frontier must pass the terminal host boundary. A single backlogged
 device blocks advancement and completion. All members share one immutable end,
 output owner and Transport; independent player IDs/captures/scores remain intact.
 Remaining queued input strictly after the terminal frontier cannot enter gameplay.
-Windows WASAPI shared/exclusive and macOS CoreAudio solo and local 2..64 owners use the same finite audio/judging/presentation contract. Their local groups additionally require the actually committed InputMerger frontier and every member at the logical end. Network endpoint connections remain required; SDK-enabled ASIO uses the upper-interval admission frontier described above. Windows uses the actually negotiated PCM rate and QPC receipt ordering; all pending WM input must drain before completion. macOS uses the configured native PCM rate and HID collection frontier; its pending resume parking must reconcile before completion. These owners reject unsupported finite modes before session resources open. Omitting --end-ns retains full-song behavior.
+Windows WASAPI shared/exclusive and macOS CoreAudio solo and local 2..64 owners use the same finite audio/judging/presentation contract. Their local groups additionally require the actually committed InputMerger frontier and every member at the logical end. Solo network owners exchange the finite endpoint identity described below; SDK-enabled ASIO uses the upper-interval admission frontier described above. Windows uses the actually negotiated PCM rate and QPC receipt ordering; all pending WM input must drain before completion. macOS uses the configured native PCM rate and HID collection frontier; its pending resume parking must reconcile before completion. These owners reject unsupported finite modes before session resources open. Omitting --end-ns retains full-song behavior.
 
 Directly unverifiable implementation paths need portable regression fixture
 source for later execution: exercise actual mixer/runtime/capture components,
@@ -1034,13 +1034,13 @@ gapless loops/browser/full widget host and full native/GUI/replay acceptance rem
 unfinished. Source compilation and authored fixtures are not execution proof.
 
 ### Native finite solo expansion
-Windows WASAPI shared/exclusive and macOS CoreAudio solo or local 2..64 commands accept a strictly later unsigned `--end-ns`. Derive the endpoint on the actual PCM grid, freeze audio at that exclusive frame, cap judging at the logical end, and finish only after native presentation and drained input/resume reconciliation. Unlimited sessions retain full-song completion. Network finite modes remain explicitly rejected pending their owners; SDK-enabled Windows ASIO uses the actual block upper-interval completion frontier described above. Author portable argument/frontier and model fixtures for later execution; compilation is not native acceptance.
+Windows WASAPI shared/exclusive and macOS CoreAudio solo or local 2..64 commands accept a strictly later unsigned `--end-ns`. Derive the endpoint on the actual PCM grid, freeze audio at that exclusive frame, cap judging at the logical end, and finish only after native presentation and drained input/resume reconciliation. Unlimited sessions retain full-song completion. Solo network finite modes use the exact section identity policy below; SDK-enabled Windows ASIO uses the actual block upper-interval completion frontier described above. Author portable argument/frontier and model fixtures for later execution; compilation is not native acceptance.
 
 ### Native finite UI practice intent
 Enabling a marked practice loop preflights a fresh pinned invocation with exact --start-ns/--end-ns, then cancels and joins the previous owner. Each native session ends only at its immutable PCM/logical endpoint and native/drained frontier. Automatic repeat requires the old worker joined, successful noncancelled Finished publication and its exact completed endpoint. Observed UI song time never authorizes an audio stop/repeat; diagnostic seconds and failures cannot repeat. Disabling repetition leaves the current immutable section fence until it finishes; F5 returns to the pinned original. Fresh repeated owners preserve replay filename ordinals and one preroll. Restart may leave a device reopening gap; no gapless claim. Prepare fixtures for later execution; native GUI/acoustic acceptance remains deferred.
 
 ### Precise practice section editor
-F6 Practice edits retained start and optional end fields independently, with Tab/click focus and exact seconds/M:SS/H:MM:SS up to nine decimal places. Empty end plays through song end; a configured end must be strictly later than start. Done atomically updates both original-song nanosecond fields in the parent settings draft, preserving unrelated options. Invalid range/capacity preserves that draft and child error state. Apply remains separate; Back discards. Full Song sets start zero and clears end; Through End clears only end. Views repaint only changed dependencies and dispose with screen scope. Native mode validation remains authoritative on Apply/start; Network finite configurations are unsupported; SDK-enabled Windows ASIO admits finite prefixes. Prepare focused regression fixtures for later execution; GUI/device execution remains deferred.
+F6 Practice edits retained start and optional end fields independently, with Tab/click focus and exact seconds/M:SS/H:MM:SS up to nine decimal places. Empty end plays through song end; a configured end must be strictly later than start. Done atomically updates both original-song nanosecond fields in the parent settings draft, preserving unrelated options. Invalid range/capacity preserves that draft and child error state. Apply remains separate; Back discards. Full Song sets start zero and clears end; Through End clears only end. Views repaint only changed dependencies and dispose with screen scope. Native mode validation remains authoritative on Apply/start; solo network finite configurations require exact section identity agreement; SDK-enabled Windows ASIO admits finite prefixes. Prepare focused regression fixtures for later execution; GUI/device execution remains deferred.
 
 ## LNOBJ gameplay composition
 
@@ -1067,3 +1067,9 @@ Native/live/replay/offline default preparation resolves an existing literal asse
 ## Declared MP3 timing
 
 Shared preparation uses tagged MP3 timing before native/offline/live/replay stream startup. Valid Xing/Info frame counts and LAME/Lavc delay/padding trim decoded PCM before it enters the immutable bank. Missing metadata leaves raw decoded frames; no guessed encoder delay is introduced. Explicit raw timing is available at the codec API. Original chart/compiled/replay identity and playback-start mapping remain unchanged. Actual source format stays fixed and malformed, incomplete, resynchronized or over-limit input fails setup. Fixtures are prepared for later execution; source checks are not acoustic synchronization or native acceptance evidence.
+
+## Finite solo network sections
+
+Solo native network competition admits an optional original-song `--end-ns`, strictly after the recorded start. Both peers exchange an exact versioned finite-section identity containing that endpoint and the existing normalized chart/rules/profile/source-seed/start/runtime identity. Different endpoints, finite versus full-song setups, or incompatible seeds/starts/rules/profiles/runtime versions cannot connect as compatible opponents. Full-song identity bytes remain unchanged. Invalid endpoints reject before ghost asset/file or socket acquisition. This section supersedes earlier finite-network rejection notes; local groups of 2..64 still reject networking before resource acquisition.
+
+Linux ALSA, Windows WASAPI/SDK-enabled ASIO and macOS CoreAudio solo owners pass the endpoint to shared competition preparation and retain their existing immutable PCM fence, logical judging prefix, actual native presentation and drained input frontier. Networking stays on its owned worker; remote summaries never enter local judging or determine completion. Each peer starts and finishes independently. Cleanup joins the socket worker after native cleanup; no synchronized start, authenticated score, authoritative ranking or guaranteed final packet is implied. Ghost comparison and captured replay headers/codecs remain unchanged, so a matching full recording may be compared over the local section prefix. Network pause and automatic network practice-loop repetition remain unsupported; a single finite network session is admitted. Pure identity and native argument fixtures must be prepared for later execution; native/socket/full acceptance remains pending.
