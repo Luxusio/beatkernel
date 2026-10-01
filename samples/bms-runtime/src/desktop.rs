@@ -162,6 +162,7 @@ struct Game {
     snapshot: Option<player::PlayerSnapshot>,
     cancelling: bool,
     joined: bool,
+    local_page: usize,
 }
 
 impl Drop for Game {
@@ -181,7 +182,7 @@ pub(super) fn run(
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
-            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; Up/Down: select; Enter: play/return; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
         );
         return Ok(());
     }
@@ -847,6 +848,8 @@ impl Desktop {
             return;
         }
         match id.0 {
+            6 if self.game.is_some() => self.change_local_page(false),
+            7 if self.game.is_some() => self.change_local_page(true),
             5 if self.game.is_none() => self.open_settings(),
             1 if self.game.is_none() && !self.entries.is_empty() => self.key(KeyCode::Enter, false),
             2 if self.game.as_ref().is_some_and(|game| !game.joined) => self.cancel(),
@@ -865,6 +868,14 @@ impl Desktop {
                 }
             }
             _ => {}
+        }
+    }
+    fn change_local_page(&mut self, forward: bool) {
+        if let Some(game) = &mut self.game {
+            let count = game.snapshot.as_ref().map_or(0, |s| s.players.len());
+            game.local_page = local_page(count, game.local_page, forward);
+            self.gesture.cancel();
+            self.hits.clear();
         }
     }
     fn cancel(&mut self) {
@@ -922,6 +933,10 @@ impl Desktop {
         }
         if self.settings.is_some() {
             self.settings_key(key, repeat);
+            return;
+        }
+        if self.game.is_some() && !repeat && matches!(key, KeyCode::PageUp | KeyCode::PageDown) {
+            self.change_local_page(key == KeyCode::PageDown);
             return;
         }
         if self.game.as_ref().is_some_and(|game| game.joined) {
@@ -984,6 +999,7 @@ impl Desktop {
             snapshot: None,
             cancelling: false,
             joined: false,
+            local_page: 0,
         });
         Ok(())
     }
@@ -1015,6 +1031,41 @@ impl Desktop {
             )?;
         } else if let Some(game) = &self.game {
             draw_game(pixels, game, self.options.lookahead)?;
+            let count = game.snapshot.as_ref().map_or(0, |s| s.players.len());
+            if count > organisms::LOCAL_PLAYERS_PER_PAGE {
+                if game.local_page > 0 {
+                    control(
+                        pixels,
+                        &mut self.hits,
+                        &self.gesture,
+                        point,
+                        ControlId(6),
+                        Bounds {
+                            x: 620,
+                            y: 658,
+                            width: 150,
+                            height: 34,
+                        },
+                        "PREVIOUS",
+                    );
+                }
+                if game.local_page + 1 < count.div_ceil(organisms::LOCAL_PLAYERS_PER_PAGE) {
+                    control(
+                        pixels,
+                        &mut self.hits,
+                        &self.gesture,
+                        point,
+                        ControlId(7),
+                        Bounds {
+                            x: 780,
+                            y: 658,
+                            width: 150,
+                            height: 34,
+                        },
+                        "NEXT",
+                    );
+                }
+            }
             if game.joined {
                 control(
                     pixels,
@@ -1627,6 +1678,18 @@ fn window_title(title: &str, artist: &str) -> String {
         .collect()
 }
 
+fn local_page(count: usize, current: usize, forward: bool) -> usize {
+    let last = count
+        .div_ceil(organisms::LOCAL_PLAYERS_PER_PAGE)
+        .saturating_sub(1);
+    let current = current.min(last);
+    if forward {
+        current.saturating_add(1).min(last)
+    } else {
+        current.saturating_sub(1)
+    }
+}
+
 fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), String> {
     let Some(snapshot) = &game.snapshot else {
         text(pixels, 24, 80, "LOADING - ESC CANCEL", 2, 0x9bb1cf);
@@ -1646,6 +1709,26 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
         }
     };
     text(pixels, 24, 65, status, 2, 0x9bb1cf);
+    if snapshot.players.len() >= 2 {
+        organisms::local_players(pixels, &snapshot.players, lookahead, game.local_page)?;
+        text(
+            pixels,
+            24,
+            665,
+            &format!(
+                "PLAYERS {}  PAGE {}/{}  PGUP/PGDN",
+                snapshot.players.len(),
+                game.local_page + 1,
+                snapshot
+                    .players
+                    .len()
+                    .div_ceil(organisms::LOCAL_PLAYERS_PER_PAGE)
+            ),
+            1,
+            0x9bb1cf,
+        );
+        return Ok(());
+    }
     organisms::scoreboard(pixels, &snapshot.score, &snapshot.recent_results);
     if let (Some(chart), Some(now)) = (&snapshot.chart, snapshot.song_time) {
         organisms::playfield(pixels, chart, now, lookahead)?;
@@ -1676,6 +1759,18 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn local_pages_keep_three_four_together_and_bound_larger_rosters() {
+        for count in [0, 1, 2, 3, 4] {
+            assert_eq!(local_page(count, 0, true), 0);
+            assert_eq!(local_page(count, usize::MAX, false), 0);
+        }
+        assert_eq!(local_page(5, 0, true), 1);
+        assert_eq!(local_page(5, 1, true), 1);
+        assert_eq!(local_page(64, 14, true), 15);
+        assert_eq!(local_page(64, 15, true), 15);
+        assert_eq!(local_page(64, 15, false), 14);
+    }
     #[test]
     fn profile_option_is_ui_owned_and_native_overrides_replace_repeated_groups() {
         let args = [

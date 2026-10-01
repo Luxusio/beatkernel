@@ -1,10 +1,12 @@
 //! Composed view components. Inputs are portable state; no I/O or clock ownership.
 use super::{
     atoms::{rect, text},
+    interaction::Bounds,
     molecules,
 };
 use crate::{
     competition::ScoreSummary,
+    player::LocalPlayerSnapshot,
     player_chart::{MAX_VISIBLE_NOTES, PlayerChart},
     scene::Scene,
 };
@@ -14,14 +16,22 @@ use beatkernel::{
 };
 const TOP: i64 = 110;
 const LINE: i64 = 610;
+#[cfg(test)]
 fn note_y(time: Timestamp, now: Timestamp, lookahead: i64) -> i64 {
-    let delta = i128::from(time.as_nanos()) - i128::from(now.as_nanos());
-    (i128::from(LINE) - delta * i128::from(LINE - TOP) / i128::from(lookahead))
-        .clamp(-10_000, 10_000) as i64
+    project_note(time, now, lookahead, TOP, LINE).clamp(-10_000, 10_000)
 }
+fn project_note(time: Timestamp, now: Timestamp, lookahead: i64, top: i64, line: i64) -> i64 {
+    let delta = i128::from(time.as_nanos()) - i128::from(now.as_nanos());
+    (i128::from(line) - delta * i128::from(line - top) / i128::from(lookahead))
+        .clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+#[cfg(test)]
 fn lane_bounds(index: usize, lanes: usize) -> (i64, i64) {
-    let left = 80 + (index * 640 / lanes.max(1)) as i64;
-    let right = 80 + ((index + 1) * 640 / lanes.max(1)) as i64;
+    partition_lane(index, lanes, 80, 640)
+}
+fn partition_lane(index: usize, lanes: usize, x: i64, width: i64) -> (i64, i64) {
+    let left = x + (index as i128 * i128::from(width) / lanes.max(1) as i128) as i64;
+    let right = x + ((index + 1) as i128 * i128::from(width) / lanes.max(1) as i128) as i64;
     (left, right)
 }
 
@@ -31,37 +41,220 @@ pub fn playfield(
     now: Timestamp,
     lookahead: i64,
 ) -> Result<(), String> {
+    playfield_in(
+        pixels,
+        chart,
+        now,
+        lookahead,
+        Bounds {
+            x: 80,
+            y: TOP - 4,
+            width: 640,
+            height: LINE - TOP + 28,
+        },
+    )
+}
+
+/// Bounds include four pixels above the lane background for clipped note-head
+/// overhang and 24 below the judgment line for labels. Projection uses only
+/// actual reported song time, with wide integer arithmetic.
+pub fn playfield_in(
+    pixels: &mut Scene,
+    chart: &PlayerChart,
+    now: Timestamp,
+    lookahead: i64,
+    bounds: Bounds,
+) -> Result<(), String> {
     if lookahead <= 0 {
         return Err("playfield lookahead must be positive".into());
     }
     let lanes = chart.lanes.len();
+    let [width, height] = pixels.dimensions();
+    if bounds.x < 0
+        || bounds.y < 0
+        || bounds.width <= 0
+        || bounds.height < 32
+        || i128::from(bounds.x) + i128::from(bounds.width) > width as i128
+        || i128::from(bounds.y) + i128::from(bounds.height) > height as i128
+        || i128::from(bounds.width) < lanes as i128 * 13
+    {
+        return Err("playfield bounds do not fit viewport or lane geometry".into());
+    }
+    let top = bounds.y + 4;
+    let line = bounds.y + bounds.height - 24;
     for lane in 0..lanes {
-        let (left, right) = lane_bounds(lane, lanes);
+        let (left, right) = partition_lane(lane, lanes, bounds.x, bounds.width);
         rect(
             pixels,
             left,
-            TOP,
+            top,
             right - left - 1,
-            LINE - TOP + 24,
+            line - top + 24,
             if lane % 2 == 0 { 0x1d2734 } else { 0x18212c },
         );
-        text(
+        clipped_text(
             pixels,
-            left.max(0) as usize + 3,
-            620,
+            Bounds {
+                x: left + 3,
+                y: line + 10,
+                width: right - left - 3,
+                height: 7,
+            },
             &(lane + 1).to_string(),
             1,
             0xa9bdd5,
         );
     }
     for note in chart.visible_notes(now, lookahead, 150_000_000, MAX_VISIBLE_NOTES) {
-        let (left, right) = lane_bounds(note.lane_index, lanes);
-        let head = note_y(note.start, now, lookahead);
-        let tail = note.end.map(|end| note_y(end, now, lookahead));
-        molecules::note(pixels, (left, right), head, tail, TOP..=LINE + 15);
+        let (left, right) = partition_lane(note.lane_index, lanes, bounds.x, bounds.width);
+        let head = project_note(note.start, now, lookahead, top, line);
+        let tail = note
+            .end
+            .map(|end| project_note(end, now, lookahead, top, line));
+        molecules::note(pixels, (left, right), head, tail, top..=line + 15);
     }
-    rect(pixels, 80, LINE, 640, 3, 0xffffff);
-    Ok(())
+    rect(pixels, bounds.x, line, bounds.width, 3, 0xffffff);
+    pixels.status()
+}
+
+pub const LOCAL_PLAYERS_PER_PAGE: usize = 4;
+
+fn page_range(count: usize, page: usize) -> Result<std::ops::Range<usize>, String> {
+    if !(1..=crate::local_players::MAX_LOCAL_PLAYERS).contains(&count)
+        || page >= count.div_ceil(LOCAL_PLAYERS_PER_PAGE)
+    {
+        return Err("invalid local player roster or display page".into());
+    }
+    let first = page * LOCAL_PLAYERS_PER_PAGE;
+    Ok(first..(first + LOCAL_PLAYERS_PER_PAGE).min(count))
+}
+
+fn panel_bounds(index: usize, count: usize) -> Bounds {
+    let columns = if count == 1 { 1 } else { 2 };
+    let rows = if count <= 2 { 1 } else { 2 };
+    let width = (912 - (columns - 1) * 12) / columns;
+    let height = (540 - (rows - 1) * 12) / rows;
+    Bounds {
+        x: 24 + (index % columns) as i64 * (width + 12) as i64,
+        y: 100 + (index / columns) as i64 * (height + 12) as i64,
+        width: width as i64,
+        height: height as i64,
+    }
+}
+
+fn clipped_text(scene: &mut Scene, bounds: Bounds, value: &str, scale: usize, color: u32) {
+    if scale == 0 || bounds.width <= 0 || bounds.height < 7 * scale as i64 {
+        return;
+    }
+    let cells = bounds.width as usize / (6 * scale);
+    let end = value
+        .char_indices()
+        .nth(cells)
+        .map_or(value.len(), |(at, _)| at);
+    text(
+        scene,
+        bounds.x as usize,
+        bounds.y as usize,
+        &value[..end],
+        scale,
+        color,
+    );
+}
+
+/// Four is a presentation-page budget, never a roster/gameplay limit.
+pub fn local_players(
+    scene: &mut Scene,
+    players: &[LocalPlayerSnapshot],
+    lookahead: i64,
+    page: usize,
+) -> Result<(), String> {
+    let visible = page_range(players.len(), page)?;
+    if lookahead <= 0 {
+        return Err("local playfield lookahead must be positive".into());
+    }
+    for (index, player) in players.iter().enumerate() {
+        if player.player.0 == 0
+            || players[..index]
+                .iter()
+                .any(|other| other.player == player.player)
+            || player.recent_results.len() > 128
+        {
+            return Err("invalid local presentation identities/result capacity".into());
+        }
+    }
+    let count = visible.len();
+    for (index, player) in players[visible].iter().enumerate() {
+        let bounds = panel_bounds(index, count);
+        rect(
+            scene,
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            0x141d29,
+        );
+        let title = format!(
+            "P{} {}",
+            player.player.0,
+            player
+                .chart
+                .as_ref()
+                .map_or("LOADING", |chart| chart.title.as_str())
+        );
+        let line = |dy: i64, height: i64| Bounds {
+            x: bounds.x + 10,
+            y: bounds.y + dy,
+            width: bounds.width - 20,
+            height,
+        };
+        clipped_text(scene, line(8, 14), &title, 2, 0xf0f4ff);
+        clipped_text(
+            scene,
+            line(32, 7),
+            &format!("HITS {} MISSES {}", player.score.hits, player.score.misses),
+            1,
+            0x9bb1cf,
+        );
+        clipped_text(
+            scene,
+            line(44, 7),
+            &format!(
+                "COMBO {} MAX {}",
+                player.score.combo, player.score.max_combo
+            ),
+            1,
+            0x9bb1cf,
+        );
+        if let Some(event) = player
+            .last_judge
+            .as_ref()
+            .or_else(|| player.recent_results.last())
+        {
+            let (label, color) = match event.outcome {
+                JudgeOutcome::Hit { grade, .. } => {
+                    (format!("G{} #{}", grade.0, event.object.0), 0x74e5c5)
+                }
+                JudgeOutcome::Miss { .. } => (format!("MISS #{}", event.object.0), 0xff8e8e),
+            };
+            clipped_text(scene, line(56, 7), &label, 1, color);
+        }
+        match (player.chart.as_ref(), player.song_time) {
+            (Some(chart), Some(now)) => playfield_in(
+                scene,
+                chart,
+                now,
+                lookahead,
+                Bounds {
+                    x: bounds.x + 10,
+                    y: bounds.y + 72,
+                    width: bounds.width - 20,
+                    height: bounds.height - 80,
+                },
+            )?,
+            _ => clipped_text(scene, line(100, 7), "WAITING FOR GAME STATE", 1, 0x9bb1cf),
+        }
+    }
+    scene.status()
 }
 pub fn scoreboard(pixels: &mut Scene, score: &ScoreSummary, recent_results: &[JudgeEvent]) {
     molecules::counter(pixels, 750, 145, "HITS", score.hits, 0x74e5c5);
@@ -81,6 +274,105 @@ pub fn scoreboard(pixels: &mut Scene, score: &ScoreSummary, recent_results: &[Ju
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn chart() -> PlayerChart {
+        let source = beatkernel_bms::parse(
+            "#BPM 120\n#TITLE A LONG TITLE FOR PLAYER PANELS\n#00011:0100\n#00051:0202\n",
+            beatkernel_bms::ParseOptions::default(),
+        )
+        .unwrap();
+        PlayerChart::from_compiled(&source, &source.compile().unwrap().chart).unwrap()
+    }
+    fn inside(rectangle: &[f32; 4], bounds: Bounds) -> bool {
+        rectangle[0] >= bounds.x as f32
+            && rectangle[1] >= bounds.y as f32
+            && rectangle[0] + rectangle[2] <= (bounds.x + bounds.width) as f32
+            && rectangle[1] + rectangle[3] <= (bounds.y + bounds.height) as f32
+    }
+    #[test]
+    fn relocated_notes_hold_caps_and_labels_remain_inside_playfield_bounds() {
+        let mut scene = Scene::new(960, 720);
+        let bounds = Bounds {
+            x: 100,
+            y: 200,
+            width: 300,
+            height: 160,
+        };
+        let chart = chart();
+        playfield_in(&mut scene, &chart, Timestamp::ZERO, 1_000_000_000, bounds).unwrap();
+        assert!(
+            scene
+                .rectangles()
+                .iter()
+                .all(|rectangle| inside(&rectangle.bounds, bounds))
+        );
+        for now in [Timestamp::MIN, Timestamp::MAX] {
+            scene.clear();
+            playfield_in(&mut scene, &chart, now, 1, bounds).unwrap();
+            assert!(
+                scene
+                    .rectangles()
+                    .iter()
+                    .all(|rectangle| inside(&rectangle.bounds, bounds))
+            );
+        }
+        assert!(playfield_in(&mut scene, &chart, Timestamp::ZERO, 0, bounds).is_err());
+        assert!(
+            playfield_in(
+                &mut scene,
+                &chart,
+                Timestamp::ZERO,
+                1,
+                Bounds {
+                    x: i64::MAX,
+                    ..bounds
+                }
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn local_panels_contain_actual_geometry_and_paging_covers_the_whole_roster() {
+        let chart = std::sync::Arc::new(chart());
+        let players: Vec<_> = (1..=64)
+            .map(|id| LocalPlayerSnapshot {
+                player: crate::local_players::PlayerId(id),
+                chart: Some(std::sync::Arc::clone(&chart)),
+                song_time: Some(Timestamp::ZERO),
+                score: ScoreSummary {
+                    hits: u64::MAX,
+                    misses: u64::MAX,
+                    combo: u64::MAX,
+                    max_combo: u64::MAX,
+                    ..Default::default()
+                },
+                last_judge: None,
+                recent_results: Vec::new(),
+            })
+            .collect();
+        let mut scene = Scene::new(960, 720);
+        for count in [2, 3, 4] {
+            scene.clear();
+            local_players(&mut scene, &players[..count], 1_000_000_000, 0).unwrap();
+            let panels: Vec<_> = (0..count).map(|index| panel_bounds(index, count)).collect();
+            assert!(scene.rectangles().iter().all(|rectangle| {
+                panels
+                    .iter()
+                    .any(|bounds| inside(&rectangle.bounds, *bounds))
+            }));
+            assert!(scene.status().is_ok());
+        }
+        let covered: Vec<_> = (0..16)
+            .flat_map(|page| page_range(64, page).unwrap())
+            .collect();
+        assert_eq!(covered, (0..64).collect::<Vec<_>>());
+        assert_eq!(page_range(5, 1).unwrap(), 4..5);
+        assert!(page_range(64, 16).is_err());
+        assert!(page_range(0, 0).is_err());
+        assert!(page_range(65, 0).is_err());
+        scene.clear();
+        local_players(&mut scene, &players, 1_000_000_000, 15).unwrap();
+        assert!(scene.status().is_ok());
+    }
     #[test]
     fn projection_preserves_extreme_timestamp_bounds_and_lane_partition() {
         assert_eq!(

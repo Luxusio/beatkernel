@@ -41,14 +41,9 @@ struct PlayerState {
     last_song: Timestamp,
 }
 
-fn admit_mode(count: usize, attached: bool, network: bool) -> Result<()> {
+fn admit_mode(count: usize, network: bool) -> Result<()> {
     if !(2..=MAX_LOCAL_PLAYERS).contains(&count) {
         return Err("Linux local play requires 2..64 explicit inputs".into());
-    }
-    if attached {
-        return Err(
-            "local multi-input graphical presentation is not implemented; use terminal play".into(),
-        );
     }
     if network {
         return Err("network competition currently supports one local participant only".into());
@@ -89,8 +84,10 @@ fn observe_reports(reports: &[PlayerReport], states: &mut [PlayerState]) -> Resu
                 failures.push(format!("player{} capture: {error}", state.player.0));
             }
         }
-        if let Err(error) = state.score.observe(&tagged.report.judge_events) {
-            failures.push(format!("player{} score: {error}", state.player.0));
+        if !tagged.report.judge_events.is_empty() {
+            if let Err(error) = state.score.observe(&tagged.report.judge_events) {
+                failures.push(format!("player{} score: {error}", state.player.0));
+            }
         }
         if let Some(competition) = state.competition.as_mut() {
             if let Err(error) = competition.observe(&tagged.report) {
@@ -107,6 +104,9 @@ fn observe_reports(reports: &[PlayerReport], states: &mut [PlayerState]) -> Resu
             );
         }
     }
+    if let Err(error) = beatkernel_bms_runtime::player::publish_local_reports(reports) {
+        failures.push(format!("local presentation: {error}"));
+    }
     if failures.is_empty() {
         Ok(())
     } else {
@@ -117,7 +117,6 @@ fn observe_reports(reports: &[PlayerReport], states: &mut [PlayerState]) -> Resu
 pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> Result<()> {
     admit_mode(
         options.local_inputs.len(),
-        beatkernel_bms_runtime::player::attached(),
         competition_options.network.is_some(),
     )?;
     let count = options.local_inputs.len();
@@ -146,6 +145,13 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             );
         }
     }
+    beatkernel_bms_runtime::player::publish_local_chart(
+        &prepared.source,
+        &prepared.compiled.chart,
+        &(1..=count)
+            .map(|id| PlayerId(id as u32))
+            .collect::<Vec<_>>(),
+    )?;
     let reserved: Vec<_> = prepared
         .bgm_commands
         .iter()
@@ -554,15 +560,10 @@ mod fixtures {
     }
     #[test]
     fn unsupported_local_modes_reject_before_resource_preparation() {
-        assert!(admit_mode(2, false, false).is_ok());
-        assert!(admit_mode(64, false, false).is_ok());
-        for (count, attached, network) in [
-            (1, false, false),
-            (65, false, false),
-            (2, true, false),
-            (2, false, true),
-        ] {
-            assert!(admit_mode(count, attached, network).is_err());
+        assert!(admit_mode(2, false).is_ok());
+        assert!(admit_mode(64, false).is_ok());
+        for (count, network) in [(1, false), (65, false), (2, true)] {
+            assert!(admit_mode(count, network).is_err());
         }
     }
 }
