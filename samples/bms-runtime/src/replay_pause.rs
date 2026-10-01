@@ -41,6 +41,11 @@ impl ReplayPause {
             base,
         })
     }
+    /// Same immutable setup opt-in as live playback; recorded song mapping stays unchanged.
+    pub fn with_playback_end_frame(mut self, end: u64) -> Result<Self, PauseError> {
+        self.native = self.native.with_playback_end_frame(end)?;
+        Ok(self)
+    }
     pub fn phase(&self) -> PausePhase {
         self.native.phase()
     }
@@ -166,6 +171,8 @@ mod fixtures {
             Timestamp::from_nanos(50_000_000),
             Duration::from_nanos(3_000_000),
         )
+        .unwrap()
+        .with_playback_end_frame(4)
         .unwrap();
         pause.request(true, pair(0)).unwrap();
         let mut output = [99.0; 10];

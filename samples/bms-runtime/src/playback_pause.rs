@@ -46,6 +46,9 @@ pub struct NativePause {
     last_pair: Option<ClockPair>,
     last_report: Option<RenderReport>,
     boundary: Option<PendingBoundary>,
+    playback_end: Option<u64>,
+    end_marker: Option<u64>,
+    setup_locked: bool,
 }
 impl NativePause {
     pub fn new(
@@ -69,7 +72,26 @@ impl NativePause {
             last_pair: None,
             last_report: None,
             boundary: None,
+            playback_end: None,
+            end_marker: None,
+            setup_locked: false,
         })
+    }
+    /// Opts into one immutable endpoint before any request or clock/report
+    /// observation. Unlimited owners retain strict manual-pause validation.
+    pub fn with_playback_end_frame(mut self, end: u64) -> Result<Self, PauseError> {
+        if self.setup_locked
+            || self.last_pair.is_some()
+            || self.last_report.is_some()
+            || self.playback_end.is_some()
+        {
+            return Err(PauseError(
+                "finite pause setup is already configured or observed",
+            ));
+        }
+        self.point(end)?;
+        self.playback_end = Some(end);
+        Ok(self)
     }
     pub fn phase(&self) -> PausePhase {
         self.phase
@@ -98,6 +120,10 @@ impl NativePause {
     }
     pub fn request(&mut self, paused: bool, reference: ClockPair) -> Result<bool, PauseError> {
         self.check_pair(reference)?;
+        self.setup_locked = true;
+        if self.end_marker.is_some() {
+            return Ok(false);
+        }
         let next = match (self.phase, paused) {
             (PausePhase::Running, true) => PausePhase::Pausing,
             (PausePhase::Paused, false) => PausePhase::Resuming,
@@ -145,6 +171,41 @@ impl NativePause {
         }
         self.point(physical)?;
         self.point(playback)?;
+        match (self.playback_end, report.playback_end_physical_frame) {
+            (None, Some(_)) => {
+                return Err(PauseError("endpoint evidence requires finite pause setup"));
+            }
+            (Some(expected), marker) => {
+                if playback > expected {
+                    return Err(PauseError("render playback passed its configured endpoint"));
+                }
+                if let Some(marker) = marker {
+                    let manual_gap = marker
+                        .checked_sub(expected)
+                        .ok_or(PauseError("physical endpoint precedes playback endpoint"))?;
+                    let prefix_end = report
+                        .start_frame
+                        .checked_add(report.playback_frames as u64)
+                        .ok_or(PauseError("endpoint prefix overflow"))?;
+                    if !report.paused
+                        || playback != expected
+                        || marker > physical
+                        || manual_gap < self.gap
+                        || (report.playback_frames > 0 && marker != prefix_end)
+                        || (report.playback_frames == 0 && marker > report.start_frame)
+                        || self.end_marker.is_some_and(|old| old != marker)
+                    {
+                        return Err(PauseError(
+                            "inconsistent or changed physical endpoint evidence",
+                        ));
+                    }
+                    self.point(marker)?;
+                } else if self.end_marker.is_some() || (report.frames > 0 && playback == expected) {
+                    return Err(PauseError("reached endpoint lost its physical marker"));
+                }
+            }
+            (None, None) => {}
+        }
         if let Some(old) = self.last_report {
             let old_end = old
                 .start_frame
@@ -196,6 +257,7 @@ impl NativePause {
         self.check_pair(pair)?;
         if let Some(report) = report {
             let (_, playback, gap) = self.check_report(report)?;
+            let terminal_marker = report.playback_end_physical_frame;
             if matches!(self.phase, PausePhase::Running | PausePhase::Pausing)
                 && !report.paused
                 && gap != self.gap
@@ -213,7 +275,7 @@ impl NativePause {
                 ));
             }
             match self.phase {
-                PausePhase::Running if report.paused => {
+                PausePhase::Running if report.paused && terminal_marker.is_none() => {
                     return Err(PauseError("unexpected paused render while running"));
                 }
                 PausePhase::Paused if !report.paused => {
@@ -226,16 +288,32 @@ impl NativePause {
                         return Err(PauseError("pause gap regressed"));
                     }
                     self.boundary = Some(PendingBoundary {
-                        physical: playback
-                            .checked_add(self.gap)
-                            .ok_or(PauseError("pause boundary overflow"))?,
+                        physical: if let Some(marker) = terminal_marker {
+                            marker
+                        } else {
+                            playback
+                                .checked_add(self.gap)
+                                .ok_or(PauseError("pause boundary overflow"))?
+                        },
                         playback,
                         gap: self.gap,
                     });
                 }
                 PausePhase::Resuming
-                    if !report.paused && report.frames > 0 && self.boundary.is_none() =>
+                    if (!report.paused || terminal_marker.is_some())
+                        && report.frames > 0
+                        && self.boundary.is_none() =>
                 {
+                    let gap = if let Some(marker) = terminal_marker {
+                        marker
+                            .checked_sub(
+                                self.playback_end
+                                    .ok_or(PauseError("finite endpoint unavailable"))?,
+                            )
+                            .ok_or(PauseError("endpoint manual gap underflow"))?
+                    } else {
+                        gap
+                    };
                     if report.playback_start_frame < self.frozen || gap <= self.gap {
                         return Err(PauseError(
                             "resume report precedes the frozen playback frontier",
@@ -251,6 +329,9 @@ impl NativePause {
                     });
                 }
                 _ => {}
+            }
+            if terminal_marker.is_some() {
+                self.end_marker = terminal_marker;
             }
             self.last_report = Some(report);
         }
@@ -638,6 +719,199 @@ mod fixtures {
                 .observe(Some(report(0, 0, 1, true)), pair(0))
                 .is_err()
         );
+    }
+    fn finite_mixer(end: u64) -> (beatkernel::audio::CommandProducer, beatkernel::audio::Mixer) {
+        use beatkernel::audio::*;
+        let format = AudioFormat::new(1000, 1).unwrap();
+        let limits = AudioLimits::new(8, 2, 8, 32, 8).unwrap();
+        let pcm_limits = PcmLimits::new(4096, 8192, 2).unwrap();
+        let mut bank = SampleBank::new(format, pcm_limits).unwrap();
+        bank.insert(
+            SampleId(1),
+            PcmSample::new(format, vec![0.25; 16], pcm_limits).unwrap(),
+        )
+        .unwrap();
+        let (mut producer, consumer) = command_queue(8).unwrap();
+        producer
+            .try_push(AudioCommand::Play {
+                voice: VoiceId(1),
+                sample: SampleId(1),
+                at: Timestamp::ZERO,
+                gain: 1.0,
+            })
+            .unwrap();
+        let config = MixerConfig::new(format, ClockDomainId(1), Timestamp::ZERO, limits)
+            .with_playback_end_frame(end);
+        (producer, Mixer::new(config, bank, consumer).unwrap())
+    }
+    #[test]
+    fn finite_running_and_pending_pause_use_actual_retained_marker() {
+        let (_producer, mut mixer) = finite_mixer(3);
+        let mut output = [9.0; 5];
+        let prefix = mixer.render(&mut output).unwrap();
+        assert_eq!(output, [0.25, 0.25, 0.25, 0.0, 0.0]);
+        assert_eq!(prefix.playback_end_physical_frame, Some(3));
+        let latest = mixer.render(&mut output).unwrap();
+        assert_eq!(latest.playback_frames, 0);
+        let mut running = NativePause::new(point(1, 0), ClockDomainId(2), 1000)
+            .unwrap()
+            .with_playback_end_frame(3)
+            .unwrap();
+        assert_eq!(
+            running.observe(Some(prefix), pair(2_000_000)).unwrap(),
+            None
+        );
+        assert_eq!(running.phase(), PausePhase::Running);
+        assert_eq!(
+            running.observe(Some(latest), pair(6_000_000)).unwrap(),
+            None
+        );
+        assert_eq!(running.phase(), PausePhase::Running);
+        assert_eq!(
+            running.scheduling_point(latest).unwrap(),
+            point(1, 3_000_000)
+        );
+        let mut pending = NativePause::new(point(1, 0), ClockDomainId(2), 1000)
+            .unwrap()
+            .with_playback_end_frame(3)
+            .unwrap();
+        pending.request(true, pair(0)).unwrap();
+        assert_eq!(
+            pending.observe(Some(latest), pair(2_000_000)).unwrap(),
+            None
+        );
+        let boundary = pending.observe(None, pair(4_000_000)).unwrap().unwrap();
+        assert_eq!(
+            boundary,
+            PauseBoundary {
+                paused: true,
+                host: point(2, 3_010_000),
+                playback_frame: 3
+            }
+        );
+        assert_eq!(pending.phase(), PausePhase::Paused);
+        assert_eq!(
+            pending.observe(Some(latest), pair(5_000_000)).unwrap(),
+            None
+        );
+        assert!(!pending.request(false, pair(5_000_000)).unwrap());
+        assert_eq!(pending.phase(), PausePhase::Paused);
+    }
+    #[test]
+    fn short_resume_reaching_end_recovers_manual_gap_from_prefix_or_coalesced_silence() {
+        for coalesced in [false, true] {
+            let (mut producer, mut mixer) = finite_mixer(3);
+            let mut pause = NativePause::new(point(1, 0), ClockDomainId(2), 1000)
+                .unwrap()
+                .with_playback_end_frame(3)
+                .unwrap();
+            let active = mixer.render(&mut [0.0; 2]).unwrap();
+            pause.observe(Some(active), pair(1_000_000)).unwrap();
+            pause.request(true, pair(1_000_000)).unwrap();
+            producer.request_pause(true);
+            let paused = mixer.render(&mut [0.0; 3]).unwrap();
+            assert_eq!(paused.playback_end_physical_frame, None);
+            let boundary = pause
+                .observe(Some(paused), pair(3_000_000))
+                .unwrap()
+                .unwrap();
+            assert_eq!(boundary.playback_frame, 2);
+            assert_eq!(boundary.host, point(2, 2_010_000));
+            pause.request(false, pair(4_000_000)).unwrap();
+            producer.request_pause(false);
+            let mut output = [9.0; 4];
+            let terminal_prefix = mixer.render(&mut output).unwrap();
+            assert_eq!(output, [0.25, 0.0, 0.0, 0.0]);
+            assert!(terminal_prefix.paused);
+            assert_eq!(terminal_prefix.playback_frames, 1);
+            assert_eq!(terminal_prefix.playback_end_physical_frame, Some(6));
+            let latest = mixer.render(&mut output).unwrap();
+            assert_eq!(latest.playback_end_physical_frame, Some(6));
+            let evidence = if coalesced { latest } else { terminal_prefix };
+            assert_eq!(
+                pause.observe(Some(evidence), pair(4_500_000)).unwrap(),
+                None
+            );
+            assert_eq!(pause.phase(), PausePhase::Resuming);
+            let resumed = pause.observe(None, pair(7_000_000)).unwrap().unwrap();
+            assert_eq!(
+                resumed,
+                PauseBoundary {
+                    paused: false,
+                    host: point(2, 5_010_000),
+                    playback_frame: 2
+                }
+            );
+            assert_eq!(pause.phase(), PausePhase::Running);
+            assert_eq!(
+                pause.song_origin_after_pause(Timestamp::ZERO).unwrap(),
+                Timestamp::from_nanos(-3_000_000)
+            );
+            assert_eq!(pause.observe(Some(latest), pair(8_000_000)).unwrap(), None);
+            assert_eq!(pause.scheduling_point(latest).unwrap(), point(1, 3_000_000));
+            assert_eq!(pause.gap, 3); // Silent terminal suffix is never counted as manual pause.
+        }
+    }
+    #[test]
+    fn finite_marker_identity_setup_and_malformed_evidence_are_atomic() {
+        let (_producer, mut mixer) = finite_mixer(3);
+        let terminal = mixer.render(&mut [0.0; 5]).unwrap();
+        let latest = mixer.render(&mut [0.0; 5]).unwrap();
+        let mut unlimited = NativePause::new(point(1, 0), ClockDomainId(2), 1000).unwrap();
+        assert!(unlimited.observe(Some(terminal), pair(4_000_000)).is_err());
+        assert!(unlimited.last_render_report().is_none());
+        assert_eq!(unlimited.phase(), PausePhase::Running);
+        let fresh = || NativePause::new(point(1, 0), ClockDomainId(2), 1000).unwrap();
+        assert!(fresh().with_playback_end_frame(u64::MAX).is_err());
+        assert!(fresh().with_playback_end_frame(0).is_ok());
+        assert!(
+            fresh()
+                .with_playback_end_frame(3)
+                .unwrap()
+                .with_playback_end_frame(3)
+                .is_err()
+        );
+        let mut requested = fresh();
+        assert!(!requested.request(false, pair(0)).unwrap());
+        assert!(requested.with_playback_end_frame(3).is_err());
+        let mut observed = fresh();
+        observed.observe(None, pair(0)).unwrap();
+        assert!(observed.with_playback_end_frame(3).is_err());
+        let mut wrong_endpoint = fresh().with_playback_end_frame(4).unwrap();
+        assert!(
+            wrong_endpoint
+                .observe(Some(terminal), pair(4_000_000))
+                .is_err()
+        );
+        assert!(wrong_endpoint.last_render_report().is_none());
+        let mut finite = fresh().with_playback_end_frame(3).unwrap();
+        finite.observe(Some(terminal), pair(4_000_000)).unwrap();
+        for malformed in [
+            RenderReport {
+                playback_end_physical_frame: Some(4),
+                ..latest
+            },
+            RenderReport {
+                playback_end_physical_frame: None,
+                ..latest
+            },
+            RenderReport {
+                paused: false,
+                ..latest
+            },
+            RenderReport {
+                playback_end_physical_frame: Some(11),
+                ..latest
+            },
+        ] {
+            let before = finite.clone();
+            assert!(finite.observe(Some(malformed), pair(6_000_000)).is_err());
+            assert_eq!(finite.last_report, before.last_report);
+            assert_eq!(finite.last_pair, before.last_pair);
+            assert_eq!(finite.end_marker, before.end_marker);
+            assert_eq!(finite.phase(), before.phase());
+        }
+        assert_eq!(finite.observe(Some(latest), pair(6_000_000)).unwrap(), None);
     }
     fn button(
         device: u64,
