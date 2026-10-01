@@ -498,9 +498,9 @@ fn main() -> Result<()> {
 
 fn finite_mode(options: &Options, network: bool) -> Result<()> {
     options.playback_end()?;
-    if options.end_ns.is_some() && (!options.local_players.is_empty() || network) {
+    if options.end_ns.is_some() && network {
         return Err(
-            "end-ns currently requires solo CoreAudio playback without network competition".into(),
+            "end-ns currently requires CoreAudio playback without network competition".into(),
         );
     }
     Ok(())
@@ -553,7 +553,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
             "Graphical player is bms-player; this is a native developer composition. Local mode: replace --keyboard-registry with repeated --local-player ID:REGISTRY (2..64 distinct keyboards).\n"
         );
         println!(
-            "macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned and strictly after start; solo/nonnetwork CoreAudio completes a finite prefix only after native presentation and input drain, without forcing remaining notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact solo or assigned local registry attachments, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown."
+            "macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned and strictly after start; solo or local nonnetwork CoreAudio completes a finite prefix only after native presentation and input drain, without forcing remaining notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact solo or assigned local registry attachments, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown."
         );
         return Ok(());
     }
@@ -1400,7 +1400,7 @@ mod fixtures {
             "1000000".into(),
         ]);
         assert!(parse(&local).is_ok());
-        assert!(validate_args(&local).is_err());
+        assert!(validate_args(&local).is_ok());
     }
     #[test]
     fn finite_frontier_is_exclusive_and_requires_real_drain_resume_and_logical_end() {
