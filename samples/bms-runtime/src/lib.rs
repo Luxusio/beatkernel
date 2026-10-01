@@ -38,6 +38,8 @@ pub mod player_chart;
 pub mod presentation_settings;
 /// Song-time command planning from actual recorded BMS judgment.
 pub mod replay_audio;
+/// Bounded saved-record discovery and chart/profile-compatible prefix previews.
+pub mod record_catalog;
 /// Bounded capture of the actual native runtime's accepted judgment operations.
 pub mod replay_capture;
 /// Checked durable replay reconstruction through the same builtin BMS judge.

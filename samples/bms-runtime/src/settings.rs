@@ -380,6 +380,64 @@ impl NativeSettings {
         self.fields[index].value = value.to_owned();
         Ok(())
     }
+    /// Adds a saved opponent to this draft, preserving all other options.
+    /// Reuses an empty row of the same kind; all rejection is atomic.
+    pub fn add_opponent(
+        &mut self,
+        kind: crate::competition::OpponentKind,
+        path: &str,
+    ) -> Result<(), String> {
+        valid_value(path)?;
+        if path.is_empty() {
+            return Err("replay opponent requires a nonempty path".into());
+        }
+        let opponents = self
+            .fields
+            .iter()
+            .filter(|row| {
+                matches!(row.flag, "--ghost-self" | "--ghost-other") && !row.value.is_empty()
+            })
+            .count();
+        if opponents >= 8 {
+            return Err("at most eight replay opponents are supported".into());
+        }
+        let flag = match kind {
+            crate::competition::OpponentKind::Own => "--ghost-self",
+            crate::competition::OpponentKind::Other => "--ghost-other",
+        };
+        if let Some(index) = self
+            .fields
+            .iter()
+            .position(|row| row.flag == flag && row.value.is_empty())
+        {
+            return self.set_value(index, path);
+        }
+        if self.fields.len() >= MAX_FIELDS {
+            return Err("native settings exceed 128 fields".into());
+        }
+        if self.fields.iter().map(|row| row.value.len()).sum::<usize>() + path.len()
+            > MAX_TOTAL_BYTES
+        {
+            return Err("native settings exceed 64 KiB of values".into());
+        }
+        let spec = *COMMON
+            .iter()
+            .find(|spec| spec.0 == flag)
+            .expect("known opponent flag");
+        self.fields
+            .try_reserve(1)
+            .map_err(|_| "opponent row allocation failed")?;
+        self.fields.push(field(spec, path.to_owned()));
+        Ok(())
+    }
+    /// Clears saved opponents while retaining editable rows and unrelated options.
+    pub fn clear_opponents(&mut self) {
+        for row in &mut self.fields {
+            if matches!(row.flag, "--ghost-self" | "--ghost-other") {
+                row.value.clear();
+            }
+        }
+    }
     pub fn add_binding(&mut self) -> Result<usize, String> {
         if self.fields.len() == MAX_FIELDS {
             return Err("native settings exceed 128 fields".into());
@@ -604,5 +662,98 @@ mod tests {
             restored,
             args(&["--device", "4", "--keyboard-registry", "300"])
         );
+    }
+}
+
+#[cfg(test)]
+mod opponent_fixtures {
+    use super::*;
+    use crate::competition::OpponentKind;
+    #[test]
+    fn opponent_rows_fill_append_count_both_kinds_and_clear_without_changing_other_options() {
+        let mut draft =
+            NativeSettings::from_args(&["--alsa".into(), "hw:1".into()], SettingsHost::Linux)
+                .unwrap();
+        let original_fields = draft.fields.len();
+        draft.add_opponent(OpponentKind::Own, "own:一.bkr").unwrap();
+        draft
+            .add_opponent(OpponentKind::Other, "other.bkr")
+            .unwrap();
+        assert_eq!(draft.fields.len(), original_fields);
+        for index in 0..6 {
+            draft
+                .add_opponent(OpponentKind::Own, &format!("record{index}.bkr"))
+                .unwrap();
+        }
+        let before = draft.native_args();
+        assert!(
+            draft
+                .add_opponent(OpponentKind::Other, "ninth.bkr")
+                .is_err()
+        );
+        assert_eq!(draft.native_args(), before);
+        draft.clear_opponents();
+        assert_eq!(
+            draft.native_args(),
+            vec!["--alsa".to_owned(), "hw:1".to_owned()]
+        );
+        let rows = draft.fields.len();
+        draft.add_opponent(OpponentKind::Own, "again.bkr").unwrap();
+        assert_eq!(draft.fields.len(), rows);
+        for path in [
+            String::new(),
+            "bad\n.bkr".into(),
+            "x".repeat(MAX_VALUE_BYTES + 1),
+        ] {
+            let before = draft.native_args();
+            assert!(draft.add_opponent(OpponentKind::Other, &path).is_err());
+            assert_eq!(draft.native_args(), before);
+        }
+    }
+    #[test]
+    fn empty_repeated_kind_rows_fill_first_and_field_total_caps_are_atomic() {
+        let mut draft = NativeSettings::from_args(
+            &[
+                "--ghost-other".into(),
+                String::new(),
+                "--ghost-other".into(),
+                String::new(),
+            ],
+            SettingsHost::Windows,
+        )
+        .unwrap();
+        draft
+            .add_opponent(OpponentKind::Other, "first.bkr")
+            .unwrap();
+        let ghosts: Vec<_> = draft
+            .fields()
+            .iter()
+            .filter(|row| row.flag == "--ghost-other")
+            .map(|row| row.value.as_str())
+            .collect();
+        assert_eq!(ghosts, vec!["first.bkr", ""]);
+        // Build valid boundary drafts through the existing bounded model.
+        let mut full = NativeSettings::from_args(&[], SettingsHost::Linux).unwrap();
+        full.add_opponent(OpponentKind::Own, "filled.bkr").unwrap();
+        while full.fields.len() < MAX_FIELDS {
+            full.add_binding().unwrap();
+        }
+        let before = full.native_args();
+        assert!(full.add_opponent(OpponentKind::Own, "extra.bkr").is_err());
+        assert_eq!(full.native_args(), before);
+        let mut bytes = NativeSettings::from_args(&[], SettingsHost::Linux).unwrap();
+        for _ in 0..16 {
+            let index = bytes.add_binding().unwrap();
+            bytes
+                .set_value(index, &"x".repeat(MAX_VALUE_BYTES))
+                .unwrap();
+        }
+        let before = bytes.native_args();
+        assert!(
+            bytes
+                .add_opponent(OpponentKind::Other, "overflow.bkr")
+                .is_err()
+        );
+        assert_eq!(bytes.native_args(), before);
     }
 }
