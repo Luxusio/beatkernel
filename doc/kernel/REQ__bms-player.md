@@ -573,3 +573,27 @@ Event-driven Selection retries drawing at the configured cadence after transient
 surface acquisition timeout, outdated configuration or lost-surface recreation.
 It enters idle Wait only after a presented frame (or a zero-size suspended
 surface), so a recovered surface cannot wait indefinitely for unrelated input.
+
+
+## Graphical practice-start draft
+
+Settings exposes a dedicated Practice child (button or F6). Its retained input
+accepts nonnegative decimal seconds, M:SS or H:MM:SS with 1..9 fractional digits;
+empty means zero. Colon seconds must be below 60, and minutes must be below 60
+in the three-part form. Two-part minutes and hours can span long songs. Input
+is bounded to 64 bytes and checked against nonnegative i64 nanoseconds with
+integer arithmetic. Invalid, fractional-overprecision or overflowing input is
+rejected without rounding or changing the parent draft.
+
+Reset changes the child editor to zero. Back/Escape discards child edits;
+Done/Enter updates only the Settings draft's --start-ns field and refreshes its
+visible editor if selected. Settings Apply and profile Save stay separate.
+Future live sessions use that applied start; F5 keeps its pinned session start.
+Native section judge/audio/record identity are the existing original-song-time
+paths. No device acquisition, chart reading or wall clock runs in view bindings.
+
+The panel owns one retained reactive node tree per Navigator instance, with
+editor/status/control dependencies and scope disposal at child exit. Idle
+rendering uses the same event-driven composition and transient-surface retry
+policy as Selection. Loops, live scrubbing, pause/resume and GUI/acoustic
+acceptance remain unfinished and user-deferred.

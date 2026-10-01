@@ -123,7 +123,10 @@ producer; native solo playback now uses the same composition.
 F5 or Retry starts the same chart again after the previous native session has
 finished cleanup. The accepted chart/device/timing/roster options stay pinned;
 recorded retries use distinct .retry<N>.bkr stems and create-new saves.
-Settings PRACTICE START (NS) selects an original song position for fresh practice;
+Settings Practice (button or F6) accepts exact seconds, M:SS or H:MM:SS with
+up to nine fractional digits; Done updates the draft and Settings Apply selects
+the next original-song practice start. The raw PRACTICE START (NS) field remains
+available in Settings and profiles;
 F5 retries the selected start. Earlier note heads/crossing holds are excluded, and
 overlapping automatic BGM resumes from original PCM frames. Section recordings
 store their start for logical replay, matching ghosts and recorded audio output.

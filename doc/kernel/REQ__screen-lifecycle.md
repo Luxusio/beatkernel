@@ -158,3 +158,15 @@ Event-driven Selection retries drawing at the configured cadence after transient
 surface acquisition timeout, outdated configuration or lost-surface recreation.
 It enters idle Wait only after a presented frame (or a zero-size suspended
 surface), so a recovered surface cannot wait indefinitely for unrelated input.
+
+
+## Practice panel lifetime
+
+Practice is an independent Settings child with typed draft/editor/view ownership
+and one retained reactive scope. It uses the existing three-entry ancestry
+Selection/Settings/Practice and the same bounded Navigator graph. Back drops
+child edits and resumes the retained Settings instance. Done validates the exact
+position and prepares the updated parent values/editor before committing the
+route. Failure retains the child and original parent draft. Buttons/input nodes
+inherit the panel scope; they do not own separate navigation lifecycles. Native
+play/replay owners and transport remain outside the panel lifetime.
