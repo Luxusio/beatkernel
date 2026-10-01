@@ -137,6 +137,147 @@ mod fixtures {
         })
     }
     #[test]
+    fn paused_native_mixer_prefix_resumes_equal_time_operations_without_duplicate_results() {
+        use crate::replay_pause::ReplayPause;
+        use beatkernel::{
+            audio::{
+                AudioCommand, AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, PcmSample,
+                SampleBank, SampleId, VoiceId, command_queue,
+            },
+            time::ClockPair,
+        };
+        let source = source();
+        let mut file = file();
+        file.records = vec![
+            ReplayRecord {
+                ordinal: 0,
+                song_time: Timestamp::from_nanos(150_000_000),
+                operation: input(0x11, 1),
+            },
+            ReplayRecord {
+                ordinal: 1,
+                song_time: Timestamp::from_nanos(150_000_000),
+                operation: input(0x12, 2),
+            },
+            ReplayRecord {
+                ordinal: 2,
+                song_time: Timestamp::from_nanos(150_000_001),
+                operation: ReplayOperation::Advance,
+            },
+        ];
+        let full = reconstruct(&source, file.clone(), limits()).unwrap();
+        let mut visual = ReplayVisual::new(&source, &file, limits()).unwrap();
+        let output = |ns| ClockPoint {
+            domain: ClockDomainId(1),
+            timestamp: Timestamp::from_nanos(ns),
+        };
+        let pair = |ns| ClockPair {
+            source: output(ns),
+            target: ClockPoint {
+                domain: ClockDomainId(2),
+                timestamp: Timestamp::from_nanos(ns + 100),
+            },
+        };
+        let format = AudioFormat::new(1000, 1).unwrap();
+        let audio_limits = AudioLimits::new(8, 2, 8, 256, 8).unwrap();
+        let pcm_limits = PcmLimits::new(4096, 4096, 2).unwrap();
+        let mut bank = SampleBank::new(format, pcm_limits).unwrap();
+        bank.insert(
+            SampleId(1),
+            PcmSample::new(format, vec![0.5], pcm_limits).unwrap(),
+        )
+        .unwrap();
+        let (mut producer, consumer) = command_queue(8).unwrap();
+        producer
+            .try_push(AudioCommand::Play {
+                voice: VoiceId(1),
+                sample: SampleId(1),
+                at: Timestamp::from_nanos(150_000_000),
+                gain: 1.0,
+            })
+            .unwrap();
+        let mut mixer = Mixer::new(
+            MixerConfig::new(format, ClockDomainId(1), Timestamp::ZERO, audio_limits),
+            bank,
+            consumer,
+        )
+        .unwrap();
+        let mut pause = ReplayPause::new(
+            output(0),
+            ClockDomainId(2),
+            1000,
+            Timestamp::ZERO,
+            Duration::ZERO,
+        )
+        .unwrap();
+        let rendered = mixer.render(&mut [0.0; 149]).unwrap();
+        pause.observe(Some(rendered), pair(148_000_000)).unwrap();
+        assert!(
+            visual
+                .advance_to(
+                    pause
+                        .presentation_song(output(148_000_000))
+                        .unwrap()
+                        .unwrap()
+                )
+                .unwrap()
+                .is_empty()
+        );
+        assert!(pause.request(true, pair(148_000_000)).unwrap());
+        producer.request_pause(true);
+        let mut silent = [1.0; 50];
+        let rendered = mixer.render(&mut silent).unwrap();
+        assert_eq!(silent, [0.0; 50]);
+        let boundary = pause
+            .observe(Some(rendered), pair(149_000_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(boundary.song, Timestamp::from_nanos(149_000_000));
+        assert!(visual.advance_to(boundary.song).unwrap().is_empty());
+        let cursor = visual.cursor;
+        assert!(
+            pause
+                .presentation_song(output(198_000_000))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(visual.cursor, cursor);
+        assert!(!visual.finished());
+        assert!(pause.request(false, pair(198_000_000)).unwrap());
+        producer.request_pause(false);
+        let rendered = mixer.render(&mut [0.0]).unwrap();
+        let boundary = pause
+            .observe(Some(rendered), pair(199_000_000))
+            .unwrap()
+            .unwrap();
+        assert!(!boundary.paused);
+        assert_eq!(boundary.song, Timestamp::from_nanos(149_000_000));
+        assert!(visual.advance_to(boundary.song).unwrap().is_empty());
+        let mut audible = [0.0];
+        mixer.render(&mut audible).unwrap();
+        assert_eq!(audible, [0.5]);
+        let song = pause
+            .presentation_song(output(200_000_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(song, Timestamp::from_nanos(150_000_000));
+        let mut results = visual.advance_to(song).unwrap();
+        assert_eq!(results.len(), 2);
+        assert!(visual.advance_to(song).unwrap().is_empty());
+        let song = pause
+            .presentation_song(output(200_000_001))
+            .unwrap()
+            .unwrap();
+        results.extend(visual.advance_to(song).unwrap());
+        assert_eq!(results, full.results());
+        assert_eq!(
+            visual.engine.stable_hash().unwrap(),
+            full.engine().stable_hash().unwrap()
+        );
+        assert!(visual.finished());
+    }
+
+    #[test]
     fn incremental_equal_time_inputs_inclusive_edge_and_prefix_match_full_validation() {
         let source = source();
         let mut file = file();
