@@ -561,8 +561,8 @@ GPU playfield uniforms.
 
 This introduces only the MIT standalone Floem reactive engine, not its released
 wgpu22/forked-winit host. The existing wgpu27/winit0.30 host and native resource
-owners remain. Settings, Records, Display, Players and Devices still use the
-previous drawing path. A changed node currently causes full composed rectangle
+owners remain. Settings now has the retained binding below. Records, Display, Players and
+Devices still use the previous drawing path. A changed node currently causes full composed rectangle
 buffer upload, not a partial GPU update; concatenation and fill cost remain
 proportional to visible geometry. GUI execution, dependency disposal behavior
 and performance measurements remain user-deferred; source compilation alone
@@ -597,3 +597,30 @@ editor/status/control dependencies and scope disposal at child exit. Idle
 rendering uses the same event-driven composition and transient-surface retry
 policy as Selection. Loops, live scrubbing, pause/resume and GUI/acoustic
 acceptance remain unfinished and user-deferred.
+
+
+## Retained Settings presentation
+
+Settings uses one stable reactive node tree per retained Navigator instance.
+Ten visible row slots bind to individual field signals; only the selected slot
+observes the active editor and cursor. Focus, profile path/editor, hint, page
+count, message/error and button state are separate dependencies. Editing one
+field or changing a message does not recreate unrelated rows or the tree.
+Child panels retain their parent's Settings bindings and Back restores the same
+instance; loading a profile or adding/reordering fields updates existing signals.
+
+View updates borrow the bounded NativeSettings fields and compare old values
+before cloning changed strings/editors. They do not clone the whole field vector
+on pointer/window redraw. There are 128 bounded field signals and ten visible
+slots; comparisons still cost up to the existing 64 KiB values per update.
+Changed packets still require composition and full rectangle upload. No custom
+signal engine, batch scheduler, per-note ViewModel or native I/O is introduced.
+
+Pending metadata suppresses controls and hit regions while the owner polls.
+Metadata completion queues redraw before returning to event-driven idle Wait,
+including errors and Save completion. Clearing hit regions invalidates retained
+composition even if every signal compares equal. Button hover uses the shared
+layout so it remains valid after hit-cache invalidation. The obsolete immediate
+Settings renderer is removed; only Display, Records, Players and Devices retain
+the previous path. Actual GUI, performance and dependency-disposal execution
+remain user-deferred; source compilation is not acceptance evidence.

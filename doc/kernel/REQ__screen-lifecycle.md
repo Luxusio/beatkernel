@@ -170,3 +170,26 @@ position and prepares the updated parent values/editor before committing the
 route. Failure retains the child and original parent draft. Buttons/input nodes
 inherit the panel scope; they do not own separate navigation lifecycles. Native
 play/replay owners and transport remain outside the panel lifetime.
+
+
+## Retained reactive Settings screen
+
+Settings retains one reactive scope and stable node tree per Navigator instance
+while children are active. Each visible row subscribes to its own field and only
+the selected row subscribes to editor/cursor; message/error changes cannot paint
+rows. Profile focus/editor, selected hint, page count and button state are separate
+dependencies. Model changes from child Done, device use, Add Binding or profile
+load update existing field signals, preserving repeated option ordering.
+
+View updates borrow the bounded draft, compare before cloning changed values,
+and never clone the full field collection on pointer redraw. Fixed field signals
+cover the existing 128-field bound; visible geometry remains ten row slots.
+Pending metadata disables controls and hit regions, while the owner continues
+polling. Completion must queue a redraw before the event loop returns to idle
+Wait, including load/save failures with no user input. Clearing cached hit regions
+forces restoration even when no signal changed. Child Back restores the retained
+Settings scope and scene; branch exit disposes subscriptions.
+
+This migration still leaves Display, Records, Players and Devices on the previous
+rendering path; full widget-host migration and actual GUI/performance acceptance
+remain unfinished and user-deferred.
