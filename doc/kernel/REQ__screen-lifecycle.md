@@ -1,8 +1,9 @@
 # Graphical screen navigation and lifecycle
 
-The single app uses an MVP-like structure: the desktop coordinator accepts UI
-intent, models hold product/session state, and existing scene components draw
-snapshots. Navigation has one typed active route. Draft storage does not decide
+The single app uses MVVM-like presentation state: ViewModels expose UI state
+and commands, Views bind to changed state, and models own gameplay/session data.
+The navigator owns screen lifecycle and back-stack admission. Gameplay notes
+have no individual ViewModels or reactive bindings. Navigation has one typed active route. Draft storage does not decide
 which screen receives input or renders. A screen transition is admitted before
 its new data is installed and before old screen data is released. Failed
 admission leaves the active route and drafts unchanged.

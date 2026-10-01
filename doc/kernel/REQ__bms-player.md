@@ -113,7 +113,7 @@ renderer without native window/audio ownership. Kernel/platform RT code does
 not depend on either UI library.
 
 The UI is a passive View of game-owned snapshots with explicit start/cancel
-commands. MVP terminology does not move judging or audio into the Presenter.
+commands. MVVM presentation state does not own judging, audio or input timing.
 The user requires incremental construction in the style of Atomic Design:
 build geometry/color/text primitives first, compose note/hold/counter elements,
 then playfield/scoreboard components and screens. Each layer consumes explicit
@@ -296,9 +296,9 @@ warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warni
 - Catalog scan happens before window creation; loading/calibration cancellation
   waits for the current preparation step — add asynchronous catalog/progressive
   preparation if startup responsiveness requires interrupting these steps.
-- At most 2048 visible notes and a finite rectangle batch are rendered per
-  frame (65,536 rectangles); exceeding geometry capacity reports an error — revise admission when
-  denser layouts require more geometry.
+- At most 2048 visible notes per displayed playfield and a finite UI rectangle
+  batch are rendered per frame (65,536 UI rectangles). Note overlap and geometry
+  capacity overflow report an error — revise admission for denser layouts.
 - In-scene text currently uses ASCII glyphs; Unicode title/artist survive in
   native window titles — add a font atlas when multilingual in-scene text is
   implemented.
@@ -480,7 +480,7 @@ hold-state restoration remain player work. Acoustic restart acceptance is deferr
 
 ## Screen lifecycle
 
-The MVP-like desktop coordinator follows the typed navigation and enter/exit,
+The MVVM presentation layer and desktop navigator follow the typed navigation and enter/exit,
 suspend/resume and owner-cleanup requirements in [screen lifecycle](REQ__screen-lifecycle.md).
 Draft presence must not decide active-screen input or drawing.
 
@@ -488,3 +488,30 @@ The primary menu UI must retain its view tree and update dependent bindings on
 state changes (Svelte-like semantics), independently of the playfield render
 cadence. Full-menu reconstruction each gameplay frame is not the chosen model.
 Toolkit selection and migration remain subject to the screen-lifecycle contract.
+
+
+## Cached GPU playfield projection
+
+The approved performance trial separates reactive menu presentation from note
+rendering. Visible note instances are retained until membership, lane geometry
+or a local time epoch changes. Every panel receives its own drift from actual
+reported song time; UI/wall clocks never advance it. The GPU projects and clips
+heads, tails and hold bodies, preserving the existing painter order. No note has
+a reactive binding or per-note ViewModel.
+
+Subtract integer timestamps with wide arithmetic before conversion. Rebase a
+local epoch before drift exceeds one quarter of the visible time span; seek,
+retry or reverse time invalidates it. Far hold endpoints can be saturated only
+outside the clipping region plus the epoch drift margin. Twenty-hour and
+week-long charts must therefore not lose precision through absolute f32 time.
+
+The first path retains at most four displayed playfields and 2048 visible notes
+per field. A denser actual overlap is an explicit presentation error, never a
+silently shortened note list. All gameplay members keep independent judging.
+
+Known ceiling: CPU selection and membership comparison still cost work per
+frame; visible geometry and GPU fill remain proportional to displayed content.
+Menu toolkit migration and navigator integration are separate unfinished work.
+Cargo compilation is source evidence only; shader execution, native rendering
+and frame-time/upload benchmarks remain deferred by the user. This trial does
+not establish that this architecture is fastest on any device.
