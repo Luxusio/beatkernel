@@ -36,6 +36,8 @@ pub mod font_text;
 /// Reusable asynchronous native/Web GPU presentation, separate from game I/O.
 #[cfg(feature = "graphics")]
 pub mod graphics;
+/// Fixed-capacity lane feedback from actual local judge results and song time.
+pub mod judge_feedback;
 /// Bounded native input merging on one common host clock.
 pub mod local_input;
 /// Collection-based local player identity and unique native input assignment.

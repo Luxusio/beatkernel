@@ -43,6 +43,7 @@ pub struct PlayerChart {
     // A range-maximum tree prunes ended holds without scanning the old prefix.
     endpoint_tree: Vec<i64>,
     tree_leaves: usize,
+    object_index: Vec<(ObjectId, usize)>,
 }
 
 /// A chart/catalog preparation failure with a user-visible explanation.
@@ -108,6 +109,12 @@ impl PlayerChart {
             });
         }
         notes.sort_by_key(|note| (note.start, note.object));
+        let mut object_index: Vec<_> = notes
+            .iter()
+            .enumerate()
+            .map(|(index, note)| (note.object, index))
+            .collect();
+        object_index.sort_unstable_by_key(|entry| entry.0);
         let tree_leaves = notes.len().max(1).next_power_of_two();
         let mut endpoint_tree = vec![i64::MIN; tree_leaves * 2];
         let mut duration_ns = 0;
@@ -127,7 +134,20 @@ impl PlayerChart {
             duration_ns,
             endpoint_tree,
             tree_leaves,
+            object_index,
         })
+    }
+
+    /// Looks up a prepared object identity without scanning notes. A changed
+    /// public note vector cannot turn a stale prepared index into a panic or
+    /// an unrelated object's mapping.
+    pub fn note_by_object(&self, object: ObjectId) -> Option<&PlayerNote> {
+        let index = self
+            .object_index
+            .binary_search_by_key(&object, |entry| entry.0)
+            .ok()?;
+        let note = self.notes.get(self.object_index[index].1)?;
+        (note.object == object).then_some(note)
     }
 
     /// Returns bounded head/body overlaps in the inclusive requested time window.
@@ -436,6 +456,12 @@ mod tests {
     use super::*;
     fn indexed_model(mut notes: Vec<PlayerNote>) -> PlayerChart {
         notes.sort_by_key(|note| (note.start, note.object));
+        let mut object_index: Vec<_> = notes
+            .iter()
+            .enumerate()
+            .map(|(index, note)| (note.object, index))
+            .collect();
+        object_index.sort_unstable_by_key(|entry| entry.0);
         let tree_leaves = notes.len().max(1).next_power_of_two();
         let mut endpoint_tree = vec![i64::MIN; tree_leaves * 2];
         for (index, note) in notes.iter().enumerate() {
@@ -452,6 +478,7 @@ mod tests {
             notes,
             endpoint_tree,
             tree_leaves,
+            object_index,
         }
     }
 
