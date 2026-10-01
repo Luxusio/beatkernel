@@ -154,14 +154,20 @@ impl SelectionView {
                             0x263d59,
                         );
                     }
+                    let item = &rows[index];
+                    let title_y = if item.artist.is_empty() { y } else { y - 5 };
                     if let Some(font) = &font {
-                        if let Err(error) =
-                            font.draw(scene, 28, y as i64, &rows[index].title, 0xf0f4ff)
+                        if let Err(error) = font
+                            .draw(scene, 28, title_y as i64, &item.title, 0xf0f4ff)
+                            .and_then(|()| {
+                                font.draw(scene, 28, (y + 9) as i64, &item.artist, 0x9bb1cf)
+                            })
                         {
                             scene.reject(error);
                         }
                     } else {
-                        text(scene, 28, y, &rows[index].title, 2, 0xf0f4ff);
+                        text(scene, 28, title_y, &item.title, 2, 0xf0f4ff);
+                        text(scene, 28, y + 14, &item.artist, 1, 0x9bb1cf);
                     }
                     hits.push((ControlId(100 + index as u64), bounds));
                 }
@@ -415,6 +421,143 @@ mod fixtures {
     }
     fn paints(view: &SelectionView) -> Vec<usize> {
         view.nodes.paints()
+    }
+    #[test]
+    fn artist_lines_keep_bitmap_row_bounds_and_empty_artist_placement() {
+        let view = SelectionView::new(
+            ScreenInstanceId(7),
+            vec![
+                SelectionItem {
+                    title: "A".into(),
+                    artist: "B".into(),
+                },
+                SelectionItem {
+                    title: "A".into(),
+                    artist: String::new(),
+                },
+            ]
+            .into(),
+            Arc::from([]),
+            960,
+            720,
+        )
+        .unwrap();
+        let mut scene = Scene::new(960, 720);
+        let mut hits = Vec::new();
+        view.compose(&mut scene, &mut hits).unwrap();
+        for (bounds, uv) in [
+            ([28.0, 135.0, 10.0, 14.0], crate::font::glyph_uv('A')),
+            ([28.0, 154.0, 5.0, 7.0], crate::font::glyph_uv('B')),
+            ([28.0, 174.0, 10.0, 14.0], crate::font::glyph_uv('A')),
+        ] {
+            assert!(
+                scene
+                    .rectangles()
+                    .iter()
+                    .any(|r| r.bounds == bounds && r.uv == uv)
+            );
+        }
+        assert_eq!(hits[0].0, ControlId(100));
+        assert_eq!((hits[0].1.y, hits[0].1.height), (134, 30));
+        let before = paints(&view);
+        view.update(frame(0));
+        assert_eq!(paints(&view), before);
+        view.set_projection(Arc::from([1]), Some(0)).unwrap();
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert_eq!(hits[0].0, ControlId(101));
+        assert!(
+            scene
+                .rectangles()
+                .iter()
+                .any(|r| r.bounds == [28.0, 140.0, 10.0, 14.0])
+        );
+        assert!(
+            !scene
+                .rectangles()
+                .iter()
+                .any(|r| r.bounds == [28.0, 154.0, 5.0, 7.0])
+        );
+    }
+    #[test]
+    fn prepared_artist_lines_follow_projection_and_renderer_texture_identity() {
+        use crate::{font_atlas::FontAtlas, font_text::FontText, texture::TextureId};
+        let mut atlas =
+            FontAtlas::new(crate::font_fixture::font_bytes(), 14.0, 128, 128, 16).unwrap();
+        atlas.prepare('A').unwrap();
+        atlas.prepare('가').unwrap();
+        let atlas = Arc::new(atlas);
+        let items: Arc<[SelectionItem]> = vec![
+            SelectionItem {
+                title: "A".into(),
+                artist: "가".into(),
+            },
+            SelectionItem {
+                title: "가".into(),
+                artist: String::new(),
+            },
+        ]
+        .into();
+        let old = TextureId::allocate().unwrap();
+        let new = TextureId::allocate().unwrap();
+        for texture in [old, new] {
+            let view = SelectionView::new_with_font(
+                ScreenInstanceId(7),
+                Arc::clone(&items),
+                Arc::from([]),
+                960,
+                720,
+                Some(FontText::new(Arc::clone(&atlas), texture).unwrap()),
+            )
+            .unwrap();
+            let mut scene = Scene::new(960, 720);
+            let mut hits = Vec::new();
+            view.compose(&mut scene, &mut hits).unwrap();
+            assert_eq!(
+                scene
+                    .batches()
+                    .iter()
+                    .filter(|b| b.texture == texture)
+                    .map(|b| b.count)
+                    .sum::<u32>(),
+                3
+            );
+            let before = paints(&view);
+            view.update(frame(0));
+            assert_eq!(paints(&view), before);
+            view.set_projection(Arc::from([0]), Some(0)).unwrap();
+            view.compose(&mut scene, &mut hits).unwrap();
+            let glyphs = scene
+                .batches()
+                .iter()
+                .filter(|b| b.texture == texture)
+                .flat_map(|b| &scene.rectangles()[b.first as usize..(b.first + b.count) as usize])
+                .collect::<Vec<_>>();
+            assert_eq!(glyphs.len(), 2);
+            assert_eq!(glyphs[1].bounds[1] - glyphs[0].bounds[1], 14.0);
+            assert!(
+                glyphs
+                    .iter()
+                    .all(|r| r.bounds[1] >= 134.0 && r.bounds[1] + r.bounds[3] <= 164.0)
+            );
+            assert_eq!(hits[0].0, ControlId(100));
+            if texture == new {
+                assert!(scene.batches().iter().all(|b| b.texture != old));
+            }
+        }
+        let mut incomplete =
+            FontAtlas::new(crate::font_fixture::font_bytes(), 14.0, 128, 128, 16).unwrap();
+        incomplete.prepare('A').unwrap();
+        assert!(
+            SelectionView::new_with_font(
+                ScreenInstanceId(7),
+                items,
+                Arc::from([]),
+                960,
+                720,
+                Some(FontText::new(Arc::new(incomplete), new).unwrap())
+            )
+            .is_err()
+        );
     }
     #[test]
     fn retained_chart_admission_matches_painter_order_before_recomposition() {

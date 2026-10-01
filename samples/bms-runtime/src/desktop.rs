@@ -1,4 +1,7 @@
 //! Native main-thread presentation of snapshots from the actual gameplay owner.
+#[cfg(test)]
+#[path = "font_fixture.rs"]
+mod font_fixture;
 use beatkernel::judge::JudgeOutcome;
 use beatkernel_bms_runtime::ui::{
     atoms::{rect, text},
@@ -202,8 +205,10 @@ struct Entry {
 fn prepare_title_font(bytes: Vec<u8>, items: &[SelectionItem]) -> Result<Arc<FontAtlas>, String> {
     let mut atlas = FontAtlas::new(bytes, 14.0, 1024, 1024, 4096)?;
     for item in items {
-        for character in item.title.chars().take(MAX_TEXT_GLYPHS) {
-            atlas.prepare(character)?;
+        for value in [&item.title, &item.artist] {
+            for character in value.chars().take(MAX_TEXT_GLYPHS) {
+                atlas.prepare(character)?;
+            }
         }
     }
     Ok(Arc::new(atlas))
@@ -4294,6 +4299,26 @@ mod tests {
             );
         }
         assert!(prepare_title_font(vec![0; 64], &[]).is_err());
+    }
+    #[test]
+    fn selection_font_prepares_artist_prefix_and_rejects_invalid_artist_before_startup() {
+        let items = [SelectionItem {
+            title: "A".into(),
+            artist: "가".into(),
+        }];
+        let atlas = prepare_title_font(font_fixture::font_bytes(), &items).unwrap();
+        assert!(atlas.get('A').is_some());
+        assert!(atlas.get('가').is_some());
+        let items = [SelectionItem {
+            title: "A".into(),
+            artist: "가".repeat(MAX_TEXT_GLYPHS) + "\n",
+        }];
+        assert!(prepare_title_font(font_fixture::font_bytes(), &items).is_ok());
+        let items = [SelectionItem {
+            title: "A".into(),
+            artist: "가\n".into(),
+        }];
+        assert!(prepare_title_font(font_fixture::font_bytes(), &items).is_err());
     }
     #[test]
     fn renderer_font_rebinding_discards_retained_titles_and_hits_but_keeps_search() {
