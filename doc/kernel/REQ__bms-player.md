@@ -427,6 +427,37 @@ Known ceiling: directory enumeration inspects at most 4096 direct entries and
 returns at most 256 records, without recursive search — add incremental paging
 when a single record directory routinely exceeds these limits.
 
+## Graphical recorded playback
+
+Records Watch starts the validated selected record with native music/keysound
+output and the existing graphical lane/score view, marked REPLAY. It uses the
+draft's output settings and the recording's actual profile/start. Output defaults
+resolve on the replay owner without keyboard discovery or live input capture.
+Recorded operations run incrementally through the same JudgeEngine, retaining
+equal-time order and original timestamps; no timeout is invented after the
+recorded prefix. Display progression uses reported native output presentation,
+not UI time or a fabricated render cursor. Missing presentation stays unknown.
+Omitted diagnostic duration waits for the recorded prefix, admitted audio,
+idle mixer block and reported native presentation to drain. Escape/focus loss
+or close cancels and joins native output before results. F5 repeats the pinned
+record through the same cleanup lifecycle. Live settings remain unchanged by
+Watch; no replay is captured and no live/network input affects its judge.
+The window title identifies the recording, the header shows REPLAY, and joined
+results are labeled RECORD PREFIX RESULTS. Watch is available after a valid
+preview; W starts it only when the record list has focus. Pending metadata
+operations disable it. Failed parser admission retains Records and its draft.
+Reported presentation remains distinct from acoustic timing proof. Execution
+acceptance is deferred.
+
+Known ceiling: the recorded ASIO host currently has no validated association
+between the driver's sample counter epoch and the Mixer output-zero epoch.
+Graphical Watch therefore rejects natural ASIO playback before native resources
+unless an explicit diagnostic seconds cutoff is provided. In that diagnostic
+mode, ASIO audio can run but graphical progress remains unavailable. WASAPI,
+ALSA and CoreAudio use their actual reported presentation observations; missing
+observations do not advance the graphical cursor and may postpone natural drain.
+Cancellation remains available. This is source behavior, not acoustic evidence.
+
 ## Configured fresh practice start
 
 Nonzero practice sessions display PRACTICE in the graphical header.

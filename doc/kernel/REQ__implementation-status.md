@@ -64,8 +64,11 @@ preservation and game-level rebinding must be assessed separately.
 Live play and logical replay use the same JudgeEngine transitions. Recorded BMS
 audio uses hit-stage sound selection shared with live publication and the actual
 Mixer, but does not reproduce historical device delays or dropped commands.
-Finite native replay duration is wall time including preroll, not an automatic
-end-of-song drain. See the replay audio and native replay contracts for limits.
+Explicit native replay seconds is a wall cutoff including preroll. Omitted
+seconds now finishes the actual recorded prefix and PCM through native
+presentation drain, without synthetic missing-tail judging or acoustic proof.
+ASIO recorded output currently requires explicit diagnostic seconds because its
+output-zero presentation epoch is not established. See native replay limits.
 
 The default asset decoder supports WAV. An injected off-thread decoder is an
 extension point, not evidence of bundled FLAC/OGG/MP3 support. Native output source
@@ -193,3 +196,19 @@ behavior, independent reviews and final QA. These activities remain deferred by
 the user's sequencing instruction. ASIO implementation must follow the selected
 GPLv3 combined-build distribution policy. No full completion verdict
 follows from this source inventory, and the full-plan task remains open.
+
+
+## Graphical recorded playback source slice
+
+The single graphical app now connects compatible Records previews to Watch,
+reusing the live lane/score view, cancellation and cleanup-gated F5 lifecycle.
+An incremental validated ReplayVisual applies actual ordered record operations;
+record prefix results remain distinct from full-song completion. Output-only
+settings projection resolves default endpoints on the game owner without input
+discovery; recorded profile/start are authoritative and live configuration is
+unchanged. WASAPI/ALSA/CoreAudio presentation drives the UI bridge; render/UI/wall
+time never substitutes for unavailable native presentation. Natural replay ends
+only after actual operations and PCM drain. ASIO's recorded-host epoch remains
+unestablished, so natural mode rejects and explicit seconds is diagnostic audio
+without graphical progress. Source fixture authorship and compilation are not
+executed GUI/native/audio acceptance; deferred independent gates remain open.

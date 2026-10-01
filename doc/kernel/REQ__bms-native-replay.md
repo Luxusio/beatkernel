@@ -26,9 +26,14 @@ ALSA uses exact float32 endpoint,
 period and buffer frames. CoreAudio uses exact numeric device, float32 format and
 buffer frames. Backend-inapplicable CLI options reject. Queue, pending, drain,
 voice and render-block capacities remain finite and independent of total notes.
-The control loop has bounded admission work and a requested finite wall duration;
-the duration includes preroll. No automatic end-of-song or acoustic-drain wait is
-inferred from render progress. Stop/close is attempted before return on success
+The control loop has bounded admission work. Optional `--seconds` is a checked
+positive wall cutoff including preroll and may truncate the record/audio tail.
+When omitted, actual recorded operations, all admitted BGM/keysound commands and
+PCM voices finish, followed by an idle output block confirmed through reported
+native presentation. This is an output drain policy, not acoustic confirmation.
+Render progress alone cannot complete the drain; absent presentation waits for
+usable observations or cancellation. Native timestamps are checked in wide
+arithmetic and never replaced by render cursor, UI or receipt time. Stop/close is attempted before return on success
 and errors; final admission/core/native diagnostics remain separately labeled.
 
 Known ceiling: initial data and commands are preloaded, and dense schedules or
@@ -70,3 +75,30 @@ fixtures with Cargo SDK compilation inactive and without C++ linkage. Actual
 forwarded-feature SDK/MSVC compilation, native replay output and physical timing
 remain unverified. The host ignores WM_CLOSE on its hidden driver window so
 message dispatch cannot destroy the system reference before native teardown.
+
+
+## Graphical Watch composition
+
+Records Watch in the single app uses this output host and the existing graphical
+playfield/score bridge. It resolves omitted output metadata on the game owner;
+it never enumerates or acquires keyboards. Linux defaults to ALSA `default`,
+48000 Hz/stereo, buffer1024/period256; Windows resolves the active multimedia
+endpoint and omitted mix rate/channels; macOS resolves the selected/default
+output's nominal rate, channels (up to stereo) and current buffer. Explicit
+values retain strict backend negotiation. App asset channel policy defaults to
+mono-stereo; the standalone host retains its exact default.
+
+The recording owns its profile/start; live input, judge, section, network,
+ghost and capture flags from the draft are excluded. Incremental judging applies
+only actual record operations in ordinal order at reported presentation time,
+with no synthetic end-of-record advances or missing-tail misses. Validation of
+the full log precedes audio start. F5 retains the selected chart/record/output
+invocation and waits for prior-owner cleanup. Stop and final checks are attempted
+on cancellation and errors, including start failures.
+
+Known ceiling: ASIO recorded output has no validated native-output-zero epoch
+association. Its presentation is unavailable and omitted seconds rejects during
+preflight; explicit seconds permits diagnostic audio only. This differs from
+the separately calibrated live ASIO input composition. WASAPI Accurate clock
+units, ALSA played estimates and CoreAudio checked presentation pairs drive
+recorded visuals; source checks do not prove observed device/audio behavior.

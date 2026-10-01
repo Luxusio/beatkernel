@@ -575,7 +575,8 @@ remains pending.
 The [`play_replay_bms` native player](doc/kernel/REQ__bms-native-replay.md) sends
 the same plan to WASAPI on Windows, ALSA on Linux, CoreAudio on macOS or optional
 Windows ASIO. Select
-`--chart PATH --replay PATH --device ID --seconds N --rate HZ --channels N`;
+`--chart PATH --replay PATH --device ID --rate HZ --channels N`
+with optional `--seconds N`;
 Linux also requires `--buffer-frames N --period-frames N`, and macOS requires
 `--buffer-frames N`. Windows accepts `--mode shared|exclusive` and
 `--shared-policy engine-period|legacy`, buffer/period frames or native defaults.
@@ -599,8 +600,21 @@ described below, with explicitly assessed finite clock relations.
 Preroll, lookahead, command capacity, voices and replay limits are configurable.
 Commands retain planned output times and are supplied from actual completed
 Mixer reports; explicit late/queue/native failures end through cleanup. The
-finite duration includes preroll and does not infer acoustic completion. Native
-playback and physical timing remain unverified; only source checks have run.
+optional wall cutoff includes preroll. Omitting it finishes the actual recorded
+prefix and queued PCM tails through native presentation drain; this does not
+prove acoustic completion. ASIO currently requires explicit diagnostic seconds
+because its recorded host lacks a validated output-zero epoch for visual progress
+and natural drain. Native playback and physical timing remain unverified; only
+source checks have run.
+
+The graphical app's Settings → Records → Preview → Watch uses the same playfield
+and native recorded audio. W watches when the record list has focus; F5 retries
+the pinned recording after cleanup. REPLAY and RECORD PREFIX RESULTS distinguish
+recorded prefixes from full-song results. Only draft output settings are used;
+watching never acquires keyboards, uses network input or saves a new capture.
+Accepted live settings remain unchanged. Device defaults resolve on the game
+owner, and absent native presentation remains unavailable. GUI/audio execution
+is still deferred.
 
 The [durable replay codec](doc/kernel/REQ__replay-codec.md) stores ordered operations,
 runtime identity and optional calibration metadata with explicit byte/count limits.
