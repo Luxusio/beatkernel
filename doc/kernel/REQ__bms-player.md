@@ -149,9 +149,18 @@ automatic preparation policy below. No in-session device substitution occurs.
 Bound drafts to 128 fields, 4096 UTF-8 bytes per value and 64 KiB total value
 bytes. Keep values intact as flag/value pairs rather than parsing shell text.
 Cursor movement and deletion honor UTF-8 scalar boundaries; reject controls and
-newlines. Current glyph fallback still applies to non-ASCII text. Clipboard,
-IME composition, multilingual shaping and enumerated keyboard device selectors
-remain future work. Native audio output metadata selection is described below. Native profile persistence is described below. Editing never acquires devices or
+newlines. Native IME search/settings input is owned by the active screen and
+selected field, including profile paths. Bounded preedit previews never modify
+the draft, search projection or persisted arguments; commits use the existing
+transactional editor. Switching fields/screens or losing active UI admission
+clears composition and native enable acknowledgement. Active composition
+suppresses ordinary keyboard text and shortcuts. The native event API carries
+no composition generation ID; ordered enable/disable and current-target guards
+are used without an absolute stale-event guarantee. Current glyph fallback,
+caret-only previews and OS candidate positioning remain; multilingual shaping,
+selection underlines and clipboard are future work. Prepared regression
+fixtures await later execution and do not certify native IME behavior.
+Native audio output metadata selection is described below. Native profile persistence is described below. Editing never acquires devices or
 changes native input/audio owners.
 The next primitives are validated RGBA8 texture resources and clipped sprite
 quads. Solid, glyph and custom texture quads preserve painter order through

@@ -128,6 +128,9 @@ Selection supports PageUp/Down by fifteen rows and Home/End within search
 results. Wheel over a chart row moves through those results, with fractional
 trackpad movement accumulated and at most one page admitted per event.
 Focused search Home/End moves its text cursor.
+Native IME input supports search, settings values and profile paths. Composition
+previews stay separate from saved drafts; switching fields or leaving the active
+screen discards them. Existing bitmap glyph fallback still applies.
 F5 or Retry starts the same chart again after the previous native session has
 finished cleanup. The accepted chart/device/timing/roster options stay pinned;
 recorded retries use distinct .retry<N>.bkr stems and create-new saves.
