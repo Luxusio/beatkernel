@@ -2,6 +2,12 @@
 #![forbid(unsafe_code)]
 /// Rolling BGM admission on an explicitly configured output frame grid.
 pub mod bgm;
+/// Saved-record opponents and actual judgment summaries.
+pub mod competition;
+/// Application competition options and native runtime observation.
+pub mod competition_live;
+/// Bounded two-player progress exchange on a dedicated socket worker.
+pub mod multiplayer;
 /// Synthetic offline composition using the same runtime and mixer as native apps.
 pub mod offline;
 /// Song-time command planning from actual recorded BMS judgment.
