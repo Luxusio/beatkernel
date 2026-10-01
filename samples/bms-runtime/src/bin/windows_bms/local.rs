@@ -539,12 +539,8 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             group.set_song_end(Timestamp::from_nanos(end))?;
         }
         let mut end_boundary = if let Some(end) = &mut native_end {
-            end.observe(
-                stream.render_report()?,
-                discipline
-                    .latest_pair()
-                    .ok_or("finite local playback requires native clock relation")?,
-            )?
+            let initial_rendered = stream.render_report()?;
+            stream.observe_end(end, &discipline, initial_rendered)?
         } else {
             None
         };
@@ -578,12 +574,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 if let Some(end) = &mut native_end {
                     end_rendered |=
                         rendered.is_some_and(|report| report.playback_end_physical_frame.is_some());
-                    if let Some(boundary) = end.observe(
-                        rendered,
-                        discipline
-                            .latest_pair()
-                            .ok_or("finite local playback requires native clock relation")?,
-                    )? {
+                    if let Some(boundary) = stream.observe_end(end, &discipline, rendered)? {
                         end_boundary = Some(boundary);
                     }
                 }

@@ -312,3 +312,132 @@ fn duplicate_options_backend_aliases_unknown_flags_and_missing_values_reject() {
         assert!(parse(&arguments).is_err());
     }
 }
+
+#[test]
+fn asio_finite_prefix_admits_exact_solo_or_local_end_without_network_or_sdk_io() {
+    let mut arguments = asio();
+    append(&mut arguments, "--start-ns", "1000000000");
+    append(&mut arguments, "--end-ns", "1000000001");
+    assert!(super::validate_args(&arguments).is_ok());
+    let options = parse(&arguments).unwrap();
+    assert_eq!(options.playback_end(48000).unwrap(), Some(144001));
+    append(&mut arguments, "--local-player", "7:path-a");
+    append(&mut arguments, "--local-player", "4294967295:path-b");
+    assert!(super::validate_args(&arguments).is_ok());
+    append(&mut arguments, "--mp-host", "127.0.0.1:39001");
+    assert!(super::validate_args(&arguments).is_err());
+    let mut solo_network = asio();
+    append(&mut solo_network, "--end-ns", "1");
+    append(&mut solo_network, "--mp-host", "127.0.0.1:39001");
+    assert!(
+        super::validate_args(&solo_network)
+            .unwrap_err()
+            .to_string()
+            .contains("network")
+    );
+    for value in [
+        "",
+        "-1",
+        "+1",
+        "0",
+        "1000000000",
+        "1.5",
+        "9223372036854775808",
+    ] {
+        let mut invalid = asio();
+        append(&mut invalid, "--start-ns", "1000000000");
+        append(&mut invalid, "--end-ns", value);
+        assert!(super::validate_args(&invalid).is_err());
+    }
+    let mut duplicate = asio();
+    append(&mut duplicate, "--end-ns", "1");
+    append(&mut duplicate, "--end-ns", "2");
+    assert!(super::validate_args(&duplicate).is_err());
+}
+
+#[test]
+fn asio_actual_upper_interval_gates_windows_completion_after_render_and_message_drain() {
+    use beatkernel::{
+        audio::{
+            AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, SampleBank, command_queue,
+        },
+        time::{ClockDomainId, ClockPoint, Timestamp},
+    };
+    use beatkernel_bms_runtime::native_end::NativeEnd;
+    use beatkernel_platform::audio::asio::{AsioPresentationObservation, MultimediaHostInterval};
+    let host = |ns| ClockPoint {
+        domain: ClockDomainId(1),
+        timestamp: Timestamp::from_nanos(ns),
+    };
+    let origin = ClockPoint {
+        domain: ClockDomainId(2),
+        timestamp: Timestamp::ZERO,
+    };
+    let format = AudioFormat::new(1000, 1).unwrap();
+    let bank = SampleBank::new(format, PcmLimits::new(1024, 1024, 1).unwrap()).unwrap();
+    let (_producer, consumer) = command_queue(8).unwrap();
+    let mut mixer = Mixer::new(
+        MixerConfig::new(
+            format,
+            origin.domain,
+            origin.timestamp,
+            AudioLimits::new(8, 1, 8, 16, 8).unwrap(),
+        )
+        .with_playback_end_frame(2),
+        bank,
+        consumer,
+    )
+    .unwrap();
+    let observation = |report, switch| {
+        AsioPresentationObservation::from_render(
+            report,
+            1000,
+            MultimediaHostInterval {
+                before: host(switch),
+                after: host(switch + 100),
+            },
+            3,
+            200,
+            origin,
+        )
+        .unwrap()
+    };
+    let mut end = NativeEnd::new(origin, ClockDomainId(1), 1000, 2).unwrap();
+    let first = mixer.render(&mut [0.0]).unwrap();
+    assert!(end.observe_asio(observation(first, 0)).unwrap().is_none());
+    let terminal = mixer.render(&mut [0.0; 2]).unwrap();
+    assert_eq!(terminal.playback_end_physical_frame, Some(2));
+    assert!(
+        end.observe_asio(observation(terminal, 1_000_000))
+            .unwrap()
+            .is_none()
+    );
+    let silence = mixer.render(&mut [1.0; 2]).unwrap();
+    let observed = observation(silence, 3_000_000);
+    let boundary = end.observe_asio(observed).unwrap().unwrap();
+    assert_eq!(boundary.host, observed.host.after);
+    assert_eq!(boundary.host, host(6_000_300));
+    let song = Timestamp::from_nanos(2_000_000);
+    for (watermark, backlog, logical) in [
+        (host(6_000_299), false, song),
+        (host(6_000_300), true, song),
+        (host(6_000_300), false, Timestamp::from_nanos(1_999_999)),
+    ] {
+        assert!(!super::finite_session_done(
+            Some(2_000_000),
+            Some(boundary.host),
+            watermark,
+            logical,
+            backlog,
+            false
+        ));
+    }
+    assert!(super::finite_session_done(
+        Some(2_000_000),
+        Some(boundary.host),
+        host(6_000_300),
+        song,
+        false,
+        false
+    ));
+}

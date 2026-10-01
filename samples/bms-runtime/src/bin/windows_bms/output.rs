@@ -234,6 +234,26 @@ impl Output {
             }
         }
     }
+    pub(super) fn observe_end(
+        &mut self,
+        end: &mut beatkernel_bms_runtime::native_end::NativeEnd,
+        discipline: &PresentationDiscipline,
+        rendered: Option<RenderReport>,
+    ) -> Result<Option<beatkernel_bms_runtime::native_end::EndBoundary>> {
+        match self {
+            Self::Wasapi(_) => Ok(end.observe(
+                rendered,
+                discipline
+                    .latest_pair()
+                    .ok_or("finite playback requires native clock relation")?,
+            )?),
+            #[cfg(feature = "asio-sdk")]
+            Self::Asio(stream) => match stream.observation()? {
+                Some(observation) => Ok(end.observe_asio(observation)?),
+                None => Ok(None),
+            },
+        }
+    }
     pub(super) fn schedule(&mut self, rate: u32) -> Result<ClockPoint> {
         match self {
             Self::Wasapi(s) => super::native::schedule_wasapi(s, rate),
