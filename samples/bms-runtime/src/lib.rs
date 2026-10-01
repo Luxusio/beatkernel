@@ -458,3 +458,8 @@ fn prepare_channels(
         limits,
     )?)
 }
+
+/// Exact accepted builtin-stage timing summaries.
+pub mod timing;
+/// Integer-only timing presentation labels.
+pub mod timing_display;

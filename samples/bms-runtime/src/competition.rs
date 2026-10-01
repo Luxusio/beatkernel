@@ -3,12 +3,15 @@
 //! A ghost consumes only recorded operations. In particular, progressing beyond
 //! a truncated file does not synthesize an advance or its timeout misses.
 
-use crate::replay_playback::{reconstruct, PlaybackError};
+use crate::{
+    replay_playback::{PlaybackError, reconstruct},
+    timing::{TimingError, TimingSummary},
+};
 use beatkernel::{
     judge::{JudgeEngine, JudgeEvent, JudgeOutcome},
     replay::{
+        REPLAY_VERSION, ReplayHeader, ReplayOperation,
         codec::{ReplayCodecLimits, ReplayFile},
-        ReplayHeader, ReplayOperation, REPLAY_VERSION,
     },
     time::Timestamp,
 };
@@ -28,11 +31,17 @@ pub struct ScoreSummary {
     pub max_combo: u64,
     /// Accepted-stage count per caller-defined grade identity.
     pub grades: BTreeMap<u32, u64>,
+    /// Exact accepted known-stage delta statistics across the entire prefix.
+    pub timing: TimingSummary,
 }
 impl ScoreSummary {
     /// Applies a batch atomically, rejecting counter overflow.
     pub fn observe(&mut self, events: &[JudgeEvent]) -> Result<(), CompetitionError> {
+        if events.is_empty() {
+            return Ok(());
+        }
         let mut next = self.clone();
+        next.timing.observe(events)?;
         for event in events {
             match event.outcome {
                 JudgeOutcome::Hit { grade, .. } => {
@@ -79,10 +88,17 @@ pub enum CompetitionError {
     AllocationFailed,
     /// Stage counts cannot be represented by u64.
     ScoreOverflow,
+    /// Accepted timing counters or sums exceeded their scalar capacity.
+    TimingOverflow,
     /// Local report time moved backward without explicit prefix rebuilding.
     TimeRegression,
     /// Canonical replay validation or builtin reconstruction failed.
     Playback(PlaybackError),
+}
+impl From<TimingError> for CompetitionError {
+    fn from(_: TimingError) -> Self {
+        Self::TimingOverflow
+    }
 }
 impl From<PlaybackError> for CompetitionError {
     fn from(error: PlaybackError) -> Self {
@@ -349,7 +365,7 @@ mod tests {
         replay::ReplaySession,
         time::{ClockDomainId, ClockPoint, Duration},
     };
-    use beatkernel_bms::{parse, ParseOptions};
+    use beatkernel_bms::{ParseOptions, parse};
 
     fn ts(nanos: i64) -> Timestamp {
         Timestamp::from_nanos(nanos)
@@ -577,5 +593,79 @@ mod tests {
             ));
             assert_eq!(exhausted, before);
         }
+    }
+    #[test]
+    fn full_timing_prefix_exceeds_history_cap_and_matches_saved_rebuild() {
+        let event = |index: usize| JudgeEvent {
+            object: ObjectId(index as u64 + 1),
+            stage: JudgeStage::Instant,
+            outcome: JudgeOutcome::Hit {
+                grade: JudgeGrade(42),
+                delta: Duration::from_nanos(if index % 2 == 0 { -3 } else { 5 }),
+            },
+            at: ts(index as i64),
+            input: None,
+        };
+        let events: Vec<_> = (0..257).map(event).collect();
+        let mut all = ScoreSummary::default();
+        all.observe(&events).unwrap();
+        assert_eq!(all.timing.count(), 257);
+        assert_eq!(all.timing.early(), 129);
+        assert_eq!(all.timing.late(), 128);
+        assert_eq!(all.timing.mean_ns(), Some(0));
+        assert_eq!(all.timing.mean_absolute_ns(), Some(3));
+        let mut chunks = ScoreSummary::default();
+        for part in events.chunks(17) {
+            chunks.observe(part).unwrap();
+        }
+        assert_eq!(chunks, all);
+        let (source, file, actual) = fixture(ClockDomainId(3), true);
+        let mut saved = Competition::new(file.header.clone(), 1).unwrap();
+        saved
+            .add_replay(&source, file, limits(), OpponentKind::Own, "timing")
+            .unwrap();
+        saved.observe(&actual, ts(3_000_000_000)).unwrap();
+        assert_eq!(saved.score().timing, saved.opponents()[0].score().timing);
+        assert_eq!(saved.score().timing.count(), 1);
+        assert_eq!(saved.score().timing.exact(), 1);
+        saved.rebuild(&[], ts(0)).unwrap();
+        assert_eq!(saved.score().timing, TimingSummary::default());
+        saved.rebuild(&actual, ts(3_000_000_000)).unwrap();
+        assert_eq!(saved.score().timing, saved.opponents()[0].score().timing);
+    }
+    #[test]
+    fn score_and_timing_overflow_preserve_each_other_atomically() {
+        let hit = JudgeEvent {
+            object: ObjectId(1),
+            stage: JudgeStage::Instant,
+            outcome: JudgeOutcome::Hit {
+                grade: JudgeGrade(7),
+                delta: Duration::from_nanos(-2),
+            },
+            at: Timestamp::ZERO,
+            input: None,
+        };
+        let mut score = ScoreSummary::default();
+        score.observe(&[hit]).unwrap();
+        score.hits = u64::MAX;
+        let before = score.clone();
+        assert!(matches!(
+            score.observe(&[hit]),
+            Err(CompetitionError::ScoreOverflow)
+        ));
+        assert_eq!(score, before);
+        let mut exhausted = ScoreSummary::default();
+        exhausted.timing = TimingSummary::exhausted_for_fixture();
+        let before = exhausted.clone();
+        assert!(matches!(
+            exhausted.observe(&[hit]),
+            Err(CompetitionError::TimingOverflow)
+        ));
+        assert_eq!(exhausted, before);
+        let mut custom = hit;
+        custom.stage = JudgeStage::Custom(123);
+        exhausted.observe(&[custom]).unwrap();
+        assert_eq!(exhausted.hits, 1);
+        assert_eq!(exhausted.timing, before.timing);
     }
 }
