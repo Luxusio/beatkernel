@@ -426,7 +426,7 @@ fn stops_ignore_measure_length_and_use_same_beat_new_tempo() {
 #[test]
 fn unsupported_and_missing_definitions_are_line_specific() {
     for command in [
-        "#RANDOM 2",
+        "#SWITCH 2",
         "#LNTYPE 2",
         "#STP 001.0 100",
         "#00031:01",

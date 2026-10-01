@@ -114,6 +114,12 @@ fn update_resolution(
 /// Parses the documented deterministic UTF-8 subset without asset IO.
 /// Unsupported timing/gameplay commands reject with original line diagnostics.
 pub fn parse(text: &str, options: ParseOptions) -> Result<BmsChart, BmsError> {
+    parse_seeded(text, options, 0)
+}
+
+/// Resolve conditional branches with the documented SplitMix64 seed before
+/// parsing selected payload. Discarded lines still obey physical input caps.
+pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsChart, BmsError> {
     if options.max_bytes == 0
         || options.max_lines == 0
         || options.max_line_bytes == 0
@@ -138,6 +144,7 @@ pub fn parse(text: &str, options: ParseOptions) -> Result<BmsChart, BmsError> {
     let mut rows = Vec::new();
     let mut raw_count = 0usize;
     let mut max_measure = 0usize;
+    let mut conditional = crate::conditional::Conditional::new(seed);
     for (index, original) in text.trim_start_matches('\u{feff}').lines().enumerate() {
         let line = index + 1;
         if line > options.max_lines {
@@ -150,6 +157,9 @@ pub fn parse(text: &str, options: ParseOptions) -> Result<BmsChart, BmsError> {
         let Some(command_line) = trimmed.strip_prefix('#') else {
             continue;
         };
+        if !conditional.payload(command_line, line)? {
+            continue;
+        }
         if command_line.len() >= 6
             && command_line.as_bytes()[..3].iter().all(u8::is_ascii_digit)
             && command_line.as_bytes()[5] == b':'
@@ -352,6 +362,7 @@ pub fn parse(text: &str, options: ParseOptions) -> Result<BmsChart, BmsError> {
             ));
         }
     }
+    conditional.finish()?;
     let mut origins = Vec::with_capacity(max_measure + 2);
     let mut durations = Vec::with_capacity(max_measure + 1);
     let mut position = Ratio::ZERO;
