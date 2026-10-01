@@ -2,11 +2,12 @@
 use super::{
     atoms::{rect, text},
     interaction::{Bounds, ControlId},
-    molecules::button,
+    molecules::{button, text_field},
     retained::RetainedNodes,
+    text_input::LineEditor,
 };
 use crate::{scene::Scene, screen_lifecycle::ScreenInstanceId};
-use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate};
+use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
 use std::sync::Arc;
 
 pub struct SelectionItem {
@@ -27,7 +28,11 @@ pub struct SelectionFrame {
 pub struct SelectionView {
     id: ScreenInstanceId,
     scope: Scope,
-    selected: RwSignal<usize>,
+    catalog_count: usize,
+    projection: RwSignal<Arc<[usize]>>,
+    cursor: RwSignal<Option<usize>>,
+    search: RwSignal<LineEditor>,
+    search_focused: RwSignal<bool>,
     hovered: RwSignal<Option<ControlId>>,
     armed: RwSignal<Option<ControlId>>,
     error: RwSignal<Option<String>>,
@@ -58,7 +63,11 @@ impl SelectionView {
         let mut view = Self {
             id,
             scope,
-            selected: scope.create_rw_signal(0),
+            catalog_count: items.len(),
+            projection: scope.create_rw_signal((0..items.len()).collect::<Vec<_>>().into()),
+            cursor: scope.create_rw_signal((!items.is_empty()).then_some(0)),
+            search: scope.create_rw_signal(LineEditor::new("", 256)?),
+            search_focused: scope.create_rw_signal(false),
             hovered: scope.create_rw_signal(None),
             armed: scope.create_rw_signal(None),
             error: scope.create_rw_signal(None),
@@ -74,28 +83,34 @@ impl SelectionView {
                 scene,
                 24,
                 65,
-                "UP/DOWN SELECT  ENTER PLAY  F2 SETTINGS",
-                2,
+                "UP/DOWN SELECT  ENTER PLAY  F2 SETTINGS  F3 SEARCH",
+                1,
                 0x9bb1cf,
             )
         });
-        let count = format!(
-            "{} CHARTS   {} SCAN DIAGNOSTICS",
-            items.len(),
-            diagnostics.len()
-        );
-        view.nodes
-            .static_node(move |scene, _| text(scene, 24, 96, &count, 2, 0xd8b36b));
+        let projection = view.projection;
+        let count = items.len();
+        let diagnostic_count = diagnostics.len();
+        let memo = scope.create_memo(move |_| projection.with(|indices| indices.len()));
+        view.nodes.bind(scope, memo, move |matches, scene, _| {
+            text(
+                scene,
+                24,
+                106,
+                &format!("{matches}/{count} CHARTS  {diagnostic_count} SCAN DIAGNOSTICS"),
+                1,
+                0xd8b36b,
+            );
+        });
         for slot in 0..15 {
-            let selected = view.selected;
-            let rows = Arc::clone(&items);
+            let cursor = view.cursor;
+            let projection = view.projection;
             let memo = scope.create_memo(move |_| {
-                let selected = selected.get();
-                selected
-                    .saturating_sub(8)
-                    .checked_add(slot)
-                    .filter(|&index| index < rows.len())
-                    .map(|index| (index, index == selected))
+                let cursor = cursor.get();
+                let position = cursor.unwrap_or(0).saturating_sub(8) + slot;
+                projection
+                    .with(|indices| indices.get(position).copied())
+                    .map(|index| (index, cursor == Some(position)))
             });
             let rows = Arc::clone(&items);
             view.nodes.bind(scope, memo, move |value, scene, hits| {
@@ -128,27 +143,21 @@ impl SelectionView {
                 text(scene, 24, 654 + index * 22, &diagnostic, 1, 0xd8b36b)
             });
         }
-        if items.is_empty() {
-            view.nodes.static_node(|scene, _| {
-                text(scene, 24, 150, "NO SUPPORTED CHARTS FOUND", 2, 0xff8e8e)
-            });
-        } else {
-            view.button_node(
-                ControlId(1),
-                Bounds {
-                    x: 550,
-                    y: 65,
-                    width: 180,
-                    height: 34,
-                },
-                "START",
-            );
-        }
+        view.button_node(
+            ControlId(1),
+            Bounds {
+                x: 550,
+                y: 65,
+                width: 180,
+                height: 34,
+            },
+            "START",
+        );
         view.button_node(
             ControlId(5),
             Bounds {
                 x: 750,
-                y: 102,
+                y: 20,
                 width: 180,
                 height: 30,
             },
@@ -164,6 +173,39 @@ impl SelectionView {
             },
             "EXIT",
         );
+        let projection = view.projection;
+        let memo = scope.create_memo(move |_| projection.with(|indices| indices.is_empty()));
+        let empty_catalog = items.is_empty();
+        view.nodes.bind(scope, memo, move |empty, scene, _| {
+            if empty {
+                text(
+                    scene,
+                    24,
+                    150,
+                    if empty_catalog {
+                        "NO SUPPORTED CHARTS FOUND"
+                    } else {
+                        "NO MATCHING CHARTS"
+                    },
+                    2,
+                    0xff8e8e,
+                );
+            }
+        });
+        let search = view.search;
+        let focused = view.search_focused;
+        let memo = scope.create_memo(move |_| (search.get(), focused.get()));
+        view.nodes
+            .bind(scope, memo, |(editor, focused), scene, hits| {
+                let bounds = Bounds {
+                    x: 440,
+                    y: 102,
+                    width: 490,
+                    height: 34,
+                };
+                text_field(scene, &editor, bounds, focused);
+                hits.push((ControlId(80), bounds));
+            });
         let pending = view.backend_pending;
         let memo = scope.create_memo(move |_| pending.get());
         view.nodes.bind(scope, memo, |pending, scene, _| {
@@ -203,8 +245,13 @@ impl SelectionView {
     /// Equality suppresses unchanged writes. Independent field signals prevent
     /// status changes from subscribing or repainting catalog rows.
     pub fn update(&self, frame: SelectionFrame) {
-        if self.selected.get_untracked() != frame.selected {
-            self.selected.set(frame.selected);
+        let cursor = self
+            .projection
+            .with_untracked(|indices| indices.binary_search(&frame.selected).ok());
+        if (cursor.is_some() || self.projection.with_untracked(|indices| indices.is_empty()))
+            && self.cursor.get_untracked() != cursor
+        {
+            self.cursor.set(cursor);
         }
         if self.hovered.get_untracked() != frame.hovered {
             self.hovered.set(frame.hovered);
@@ -218,6 +265,51 @@ impl SelectionView {
         if self.backend_pending.get_untracked() != frame.backend_pending {
             self.backend_pending.set(frame.backend_pending);
         }
+    }
+    /// Sorted original indices are validated before changing any signal. A
+    /// shared projection and unchanged cursor skip both scanning and writes.
+    pub fn set_projection(
+        &self,
+        indices: Arc<[usize]>,
+        cursor: Option<usize>,
+    ) -> Result<(), String> {
+        let same = self
+            .projection
+            .with_untracked(|old| Arc::ptr_eq(old, &indices));
+        if same && self.cursor.get_untracked() == cursor {
+            return Ok(());
+        }
+        if cursor.is_some_and(|cursor| cursor >= indices.len())
+            || (cursor.is_none() != indices.is_empty())
+        {
+            return Err("Selection projection cursor is outside its results".into());
+        }
+        if !same
+            && (indices.iter().any(|&index| index >= self.catalog_count)
+                || indices.windows(2).any(|pair| pair[0] >= pair[1]))
+        {
+            return Err("Selection projection must contain sorted unique catalog indices".into());
+        }
+        if !same {
+            self.projection.set(indices);
+        }
+        if self.cursor.get_untracked() != cursor {
+            self.cursor.set(cursor);
+        }
+        Ok(())
+    }
+    /// Borrows and compares editor contents/cursor before cloning a changed value.
+    pub fn set_search(&self, editor: &LineEditor, focused: bool) -> Result<(), String> {
+        if editor.value().len() > 256 {
+            return Err("Selection search exceeds 256 bytes".into());
+        }
+        if !self.search.with_untracked(|old| old == editor) {
+            self.search.set(editor.clone());
+        }
+        if self.search_focused.get_untracked() != focused {
+            self.search_focused.set(focused);
+        }
+        Ok(())
     }
     pub fn dirty(&self) -> bool {
         self.nodes.dirty()
@@ -234,14 +326,25 @@ impl SelectionView {
     fn button_node(&mut self, id: ControlId, bounds: Bounds, label: &'static str) {
         let hovered = self.hovered;
         let armed = self.armed;
-        let memo = self
-            .scope
-            .create_memo(move |_| (hovered.get() == Some(id), armed.get() == Some(id)));
-        self.nodes
-            .bind(self.scope, memo, move |(hovered, armed), scene, hits| {
+        let projection = self.projection;
+        let memo = self.scope.create_memo(move |_| {
+            let enabled = id != ControlId(1) || projection.with(|indices| !indices.is_empty());
+            (
+                enabled,
+                enabled && hovered.get() == Some(id),
+                enabled && armed.get() == Some(id),
+            )
+        });
+        self.nodes.bind(
+            self.scope,
+            memo,
+            move |(enabled, hovered, armed), scene, hits| {
                 button(scene, bounds, label, hovered, armed);
-                hits.push((id, bounds));
-            });
+                if enabled {
+                    hits.push((id, bounds));
+                }
+            },
+        );
     }
 }
 impl Drop for SelectionView {
@@ -341,7 +444,7 @@ mod fixtures {
         assert_eq!(hits[14].1.y, 610);
         assert_eq!(
             hits[15..].iter().map(|(id, _)| id.0).collect::<Vec<_>>(),
-            vec![1, 5, 4]
+            vec![1, 5, 4, 80]
         );
         assert_eq!(scene.rectangles()[0].bounds, [0.0, 0.0, 960.0, 720.0]);
         let count = scene.rectangles().len();
@@ -358,7 +461,7 @@ mod fixtures {
         empty.compose(&mut scene, &mut hits).unwrap();
         assert_eq!(
             hits.iter().map(|(id, _)| id.0).collect::<Vec<_>>(),
-            vec![5, 4]
+            vec![5, 4, 80]
         );
     }
     #[test]
@@ -372,5 +475,87 @@ mod fixtures {
             SelectionView::new(ScreenInstanceId(1), Arc::from([]), Arc::from([]), 800, 600)
                 .is_err()
         );
+    }
+    #[test]
+    fn filtered_rows_keep_original_identity_and_empty_results_disable_start() {
+        let view = view(30);
+        let indices: Arc<[usize]> = vec![2, 8, 20, 25].into();
+        view.set_projection(indices.clone(), Some(2)).unwrap();
+        let before = paints(&view);
+        view.set_projection(indices, Some(2)).unwrap();
+        assert_eq!(paints(&view), before);
+        let mut scene = Scene::with_capacity(960, 720, 64);
+        let mut hits = Vec::new();
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert_eq!(
+            hits[..4].iter().map(|(id, _)| id.0).collect::<Vec<_>>(),
+            vec![102, 108, 120, 125]
+        );
+        assert_eq!(
+            hits[4..].iter().map(|(id, _)| id.0).collect::<Vec<_>>(),
+            vec![1, 5, 4, 80]
+        );
+        let settings = hits.iter().find(|(id, _)| id.0 == 5).unwrap().1;
+        let search = hits.iter().find(|(id, _)| id.0 == 80).unwrap().1;
+        assert_eq!(
+            (settings.x, settings.y, settings.width, settings.height),
+            (750, 20, 180, 30)
+        );
+        assert_eq!(
+            (search.x, search.y, search.width, search.height),
+            (440, 102, 490, 34)
+        );
+        view.set_projection(Arc::from([]), None).unwrap();
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert_eq!(
+            hits.iter().map(|(id, _)| id.0).collect::<Vec<_>>(),
+            vec![5, 4, 80]
+        );
+        assert_eq!(view.cursor.get_untracked(), None);
+    }
+    #[test]
+    fn projection_preflight_and_search_updates_preserve_unrelated_nodes() {
+        let view = view(30);
+        let indices: Arc<[usize]> = vec![2, 8, 20].into();
+        view.set_projection(indices.clone(), Some(0)).unwrap();
+        let before = paints(&view);
+        let identities = view.nodes.identities();
+        for (indices, cursor) in [
+            (vec![8, 2], Some(0)),
+            (vec![2, 2], Some(0)),
+            (vec![30], Some(0)),
+            (vec![2, 8], Some(2)),
+            (vec![2, 8], None),
+            (vec![], Some(0)),
+        ] {
+            assert!(view.set_projection(indices.into(), cursor).is_err());
+            assert_eq!(paints(&view), before);
+        }
+        assert!(
+            view.projection
+                .with_untracked(|old| Arc::ptr_eq(old, &indices))
+        );
+        let mut editor = LineEditor::new("blue", 256).unwrap();
+        view.set_search(&editor, true).unwrap();
+        let changed = paints(&view);
+        let changed_nodes = changed
+            .iter()
+            .zip(&before)
+            .enumerate()
+            .filter_map(|(index, (after, before))| (after != before).then_some(index))
+            .collect::<Vec<_>>();
+        assert_eq!(changed_nodes, vec![23]);
+        view.set_search(&editor, true).unwrap();
+        assert_eq!(paints(&view), changed);
+        editor.left();
+        view.set_search(&editor, true).unwrap();
+        assert_eq!(&paints(&view)[4..19], &before[4..19]);
+        let before = paints(&view);
+        assert!(
+            view.set_search(&LineEditor::new(&"x".repeat(257), 4096).unwrap(), false)
+                .is_err()
+        );
+        assert_eq!(paints(&view), before);
+        assert_eq!(view.nodes.identities(), identities);
     }
 }

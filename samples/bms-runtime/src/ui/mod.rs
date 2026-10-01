@@ -1,6 +1,7 @@
 //! Bottom-up presentation components: atoms → molecules → organisms.
 //! Each component emits geometry from explicit data; none owns gameplay or I/O.
 pub mod atoms;
+pub mod catalog_search;
 pub mod devices;
 pub mod display;
 pub mod interaction;
