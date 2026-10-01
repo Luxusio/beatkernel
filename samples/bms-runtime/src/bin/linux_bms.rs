@@ -531,18 +531,6 @@ mod native {
         }
         Err("no valid native ALSA presentation pair within two seconds".into())
     }
-    pub(super) fn schedule(stream: &AlsaStream) -> Result<ClockPoint> {
-        let snapshot = stream.snapshot();
-        if snapshot.status != AlsaStatus::Running {
-            return Err(format!("ALSA terminated: {:?}", snapshot.status).into());
-        }
-        let rate = u128::from(stream.configuration().format.sample_rate());
-        let nanos = (u128::from(snapshot.rendered_frames) * 1_000_000_000).div_ceil(rate);
-        Ok(ClockPoint {
-            domain: OUTPUT,
-            timestamp: Timestamp::from_nanos(i64::try_from(nanos)?),
-        })
-    }
     fn playback_schedule(pause: &NativePause, stream: &AlsaStream) -> Result<ClockPoint> {
         Ok(pause.scheduling_point(
             stream
