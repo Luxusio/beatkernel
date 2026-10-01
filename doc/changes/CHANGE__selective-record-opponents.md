@@ -35,3 +35,6 @@ and WASM graphics library with locked dependencies. The existing retained error
 fixture was updated for the added nodes and compiled again on the host. Scoped
 formatting and diff checks succeeded. Fixtures were compiled, not executed;
 native GUI and formal acceptance remain unverified.
+Final button widths accommodate the full removal labels with separate hit
+rectangles and space before Watch; that sizing adjustment was compiled again
+with host library/tests, without executing the tests.

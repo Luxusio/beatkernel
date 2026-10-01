@@ -115,7 +115,7 @@ pub const BUTTONS: [(ControlId, Bounds, &'static str); 11] = [
     (
         ControlId(60),
         Bounds {
-            x: 444,
+            x: 430,
             y: 575,
             width: 140,
             height: 34,
@@ -125,9 +125,9 @@ pub const BUTTONS: [(ControlId, Bounds, &'static str); 11] = [
     (
         ControlId(61),
         Bounds {
-            x: 594,
+            x: 580,
             y: 575,
-            width: 150,
+            width: 164,
             height: 34,
         },
         "REMOVE OTHER",
