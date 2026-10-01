@@ -44,6 +44,10 @@ pub mod local_players;
 pub mod local_runtime;
 /// Graphical local-player draft using typed keyboard metadata and stable IDs.
 pub mod local_setup;
+/// Complete MPEG Layer III assets and declared encoder timing during preparation.
+pub mod mp3_decode;
+#[cfg(test)]
+mod mp3_fixture;
 /// Bounded two-player progress exchange on a dedicated socket worker.
 pub mod multiplayer;
 /// Omitted solo option defaults, independent of native discovery.
@@ -169,7 +173,7 @@ impl AssetDecoder for WavDecoder {
     }
 }
 
-/// Default off-thread asset decoding by FLAC/Ogg signatures or strict WAV.
+/// Default off-thread asset decoding by FLAC/Ogg/MPEG signatures or strict WAV.
 /// Other formats reject; neither extension replacement nor resampling occurs here.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DefaultAssetDecoder;
@@ -184,13 +188,19 @@ impl AssetDecoder for DefaultAssetDecoder {
             flac_decode::FlacDecoder.decode(path, encoded, limits)
         } else if encoded.starts_with(b"OggS") {
             vorbis_decode::VorbisDecoder.decode(path, encoded, limits)
+        } else if encoded.starts_with(b"ID3")
+            || encoded
+                .get(..2)
+                .is_some_and(|header| header[0] == 0xff && header[1] & 0xe0 == 0xe0)
+        {
+            mp3_decode::Mp3Decoder.decode(path, encoded, limits)
         } else {
             WavDecoder.decode(path, encoded, limits)
         }
     }
 }
 
-/// Prepare a bounded UTF-8 or Shift-JIS BMS and referenced WAV/FLAC/Vorbis assets off-thread.
+/// Prepare a bounded UTF-8 or Shift-JIS BMS and WAV/FLAC/Vorbis/MP3 assets off-thread.
 pub fn load_prepared(
     path: &Path,
     format: AudioFormat,

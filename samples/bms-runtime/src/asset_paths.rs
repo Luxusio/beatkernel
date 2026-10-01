@@ -35,25 +35,32 @@ fn variants(relative: &Path) -> Vec<PathBuf> {
         .extension()
         .and_then(|extension| extension.to_str())
     {
-        Some(extension) if extension.eq_ignore_ascii_case("wav") => ["wav", "flac", "ogg"],
-        Some(extension) if extension.eq_ignore_ascii_case("flac") => ["flac", "wav", "ogg"],
-        Some(extension) if extension.eq_ignore_ascii_case("ogg") => ["ogg", "wav", "flac"],
-        Some(extension) if extension.eq_ignore_ascii_case("mp3") => ["wav", "flac", "ogg"],
-        None => ["wav", "flac", "ogg"],
+        Some(extension) if extension.eq_ignore_ascii_case("wav") => ["wav", "flac", "ogg", "mp3"],
+        Some(extension) if extension.eq_ignore_ascii_case("flac") => ["flac", "wav", "ogg", "mp3"],
+        Some(extension) if extension.eq_ignore_ascii_case("ogg") => ["ogg", "wav", "flac", "mp3"],
+        Some(extension) if extension.eq_ignore_ascii_case("mp3") => ["mp3", "wav", "flac", "ogg"],
+        None => ["wav", "flac", "ogg", "mp3"],
         _ => return Vec::new(),
     };
-    let mut candidates = Vec::with_capacity(32);
+    let mut candidates = Vec::with_capacity(36);
     for family in families {
-        for mask in 0..(1 << family.len()) {
+        let letters = family.bytes().filter(u8::is_ascii_alphabetic).count();
+        for mask in 0..(1usize << letters) {
+            let mut letter_index = 0;
             let extension: String = family
                 .bytes()
-                .enumerate()
-                .map(|(index, byte)| {
-                    char::from(if mask & (1 << index) == 0 {
-                        byte
+                .map(|byte| {
+                    if byte.is_ascii_alphabetic() {
+                        let uppercase = mask & (1 << letter_index) != 0;
+                        letter_index += 1;
+                        char::from(if uppercase {
+                            byte.to_ascii_uppercase()
+                        } else {
+                            byte
+                        })
                     } else {
-                        byte.to_ascii_uppercase()
-                    })
+                        char::from(byte)
+                    }
                 })
                 .collect();
             let candidate = relative.with_extension(extension);
@@ -90,7 +97,7 @@ fn existing(root: &Path, candidate: &Path) -> io::Result<Option<PathBuf>> {
 }
 
 /// Resolves a contained regular file from a canonical directory root. Variant
-/// lookup preserves stem/directory spelling and tries at most 32 WAV/FLAC/OGG ASCII
+/// lookup preserves stem/directory spelling and tries at most 36 WAV/FLAC/OGG/MP3 ASCII
 /// extension case combinations. Unknown extensions remain literal-only.
 /// This assumes a trusted static filesystem; it is not a race-free sandbox.
 pub fn resolve_asset(root: &Path, name: &str, policy: AssetPathPolicy) -> io::Result<PathBuf> {
@@ -124,8 +131,8 @@ mod fixtures {
     use std::sync::atomic::{AtomicU64, Ordering};
     #[test]
     fn bounded_case_order_preserves_unicode_stems_directories_and_family_priority() {
-        let candidates = variants(Path::new("日本/音.mp3"));
-        assert_eq!(candidates.len(), 32);
+        let candidates = variants(Path::new("日本/音"));
+        assert_eq!(candidates.len(), 36);
         assert_eq!(
             candidates[..8],
             ["wav", "Wav", "wAv", "WAv", "waV", "WaV", "wAV", "WAV"]
@@ -136,8 +143,20 @@ mod fixtures {
         assert_eq!(candidates[23], Path::new("日本/音.FLAC"));
         assert_eq!(candidates[24], Path::new("日本/音.ogg"));
         assert_eq!(candidates[31], Path::new("日本/音.OGG"));
+        assert_eq!(
+            candidates[32..],
+            ["mp3", "Mp3", "mP3", "MP3"]
+                .map(|extension| PathBuf::from(format!("日本/音.{extension}")))
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            36
+        );
         let supported = variants(Path::new("日本/音.FlAc"));
-        assert_eq!(supported.len(), 31);
+        assert_eq!(supported.len(), 35);
         assert_eq!(supported[0], Path::new("日本/音.flac"));
         assert_eq!(supported[15], Path::new("日本/音.wav"));
         assert!(
@@ -146,11 +165,18 @@ mod fixtures {
                 .any(|candidate| candidate == Path::new("日本/音.FlAc"))
         );
         let ogg = variants(Path::new("日本/音.oGg"));
-        assert_eq!(ogg.len(), 31);
+        assert_eq!(ogg.len(), 35);
         assert_eq!(ogg[0], Path::new("日本/音.ogg"));
         assert_eq!(ogg[7], Path::new("日本/音.wav"));
         assert_eq!(ogg[15], Path::new("日本/音.flac"));
-        assert_eq!(variants(Path::new("tone")).len(), 32);
+        let mp3 = variants(Path::new("日本/音.mP3"));
+        assert_eq!(mp3.len(), 35);
+        assert_eq!(
+            mp3[..3],
+            ["日本/音.mp3", "日本/音.Mp3", "日本/音.MP3"].map(PathBuf::from)
+        );
+        assert_eq!(mp3[3], Path::new("日本/音.wav"));
+        assert_eq!(variants(Path::new("tone")).len(), 36);
         assert!(variants(Path::new("tone.xyz")).is_empty());
     }
     #[test]

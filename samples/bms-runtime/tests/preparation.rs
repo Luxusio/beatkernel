@@ -60,12 +60,129 @@ fn wav(channels: u16, samples: &[i16]) -> Vec<u8> {
     out
 }
 
+fn captured_setup_identity(prepared: &PreparedBms) -> beatkernel::replay::ReplayHeader {
+    let profile = beatkernel::judge::JudgeProfile::new(
+        vec![beatkernel::judge::JudgeWindow {
+            grade: beatkernel::judge::JudgeGrade(7),
+            early: beatkernel::time::Duration::ZERO,
+            late: beatkernel::time::Duration::ZERO,
+        }],
+        beatkernel::time::Duration::ZERO,
+    )
+    .unwrap();
+    let judge = beatkernel::judge::JudgeEngine::new(
+        prepared.compiled.chart.clone(),
+        prepared.source.rules(),
+        profile,
+    )
+    .unwrap();
+    replay_capture::LiveReplayCapture::new(
+        &judge,
+        beatkernel::time::ClockDomainId(17),
+        competition_live::replay_limits().unwrap(),
+    )
+    .unwrap()
+    .into_file()
+    .header
+}
+
 #[path = "../src/flac_fixture.rs"]
 mod flac_fixture;
 
 #[path = "../src/vorbis_fixture.rs"]
 #[allow(dead_code)] // Decoder-only corruption helpers are shared with unit fixtures.
 mod vorbis_fixture;
+
+#[path = "../src/mp3_fixture.rs"]
+#[allow(dead_code)] // Unit codec fixtures also use frame/tag mutation helpers.
+mod mp3_fixture;
+
+#[test]
+fn default_tagged_mp3_preserves_prepared_timing_identity_and_actual_rendered_pcm() {
+    let dir = Directory::new();
+    std::fs::create_dir(dir.0.join("assets")).unwrap();
+    let encoded = mp3_fixture::tagged_silence(1, 4, 576, 1000);
+    // MPEG2: 4×576 audio frames, minus 576 encoder delay and 1000 padding.
+    // Decoder latency redistributes 529 frames between the leading/trailing cuts.
+    let retained = 728usize;
+    dir.write("assets/日本.mP3", &encoded);
+    dir.write("head.wav", &wav(1, &[16384, -8192]));
+    let path = dir.write(
+        "chart.bms",
+        "#BPM 60\n#WAV01 head.wav\n#WAV02 assets\\日本.wav\n#00011:01\n#00001:02\n".as_bytes(),
+    );
+    let format = AudioFormat::new(24_000, 2).unwrap();
+    let pcm_limits = PcmLimits::new(retained * 2 * 4, 8192, 8).unwrap();
+    let prepared = load_prepared(&path, format, pcm_limits, ChannelPolicy::MonoToStereo).unwrap();
+    assert_eq!(prepared.source.samples[&2], "assets\\日本.wav");
+    let bgm = prepared.bank.get(SampleId(2)).unwrap();
+    assert_eq!(bgm.frames(), retained);
+    assert_eq!(bgm.samples(), vec![0.0; retained * 2]);
+    let identity = captured_setup_identity(&prepared);
+    assert!(
+        load_prepared_with_decoder(
+            &path,
+            format,
+            pcm_limits,
+            ChannelPolicy::MonoToStereo,
+            &DefaultAssetDecoder
+        )
+        .is_err()
+    );
+    let raw = mp3_decode::Mp3Decoder
+        .decode_with_timing(
+            Path::new("not-opened.mp3"),
+            &encoded,
+            PcmLimits::new(9216, 9216, 1).unwrap(),
+            mp3_decode::Mp3TimingPolicy::RawFrames,
+        )
+        .unwrap();
+    assert_eq!(raw.frames(), 2304);
+    dir.write("assets/日本.wav", &wav(1, &vec![0; retained]));
+    let literal = load_prepared(&path, format, pcm_limits, ChannelPolicy::MonoToStereo).unwrap();
+    assert_eq!(captured_setup_identity(&literal), identity);
+    let mut results = Vec::new();
+    for chart in [prepared, literal] {
+        let mut output = Vec::new();
+        let report = offline::render_offline(
+            chart,
+            offline::OfflineOptions {
+                frames: u64::try_from(retained + 1).unwrap(),
+                block_frames: 31,
+                command_capacity: 4,
+                max_voices: 2,
+            },
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(report.hits, 1);
+        let mut expected = vec![0.0f32; (retained + 1) * 2];
+        expected[..4].copy_from_slice(&[0.5, 0.5, -0.25, -0.25]);
+        assert_eq!(
+            output,
+            expected
+                .iter()
+                .flat_map(|sample| sample.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+        results.push(output);
+    }
+    assert_eq!(results[0], results[1]);
+    dir.write("assets/日本.wav", &encoded); // Content dispatch ignores filename suffix.
+    assert_eq!(
+        load_prepared(&path, format, pcm_limits, ChannelPolicy::MonoToStereo)
+            .unwrap()
+            .bank
+            .get(SampleId(2))
+            .unwrap()
+            .frames(),
+        retained
+    );
+    let small = PcmLimits::new(retained * 8 - 1, 8192, 8).unwrap();
+    assert!(load_prepared(&path, format, small, ChannelPolicy::MonoToStereo).is_err());
+    dir.write("assets/日本.wav", b"ID3damaged");
+    assert!(load_prepared(&path, format, pcm_limits, ChannelPolicy::MonoToStereo).is_err());
+}
 
 #[test]
 fn default_vorbis_reference_variants_preserve_pcm_extent_and_literal_errors() {
@@ -179,35 +296,10 @@ fn converted_mixed_case_flac_default_lookup_preserves_chart_identity_and_rendere
         converted.bank.get(SampleId(1)).unwrap().samples(),
         &[0.5, 0.5, -0.25, -0.25]
     );
-    let identity = |prepared: &PreparedBms| {
-        let profile = beatkernel::judge::JudgeProfile::new(
-            vec![beatkernel::judge::JudgeWindow {
-                grade: beatkernel::judge::JudgeGrade(7),
-                early: beatkernel::time::Duration::ZERO,
-                late: beatkernel::time::Duration::ZERO,
-            }],
-            beatkernel::time::Duration::ZERO,
-        )
-        .unwrap();
-        let judge = beatkernel::judge::JudgeEngine::new(
-            prepared.compiled.chart.clone(),
-            prepared.source.rules(),
-            profile,
-        )
-        .unwrap();
-        replay_capture::LiveReplayCapture::new(
-            &judge,
-            beatkernel::time::ClockDomainId(17),
-            competition_live::replay_limits().unwrap(),
-        )
-        .unwrap()
-        .into_file()
-        .header
-    };
-    let original_identity = identity(&converted);
+    let original_identity = captured_setup_identity(&converted);
     dir.write("assets/日本.wav", &wav(1, &[16384, -8192]));
     let exact = load_prepared(&path, format, limits(), ChannelPolicy::MonoToStereo).unwrap();
-    assert_eq!(identity(&exact), original_identity);
+    assert_eq!(captured_setup_identity(&exact), original_identity);
     let mut results = Vec::new();
     for prepared in [converted, exact] {
         let mut bytes = Vec::new();
