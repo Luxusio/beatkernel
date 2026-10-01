@@ -11,7 +11,9 @@ use beatkernel_bms_runtime::{
     local_players::PlayerId,
     local_setup::LocalSetup,
     player, player_chart,
+    presentation_settings::PresentationSettings,
     settings::{NativeSettings, SettingsHost},
+    settings_profile::PlayerProfile,
 };
 use beatkernel_bms_runtime::{
     graphics::{self, BackendChoice, Presentation, Renderer},
@@ -47,6 +49,7 @@ struct Options {
     backend: BackendChoice,
     presentation: Presentation,
     profile: Option<PathBuf>,
+    display_overrides: Vec<String>,
 }
 impl Options {
     fn parse(args: &[String]) -> Result<Self, Box<dyn Error>> {
@@ -59,12 +62,9 @@ impl Options {
             backend: BackendChoice::Auto,
             presentation: Presentation::Fifo,
             profile: None,
+            display_overrides: Vec::new(),
         };
         let mut index = 0;
-        let mut seen_fps = false;
-        let mut seen_lookahead = false;
-        let mut seen_backend = false;
-        let mut seen_present = false;
         while index < args.len() {
             let flag = args[index].as_str();
             let value = args
@@ -96,41 +96,9 @@ impl Options {
                             return Err("duplicate --library".into());
                         }
                     }
-                    "--ui-lookahead-ms" => {
-                        if seen_lookahead {
-                            return Err("duplicate --ui-lookahead-ms".into());
-                        }
-                        seen_lookahead = true;
-                        let millis: i64 = value.parse()?;
-                        if !(100..=10_000).contains(&millis) {
-                            return Err("--ui-lookahead-ms must be 100..10000".into());
-                        }
-                        options.lookahead = millis * 1_000_000;
-                    }
-                    "--gpu-backend" => {
-                        if seen_backend {
-                            return Err("duplicate --gpu-backend".into());
-                        }
-                        seen_backend = true;
-                        options.backend = value.parse()?;
-                    }
-                    "--present" => {
-                        if seen_present {
-                            return Err("duplicate --present".into());
-                        }
-                        seen_present = true;
-                        options.presentation = value.parse()?;
-                    }
-                    _ => {
-                        if seen_fps {
-                            return Err("duplicate --ui-fps".into());
-                        }
-                        seen_fps = true;
-                        options.fps = value.parse()?;
-                        if !(30..=240).contains(&options.fps) {
-                            return Err("--ui-fps must be 30..240".into());
-                        }
-                    }
+                    _ => options
+                        .display_overrides
+                        .extend([flag.to_owned(), value.clone()]),
                 }
                 index += 2;
             } else {
@@ -149,7 +117,24 @@ impl Options {
         if options.library.is_some() == options.chart.is_some() {
             return Err("choose exactly one of --library DIR or --chart PATH".into());
         }
+        let display =
+            PresentationSettings::default().apply_overrides(&options.display_overrides)?;
+        options.set_display(display);
         Ok(options)
+    }
+    fn display(&self) -> PresentationSettings {
+        PresentationSettings {
+            backend: self.backend,
+            presentation: self.presentation,
+            fps: self.fps as u16,
+            lookahead_ms: (self.lookahead / 1_000_000) as u32,
+        }
+    }
+    fn set_display(&mut self, display: PresentationSettings) {
+        self.backend = display.backend;
+        self.presentation = display.presentation;
+        self.fps = usize::from(display.fps);
+        self.lookahead = i64::from(display.lookahead_ms) * 1_000_000;
     }
 }
 
@@ -192,12 +177,17 @@ pub(super) fn run(
     let mut options = Options::parse(args)?;
     if let Some(path) = &options.profile {
         let profile =
-            beatkernel_bms_runtime::settings_profile::load_profile(path, settings_host())?;
+            beatkernel_bms_runtime::settings_profile::load_player_profile(path, settings_host())?;
         options.native = beatkernel_bms_runtime::settings::overlay_native_args(
-            &profile.native_args(),
+            &profile.native.native_args(),
             &without_chart(&options.native),
             settings_host(),
         )?;
+        options.set_display(
+            profile
+                .presentation
+                .apply_overrides(&options.display_overrides)?,
+        );
     }
     let (entries, diagnostics) = if let Some(root) = &options.library {
         let library = match player_chart::scan_library(root) {
@@ -240,8 +230,11 @@ pub(super) fn run(
         )
     };
     let event_loop = EventLoop::new()?;
+    let active_backend = options.backend;
     let mut app = Desktop {
         options,
+        active_backend,
+        display: None,
         native,
         validate,
         query_devices,
@@ -279,6 +272,7 @@ pub(super) fn run(
 const SETTINGS_ROWS: usize = 10;
 struct SettingsDraft {
     values: NativeSettings,
+    presentation: PresentationSettings,
     cached_local: Option<LocalSetup>,
     selected: usize,
     editor: LineEditor,
@@ -334,6 +328,43 @@ fn edit_line(
     }
     Ok(())
 }
+const DISPLAY_FLAGS: [&str; 4] = [
+    "--gpu-backend",
+    "--present",
+    "--ui-fps",
+    "--ui-lookahead-ms",
+];
+struct DisplayDraft {
+    editors: [LineEditor; 4],
+    selected: usize,
+    error: Option<String>,
+}
+impl DisplayDraft {
+    fn new(value: PresentationSettings) -> Result<Self, String> {
+        Ok(Self {
+            editors: [
+                LineEditor::new(value.backend.as_str(), 32)?,
+                LineEditor::new(value.presentation.as_str(), 32)?,
+                LineEditor::new(&value.fps.to_string(), 32)?,
+                LineEditor::new(&value.lookahead_ms.to_string(), 32)?,
+            ],
+            selected: 0,
+            error: None,
+        })
+    }
+    fn value(&self) -> Result<PresentationSettings, String> {
+        let args: Vec<String> = DISPLAY_FLAGS
+            .iter()
+            .zip(&self.editors)
+            .flat_map(|(flag, editor)| [(*flag).to_owned(), editor.value().to_owned()])
+            .collect();
+        PresentationSettings::default().apply_overrides(&args)
+    }
+    fn edit(&mut self, key: Option<KeyCode>, value: Option<&str>) {
+        self.error = edit_line(&mut self.editors[self.selected], key, value).err();
+    }
+}
+
 struct LocalDraft {
     model: LocalSetup,
     selected: usize,
@@ -348,7 +379,7 @@ struct DevicePicker {
 }
 enum ProfileResult {
     Devices(DeviceCatalog, Option<PlayerId>),
-    Loaded(NativeSettings),
+    Loaded(PlayerProfile),
     Saved,
 }
 struct ProfileOperation(Option<JoinHandle<Result<ProfileResult, String>>>);
@@ -383,6 +414,8 @@ fn with_chart(args: &[String], path: &str) -> Vec<String> {
 
 struct Desktop {
     options: Options,
+    active_backend: BackendChoice,
+    display: Option<DisplayDraft>,
     native: Native,
     validate: Native,
     query_devices: QueryDevices,
@@ -424,6 +457,7 @@ impl Desktop {
             )?;
             Ok::<_, String>(SettingsDraft {
                 values,
+                presentation: self.options.display(),
                 cached_local: self.accepted_local.clone(),
                 selected: 0,
                 editor,
@@ -452,6 +486,13 @@ impl Desktop {
         self.hits.clear();
     }
     fn open_local(&mut self) {
+        if self.display.is_some()
+            || self.profile_io.is_some()
+            || self.game.is_some()
+            || self.picker.is_some()
+        {
+            return;
+        }
         let result = (|| {
             let draft = self.settings.as_ref().ok_or("settings unavailable")?;
             let parsed = LocalSetup::from_settings(&draft.values, settings_host())?;
@@ -596,6 +637,9 @@ impl Desktop {
         Ok(args)
     }
     fn device_request(&mut self, keyboard: bool) {
+        if self.display.is_some() {
+            return;
+        }
         if keyboard
             && self
                 .local_setup
@@ -747,7 +791,12 @@ impl Desktop {
         }
     }
     fn profile_request(&mut self, save: bool) {
-        if self.profile_io.is_some() || self.game.is_some() {
+        if self.profile_io.is_some()
+            || self.game.is_some()
+            || self.display.is_some()
+            || self.picker.is_some()
+            || self.local_setup.is_some()
+        {
             return;
         }
         if let Some(draft) = &mut self.settings {
@@ -760,19 +809,25 @@ impl Desktop {
             }
             if save {
                 self.validate_settings(&draft.values)?;
+                draft.presentation.validate()?;
             }
             let path = PathBuf::from(draft.profile.value());
-            let values = draft.values.clone();
+            let values = PlayerProfile {
+                native: draft.values.clone(),
+                presentation: draft.presentation,
+            };
             let host = settings_host();
             thread::Builder::new()
                 .name("bms-profile".into())
                 .spawn(move || {
                     if save {
-                        beatkernel_bms_runtime::settings_profile::save_profile(&path, &values, host)
-                            .map(|()| ProfileResult::Saved)
-                            .map_err(|error| error.to_string())
+                        beatkernel_bms_runtime::settings_profile::save_player_profile(
+                            &path, &values, host,
+                        )
+                        .map(|()| ProfileResult::Saved)
+                        .map_err(|error| error.to_string())
                     } else {
-                        beatkernel_bms_runtime::settings_profile::load_profile(&path, host)
+                        beatkernel_bms_runtime::settings_profile::load_player_profile(&path, host)
                             .map(ProfileResult::Loaded)
                             .map_err(|error| error.to_string())
                     }
@@ -828,7 +883,8 @@ impl Desktop {
                     draft.error = None;
                     draft.message = Some("PROFILE SAVED - APPLY IS SEPARATE".into());
                 }
-                Ok(ProfileResult::Loaded(values)) => {
+                Ok(ProfileResult::Loaded(profile)) => {
+                    let values = profile.native;
                     let editor = values
                         .fields()
                         .first()
@@ -837,6 +893,7 @@ impl Desktop {
                     match editor {
                         Ok(editor) => {
                             draft.values = values;
+                            draft.presentation = profile.presentation;
                             draft.cached_local = None;
                             draft.selected = 0;
                             draft.editor = editor;
@@ -854,19 +911,44 @@ impl Desktop {
         self.hits.clear();
     }
     fn apply_settings(&mut self) {
-        if self.profile_io.is_some() {
+        if self.profile_io.is_some()
+            || self.game.is_some()
+            || self.display.is_some()
+            || self.picker.is_some()
+            || self.local_setup.is_some()
+        {
             return;
         }
         let Some(draft) = &self.settings else {
             return;
         };
-        let result = self.validate_settings(&draft.values);
+        let result = (|| {
+            let args = self.validate_settings(&draft.values)?;
+            let presentation = draft.presentation;
+            presentation.validate()?;
+            graphics::instance_descriptor(presentation.backend)?;
+            let cached_local = draft.cached_local.clone();
+            let profile =
+                (!draft.profile.value().is_empty()).then(|| PathBuf::from(draft.profile.value()));
+            Ok::<_, String>((args, presentation, cached_local, profile))
+        })();
+        // All drafts and host/build validation are complete before GPU mutation.
+        // No options are committed if the current surface rejects this mode.
+        let result = result.and_then(|(args, presentation, cached_local, profile)| {
+            if presentation.presentation != self.options.presentation {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.set_presentation(presentation.presentation)?;
+                }
+            }
+            Ok((args, presentation, cached_local, profile))
+        });
         match result {
-            Ok(args) => {
+            Ok((args, presentation, cached_local, profile)) => {
                 self.options.native = args;
-                self.accepted_local = draft.cached_local.clone();
-                self.options.profile = (!draft.profile.value().is_empty())
-                    .then(|| PathBuf::from(draft.profile.value()));
+                self.options.set_display(presentation);
+                self.next_frame = Instant::now();
+                self.accepted_local = cached_local;
+                self.options.profile = profile;
                 self.settings = None;
                 self.failure = None;
             }
@@ -877,6 +959,72 @@ impl Desktop {
             }
         }
         self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn open_display(&mut self) {
+        if self.game.is_some()
+            || self.profile_io.is_some()
+            || self.picker.is_some()
+            || self.local_setup.is_some()
+            || self.display.is_some()
+        {
+            return;
+        }
+        if let Some(draft) = &mut self.settings {
+            match DisplayDraft::new(draft.presentation) {
+                Ok(display) => self.display = Some(display),
+                Err(error) => draft.error = Some(error),
+            }
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn finish_display(&mut self) {
+        if self.profile_io.is_some() || self.game.is_some() {
+            return;
+        }
+        let Some(display) = &mut self.display else {
+            return;
+        };
+        match display.value() {
+            Ok(value) => {
+                if let Some(draft) = &mut self.settings {
+                    draft.presentation = value;
+                    draft.error = None;
+                    draft.message = Some("DISPLAY DRAFT UPDATED - APPLY IS SEPARATE".into());
+                }
+                self.display = None;
+            }
+            Err(error) => display.error = Some(error),
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn display_key(&mut self, key: KeyCode, repeat: bool) {
+        match key {
+            KeyCode::Escape if !repeat => self.display = None,
+            KeyCode::Enter if !repeat => self.finish_display(),
+            KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::Tab => {
+                if let Some(display) = &mut self.display {
+                    display.selected = match key {
+                        KeyCode::ArrowUp => display.selected.saturating_sub(1),
+                        KeyCode::Tab => (display.selected + 1) % 4,
+                        _ => (display.selected + 1).min(3),
+                    };
+                }
+            }
+            KeyCode::ArrowLeft
+            | KeyCode::ArrowRight
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::Backspace
+            | KeyCode::Delete => {
+                if let Some(display) = &mut self.display {
+                    display.edit(Some(key), None);
+                }
+            }
+            _ => {}
+        }
         self.hits.clear();
     }
     fn settings_key(&mut self, key: KeyCode, repeat: bool) {
@@ -956,6 +1104,20 @@ impl Desktop {
         if self.profile_io.is_some() {
             return;
         }
+        if self.display.is_some() {
+            match id.0 {
+                40 => self.finish_display(),
+                41 => self.display = None,
+                40000..=40003 => {
+                    self.display.as_mut().expect("display routing").selected =
+                        (id.0 - 40000) as usize
+                }
+                _ => {}
+            }
+            self.gesture.cancel();
+            self.hits.clear();
+            return;
+        }
         if self.picker.is_some() {
             match id.0 {
                 20 => self.use_device(),
@@ -1011,6 +1173,7 @@ impl Desktop {
         }
         if self.settings.is_some() {
             match id.0 {
+                18 => self.open_display(),
                 17 => self.open_local(),
                 16 => self.device_request(false),
 
@@ -1153,6 +1316,10 @@ impl Desktop {
         if !self.active || self.closing || self.profile_io.is_some() {
             return;
         }
+        if self.display.is_some() {
+            self.display_key(key, repeat);
+            return;
+        }
         if self.picker.is_some() {
             self.picker_key(key, repeat);
             return;
@@ -1245,7 +1412,16 @@ impl Desktop {
         let pixels = &mut self.scene;
         rect(pixels, 0, 0, WIDTH as i64, HEIGHT as i64, 0x10151e);
         text(pixels, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
-        if let Some(picker) = &self.picker {
+        if let Some(display) = &self.display {
+            draw_display(
+                pixels,
+                display,
+                &mut self.hits,
+                &self.gesture,
+                point,
+                self.profile_io.is_some(),
+            );
+        } else if let Some(picker) = &self.picker {
             draw_devices(
                 pixels,
                 picker,
@@ -1455,6 +1631,19 @@ impl Desktop {
                 "EXIT",
             );
         }
+        if self.game.is_none()
+            && self.settings.is_none()
+            && self.active_backend != self.options.backend
+        {
+            text(
+                pixels,
+                24,
+                700,
+                "GPU BACKEND PENDING - SAVE PROFILE AND RESTART",
+                1,
+                0xd8b36b,
+            );
+        }
         if let Some(error) = &self.failure {
             text(
                 pixels,
@@ -1506,7 +1695,7 @@ impl ApplicationHandler for Desktop {
             let window = self.window.as_ref().expect("created window").clone();
             // Native startup only. Reusable Renderer::new stays async for WASM hosts.
             let result = (|| -> Result<(wgpu::Instance, Renderer), String> {
-                let instance = graphics::instance(self.options.backend)?;
+                let instance = graphics::instance(self.active_backend)?;
                 let surface = instance
                     .create_surface(window.clone())
                     .map_err(|error| error.to_string())?;
@@ -1638,8 +1827,12 @@ impl ApplicationHandler for Desktop {
                         Key::Character(value) => Some(value.as_str()),
                         _ => None,
                     });
-                    if let (Some(draft), Some(value)) = (&mut self.settings, value) {
-                        draft.edit(None, Some(value));
+                    if let Some(value) = value {
+                        if let Some(display) = &mut self.display {
+                            display.edit(None, Some(value));
+                        } else if let Some(draft) = &mut self.settings {
+                            draft.edit(None, Some(value));
+                        }
                     }
                 }
             }
@@ -1920,6 +2113,71 @@ fn draw_devices(
     }
 }
 
+fn draw_display(
+    scene: &mut Scene,
+    display: &DisplayDraft,
+    hits: &mut Vec<(ControlId, Bounds)>,
+    gesture: &Gesture,
+    point: Option<(f64, f64)>,
+    pending: bool,
+) {
+    text(
+        scene,
+        24,
+        65,
+        "DISPLAY - ENTER DONE - ESC BACK",
+        2,
+        0x9bb1cf,
+    );
+    for (index, label) in ["GPU BACKEND", "PRESENT MODE", "UI FPS", "LOOKAHEAD MS"]
+        .iter()
+        .enumerate()
+    {
+        let y = 130 + index as i64 * 75;
+        text(scene, 24, (y + 10) as usize, label, 1, 0xf0f4ff);
+        let bounds = Bounds {
+            x: 280,
+            y,
+            width: 650,
+            height: 34,
+        };
+        molecules::text_field(
+            scene,
+            &display.editors[index],
+            bounds,
+            index == display.selected && !pending,
+        );
+        if !pending {
+            hits.push((ControlId(40000 + index as u64), bounds));
+        }
+    }
+    for (y, hint) in [
+        (445, "BACKEND: AUTO / VULKAN / DX12 / METAL / GL"),
+        (460, "PRESENT: FIFO / IMMEDIATE / MAILBOX"),
+        (475, "UI FPS: 30..240   LOOKAHEAD: 100..10000 MS"),
+        (500, "SAVE PROFILE + RESTART FOR GPU BACKEND"),
+        (515, "DONE UPDATES DRAFT - APPLY IS SEPARATE"),
+    ] {
+        text(scene, 24, y, hint, 1, 0x9bb1cf);
+    }
+    for (id, x, label) in [(40, 24, "DONE"), (41, 212, "BACK")] {
+        let bounds = Bounds {
+            x,
+            y: 620,
+            width: 170,
+            height: 34,
+        };
+        if pending {
+            molecules::button(scene, bounds, label, false, false);
+        } else {
+            control(scene, hits, gesture, point, ControlId(id), bounds, label);
+        }
+    }
+    if let Some(error) = &display.error {
+        text(scene, 24, 690, error, 1, 0xff8e8e);
+    }
+}
+
 fn draw_settings(
     scene: &mut Scene,
     draft: &SettingsDraft,
@@ -1928,19 +2186,16 @@ fn draw_settings(
     point: Option<(f64, f64)>,
     pending: bool,
 ) -> Result<(), String> {
-    text(
-        scene,
-        24,
-        65,
-        "SETTINGS - ENTER APPLY - ESC BACK",
-        1,
-        0x9bb1cf,
-    );
-    for (id, x, label) in [(17, 515, "PLAYERS"), (16, 730, "AUDIO OVERRIDE")] {
+    text(scene, 24, 65, "SETTINGS - APPLY / BACK", 1, 0x9bb1cf);
+    for (id, x, label) in [
+        (18, 355, "DISPLAY"),
+        (17, 550, "PLAYERS"),
+        (16, 745, "AUDIO"),
+    ] {
         let bounds = Bounds {
             x,
             y: 60,
-            width: 200,
+            width: 185,
             height: 34,
         };
         if !pending {
@@ -2186,6 +2441,83 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
 mod tests {
     use super::*;
     #[test]
+    fn display_modal_isolated_edits_back_and_pending_controls() {
+        let original = PresentationSettings::default();
+        let mut modal = DisplayDraft::new(original).unwrap();
+        modal.selected = 2;
+        modal.edit(Some(KeyCode::Home), None);
+        modal.edit(None, Some("9"));
+        assert!(modal.value().is_err());
+        assert_eq!(original.fps, 120);
+        // Back drops the isolated modal; reopening starts from the accepted draft.
+        drop(modal);
+        let modal = DisplayDraft::new(original).unwrap();
+        assert_eq!(modal.value().unwrap(), original);
+        let mut scene = Scene::new(960, 720);
+        let mut hits = Vec::new();
+        draw_display(
+            &mut scene,
+            &modal,
+            &mut hits,
+            &Gesture::default(),
+            None,
+            false,
+        );
+        assert_eq!(hits.len(), 6);
+        assert!(hits.iter().any(|(id, _)| *id == ControlId(40)));
+        assert!(
+            hits.iter()
+                .all(|(id, _)| matches!(id.0, 40 | 41 | 40000..=40003))
+        );
+        hits.clear();
+        scene.clear();
+        draw_display(
+            &mut scene,
+            &modal,
+            &mut hits,
+            &Gesture::default(),
+            None,
+            true,
+        );
+        assert!(hits.is_empty());
+    }
+    #[test]
+    fn explicit_display_cli_overrides_preserve_profile_values_and_native_flag_values() {
+        let options = Options::parse(&[
+            "--chart".into(),
+            "--ui-fps".into(),
+            "--profile".into(),
+            "profile.bkp".into(),
+            "--present".into(),
+            "mailbox".into(),
+        ])
+        .unwrap();
+        assert_eq!(options.display_overrides, ["--present", "mailbox"]);
+        assert_eq!(options.chart, Some(PathBuf::from("--ui-fps")));
+        let stored = PresentationSettings {
+            backend: BackendChoice::Gl,
+            presentation: Presentation::Fifo,
+            fps: 60,
+            lookahead_ms: 3500,
+        };
+        let merged = stored.apply_overrides(&options.display_overrides).unwrap();
+        assert_eq!(merged.backend, BackendChoice::Gl);
+        assert_eq!(merged.fps, 60);
+        assert_eq!(merged.lookahead_ms, 3500);
+        assert_eq!(merged.presentation, Presentation::Mailbox);
+        assert!(
+            Options::parse(&[
+                "--chart".into(),
+                "song.bms".into(),
+                "--ui-fps".into(),
+                "120".into(),
+                "--ui-fps".into(),
+                "60".into()
+            ])
+            .is_err()
+        );
+    }
+    #[test]
     fn comparison_toggle_is_available_only_for_groups_with_retained_comparisons() {
         let mut players: Vec<_> = (1..=2)
             .map(|id| player::LocalPlayerSnapshot {
@@ -2241,6 +2573,7 @@ mod tests {
         let values = NativeSettings::from_args(&[], SettingsHost::Linux).unwrap();
         let draft = SettingsDraft {
             values: values.clone(),
+            presentation: PresentationSettings::default(),
             cached_local: None,
             selected: 0,
             editor: LineEditor::new("", 4096).unwrap(),
@@ -2342,6 +2675,7 @@ mod tests {
         let mut draft = SettingsDraft {
             cached_local: None,
             values,
+            presentation: PresentationSettings::default(),
             selected: 0,
             editor,
             profile: LineEditor::new("", 4096).unwrap(),
