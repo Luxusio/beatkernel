@@ -269,6 +269,135 @@ mod section_fixtures {
     }
 
     #[test]
+    fn lnobj_live_reports_and_replay_share_bpm_stop_hold_timing() {
+        use beatkernel::{
+            audio::command_queue,
+            input::{
+                Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector, EventMeta,
+                PhysicalControlId, PhysicalInputEvent,
+            },
+            judge::{JudgeOutcome, JudgeStage},
+            runtime::Runtime,
+            time::{ClockMapper, ClockMappingQuality, ClockPoint},
+            transport::{Rate, Transport},
+        };
+        struct Identity;
+        impl ClockMapper for Identity {
+            fn map(&self, from: ClockPoint, to: ClockDomainId) -> Option<Timestamp> {
+                (from.domain == to).then_some(from.timestamp)
+            }
+            fn quality(&self) -> ClockMappingQuality {
+                ClockMappingQuality::Exact
+            }
+        }
+        let point = |at| ClockPoint {
+            domain: ClockDomainId(17),
+            timestamp: Timestamp::from_nanos(at),
+        };
+        let text = "#BPM 60\n#BPM01 120\n#STOP01 48\n#LNOBJ ZZ\n#WAV01 tap.wav\n#00011:010000ZZ\n#00008:00010000\n#00009:00010000\n";
+        let source = parse(text, ParseOptions::default()).unwrap();
+        let compiled = source.compile().unwrap();
+        let object = &compiled.chart.objects()[0];
+        assert_eq!(object.time.start, Timestamp::ZERO);
+        assert_eq!(object.time.end, Some(Timestamp::from_nanos(2_500_000_000)));
+        let rules = source.rules();
+        let control = source.notes[0].lane.control();
+        let bindings = BindingMap::from_bindings(rules.iter().map(|rule| Binding {
+            device: DeviceSelector::Exact(DeviceId(3)),
+            physical: PhysicalControlId::keyboard(rule.control.0 as u16),
+            game_control: rule.control,
+        }))
+        .unwrap();
+        let judge = JudgeEngine::new(
+            compiled.chart,
+            rules,
+            JudgeProfile::new(
+                vec![JudgeWindow {
+                    grade: JudgeGrade(7),
+                    early: Duration::ZERO,
+                    late: Duration::ZERO,
+                }],
+                Duration::ZERO,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut capture = LiveReplayCapture::new(&judge, ClockDomainId(17), limits()).unwrap();
+        let (producer, _consumer) = command_queue(1).unwrap();
+        let mut runtime = Runtime::new(
+            ClockDomainId(17),
+            ClockDomainId(17),
+            Transport::new(Timestamp::ZERO, Timestamp::ZERO, Rate::NORMAL),
+            bindings,
+            judge,
+            producer,
+            vec![],
+            0,
+        )
+        .unwrap();
+        let mut live = Vec::new();
+        for (sequence, (at, state)) in [(0, ButtonState::Down), (2_500_000_000, ButtonState::Up)]
+            .into_iter()
+            .enumerate()
+        {
+            let report = runtime
+                .process_input(
+                    PhysicalInputEvent::Button(ButtonEvent {
+                        meta: EventMeta::new(DeviceId(3), point(at), sequence as u64),
+                        control: PhysicalControlId::keyboard(control.0 as u16),
+                        state,
+                    }),
+                    &Identity,
+                    point(at),
+                )
+                .unwrap();
+            assert!(report.judge_error.is_none());
+            live.extend_from_slice(&report.judge_events);
+            capture.record_report(&report).unwrap();
+        }
+        let report = runtime
+            .advance_to(point(2_500_000_001), &Identity, point(2_500_000_001))
+            .unwrap();
+        assert!(report.judge_error.is_none());
+        live.extend_from_slice(&report.judge_events);
+        capture.record_report(&report).unwrap();
+        assert_eq!(live.len(), 2);
+        assert_eq!(
+            live.iter().map(|event| event.stage).collect::<Vec<_>>(),
+            [JudgeStage::HoldHead, JudgeStage::HoldTail]
+        );
+        assert!(live.iter().all(|event| event.outcome
+            == JudgeOutcome::Hit {
+                grade: JudgeGrade(7),
+                delta: Duration::ZERO,
+            }));
+        let recorded = capture.into_file();
+        let mut replay = reconstruct(&source, recorded.clone(), limits()).unwrap();
+        assert_eq!(replay.results(), live);
+        assert_eq!(
+            replay.engine().stable_hash().unwrap(),
+            runtime.judge().stable_hash().unwrap()
+        );
+        replay.seek_cursor(0).unwrap();
+        assert!(replay.results().is_empty());
+        replay.seek_cursor(recorded.records.len()).unwrap();
+        assert_eq!(replay.results(), live);
+        assert_eq!(
+            replay.engine().stable_hash().unwrap(),
+            runtime.judge().stable_hash().unwrap()
+        );
+        let changed = parse(
+            &text.replace("#STOP01 48", "#STOP01 96"),
+            ParseOptions::default(),
+        )
+        .unwrap();
+        assert!(matches!(
+            reconstruct(&changed, recorded, limits()),
+            Err(PlaybackError::IdentityMismatch(_))
+        ));
+    }
+
+    #[test]
     fn v1_defaults_zero_and_v2_preserves_start_profile_and_signed_offset() {
         let source = source();
         for start in [

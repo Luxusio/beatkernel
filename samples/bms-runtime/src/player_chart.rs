@@ -378,6 +378,35 @@ mod tests {
     }
 
     #[test]
+    fn lnobj_body_uses_compiled_bpm_stop_endpoint_without_endpoint_note() {
+        let source = parse(
+            "#BPM 60\n#BPM01 120\n#STOP01 48\n#LNOBJ ZZ\n#WAV01 tap.wav\n#00011:010000ZZ\n#00008:00010000\n#00009:00010000\n",
+            ParseOptions::default(),
+        ).unwrap();
+        let compiled = source.compile().unwrap();
+        let chart = PlayerChart::from_compiled(&source, &compiled.chart).unwrap();
+        assert_eq!(chart.lanes, [0x11]);
+        assert_eq!(chart.notes.len(), 1);
+        let note = &chart.notes[0];
+        assert_eq!(note.object, compiled.chart.objects()[0].id);
+        assert_eq!(note.start, Timestamp::ZERO);
+        assert_eq!(note.end, Some(Timestamp::from_nanos(2_500_000_000)));
+        assert_eq!(chart.duration_ns, 2_500_000_000);
+        for at in [0, 1_250_000_000, 2_499_999_999, 2_500_000_000] {
+            let visible = chart
+                .visible_notes_checked(Timestamp::from_nanos(at), 0, 0)
+                .unwrap();
+            assert_eq!(visible, [note]);
+        }
+        assert!(
+            chart
+                .visible_notes_checked(Timestamp::from_nanos(2_500_000_001), 0, 0)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn unicode_lane_order_and_exact_hold_overlap() {
         let chart = model(
             "#TITLE 별빛\n#ARTIST 作曲家\n#BPM 60\n#LNTYPE 1\n#WAV01 tap.wav\n#00016:01\n#00021:01\n#00026:01\n#00051:0101\n",
