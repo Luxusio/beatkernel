@@ -174,3 +174,6 @@ profile entries from the others. Conflicting forms supplied together remain an
 explicit native validation error. Within an accepted draft, exhausted player-ID
 space still permits retaining/shrinking existing u32::MAX IDs; growth fails
 atomically rather than reusing retired IDs.
+
+### Native finite local cohort endpoints
+WASAPI shared/exclusive and CoreAudio local 2..64 sessions accept --end-ns with one shared immutable audio/logical end. Finish only after actual native presentation, every acquisition source drained, real globally committed input frontier past the terminal boundary, all members at logical end and pending resume reconciliation complete. Preserve per-player original-input prefixes and independent captures/scores; do not force unfinished notes. ASIO/network finite integration remains pending. Fixtures must be prepared for later execution; source compilation is not native acceptance.

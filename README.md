@@ -160,14 +160,14 @@ Linux solo and local 2..64 owners can opt into `--end-ns N`, strictly after
 presentation plus drained input before finite-prefix completion. Manual pause
 and short resume retain their physical gaps. Every assigned keyboard must drain
 and every member must reach the same logical end. Network endpoint support and
-Windows/macOS local-group and UI practice-region wiring remain unfinished; loops above retain
+UI practice-region wiring remains unfinished; loops above retain
 their observed-position ceiling. Portable regression fixtures are prepared for
 later execution, while native hardware/GUI/acoustic checks remain unverified.
-Windows WASAPI shared/exclusive and macOS CoreAudio solo owners also accept
+Windows WASAPI shared/exclusive and macOS CoreAudio solo and local 2..64 owners also accept
 `--end-ns`, using their actual PCM grid and native output/host clock relation.
 The endpoint freezes audio, caps judging, and finishes an incomplete prefix only
 after output presentation, input collection drain and pending resume reconciliation.
-Finite local groups on these platforms, ASIO and network sessions are rejected
+Finite ASIO and network sessions are rejected
 before session resources are opened. Omitting the end retains full-song completion.
 A first clock observation already beyond the endpoint fails explicitly because
 no actual lower bracket exists. Native device execution remains unverified.
