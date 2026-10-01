@@ -173,6 +173,8 @@ impl Mixer {
     /// emits silence on the physical output grid while preserving the playback
     /// cursor, voices, rational heads and all queued or pending commands.
     /// Command targets use the playback grid, excluding paused output frames.
+    /// An immutable playback endpoint limits the active prefix, zeros its
+    /// physical suffix and remains paused even if the producer requests resume.
     pub fn render(&mut self, output: &mut [f32]) -> Result<RenderReport, AudioError> {
         let channels = usize::from(self.config.format().channels());
         if !output.len().is_multiple_of(channels) {
@@ -189,13 +191,19 @@ impl Mixer {
             .ok_or(AudioError::Overflow)?;
         let start = self.frame_cursor;
         let playback_start = self.playback_frame_cursor;
+        let active_extent = self
+            .config
+            .playback_end_frame()
+            .map_or(extent, |end| extent.min(end.saturating_sub(playback_start)));
         let playback_end = playback_start
-            .checked_add(extent)
+            .checked_add(active_extent)
             .ok_or(AudioError::Overflow)?;
+        let active_frames = usize::try_from(active_extent).map_err(|_| AudioError::Overflow)?;
+        let active_samples = active_frames * channels;
         if frames == 0 {
             return Ok(self.report(start, playback_start, 0));
         }
-        self.paused = self.consumer.pause_requested();
+        self.paused = self.consumer.pause_requested() || active_extent == 0;
         if self.paused {
             output.fill(0.0);
             self.frame_cursor = end;
@@ -232,7 +240,7 @@ impl Mixer {
             );
         }
 
-        for frame in output.chunks_exact_mut(channels) {
+        for frame in output[..active_samples].chunks_exact_mut(channels) {
             while self
                 .pending
                 .first()
@@ -245,9 +253,14 @@ impl Mixer {
                 self.apply(pending.command);
             }
             self.mix_frame(frame);
-            self.frame_cursor += 1;
             self.playback_frame_cursor += 1;
         }
+        output[active_samples..].fill(0.0);
+        self.frame_cursor = end;
+        self.paused = self
+            .config
+            .playback_end_frame()
+            .is_some_and(|end| self.playback_frame_cursor >= end);
         debug_assert_eq!(self.frame_cursor, end);
         debug_assert_eq!(self.playback_frame_cursor, playback_end);
         self.counters.rendered_frames = self.counters.rendered_frames.saturating_add(extent);
@@ -268,7 +281,8 @@ impl Mixer {
     pub const fn playback_frame_cursor(&self) -> u64 {
         self.playback_frame_cursor
     }
-    /// Pause state adopted by the most recent valid nonempty render.
+    /// Applied end-state of the most recent valid nonempty render, including
+    /// an immutable playback endpoint that queue resume cannot lift.
     pub const fn is_paused(&self) -> bool {
         self.paused
     }
@@ -431,7 +445,8 @@ impl Mixer {
             start_frame,
             frames,
             playback_start_frame,
-            playback_frames: if self.paused { 0 } else { frames },
+            playback_frames: usize::try_from(self.playback_frame_cursor - playback_start_frame)
+                .expect("playback extent is bounded by this block's usize extent"),
             paused: self.paused,
             active_voices: self.voices.iter().filter(|slot| slot.is_some()).count(),
             pending_commands: self.pending.len(),

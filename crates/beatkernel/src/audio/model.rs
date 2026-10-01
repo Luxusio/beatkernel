@@ -198,6 +198,7 @@ pub struct MixerConfig {
     domain: ClockDomainId,
     origin: Timestamp,
     limits: AudioLimits,
+    playback_end_frame: Option<u64>,
 }
 
 impl MixerConfig {
@@ -213,6 +214,7 @@ impl MixerConfig {
             domain,
             origin,
             limits,
+            playback_end_frame: None,
         }
     }
     /// Internal output PCM format.
@@ -230,6 +232,17 @@ impl MixerConfig {
     /// Explicit bounded storage/work limits.
     pub const fn limits(self) -> AudioLimits {
         self.limits
+    }
+    /// Sets an exclusive immutable endpoint on the absolute playback frame
+    /// grid. Frames at/after it stay silent even after a queue resume request.
+    /// Repetition requires a fresh mixer; zero prevents command consumption.
+    pub const fn with_playback_end_frame(mut self, end: u64) -> Self {
+        self.playback_end_frame = Some(end);
+        self
+    }
+    /// Exclusive playback endpoint, or no finite fence by default.
+    pub const fn playback_end_frame(self) -> Option<u64> {
+        self.playback_end_frame
     }
 }
 
@@ -328,12 +341,14 @@ pub struct RenderReport {
     /// Number of contiguous frames produced.
     pub frames: usize,
     /// First frame on the scheduling grid, excluding explicit paused silence.
-    /// Equal to `start_frame` until the first queue pause.
+    /// Equal to `start_frame` until the first inserted silent pause frames.
     pub playback_start_frame: u64,
-    /// Scheduling frames processed by this block; zero during explicit pause.
+    /// Scheduling frames processed by this block, including an active prefix
+    /// before an immutable endpoint; zero during a whole-block explicit pause.
     /// A zero sample-head Rate still advances this scheduling grid.
     pub playback_frames: usize,
-    /// Applied queue-pause state. Only a valid nonempty render adopts requests.
+    /// Applied pause state at block end, including an immutable endpoint reached
+    /// after an active prefix. Only valid nonempty renders adopt requests/fences.
     /// This is render evidence, not proof of native/acoustic presentation.
     pub paused: bool,
     /// Number of active voices after this block.
