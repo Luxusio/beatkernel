@@ -1131,3 +1131,30 @@ fixtures must be authored for later execution; source checks are compile only.
 
 Original BMP00/04/06 semantics: [author's BMS format](https://bm98.yaneu.com/bm98/bmsformat.html). Channel07 extension context:
 [hitkey command memo](https://hitkey.nekokan.dyndns.info/cmds.htm).
+
+## Static image preparation
+
+Support BMP/PNG/JPEG raster signatures with bounded configurable decoding into
+straight RGBA8 before playback; preserve alpha and literal image orientation,
+without resizing. Use the maintained image codec with only these format
+features enabled. Videos, other formats, legacy black color-key transparency,
+GPU upload/display and streamed texture-cache policy remain pending.
+
+An explicit portable ImageAssets preparation API opens only visual references
+and defined BMP00, outside audio/input/frame callbacks. Undefined references,
+missing files and damaged/unsupported encoded images have explicit unavailable
+reasons and later render blank; visual-only failures need not cancel audio.
+Unsafe paths, escapes, nonfiles, access errors and configured capacity/aggregate
+limits reject preparation atomically. Reuse exact contained path resolution;
+no filename-extension replacement yet. Deduplicate canonical files and share
+immutable decoded RGBA data across image IDs. Do not equate CPU asset count
+with the renderer's concurrent texture slots.
+
+Bound encoded inputs and decoded extents/output before admission and enforce
+a cumulative decoded bank budget. Defaults: encoded/output64MiB, dimensions
+4096, referenced IDs1296 and bank64MiB. Bank budget configurable up to256MiB;
+extent up to16384 remains subject to per-image64MiB output. Limits constrain
+encoded/output/retained storage, not a hard total-process peak: decoder buffers
+and RGBA conversion can coexist. Author codec and real filesystem/prepared
+chart fixtures for later execution; source compilation alone does not establish
+codec correctness or native rendering acceptance.
