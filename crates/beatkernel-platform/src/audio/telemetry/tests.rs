@@ -40,6 +40,7 @@ fn snapshot() -> AudioStreamSnapshot {
             playback_start_frame: u64::MAX - 17,
             playback_frames: 0,
             paused: true,
+            playback_end_physical_frame: Some(u64::MAX),
             active_voices: 3,
             pending_commands: 2,
             song_position: Timestamp::from_nanos(-17),
@@ -147,9 +148,36 @@ fn production_publication_preserves_literal_scalar_widths_signed_times_and_all_c
             10,
             u64::MAX - 17,
             0,
-            1
+            1,
+            1,
+            u64::MAX
         ]
     );
+}
+
+#[test]
+fn endpoint_presence_distinguishes_zero_maximum_and_absent_across_publications() {
+    let telemetry = Telemetry::new();
+    let mut generation = 0;
+    for marker in [Some(0), Some(u64::MAX), None, Some(17)] {
+        let mut expected = snapshot();
+        expected
+            .render
+            .as_mut()
+            .unwrap()
+            .playback_end_physical_frame = marker;
+        telemetry.publish(expected, &mut generation);
+        let actual = telemetry.read();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            telemetry.values[36].load(Ordering::SeqCst),
+            u64::from(marker.is_some())
+        );
+        assert_eq!(
+            telemetry.values[37].load(Ordering::SeqCst),
+            marker.unwrap_or(0)
+        );
+    }
 }
 
 #[test]

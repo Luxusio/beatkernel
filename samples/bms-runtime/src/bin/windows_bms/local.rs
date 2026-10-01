@@ -955,6 +955,7 @@ mod fixtures {
             playback_start_frame: 1,
             playback_frames: 0,
             paused: true,
+            playback_end_physical_frame: None,
             active_voices: 0,
             pending_commands: 0,
             song_position: Timestamp::ZERO,

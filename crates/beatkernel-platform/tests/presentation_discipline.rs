@@ -603,6 +603,7 @@ mod asio_observations {
             playback_start_frame: start_frame,
             playback_frames: 64,
             paused: false,
+            playback_end_physical_frame: None,
             active_voices: 0,
             pending_commands: 0,
             song_position: Timestamp::ZERO,

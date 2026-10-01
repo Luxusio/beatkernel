@@ -17,6 +17,7 @@ pub struct Mixer {
     frame_cursor: u64,
     playback_frame_cursor: u64,
     paused: bool,
+    playback_end_physical_frame: Option<u64>,
     counters: AudioCounters,
     rate: Rate,
     song_position: Timestamp,
@@ -147,6 +148,7 @@ impl Mixer {
             frame_cursor: 0,
             playback_frame_cursor: 0,
             paused: false,
+            playback_end_physical_frame: None,
             counters: AudioCounters::default(),
             rate: Rate::NORMAL,
             song_position: Timestamp::ZERO,
@@ -200,11 +202,15 @@ impl Mixer {
             .ok_or(AudioError::Overflow)?;
         let active_frames = usize::try_from(active_extent).map_err(|_| AudioError::Overflow)?;
         let active_samples = active_frames * channels;
+        let physical_prefix_end = start
+            .checked_add(active_extent)
+            .ok_or(AudioError::Overflow)?;
         if frames == 0 {
             return Ok(self.report(start, playback_start, 0));
         }
         self.paused = self.consumer.pause_requested() || active_extent == 0;
         if self.paused {
+            self.mark_playback_end(start);
             output.fill(0.0);
             self.frame_cursor = end;
             self.counters.rendered_frames = self.counters.rendered_frames.saturating_add(extent);
@@ -261,6 +267,7 @@ impl Mixer {
             .config
             .playback_end_frame()
             .is_some_and(|end| self.playback_frame_cursor >= end);
+        self.mark_playback_end(physical_prefix_end);
         debug_assert_eq!(self.frame_cursor, end);
         debug_assert_eq!(self.playback_frame_cursor, playback_end);
         self.counters.rendered_frames = self.counters.rendered_frames.saturating_add(extent);
@@ -285,6 +292,16 @@ impl Mixer {
     /// an immutable playback endpoint that queue resume cannot lift.
     pub const fn is_paused(&self) -> bool {
         self.paused
+    }
+    fn mark_playback_end(&mut self, physical: u64) {
+        if self.playback_end_physical_frame.is_none()
+            && self
+                .config
+                .playback_end_frame()
+                .is_some_and(|end| self.playback_frame_cursor >= end)
+        {
+            self.playback_end_physical_frame = Some(physical);
+        }
     }
 
     /// Fixed cumulative telemetry snapshot.
@@ -448,6 +465,7 @@ impl Mixer {
             playback_frames: usize::try_from(self.playback_frame_cursor - playback_start_frame)
                 .expect("playback extent is bounded by this block's usize extent"),
             paused: self.paused,
+            playback_end_physical_frame: self.playback_end_physical_frame,
             active_voices: self.voices.iter().filter(|slot| slot.is_some()).count(),
             pending_commands: self.pending.len(),
             song_position: self.song_position,

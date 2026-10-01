@@ -317,6 +317,7 @@ mod tests {
             playback_start_frame: start,
             playback_frames: 10,
             paused: false,
+            playback_end_physical_frame: None,
             active_voices: active,
             pending_commands: pending,
             song_position: Timestamp::ZERO,

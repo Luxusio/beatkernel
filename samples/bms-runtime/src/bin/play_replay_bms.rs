@@ -1003,6 +1003,7 @@ mod fixtures {
             playback_start_frame: 40,
             playback_frames: 0,
             paused: true,
+            playback_end_physical_frame: None,
             active_voices: 1,
             pending_commands: 2,
             song_position: Timestamp::ZERO,

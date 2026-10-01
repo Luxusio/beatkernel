@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) struct Telemetry {
     version: AtomicU64,
     pub(crate) status: AtomicU64,
-    values: [AtomicU64; 36],
+    values: [AtomicU64; 38],
 }
 
 /// Observes one running deadline interval; Ready/prefill is not an interval.
@@ -106,8 +106,8 @@ fn decode_status(value: u64) -> AudioStreamStatus {
     }
 }
 
-fn encode_snapshot(snapshot: AudioStreamSnapshot) -> [u64; 36] {
-    let mut values = [0u64; 36];
+fn encode_snapshot(snapshot: AudioStreamSnapshot) -> [u64; 38] {
+    let mut values = [0u64; 38];
     let counters = snapshot.counters;
     values[..7].copy_from_slice(&[
         status_code(snapshot.status),
@@ -163,16 +163,20 @@ fn encode_snapshot(snapshot: AudioStreamSnapshot) -> [u64; 36] {
             counters.invalid_rates,
             counters.invalid_times,
         ]);
-        values[33..].copy_from_slice(&[
+        values[33..36].copy_from_slice(&[
             render.playback_start_frame,
             render.playback_frames as u64,
             u64::from(render.paused),
         ]);
+        if let Some(frame) = render.playback_end_physical_frame {
+            values[36] = 1;
+            values[37] = frame;
+        }
     }
     values
 }
 
-fn decode_snapshot(values: [u64; 36]) -> AudioStreamSnapshot {
+fn decode_snapshot(values: [u64; 38]) -> AudioStreamSnapshot {
     AudioStreamSnapshot {
         telemetry_available: true,
         status: decode_status(values[0]),
@@ -211,6 +215,7 @@ fn decode_snapshot(values: [u64; 36]) -> AudioStreamSnapshot {
             playback_start_frame: values[33],
             playback_frames: values[34] as usize,
             paused: values[35] != 0,
+            playback_end_physical_frame: (values[36] != 0).then_some(values[37]),
             active_voices: values[18] as usize,
             pending_commands: values[19] as usize,
             song_position: Timestamp::from_nanos(values[20] as i64),

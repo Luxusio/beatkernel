@@ -78,6 +78,7 @@ fn immutable_end_straddles_pcm_and_retains_commands_voices_and_song_anchor() {
         (5, 3)
     );
     assert_eq!(report.active_voices, 1);
+    assert_eq!(report.playback_end_physical_frame, Some(3));
     assert_eq!(report.pending_commands, 3);
     assert_eq!(report.counters.commands_applied, 1);
     assert_eq!(report.song_position, Timestamp::ZERO);
@@ -97,6 +98,7 @@ fn immutable_end_straddles_pcm_and_retains_commands_voices_and_song_anchor() {
     );
     assert_eq!(frozen.pending_commands, 3);
     assert_eq!(frozen.active_voices, 1);
+    assert_eq!(frozen.playback_end_physical_frame, Some(3));
     assert_eq!(mixer.rate(), Rate::NORMAL);
     assert_eq!(mixer.playback_frame_cursor(), 3);
 }
@@ -114,6 +116,7 @@ fn exact_end_block_is_all_active_and_reports_paused_at_its_end() {
     producer.try_push(play(1, 0, 1.0)).unwrap();
     let first = mixer.render(&mut [99.0; 2]).unwrap();
     assert!(!first.paused);
+    assert_eq!(first.playback_end_physical_frame, None);
     let mut last = [99.0];
     let end = mixer.render(&mut last).unwrap();
     assert_eq!(last, [0.25]);
@@ -122,6 +125,7 @@ fn exact_end_block_is_all_active_and_reports_paused_at_its_end() {
         (2, 1, true)
     );
     assert!(mixer.is_paused());
+    assert_eq!(end.playback_end_physical_frame, Some(3));
     assert_eq!(mixer.render(&mut []).unwrap().playback_frames, 0);
     assert_eq!(mono(&[0.25]).1.config().playback_end_frame(), None);
 }
@@ -140,6 +144,7 @@ fn zero_endpoint_and_invalid_empty_renders_do_not_adopt_or_consume() {
     producer.try_push(play(1, 0, 1.0)).unwrap();
     let original = mixer.render(&mut []).unwrap();
     assert!(!original.paused);
+    assert_eq!(original.playback_end_physical_frame, None);
     producer.request_pause(true);
     let mut invalid = [99.0; 3];
     assert_eq!(mixer.render(&mut invalid), Err(AudioError::InvalidBuffer));
@@ -153,6 +158,7 @@ fn zero_endpoint_and_invalid_empty_renders_do_not_adopt_or_consume() {
     let end = mixer.render(&mut output).unwrap();
     assert_eq!(output, [0.0; 4]);
     assert!(end.paused);
+    assert_eq!(end.playback_end_physical_frame, Some(0));
     assert_eq!(end.playback_frames, 0);
     assert_eq!(end.counters.commands_consumed, 0);
     assert_eq!(
@@ -170,7 +176,7 @@ fn manual_pause_fractional_heads_and_hard_end_are_partition_invariant() {
         first: &[usize],
         pause: &[usize],
         last: &[usize],
-    ) -> (Vec<f32>, AudioCounters, u64, u64) {
+    ) -> (Vec<f32>, AudioCounters, u64, u64, Option<u64>) {
         let (mut producer, mut mixer) = rig_end(
             AudioFormat::new(1000, 1).unwrap(),
             1000,
@@ -203,12 +209,14 @@ fn manual_pause_fractional_heads_and_hard_end_are_partition_invariant() {
             pcm.extend(block);
         }
         assert!(mixer.is_paused());
-        assert_eq!(mixer.render(&mut []).unwrap().pending_commands, 1);
+        let final_report = mixer.render(&mut []).unwrap();
+        assert_eq!(final_report.pending_commands, 1);
         (
             pcm,
             mixer.counters(),
             mixer.frame_cursor(),
             mixer.playback_frame_cursor(),
+            final_report.playback_end_physical_frame,
         )
     }
     let whole = render(&[2], &[3], &[5]);
@@ -219,6 +227,145 @@ fn manual_pause_fractional_heads_and_hard_end_are_partition_invariant() {
         assert!((actual - expected).abs() < 1e-7);
     }
     assert_eq!((whole.2, whole.3), (10, 5));
+    assert_eq!(whole.4, Some(8));
+}
+
+#[test]
+fn endpoint_marker_retains_all_manual_pause_gaps_even_after_short_resume_and_coalescence() {
+    let (mut producer, mut mixer) = rig_end(
+        AudioFormat::new(1000, 1).unwrap(),
+        1000,
+        &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+        bounds(),
+        0,
+        Some(5),
+    );
+    producer.try_push(play(1, 0, 1.0)).unwrap();
+    producer.try_push(stop(1, 5_000_000)).unwrap();
+    let mut first = [99.0; 2];
+    assert_eq!(
+        mixer
+            .render(&mut first)
+            .unwrap()
+            .playback_end_physical_frame,
+        None
+    );
+    assert_eq!(first, [0.1, 0.2]);
+    producer.request_pause(true);
+    let mut silent = [99.0; 3];
+    let manually_paused = mixer.render(&mut silent).unwrap();
+    assert_eq!(silent, [0.0; 3]);
+    assert_eq!(manually_paused.playback_end_physical_frame, None);
+    producer.request_pause(false);
+    let mut short = [99.0];
+    let short_resume = mixer.render(&mut short).unwrap();
+    assert_eq!(short, [0.3]);
+    assert!(!short_resume.paused);
+    assert_eq!(short_resume.playback_end_physical_frame, None);
+    producer.request_pause(true);
+    assert_eq!(
+        mixer
+            .render(&mut short)
+            .unwrap()
+            .playback_end_physical_frame,
+        None
+    );
+    producer.request_pause(false);
+    let mut crossing = [99.0; 4];
+    let end = mixer.render(&mut crossing).unwrap();
+    assert_eq!(crossing, [0.4, 0.5, 0.0, 0.0]);
+    assert_eq!(
+        (
+            end.start_frame,
+            end.playback_start_frame,
+            end.playback_frames
+        ),
+        (7, 3, 2)
+    );
+    assert_eq!(end.playback_end_physical_frame, Some(9));
+    assert_eq!(end.pending_commands, 1);
+    // A latest-only native observer may never see the active-prefix report.
+    // The later pure-silent report must still identify the actual frame9.
+    producer.request_pause(false);
+    let latest = mixer.render(&mut silent).unwrap();
+    assert_eq!(
+        (
+            latest.start_frame,
+            latest.playback_start_frame,
+            latest.playback_frames
+        ),
+        (11, 5, 0)
+    );
+    assert_eq!(latest.playback_end_physical_frame, Some(9));
+    assert_eq!(
+        latest.counters.commands_consumed,
+        end.counters.commands_consumed
+    );
+    let empty = mixer.render(&mut []).unwrap();
+    assert_eq!(empty.playback_end_physical_frame, Some(9));
+    let mut invalid = [99.0; 257];
+    assert_eq!(mixer.render(&mut invalid), Err(AudioError::RenderCapacity));
+    assert_eq!(invalid, [99.0; 257]);
+    assert_eq!(mixer.render(&mut []).unwrap(), empty);
+}
+
+#[test]
+fn short_resume_reaching_end_with_no_unpaused_report_still_has_exact_physical_marker() {
+    let (mut producer, mut mixer) = rig_end(
+        AudioFormat::new(1000, 1).unwrap(),
+        1000,
+        &[0.25; 8],
+        bounds(),
+        0,
+        Some(3),
+    );
+    producer.try_push(play(1, 0, 1.0)).unwrap();
+    mixer.render(&mut [99.0; 2]).unwrap();
+    producer.request_pause(true);
+    assert_eq!(
+        mixer
+            .render(&mut [99.0; 7])
+            .unwrap()
+            .playback_end_physical_frame,
+        None
+    );
+    producer.request_pause(false);
+    let mut resumed = [99.0; 4];
+    let end = mixer.render(&mut resumed).unwrap();
+    assert_eq!(resumed, [0.25, 0.0, 0.0, 0.0]);
+    assert!(end.paused);
+    assert_eq!(end.playback_end_physical_frame, Some(10));
+    assert_eq!(
+        mixer
+            .render(&mut [99.0; 2])
+            .unwrap()
+            .playback_end_physical_frame,
+        Some(10)
+    );
+    let (mut producer, mut unlimited) = mono(&[0.25; 8]);
+    assert_eq!(
+        unlimited
+            .render(&mut [99.0; 2])
+            .unwrap()
+            .playback_end_physical_frame,
+        None
+    );
+    producer.request_pause(true);
+    assert_eq!(
+        unlimited
+            .render(&mut [99.0; 2])
+            .unwrap()
+            .playback_end_physical_frame,
+        None
+    );
+    producer.request_pause(false);
+    assert_eq!(
+        unlimited
+            .render(&mut [99.0; 2])
+            .unwrap()
+            .playback_end_physical_frame,
+        None
+    );
 }
 fn mono(samples: &[f32]) -> (CommandProducer, Mixer) {
     rig(
@@ -510,6 +657,7 @@ fn empty_output_preserves_queue_cursor_rate_and_initial_report() {
             playback_start_frame: 0,
             playback_frames: 0,
             paused: false,
+            playback_end_physical_frame: None,
             active_voices: 0,
             pending_commands: 0,
             song_position: Timestamp::ZERO,

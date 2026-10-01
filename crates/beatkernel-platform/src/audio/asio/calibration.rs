@@ -194,6 +194,7 @@ mod fixtures {
                 playback_start_frame: frame,
                 playback_frames: 1,
                 paused: false,
+                playback_end_physical_frame: None,
                 active_voices: 0,
                 pending_commands: 0,
                 song_position: Timestamp::ZERO,

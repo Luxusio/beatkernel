@@ -351,6 +351,11 @@ pub struct RenderReport {
     /// after an active prefix. Only valid nonempty renders adopt requests/fences.
     /// This is render evidence, not proof of native/acoustic presentation.
     pub paused: bool,
+    /// Physical exclusive prefix end when the immutable playback endpoint was
+    /// first reached by a valid nonempty render. Retained across later reports,
+    /// including silence/empty blocks; None for unlimited or not-yet-ended output.
+    /// This render evidence does not prove native/acoustic presentation.
+    pub playback_end_physical_frame: Option<u64>,
     /// Number of active voices after this block.
     pub active_voices: usize,
     /// Number of pending commands after this block.
