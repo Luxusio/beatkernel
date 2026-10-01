@@ -8,6 +8,61 @@ use beatkernel::{
 use std::{collections::BTreeSet, error::Error};
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
+/// Reconstructs fresh practice objects while retaining original timing markers.
+/// Earlier heads, including whole crossing holds, are excluded identically to
+/// PCM preparation. Reapplying the same selection is idempotent.
+pub fn source_at(
+    source: &beatkernel_bms::BmsChart,
+    start: Timestamp,
+) -> Result<beatkernel_bms::BmsChart> {
+    if start.as_nanos() < 0 {
+        return Err("practice start must be nonnegative".into());
+    }
+    let mut source = source.clone();
+    if start != Timestamp::ZERO {
+        let compiled = source.compile()?;
+        retain_source(&mut source, &retained_objects(&compiled.chart, start));
+    }
+    Ok(source)
+}
+
+fn retained_objects(
+    chart: &beatkernel::chart::CompiledChart,
+    start: Timestamp,
+) -> BTreeSet<beatkernel::chart::ObjectId> {
+    chart
+        .objects()
+        .iter()
+        .filter(|object| object.time.start >= start)
+        .map(|object| object.id)
+        .collect()
+}
+
+fn retain_source(
+    source: &mut beatkernel_bms::BmsChart,
+    retained: &BTreeSet<beatkernel::chart::ObjectId>,
+) {
+    source
+        .source
+        .objects
+        .retain(|object| retained.contains(&object.id));
+    source.notes.retain(|note| retained.contains(&note.object));
+}
+
+/// Validates a recording before allocating its section music suffixes.
+/// Supply freshly loaded original assets; repeated suffix selection is invalid.
+pub fn prepare_replay(
+    prepared: PreparedBms,
+    file: &beatkernel::replay::codec::ReplayFile,
+    limits: beatkernel::replay::codec::ReplayCodecLimits,
+    pcm_limits: PcmLimits,
+) -> Result<PreparedBms> {
+    // Reconstruction validates canonical bounds and identity before PCM copies.
+    crate::replay_playback::validate_setup(&prepared.source, file, limits)?;
+    let (_, start) = crate::replay_playback::decode_setup(&file.header.options)?;
+    Ok(prepare_at(prepared, start, pcm_limits)?.0)
+}
+
 /// Original-source selection evidence; native presentation remains uncertain.
 #[derive(Debug)]
 pub struct TailSelection {
@@ -49,14 +104,7 @@ pub fn prepare_at(
     if start == Timestamp::ZERO {
         return Ok((prepared, report));
     }
-    let retained: BTreeSet<_> = prepared
-        .compiled
-        .chart
-        .objects()
-        .iter()
-        .filter(|object| object.time.start >= start)
-        .map(|object| object.id)
-        .collect();
+    let retained = retained_objects(&prepared.compiled.chart, start);
     report.excluded_objects = prepared.compiled.chart.objects().len() - retained.len();
     report.excluded_crossing_holds = prepared
         .compiled
@@ -167,15 +215,7 @@ pub fn prepare_at(
         AudioCommand::Play { at, .. } => *at,
         _ => Timestamp::ZERO,
     });
-    prepared
-        .source
-        .source
-        .objects
-        .retain(|object| retained.contains(&object.id));
-    prepared
-        .source
-        .notes
-        .retain(|note| retained.contains(&note.object));
+    retain_source(&mut prepared.source, &retained);
     prepared
         .sounds
         .retain(|sound| retained.contains(&sound.object));
