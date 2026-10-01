@@ -165,6 +165,7 @@ struct Game {
     cancelling: bool,
     joined: bool,
     local_page: usize,
+    local_comparisons: bool,
 }
 
 impl Drop for Game {
@@ -184,7 +185,7 @@ pub(super) fn run(
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
-            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
         );
         return Ok(());
     }
@@ -1061,6 +1062,7 @@ impl Desktop {
         match id.0 {
             6 if self.game.is_some() => self.change_local_page(false),
             7 if self.game.is_some() => self.change_local_page(true),
+            8 if self.game.is_some() => self.toggle_local_comparisons(),
             5 if self.game.is_none() => self.open_settings(),
             1 if self.game.is_none() && !self.entries.is_empty() => self.key(KeyCode::Enter, false),
             2 if self.game.as_ref().is_some_and(|game| !game.joined) => self.cancel(),
@@ -1087,6 +1089,19 @@ impl Desktop {
             game.local_page = local_page(count, game.local_page, forward);
             self.gesture.cancel();
             self.hits.clear();
+        }
+    }
+    fn toggle_local_comparisons(&mut self) {
+        if let Some(game) = &mut self.game {
+            if game
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| local_comparisons_available(&snapshot.players))
+            {
+                game.local_comparisons = !game.local_comparisons;
+                self.gesture.cancel();
+                self.hits.clear();
+            }
         }
     }
     fn cancel(&mut self) {
@@ -1154,6 +1169,10 @@ impl Desktop {
             self.change_local_page(key == KeyCode::PageDown);
             return;
         }
+        if self.game.is_some() && !repeat && key == KeyCode::KeyC {
+            self.toggle_local_comparisons();
+            return;
+        }
         if self.game.as_ref().is_some_and(|game| game.joined) {
             if !repeat && matches!(key, KeyCode::Enter | KeyCode::Escape) {
                 self.game = None;
@@ -1215,6 +1234,7 @@ impl Desktop {
             cancelling: false,
             joined: false,
             local_page: 0,
+            local_comparisons: false,
         });
         Ok(())
     }
@@ -1290,6 +1310,30 @@ impl Desktop {
                         "NEXT",
                     );
                 }
+            }
+            if game
+                .snapshot
+                .as_ref()
+                .is_some_and(|snapshot| local_comparisons_available(&snapshot.players))
+            {
+                control(
+                    pixels,
+                    &mut self.hits,
+                    &self.gesture,
+                    point,
+                    ControlId(8),
+                    Bounds {
+                        x: 550,
+                        y: 65,
+                        width: 180,
+                        height: 34,
+                    },
+                    if game.local_comparisons {
+                        "COMPARISONS *"
+                    } else {
+                        "COMPARISONS"
+                    },
+                );
             }
             if game.joined {
                 control(
@@ -2033,6 +2077,14 @@ fn window_title(title: &str, artist: &str) -> String {
         .collect()
 }
 
+fn local_comparisons_available(players: &[player::LocalPlayerSnapshot]) -> bool {
+    players.len() >= 2
+        && players.iter().any(|player| {
+            player.competition.as_ref().is_some_and(|comparisons| {
+                !comparisons.ghosts.is_empty() || comparisons.network.is_some()
+            })
+        })
+}
 fn local_page(count: usize, current: usize, forward: bool) -> usize {
     let last = count
         .div_ceil(organisms::LOCAL_PLAYERS_PER_PAGE)
@@ -2065,26 +2117,45 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
     };
     text(pixels, 24, 65, status, 2, 0x9bb1cf);
     if snapshot.players.len() >= 2 {
-        organisms::local_players(pixels, &snapshot.players, lookahead, game.local_page)?;
+        organisms::local_players_with_competition(
+            pixels,
+            &snapshot.players,
+            lookahead,
+            game.local_page,
+            game.local_comparisons,
+        )?;
         text(
             pixels,
             24,
             665,
             &format!(
-                "PLAYERS {}  PAGE {}/{}  PGUP/PGDN",
+                "PLAYERS {}  PAGE {}/{}  PGUP/PGDN{}",
                 snapshot.players.len(),
                 game.local_page + 1,
                 snapshot
                     .players
                     .len()
-                    .div_ceil(organisms::LOCAL_PLAYERS_PER_PAGE)
+                    .div_ceil(organisms::LOCAL_PLAYERS_PER_PAGE),
+                if local_comparisons_available(&snapshot.players) {
+                    "  C COMPARISONS"
+                } else {
+                    ""
+                }
             ),
             1,
             0x9bb1cf,
         );
         return Ok(());
     }
-    organisms::scoreboard(pixels, &snapshot.score, &snapshot.recent_results);
+    if let Some(competition) = snapshot
+        .players
+        .first()
+        .and_then(|player| player.competition.as_ref())
+    {
+        organisms::competition_scoreboard(pixels, &snapshot.score, competition)?;
+    } else {
+        organisms::scoreboard(pixels, &snapshot.score, &snapshot.recent_results);
+    }
     if let (Some(chart), Some(now)) = (&snapshot.chart, snapshot.song_time) {
         organisms::playfield(pixels, chart, now, lookahead)?;
         text(
@@ -2114,6 +2185,45 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn comparison_toggle_is_available_only_for_groups_with_retained_comparisons() {
+        let mut players: Vec<_> = (1..=2)
+            .map(|id| player::LocalPlayerSnapshot {
+                player: beatkernel_bms_runtime::local_players::PlayerId(id),
+                chart: None,
+                song_time: None,
+                score: Default::default(),
+                last_judge: None,
+                recent_results: Vec::new(),
+                competition: None,
+            })
+            .collect();
+        assert!(!local_comparisons_available(&players));
+        players[0].competition = Some(player::CompetitionSnapshot {
+            ghosts: Vec::new(),
+            network: None,
+        });
+        assert!(!local_comparisons_available(&players));
+        players[0].competition.as_mut().unwrap().network = Some(player::NetworkSnapshot {
+            status: player::NetworkStatus::Disconnected,
+            progress: None,
+        });
+        assert!(local_comparisons_available(&players));
+        assert!(!local_comparisons_available(&players[..1]));
+        // Retained ghost prefixes alone are sufficient, without a remote connection.
+        let comparison = players[0].competition.as_mut().unwrap();
+        comparison.network = None;
+        comparison.ghosts.push(player::GhostSnapshot {
+            kind: beatkernel_bms_runtime::competition::OpponentKind::Own,
+            label: "past record".into(),
+            hits: 1,
+            misses: 0,
+            combo: 1,
+            max_combo: 1,
+            recorded_until: Some(beatkernel::time::Timestamp::ZERO),
+        });
+        assert!(local_comparisons_available(&players));
+    }
     #[test]
     fn local_pages_keep_three_four_together_and_bound_larger_rosters() {
         for count in [0, 1, 2, 3, 4] {

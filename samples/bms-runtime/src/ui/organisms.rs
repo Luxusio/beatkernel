@@ -5,8 +5,8 @@ use super::{
     molecules,
 };
 use crate::{
-    competition::ScoreSummary,
-    player::LocalPlayerSnapshot,
+    competition::{OpponentKind, ScoreSummary},
+    player::{CompetitionSnapshot, LocalPlayerSnapshot, NetworkStatus},
     player_chart::{MAX_VISIBLE_NOTES, PlayerChart},
     scene::Scene,
 };
@@ -161,12 +161,125 @@ fn clipped_text(scene: &mut Scene, bounds: Bounds, value: &str, scale: usize, co
     );
 }
 
+/// Exact counts use one row in wide panels and separate rows in the sidebar.
+fn competition_height(snapshot: &CompetitionSnapshot, width: i64) -> Result<i64, String> {
+    if snapshot.ghosts.len() > 8 {
+        return Err("competition display exceeds eight recorded opponents".into());
+    }
+    let ghost_rows = if width >= 44 * 6 { 2 } else { 3 };
+    Ok(
+        (snapshot.ghosts.len() as i64 * ghost_rows
+            + if snapshot.network.is_some() { 4 } else { 0 })
+            * 7,
+    )
+}
+
+/// Passive comparison only: peer progress has its own clock and is self-reported.
+/// Labels may be clipped; opponent rows, lifecycle and exact counters are retained.
+pub fn competition_summary(
+    scene: &mut Scene,
+    snapshot: &CompetitionSnapshot,
+    bounds: Bounds,
+) -> Result<(), String> {
+    let required = competition_height(snapshot, bounds.width)?;
+    let [width, height] = scene.dimensions();
+    if bounds.x < 0
+        || bounds.y < 0
+        || bounds.width < 186
+        || bounds.height < required
+        || i128::from(bounds.x) + i128::from(bounds.width) > width as i128
+        || i128::from(bounds.y) + i128::from(bounds.height) > height as i128
+    {
+        return Err("competition summary bounds do not fit all opponent rows".into());
+    }
+    let wide = bounds.width >= 44 * 6;
+    let mut y = bounds.y;
+    let mut row = |value: &str, color| {
+        clipped_text(
+            scene,
+            Bounds {
+                y,
+                height: 7,
+                ..bounds
+            },
+            value,
+            1,
+            color,
+        );
+        y += 7;
+    };
+    for ghost in &snapshot.ghosts {
+        let kind = match ghost.kind {
+            OpponentKind::Own => "OWN",
+            OpponentKind::Other => "OTHER",
+        };
+        row(&format!("{kind} {}", ghost.label), 0xb6cce6);
+        if wide {
+            row(&format!("H{} M{}", ghost.hits, ghost.misses), 0x9bb1cf);
+        } else {
+            row(&format!("H{}", ghost.hits), 0x9bb1cf);
+            row(&format!("M{}", ghost.misses), 0x9bb1cf);
+        }
+    }
+    if let Some(peer) = &snapshot.network {
+        let status = match peer.status {
+            NetworkStatus::Waiting => "WAITING",
+            NetworkStatus::Connected => "CONNECTED",
+            NetworkStatus::Disconnected => "DISCONNECTED",
+            NetworkStatus::Stopped => "STOPPED",
+        };
+        if wide {
+            row("PEER REPORTED", 0xe3c887);
+            row(status, 0xe3c887);
+            match &peer.progress {
+                Some(progress) => row(
+                    &format!("H{} M{}", progress.hits, progress.misses),
+                    0x9bb1cf,
+                ),
+                None => row("NO PEER PROGRESS", 0x9bb1cf),
+            }
+        } else {
+            row(&format!("PEER REPORTED {status}"), 0xe3c887);
+            match &peer.progress {
+                Some(progress) => {
+                    row(&format!("H{}", progress.hits), 0x9bb1cf);
+                    row(&format!("M{}", progress.misses), 0x9bb1cf);
+                }
+                None => {
+                    row("NO PEER PROGRESS", 0x9bb1cf);
+                    row("", 0x9bb1cf);
+                }
+            }
+        }
+        match &peer.progress {
+            Some(progress) => row(
+                &format!("SONG {:.3} S", progress.song_ns as f64 / 1e9),
+                0x9bb1cf,
+            ),
+            None => row("SONG UNKNOWN", 0x9bb1cf),
+        }
+    }
+    scene.status()
+}
+
 /// Four is a presentation-page budget, never a roster/gameplay limit.
 pub fn local_players(
     scene: &mut Scene,
     players: &[LocalPlayerSnapshot],
     lookahead: i64,
     page: usize,
+) -> Result<(), String> {
+    local_players_with_competition(scene, players, lookahead, page, false)
+}
+
+/// Explicit comparison view reserves rows without changing song-time projection.
+/// Normal gameplay keeps its original lanes even when comparison state exists.
+pub fn local_players_with_competition(
+    scene: &mut Scene,
+    players: &[LocalPlayerSnapshot],
+    lookahead: i64,
+    page: usize,
+    show: bool,
 ) -> Result<(), String> {
     let visible = page_range(players.len(), page)?;
     if lookahead <= 0 {
@@ -238,6 +351,19 @@ pub fn local_players(
             };
             clipped_text(scene, line(56, 7), &label, 1, color);
         }
+        let comparisons = if show {
+            player.competition.as_ref()
+        } else {
+            None
+        };
+        let summary_height = comparisons
+            .map(|snapshot| competition_height(snapshot, bounds.width - 20))
+            .transpose()?
+            .unwrap_or(0);
+        if let Some(snapshot) = comparisons {
+            competition_summary(scene, snapshot, line(72, summary_height))?;
+        }
+        let field_offset = 72 + summary_height;
         match (player.chart.as_ref(), player.song_time) {
             (Some(chart), Some(now)) => playfield_in(
                 scene,
@@ -246,12 +372,18 @@ pub fn local_players(
                 lookahead,
                 Bounds {
                     x: bounds.x + 10,
-                    y: bounds.y + 72,
+                    y: bounds.y + field_offset,
                     width: bounds.width - 20,
-                    height: bounds.height - 80,
+                    height: bounds.height - field_offset - 8,
                 },
             )?,
-            _ => clipped_text(scene, line(100, 7), "WAITING FOR GAME STATE", 1, 0x9bb1cf),
+            _ => clipped_text(
+                scene,
+                line(field_offset + 12, 7),
+                "WAITING FOR GAME STATE",
+                1,
+                0x9bb1cf,
+            ),
         }
     }
     scene.status()
@@ -270,6 +402,58 @@ pub fn scoreboard(pixels: &mut Scene, score: &ScoreSummary, recent_results: &[Ju
         };
         text(pixels, 750, 520 + index * 22, &label, 1, color);
     }
+}
+/// Competition mode reserves the sidebar for every recorded/remote prefix.
+pub fn competition_scoreboard(
+    scene: &mut Scene,
+    score: &ScoreSummary,
+    snapshot: &CompetitionSnapshot,
+) -> Result<(), String> {
+    for (index, (label, value, color)) in [
+        ("HITS", score.hits, 0x74e5c5),
+        ("MISSES", score.misses, 0xff8e8e),
+        ("COMBO", score.combo, 0x9bb1cf),
+        ("MAX COMBO", score.max_combo, 0x9bb1cf),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let y = 145 + index as i64 * 28;
+        clipped_text(
+            scene,
+            Bounds {
+                x: 750,
+                y,
+                width: 186,
+                height: 7,
+            },
+            label,
+            1,
+            color,
+        );
+        clipped_text(
+            scene,
+            Bounds {
+                x: 750,
+                y: y + 10,
+                width: 186,
+                height: 7,
+            },
+            &value.to_string(),
+            1,
+            color,
+        );
+    }
+    competition_summary(
+        scene,
+        snapshot,
+        Bounds {
+            x: 750,
+            y: 280,
+            width: 186,
+            height: 360,
+        },
+    )
 }
 #[cfg(test)]
 mod tests {
@@ -347,6 +531,7 @@ mod tests {
                 },
                 last_judge: None,
                 recent_results: Vec::new(),
+                competition: None,
             })
             .collect();
         let mut scene = Scene::new(960, 720);
@@ -372,6 +557,156 @@ mod tests {
         scene.clear();
         local_players(&mut scene, &players, 1_000_000_000, 15).unwrap();
         assert!(scene.status().is_ok());
+    }
+    fn comparisons(status: NetworkStatus, song_ns: i64) -> CompetitionSnapshot {
+        CompetitionSnapshot {
+            ghosts: (0..8)
+                .map(|index| crate::player::GhostSnapshot {
+                    kind: if index % 2 == 0 {
+                        OpponentKind::Own
+                    } else {
+                        OpponentKind::Other
+                    },
+                    label: "A VERY LONG RECORDED OPPONENT LABEL".repeat(2),
+                    hits: u64::MAX,
+                    misses: u64::MAX,
+                    combo: 0,
+                    max_combo: 0,
+                    recorded_until: Some(Timestamp::MAX),
+                })
+                .collect(),
+            network: Some(crate::player::NetworkSnapshot {
+                status,
+                progress: Some(crate::multiplayer::Progress {
+                    song_ns,
+                    hits: u64::MAX,
+                    misses: u64::MAX,
+                    combo: 0,
+                    max_combo: 0,
+                }),
+            }),
+        }
+    }
+    #[test]
+    fn competition_rows_keep_all_prefixes_and_exact_extreme_counts_inside_bounds() {
+        let mut scene = Scene::new(960, 720);
+        for status in [
+            NetworkStatus::Waiting,
+            NetworkStatus::Connected,
+            NetworkStatus::Disconnected,
+            NetworkStatus::Stopped,
+        ] {
+            for song in [i64::MIN, i64::MAX] {
+                let snapshot = comparisons(status, song);
+                assert_eq!(competition_height(&snapshot, 186).unwrap(), 196);
+                assert_eq!(competition_height(&snapshot, 430).unwrap(), 140);
+                for bounds in [
+                    Bounds {
+                        x: 750,
+                        y: 280,
+                        width: 186,
+                        height: 360,
+                    },
+                    Bounds {
+                        x: 34,
+                        y: 172,
+                        width: 430,
+                        height: 140,
+                    },
+                ] {
+                    scene.clear();
+                    competition_summary(&mut scene, &snapshot, bounds).unwrap();
+                    assert!(
+                        scene
+                            .rectangles()
+                            .iter()
+                            .all(|rectangle| inside(&rectangle.bounds, bounds))
+                    );
+                    assert!(!scene.rectangles().is_empty());
+                }
+            }
+        }
+        let mut snapshot = comparisons(NetworkStatus::Stopped, 0);
+        snapshot.network.as_mut().unwrap().progress = None;
+        scene.clear();
+        competition_summary(
+            &mut scene,
+            &snapshot,
+            Bounds {
+                x: 750,
+                y: 280,
+                width: 186,
+                height: 360,
+            },
+        )
+        .unwrap();
+        assert!(
+            competition_summary(
+                &mut scene,
+                &snapshot,
+                Bounds {
+                    x: 750,
+                    y: 280,
+                    width: 186,
+                    height: 195
+                }
+            )
+            .is_err()
+        );
+        snapshot.ghosts.push(snapshot.ghosts[0].clone());
+        assert!(competition_height(&snapshot, 430).is_err());
+    }
+    #[test]
+    fn four_competition_panels_preserve_room_for_actual_chart_projection() {
+        let chart = std::sync::Arc::new(chart());
+        let players: Vec<_> = (1..=4)
+            .map(|id| LocalPlayerSnapshot {
+                player: crate::local_players::PlayerId(id),
+                chart: Some(std::sync::Arc::clone(&chart)),
+                song_time: Some(Timestamp::ZERO),
+                score: ScoreSummary::default(),
+                last_judge: None,
+                recent_results: Vec::new(),
+                competition: Some(comparisons(NetworkStatus::Connected, i64::MIN)),
+            })
+            .collect();
+        let mut scene = Scene::new(960, 720);
+        local_players(&mut scene, &players, 1_000_000_000, 0).unwrap();
+        // Stored opponents do not shrink the ordinary gameplay lane background.
+        assert!(
+            scene
+                .rectangles()
+                .iter()
+                .any(|rectangle| rectangle.bounds[0] == 34.0
+                    && rectangle.bounds[1] == 176.0
+                    && rectangle.bounds[3] == 180.0)
+        );
+        scene.clear();
+        local_players_with_competition(&mut scene, &players, 1_000_000_000, 0, true).unwrap();
+        assert!(
+            scene
+                .rectangles()
+                .iter()
+                .any(|rectangle| rectangle.bounds[0] == 34.0
+                    && rectangle.bounds[1] == 316.0
+                    && rectangle.bounds[3] == 40.0)
+        );
+        let panels: Vec<_> = (0..4).map(|index| panel_bounds(index, 4)).collect();
+        assert!(scene.rectangles().iter().all(|rectangle| {
+            panels
+                .iter()
+                .any(|bounds| inside(&rectangle.bounds, *bounds))
+        }));
+        assert!(scene.status().is_ok());
+        let bounds = panel_bounds(0, 4);
+        assert_eq!(
+            bounds.height
+                - 72
+                - competition_height(players[0].competition.as_ref().unwrap(), bounds.width - 20)
+                    .unwrap()
+                - 8,
+            44
+        );
     }
     #[test]
     fn projection_preserves_extreme_timestamp_bounds_and_lane_partition() {
