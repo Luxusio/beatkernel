@@ -453,12 +453,8 @@ fn validate_finite_modes(
     competition: &beatkernel_bms_runtime::competition_live::CompetitionOptions,
 ) -> Result<()> {
     options.playback_end()?;
-    if options.end_ns.is_some()
-        && (!options.local_inputs.is_empty() || competition.network.is_some())
-    {
-        return Err(
-            "end-ns currently requires Linux solo playback without network competition".into(),
-        );
+    if options.end_ns.is_some() && competition.network.is_some() {
+        return Err("end-ns currently requires Linux playback without network competition".into());
     }
     Ok(())
 }
@@ -485,7 +481,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
         println!(
-            "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned, strictly after start, and currently solo/nonnetwork only; it completes a finite prefix after native presentation and input drain, without forcing unfinished notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; network competition is not yet supported for local groups. Native float32 ALSA, no fallback. Physical timing Unknown."
+            "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned, strictly after start, and currently solo or local 2..64 without network competition; it completes a finite prefix after native presentation and input drain, without forcing unfinished notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; network competition is not yet supported for local groups. Native float32 ALSA, no fallback. Physical timing Unknown."
         );
         return Ok(());
     }
@@ -657,6 +653,21 @@ mod native {
         )?);
         let song_origin = options.song_origin()?;
         let playback_end = options.playback_end()?;
+        // Validate the same endpoint grids as local playback before asset/device owners.
+        let mut pause = NativePause::new(output_origin(), HOST, options.format.sample_rate())?;
+        if let Some(end) = playback_end {
+            pause = pause.with_playback_end_frame(end)?;
+        }
+        let mut native_end = playback_end
+            .map(|end| {
+                beatkernel_bms_runtime::native_end::NativeEnd::new(
+                    output_origin(),
+                    HOST,
+                    options.format.sample_rate(),
+                    end,
+                )
+            })
+            .transpose()?;
         let pause_supported = competition_options.network.is_none();
         let prepared = load_prepared(
             &options.chart,
@@ -859,20 +870,6 @@ mod native {
             let mut last_song = song_origin;
             let mut last_operation = host_origin;
             let mut last_progress = None;
-            let mut pause = NativePause::new(output_origin(), HOST, options.format.sample_rate())?;
-            if let Some(end) = playback_end {
-                pause = pause.with_playback_end_frame(end)?;
-            }
-            let mut native_end = playback_end
-                .map(|end| {
-                    beatkernel_bms_runtime::native_end::NativeEnd::new(
-                        output_origin(),
-                        HOST,
-                        options.format.sample_rate(),
-                        end,
-                    )
-                })
-                .transpose()?;
             let mut end_boundary = if let Some(end) = &mut native_end {
                 end.observe(stream.last_render_report(), pair)?
             } else {
@@ -1235,7 +1232,7 @@ mod fixtures {
         assert!(validate_args(&duplicate).is_err());
     }
     #[test]
-    fn unsupported_finite_cohort_and_network_modes_fail_during_settings_preflight() {
+    fn finite_cohort_settings_are_admitted_but_network_end_policy_remains_unavailable() {
         let mut local = args();
         let index = local.iter().position(|flag| flag == "--evdev").unwrap();
         local.drain(index..index + 2);
@@ -1247,12 +1244,7 @@ mod fixtures {
         ]);
         assert!(validate_args(&local).is_ok());
         local.extend(["--end-ns".into(), "2000000".into()]);
-        assert!(
-            validate_args(&local)
-                .unwrap_err()
-                .to_string()
-                .contains("requires Linux solo")
-        );
+        assert!(validate_args(&local).is_ok());
         let mut network = args();
         network.extend(["--mp-host".into(), "127.0.0.1:39001".into()]);
         assert!(validate_args(&network).is_ok());
@@ -1261,7 +1253,7 @@ mod fixtures {
             validate_args(&network)
                 .unwrap_err()
                 .to_string()
-                .contains("requires Linux solo")
+                .contains("without network competition")
         );
     }
 
