@@ -1,6 +1,8 @@
 //! Latest-state presentation bridge; never called from the audio callback.
 use crate::{
-    competition::ScoreSummary, local_players::PlayerId, local_runtime::PlayerReport,
+    competition::{OpponentKind, ScoreSummary},
+    local_players::PlayerId,
+    local_runtime::PlayerReport,
     player_chart::PlayerChart,
 };
 use beatkernel::{
@@ -31,6 +33,38 @@ pub enum PlayerStatus {
     Failed(String),
 }
 
+/// Actual recorded-operation prefix, with a bounded display basename.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GhostSnapshot {
+    pub kind: OpponentKind,
+    pub label: String,
+    pub hits: u64,
+    pub misses: u64,
+    pub combo: u64,
+    pub max_combo: u64,
+    pub recorded_until: Option<Timestamp>,
+}
+/// Connection lifecycle; peer scores remain explicitly self-reported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetworkStatus {
+    Waiting,
+    Connected,
+    Disconnected,
+    Stopped,
+}
+/// Last peer prefix is retained even after disconnect or cleanup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetworkSnapshot {
+    pub status: NetworkStatus,
+    pub progress: Option<crate::multiplayer::Progress>,
+}
+/// One local player's bounded comparison state; no judge or clock authority.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompetitionSnapshot {
+    pub ghosts: Vec<GhostSnapshot>,
+    pub network: Option<NetworkSnapshot>,
+}
+
 /// One stable local member's actual reports; never an aggregate cohort score.
 #[derive(Clone)]
 pub struct LocalPlayerSnapshot {
@@ -40,6 +74,7 @@ pub struct LocalPlayerSnapshot {
     pub score: ScoreSummary,
     pub last_judge: Option<JudgeEvent>,
     pub recent_results: Vec<JudgeEvent>,
+    pub competition: Option<CompetitionSnapshot>,
 }
 impl LocalPlayerSnapshot {
     fn new(player: PlayerId, chart: Option<Arc<PlayerChart>>) -> Self {
@@ -50,6 +85,7 @@ impl LocalPlayerSnapshot {
             score: ScoreSummary::default(),
             last_judge: None,
             recent_results: Vec::new(),
+            competition: None,
         }
     }
     fn update_report(&mut self, report: &RuntimeReport) {
@@ -71,6 +107,38 @@ impl LocalPlayerSnapshot {
             self.recent_results.push(*event);
         }
     }
+}
+
+/// Replace one known member's comparisons on the game owner, never a callback.
+/// Validate bounds before mutating; unattached native commands are a no-op.
+pub fn publish_competition(
+    player: PlayerId,
+    snapshot: CompetitionSnapshot,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if snapshot.ghosts.len() > 8
+        || snapshot.ghosts.iter().any(|ghost| {
+            ghost.label.len() > 256
+                || ghost.label.chars().count() > 64
+                || ghost.label.chars().any(char::is_control)
+        })
+    {
+        return Err("competition presentation exceeds ghost/label bounds".into());
+    }
+    SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        let Some(current) = session.as_mut() else {
+            return Ok(());
+        };
+        let member = current
+            .snapshot
+            .players
+            .iter_mut()
+            .find(|member| member.player == player)
+            .ok_or("competition presentation requires a registered player")?;
+        member.competition = Some(snapshot);
+        current.publish_latest(false);
+        Ok(())
+    })
 }
 
 /// Immutable UI copy of actual chart/time/results; no inferred clock relation.
@@ -419,6 +487,56 @@ impl Session {
 #[cfg(test)]
 mod fixtures {
     use super::*;
+    fn comparisons() -> CompetitionSnapshot {
+        CompetitionSnapshot {
+            ghosts: vec![GhostSnapshot {
+                kind: OpponentKind::Own,
+                label: "old.bkr".into(),
+                hits: 12,
+                misses: 2,
+                combo: 3,
+                max_combo: 8,
+                recorded_until: Some(Timestamp::from_nanos(99)),
+            }],
+            network: Some(NetworkSnapshot {
+                status: NetworkStatus::Disconnected,
+                progress: Some(crate::multiplayer::Progress {
+                    song_ns: 1_000_000_000,
+                    hits: 7,
+                    misses: 1,
+                    combo: 2,
+                    max_combo: 5,
+                }),
+            }),
+        }
+    }
+    #[test]
+    fn competition_is_member_specific_bounded_and_retained_through_cleanup() {
+        let (source, chart) = chart_fixture();
+        let (publisher, viewer) = channel();
+        with_publisher(publisher, || {
+            publish_local_chart(&source, &chart, &[PlayerId(3), PlayerId(9)]).unwrap();
+            let value = comparisons();
+            publish_competition(PlayerId(9), value.clone()).unwrap();
+            assert!(publish_competition(PlayerId(1), value.clone()).is_err());
+            let mut oversized = value.clone();
+            oversized.ghosts = vec![value.ghosts[0].clone(); 9];
+            assert!(publish_competition(PlayerId(9), oversized).is_err());
+            let mut bad_label = value;
+            bad_label.ghosts[0].label = "bad\nlabel".into();
+            assert!(publish_competition(PlayerId(9), bad_label).is_err());
+            publish_local_reports(&[report(3, 50, 1, 0), report(9, 50, 2, 0)]).unwrap();
+            viewer.cancel();
+            Ok(())
+        })
+        .unwrap();
+        let final_state = viewer.take_latest().unwrap();
+        assert_eq!(final_state.players[0].competition, None);
+        assert_eq!(final_state.players[1].competition, Some(comparisons()));
+        assert_eq!(final_state.players[1].score.hits, 2);
+        assert!(final_state.cancelled);
+        assert_eq!(final_state.status, PlayerStatus::Finished);
+    }
     fn chart_fixture() -> (BmsChart, CompiledChart) {
         let source = beatkernel_bms::parse(
             "#TITLE Local\n#BPM 120\n#WAV01 tap.wav\n#00011:01\n",

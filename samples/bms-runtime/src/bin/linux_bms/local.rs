@@ -214,7 +214,8 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         states.push(PlayerState {
             player,
             capture,
-            competition: LiveCompetition::prepare(
+            competition: LiveCompetition::prepare_for(
+                player,
                 &competition_options,
                 &prepared.source,
                 &judge,

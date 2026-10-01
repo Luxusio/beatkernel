@@ -1,9 +1,11 @@
 //! Shared native application flags and observation outside the audio callback.
 use crate::{
     competition::{Competition, OpponentKind},
+    local_players::PlayerId,
     multiplayer::{
-        competition_identity, Multiplayer, MultiplayerEvent, MultiplayerOptions, Progress,
+        Multiplayer, MultiplayerEvent, MultiplayerOptions, Progress, competition_identity,
     },
+    player::{self, CompetitionSnapshot, GhostSnapshot, NetworkSnapshot, NetworkStatus},
     replay_capture::LiveReplayCapture,
     replay_playback::read_replay,
 };
@@ -11,13 +13,13 @@ use beatkernel::{
     input::CodecLimits, judge::JudgeEngine, replay::codec::ReplayCodecLimits,
     runtime::RuntimeReport, time::ClockDomainId,
 };
-use beatkernel_bms::{parse, BmsChart, ParseOptions};
+use beatkernel_bms::{BmsChart, ParseOptions, parse};
 use std::{
     fs::File,
     io::Read,
     net::SocketAddr,
     path::{Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -177,11 +179,14 @@ pub fn load_chart(path: &Path) -> Result<BmsChart> {
 
 /// Per-play competition state. Socket work never runs on the gameplay thread.
 pub struct LiveCompetition {
+    player: PlayerId,
     competition: Competition,
     network: Option<Multiplayer>,
     last_publish: Option<i64>,
     last_display: Option<i64>,
     network_failed: bool,
+    network_status: Option<NetworkStatus>,
+    last_presentation: Option<Instant>,
 }
 impl LiveCompetition {
     /// Load ghosts before starting audio; spawn networking only when selected.
@@ -191,6 +196,20 @@ impl LiveCompetition {
         judge: &JudgeEngine,
         domain: ClockDomainId,
     ) -> Result<Option<Self>> {
+        Self::prepare_for(PlayerId(1), options, source, judge, domain)
+    }
+
+    /// Prepare comparisons for a stable member of the shared local session.
+    pub fn prepare_for(
+        player: PlayerId,
+        options: &CompetitionOptions,
+        source: &BmsChart,
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+    ) -> Result<Option<Self>> {
+        if player.0 == 0 {
+            return Err("competition player ID must be nonzero".into());
+        }
         if options.ghosts.is_empty() && options.network.is_none() {
             return Ok(None);
         }
@@ -213,13 +232,58 @@ impl LiveCompetition {
             }
             None => None,
         };
-        Ok(Some(Self {
+        let mut prepared = Self {
+            player,
             competition,
             network,
             last_publish: None,
             last_display: None,
             network_failed: false,
-        }))
+            network_status: options.network.as_ref().map(|_| NetworkStatus::Waiting),
+            last_presentation: None,
+        };
+        prepared.publish_presentation(true)?;
+        Ok(Some(prepared))
+    }
+
+    fn publish_presentation(&mut self, force: bool) -> Result<()> {
+        if !player::attached()
+            || (!force
+                && self
+                    .last_presentation
+                    .is_some_and(|last| last.elapsed() < Duration::from_millis(50)))
+        {
+            return Ok(());
+        }
+        let ghosts = self
+            .competition
+            .opponents()
+            .iter()
+            .map(|opponent| {
+                let score = opponent.score();
+                GhostSnapshot {
+                    kind: opponent.kind(),
+                    label: display_basename(opponent.label()),
+                    hits: score.hits,
+                    misses: score.misses,
+                    combo: score.combo,
+                    max_combo: score.max_combo,
+                    recorded_until: opponent.recorded_until(),
+                }
+            })
+            .collect();
+        player::publish_competition(
+            self.player,
+            CompetitionSnapshot {
+                ghosts,
+                network: self.network_status.map(|status| NetworkSnapshot {
+                    status,
+                    progress: self.network.as_ref().and_then(Multiplayer::remote_progress),
+                }),
+            },
+        )?;
+        self.last_presentation = Some(Instant::now());
+        Ok(())
     }
 
     /// Observe actual admitted runtime results; remote data never enters judge.
@@ -231,9 +295,12 @@ impl LiveCompetition {
         if let Some(network) = &mut self.network {
             for event in network.poll() {
                 match event {
-                    MultiplayerEvent::Connected => println!(
-                        "multiplayer peer connected; compatible setup, self-reported progress"
-                    ),
+                    MultiplayerEvent::Connected => {
+                        self.network_status = Some(NetworkStatus::Connected);
+                        println!(
+                            "multiplayer peer connected; compatible setup, self-reported progress"
+                        );
+                    }
                     MultiplayerEvent::Progress(_) => {}
                     MultiplayerEvent::Disconnected(error) => {
                         eprintln!("multiplayer disconnected: {error}; local play continues");
@@ -291,7 +358,9 @@ impl LiveCompetition {
                 network.request_stop();
             }
             self.network_failed = true;
+            self.network_status = Some(NetworkStatus::Disconnected);
         }
+        self.publish_presentation(disconnected)?;
         Ok(())
     }
 
@@ -306,27 +375,69 @@ impl LiveCompetition {
         for opponent in self.competition.opponents() {
             let hit_difference =
                 i128::from(self.competition.score().hits) - i128::from(opponent.score().hits);
-            println!("competition final {:?} ghost={} score={:?} local_hit_difference={hit_difference:+} recorded_until={:?}", opponent.kind(), opponent.label(), opponent.score(), opponent.recorded_until());
+            println!(
+                "competition final {:?} ghost={} score={:?} local_hit_difference={hit_difference:+} recorded_until={:?}",
+                opponent.kind(),
+                opponent.label(),
+                opponent.score(),
+                opponent.recorded_until()
+            );
         }
         if let Some(network) = &mut self.network {
             for event in network.poll() {
                 if let MultiplayerEvent::Disconnected(error) = event {
                     eprintln!("multiplayer final disconnect: {error}");
+                    self.network_failed = true;
                 }
             }
             if let Some(remote) = network.remote_progress() {
-                println!("competition last peer-reported prefix={remote:?}; independent song time, not a final ranking");
+                println!(
+                    "competition last peer-reported prefix={remote:?}; independent song time, not a final ranking"
+                );
             }
             if let Err(error) = network.stop() {
                 eprintln!("multiplayer worker cleanup failed: {error}");
+                self.network_failed = true;
             }
+            self.network_status = Some(if self.network_failed {
+                NetworkStatus::Disconnected
+            } else {
+                NetworkStatus::Stopped
+            });
         }
+        if let Err(error) = self.publish_presentation(true) {
+            eprintln!("competition presentation cleanup: {error}");
+        }
+    }
+}
+
+fn display_basename(label: &str) -> String {
+    // Accept either platform separator without exposing directories in the UI.
+    let basename = label.rsplit(['/', '\\']).next().unwrap_or("");
+    let clean: String = basename
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect();
+    if clean.is_empty() {
+        "RECORD".into()
+    } else {
+        clean
     }
 }
 
 #[cfg(test)]
 mod fixtures {
     use super::*;
+    #[test]
+    fn display_labels_remove_directories_controls_and_bound_unicode() {
+        assert_eq!(display_basename("/private/user/own.bkr"), "own.bkr");
+        assert_eq!(display_basename("C:\\private\\other.bkr"), "other.bkr");
+        assert_eq!(display_basename("/empty/\n"), "RECORD");
+        let label = display_basename(&"🎵".repeat(100));
+        assert_eq!(label.chars().count(), 64);
+        assert_eq!(label.len(), 256);
+    }
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).into()).collect()
     }
