@@ -107,6 +107,7 @@ pub mod vorbis_decode;
 #[cfg(test)]
 mod vorbis_fixture;
 
+use beatkernel::replay::codec::{ReplayCodecLimits, ReplayFile, encode_replay};
 use beatkernel::{
     audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, VoiceId},
     judge::JudgeStage,
@@ -212,7 +213,8 @@ pub fn load_prepared(
 
 /// Resolve a caller-selected chart seed and prepare only its selected assets.
 /// This uses the default decoder and compatible path policy. The resolved
-/// source must be supplied again for replay; source seed serialization is pending.
+/// source and explicit seed must be supplied to capture; replay-aware loading
+/// restores the stored seed before validating the setup.
 pub fn load_prepared_with_seed(
     path: &Path,
     format: AudioFormat,
@@ -228,6 +230,32 @@ pub fn load_prepared_with_seed(
         &DefaultAssetDecoder,
         asset_paths::AssetPathPolicy::AudioVariants,
         seed,
+        None,
+    )
+}
+
+/// Restore the recorded BMS branch and validate its setup before asset IO.
+/// Assets use the default decoder and compatible file policy; original-song
+/// section selection remains the caller's existing prepare_replay/render path.
+pub fn load_prepared_for_replay(
+    path: &Path,
+    format: AudioFormat,
+    pcm_limits: PcmLimits,
+    channels: ChannelPolicy,
+    file: &ReplayFile,
+    limits: ReplayCodecLimits,
+) -> Result<PreparedBms, Box<dyn Error>> {
+    encode_replay(file, limits)?;
+    let (_, _, seed) = replay_playback::decode_chart_setup(&file.header.options)?;
+    prepare_seeded(
+        path,
+        format,
+        pcm_limits,
+        channels,
+        &DefaultAssetDecoder,
+        asset_paths::AssetPathPolicy::AudioVariants,
+        seed,
+        Some((file, limits)),
     )
 }
 
@@ -263,7 +291,7 @@ pub fn load_prepared_with_decoder_and_paths(
     decoder: &dyn AssetDecoder,
     paths: asset_paths::AssetPathPolicy,
 ) -> Result<PreparedBms, Box<dyn Error>> {
-    prepare_seeded(path, format, pcm_limits, channels, decoder, paths, 0)
+    prepare_seeded(path, format, pcm_limits, channels, decoder, paths, 0, None)
 }
 
 fn prepare_seeded(
@@ -274,6 +302,7 @@ fn prepare_seeded(
     decoder: &dyn AssetDecoder,
     paths: asset_paths::AssetPathPolicy,
     seed: u64,
+    replay: Option<(&ReplayFile, ReplayCodecLimits)>,
 ) -> Result<PreparedBms, Box<dyn Error>> {
     let chart_path = std::fs::canonicalize(path)?;
     let root = chart_path.parent().ok_or("chart has no parent")?;
@@ -285,6 +314,9 @@ fn prepare_seeded(
         options.max_bytes,
     )?;
     let source = parse_seeded(&text, options, seed)?;
+    if let Some((file, limits)) = replay {
+        replay_playback::validate_setup(&source, file, limits)?;
+    }
     let compiled = source.compile()?;
     let referenced: BTreeSet<_> = source
         .notes

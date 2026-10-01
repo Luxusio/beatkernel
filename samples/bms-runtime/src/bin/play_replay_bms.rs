@@ -9,7 +9,7 @@ use beatkernel_bms_runtime::{
     ChannelPolicy,
     bgm::{BgmConfig, BgmFeeder},
     completion::ReplayCompletion,
-    load_prepared,
+    load_prepared_for_replay,
     playback_pause::PausePhase,
     player,
     replay_audio::{completed_render_cursor, plan_audio},
@@ -831,11 +831,13 @@ fn run(options: Options) -> Result<()> {
         CodecLimits::new(65536, 32768)?,
     )?;
     let file = read_replay(&mut File::open(&options.replay)?, limits)?;
-    let prepared = load_prepared(
+    let prepared = load_prepared_for_replay(
         &options.chart,
         options.format,
         PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
         options.channel_policy,
+        &file,
+        limits,
     )?;
     let prepared = beatkernel_bms_runtime::section_start::prepare_replay(
         prepared,

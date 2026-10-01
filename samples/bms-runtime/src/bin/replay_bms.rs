@@ -1,9 +1,8 @@
 //! Bounded logical BMS replay reconstruction; no assets, devices or output files.
 use beatkernel::{input::CodecLimits, replay::codec::ReplayCodecLimits, time::Timestamp};
-use beatkernel_bms::{ParseOptions, parse as parse_chart};
 use beatkernel_bms_runtime::{
-    chart_text::read_chart_text,
-    replay_playback::{read_replay, reconstruct},
+    competition_live::load_chart_with_seed,
+    replay_playback::{decode_chart_setup, read_replay, reconstruct},
 };
 use std::{collections::HashSet, error::Error, fs::File, path::PathBuf};
 
@@ -81,13 +80,12 @@ fn run(options: Options) -> Result<()> {
         4096,
         CodecLimits::new(65536, 32768)?,
     )?;
-    let chart_options = ParseOptions::default();
-    let text = read_chart_text(&mut File::open(&options.chart)?, chart_options.max_bytes)?;
-    let chart = parse_chart(&text, chart_options)?;
+    let file = read_replay(&mut File::open(&options.replay)?, limits)?;
+    let (_, _, seed) = decode_chart_setup(&file.header.options)?;
+    let chart = load_chart_with_seed(&options.chart, seed)?;
     for warning in &chart.warnings {
         eprintln!("BMS warning line {}: {}", warning.line, warning.message);
     }
-    let file = read_replay(&mut File::open(&options.replay)?, limits)?;
     let mut session = reconstruct(&chart, file, limits)?;
     if let Some(cursor) = options.cursor {
         session.seek_cursor(cursor)?;
@@ -196,6 +194,7 @@ mod fixtures {
 
     #[test]
     fn chart_reader_uses_shared_decoding_and_stream_limits() {
+        use beatkernel_bms_runtime::chart_text::read_chart_text;
         use std::io::{self, Read};
         let text = b"#BPM 120\n";
         assert_eq!(

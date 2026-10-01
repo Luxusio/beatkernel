@@ -6,8 +6,8 @@ use beatkernel::{
     time::Duration,
 };
 use beatkernel_bms_runtime::{
-    load_prepared, offline::OfflineOptions, replay_playback::read_replay,
-    replay_render::render_replay, ChannelPolicy,
+    ChannelPolicy, load_prepared_for_replay, offline::OfflineOptions, replay_playback::read_replay,
+    replay_render::render_replay,
 };
 use std::{collections::HashSet, error::Error, fs::File, io::Write, path::PathBuf};
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -124,11 +124,13 @@ fn run(options: Options) -> Result<()> {
         CodecLimits::new(65536, 32768)?,
     )?;
     let file = read_replay(&mut File::open(&options.replay)?, limits)?;
-    let prepared = load_prepared(
+    let prepared = load_prepared_for_replay(
         &options.chart,
         options.format,
         PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
         ChannelPolicy::Exact,
+        &file,
+        limits,
     )?;
     for warning in &prepared.source.warnings {
         eprintln!("BMS warning line {}: {}", warning.line, warning.message);
@@ -142,9 +144,22 @@ fn run(options: Options) -> Result<()> {
         options.preroll,
         &mut output,
     )?;
-    println!("last successful core RenderReport={:?}; execution distinct from admission/native/physical delivery", report.last_render);
+    println!(
+        "last successful core RenderReport={:?}; execution distinct from admission/native/physical delivery",
+        report.last_render
+    );
     output.flush()?;
-    println!("logical replay sounds rendered to new raw interleaved f32le {:?}: frames={} format={:?} commands_admitted={} full_replay_results={} full_replay_hits={} recorded_until={:?} final_judge_hash={:#018x}; no native playback or original dropped-audio reproduction", options.output, report.frames, report.format, report.commands_admitted, report.judge_results, report.hits, report.recorded_until, report.final_judge_hash);
+    println!(
+        "logical replay sounds rendered to new raw interleaved f32le {:?}: frames={} format={:?} commands_admitted={} full_replay_results={} full_replay_hits={} recorded_until={:?} final_judge_hash={:#018x}; no native playback or original dropped-audio reproduction",
+        options.output,
+        report.frames,
+        report.format,
+        report.commands_admitted,
+        report.judge_results,
+        report.hits,
+        report.recorded_until,
+        report.final_judge_hash
+    );
     Ok(())
 }
 fn main() -> Result<()> {
@@ -154,7 +169,9 @@ fn main() -> Result<()> {
 
 pub(crate) fn run_args(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
-        println!("render_replay_bms --chart PATH --replay PATH --output NEW_PATH --seconds N --rate HZ [--channels N --preroll-ns N --block-frames N --command-capacity N --voices N --max-records N --max-bytes N]\nDefaults: channels 2 (Exact asset layout), preroll 3000000000ns, block frames 4096, command capacity 65536, voices 4096, max records 1000000, max bytes 67108864.\nSeconds is a positive finite checked output duration including preroll; rate is nonzero. Preroll is nonnegative i64 nanoseconds; capacities are positive checked integers within core limits.\nLoads bounded WAV assets and matching logical replay, writes new raw interleaved f32le without overwriting. Failures may leave a partial new file.\nJudge counts/hash describe the full replay; admitted sounds and PCM are cut off by the requested extent. No native playback, physical timing, or past dropped-audio reproduction.");
+        println!(
+            "render_replay_bms --chart PATH --replay PATH --output NEW_PATH --seconds N --rate HZ [--channels N --preroll-ns N --block-frames N --command-capacity N --voices N --max-records N --max-bytes N]\nDefaults: channels 2 (Exact asset layout), preroll 3000000000ns, block frames 4096, command capacity 65536, voices 4096, max records 1000000, max bytes 67108864.\nSeconds is a positive finite checked output duration including preroll; rate is nonzero. Preroll is nonnegative i64 nanoseconds; capacities are positive checked integers within core limits.\nLoads bounded WAV assets and matching logical replay, writes new raw interleaved f32le without overwriting. Failures may leave a partial new file.\nJudge counts/hash describe the full replay; admitted sounds and PCM are cut off by the requested extent. No native playback, physical timing, or past dropped-audio reproduction."
+        );
         return Ok(());
     }
     run(parse(args)?)

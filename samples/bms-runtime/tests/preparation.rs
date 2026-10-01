@@ -776,3 +776,186 @@ fn seeded_branches_share_loading_pcm_and_replay_setup() {
             .collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn durable_source_seed_restores_real_capture_assets_pcm_and_replay() {
+    use beatkernel::{
+        input::{
+            Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector, EventMeta,
+            PhysicalControlId, PhysicalInputEvent,
+        },
+        judge::JudgeEngine,
+        replay::codec::{decode_replay, encode_replay},
+        runtime::Runtime,
+        time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
+        transport::{Rate, Transport},
+    };
+    struct Identity;
+    impl ClockMapper for Identity {
+        fn map(&self, from: ClockPoint, to: ClockDomainId) -> Option<Timestamp> {
+            (from.domain == to).then_some(from.timestamp)
+        }
+        fn quality(&self) -> ClockMappingQuality {
+            ClockMappingQuality::Exact
+        }
+    }
+    let point = |nanos| ClockPoint {
+        domain: ClockDomainId(17),
+        timestamp: Timestamp::from_nanos(nanos),
+    };
+    let dir = Directory::new();
+    dir.write("first.wav", &wav(1, &[16384, -8192]));
+    let path = dir.write("seed.bms", b"#BPM 60\n#RANDOM 2\n#IF 1\n#WAV01 first.wav\n#00011:01\n#00001:01\n#ELSE\n#WAV02 missing.wav\n#00012:02\n#00001:02\n#ENDIF\n");
+    let format = AudioFormat::new(24_000, 1).unwrap();
+    assert!(load_prepared(&path, format, limits(), ChannelPolicy::Exact).is_err());
+    let live = load_prepared_with_seed(&path, format, limits(), ChannelPolicy::Exact, 3).unwrap();
+    let profile = replay_playback::decode_profile(&captured_setup_identity(&live).options).unwrap();
+    let judge =
+        JudgeEngine::new(live.compiled.chart.clone(), live.source.rules(), profile).unwrap();
+    let replay_limits = competition_live::replay_limits().unwrap();
+    let mut capture = replay_capture::LiveReplayCapture::new_at_with_chart_seed(
+        &judge,
+        ClockDomainId(17),
+        replay_limits,
+        Timestamp::ZERO,
+        3,
+    )
+    .unwrap();
+    let control = live.source.notes[0].lane.control();
+    let physical = PhysicalControlId::keyboard(7);
+    let bindings = BindingMap::from_bindings([Binding {
+        device: DeviceSelector::Exact(DeviceId(3)),
+        physical,
+        game_control: control,
+    }])
+    .unwrap();
+    let (producer, _consumer) = command_queue(1).unwrap();
+    let mut runtime = Runtime::new(
+        ClockDomainId(17),
+        ClockDomainId(17),
+        Transport::new(Timestamp::ZERO, Timestamp::ZERO, Rate::NORMAL),
+        bindings,
+        judge,
+        producer,
+        vec![],
+        0,
+    )
+    .unwrap();
+    let report = runtime
+        .process_input(
+            PhysicalInputEvent::Button(ButtonEvent {
+                meta: EventMeta::new(DeviceId(3), point(0), 0),
+                control: physical,
+                state: ButtonState::Down,
+            }),
+            &Identity,
+            point(0),
+        )
+        .unwrap();
+    assert!(report.judge_error.is_none());
+    assert_eq!(report.judge_events.len(), 1);
+    let live_results = report.judge_events.clone();
+    capture.record_report(&report).unwrap();
+    capture
+        .record_report(&runtime.advance_to(point(1), &Identity, point(1)).unwrap())
+        .unwrap();
+    let recorded = capture.into_file();
+    let file = decode_replay(
+        &encode_replay(&recorded, replay_limits).unwrap(),
+        replay_limits,
+    )
+    .unwrap();
+    assert_eq!(file, recorded);
+    assert_eq!(file.header.seed, 0); // Judge-rule seed stays distinct.
+    assert_eq!(
+        replay_playback::decode_chart_setup(&file.header.options)
+            .unwrap()
+            .2,
+        3
+    );
+    let restored = load_prepared_for_replay(
+        &path,
+        format,
+        limits(),
+        ChannelPolicy::Exact,
+        &file,
+        replay_limits,
+    )
+    .unwrap();
+    assert_eq!(restored.source.source, live.source.source);
+    assert_eq!(
+        restored.bank.get(SampleId(1)).unwrap().samples(),
+        &[0.5, -0.25]
+    );
+    assert!(restored.bank.get(SampleId(2)).is_none());
+    let mut session =
+        replay_playback::reconstruct(&restored.source, file.clone(), replay_limits).unwrap();
+    session.seek_cursor(file.records.len()).unwrap();
+    assert_eq!(session.results(), live_results);
+    assert_eq!(
+        session.engine().stable_hash().unwrap(),
+        runtime.judge().stable_hash().unwrap()
+    );
+    session.seek_cursor(0).unwrap();
+    session.seek_cursor(file.records.len()).unwrap();
+    assert_eq!(session.results(), live_results);
+    let mut output = Vec::new();
+    let report = replay_render::render_replay(
+        restored,
+        file.clone(),
+        replay_limits,
+        offline::OfflineOptions {
+            frames: 3,
+            block_frames: 1,
+            command_capacity: 4,
+            max_voices: 2,
+        },
+        Duration::ZERO,
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(report.hits, 1);
+    assert_eq!(
+        output,
+        [1.0f32, -0.5, 0.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
+    // An incompatible setup rejects before attempting the now-missing selected asset.
+    std::fs::remove_file(dir.0.join("first.wav")).unwrap();
+    let mut wrong = file.clone();
+    wrong.header.chart_identity.push(0);
+    let error = load_prepared_for_replay(
+        &path,
+        format,
+        limits(),
+        ChannelPolicy::Exact,
+        &wrong,
+        replay_limits,
+    )
+    .err()
+    .unwrap();
+    assert!(matches!(
+        error.downcast_ref::<replay_playback::PlaybackError>(),
+        Some(replay_playback::PlaybackError::IdentityMismatch(
+            "compiled judge setup/profile"
+        ))
+    ));
+    let mut malformed = file;
+    malformed.header.options = b"bms-judge-profile/v3:".to_vec();
+    let error = load_prepared_for_replay(
+        &dir.0.join("does-not-exist.bms"),
+        format,
+        limits(),
+        ChannelPolicy::Exact,
+        &malformed,
+        replay_limits,
+    )
+    .err()
+    .unwrap();
+    assert!(matches!(
+        error.downcast_ref::<replay_playback::PlaybackError>(),
+        Some(replay_playback::PlaybackError::Metadata(_))
+    ));
+}
