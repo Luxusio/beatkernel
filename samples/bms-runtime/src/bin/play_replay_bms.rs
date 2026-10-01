@@ -54,6 +54,17 @@ enum AsioView {
     Bits32,
     Bits64,
 }
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(
+    not(all(target_os = "windows", feature = "asio-sdk")),
+    allow(dead_code)
+)]
+struct AsioClockOptions {
+    timer_error: u64,
+    drift_error: u64,
+    latency_error: u64,
+    anchor_age: u64,
+}
 #[derive(Debug)]
 struct Options {
     backend: Backend,
@@ -67,6 +78,11 @@ struct Options {
         allow(dead_code)
     )]
     output_channels: Option<Vec<u32>>,
+    #[cfg_attr(
+        not(all(target_os = "windows", feature = "asio-sdk")),
+        allow(dead_code)
+    )]
+    asio_clock: Option<AsioClockOptions>,
     chart: PathBuf,
     replay: PathBuf,
     device: String,
@@ -105,6 +121,9 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
     let mut backend = host;
     let mut asio_view = None;
     let mut output_channels = None;
+    let mut asio_system_clock = false;
+    let (mut timer_error, mut drift_error, mut latency_error) = (None, None, None);
+    let mut anchor_age = 1_000_000_000u64;
     let (mut chart, mut replay, mut device, mut seconds, mut rate, mut channels) =
         (None, None, None, None, None, None);
     let (mut buffer, mut period) = (None, None);
@@ -143,6 +162,30 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
                     "64" => AsioView::Bits64,
                     _ => return Err("ASIO view must be native, 32 or 64".into()),
                 })
+            }
+            "--asio-system-clock" => {
+                if value != "multimedia" {
+                    return Err("ASIO system clock must be explicitly multimedia".into());
+                }
+                asio_system_clock = true;
+            }
+            "--asio-timer-error-ns"
+            | "--asio-drift-error-ns"
+            | "--asio-latency-error-ns"
+            | "--asio-anchor-age-ns" => {
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err("ASIO clock bounds require unsigned decimal nanoseconds".into());
+                }
+                let number: u64 = value.parse()?;
+                if number > i64::MAX as u64 {
+                    return Err("ASIO clock bounds exceed signed timestamp capacity".into());
+                }
+                match flag.as_str() {
+                    "--asio-timer-error-ns" => timer_error = Some(number),
+                    "--asio-drift-error-ns" => drift_error = Some(number),
+                    "--asio-latency-error-ns" => latency_error = Some(number),
+                    _ => anchor_age = number,
+                }
             }
             "--output-channels" => {
                 let mut selected = Vec::new();
@@ -239,7 +282,9 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
     if backend != host && !(host == Backend::Windows && backend == Backend::Asio) {
         return Err("requested backend is incompatible with host".into());
     }
-    if backend != Backend::Asio && (asio_view.is_some() || output_channels.is_some()) {
+    if backend != Backend::Asio
+        && (output_channels.is_some() || seen.iter().any(|flag| flag.starts_with("--asio-")))
+    {
         return Err("ASIO flags require --backend asio".into());
     }
     if backend != Backend::Windows && (mode_set || shared_set) {
@@ -280,14 +325,17 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
             }
         }
         Backend::Asio => {
-            if seconds.is_none() {
-                return Err("ASIO recorded playback requires explicit --seconds: this host has no validated native output-zero presentation epoch for visual progress or natural drain".into());
-            }
             if period.is_some() || mode_set || shared_set {
                 return Err("ASIO rejects period/mode/shared-policy flags".into());
             }
-            if asio_view.is_none() || output_channels.is_none() {
-                return Err("ASIO requires --asio-view and --output-channels".into());
+            if asio_view.is_none()
+                || output_channels.is_none()
+                || !asio_system_clock
+                || timer_error.is_none()
+                || drift_error.is_none()
+                || latency_error.is_none()
+            {
+                return Err("ASIO requires explicit view, output channels, multimedia clock and timer/drift/latency error assessments".into());
             }
             if buffer.is_some_and(|n| n as usize > AudioLimits::MAX_RENDER_FRAMES) {
                 return Err("ASIO buffer exceeds core render ceiling".into());
@@ -344,10 +392,35 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
         4096,
         CodecLimits::new(65536, 32768)?,
     )?;
+    let asio_clock = if backend == Backend::Asio {
+        beatkernel_platform::audio::asio::MultimediaClockAnchor::new(
+            0,
+            ClockPoint {
+                domain: HOST,
+                timestamp: Timestamp::ZERO,
+            },
+            ClockPoint {
+                domain: HOST,
+                timestamp: Timestamp::ZERO,
+            },
+            anchor_age,
+            timer_error.expect("validated ASIO timer assessment"),
+            drift_error.expect("validated ASIO drift assessment"),
+        )?;
+        Some(AsioClockOptions {
+            timer_error: timer_error.unwrap(),
+            drift_error: drift_error.unwrap(),
+            latency_error: latency_error.unwrap(),
+            anchor_age,
+        })
+    } else {
+        None
+    };
     Ok(Options {
         backend,
         asio_view,
         output_channels,
+        asio_clock,
         chart: chart.ok_or("--chart PATH is required")?,
         replay: replay.ok_or("--replay PATH is required")?,
         device,
@@ -978,7 +1051,7 @@ fn main() -> Result<()> {
 pub(crate) fn run_args(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
         println!(
-            "play_replay_bms --chart PATH --replay PATH --device ID --rate HZ --channels N [--seconds N --channel-policy exact|mono-stereo --backend wasapi|asio|alsa|coreaudio --asio-view native|32|64 --output-channels 0,1 --buffer-frames N --period-frames N --mode shared|exclusive --shared-policy engine-period|legacy --preroll-ns N --lookahead-ns N --command-capacity N --voices N --max-records N --max-bytes N]\nASIO requires Windows + asio-sdk, explicit braced CLSID/view/output channels, rejects mode/shared-policy/period, buffer default driver preferred.\nHost backend: WASAPI on Windows, ALSA on Linux, CoreAudio on macOS. No input acquisition. Exact float32 output rate/channels; no endpoint/mode fallback. Channel policy defaults exact; mono-stereo explicitly duplicates mono assets into stereo.\nLinux requires explicit buffer/period; macOS requires numeric AudioDeviceID and buffer, rejects period. Mode/shared-policy are Windows only, default shared engine-period; explicit shared-policy rejects exclusive. Windows buffer/period default to device settings, and unsupported requested combinations reject.\nDefaults: preroll 3000000000ns, lookahead 3000000000ns, commands 65536, voices 4096, records 1000000, replay bytes 67108864. Nonnegative i64 preroll, positive i64 lookahead, positive checked finite seconds and capacities.\nOmit seconds to finish the actual recorded prefix and drain admitted PCM through native presentation. Seconds is an optional wall cutoff after Start including preroll and can truncate the prefix/tail. Presentation missing/degraded stays unavailable; cancellation remains available. ASIO currently lacks a validated output-zero epoch here, so visual progress/natural drain are unavailable and explicit diagnostic seconds is required. Finite horizons/credit can fail on stalls/dense cues; final admission/core/native diagnostics remain separate. Source implementation is not native sound or physical timing evidence."
+            "play_replay_bms --chart PATH --replay PATH --device ID --rate HZ --channels N [--seconds N --channel-policy exact|mono-stereo --backend wasapi|asio|alsa|coreaudio --asio-view native|32|64 --output-channels 0,1 --buffer-frames N --period-frames N --mode shared|exclusive --shared-policy engine-period|legacy --preroll-ns N --lookahead-ns N --command-capacity N --voices N --max-records N --max-bytes N]\nASIO requires Windows + asio-sdk, explicit braced CLSID/view/output channels and --asio-system-clock multimedia plus --asio-timer-error-ns, --asio-drift-error-ns, --asio-latency-error-ns assessments; optional --asio-anchor-age-ns defaults1000000000. Rejects mode/shared-policy/period; buffer defaults driver preferred.\nHost backend: WASAPI on Windows, ALSA on Linux, CoreAudio on macOS. No input acquisition. Exact float32 output rate/channels; no endpoint/mode fallback. Channel policy defaults exact; mono-stereo explicitly duplicates mono assets into stereo.\nLinux requires explicit buffer/period; macOS requires numeric AudioDeviceID and buffer, rejects period. Mode/shared-policy are Windows only, default shared engine-period; explicit shared-policy rejects exclusive. Windows buffer/period default to device settings, and unsupported requested combinations reject.\nDefaults: preroll 3000000000ns, lookahead 3000000000ns, commands 65536, voices 4096, records 1000000, replay bytes 67108864. Nonnegative i64 preroll, positive i64 lookahead, positive checked finite seconds and capacities.\nOmit seconds to finish the actual recorded prefix and drain admitted PCM through native presentation. Seconds is an optional wall cutoff after Start including preroll and can truncate the prefix/tail. Presentation missing/degraded stays unavailable; cancellation remains available. ASIO queues actual rendered-block presentation observations until fresh QPC reaches their assessed upper host interval, then advances visual/natural drain. Prepared frames/raw sample position do not establish audible progress. ASIO pause remains unsupported, physical accuracy unmeasured. Finite horizons/credit can fail on stalls/dense cues; final admission/core/native diagnostics remain separate. Source implementation is not native sound or physical timing evidence."
         );
         return Ok(());
     }
@@ -989,6 +1062,24 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
 #[allow(dead_code)] // Shared by the graphical app; standalone binary parses in run_args.
 pub(crate) fn validate_args(args: &[String]) -> Result<()> {
     parse(args, host_backend()).map(|_| ())
+}
+
+/// Resolves the explicitly selected driver's format without opening a stream or files.
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+pub(crate) fn default_asio_format(args: &[String]) -> Result<AudioFormat> {
+    let options = parse(args, Backend::Windows)?;
+    if options.backend != Backend::Asio {
+        return Err("ASIO format query requires explicit ASIO configuration".into());
+    }
+    #[cfg(feature = "asio-sdk")]
+    {
+        asio_native::default_format(&options)
+    }
+    #[cfg(not(feature = "asio-sdk"))]
+    {
+        Err("ASIO format query requires feature asio-sdk and caller SDK/MSVC".into())
+    }
 }
 
 #[cfg(test)]
@@ -1237,18 +1328,21 @@ mod fixtures {
             "native",
             "--output-channels",
             "0,1",
+            "--asio-system-clock",
+            "multimedia",
+            "--asio-timer-error-ns",
+            "0",
+            "--asio-drift-error-ns",
+            "0",
+            "--asio-latency-error-ns",
+            "0",
         ]);
         let device = asio.iter().position(|value| value == "--device").unwrap();
         asio[device + 1] = "{12345678-9ABC-DEF0-1234-56789ABCDEF0}".into();
         assert!(parse(&asio, Backend::Windows).is_ok());
         let seconds = asio.iter().position(|value| value == "--seconds").unwrap();
         asio.drain(seconds..seconds + 2);
-        assert!(
-            parse(&asio, Backend::Windows)
-                .unwrap_err()
-                .to_string()
-                .contains("output-zero presentation epoch")
-        );
+        assert!(parse(&asio, Backend::Windows).is_ok());
     }
 
     #[test]
@@ -1330,7 +1424,9 @@ mod asio_fixtures;
 mod asio_native {
     use super::*;
     use beatkernel_platform::{
-        audio::asio::AsioBufferRequest,
+        audio::asio::{
+            AsioBufferRequest, AsioPresentationError, MultimediaClockAnchor, MultimediaClockError,
+        },
         windows::asio::{
             AsioEnumerationLimits, AsioRegistryView,
             control::AsioControl,
@@ -1451,6 +1547,10 @@ mod asio_native {
         stream: AsioStream,
         window: Window,
         retained: Option<RenderReport>,
+        clock: beatkernel_platform::windows::clock::QpcClock,
+        anchor: Option<MultimediaClockAnchor>,
+        timing: AsioClockOptions,
+        presentation: beatkernel_bms_runtime::asio_replay::AsioReplayPresentation,
     }
     impl Stream {
         fn snapshot(&mut self, final_check: bool) -> Result<AsioStreamSnapshot> {
@@ -1499,13 +1599,45 @@ mod asio_native {
             })
         }
         fn presented(&mut self) -> Result<Option<ClockPoint>> {
+            self.window.pump()?;
             self.snapshot(false)?;
-            // The native ASIO sample counter is not bound to Mixer frame zero.
-            // This recorded host has no explicitly declared driver timestamp
-            // relation/epoch, so neither prepared frames nor callback receipts
-            // can establish presentation. Parser requires diagnostic seconds;
-            // cancellation remains available without inventing visual progress.
-            Ok(None)
+            let now = self.clock.sample()?.normalized;
+            if self.anchor.as_ref().is_none_or(|anchor| {
+                i128::from(now.timestamp.as_nanos())
+                    - i128::from(anchor.after().timestamp.as_nanos())
+                    >= i128::from(self.timing.anchor_age) / 2
+            }) {
+                let receipt = self.clock.sample_multimedia()?;
+                self.anchor = Some(MultimediaClockAnchor::new(
+                    receipt.milliseconds,
+                    receipt.before.normalized,
+                    receipt.after.normalized,
+                    self.timing.anchor_age,
+                    self.timing.timer_error,
+                    self.timing.drift_error,
+                )?);
+            }
+            let observation = match self.stream.presentation_observation(
+                self.anchor.as_ref().expect("initialized ASIO clock anchor"),
+                &self.clock,
+                self.timing.latency_error,
+                ClockPoint {
+                    domain: OUTPUT,
+                    timestamp: Timestamp::ZERO,
+                },
+            ) {
+                Ok(observation) => Some(observation),
+                Err(
+                    AsioPresentationError::Unavailable
+                    | AsioPresentationError::Clock(MultimediaClockError::Expired),
+                ) => None,
+                Err(error) => return Err(error.into()),
+            };
+            // Queued real block observations mature against fresh QPC; neither
+            // the latest prepared block nor wall-time extrapolation is audible progress.
+            Ok(self
+                .presentation
+                .observe(observation, self.clock.sample()?.normalized)?)
         }
         fn last_render(&mut self) -> Option<RenderReport> {
             if let Ok(snapshot) = self.stream.snapshot() {
@@ -1530,7 +1662,12 @@ mod asio_native {
             let _ = self.stream.stop();
         }
     }
-    pub(super) fn open(options: &Options, mixer: Mixer) -> Result<Box<dyn NativeOutput>> {
+    // Control must release before the driver's caller-owned window on every query error.
+    struct Setup {
+        control: AsioControl,
+        window: Window,
+    }
+    fn setup(options: &Options) -> Result<Setup> {
         let view = match options.asio_view.ok_or("ASIO view required")? {
             AsioView::Native => AsioRegistryView::Native,
             AsioView::Bits32 => AsioRegistryView::Bits32,
@@ -1549,7 +1686,34 @@ mod asio_native {
         let window = Window::new()?;
         // SAFETY: explicitly selected installed driver is trusted; window is valid,
         // owned by this thread and retained until stream stop/Release/callback drain.
-        let mut control = unsafe { AsioControl::open(registration, Some(window.hwnd as usize)) }?;
+        let control = unsafe { AsioControl::open(registration, Some(window.hwnd as usize)) }?;
+        Ok(Setup { control, window })
+    }
+    pub(super) fn default_format(options: &Options) -> Result<AudioFormat> {
+        let mut setup = setup(options)?;
+        let rate = setup.control.sample_rate()?;
+        if !rate.is_finite() || rate <= 0.0 || rate.fract() != 0.0 || rate > f64::from(u32::MAX) {
+            return Err("ASIO driver rate must be a positive integral u32".into());
+        }
+        Ok(AudioFormat::new(rate as u32, options.format.channels())?)
+    }
+    pub(super) fn open(options: &Options, mixer: Mixer) -> Result<Box<dyn NativeOutput>> {
+        let timing = options
+            .asio_clock
+            .ok_or("explicit ASIO clock assessments required")?;
+        let presentation = beatkernel_bms_runtime::asio_replay::AsioReplayPresentation::new(
+            ClockPoint {
+                domain: OUTPUT,
+                timestamp: Timestamp::ZERO,
+            },
+            HOST,
+            options.format.sample_rate(),
+            4096,
+        )?;
+        let Setup {
+            window,
+            mut control,
+        } = setup(options)?;
         let constraints = control.buffer_constraints()?;
         let request = options.buffer.map_or(
             AsioBufferRequest::DriverPreferred,
@@ -1564,7 +1728,8 @@ mod asio_native {
             .clone()
             .ok_or("ASIO output channels required")?;
         println!(
-            "ASIO exact registration={registration:?}; requested buffer={request:?}; reported={constraints:?}; resolved frames={resolved}; reported rate={}; Mixer rate={}",
+            "ASIO exact registration={}; requested buffer={request:?}; reported={constraints:?}; resolved frames={resolved}; reported rate={}; Mixer rate={}",
+            options.device,
             control.sample_rate()?,
             options.format.sample_rate()
         );
@@ -1574,13 +1739,16 @@ mod asio_native {
                 control.channel_info(*channel, false)?
             );
         }
-        let host_clock =
-            beatkernel_platform::windows::clock::QpcClock::new(beatkernel::time::ClockDomainId(1))?;
+        let host_clock = beatkernel_platform::windows::clock::QpcClock::new(HOST)?;
         let stream = AsioStream::prepare_with_clock(control, mixer, channels, request, host_clock)?;
         Ok(Box::new(Stream {
             stream,
             window,
             retained: None,
+            clock: host_clock,
+            anchor: None,
+            timing,
+            presentation,
         }))
     }
 }

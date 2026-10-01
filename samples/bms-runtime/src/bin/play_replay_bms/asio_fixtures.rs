@@ -38,6 +38,14 @@ fn asio() -> Vec<String> {
     append(&mut arguments, "--backend", "asio");
     append(&mut arguments, "--asio-view", "native");
     append(&mut arguments, "--output-channels", "0,1");
+    for (flag, value) in [
+        ("--asio-system-clock", "multimedia"),
+        ("--asio-timer-error-ns", "0"),
+        ("--asio-drift-error-ns", "0"),
+        ("--asio-latency-error-ns", "0"),
+    ] {
+        append(&mut arguments, flag, value);
+    }
     arguments
 }
 fn native(host: Backend) -> Vec<String> {
@@ -234,7 +242,14 @@ fn strict_braced_uuid_shape_rejects_malformed_nonascii_nul_and_trailing_identity
 
 #[test]
 fn mandatory_asio_selection_and_duplicate_flags_never_choose_a_fallback() {
-    for flag in ["--asio-view", "--output-channels"] {
+    for flag in [
+        "--asio-view",
+        "--output-channels",
+        "--asio-system-clock",
+        "--asio-timer-error-ns",
+        "--asio-drift-error-ns",
+        "--asio-latency-error-ns",
+    ] {
         let mut arguments = asio();
         let index = arguments
             .iter()
@@ -297,5 +312,50 @@ fn backend_view_format_and_finite_capacity_values_are_strictly_validated() {
         let mut arguments = asio();
         append(&mut arguments, flag, &usize::MAX.to_string());
         assert!(parse(&arguments, Backend::Windows).is_err());
+    }
+}
+
+#[test]
+fn recorded_asio_natural_completion_requires_explicit_bounded_clock_assessments() {
+    let mut natural = asio();
+    let index = natural.iter().position(|s| s == "--seconds").unwrap();
+    natural.drain(index..index + 2);
+    let options = parse(&natural, Backend::Windows).unwrap();
+    assert_eq!(options.seconds, None);
+    assert_eq!(options.asio_clock.unwrap().anchor_age, 1_000_000_000);
+    for flag in [
+        "--asio-timer-error-ns",
+        "--asio-drift-error-ns",
+        "--asio-latency-error-ns",
+    ] {
+        for value in ["", "-1", "+1", "NaN", "9223372036854775808"] {
+            let mut invalid = natural.clone();
+            set(&mut invalid, flag, value);
+            assert!(parse(&invalid, Backend::Windows).is_err());
+        }
+    }
+    for age in ["0", "2147483648000000", "18446744073709551615"] {
+        let mut invalid = natural.clone();
+        append(&mut invalid, "--asio-anchor-age-ns", age);
+        assert!(parse(&invalid, Backend::Windows).is_err());
+    }
+    let mut incompatible = natural.clone();
+    set(&mut incompatible, "--asio-system-clock", "qpc");
+    assert!(parse(&incompatible, Backend::Windows).is_err());
+    for (flag, value) in [
+        ("--asio-system-clock", "multimedia"),
+        ("--asio-timer-error-ns", "0"),
+        ("--asio-drift-error-ns", "0"),
+        ("--asio-latency-error-ns", "0"),
+        ("--asio-anchor-age-ns", "1"),
+    ] {
+        let mut wrong_backend = native(Backend::Windows);
+        append(&mut wrong_backend, flag, value);
+        assert!(parse(&wrong_backend, Backend::Windows).is_err());
+        let mut duplicate = natural.clone();
+        append(&mut duplicate, flag, value);
+        if flag != "--asio-anchor-age-ns" {
+            assert!(parse(&duplicate, Backend::Windows).is_err());
+        }
     }
 }

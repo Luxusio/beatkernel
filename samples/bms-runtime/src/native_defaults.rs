@@ -116,13 +116,33 @@ pub fn replay_args(
     let replay = replay.ok_or("replay path required")?;
     chart.ok_or("chart path required")?;
     NativeSettings::from_args(&native, host)?;
+    let asio = native.chunks_exact(2).any(|p| p == ["--backend", "asio"]);
+    let routed_channels = native
+        .chunks_exact(2)
+        .find(|p| p[0] == "--output-channels")
+        .map(|p| p[1].split(',').count());
     let mut result = Vec::new();
     for pair in native.chunks_exact(2) {
+        if asio && pair[0] == "--buffer" {
+            if pair[1] == "default" {
+                continue;
+            }
+            let frames = pair[1]
+                .strip_prefix("frames:")
+                .ok_or("ASIO replay buffer must be driver default or exact frames")?;
+            result.extend(["--buffer-frames".into(), frames.to_owned()]);
+            continue;
+        }
         let flag = match pair[0].as_str() {
             "--chart" | "--device" | "--backend" | "--mode" | "--shared-policy" | "--asio-view"
             | "--output-channels" | "--rate" | "--channels" | "--buffer-frames"
             | "--period-frames" | "--preroll-ns" | "--voices" | "--seconds"
             | "--channel-policy" => pair[0].as_str(),
+            "--asio-system-clock"
+            | "--asio-timer-error-ns"
+            | "--asio-drift-error-ns"
+            | "--asio-latency-error-ns"
+            | "--asio-anchor-age-ns" => pair[0].as_str(),
             "--alsa" => "--device",
             "--bgm-lookahead-ns" => "--lookahead-ns",
             "--replay-max-records" => "--max-records",
@@ -131,7 +151,6 @@ pub fn replay_args(
         };
         result.extend([flag.to_owned(), pair[1].clone()]);
     }
-    let asio = result.chunks_exact(2).any(|p| p == ["--backend", "asio"]);
     let mut add = |flag: &str, value: String| {
         if !result.chunks_exact(2).any(|p| p[0] == flag) {
             result.extend([flag.to_owned(), value]);
@@ -149,7 +168,16 @@ pub fn replay_args(
         add("--mode", "shared".into());
     }
     add("--rate", defaults.rate.to_string());
-    add("--channels", defaults.channels.to_string());
+    add(
+        "--channels",
+        if asio {
+            routed_channels
+                .ok_or("ASIO replay output routing required")?
+                .to_string()
+        } else {
+            defaults.channels.to_string()
+        },
+    );
     if host != SettingsHost::Windows {
         add("--buffer-frames", defaults.buffer_frames.to_string());
     }
@@ -163,6 +191,65 @@ pub fn replay_args(
 #[cfg(test)]
 mod fixtures {
     use super::*;
+    #[test]
+    fn asio_watch_preserves_clock_assessments_exact_buffer_and_routed_channel_count() {
+        let args = [
+            "--chart",
+            "song.bms",
+            "--replay",
+            "past.bkr",
+            "--backend",
+            "asio",
+            "--device",
+            "{12345678-9ABC-DEF0-1234-56789ABCDEF0}",
+            "--asio-view",
+            "native",
+            "--output-channels",
+            "3",
+            "--buffer",
+            "frames:64",
+            "--asio-system-clock",
+            "multimedia",
+            "--asio-timer-error-ns",
+            "100",
+            "--asio-drift-error-ns",
+            "200",
+            "--asio-latency-error-ns",
+            "300",
+            "--asio-anchor-age-ns",
+            "500000000",
+        ]
+        .map(String::from);
+        let out = replay_args(
+            &args,
+            SettingsHost::Windows,
+            &NativeDefaults::for_validation(),
+        )
+        .unwrap();
+        for pair in [
+            ["--buffer-frames", "64"],
+            ["--channels", "1"],
+            ["--output-channels", "3"],
+            ["--asio-system-clock", "multimedia"],
+            ["--asio-timer-error-ns", "100"],
+            ["--asio-drift-error-ns", "200"],
+            ["--asio-latency-error-ns", "300"],
+            ["--asio-anchor-age-ns", "500000000"],
+        ] {
+            assert!(out.chunks_exact(2).any(|p| p == pair));
+        }
+        assert!(!out.iter().any(|s| s == "--mode" || s == "--buffer"));
+        let mut preferred = args.to_vec();
+        let index = preferred.iter().position(|s| s == "--buffer").unwrap();
+        preferred[index + 1] = "default".into();
+        let out = replay_args(
+            &preferred,
+            SettingsHost::Windows,
+            &NativeDefaults::for_validation(),
+        )
+        .unwrap();
+        assert!(!out.iter().any(|s| s == "--buffer-frames"));
+    }
     #[test]
     fn recorded_output_projection_omits_live_state_and_preserves_exact_output() {
         let args = [

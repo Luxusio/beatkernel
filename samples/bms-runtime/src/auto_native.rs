@@ -144,6 +144,13 @@ pub(super) fn prepare_replay(args: &[String]) -> Result<Vec<String>> {
                 .id
                 .0;
         }
+        if asio && get("--rate").is_none() {
+            let projected =
+                beatkernel_bms_runtime::native_defaults::replay_args(args, host(), &defaults)?;
+            let format = crate::replay_player::default_asio_format(&projected)?;
+            defaults.rate = format.sample_rate();
+            defaults.channels = format.channels();
+        }
         if !asio && (get("--rate").is_none() || get("--channels").is_none()) {
             let id = AudioDeviceId(get("--device").unwrap_or(&defaults.device).to_owned());
             let format = beatkernel_platform::windows::audio::WasapiBackend.mix_format(&id)?;
