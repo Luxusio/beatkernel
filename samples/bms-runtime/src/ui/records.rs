@@ -21,7 +21,7 @@ const DIRECTORY: Bounds = Bounds {
     height: 34,
 };
 /// Shared button geometry in painter order, including conditionally visible pages.
-pub const BUTTONS: [(ControlId, Bounds, &'static str); 9] = [
+pub const BUTTONS: [(ControlId, Bounds, &'static str); 11] = [
     (
         ControlId(56),
         Bounds {
@@ -112,6 +112,26 @@ pub const BUTTONS: [(ControlId, Bounds, &'static str); 9] = [
         },
         "WATCH (W)",
     ),
+    (
+        ControlId(60),
+        Bounds {
+            x: 444,
+            y: 575,
+            width: 140,
+            height: 34,
+        },
+        "REMOVE OWN",
+    ),
+    (
+        ControlId(61),
+        Bounds {
+            x: 594,
+            y: 575,
+            width: 150,
+            height: 34,
+        },
+        "REMOVE OTHER",
+    ),
 ];
 pub struct RecordsFrame<'a> {
     pub directory: &'a LineEditor,
@@ -123,6 +143,8 @@ pub struct RecordsFrame<'a> {
     pub preview: Option<&'a RecordPreview>,
     pub pending: bool,
     pub opponents: usize,
+    /// Exact selected path occurrences, ordered own/other, in the parent draft.
+    pub selected_opponents: [usize; 2],
     pub message: Option<&'a str>,
     pub error: Option<&'a str>,
     pub hovered: Option<ControlId>,
@@ -145,7 +167,10 @@ fn available(frame: &RecordsFrame<'_>, id: ControlId) -> bool {
         56 => frame.catalog.is_some() && frame.first > 0,
         57 => frame.catalog.is_some() && frame.first.saturating_add(10) < count,
         51 => frame.selected.is_some_and(|index| index < count),
-        52 | 53 | 59 => frame.preview.is_some(),
+        52 | 53 => frame.preview.is_some() && frame.opponents < 8,
+        59 => frame.preview.is_some(),
+        60 => frame.selected_opponents[0] > 0,
+        61 => frame.selected_opponents[1] > 0,
         50 | 54 | 55 => true,
         _ => false,
     }
@@ -174,6 +199,13 @@ pub fn hit(frame: &RecordsFrame<'_>, point: Option<(f64, f64)>) -> Option<Contro
 fn validate_frame(frame: &RecordsFrame<'_>) -> Result<(), String> {
     let count = frame.catalog.map_or(0, |catalog| catalog.entries.len());
     if count > 256
+        || frame.opponents > crate::settings::MAX_FIELDS
+        || frame
+            .selected_opponents
+            .iter()
+            .any(|&count| count > crate::settings::MAX_FIELDS)
+        || frame.selected_opponents.iter().sum::<usize>() > frame.opponents
+        || (frame.selected.is_none() && frame.selected_opponents != [0; 2])
         || frame.first.checked_add(10).is_none()
         || (count == 0 && frame.first != 0)
         || (count > 0 && frame.first >= count)
@@ -231,10 +263,11 @@ pub struct RecordsView {
     summary: RwSignal<Option<(usize, bool)>>,
     preview: RwSignal<Option<Preview>>,
     opponents: RwSignal<usize>,
+    selected_opponents: RwSignal<[usize; 2]>,
     message: RwSignal<Option<String>>,
     error: RwSignal<Option<String>>,
     pending: RwSignal<bool>,
-    gates: [RwSignal<bool>; 9],
+    gates: [RwSignal<bool>; 11],
     hovered: RwSignal<Option<ControlId>>,
     armed: RwSignal<Option<ControlId>>,
     nodes: RetainedNodes,
@@ -253,6 +286,7 @@ impl RecordsView {
             summary: scope.create_rw_signal(None),
             preview: scope.create_rw_signal(None),
             opponents: scope.create_rw_signal(0),
+            selected_opponents: scope.create_rw_signal([0; 2]),
             message: scope.create_rw_signal(None),
             error: scope.create_rw_signal(None),
             pending: scope.create_rw_signal(false),
@@ -425,7 +459,19 @@ impl RecordsView {
                 0x9bb1cf,
             )
         });
-        for index in 2..9 {
+        let selected_opponents = view.selected_opponents;
+        let memo = scope.create_memo(move |_| selected_opponents.get());
+        view.nodes.bind(scope, memo, |counts, scene, _| {
+            text(
+                scene,
+                24,
+                576,
+                &format!("SELECTED OWN {} / OTHER {}", counts[0], counts[1]),
+                1,
+                0x9bb1cf,
+            );
+        });
+        for index in 2..BUTTONS.len() {
             view.button_node(index);
         }
         let message = view.message;
@@ -505,6 +551,9 @@ impl RecordsView {
         }
         if self.opponents.get_untracked() != frame.opponents {
             self.opponents.set(frame.opponents);
+        }
+        if self.selected_opponents.get_untracked() != frame.selected_opponents {
+            self.selected_opponents.set(frame.selected_opponents);
         }
         if !self
             .message
@@ -600,11 +649,63 @@ mod fixtures {
             preview: None,
             pending: false,
             opponents: 0,
+            selected_opponents: [0; 2],
             message: None,
             error: None,
             hovered: None,
             armed: None,
         }
+    }
+    #[test]
+    fn selective_membership_gates_survive_overfull_drafts_without_repainting_rows() {
+        let view = RecordsView::new(ScreenInstanceId(8), 960, 720).unwrap();
+        let catalog = catalog(1);
+        let directory = LineEditor::new("records", 4096).unwrap();
+        let mut value = frame(&directory, &catalog);
+        value.opponents = 3;
+        value.selected_opponents = [2, 1];
+        assert_eq!(hit(&value, Some((450.0, 580.0))), Some(ControlId(60)));
+        assert_eq!(hit(&value, Some((600.0, 580.0))), Some(ControlId(61)));
+        view.update(value).unwrap();
+        let mut scene = Scene::new(960, 720);
+        let mut hits = Vec::new();
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert!(hits.iter().any(|(id, _)| id.0 == 60));
+        assert!(hits.iter().any(|(id, _)| id.0 == 61));
+        let before = view.nodes.paints();
+        let mut value = frame(&directory, &catalog);
+        value.opponents = 2;
+        value.selected_opponents = [1, 1];
+        view.update(value).unwrap();
+        assert_eq!(&view.nodes.paints()[3..13], &before[3..13]);
+        let same = view.nodes.paints();
+        let mut value = frame(&directory, &catalog);
+        value.opponents = 2;
+        value.selected_opponents = [1, 1];
+        view.update(value).unwrap();
+        assert_eq!(view.nodes.paints(), same);
+        let mut overfull = frame(&directory, &catalog);
+        overfull.opponents = 9;
+        overfull.selected_opponents = [9, 0];
+        assert_eq!(hit(&overfull, Some((450.0, 580.0))), Some(ControlId(60)));
+        assert!(!available(&overfull, ControlId(52)));
+        view.update(overfull).unwrap();
+        let before = view.nodes.paints();
+        for counts in [[usize::MAX, 0], [9, 1]] {
+            let mut invalid = frame(&directory, &catalog);
+            invalid.opponents = 9;
+            invalid.selected_opponents = counts;
+            assert!(view.update(invalid).is_err());
+            assert_eq!(view.nodes.paints(), before);
+        }
+        let mut pending = frame(&directory, &catalog);
+        pending.opponents = 1;
+        pending.selected_opponents = [1, 0];
+        pending.pending = true;
+        assert_eq!(hit(&pending, Some((450.0, 580.0))), None);
+        view.update(pending).unwrap();
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert!(hits.is_empty());
     }
     #[test]
     fn no_op_error_directory_and_selection_updates_repaint_only_dependencies() {
@@ -623,8 +724,9 @@ mod fixtures {
         update.error = Some("ERROR");
         view.update(update).unwrap();
         let error = view.nodes.paints();
-        assert_eq!(&error[..26], &before[..26]);
-        assert_eq!(error[26], before[26] + 1);
+        let error_node = before.len() - 1;
+        assert_eq!(&error[..error_node], &before[..error_node]);
+        assert_eq!(error[error_node], before[error_node] + 1);
         directory.left();
         let mut update = frame(&directory, &catalog);
         update.error = Some("ERROR");

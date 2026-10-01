@@ -1895,6 +1895,38 @@ impl Desktop {
         self.gesture.cancel();
         self.invalidate_hits();
     }
+    fn remove_record(&mut self, kind: OpponentKind) {
+        if !self.records_admitted() || self.navigator.route() != ScreenRoute::Records {
+            return;
+        }
+        let result = (|| {
+            let path = self
+                .records
+                .as_ref()
+                .and_then(|records| records.selected_path())
+                .and_then(|path| path.to_str())
+                .ok_or("select a UTF-8 record path first")?
+                .to_owned();
+            let draft = self.settings.as_mut().ok_or("settings unavailable")?;
+            if !draft.values.remove_opponent(kind, &path)? {
+                return Err("selected record is not configured with this kind".into());
+            }
+            draft.refresh_selected()?;
+            Ok::<_, String>(())
+        })();
+        if let Some(records) = &mut self.records {
+            match result {
+                Ok(()) => {
+                    records.error = None;
+                    records.message =
+                        Some("ONE RECORD REMOVED FROM DRAFT - APPLY IS SEPARATE".into());
+                }
+                Err(error) => records.error = Some(error),
+            }
+        }
+        self.gesture.cancel();
+        self.invalidate_hits();
+    }
     fn records_key(&mut self, key: KeyCode, repeat: bool) {
         match key {
             KeyCode::KeyW
@@ -2221,6 +2253,8 @@ impl Desktop {
                 54 => self.clear_records(),
                 55 => self.back(),
                 59 => self.watch_record(),
+                60 => self.remove_record(OpponentKind::Own),
+                61 => self.remove_record(OpponentKind::Other),
                 56 => self.records.as_mut().expect("records routing").page(false),
                 57 => self.records.as_mut().expect("records routing").page(true),
                 58 => {
@@ -3355,9 +3389,14 @@ impl Desktop {
             .settings
             .as_ref()
             .map_or(0, |draft| saved_opponents(&draft.values));
-        let mut frame = records_frame(records, self.profile_io.is_some(), opponents);
+        let mut frame = records_frame(
+            records,
+            self.profile_io.is_some(),
+            opponents,
+            self.settings.as_ref().map(|draft| &draft.values),
+        );
         frame.hovered = beatkernel_bms_runtime::ui::records::hit(&frame, self.point());
-        frame.armed = (50..=59)
+        frame.armed = (50..=61)
             .map(ControlId)
             .find(|&id| self.gesture.is_armed(id));
         let view = self
@@ -4080,7 +4119,12 @@ fn saved_opponents(settings: &NativeSettings) -> usize {
         })
         .count()
 }
-fn records_frame(records: &RecordsDraft, pending: bool, opponents: usize) -> RecordsFrame<'_> {
+fn records_frame<'a>(
+    records: &'a RecordsDraft,
+    pending: bool,
+    opponents: usize,
+    settings: Option<&NativeSettings>,
+) -> RecordsFrame<'a> {
     RecordsFrame {
         directory: &records.directory,
         directory_focused: records.directory_focused,
@@ -4090,6 +4134,14 @@ fn records_frame(records: &RecordsDraft, pending: bool, opponents: usize) -> Rec
         preview: records.valid_preview(),
         pending,
         opponents,
+        selected_opponents: settings
+            .zip(records.selected_path().and_then(|path| path.to_str()))
+            .map_or([0; 2], |(settings, path)| {
+                [
+                    settings.opponent_count(OpponentKind::Own, path),
+                    settings.opponent_count(OpponentKind::Other, path),
+                ]
+            }),
         message: records.message.as_deref(),
         error: records.error.as_deref(),
         hovered: None,
@@ -4109,9 +4161,9 @@ fn draw_records(
 ) {
     let id = ScreenNavigator::default().active_id().unwrap();
     let view = RecordsView::new(id, WIDTH as u32, HEIGHT as u32).unwrap();
-    let mut frame = records_frame(records, pending, opponents);
+    let mut frame = records_frame(records, pending, opponents, None);
     frame.hovered = beatkernel_bms_runtime::ui::records::hit(&frame, point);
-    frame.armed = (50..=59).map(ControlId).find(|&id| gesture.is_armed(id));
+    frame.armed = (50..=61).map(ControlId).find(|&id| gesture.is_armed(id));
     view.update(frame).unwrap();
     view.compose(scene, hits).unwrap();
 }
@@ -5849,6 +5901,72 @@ mod tests {
             8,
         );
         assert!(hits.is_empty());
+    }
+    #[test]
+    fn selective_record_removal_refreshes_parent_editor_and_preserves_duplicates_and_accepted_state()
+     {
+        let mut app = lifecycle_fixture();
+        app.open_settings();
+        app.open_records();
+        let path = "records/own.bkr";
+        let draft = app.settings.as_mut().unwrap();
+        draft.values.add_opponent(OpponentKind::Own, path).unwrap();
+        draft.values.add_opponent(OpponentKind::Own, path).unwrap();
+        draft
+            .values
+            .add_opponent(OpponentKind::Other, path)
+            .unwrap();
+        let row = draft
+            .values
+            .fields()
+            .iter()
+            .position(|row| row.flag == "--ghost-self" && row.value == path)
+            .unwrap();
+        draft.select(row).unwrap();
+        let accepted = app.options.native.clone();
+        let records = app.records.as_mut().unwrap();
+        records.catalog = Some(RecordCatalog {
+            entries: vec![path.into()],
+            truncated: false,
+        });
+        records.selected = Some(0);
+        assert!(records.preview.is_none());
+        app.remove_record(OpponentKind::Own);
+        let draft = app.settings.as_ref().unwrap();
+        assert_eq!(draft.values.opponent_count(OpponentKind::Own, path), 1);
+        assert_eq!(draft.values.opponent_count(OpponentKind::Other, path), 1);
+        assert_eq!(draft.selected, row);
+        assert_eq!(draft.editor.value(), "");
+        assert_eq!(app.options.native, accepted);
+        let records = app.records.as_ref().unwrap();
+        let frame = records_frame(
+            records,
+            false,
+            saved_opponents(&draft.values),
+            Some(&draft.values),
+        );
+        assert_eq!(frame.selected_opponents, [1, 1]);
+        app.remove_record(OpponentKind::Own);
+        app.remove_record(OpponentKind::Own); // Missing targets report an error and preserve others.
+        assert!(app.records.as_ref().unwrap().error.is_some());
+        assert_eq!(
+            app.settings
+                .as_ref()
+                .unwrap()
+                .values
+                .opponent_count(OpponentKind::Other, path),
+            1
+        );
+        app.back();
+        app.remove_record(OpponentKind::Other); // Hidden child cannot mutate parent draft.
+        assert_eq!(
+            app.settings
+                .as_ref()
+                .unwrap()
+                .values
+                .opponent_count(OpponentKind::Other, path),
+            1
+        );
     }
     #[test]
     fn cleared_ghost_field_refreshes_the_settings_editor_without_resurrecting_path() {
