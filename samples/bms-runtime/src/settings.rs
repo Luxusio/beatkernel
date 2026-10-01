@@ -46,7 +46,7 @@ pub fn overlay_native_args(
     Ok(NativeSettings::from_args(&merged, host)?.native_args())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingsField {
     pub flag: &'static str,
     pub label: &'static str,
