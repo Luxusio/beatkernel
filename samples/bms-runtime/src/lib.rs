@@ -472,3 +472,6 @@ pub mod timing_display;
 /// UI-owned bounded GPU background cache and ordered static image composition.
 #[cfg(feature = "graphics")]
 pub mod bga_render;
+
+/// Immutable exact-black transparency for chart-declared BGA Layer resources.
+pub mod image_key;

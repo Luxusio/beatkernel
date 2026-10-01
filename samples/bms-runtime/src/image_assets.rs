@@ -2,9 +2,10 @@
 use crate::{
     asset_paths::{AssetPathPolicy, resolve_asset},
     image_decode::{ImageDecodeError, ImageDecodeLimits, decode},
+    image_key::{black_to_transparent, needs_key},
     texture::RgbaImage,
 };
-use beatkernel_bms::{BmsChart, ImageId};
+use beatkernel_bms::{BgaChannel, BmsChart, ImageId};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
@@ -23,7 +24,7 @@ pub const MAX_IMAGE_BANK_BYTES: u64 = 256 * 1024 * 1024;
 pub struct ImageAssetLimits {
     /// Maximum referenced image IDs, including unavailable resources.
     pub max_images: usize,
-    /// Maximum bytes in unique retained RGBA images, counted once per file.
+    /// Maximum retained RGBA bytes, counting raw files and changed Layer variants.
     pub max_decoded_bytes: u64,
     /// Encoded input, dimensions and output bounds for one image.
     pub decode: ImageDecodeLimits,
@@ -68,6 +69,7 @@ pub enum ImageUnavailable {
 #[derive(Clone, Default)]
 pub struct ImageAssets {
     images: BTreeMap<ImageId, Arc<RgbaImage>>,
+    layers: BTreeMap<ImageId, Arc<RgbaImage>>,
     unavailable: BTreeMap<ImageId, ImageUnavailable>,
     decoded_bytes: u64,
     unique_images: usize,
@@ -196,7 +198,57 @@ impl ImageAssets {
                 }
             }
         }
+        let layer_ids = chart
+            .bga
+            .iter()
+            .filter(|event| event.channel == BgaChannel::Layer)
+            .map(|event| event.image)
+            .collect();
+        let (layers, decoded_bytes) = bank.keyed_layers(&layer_ids, limits.max_decoded_bytes)?;
+        bank.layers = layers;
+        bank.decoded_bytes = decoded_bytes;
         Ok(bank)
+    }
+
+    fn keyed_layers(
+        &self,
+        ids: &BTreeSet<ImageId>,
+        budget: u64,
+    ) -> Result<(BTreeMap<ImageId, Arc<RgbaImage>>, u64), String> {
+        let mut layers = BTreeMap::new();
+        let mut variants: Vec<(Arc<RgbaImage>, Arc<RgbaImage>)> = Vec::new();
+        variants
+            .try_reserve_exact(ids.len())
+            .map_err(|e| e.to_string())?;
+        let mut total = self.decoded_bytes;
+        for &id in ids {
+            let Some(original) = self.images.get(&id) else {
+                continue;
+            };
+            let keyed = if let Some((_, keyed)) =
+                variants.iter().find(|(raw, _)| Arc::ptr_eq(raw, original))
+            {
+                Arc::clone(keyed)
+            } else {
+                if needs_key(original) {
+                    total = total
+                        .checked_add(original.byte_len())
+                        .filter(|bytes| *bytes <= budget)
+                        .ok_or("image bank Layer variant byte budget exceeded")?;
+                }
+                let keyed = black_to_transparent(original)?;
+                variants.push((Arc::clone(original), Arc::clone(&keyed)));
+                keyed
+            };
+            layers.insert(id, keyed);
+        }
+        Ok((layers, total))
+    }
+
+    /// Borrows only declared Layer pixels, with exact black made transparent.
+    /// Non-Layer IDs and unavailable resources have no fallback to raw pixels.
+    pub fn get_layer(&self, image: ImageId) -> Option<&Arc<RgbaImage>> {
+        self.layers.get(&image)
     }
 
     /// Borrows shared decoded pixels; unavailable selections have no image.
@@ -219,8 +271,96 @@ impl ImageAssets {
     pub fn unique_images(&self) -> usize {
         self.unique_images
     }
-    /// Retained RGBA byte count, excluding codec scratch and encoded inputs.
+    /// Retained raw plus changed Layer RGBA bytes, excluding decoder scratch.
     pub fn decoded_bytes(&self) -> u64 {
         self.decoded_bytes
+    }
+}
+
+#[cfg(test)]
+mod layer_fixtures {
+    use super::*;
+    fn raw(pixels: Vec<u8>) -> Arc<RgbaImage> {
+        Arc::new(RgbaImage::new((pixels.len() / 4) as u32, 1, pixels).unwrap())
+    }
+    #[test]
+    fn changed_alias_variants_count_once_and_raw_base_poor_remain_immutable() {
+        let original = raw(vec![0, 0, 0, 255, 1, 0, 0, 127]);
+        let unchanged = raw(vec![0, 0, 0, 0, 7, 8, 9, 255]);
+        let mut bank = ImageAssets::default();
+        for id in [0, 1, 2] {
+            bank.images.insert(ImageId(id), original.clone());
+        }
+        bank.images.insert(ImageId(3), unchanged.clone());
+        bank.unavailable
+            .insert(ImageId(4), ImageUnavailable::Undefined);
+        bank.decoded_bytes = 16;
+        bank.unique_images = 2;
+        let ids = [ImageId(1), ImageId(2), ImageId(3), ImageId(4)]
+            .into_iter()
+            .collect();
+        assert!(bank.keyed_layers(&ids, 23).is_err());
+        assert_eq!(bank.decoded_bytes(), 16);
+        assert!(bank.layers.is_empty());
+        let (layers, total) = bank.keyed_layers(&ids, 24).unwrap();
+        bank.layers = layers;
+        bank.decoded_bytes = total;
+        assert_eq!(bank.decoded_bytes(), 24);
+        assert_eq!(bank.unique_images(), 2);
+        assert_eq!(bank.len(), 5);
+        assert!(Arc::ptr_eq(
+            bank.get_layer(ImageId(1)).unwrap(),
+            bank.get_layer(ImageId(2)).unwrap()
+        ));
+        assert!(!Arc::ptr_eq(
+            bank.get(ImageId(1)).unwrap(),
+            bank.get_layer(ImageId(1)).unwrap()
+        ));
+        assert!(Arc::ptr_eq(bank.get(ImageId(0)).unwrap(), &original));
+        assert_eq!(
+            bank.get(ImageId(0)).unwrap().pixels(),
+            &[0, 0, 0, 255, 1, 0, 0, 127]
+        );
+        assert_eq!(
+            bank.get_layer(ImageId(1)).unwrap().pixels(),
+            &[0, 0, 0, 0, 1, 0, 0, 127]
+        );
+        assert!(Arc::ptr_eq(bank.get_layer(ImageId(3)).unwrap(), &unchanged));
+        assert!(bank.get_layer(ImageId(0)).is_none());
+        assert!(bank.get_layer(ImageId(4)).is_none());
+        let snapshot = bank.clone();
+        assert!(Arc::ptr_eq(
+            snapshot.get_layer(ImageId(1)).unwrap(),
+            bank.get_layer(ImageId(1)).unwrap()
+        ));
+    }
+    #[test]
+    fn declared_channel_filter_has_no_raw_fallback_and_noop_needs_no_extra_budget() {
+        let chart = beatkernel_bms::parse(
+            "#BMP01 same.png\n#BMP02 same.png\n#BMP03 same.png\n#00004:01\n#00007:02\n#00006:03",
+            beatkernel_bms::ParseOptions::default(),
+        )
+        .unwrap();
+        let original = raw(vec![0, 0, 0, 0]);
+        let mut bank = ImageAssets::default();
+        for id in [1, 2, 3] {
+            bank.images.insert(ImageId(id), original.clone());
+        }
+        bank.decoded_bytes = 4;
+        bank.unique_images = 1;
+        let ids = chart
+            .bga
+            .iter()
+            .filter(|event| event.channel == BgaChannel::Layer)
+            .map(|event| event.image)
+            .collect();
+        let (layers, total) = bank.keyed_layers(&ids, 4).unwrap();
+        bank.layers = layers;
+        bank.decoded_bytes = total;
+        assert!(bank.get(ImageId(1)).is_some());
+        assert!(bank.get_layer(ImageId(1)).is_none());
+        assert!(bank.get_layer(ImageId(3)).is_none());
+        assert!(Arc::ptr_eq(bank.get_layer(ImageId(2)).unwrap(), &original));
+        assert_eq!(bank.decoded_bytes(), 4);
     }
 }
