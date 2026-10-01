@@ -157,6 +157,38 @@ impl NativeEnd {
         }
         Ok(marker)
     }
+    /// Acknowledges an ASIO crossing block at its conservative host upper
+    /// frontier, including the observation's supplied latency/error bounds.
+    /// Prepared render endpoints alone never substitute for presentation. This
+    /// does not establish physical accuracy or an interpolated exact host time.
+    pub fn observe_asio(
+        &mut self,
+        observation: beatkernel_platform::audio::asio::AsioPresentationObservation,
+    ) -> Result<Option<EndBoundary>, EndError> {
+        if observation.sample_rate != self.rate
+            || observation.output_origin != self.origin
+            || observation.output != self.point(observation.render.start_frame)?
+            || observation.render.frames == 0
+            || observation.host.before.domain != self.host
+            || observation.host.after.domain != self.host
+            || observation.host.before.timestamp > observation.host.after.timestamp
+        {
+            return Err(EndError(
+                "ASIO end observation has inconsistent configuration, grid or host interval",
+            ));
+        }
+        let mut next = self.clone();
+        let boundary = next.observe_inner(
+            Some(observation.render),
+            ClockPair {
+                source: observation.output,
+                target: observation.host.after,
+            },
+            true,
+        )?;
+        *self = next;
+        Ok(boundary)
+    }
     /// Unavailable render telemetry preserves prior evidence. Invalid observations
     /// commit nothing. A boundary is emitted once after actual native crossing.
     pub fn observe(
@@ -165,7 +197,7 @@ impl NativeEnd {
         pair: ClockPair,
     ) -> Result<Option<EndBoundary>, EndError> {
         let mut next = self.clone();
-        let boundary = next.observe_inner(report, pair)?;
+        let boundary = next.observe_inner(report, pair, false)?;
         *self = next;
         Ok(boundary)
     }
@@ -173,6 +205,7 @@ impl NativeEnd {
         &mut self,
         report: Option<RenderReport>,
         pair: ClockPair,
+        upper_frontier: bool,
     ) -> Result<Option<EndBoundary>, EndError> {
         self.check_pair(pair)?;
         if let Some(report) = report {
@@ -202,7 +235,7 @@ impl NativeEnd {
                 "endpoint precedes the first actual native clock observation",
             ));
         }
-        let host = if pair.source.timestamp == output.timestamp {
+        let host = if upper_frontier || pair.source.timestamp == output.timestamp {
             pair.target.timestamp
         } else {
             let source_delta = i128::from(pair.source.timestamp.as_nanos())
@@ -295,6 +328,186 @@ mod fixtures {
             .unwrap(),
             producer,
         )
+    }
+    fn asio(
+        render: RenderReport,
+        before: i64,
+        after: i64,
+        latency_frames: u32,
+        error_ns: u64,
+    ) -> beatkernel_platform::audio::asio::AsioPresentationObservation {
+        use beatkernel_platform::audio::asio::{
+            AsioPresentationObservation, MultimediaHostInterval,
+        };
+        AsioPresentationObservation::from_render(
+            render,
+            1000,
+            MultimediaHostInterval {
+                before: ClockPoint {
+                    domain: ClockDomainId(1),
+                    timestamp: Timestamp::from_nanos(before),
+                },
+                after: ClockPoint {
+                    domain: ClockDomainId(1),
+                    timestamp: Timestamp::from_nanos(after),
+                },
+            },
+            latency_frames,
+            error_ns,
+            output(0),
+        )
+        .unwrap()
+    }
+    fn evidence_unchanged(actual: &NativeEnd, before: &NativeEnd) {
+        assert_eq!(actual.lower, before.lower);
+        assert_eq!(actual.last_pair, before.last_pair);
+        assert_eq!(actual.last_report, before.last_report);
+        assert_eq!(actual.physical, before.physical);
+        assert_eq!(actual.emitted, before.emitted);
+    }
+    #[test]
+    fn asio_prepared_marker_waits_crossing_block_and_returns_latency_error_upper_frontier_once() {
+        let (mut mixer, _producer) = mixer(4);
+        let mut end = NativeEnd::new(output(0), ClockDomainId(1), 1000, 4).unwrap();
+        let first = mixer.render(&mut [0.0; 2]).unwrap();
+        end.observe_asio(asio(first, 10_000, 11_000, 3, 100))
+            .unwrap();
+        let mut samples = [9.0; 4];
+        let prepared = mixer.render(&mut samples).unwrap();
+        assert_eq!(samples, [0.5, 0.5, 0.0, 0.0]);
+        assert_eq!(prepared.playback_end_physical_frame, Some(4));
+        let prepared_observation = asio(prepared, 2_010_000, 2_011_000, 3, 100);
+        assert_eq!(prepared_observation.output, output(2_000_000));
+        assert_eq!(end.observe_asio(prepared_observation).unwrap(), None);
+        assert!(!end.emitted);
+        let silence = mixer.render(&mut [9.0; 2]).unwrap();
+        assert_eq!(silence.playback_start_frame, 4);
+        assert_eq!(silence.playback_frames, 0);
+        assert_eq!(silence.playback_end_physical_frame, Some(4));
+        let crossing = asio(silence, 6_010_000, 6_011_000, 3, 100);
+        let boundary = end.observe_asio(crossing).unwrap().unwrap();
+        assert_eq!(boundary.host, crossing.host.after);
+        assert_eq!(boundary.host.timestamp.as_nanos(), 9_011_100);
+        assert_eq!(boundary.output, output(4_000_000));
+        assert_eq!((boundary.physical_frame, boundary.playback_frame), (4, 4));
+        assert_ne!(boundary.host.timestamp.as_nanos(), 7_011_100); // No interpolated midpoint/endpoint estimate.
+        let later = mixer.render(&mut [9.0; 2]).unwrap();
+        assert_eq!(
+            end.observe_asio(asio(later, 8_010_000, 8_011_000, 3, 100))
+                .unwrap(),
+            None
+        );
+        assert_eq!(mixer.playback_frame_cursor(), 4);
+        assert!(end.emitted);
+    }
+    #[test]
+    fn asio_invalid_rate_origin_grid_interval_and_regression_preserve_all_evidence() {
+        let (mut mixer, _producer) = mixer(4);
+        let mut end = NativeEnd::new(output(0), ClockDomainId(1), 1000, 4).unwrap();
+        let first = mixer.render(&mut [0.0; 2]).unwrap();
+        end.observe_asio(asio(first, 10_000, 11_000, 0, 0)).unwrap();
+        let prepared = mixer.render(&mut [0.0; 4]).unwrap();
+        let valid = asio(prepared, 2_010_000, 2_011_000, 0, 0);
+        let mut wrong_rate = valid;
+        wrong_rate.sample_rate = 1001;
+        let mut wrong_origin = valid;
+        wrong_origin.output_origin = output(1);
+        let mut wrong_grid = valid;
+        wrong_grid.output = output(2_000_001);
+        let mut wrong_domain = valid;
+        wrong_domain.host.before.domain = ClockDomainId(9);
+        let mut wrong_upper_domain = valid;
+        wrong_upper_domain.host.after.domain = ClockDomainId(9);
+        let mut reversed = valid;
+        reversed.host.before.timestamp = Timestamp::from_nanos(2_011_001);
+        let mut upper_regression = valid;
+        upper_regression.host.before.timestamp = Timestamp::from_nanos(0);
+        upper_regression.host.after.timestamp = Timestamp::from_nanos(10_999);
+        let mut wrong_counter = valid;
+        wrong_counter.render.counters.rendered_frames -= 1;
+        let mut empty = valid;
+        empty.render.frames = 0;
+        for malformed in [
+            wrong_rate,
+            wrong_origin,
+            wrong_grid,
+            wrong_domain,
+            wrong_upper_domain,
+            reversed,
+            upper_regression,
+            wrong_counter,
+            empty,
+        ] {
+            let before = end.clone();
+            assert!(end.observe_asio(malformed).is_err());
+            evidence_unchanged(&end, &before);
+        }
+        assert_eq!(end.observe_asio(valid).unwrap(), None);
+        let silent = mixer.render(&mut [0.0; 2]).unwrap();
+        let crossing = asio(silent, 6_010_000, 6_011_000, 0, 0);
+        let mut unseeded = NativeEnd::new(output(0), ClockDomainId(1), 1000, 4).unwrap();
+        let before = unseeded.clone();
+        assert!(unseeded.observe_asio(crossing).is_err());
+        evidence_unchanged(&unseeded, &before);
+        assert!(end.observe_asio(crossing).unwrap().is_some());
+    }
+    #[test]
+    fn asio_crossing_accepts_coarse_upper_plateau_without_changing_generic_interpolation() {
+        let (mut mixer, _producer) = mixer(4);
+        let mut end = NativeEnd::new(output(0), ClockDomainId(1), 1000, 4).unwrap();
+        let first = mixer.render(&mut [0.0; 2]).unwrap();
+        assert_eq!(
+            end.observe_asio(asio(first, 5_000, 10_000, 0, 0)).unwrap(),
+            None
+        );
+        let prepared = mixer.render(&mut [0.0; 4]).unwrap();
+        assert_eq!(
+            end.observe_asio(asio(prepared, 9_000, 10_000, 0, 0))
+                .unwrap(),
+            None
+        );
+        let silent = mixer.render(&mut [0.0; 2]).unwrap();
+        let crossing = asio(silent, 10_000, 10_000, 0, 0);
+        assert_eq!(crossing.output, output(6_000_000));
+        let mut generic = end.clone();
+        let before = generic.clone();
+        assert!(
+            generic
+                .observe(
+                    Some(silent),
+                    ClockPair {
+                        source: crossing.output,
+                        target: crossing.host.after,
+                    }
+                )
+                .is_err()
+        );
+        evidence_unchanged(&generic, &before);
+        let boundary = end.observe_asio(crossing).unwrap().unwrap();
+        assert_eq!(boundary.host, crossing.host.after);
+        assert_eq!(boundary.output, output(4_000_000));
+        assert_eq!(mixer.playback_frame_cursor(), 4);
+        assert_eq!(end.observe_asio(crossing).unwrap(), None);
+    }
+    #[test]
+    fn asio_wide_crossing_interval_uses_supplied_upper_without_interpolation() {
+        let (mut mixer, _producer) = mixer(4);
+        let mut end = NativeEnd::new(output(0), ClockDomainId(1), 1000, 4).unwrap();
+        let first = mixer.render(&mut [0.0; 2]).unwrap();
+        end.observe_asio(asio(first, i64::MIN, i64::MIN, 0, 0))
+            .unwrap();
+        let prepared = mixer.render(&mut [0.0; 4]).unwrap();
+        assert_eq!(
+            end.observe_asio(asio(prepared, i64::MIN, -1, 0, 0))
+                .unwrap(),
+            None
+        );
+        let silent = mixer.render(&mut [0.0; 2]).unwrap();
+        let crossing = asio(silent, i64::MIN, i64::MAX, 0, 0);
+        let boundary = end.observe_asio(crossing).unwrap().unwrap();
+        assert_eq!(boundary.host, crossing.host.after);
+        assert_eq!(boundary.host.timestamp.as_nanos(), i64::MAX);
+        assert_eq!(boundary.output, output(4_000_000));
     }
     #[test]
     fn short_resume_endpoint_survives_coalescing_and_waits_for_real_native_presentation() {
