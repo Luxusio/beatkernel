@@ -119,6 +119,7 @@ dependencies = [
 name = "beatkernel-bms-runtime"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "beatkernel",
  "beatkernel-bms",
  "beatkernel-platform",

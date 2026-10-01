@@ -13,6 +13,7 @@ these direct notices are not a complete binary license inventory.
 | bytemuck 1.24.0 | MIT | [license](third-party/bytemuck-1.24.0-LICENSE.txt) |
 | pollster 0.4.0 | MIT | [license](third-party/pollster-0.4.0-LICENSE.txt) |
 | floem_reactive 0.2.0 | MIT | [license](third-party/floem-reactive-0.2.0-LICENSE.txt) |
+| ab_glyph 0.2.32 | Apache-2.0 | [license](third-party/ab-glyph-0.2.32-LICENSE.txt) |
 
 The texts are copied from the pinned published packages. The floem_reactive
 package declares MIT but omits the license text; its retained text comes from
