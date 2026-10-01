@@ -460,7 +460,11 @@ mod native {
         transport::{Rate, Transport},
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
-    use beatkernel_bms_runtime::{ChannelPolicy, load_prepared};
+    use beatkernel_bms_runtime::{
+        ChannelPolicy, load_prepared,
+        playback_pause::{NativePause, PauseKeyboard, PausePhase},
+        player::{self, PauseState},
+    };
     use beatkernel_platform::{
         audio::{
             DeviceFormat, SampleEncoding,
@@ -539,6 +543,36 @@ mod native {
             timestamp: Timestamp::from_nanos(i64::try_from(nanos)?),
         })
     }
+    fn playback_schedule(pause: &NativePause, stream: &AlsaStream) -> Result<ClockPoint> {
+        Ok(pause.scheduling_point(
+            stream
+                .last_render_report()
+                .or_else(|| pause.last_render_report())
+                .ok_or("mixer playback boundary unavailable for keysound scheduling")?,
+        )?)
+    }
+    fn reconcile_resume(
+        keyboard: &mut PauseKeyboard,
+        at: ClockPoint,
+        pause: &NativePause,
+        stream: &AlsaStream,
+        runtime: &mut Runtime,
+        capture: &mut Option<beatkernel_bms_runtime::replay_capture::LiveReplayCapture>,
+        competition: &mut Option<beatkernel_bms_runtime::competition_live::LiveCompetition>,
+    ) -> Result<()> {
+        for event in keyboard.resume(at)? {
+            print_report(
+                runtime.process_input(
+                    event,
+                    &ExplicitDomains,
+                    playback_schedule(pause, stream)?,
+                )?,
+                capture,
+                competition,
+            )?;
+        }
+        Ok(())
+    }
     fn print_report(
         report: RuntimeReport,
         capture: &mut Option<beatkernel_bms_runtime::replay_capture::LiveReplayCapture>,
@@ -572,6 +606,7 @@ mod native {
             4096, HOST,
         )?);
         let song_origin = options.song_origin()?;
+        let pause_supported = competition_options.network.is_none();
         let prepared = load_prepared(
             &options.chart,
             options.format,
@@ -763,17 +798,68 @@ mod native {
             let mut last_song = song_origin;
             let mut last_operation = host_origin;
             let mut last_progress = None;
+            let mut pause = NativePause::new(output_origin(), HOST, options.format.sample_rate())?;
+            let mut keyboard = PauseKeyboard::new();
+            let mut paused_boundary: Option<ClockPoint> = None;
+            let mut resume_boundary: Option<ClockPoint> = None;
+            let mut pause_committed = false;
+            if pause_supported {
+                player::publish_pause(PauseState::Running);
+            }
+
             let pump_outcome = (|| -> Result<()> {
                 while deadline.is_none_or(|deadline| Instant::now() < deadline)
                     && !beatkernel_bms_runtime::player::cancelled()
                 {
+                    player::retry_pause_publication();
                     if let Some(pair) = observe(&stream, false)? {
                         discipline.observe_clock_pair(pair)?;
+                    }
+                    let reference = discipline
+                        .latest_pair()
+                        .ok_or("pause requires native clock relation")?;
+                    if pause_supported
+                        && (pause.phase() == PausePhase::Running || pause_committed)
+                        && resume_boundary.is_none()
+                        && pause.request(player::pause_requested(), reference)?
+                    {
+                        let desired = pause.phase() == PausePhase::Pausing;
+                        runtime.request_audio_pause(desired);
+                        player::publish_pause(if desired {
+                            PauseState::Pausing
+                        } else {
+                            PauseState::Resuming
+                        });
+                    }
+                    if let Some(boundary) = pause.observe(stream.last_render_report(), reference)? {
+                        if boundary.paused {
+                            runtime.transport_mut().pause(boundary.host.timestamp)?;
+                            paused_boundary = Some(boundary.host);
+                            pause_committed = false;
+                        } else {
+                            runtime.transport_mut().resume(boundary.host.timestamp)?;
+                            resume_boundary = Some(boundary.host);
+                            paused_boundary = None;
+                            pause_committed = false;
+                            discipline = PresentationDiscipline::new(
+                                DisciplineConfig::default(),
+                                output_origin(),
+                                HOST,
+                                pause.song_origin_after_pause(song_origin)?,
+                            )?;
+                            discipline.observe_clock_pair(reference)?;
+                        }
                     }
                     feed_rendered(&mut bgm, stream.last_render_report(), |command| {
                         runtime.enqueue_audio(command)
                     })?;
                     discipline.validate_host(clock.now()?)?;
+                    if pause.last_render_report().is_none()
+                        || matches!(pause.phase(), PausePhase::Pausing | PausePhase::Resuming)
+                    {
+                        std::thread::sleep(WallDuration::from_millis(1));
+                        continue;
+                    }
                     let mut backlog = true;
                     for _ in 0..256 {
                         match input.read_next()? {
@@ -817,11 +903,37 @@ mod native {
                                 }
                                 discipline.validate_host(host)?;
                                 delivery.observe(host, acquired_now)?;
+                                if let Some(at) = resume_boundary {
+                                    if host.timestamp < at.timestamp {
+                                        keyboard.observe_paused(event)?;
+                                        continue;
+                                    }
+                                    reconcile_resume(
+                                        &mut keyboard,
+                                        at,
+                                        &pause,
+                                        &stream,
+                                        &mut runtime,
+                                        &mut capture,
+                                        &mut competition,
+                                    )?;
+                                    last_operation = at;
+                                    resume_boundary = None;
+                                    player::publish_pause(PauseState::Running);
+                                }
+                                if paused_boundary.is_some_and(|at| host.timestamp >= at.timestamp)
+                                {
+                                    keyboard.observe_paused(event)?;
+                                    continue;
+                                }
+                                if !keyboard.accept(&event)? {
+                                    continue;
+                                }
                                 print_report(
                                     runtime.process_input(
                                         event,
                                         &ExplicitDomains,
-                                        schedule(&stream)?,
+                                        playback_schedule(&pause, &stream)?,
                                     )?,
                                     &mut capture,
                                     &mut competition,
@@ -829,6 +941,37 @@ mod native {
                                 last_operation = host;
                             }
                         }
+                    }
+                    if !backlog {
+                        if let Some(at) = resume_boundary.take() {
+                            reconcile_resume(
+                                &mut keyboard,
+                                at,
+                                &pause,
+                                &stream,
+                                &mut runtime,
+                                &mut capture,
+                                &mut competition,
+                            )?;
+                            last_operation = at;
+                            player::publish_pause(PauseState::Running);
+                        }
+                        if let Some(at) = paused_boundary.filter(|_| !pause_committed) {
+                            let report = runtime.advance_to(
+                                at,
+                                &ExplicitDomains,
+                                playback_schedule(&pause, &stream)?,
+                            )?;
+                            last_operation = at;
+                            last_song = report.song_time;
+                            print_report(report, &mut capture, &mut competition)?;
+                            pause_committed = true;
+                            player::publish_pause(PauseState::Paused);
+                        }
+                    }
+                    if pause.phase() == PausePhase::Paused || resume_boundary.is_some() {
+                        std::thread::sleep(WallDuration::from_millis(1));
+                        continue;
                     }
                     let now = clock.now()?;
                     discipline.validate_host(now)?;
@@ -852,8 +995,11 @@ mod native {
                         options.advance_lag,
                         backlog,
                     )? {
-                        let report =
-                            runtime.advance_to(at, &ExplicitDomains, schedule(&stream)?)?;
+                        let report = runtime.advance_to(
+                            at,
+                            &ExplicitDomains,
+                            playback_schedule(&pause, &stream)?,
+                        )?;
                         last_operation = at;
                         last_song = report.song_time;
                         let nanos = last_song.as_nanos();

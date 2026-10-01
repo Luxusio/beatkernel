@@ -172,6 +172,20 @@ struct Game {
 }
 
 impl Game {
+    fn pause_target(&self) -> Option<bool> {
+        if self.replay || self.joined || self.cancelling || self.prepared_retry.is_some() {
+            return None;
+        }
+        let snapshot = self.snapshot.as_ref()?;
+        if snapshot.cancelled || snapshot.status != player::PlayerStatus::Playing {
+            return None;
+        }
+        match snapshot.pause {
+            player::PauseState::Running => Some(true),
+            player::PauseState::Paused => Some(false),
+            _ => None,
+        }
+    }
     fn accept_snapshot(&mut self, snapshot: player::PlayerSnapshot) {
         let count = snapshot.players.len();
         if count > 0 {
@@ -276,7 +290,7 @@ pub(super) fn run(
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
-            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F3 in selection: search; F4 in settings: records; F6 in settings: practice;  W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry pinned start; F7: mark live position; F8: restart mark after cleanup; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F3 in selection: search; F4 in settings: records; F6 in settings: practice;  W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry pinned start; F7: mark live position; F8: restart mark after cleanup; F9: pause/resume when native owner supports it; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
         );
         return Ok(());
     }
@@ -2195,6 +2209,9 @@ impl Desktop {
             60 if self.navigator.route() == (ScreenRoute::Play { replay: false }) => {
                 self.mark_practice()
             }
+            62 if self.navigator.route() == (ScreenRoute::Play { replay: false }) => {
+                self.toggle_pause()
+            }
             61 if matches!(
                 self.navigator.route(),
                 ScreenRoute::Play { replay: false } | ScreenRoute::Results { replay: false }
@@ -2261,6 +2278,16 @@ impl Desktop {
         }
         self.gesture.cancel();
         self.invalidate_hits();
+    }
+    fn toggle_pause(&mut self) {
+        if !self.ui_ready() || self.navigator.route() != (ScreenRoute::Play { replay: false }) {
+            return;
+        }
+        if let Some(game) = &self.game {
+            if let Some(paused) = game.pause_target() {
+                game.viewer.request_pause(paused);
+            }
+        }
     }
     fn request_retry(&mut self) {
         self.request_restart(false);
@@ -2544,6 +2571,13 @@ impl Desktop {
             && self.navigator.route() == (ScreenRoute::Play { replay: false })
         {
             self.mark_practice();
+            return;
+        }
+        if !repeat
+            && key == KeyCode::F9
+            && self.navigator.route() == (ScreenRoute::Play { replay: false })
+        {
+            self.toggle_pause();
             return;
         }
         if !repeat
@@ -3032,6 +3066,22 @@ impl Desktop {
                 );
             }
             if !game.replay {
+                if let Some(paused) = game.pause_target() {
+                    control(
+                        pixels,
+                        &mut self.hits,
+                        &self.gesture,
+                        point,
+                        ControlId(62),
+                        Bounds {
+                            x: 740,
+                            y: 65,
+                            width: 190,
+                            height: 34,
+                        },
+                        if paused { "PAUSE F9" } else { "RESUME F9" },
+                    );
+                }
                 let mark_bounds = Bounds {
                     x: 550,
                     y: 20,
@@ -3614,6 +3664,15 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
                 "NATIVE PRESENTATION UNAVAILABLE - ESC CANCEL"
             }
             player::PlayerStatus::Playing if game.replay => "WATCHING RECORD - ESC CANCEL",
+            player::PlayerStatus::Playing if snapshot.pause == player::PauseState::Pausing => {
+                "PAUSING - NATIVE WAIT"
+            }
+            player::PlayerStatus::Playing if snapshot.pause == player::PauseState::Paused => {
+                "PAUSED - F9 RESUME"
+            }
+            player::PlayerStatus::Playing if snapshot.pause == player::PauseState::Resuming => {
+                "RESUMING - NATIVE WAIT"
+            }
             player::PlayerStatus::Playing => "PLAYING - ESC CANCEL",
             player::PlayerStatus::Stopping => "STOPPING",
             player::PlayerStatus::Finished => "FINISHING CLEANUP",
@@ -4246,6 +4305,40 @@ mod tests {
         app.key(KeyCode::Escape, false);
         assert_eq!(app.navigator.route(), ScreenRoute::Selection);
         assert!(app.game.is_none());
+    }
+
+    #[test]
+    fn pause_control_requires_stable_live_native_ack_and_never_reaches_retry_or_replay() {
+        let mut game = retry_fixture();
+        for (phase, expected) in [
+            (player::PauseState::Unavailable, None),
+            (player::PauseState::Running, Some(true)),
+            (player::PauseState::Pausing, None),
+            (player::PauseState::Paused, Some(false)),
+            (player::PauseState::Resuming, None),
+        ] {
+            game.accept_snapshot(player::PlayerSnapshot {
+                status: player::PlayerStatus::Playing,
+                pause: phase,
+                ..Default::default()
+            });
+            assert_eq!(game.pause_target(), expected);
+        }
+        game.snapshot.as_mut().unwrap().pause = player::PauseState::Running;
+        game.replay = true;
+        assert_eq!(game.pause_target(), None);
+        game.replay = false;
+        game.prepared_retry = Some(game.launch.retry().unwrap());
+        assert_eq!(game.pause_target(), None);
+        game.prepared_retry = None;
+        game.snapshot.as_mut().unwrap().cancelled = true;
+        assert_eq!(game.pause_target(), None);
+        game.snapshot.as_mut().unwrap().cancelled = false;
+        game.cancelling = true;
+        assert_eq!(game.pause_target(), None);
+        game.cancelling = false;
+        game.joined = true;
+        assert_eq!(game.pause_target(), None);
     }
 
     #[test]
