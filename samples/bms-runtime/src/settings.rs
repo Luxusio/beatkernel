@@ -406,10 +406,7 @@ impl NativeSettings {
         if opponents >= 8 {
             return Err("at most eight replay opponents are supported".into());
         }
-        let flag = match kind {
-            crate::competition::OpponentKind::Own => "--ghost-self",
-            crate::competition::OpponentKind::Other => "--ghost-other",
-        };
+        let flag = opponent_flag(kind);
         if let Some(index) = self
             .fields
             .iter()
@@ -434,6 +431,40 @@ impl NativeSettings {
             .map_err(|_| "opponent row allocation failed")?;
         self.fields.push(field(spec, path.to_owned()));
         Ok(())
+    }
+    /// Counts exact kind/path occurrences without resolving filesystem identity.
+    /// Empty queries never count unused editable rows.
+    pub fn opponent_count(&self, kind: crate::competition::OpponentKind, path: &str) -> usize {
+        if path.is_empty() {
+            return 0;
+        }
+        let flag = opponent_flag(kind);
+        self.fields
+            .iter()
+            .filter(|row| row.flag == flag && row.value == path)
+            .count()
+    }
+    /// Clears the first exact kind/path occurrence, preserving its editable row
+    /// and every other value. Missing paths return false; rejection is atomic.
+    pub fn remove_opponent(
+        &mut self,
+        kind: crate::competition::OpponentKind,
+        path: &str,
+    ) -> Result<bool, String> {
+        valid_value(path)?;
+        if path.is_empty() {
+            return Err("replay opponent requires a nonempty path".into());
+        }
+        let flag = opponent_flag(kind);
+        if let Some(row) = self
+            .fields
+            .iter_mut()
+            .find(|row| row.flag == flag && row.value == path)
+        {
+            row.value.clear();
+            return Ok(true);
+        }
+        Ok(false)
     }
     /// Clears saved opponents while retaining editable rows and unrelated options.
     pub fn clear_opponents(&mut self) {
@@ -471,6 +502,12 @@ fn field(spec: Spec, value: String) -> SettingsField {
         label: spec.1,
         hint: spec.2,
         value,
+    }
+}
+fn opponent_flag(kind: crate::competition::OpponentKind) -> &'static str {
+    match kind {
+        crate::competition::OpponentKind::Own => "--ghost-self",
+        crate::competition::OpponentKind::Other => "--ghost-other",
     }
 }
 fn repeatable(flag: &str) -> bool {
@@ -764,6 +801,104 @@ mod tests {
 mod opponent_fixtures {
     use super::*;
     use crate::competition::OpponentKind;
+    #[test]
+    fn exact_removal_clears_only_first_kind_path_row_and_preserves_schema_order() {
+        let path = "C:records:一.bkr";
+        let args = [
+            "--ghost-self",
+            path,
+            "--bind",
+            "30:1",
+            "--ghost-other",
+            path,
+            "--ghost-self",
+            "other.bkr",
+            "--ghost-self",
+            path,
+            "--start-ns",
+            "123",
+            "--end-ns",
+            "456",
+        ]
+        .map(String::from);
+        let mut draft = NativeSettings::from_args(&args, SettingsHost::Windows).unwrap();
+        assert_eq!(draft.opponent_count(OpponentKind::Own, path), 2);
+        assert_eq!(draft.opponent_count(OpponentKind::Other, path), 1);
+        assert_eq!(draft.opponent_count(OpponentKind::Own, ""), 0);
+        assert_eq!(
+            draft.opponent_count(OpponentKind::Own, "./C:records:一.bkr"),
+            0
+        );
+        let mut expected = draft.fields.clone();
+        expected[0].value.clear();
+        assert_eq!(draft.remove_opponent(OpponentKind::Own, path), Ok(true));
+        assert_eq!(draft.fields, expected);
+        assert_eq!(draft.opponent_count(OpponentKind::Own, path), 1);
+        assert_eq!(draft.opponent_count(OpponentKind::Other, path), 1);
+        expected[4].value.clear();
+        assert_eq!(draft.remove_opponent(OpponentKind::Own, path), Ok(true));
+        assert_eq!(draft.fields, expected);
+        assert_eq!(draft.remove_opponent(OpponentKind::Own, path), Ok(false));
+        assert_eq!(draft.fields, expected);
+        expected[2].value.clear();
+        assert_eq!(draft.remove_opponent(OpponentKind::Other, path), Ok(true));
+        assert_eq!(draft.fields, expected);
+        assert_eq!(draft.opponent_count(OpponentKind::Own, "other.bkr"), 1);
+    }
+    #[test]
+    fn invalid_and_missing_removal_preserve_even_full_draft_and_free_row_reuses_capacity() {
+        let mut draft = NativeSettings::from_args(&[], SettingsHost::Linux).unwrap();
+        for i in 0..8 {
+            draft
+                .add_opponent(OpponentKind::Own, &format!("record{i}.bkr"))
+                .unwrap();
+        }
+        while draft.fields.len() < MAX_FIELDS {
+            draft.add_binding().unwrap();
+        }
+        let before = draft.fields.clone();
+        for path in [
+            String::new(),
+            "bad\n.bkr".into(),
+            "bad\0.bkr".into(),
+            "bad\u{2028}.bkr".into(),
+            "x".repeat(MAX_VALUE_BYTES + 1),
+        ] {
+            assert!(draft.remove_opponent(OpponentKind::Own, &path).is_err());
+            assert_eq!(draft.fields, before);
+        }
+        assert_eq!(
+            draft.remove_opponent(OpponentKind::Other, "record0.bkr"),
+            Ok(false)
+        );
+        assert_eq!(
+            draft.remove_opponent(OpponentKind::Own, &"x".repeat(MAX_VALUE_BYTES)),
+            Ok(false)
+        );
+        assert_eq!(draft.fields, before);
+        assert!(draft.add_opponent(OpponentKind::Own, "ninth.bkr").is_err());
+        let cleared_index = draft
+            .fields
+            .iter()
+            .position(|row| row.flag == "--ghost-self" && row.value == "record3.bkr")
+            .unwrap();
+        assert_eq!(
+            draft.remove_opponent(OpponentKind::Own, "record3.bkr"),
+            Ok(true)
+        );
+        draft
+            .add_opponent(OpponentKind::Own, "replacement.bkr")
+            .unwrap();
+        let mut expected = before;
+        expected[cleared_index].value = "replacement.bkr".into();
+        assert_eq!(draft.fields, expected);
+        assert_eq!(draft.fields.len(), MAX_FIELDS);
+        assert_eq!(draft.opponent_count(OpponentKind::Own, "record3.bkr"), 0);
+        assert_eq!(
+            draft.opponent_count(OpponentKind::Own, "replacement.bkr"),
+            1
+        );
+    }
     #[test]
     fn opponent_rows_fill_append_count_both_kinds_and_clear_without_changing_other_options() {
         let mut draft =
