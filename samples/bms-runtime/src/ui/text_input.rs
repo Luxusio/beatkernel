@@ -49,6 +49,28 @@ impl LineEditor {
         self.cursor += text.len();
         Ok(())
     }
+    /// Creates visual composition text at the committed caret without changing
+    /// this editor. Cursor endpoints are UTF-8 byte offsets within `text`; the
+    /// first endpoint places the preview caret, without replacing a selection.
+    pub fn preedit(&self, text: &str, cursor: Option<(usize, usize)>) -> Result<Self, String> {
+        if let Some((start, end)) = cursor {
+            if start > end
+                || end > text.len()
+                || !text.is_char_boundary(start)
+                || !text.is_char_boundary(end)
+            {
+                return Err(
+                    "preedit cursor must be ordered UTF-8 scalar boundaries within its text".into(),
+                );
+            }
+        }
+        let mut preview = self.clone();
+        preview.insert(text)?;
+        if let Some((start, _)) = cursor {
+            preview.cursor = self.cursor + start;
+        }
+        Ok(preview)
+    }
     pub fn left(&mut self) {
         self.cursor = self.value[..self.cursor]
             .char_indices()
@@ -103,6 +125,77 @@ fn invalid_character(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preedit_unicode_middle_insertion_tracks_byte_cursor_and_preserves_base() {
+        let mut base = LineEditor::new("a별b", 12).unwrap();
+        base.left();
+        let original = base.clone();
+        let text = "音é";
+        for (selection, caret) in [
+            (Some((0, 0)), 4),
+            (Some((0, 3)), 4),
+            (Some((3, 5)), 7),
+            (Some((5, 5)), 9),
+            (None, 9),
+        ] {
+            let preview = base.preedit(text, selection).unwrap();
+            assert_eq!(preview.value(), "a별音éb");
+            assert_eq!(preview.value().len(), 10);
+            assert_eq!(preview.cursor(), caret);
+            assert!(preview.value().is_char_boundary(preview.cursor()));
+            assert_eq!(base, original);
+        }
+        let exact = LineEditor::new("a별b", 10)
+            .unwrap()
+            .preedit(text, None)
+            .unwrap();
+        assert_eq!(exact.value(), "a별b音é");
+        assert_eq!(exact.cursor(), 10);
+        assert_eq!(exact.max_bytes, 10);
+    }
+    #[test]
+    fn preedit_empty_text_and_zero_or_end_cursors_leave_committed_editor_intact() {
+        let mut base = LineEditor::new("ab", 8).unwrap();
+        base.home();
+        base.right();
+        for selection in [None, Some((0, 0))] {
+            assert_eq!(base.preedit("", selection).unwrap(), base);
+        }
+        assert_eq!(base.preedit("音", Some((0, 3))).unwrap().cursor(), 1);
+        assert_eq!(base.preedit("音", Some((3, 3))).unwrap().cursor(), 4);
+        assert_eq!(base.preedit("音", None).unwrap().value(), "a音b");
+        assert_eq!((base.value(), base.cursor()), ("ab", 1));
+        let empty = LineEditor::new("", 1).unwrap();
+        assert_eq!(empty.preedit("", None).unwrap(), empty);
+        assert_eq!(empty.preedit("x", Some((1, 1))).unwrap().cursor(), 1);
+        assert_eq!(empty.value(), "");
+    }
+    #[test]
+    fn preedit_rejects_control_capacity_and_invalid_byte_ranges_without_base_mutation() {
+        let mut base = LineEditor::new("a別b", 8).unwrap();
+        base.left();
+        let original = base.clone();
+        for selection in [
+            Some((3, 0)),
+            Some((0, 4)),
+            Some((1, 3)),
+            Some((0, 2)),
+            Some((usize::MAX, usize::MAX)),
+        ] {
+            assert!(base.preedit("音", selection).is_err());
+            assert_eq!(base, original);
+        }
+        for text in ["\n", "\t", "\u{2028}", "\u{2029}", "音音", "abcdef"] {
+            assert!(base.preedit(text, None).is_err());
+            assert_eq!(base, original);
+        }
+        assert!(base.preedit("", Some((0, 1))).is_err());
+        assert_eq!(base, original);
+        let preview = base.preedit("音", Some((3, 3))).unwrap();
+        assert_eq!(preview.value().len(), 8);
+        assert_eq!(preview.cursor(), 7);
+        assert_eq!(base, original);
+    }
     #[test]
     fn unicode_cursor_and_rejected_edits_preserve_boundaries() {
         let mut line = LineEditor::new("a별b", 8).unwrap();
