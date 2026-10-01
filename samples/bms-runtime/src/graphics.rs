@@ -1,53 +1,12 @@
 //! GPU rectangle batches; no native window, input, audio, or transport ownership.
 
 use std::collections::BTreeMap;
-use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-use crate::scene::{Rectangle, Scene, MAX_RECTANGLES};
-use crate::texture::{RgbaImage, TextureId, MAX_TEXTURES, MAX_TEXTURE_BYTES};
+use crate::scene::{MAX_RECTANGLES, Rectangle, Scene};
+use crate::texture::{MAX_TEXTURE_BYTES, MAX_TEXTURES, RgbaImage, TextureId};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BackendChoice {
-    Auto,
-    Vulkan,
-    Dx12,
-    Metal,
-    Gl,
-}
-
-impl FromStr for BackendChoice {
-    type Err = String;
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "auto" => Ok(Self::Auto),
-            "vulkan" => Ok(Self::Vulkan),
-            "dx12" => Ok(Self::Dx12),
-            "metal" => Ok(Self::Metal),
-            "gl" => Ok(Self::Gl),
-            _ => Err("graphics backend must be auto, vulkan, dx12, metal, or gl".into()),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Presentation {
-    Fifo,
-    Immediate,
-    Mailbox,
-}
-
-impl FromStr for Presentation {
-    type Err = String;
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "fifo" => Ok(Self::Fifo),
-            "immediate" => Ok(Self::Immediate),
-            "mailbox" => Ok(Self::Mailbox),
-            _ => Err("presentation must be fifo, immediate, or mailbox".into()),
-        }
-    }
-}
+pub use crate::presentation_settings::{BackendChoice, Presentation};
 
 impl Presentation {
     fn mode(self) -> wgpu::PresentMode {
@@ -56,6 +15,20 @@ impl Presentation {
             Self::Immediate => wgpu::PresentMode::Immediate,
             Self::Mailbox => wgpu::PresentMode::Mailbox,
         }
+    }
+}
+
+fn supported_presentation(
+    presentation: Presentation,
+    modes: &[wgpu::PresentMode],
+) -> Result<wgpu::PresentMode, String> {
+    let requested = presentation.mode();
+    if modes.contains(&requested) {
+        Ok(requested)
+    } else {
+        Err(format!(
+            "presentation {presentation:?} unavailable; supported: {modes:?}"
+        ))
     }
 }
 
@@ -138,13 +111,7 @@ impl Renderer {
             .await
             .map_err(|error| format!("request graphics adapter: {error}"))?;
         let capabilities = surface.get_capabilities(&adapter);
-        let present_mode = presentation.mode();
-        if !capabilities.present_modes.contains(&present_mode) {
-            return Err(format!(
-                "presentation {presentation:?} unavailable; supported: {:?}",
-                capabilities.present_modes
-            ));
-        }
+        let present_mode = supported_presentation(presentation, &capabilities.present_modes)?;
         // Prefer a linear UNORM surface so existing byte RGB glyph/note colors
         // retain their values instead of applying an extra sRGB conversion.
         let format = capabilities
@@ -423,6 +390,26 @@ impl Renderer {
         }
     }
 
+    /// Change supported presentation on the window owner, outside a play session.
+    /// Unsupported modes leave configuration unchanged. Suspended/lost surfaces
+    /// retain the request for the existing resize/recreation path.
+    pub fn set_presentation(&mut self, presentation: Presentation) -> Result<(), String> {
+        self.check_failure()?;
+        let capabilities = self.surface.get_capabilities(&self.adapter);
+        let mode = supported_presentation(presentation, &capabilities.present_modes)?;
+        if self.config.present_mode == mode {
+            return Ok(());
+        }
+        let mut requested = self.config.clone();
+        requested.present_mode = mode;
+        if !self.suspended && !self.recreate_surface {
+            self.surface.configure(&self.device, &requested);
+            self.check_failure()?;
+        }
+        self.config = requested;
+        Ok(())
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
         self.check_failure()?;
         if width == 0 || height == 0 {
@@ -564,6 +551,16 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn presentation_admission_uses_exact_surface_capabilities() {
+        let modes = [wgpu::PresentMode::Fifo, wgpu::PresentMode::Immediate];
+        assert_eq!(
+            supported_presentation(Presentation::Immediate, &modes).unwrap(),
+            wgpu::PresentMode::Immediate
+        );
+        assert!(supported_presentation(Presentation::Mailbox, &modes).is_err());
+        assert!(supported_presentation(Presentation::Fifo, &[]).is_err());
+    }
     #[test]
     fn texture_admission_counts_builtins_and_checks_bytes() {
         assert_eq!(

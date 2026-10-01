@@ -20,10 +20,10 @@ pub mod graphics;
 pub mod local_input;
 /// Collection-based local player identity and unique native input assignment.
 pub mod local_players;
-/// Graphical local-player draft using typed keyboard metadata and stable IDs.
-pub mod local_setup;
 /// Shared-transport/output execution over independent actual core runtimes.
 pub mod local_runtime;
+/// Graphical local-player draft using typed keyboard metadata and stable IDs.
+pub mod local_setup;
 /// Bounded two-player progress exchange on a dedicated socket worker.
 pub mod multiplayer;
 /// Omitted solo option defaults, independent of native discovery.
@@ -34,6 +34,8 @@ pub mod offline;
 pub mod player;
 /// Bounded chart catalog and exact compiled lane display data.
 pub mod player_chart;
+/// Portable display configuration shared by CLI, graphical drafts and profiles.
+pub mod presentation_settings;
 /// Song-time command planning from actual recorded BMS judgment.
 pub mod replay_audio;
 /// Bounded capture of the actual native runtime's accepted judgment operations.

@@ -1,5 +1,8 @@
-//! Versioned native profiles; file work belongs outside real-time owners.
-use crate::settings::{NativeSettings, SettingsHost};
+//! Versioned native/player profiles; file work belongs outside real-time owners.
+use crate::{
+    presentation_settings::PresentationSettings,
+    settings::{NativeSettings, SettingsHost},
+};
 use std::{
     error::Error,
     fs::{self, File, OpenOptions},
@@ -20,11 +23,25 @@ fn host_name(host: SettingsHost) -> &'static str {
     }
 }
 
+fn profile_native_args(values: &NativeSettings, host: SettingsHost) -> Result<Vec<String>, String> {
+    // Empty schemas still identify their platform, preventing a foreign empty
+    // model from being relabeled merely because native_args omits empty fields.
+    let identity = match host {
+        SettingsHost::Windows => "--keyboard-path",
+        SettingsHost::Linux => "--evdev",
+        SettingsHost::Macos => "--keyboard-registry",
+    };
+    if !values.fields().iter().any(|field| field.flag == identity) {
+        return Err("profile native settings belong to another operating system".into());
+    }
+    let args = values.native_args();
+    NativeSettings::from_args(&args, host)?;
+    Ok(args)
+}
+
 /// Native-only, LF-terminated UTF-8; values already reject tabs/line breaks.
 pub fn encode_profile(values: &NativeSettings, host: SettingsHost) -> Result<Vec<u8>, String> {
-    let args = values.native_args();
-    // Ensure a caller did not supply a model for another platform.
-    NativeSettings::from_args(&args, host)?;
+    let args = profile_native_args(values, host)?;
     let mut encoded = format!("{MAGIC}\t1\t{}\n", host_name(host));
     for pair in args.chunks_exact(2) {
         encoded.push_str(&pair[0]);
@@ -38,9 +55,85 @@ pub fn encode_profile(values: &NativeSettings, host: SettingsHost) -> Result<Vec
     Ok(encoded.into_bytes())
 }
 
-/// Checks host/schema and draft limits before returning any replacement state.
-/// CRLF records are accepted; the encoder consistently produces LF records.
+/// Combined native/display profile; chart/library selection remains external.
+#[derive(Clone, Debug)]
+pub struct PlayerProfile {
+    pub native: NativeSettings,
+    pub presentation: PresentationSettings,
+}
+
+/// Encodes version 2 with all four canonical presentation records.
+pub fn encode_player_profile(
+    values: &PlayerProfile,
+    host: SettingsHost,
+) -> Result<Vec<u8>, String> {
+    values.presentation.validate()?;
+    let native = profile_native_args(&values.native, host)?;
+    if native.len() / 2 > crate::settings::MAX_FIELDS {
+        return Err("profile exceeds 128 native records".into());
+    }
+    let mut encoded = format!("{MAGIC}\t2\t{}\n", host_name(host));
+    let display = values.presentation.args();
+    for pair in native.chunks_exact(2).chain(display.chunks_exact(2)) {
+        encoded.push_str(&pair[0]);
+        encoded.push('\t');
+        encoded.push_str(&pair[1]);
+        encoded.push('\n');
+    }
+    if encoded.len() > MAX_PROFILE_BYTES {
+        return Err("profile exceeds 72 KiB".into());
+    }
+    Ok(encoded.into_bytes())
+}
+
+/// Strict native-only version 1 decoder. Combined version 2 is refused.
 pub fn decode_profile(encoded: &[u8], host: SettingsHost) -> Result<NativeSettings, String> {
+    let (version, args) = profile_records(encoded, host)?;
+    if version != 1 {
+        return Err("native-only profile requires version 1".into());
+    }
+    NativeSettings::from_args(&args, host)
+}
+
+/// Decodes version 2 atomically, or upgrades version 1 with default display values.
+/// All four version 2 presentation flags are required exactly once.
+pub fn decode_player_profile(encoded: &[u8], host: SettingsHost) -> Result<PlayerProfile, String> {
+    let (version, records) = profile_records(encoded, host)?;
+    if version == 1 {
+        return Ok(PlayerProfile {
+            native: NativeSettings::from_args(&records, host)?,
+            presentation: PresentationSettings::default(),
+        });
+    }
+    let mut native = Vec::new();
+    let mut display = Vec::new();
+    for pair in records.chunks_exact(2) {
+        let destination = if matches!(
+            pair[0].as_str(),
+            "--gpu-backend" | "--present" | "--ui-fps" | "--ui-lookahead-ms"
+        ) {
+            &mut display
+        } else {
+            &mut native
+        };
+        destination.extend(pair.iter().cloned());
+    }
+    if native.len() / 2 > crate::settings::MAX_FIELDS {
+        return Err("profile exceeds 128 native records".into());
+    }
+    if display.len() != 8 {
+        return Err("player profile requires all four presentation records".into());
+    }
+    let presentation = PresentationSettings::default().apply_overrides(&display)?;
+    let native = NativeSettings::from_args(&native, host)?;
+    Ok(PlayerProfile {
+        native,
+        presentation,
+    })
+}
+
+/// Bounded UTF-8 record parsing shared by both schemas. CRLF is accepted.
+fn profile_records(encoded: &[u8], host: SettingsHost) -> Result<(u8, Vec<String>), String> {
     if encoded.len() > MAX_PROFILE_BYTES {
         return Err("profile exceeds 72 KiB".into());
     }
@@ -49,14 +142,23 @@ pub fn decode_profile(encoded: &[u8], host: SettingsHost) -> Result<NativeSettin
         return Err("profile has an incomplete final record".into());
     }
     let (header, records) = text.split_once('\n').ok_or("profile header missing")?;
-    let expected = format!("{MAGIC}\t1\t{}", host_name(host));
-    if header.strip_suffix('\r').unwrap_or(header) != expected {
+    let header = header.strip_suffix('\r').unwrap_or(header);
+    let version = if header == format!("{MAGIC}\t1\t{}", host_name(host)) {
+        1
+    } else if header == format!("{MAGIC}\t2\t{}", host_name(host)) {
+        2
+    } else {
         return Err("profile magic, version or operating system differs".into());
-    }
+    };
+    let limit = if version == 1 {
+        crate::settings::MAX_FIELDS
+    } else {
+        crate::settings::MAX_FIELDS + 4
+    };
     let mut args = Vec::new();
     for record in records.split_terminator('\n') {
-        if args.len() / 2 == crate::settings::MAX_FIELDS {
-            return Err("profile exceeds 128 records".into());
+        if args.len() / 2 == limit {
+            return Err("profile exceeds schema record limit".into());
         }
         let record = record.strip_suffix('\r').unwrap_or(record);
         let (flag, value) = record
@@ -67,12 +169,23 @@ pub fn decode_profile(encoded: &[u8], host: SettingsHost) -> Result<NativeSettin
         }
         args.extend([flag.to_owned(), value.to_owned()]);
     }
-    NativeSettings::from_args(&args, host)
+    Ok((version, args))
 }
 
-/// Reads a regular, non-symlink file with a growth-safe encoded byte limit.
-/// Schema loading alone does not validate native resource availability.
+/// Reads a regular, non-symlink version 1 native profile with a growth-safe cap.
 pub fn load_profile(path: &Path, host: SettingsHost) -> Result<NativeSettings, Box<dyn Error>> {
+    Ok(decode_profile(&read_profile_bytes(path)?, host)?)
+}
+
+/// Reads a combined player profile or a legacy native profile with display defaults.
+pub fn load_player_profile(
+    path: &Path,
+    host: SettingsHost,
+) -> Result<PlayerProfile, Box<dyn Error>> {
+    Ok(decode_player_profile(&read_profile_bytes(path)?, host)?)
+}
+
+fn read_profile_bytes(path: &Path) -> Result<Vec<u8>, Box<dyn Error>> {
     regular_path(path)?;
     let file = File::open(path)?;
     let metadata = file.metadata()?;
@@ -83,7 +196,10 @@ pub fn load_profile(path: &Path, host: SettingsHost) -> Result<NativeSettings, B
     bytes.try_reserve_exact(MAX_PROFILE_BYTES + 1)?;
     file.take((MAX_PROFILE_BYTES + 1) as u64)
         .read_to_end(&mut bytes)?;
-    Ok(decode_profile(&bytes, host)?)
+    if bytes.len() > MAX_PROFILE_BYTES {
+        return Err("profile exceeds 72 KiB".into());
+    }
+    Ok(bytes)
 }
 
 /// Writes a synced, uniquely owned sibling before publishing it.
@@ -96,12 +212,39 @@ pub fn save_profile(
     host: SettingsHost,
 ) -> Result<(), Box<dyn Error>> {
     let encoded = encode_profile(values, host)?;
+    save_encoded(path, &encoded, host, validate_native_profile)
+}
+
+/// Writes version 2 using the same bounded file owner and publication protocol.
+/// Existing valid same-host version 1 or version 2 may be replaced; malformed,
+/// foreign and symlink targets remain refused. Native-only save refuses version 2.
+pub fn save_player_profile(
+    path: &Path,
+    values: &PlayerProfile,
+    host: SettingsHost,
+) -> Result<(), Box<dyn Error>> {
+    let encoded = encode_player_profile(values, host)?;
+    save_encoded(path, &encoded, host, validate_player_profile)
+}
+
+fn validate_native_profile(bytes: &[u8], host: SettingsHost) -> Result<(), String> {
+    decode_profile(bytes, host).map(|_| ())
+}
+fn validate_player_profile(bytes: &[u8], host: SettingsHost) -> Result<(), String> {
+    decode_player_profile(bytes, host).map(|_| ())
+}
+fn save_encoded(
+    path: &Path,
+    encoded: &[u8],
+    host: SettingsHost,
+    validate: fn(&[u8], SettingsHost) -> Result<(), String>,
+) -> Result<(), Box<dyn Error>> {
     if path.file_name().is_none() {
         return Err("profile path requires a file name".into());
     }
     let replacing = match fs::symlink_metadata(path) {
         Ok(_) => {
-            load_profile(path, host)?;
+            validate(&read_profile_bytes(path)?, host)?;
             true
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => false,
@@ -113,7 +256,7 @@ pub fn save_profile(
         .unwrap_or_else(|| Path::new("."));
     let (mut file, mut temporary) = create_temporary(parent)?;
     let written = (|| -> io::Result<()> {
-        file.write_all(&encoded)?;
+        file.write_all(encoded)?;
         file.sync_all()
     })();
     drop(file); // Windows rename/cleanup must not depend on an open handle.
@@ -121,7 +264,7 @@ pub fn save_profile(
     if replacing {
         // Catch a changed/foreign/symlink target before replacement. Concurrent
         // writers still require external coordination; this is not a lock.
-        load_profile(path, host)?;
+        validate(&read_profile_bytes(path)?, host)?;
         fs::rename(temporary.path(), path)?;
         temporary.path = None;
     } else {
@@ -193,6 +336,177 @@ mod tests {
         .collect::<Vec<_>>();
         NativeSettings::from_args(&args, SettingsHost::Linux).unwrap()
     }
+    #[test]
+    fn combined_profiles_roundtrip_all_hosts_and_load_v1_display_defaults() {
+        use crate::presentation_settings::{BackendChoice, Presentation};
+        for host in [
+            SettingsHost::Windows,
+            SettingsHost::Linux,
+            SettingsHost::Macos,
+        ] {
+            let native = NativeSettings::from_args(&[], host).unwrap();
+            let model = PlayerProfile {
+                native,
+                presentation: PresentationSettings {
+                    backend: BackendChoice::Vulkan,
+                    presentation: Presentation::Mailbox,
+                    fps: 90,
+                    lookahead_ms: 3456,
+                },
+            };
+            let encoded = encode_player_profile(&model, host).unwrap();
+            assert!(
+                String::from_utf8(encoded.clone())
+                    .unwrap()
+                    .starts_with(&format!("{MAGIC}\t2\t{}\n", host_name(host)))
+            );
+            let decoded = decode_player_profile(&encoded, host).unwrap();
+            assert_eq!(decoded.native.native_args(), model.native.native_args());
+            assert_eq!(decoded.presentation, model.presentation);
+            let crlf = String::from_utf8(encoded.clone())
+                .unwrap()
+                .replace('\n', "\r\n");
+            assert_eq!(
+                decode_player_profile(crlf.as_bytes(), host)
+                    .unwrap()
+                    .presentation,
+                model.presentation
+            );
+            assert!(decode_profile(&encoded, host).is_err());
+            assert!(validate_native_profile(&encoded, host).is_err()); // Old save protocol cannot overwrite v2.
+            assert!(validate_player_profile(&encoded, host).is_ok());
+            let legacy = encode_profile(&model.native, host).unwrap();
+            assert_eq!(
+                decode_player_profile(&legacy, host).unwrap().presentation,
+                PresentationSettings::default()
+            );
+            assert!(validate_player_profile(&legacy, host).is_ok());
+        }
+    }
+
+    #[test]
+    fn combined_profiles_preserve_unicode_repeats_and_stable_local_ids() {
+        let args = [
+            "--local-player",
+            "4294967295:/dev/input/event0",
+            "--local-player",
+            "9:/dev/input/event1",
+            "--bind",
+            "11:04",
+            "--bind",
+            "12:05",
+            "--ghost-self",
+            "내 기록.bkr",
+        ]
+        .map(String::from)
+        .to_vec();
+        let model = PlayerProfile {
+            native: NativeSettings::from_args(&args, SettingsHost::Linux).unwrap(),
+            presentation: PresentationSettings::default()
+                .apply_overrides(&["--present".into(), "immediate".into()])
+                .unwrap(),
+        };
+        let decoded = decode_player_profile(
+            &encode_player_profile(&model, SettingsHost::Linux).unwrap(),
+            SettingsHost::Linux,
+        )
+        .unwrap();
+        assert_eq!(decoded.native.native_args(), args);
+        assert_eq!(decoded.presentation, model.presentation);
+        assert!(
+            !decoded
+                .native
+                .native_args()
+                .iter()
+                .any(|flag| flag == "--present")
+        );
+    }
+
+    #[test]
+    fn v2_requires_four_distinct_display_fields_and_rejects_unknown_foreign_records() {
+        let header = format!("{MAGIC}\t2\tlinux\n");
+        let display =
+            "--gpu-backend\tauto\n--present\tfifo\n--ui-fps\t120\n--ui-lookahead-ms\t2000\n";
+        for records in [
+            "",
+            "--gpu-backend\tauto\n--present\tfifo\n--ui-fps\t120\n",
+            "--gpu-backend\tauto\n--present\tfifo\n--ui-fps\t120\n--ui-fps\t90\n",
+            "--gpu-backend\tauto\n--present\tfifo\n--ui-fps\t29\n--ui-lookahead-ms\t2000\n",
+            "--gpu-backend\tauto\n--present\tfifo\n--ui-fps\t120\n--ui-lookahead-ms\t10001\n",
+        ] {
+            assert!(
+                decode_player_profile(format!("{header}{records}").as_bytes(), SettingsHost::Linux)
+                    .is_err()
+            );
+        }
+        for forbidden in [
+            "--chart\tchart.bms\n",
+            "--library\tdirectory\n",
+            "--unknown\tx\n",
+            "--alsa\ta\n--alsa\tb\n",
+            "--alsa\ta\tb\n",
+            "\n",
+        ] {
+            assert!(
+                decode_player_profile(
+                    format!("{header}{forbidden}{display}").as_bytes(),
+                    SettingsHost::Linux
+                )
+                .is_err()
+            );
+        }
+        let valid = format!("{header}{display}");
+        assert!(decode_player_profile(valid.as_bytes(), SettingsHost::Windows).is_err());
+        assert!(
+            decode_player_profile(&valid.as_bytes()[..valid.len() - 1], SettingsHost::Linux)
+                .is_err()
+        );
+        assert!(decode_player_profile(&[255, b'\n'], SettingsHost::Linux).is_err());
+        assert!(
+            decode_player_profile(
+                format!("{MAGIC}\t3\tlinux\n{display}").as_bytes(),
+                SettingsHost::Linux
+            )
+            .is_err()
+        );
+        let foreign_blank = NativeSettings::from_args(&[], SettingsHost::Windows).unwrap();
+        assert!(encode_profile(&foreign_blank, SettingsHost::Linux).is_err());
+        assert!(
+            encode_player_profile(
+                &PlayerProfile {
+                    native: foreign_blank,
+                    presentation: PresentationSettings::default()
+                },
+                SettingsHost::Linux
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn combined_codec_checks_records_total_bytes_and_display_bounds_before_state() {
+        let header = format!("{MAGIC}\t2\tlinux\n");
+        let many = format!("{header}{}", "--bind\t11:04\n".repeat(133));
+        assert!(profile_records(many.as_bytes(), SettingsHost::Linux).is_err());
+        let native_over = format!(
+            "{header}{}--gpu-backend\tauto\n--present\tfifo\n--ui-fps\t120\n",
+            "--bind\t11:04\n".repeat(129)
+        );
+        assert!(decode_player_profile(native_over.as_bytes(), SettingsHost::Linux).is_err());
+        assert!(
+            decode_player_profile(&vec![b'x'; MAX_PROFILE_BYTES + 1], SettingsHost::Linux).is_err()
+        );
+        let model = PlayerProfile {
+            native: values(),
+            presentation: PresentationSettings {
+                fps: 0,
+                ..PresentationSettings::default()
+            },
+        };
+        assert!(encode_player_profile(&model, SettingsHost::Linux).is_err());
+        assert_eq!(model.presentation.fps, 0);
+    }
+
     #[test]
     fn local_device_group_round_trips_and_overlays_as_one_ordered_group() {
         let original = [
