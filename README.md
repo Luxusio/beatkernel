@@ -115,9 +115,9 @@ APIs accept repeated `--local-input PATH` or stable `--local-player ID:PATH` for
 2..64 players;
 The graphical player draws independent local panels with pages for larger
 rosters. Settings → Players provides count and distinct-keyboard assignment for
-Linux and Windows local groups, while solo keeps automatic input. Windows uses
+Linux, Windows and macOS local groups, while solo keeps automatic input. Windows uses
 stable `--local-player ID:INTERFACE_PATH` assignments with one Raw Input pump.
-macOS multi-input acquisition remains unfinished. The shared execution primitive
+macOS uses stable --local-player ID:REGISTRY assignments over IOHID and CoreAudio. The shared execution primitive
 owns independent core runtimes with one authoritative song transport and output
 producer; native solo playback now uses the same composition.
 F2 or Settings opens a bounded advanced draft editor for devices, buffers, timing,

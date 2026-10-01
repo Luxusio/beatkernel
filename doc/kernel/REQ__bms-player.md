@@ -6,7 +6,8 @@ chart/time/score/competition prefix through the existing graphical bridge, while
 sharing one native audio output and song transport. Backend and buffer controls
 remain the existing WASAPI shared/exclusive or optional ASIO settings. Keyboard
 disconnect cancels the group without substitution. Graphical/native acceptance
-is still deferred; macOS multi-input composition remains unfinished.
+is still deferred. macOS uses the same roster with exact IORegistry keyboard
+identities and shared CoreAudio output.
 
 ## Presentation settings and combined profiles
 
@@ -256,8 +257,8 @@ compilation may proceed; actual GUI rendering/focus/close/restart/input/audio,
 replay/network execution and independent reviews/QA remain required later.
 This presentation increment does not by itself prove the full player complete.
 Graphical native settings and audio output metadata selectors now have source
-integration, including Linux and Windows local-player assignment. macOS multi-input,
-expanded transport/practice controls remain player work. Native and display
+integration, including Linux, Windows and macOS local-player assignment.
+Expanded transport/practice controls remain player work. Native and display
 profiles have source
 integration with file-I/O and interruption acceptance still pending. Existing
 casual multiplayer has independent local starts and unauthenticated progress;
@@ -359,7 +360,7 @@ Shared Runtime composition has source integration and native solo adoption.
 Linux terminal composition now provides simultaneous evdev acquisition and
 per-player judging/replay using the shared output and graphical assignment UI.
 Windows uses simultaneous Raw Input acquisition with the same group; macOS
-multi-input composition remains required implementation work.
+uses IOHID acquisition and one CoreAudio output.
 Linux local-input mode now publishes independent members to the graphical player;
 network competition with a local group still fails before device acquisition.
 
@@ -383,5 +384,4 @@ validates every assignment before updating the settings draft; Apply separately
 accepts next-session options, while Back discards roster changes. Modal/pending
 operations fence underlying text/menu editing. Stable player IDs survive group
 resize/profile import and reach the real native runtime/replay filenames.
-Current multi-input preparation supports Linux and Windows; macOS fails count growth
-explicitly. Developer native/terminal commands do not replace graphical play.
+Current multi-input source preparation supports Linux, Windows and macOS. Developer native/terminal commands do not replace graphical play.

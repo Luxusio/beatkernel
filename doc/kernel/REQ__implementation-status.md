@@ -10,9 +10,8 @@ input/judging on a game thread, with separate native output and network owners.
 The product UI uses winit/wgpu, with actual chart, score and local-player
 snapshots. Competition prefixes are connected to that same bridge. Display
 drafts and version 2 player profiles include GPU backend, presentation, FPS and
-lookahead; version 1 loads with display defaults. Native Linux and Windows local
-groups compose independent player runtimes with one shared output. macOS local
-groups remain unfinished. Peer progress
+lookahead; version 1 loads with display defaults. Native Linux, Windows and macOS local
+groups compose independent player runtimes with one shared output. Peer progress
 is unauthenticated with independent local starts. Source checks exist;
 actual socket exchange, gameplay and fixture execution remain deferred.
 It records implementation locations, not independent review or phase acceptance.

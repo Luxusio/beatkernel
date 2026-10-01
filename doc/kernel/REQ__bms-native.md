@@ -269,3 +269,14 @@ scores and per-player replay suffixes. --local-input keeps sequential IDs. Both
 forms require2..64 unique devices and cannot mix or combine with solo --evdev.
 Fresh native DeviceIds remain separate from stable IDs. Device aliases and
 availability are checked from actual opened handles before output start.
+
+## macOS local cohort composition
+
+Graphical local setup shall support 2..64 players assigned to distinct positive
+IORegistry keyboard identities. The game owner polls one IOHID acquisition owner
+and preserves normalized Mach timestamps through the bounded merger. Each member
+keeps independent judgment, score, ghost and replay state over a shared transport,
+CoreAudio output and BGM. Missing, ambiguous or removed assignments and HID queue
+loss fail the cohort without automatic retargeting. Group plus network admission
+is rejected before native resources. Output stop and HID close precede every
+member replay save attempt. Native execution acceptance remains deferred.

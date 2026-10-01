@@ -10,7 +10,9 @@ deadline advancement while messages remain queued; `--advance-lag-ns` (0..1s,
 default 2ms) controls its common frontier. Selected removal and chronology errors
 stop the whole group, preserving completed prefixes through cleanup and replay
 save. Raw Input receipt timestamps do not establish physical key actuation time.
-Native execution acceptance remains deferred; macOS group acquisition is pending.
+Native execution acceptance remains deferred. macOS groups use exact positive
+IORegistry identities with one IOHID owner and shared CoreAudio output; normalized
+Mach event timestamps feed the same bounded merger and independent member state.
 
 Each stable local member owns its competition presentation: at most eight
 recorded ghost prefixes and one peer-reported prefix, with connection lifecycle
@@ -42,7 +44,7 @@ assuming two panes. Removing a member/session route needs held-key cleanup.
 Portable roster/admission, solo automatic preparation and shared Runtime
 composition now have source integration. Linux terminal composition adds multiple
 simultaneous evdev sources with graphical roster assignment. Windows composes
-simultaneous Raw Input sources; macOS multi-input remains unimplemented.
+simultaneous Raw Input sources; macOS composes simultaneous IOHID sources.
 Source integration does not prove native
 multiplayer acceptance.
 Actual discovery, filtering and multi-player acceptance remain deferred.
@@ -101,8 +103,8 @@ group failure. Only after all judges and shared output drain finish is the
 cohort complete. Save separate .p<ID>.bkr recordings after native cleanup.
 
 This integration starts with Linux terminal play and its graphical publication.
-Graphical roster assignment has Linux and Windows source integration. macOS native
-multi-input integration remains required work. Combined local-network sessions currently fail explicitly
+Graphical roster assignment and native multiple-input composition have Linux,
+Windows and macOS source integration. Combined local-network sessions currently fail explicitly
 before resource acquisition rather than claim partial support.
 Native execution and file/recording acceptance remain deferred.
 
@@ -135,7 +137,7 @@ continues for every member. Notes and text stay within each panel and retain
 original song-time projection. Prepared-chart and report publication occur on
 the game owner, never audio callbacks or UI event timestamps. Linux local mode
 attaches this presentation; Settings Players assigns devices or imports CLI/profile
-identities. Windows uses the same presentation; macOS multi-input remains required work.
+identities. Windows and macOS use the same presentation.
 Native UI/GPU/execution acceptance is still user-deferred.
 
 ## Graphical roster assignment
@@ -158,8 +160,10 @@ retains sequential IDs. The two forms and solo --evdev cannot mix. Native fresh
 DeviceIds stay separate from stable player IDs and opened alias/availability
 checks remain authoritative. Returning to solo clears local assignments.
 
-Current multiple-input execution/assignment support is Linux; WinMac count
-growth explicitly reports unavailable acquisition until implemented. Audio
+Current multiple-input source composition and assignment support covers Linux,
+Windows and macOS. macOS --local-player ID:REGISTRY uses positive decimal u64
+registries and rejects numeric aliases; group/solo registry overrides cannot mix.
+Fresh native attachment IDs remain separate from persistent player IDs. Audio
 configuration remains one shared optional advanced override. Profile value and
 aggregate settings caps remain in force, including ID/path encoding overhead.
 GUI rendering, metadata query and actual play acceptance remain user-deferred.

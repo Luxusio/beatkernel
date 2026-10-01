@@ -169,3 +169,18 @@ capture creation has no captured file; startup failures after creation may save 
 empty valid prefix. Control-thread recording may allocate and encode candidate
 records. Replay contains accepted judge operations rather than physical audio output
 or device latency evidence. Portable CLI fixtures are authored/compiled only.
+
+## Shared-output local players
+
+The graphical roster also composes 2..64 distinct IORegistry keyboard assignments
+through repeated --local-player ID:REGISTRY, replacing the solo registry option.
+Both IDs require positive ASCII decimal integers; player IDs use u32 and registry
+IDs use u64. Numeric aliases, duplicate player IDs, missing or ambiguous native
+attachments, unsupported scalar layouts and HID queue loss fail explicitly.
+One game owner polls IOHID and merges original normalized Mach timestamps before
+advancing all independent judges to a shared frontier. Selected removal stops the
+cohort; no device substitution occurs. Shared CoreAudio/BGM/transport and checked
+voice allocation accompany per-member scores, ghosts, completion and recordings.
+A group cannot join the current two-peer network mode. Output stop and HID close
+precede all independent .p<ID>.bkr create-new saves, including valid failure prefixes.
+Source compilation is distinct from deferred native and graphical acceptance.
