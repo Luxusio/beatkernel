@@ -18,6 +18,8 @@ pub mod font;
 pub mod graphics;
 /// Collection-based local player identity and unique native input assignment.
 pub mod local_players;
+/// Shared-transport/output execution over independent actual core runtimes.
+pub mod local_runtime;
 /// Bounded two-player progress exchange on a dedicated socket worker.
 pub mod multiplayer;
 /// Omitted solo option defaults, independent of native discovery.

@@ -3,7 +3,7 @@ use crate::settings::{MAX_VALUE_BYTES, SettingsHost};
 use beatkernel::input::DeviceId;
 
 pub const MAX_LOCAL_PLAYERS: usize = 64;
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PlayerId(pub u32);
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LocalPlayer {

@@ -368,10 +368,11 @@ mod native {
         audio::{command_queue, Mixer, MixerConfig, PcmLimits},
         input::{Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId},
         judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
-        runtime::{Runtime, RuntimeReport},
+        runtime::RuntimeReport,
         time::{ClockDomainId, ClockMapper, ClockMappingQuality, Duration},
         transport::{Rate, Transport},
     };
+    use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
     use beatkernel_bms_runtime::{load_prepared, ChannelPolicy};
     use beatkernel_platform::{
         audio::presentation::discipline::{
