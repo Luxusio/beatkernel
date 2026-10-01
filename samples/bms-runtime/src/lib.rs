@@ -112,7 +112,7 @@ use beatkernel::{
     judge::JudgeStage,
     runtime::SoundBinding,
 };
-use beatkernel_bms::{BmsChart, CompiledBms, ParseOptions, parse};
+use beatkernel_bms::{BmsChart, CompiledBms, ParseOptions, parse_seeded};
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -207,13 +207,27 @@ pub fn load_prepared(
     pcm_limits: PcmLimits,
     channels: ChannelPolicy,
 ) -> Result<PreparedBms, Box<dyn Error>> {
-    load_prepared_with_decoder_and_paths(
+    load_prepared_with_seed(path, format, pcm_limits, channels, 0)
+}
+
+/// Resolve a caller-selected chart seed and prepare only its selected assets.
+/// This uses the default decoder and compatible path policy. The resolved
+/// source must be supplied again for replay; source seed serialization is pending.
+pub fn load_prepared_with_seed(
+    path: &Path,
+    format: AudioFormat,
+    pcm_limits: PcmLimits,
+    channels: ChannelPolicy,
+    seed: u64,
+) -> Result<PreparedBms, Box<dyn Error>> {
+    prepare_seeded(
         path,
         format,
         pcm_limits,
         channels,
         &DefaultAssetDecoder,
         asset_paths::AssetPathPolicy::AudioVariants,
+        seed,
     )
 }
 
@@ -249,6 +263,18 @@ pub fn load_prepared_with_decoder_and_paths(
     decoder: &dyn AssetDecoder,
     paths: asset_paths::AssetPathPolicy,
 ) -> Result<PreparedBms, Box<dyn Error>> {
+    prepare_seeded(path, format, pcm_limits, channels, decoder, paths, 0)
+}
+
+fn prepare_seeded(
+    path: &Path,
+    format: AudioFormat,
+    pcm_limits: PcmLimits,
+    channels: ChannelPolicy,
+    decoder: &dyn AssetDecoder,
+    paths: asset_paths::AssetPathPolicy,
+    seed: u64,
+) -> Result<PreparedBms, Box<dyn Error>> {
     let chart_path = std::fs::canonicalize(path)?;
     let root = chart_path.parent().ok_or("chart has no parent")?;
     let options = ParseOptions::default();
@@ -258,7 +284,7 @@ pub fn load_prepared_with_decoder_and_paths(
         chart_text::ChartTextEncoding::Auto,
         options.max_bytes,
     )?;
-    let source = parse(&text, options)?;
+    let source = parse_seeded(&text, options, seed)?;
     let compiled = source.compile()?;
     let referenced: BTreeSet<_> = source
         .notes

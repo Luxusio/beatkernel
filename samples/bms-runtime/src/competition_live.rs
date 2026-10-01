@@ -16,7 +16,7 @@ use beatkernel::{
     runtime::RuntimeReport,
     time::{ClockDomainId, Timestamp},
 };
-use beatkernel_bms::{BmsChart, ParseOptions, parse};
+use beatkernel_bms::{BmsChart, ParseOptions, parse_seeded};
 use std::{
     fs::File,
     net::SocketAddr,
@@ -164,9 +164,16 @@ pub fn replay_limits() -> Result<ReplayCodecLimits> {
 
 /// Read a bounded UTF-8 or Shift-JIS BMS chart without loading its sound assets.
 pub fn load_chart(path: &Path) -> Result<BmsChart> {
+    load_chart_with_seed(path, 0)
+}
+
+/// Read and resolve BMS conditional branches using a caller-selected chart seed.
+/// Replay reconstruction must receive this same resolved source; its current
+/// header seed describes judge rules, not BMS source branch provenance.
+pub fn load_chart_with_seed(path: &Path, seed: u64) -> Result<BmsChart> {
     let options = ParseOptions::default();
     let text = crate::chart_text::read_chart_text(&mut File::open(path)?, options.max_bytes)?;
-    Ok(parse(&text, options)?)
+    Ok(parse_seeded(&text, options, seed)?)
 }
 
 /// Per-play competition state. Socket work never runs on the gameplay thread.

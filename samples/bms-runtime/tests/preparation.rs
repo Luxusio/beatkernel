@@ -713,3 +713,66 @@ fn chart_note_count_is_independent_of_active_voice_capacity() {
         _ => panic!("unexpected BGM command"),
     }
 }
+
+#[test]
+fn seeded_branches_share_loading_pcm_and_replay_setup() {
+    let dir = Directory::new();
+    dir.write("second.wav", &wav(1, &[16384, -8192]));
+    let path = dir.write("random.bms", b"#BPM 60\n#RANDOM 2\n#IF 1\n#WAV01 first.wav\n#00011:01\n#ELSE\n#WAV02 second.wav\n#00012:02\n#00001:02\n#ENDIF\n");
+    let format = AudioFormat::new(24_000, 1).unwrap();
+    let baseline = load_prepared(&path, format, limits(), ChannelPolicy::Exact).unwrap();
+    assert_eq!(baseline.source.notes.len(), 1);
+    assert_eq!(baseline.source.notes[0].sample, SampleId(2));
+    assert!(!baseline.source.samples.contains_key(&1));
+    assert!(baseline.bank.get(SampleId(1)).is_none());
+    assert_eq!(
+        baseline.bank.get(SampleId(2)).unwrap().samples(),
+        &[0.5, -0.25]
+    );
+    let loaded = competition_live::load_chart_with_seed(&path, 0).unwrap();
+    assert_eq!(loaded.source, baseline.source.source);
+    assert_eq!(
+        competition_live::load_chart(&path).unwrap().source,
+        loaded.source
+    );
+    let again = load_prepared_with_seed(&path, format, limits(), ChannelPolicy::Exact, 0).unwrap();
+    let identity = captured_setup_identity(&baseline);
+    assert_eq!(captured_setup_identity(&again), identity);
+    let recording = beatkernel::replay::codec::ReplayFile::new(identity.clone(), Vec::new());
+    let replay_limits = competition_live::replay_limits().unwrap();
+    replay_playback::validate_setup(&loaded, &recording, replay_limits).unwrap();
+    let mut replay =
+        replay_playback::reconstruct(&loaded, recording.clone(), replay_limits).unwrap();
+    replay.seek(beatkernel::time::Timestamp::ZERO).unwrap();
+    // Seed3 selects the missing first asset; its branch cannot silently use second.wav.
+    assert!(load_prepared_with_seed(&path, format, limits(), ChannelPolicy::Exact, 3).is_err());
+    dir.write("first.wav", &wav(1, &[8192, 4096]));
+    let other = load_prepared_with_seed(&path, format, limits(), ChannelPolicy::Exact, 3).unwrap();
+    assert_eq!(other.source.notes[0].sample, SampleId(1));
+    assert_ne!(
+        captured_setup_identity(&other).chart_identity,
+        identity.chart_identity
+    );
+    assert!(replay_playback::validate_setup(&other.source, &recording, replay_limits).is_err());
+    assert!(replay_playback::reconstruct(&other.source, recording, replay_limits).is_err());
+    let mut output = Vec::new();
+    let report = offline::render_offline(
+        baseline,
+        offline::OfflineOptions {
+            frames: 3,
+            block_frames: 1,
+            command_capacity: 4,
+            max_voices: 2,
+        },
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(report.hits, 1);
+    assert_eq!(
+        output,
+        [1.0f32, -0.5, 0.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>()
+    );
+}
