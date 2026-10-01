@@ -30,6 +30,8 @@ pub mod multiplayer;
 pub mod native_defaults;
 /// Synthetic offline composition using the same runtime and mixer as native apps.
 pub mod offline;
+/// Typed UI panel ownership and cancellation permits for off-thread work.
+pub mod panel_scope;
 /// Actual game-to-UI presentation and cancellation outside audio callbacks.
 pub mod player;
 /// Bounded chart catalog and exact compiled lane display data.
