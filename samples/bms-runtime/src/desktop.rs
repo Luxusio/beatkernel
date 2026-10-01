@@ -4,12 +4,16 @@ use beatkernel_bms_runtime::ui::{
     atoms::{rect, text},
     interaction::{logical_point, Bounds, ControlId, Gesture},
     molecules, organisms,
+    text_input::LineEditor,
 };
 use beatkernel_bms_runtime::{
     graphics::{self, BackendChoice, Presentation, Renderer},
     scene::Scene,
 };
-use beatkernel_bms_runtime::{player, player_chart};
+use beatkernel_bms_runtime::{
+    player, player_chart,
+    settings::{NativeSettings, SettingsHost},
+};
 use std::{
     error::Error,
     path::PathBuf,
@@ -22,7 +26,7 @@ use winit::{
     dpi::LogicalSize,
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
+    keyboard::{Key, KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
 
@@ -152,9 +156,9 @@ impl Drop for Game {
     }
 }
 
-pub(super) fn run(args: &[String], native: Native) -> Result<(), Box<dyn Error>> {
+pub(super) fn run(args: &[String], native: Native, validate: Native) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
-        println!("player (--library DIR | --chart PATH) [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nPass explicit native backend/device/rate/buffer/binding options as flag-value pairs.\nUp/Down: select; Enter: play/return; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options.");
+        println!("player (--library DIR | --chart PATH) [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nPass explicit native backend/device/rate/buffer/binding options as flag-value pairs.\nF2: settings; Up/Down: select; Enter: play/return; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options.");
         return Ok(());
     }
     let options = Options::parse(args)?;
@@ -202,6 +206,8 @@ pub(super) fn run(args: &[String], native: Native) -> Result<(), Box<dyn Error>>
     let mut app = Desktop {
         options,
         native,
+        validate,
+        settings: None,
         entries,
         diagnostics,
         selected: 0,
@@ -219,7 +225,7 @@ pub(super) fn run(args: &[String], native: Native) -> Result<(), Box<dyn Error>>
         next_frame: Instant::now(),
         pointer: None,
         gesture: Gesture::default(),
-        hits: Vec::with_capacity(17),
+        hits: Vec::with_capacity(32),
     };
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.fatal {
@@ -228,9 +234,89 @@ pub(super) fn run(args: &[String], native: Native) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
+const SETTINGS_ROWS: usize = 12;
+struct SettingsDraft {
+    values: NativeSettings,
+    selected: usize,
+    editor: LineEditor,
+    error: Option<String>,
+}
+impl SettingsDraft {
+    fn select(&mut self, index: usize) -> Result<(), String> {
+        let field = self
+            .values
+            .fields()
+            .get(index)
+            .ok_or("settings row unavailable")?;
+        self.editor = LineEditor::new(&field.value, 4096)?;
+        self.selected = index;
+        Ok(())
+    }
+    fn edit(&mut self, key: Option<KeyCode>, value: Option<&str>) {
+        let before = self.editor.clone();
+        let result = match key {
+            Some(KeyCode::ArrowLeft) => {
+                self.editor.left();
+                Ok(())
+            }
+            Some(KeyCode::ArrowRight) => {
+                self.editor.right();
+                Ok(())
+            }
+            Some(KeyCode::Home) => {
+                self.editor.home();
+                Ok(())
+            }
+            Some(KeyCode::End) => {
+                self.editor.end();
+                Ok(())
+            }
+            Some(KeyCode::Delete) => {
+                self.editor.delete();
+                Ok(())
+            }
+            Some(KeyCode::Backspace) => {
+                self.editor.backspace();
+                Ok(())
+            }
+            _ => value.map_or(Ok(()), |value| self.editor.insert(value)),
+        }
+        .and_then(|()| self.values.set_value(self.selected, self.editor.value()));
+        if let Err(error) = result {
+            // Preserve the last accepted bounded draft if an edit exceeds a model limit.
+            self.editor = before;
+            self.error = Some(error);
+        } else {
+            self.error = None;
+        }
+    }
+}
+fn settings_host() -> SettingsHost {
+    if cfg!(target_os = "windows") {
+        SettingsHost::Windows
+    } else if cfg!(target_os = "macos") {
+        SettingsHost::Macos
+    } else {
+        SettingsHost::Linux
+    }
+}
+fn without_chart(args: &[String]) -> Vec<String> {
+    args.chunks_exact(2)
+        .filter(|pair| pair[0] != "--chart")
+        .flat_map(|pair| pair.iter().cloned())
+        .collect()
+}
+fn with_chart(args: &[String], path: &str) -> Vec<String> {
+    let mut args = without_chart(args);
+    args.extend(["--chart".into(), path.into()]);
+    args
+}
+
 struct Desktop {
     options: Options,
     native: Native,
+    validate: Native,
+    settings: Option<SettingsDraft>,
     entries: Vec<Entry>,
     diagnostics: Vec<String>,
     selected: usize,
@@ -251,6 +337,99 @@ struct Desktop {
     hits: Vec<(ControlId, Bounds)>,
 }
 impl Desktop {
+    fn open_settings(&mut self) {
+        if self.game.is_some() {
+            return;
+        }
+        let result = (|| {
+            let values =
+                NativeSettings::from_args(&without_chart(&self.options.native), settings_host())?;
+            let editor = LineEditor::new(
+                &values.fields().first().ok_or("no settings fields")?.value,
+                4096,
+            )?;
+            Ok::<_, String>(SettingsDraft {
+                values,
+                selected: 0,
+                editor,
+                error: None,
+            })
+        })();
+        match result {
+            Ok(draft) => {
+                self.settings = Some(draft);
+                self.failure = None;
+            }
+            Err(error) => self.failure = Some(error),
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn apply_settings(&mut self) {
+        let Some(draft) = &mut self.settings else {
+            return;
+        };
+        let result = (|| {
+            draft
+                .values
+                .set_value(draft.selected, draft.editor.value())?;
+            let args = without_chart(&draft.values.native_args());
+            let path = self
+                .entries
+                .get(self.selected)
+                .map(|entry| entry.path.as_path())
+                .unwrap_or_else(|| std::path::Path::new("settings-validation.bms"));
+            let path = path.to_str().ok_or("native chart path must be UTF-8")?;
+            (self.validate)(&with_chart(&args, path)).map_err(|error| error.to_string())?;
+            Ok::<_, String>(args)
+        })();
+        match result {
+            Ok(args) => {
+                self.options.native = args;
+                self.settings = None;
+                self.failure = None;
+            }
+            Err(error) => draft.error = Some(error),
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn settings_key(&mut self, key: KeyCode, repeat: bool) {
+        match key {
+            KeyCode::Escape if !repeat => {
+                self.settings = None;
+                self.hits.clear();
+            }
+            KeyCode::Enter if !repeat => self.apply_settings(),
+            KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::Tab => {
+                if let Some(draft) = &mut self.settings {
+                    let length = draft.values.fields().len();
+                    let next = if key == KeyCode::ArrowUp {
+                        draft.selected.saturating_sub(1)
+                    } else if key == KeyCode::Tab {
+                        (draft.selected + 1) % length
+                    } else {
+                        (draft.selected + 1).min(length - 1)
+                    };
+                    if let Err(error) = draft.select(next) {
+                        draft.error = Some(error);
+                    }
+                    self.hits.clear();
+                }
+            }
+            KeyCode::ArrowLeft
+            | KeyCode::ArrowRight
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::Backspace
+            | KeyCode::Delete => {
+                if let Some(draft) = &mut self.settings {
+                    draft.edit(Some(key), None);
+                }
+            }
+            _ => {}
+        }
+    }
     fn point(&self) -> Option<(f64, f64)> {
         let window = self.window.as_ref()?;
         let size = window.inner_size();
@@ -272,7 +451,43 @@ impl Desktop {
             .map(|(id, _)| *id)
     }
     fn activate(&mut self, id: ControlId) {
+        if self.settings.is_some() {
+            match id.0 {
+                10 => self.apply_settings(),
+                11 => {
+                    self.settings = None;
+                    self.gesture.cancel();
+                    self.hits.clear();
+                }
+                12 => {
+                    if let Some(draft) = &mut self.settings {
+                        match draft
+                            .values
+                            .add_binding()
+                            .and_then(|index| draft.select(index))
+                        {
+                            Ok(()) => draft.error = None,
+                            Err(error) => draft.error = Some(error),
+                        }
+                    }
+                    self.gesture.cancel();
+                    self.hits.clear();
+                }
+                row if row >= 1000 => {
+                    if let Some(draft) = &mut self.settings {
+                        if let Err(error) = draft.select((row - 1000) as usize) {
+                            draft.error = Some(error);
+                        }
+                    }
+                    self.gesture.cancel();
+                    self.hits.clear();
+                }
+                _ => {}
+            }
+            return;
+        }
         match id.0 {
+            5 if self.game.is_none() => self.open_settings(),
             1 if self.game.is_none() && !self.entries.is_empty() => self.key(KeyCode::Enter, false),
             2 if self.game.as_ref().is_some_and(|game| !game.joined) => self.cancel(),
             3 if self.game.as_ref().is_some_and(|game| game.joined) => {
@@ -341,6 +556,10 @@ impl Desktop {
         if !self.active || self.closing {
             return;
         }
+        if self.settings.is_some() {
+            self.settings_key(key, repeat);
+            return;
+        }
         if self.game.as_ref().is_some_and(|game| game.joined) {
             if !repeat && matches!(key, KeyCode::Enter | KeyCode::Escape) {
                 self.game = None;
@@ -355,6 +574,7 @@ impl Desktop {
             }
         } else {
             match key {
+                KeyCode::F2 if !repeat => self.open_settings(),
                 KeyCode::Escape if !repeat => self.closing = true,
                 KeyCode::ArrowUp => self.selected = self.selected.saturating_sub(1),
                 KeyCode::ArrowDown if !self.entries.is_empty() => {
@@ -371,17 +591,12 @@ impl Desktop {
     }
     fn start(&mut self) -> Result<(), String> {
         let entry = &self.entries[self.selected];
-        let mut args = self.options.native.clone();
-        if self.options.library.is_some() {
-            args.push("--chart".into());
-            args.push(
-                entry
-                    .path
-                    .to_str()
-                    .ok_or("native chart path must be UTF-8")?
-                    .into(),
-            );
-        }
+        let path = entry
+            .path
+            .to_str()
+            .ok_or("native chart path must be UTF-8")?;
+        let args = with_chart(&self.options.native, path);
+        (self.validate)(&args).map_err(|error| error.to_string())?;
         let (publisher, viewer) = player::channel();
         let native = self.native;
         let worker = thread::Builder::new()
@@ -412,7 +627,9 @@ impl Desktop {
         let pixels = &mut self.scene;
         rect(pixels, 0, 0, WIDTH as i64, HEIGHT as i64, 0x10151e);
         text(pixels, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
-        if let Some(game) = &self.game {
+        if let Some(draft) = &self.settings {
+            draw_settings(pixels, draft, &mut self.hits, &self.gesture, point)?;
+        } else if let Some(game) = &self.game {
             draw_game(pixels, game, self.options.lookahead)?;
             if game.joined {
                 control(
@@ -450,7 +667,7 @@ impl Desktop {
                 pixels,
                 24,
                 65,
-                "UP/DOWN SELECT  ENTER PLAY  ESC EXIT",
+                "UP/DOWN SELECT  ENTER PLAY  F2 SETTINGS",
                 2,
                 0x9bb1cf,
             );
@@ -505,6 +722,20 @@ impl Desktop {
                     "START",
                 );
             }
+            control(
+                pixels,
+                &mut self.hits,
+                &self.gesture,
+                point,
+                ControlId(5),
+                Bounds {
+                    x: 750,
+                    y: 102,
+                    width: 180,
+                    height: 30,
+                },
+                "SETTINGS",
+            );
             control(
                 pixels,
                 &mut self.hits,
@@ -669,8 +900,34 @@ impl ApplicationHandler for Desktop {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                let editing = self.settings.is_some();
+                let navigation = matches!(
+                    event.physical_key,
+                    PhysicalKey::Code(
+                        KeyCode::Escape
+                            | KeyCode::Enter
+                            | KeyCode::Tab
+                            | KeyCode::ArrowUp
+                            | KeyCode::ArrowDown
+                            | KeyCode::ArrowLeft
+                            | KeyCode::ArrowRight
+                            | KeyCode::Home
+                            | KeyCode::End
+                            | KeyCode::Backspace
+                            | KeyCode::Delete
+                    )
+                );
                 if let PhysicalKey::Code(key) = event.physical_key {
                     self.key(key, event.repeat);
+                }
+                if editing && !navigation && self.active && !self.closing {
+                    let value = event.text.as_deref().or_else(|| match &event.logical_key {
+                        Key::Character(value) => Some(value.as_str()),
+                        _ => None,
+                    });
+                    if let (Some(draft), Some(value)) = (&mut self.settings, value) {
+                        draft.edit(None, Some(value));
+                    }
                 }
             }
             WindowEvent::RedrawRequested if !self.suspended && !self.closing && !self.occluded => {
@@ -711,6 +968,87 @@ impl ApplicationHandler for Desktop {
         // Unexpected OS exit still joins native owners through Game::drop.
         self.game = None;
     }
+}
+
+fn draw_settings(
+    scene: &mut Scene,
+    draft: &SettingsDraft,
+    hits: &mut Vec<(ControlId, Bounds)>,
+    gesture: &Gesture,
+    point: Option<(f64, f64)>,
+) -> Result<(), String> {
+    text(
+        scene,
+        24,
+        65,
+        "NATIVE SETTINGS - EMPTY OMITTED - ENTER APPLY - ESC BACK",
+        1,
+        0x9bb1cf,
+    );
+    let first = draft.selected / SETTINGS_ROWS * SETTINGS_ROWS;
+    text(
+        scene,
+        24,
+        91,
+        &format!(
+            "FIELDS {}-{} OF {}   UP/DOWN OR TAB SELECT",
+            first + 1,
+            (first + SETTINGS_ROWS).min(draft.values.fields().len()),
+            draft.values.fields().len()
+        ),
+        1,
+        0xd8b36b,
+    );
+    for (index, field) in draft
+        .values
+        .fields()
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(SETTINGS_ROWS)
+    {
+        let y = 120 + (index - first) as i64 * 39;
+        text(scene, 24, (y + 10) as usize, field.label, 1, 0xf0f4ff);
+        let bounds = Bounds {
+            x: 280,
+            y,
+            width: 650,
+            height: 32,
+        };
+        if index == draft.selected {
+            molecules::text_field(scene, &draft.editor, bounds, true);
+        } else {
+            molecules::text_field_value(scene, &field.value, bounds);
+        }
+        hits.push((ControlId(1000 + index as u64), bounds));
+    }
+    if let Some(field) = draft.values.fields().get(draft.selected) {
+        text(scene, 24, 605, field.hint, 1, 0x9bb1cf);
+    }
+    for (id, x, label) in [
+        (10, 24, "APPLY"),
+        (11, 230, "BACK"),
+        (12, 436, "ADD BINDING"),
+    ] {
+        control(
+            scene,
+            hits,
+            gesture,
+            point,
+            ControlId(id),
+            Bounds {
+                x,
+                y: 638,
+                width: 190,
+                height: 34,
+            },
+            label,
+        );
+    }
+    if let Some(error) = &draft.error {
+        text(scene, 24, 690, error, 1, 0xff8e8e);
+    }
+    Ok(())
 }
 
 fn control(
@@ -789,6 +1127,56 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn settings_edits_update_the_draft_and_rejections_preserve_text_and_caret() {
+        let values =
+            NativeSettings::from_args(&["--evdev".into(), "device".into()], SettingsHost::Linux)
+                .unwrap();
+        let editor = LineEditor::new("device", 4096).unwrap();
+        let mut draft = SettingsDraft {
+            values,
+            selected: 0,
+            editor,
+            error: None,
+        };
+        draft.edit(Some(KeyCode::Home), None);
+        draft.edit(None, Some("별"));
+        assert_eq!(draft.values.fields()[0].value, "별device");
+        let before = (draft.editor.value().to_owned(), draft.editor.cursor());
+        draft.edit(None, Some("\n"));
+        assert!(draft.error.is_some());
+        assert_eq!(
+            (draft.editor.value().to_owned(), draft.editor.cursor()),
+            before
+        );
+        assert_eq!(draft.values.fields()[0].value, "별device");
+    }
+    #[test]
+    fn selection_replaces_chart_once_and_preserves_repeated_native_options() {
+        let args = [
+            "--chart",
+            "old.bms",
+            "--bind",
+            "11:04",
+            "--ghost-self",
+            "one.bkr",
+            "--bind",
+            "12:05",
+            "--ghost-self",
+            "two.bkr",
+        ]
+        .map(String::from);
+        let next = with_chart(&args, "selected.bms");
+        assert_eq!(
+            next.iter()
+                .filter(|value| value.as_str() == "--chart")
+                .count(),
+            1
+        );
+        assert_eq!(next.last().unwrap(), "selected.bms");
+        assert_eq!(without_chart(&next), without_chart(&args));
+        assert!(!next.iter().any(|value| value == "old.bms"));
+    }
     #[test]
     fn ui_options_leave_native_device_configuration_intact() {
         let args = [

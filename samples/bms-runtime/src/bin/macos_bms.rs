@@ -335,6 +335,13 @@ fn main() -> Result<()> {
     run_args(&args)
 }
 
+/// Validate settings through the same parsers as play, without opening any resources.
+#[allow(dead_code)] // Standalone native binaries have no settings screen.
+pub(crate) fn validate_args(args: &[String]) -> Result<()> {
+    let (_, native) = beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
+    parse(&native).map(|_| ())
+}
+
 pub(crate) fn run_args(args: &[String]) -> Result<()> {
     let (competition_options, args) =
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
@@ -863,6 +870,28 @@ mod fixtures {
         ClockPoint {
             domain: ClockDomainId(2),
             timestamp: Timestamp::from_nanos(n),
+        }
+    }
+    #[test]
+    fn settings_validation_preserves_native_and_competition_constraints() {
+        let mut configured = args();
+        configured.extend([
+            "--ghost-self".into(),
+            "unopened-opponent.bkr".into(),
+            "--mp-host".into(),
+            "127.0.0.1:34567".into(),
+        ]);
+        assert!(validate_args(&configured).is_ok());
+        for (flag, value) in [
+            ("--unknown-setting", "1"),
+            ("--backend", "invalid"),
+            ("--early-ns", "-1"),
+            ("--ghost-other", ""),
+            ("--mp-timeout-ms", "99"),
+        ] {
+            let mut invalid = configured.clone();
+            invalid.extend([flag.into(), value.into()]);
+            assert!(validate_args(&invalid).is_err());
         }
     }
     #[test]

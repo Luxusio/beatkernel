@@ -48,7 +48,7 @@ Saved opponents require the same compiled chart and judging profile. Multiplayer
 fn desktop(args: &[String]) -> Result<()> {
     #[cfg(feature = "desktop")]
     {
-        crate::desktop::run(args, native)
+        crate::desktop::run(args, native, validate_native)
     }
     #[cfg(not(feature = "desktop"))]
     {
@@ -83,6 +83,21 @@ fn native(args: &[String]) -> Result<()> {
     return crate::linux_play::run_args(args);
     #[cfg(target_os = "macos")]
     return crate::macos_play::run_args(args);
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    {
+        let _ = args;
+        Err("native BMS play requires Windows, Linux or macOS".into())
+    }
+}
+
+#[cfg(feature = "desktop")]
+fn validate_native(args: &[String]) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    return crate::windows_play::validate_args(args);
+    #[cfg(target_os = "linux")]
+    return crate::linux_play::validate_args(args);
+    #[cfg(target_os = "macos")]
+    return crate::macos_play::validate_args(args);
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
     {
         let _ = args;
