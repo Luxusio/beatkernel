@@ -2,6 +2,7 @@
 use beatkernel::judge::JudgeOutcome;
 use beatkernel_bms_runtime::ui::{
     atoms::{rect, text},
+    display::{BUTTONS as DISPLAY_BUTTONS, DisplayFrame, DisplayView},
     interaction::{Bounds, ControlId, Gesture, logical_point},
     molecules, organisms,
     practice::{PracticeFrame, PracticeView},
@@ -319,6 +320,7 @@ pub(super) fn run(
         options,
         active_backend,
         display: None,
+        display_view: None,
         practice: None,
         records: None,
         native,
@@ -670,6 +672,7 @@ struct Desktop {
     options: Options,
     active_backend: BackendChoice,
     display: Option<PanelScope<DisplayDraft>>,
+    display_view: Option<DisplayView>,
     practice: Option<PanelScope<PracticeDraft>>,
     records: Option<PanelScope<RecordsDraft>>,
     native: Native,
@@ -749,6 +752,13 @@ impl Desktop {
         release_panel(&mut self.picker, &self.navigator);
         release_panel(&mut self.records, &self.navigator);
         release_panel(&mut self.display, &self.navigator);
+        if self
+            .display_view
+            .as_ref()
+            .is_some_and(|view| !self.navigator.retains(view.id()))
+        {
+            self.display_view = None;
+        }
         release_panel(&mut self.practice, &self.navigator);
         release_panel(&mut self.local_setup, &self.navigator);
         release_panel(&mut self.settings, &self.navigator);
@@ -2397,7 +2407,10 @@ impl Desktop {
     fn reactive_waits_for_events(&self) -> bool {
         matches!(
             self.navigator.route(),
-            ScreenRoute::Selection | ScreenRoute::Practice | ScreenRoute::Settings
+            ScreenRoute::Selection
+                | ScreenRoute::Practice
+                | ScreenRoute::Settings
+                | ScreenRoute::Display
         ) && self.navigator.phase() == ScreenPhase::Active
             && !self.occluded
             && self.profile_io.is_none()
@@ -2502,6 +2515,59 @@ impl Desktop {
         }
         self.render_scene()
     }
+    fn draw_display_view(&mut self) -> Result<(), String> {
+        let id = self
+            .navigator
+            .active_id()
+            .ok_or("display instance unavailable")?;
+        if self
+            .display_view
+            .as_ref()
+            .is_none_or(|view| view.id() != id)
+        {
+            self.display_view = Some(DisplayView::new(id, WIDTH as u32, HEIGHT as u32)?);
+            self.painted_reactive = None;
+        }
+        let pending = self.profile_io.is_some();
+        let point = self.point();
+        let hovered = if pending {
+            None
+        } else {
+            point.and_then(|point| {
+                DISPLAY_BUTTONS
+                    .iter()
+                    .rev()
+                    .find(|(_, bounds, _)| bounds.contains(point))
+                    .map(|(id, _, _)| *id)
+            })
+        };
+        let armed = if pending {
+            None
+        } else {
+            DISPLAY_BUTTONS
+                .iter()
+                .map(|(id, _, _)| *id)
+                .find(|&id| self.gesture.is_armed(id))
+        };
+        let display = self.display.as_ref().ok_or("display data unavailable")?;
+        let view = self
+            .display_view
+            .as_ref()
+            .ok_or("display view unavailable")?;
+        view.update(DisplayFrame {
+            editors: &display.editors,
+            selected: display.selected,
+            error: display.error.as_deref(),
+            pending,
+            hovered,
+            armed,
+        })?;
+        if view.dirty() || self.painted_reactive != Some(id) {
+            view.compose(&mut self.scene, &mut self.hits)?;
+            self.painted_reactive = Some(id);
+        }
+        self.render_scene()
+    }
     fn draw_practice(&mut self) -> Result<(), String> {
         let id = self
             .navigator
@@ -2541,6 +2607,9 @@ impl Desktop {
         if route == ScreenRoute::Settings {
             return self.draw_settings_view();
         }
+        if route == ScreenRoute::Display {
+            return self.draw_display_view();
+        }
         self.painted_reactive = None;
         let point = self.point();
         self.invalidate_hits();
@@ -2572,19 +2641,6 @@ impl Desktop {
                 self.settings
                     .as_ref()
                     .map_or(0, |draft| saved_opponents(&draft.values)),
-            );
-        } else if route == ScreenRoute::Display {
-            let display = self
-                .display
-                .as_ref()
-                .ok_or("display screen data unavailable")?;
-            draw_display(
-                pixels,
-                display,
-                &mut self.hits,
-                &self.gesture,
-                point,
-                self.profile_io.is_some(),
             );
         } else if matches!(route, ScreenRoute::Devices { .. }) {
             let picker = self
@@ -3235,6 +3291,7 @@ fn draw_devices(
     }
 }
 
+#[cfg(test)]
 fn draw_display(
     scene: &mut Scene,
     display: &DisplayDraft,
@@ -3243,61 +3300,28 @@ fn draw_display(
     point: Option<(f64, f64)>,
     pending: bool,
 ) {
-    text(
-        scene,
-        24,
-        65,
-        "DISPLAY - ENTER DONE - ESC BACK",
-        2,
-        0x9bb1cf,
-    );
-    for (index, label) in ["GPU BACKEND", "PRESENT MODE", "UI FPS", "LOOKAHEAD MS"]
+    let view = DisplayView::new(ScreenInstanceId(1), WIDTH as u32, HEIGHT as u32).unwrap();
+    let hovered = point.and_then(|point| {
+        DISPLAY_BUTTONS
+            .iter()
+            .rev()
+            .find(|(_, bounds, _)| bounds.contains(point))
+            .map(|(id, _, _)| *id)
+    });
+    let armed = DISPLAY_BUTTONS
         .iter()
-        .enumerate()
-    {
-        let y = 130 + index as i64 * 75;
-        text(scene, 24, (y + 10) as usize, label, 1, 0xf0f4ff);
-        let bounds = Bounds {
-            x: 280,
-            y,
-            width: 650,
-            height: 34,
-        };
-        molecules::text_field(
-            scene,
-            &display.editors[index],
-            bounds,
-            index == display.selected && !pending,
-        );
-        if !pending {
-            hits.push((ControlId(40000 + index as u64), bounds));
-        }
-    }
-    for (y, hint) in [
-        (445, "BACKEND: AUTO / VULKAN / DX12 / METAL / GL"),
-        (460, "PRESENT: FIFO / IMMEDIATE / MAILBOX"),
-        (475, "UI FPS: 30..240   LOOKAHEAD: 100..10000 MS"),
-        (500, "SAVE PROFILE + RESTART FOR GPU BACKEND"),
-        (515, "DONE UPDATES DRAFT - APPLY IS SEPARATE"),
-    ] {
-        text(scene, 24, y, hint, 1, 0x9bb1cf);
-    }
-    for (id, x, label) in [(40, 24, "DONE"), (41, 212, "BACK")] {
-        let bounds = Bounds {
-            x,
-            y: 620,
-            width: 170,
-            height: 34,
-        };
-        if pending {
-            molecules::button(scene, bounds, label, false, false);
-        } else {
-            control(scene, hits, gesture, point, ControlId(id), bounds, label);
-        }
-    }
-    if let Some(error) = &display.error {
-        text(scene, 24, 690, error, 1, 0xff8e8e);
-    }
+        .map(|(id, _, _)| *id)
+        .find(|&id| gesture.is_armed(id));
+    view.update(DisplayFrame {
+        editors: &display.editors,
+        selected: display.selected,
+        error: display.error.as_deref(),
+        pending,
+        hovered,
+        armed,
+    })
+    .unwrap();
+    view.compose(scene, hits).unwrap();
 }
 
 fn saved_opponents(settings: &NativeSettings) -> usize {
@@ -3728,6 +3752,7 @@ mod tests {
             options: Options::parse(&[]).unwrap(),
             active_backend: BackendChoice::Auto,
             display: None,
+            display_view: None,
             practice: None,
             records: None,
             native: native_unavailable,
@@ -3826,6 +3851,39 @@ mod tests {
         assert!(app.settings_view.is_none());
         assert!(app.settings.is_none());
         assert_eq!(app.navigator.route(), ScreenRoute::Selection);
+    }
+
+    #[test]
+    fn retained_display_done_failure_back_and_close_preserve_draft_ownership() {
+        let mut app = lifecycle_fixture();
+        app.open_settings();
+        let parent = app.navigator.active_id();
+        app.open_display();
+        app.draw().unwrap();
+        let id = app.display_view.as_ref().unwrap().id();
+        assert!(app.reactive_waits_for_events());
+        app.display.as_mut().unwrap().editors[2] = LineEditor::new("180", 32).unwrap();
+        app.draw().unwrap();
+        assert_eq!(app.display_view.as_ref().unwrap().id(), id);
+        assert!(!app.display_view.as_ref().unwrap().dirty());
+        app.finish_display();
+        assert_eq!(app.navigator.active_id(), parent);
+        assert!(app.display_view.is_none());
+        assert_eq!(app.settings.as_ref().unwrap().presentation.fps, 180);
+        assert_eq!(app.options.fps, 120);
+        app.open_display();
+        let child = app.navigator.active_id();
+        app.display.as_mut().unwrap().editors[2] = LineEditor::new("9", 32).unwrap();
+        app.finish_display();
+        assert_eq!(app.navigator.active_id(), child);
+        assert!(app.display.as_ref().unwrap().error.is_some());
+        assert_eq!(app.settings.as_ref().unwrap().presentation.fps, 180);
+        app.back();
+        app.open_display();
+        assert_eq!(app.display.as_ref().unwrap().editors[2].value(), "180");
+        app.draw().unwrap();
+        app.request_close();
+        assert!(app.display_view.is_none());
     }
 
     #[test]
