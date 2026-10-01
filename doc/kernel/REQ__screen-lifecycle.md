@@ -190,6 +190,23 @@ Wait, including load/save failures with no user input. Clearing cached hit regio
 forces restoration even when no signal changed. Child Back restores the retained
 Settings scope and scene; branch exit disposes subscriptions.
 
-This migration still leaves Display, Records, Players and Devices on the previous
-rendering path; full widget-host migration and actual GUI/performance acceptance
+Display now uses the retained child below. Records, Players and Devices remain
+on the previous rendering path; full widget-host migration and actual GUI/performance acceptance
 remain unfinished and user-deferred.
+
+
+## Retained Display child
+
+Display owns one retained view scope per Navigator instance. Its four editors
+(GPU backend, presentation mode, FPS and lookahead) have independent signals;
+focus updates affect the old/new field, and errors cannot repaint fields.
+The view borrows draft editors and compares before cloning changes. Done
+validates and updates the parent Settings presentation draft; Apply remains
+separate. Back discards Display edits. Failed Done preserves the child/parent.
+
+Display uses a reusable retained node/immutable packet primitive on the UI
+thread. The primitive handles ordered geometry and dirty composition; the view
+still owns Floem scope disposal. It has no native I/O, gameplay clock, navigation
+stack or custom signal/batch scheduler. Pending state disables all hits and idle
+Display follows the existing event-driven/surface-retry rules. Other menu
+migrations and GUI/performance acceptance remain unfinished and user-deferred.

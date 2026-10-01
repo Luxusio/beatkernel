@@ -561,8 +561,8 @@ GPU playfield uniforms.
 
 This introduces only the MIT standalone Floem reactive engine, not its released
 wgpu22/forked-winit host. The existing wgpu27/winit0.30 host and native resource
-owners remain. Settings now has the retained binding below. Records, Display, Players and
-Devices still use the previous drawing path. A changed node currently causes full composed rectangle
+owners remain. Settings now has the retained binding below. Display uses the retained child below. Records, Players and Devices still use
+the previous drawing path. A changed node currently causes full composed rectangle
 buffer upload, not a partial GPU update; concatenation and fill cost remain
 proportional to visible geometry. GUI execution, dependency disposal behavior
 and performance measurements remain user-deferred; source compilation alone
@@ -621,6 +621,25 @@ Metadata completion queues redraw before returning to event-driven idle Wait,
 including errors and Save completion. Clearing hit regions invalidates retained
 composition even if every signal compares equal. Button hover uses the shared
 layout so it remains valid after hit-cache invalidation. The obsolete immediate
-Settings renderer is removed; only Display, Records, Players and Devices retain
+Settings renderer is removed; Display now has the retained child below; Records, Players and Devices retain
 the previous path. Actual GUI, performance and dependency-disposal execution
 remain user-deferred; source compilation is not acceptance evidence.
+
+
+## Retained Display presentation
+
+Display creates stable editor, control and error nodes per Navigator instance,
+using a reusable retained-node primitive for immutable geometry packets and
+ordered composition. Each of its four editor values has an independent signal;
+selection focus updates the old/new field, and errors never repaint fields.
+Updates borrow editors and clone only changed state. Pending disables all hits.
+Scope disposal remains the containing view's responsibility, independent of
+native session ownership.
+
+Done validates the existing PresentationSettings model before updating the
+parent Settings draft. Back discards edits; failure retains both drafts. Apply
+still changes the next accepted presentation settings, and GPU backend changes
+still require profile save/restart. Idle Display uses the same event-driven
+redraw, hit invalidation and surface retry policy as the other retained menus.
+Source compilation cannot establish actual GPU capability, GUI behavior or
+performance; execution remains user-deferred.
