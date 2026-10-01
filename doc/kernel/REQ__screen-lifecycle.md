@@ -85,8 +85,8 @@ is introduced into the ASIO-free MIT distribution by this requirement.
 
 The confirmed decision is update semantics; framework adoption is not complete.
 The desktop now uses the typed Navigator and retained instance back stack for
-draw/input/transition routing. Actual GUI lifecycle acceptance and reactive
-menu/widget toolkit migration remain unfinished.
+draw/input/transition routing. Actual GUI lifecycle acceptance remains unfinished. Selection has the retained
+binding described below; other menu/widget toolkit migration remains unfinished.
 
 
 ## Scoped reusable panels
@@ -119,5 +119,42 @@ the old route and drafts. Cleanup must never drop a running native play owner.
 Native owners remain application session resources and publish their final
 snapshot after join before Results, retry or return to Selection.
 
-This lifecycle integration does not select or introduce a reactive UI toolkit.
-Retained reactive menu/widget binding remains a separate implementation step.
+This lifecycle boundary is independent of the UI toolkit. Selection now uses
+the standalone reactive engine below; other menu/widget binding remains a
+separate implementation step.
+
+
+## Retained reactive selection screen
+
+The first migrated screen is Selection. Its fixed header, instructions, row
+slots, diagnostics, buttons and status nodes are created once per retained
+ScreenInstanceId. The standalone floem_reactive 0.2.0 engine tracks signal
+dependencies; memo equality prevents unchanged rows/buttons from repainting.
+Changing a selected-row highlight updates dependent rows, while page/visible
+range changes may update all row slots. Unrelated status changes cannot rebuild
+the catalog-row nodes. No application batching scheduler or custom signal engine
+is introduced. Scope disposal releases signals/effects when its screen leaves
+the Navigator, and retained parent return reuses that scope.
+
+Scene composition concatenates existing node geometry when dependencies change
+or another screen overwrote the surface scene. An unchanged selection redraw
+reuses the composed scene; idle Selection waits for input/window events rather
+than refreshing at gameplay FPS. GPU rectangle uploads require a changed scene
+identity/geometry epoch; equal counters from different scenes cannot alias.
+Timed playfield uniforms retain their independent actual-song-time updates.
+A changed node currently causes a full composed rectangle buffer upload; partial
+GPU subrange updates are not implemented.
+
+The published Floem 0.2.0 host uses wgpu22/floem-winit0.29.5, unlike this app's
+wgpu27/winit0.30.13. Its separately released MIT reactive engine depends only on
+smallvec and is used without introducing that host. See the
+[published Floem manifest](https://docs.rs/crate/floem/0.2.0/source/Cargo.toml) and
+[reactive engine documentation](https://docs.rs/floem_reactive/latest/floem_reactive/).
+This is actual dependency tracking and retained node rendering for Selection;
+other menu screens and full existing-widget toolkit migration remain pending.
+Source checks do not prove GUI behavior or performance; execution remains deferred.
+
+Event-driven Selection retries drawing at the configured cadence after transient
+surface acquisition timeout, outdated configuration or lost-surface recreation.
+It enters idle Wait only after a presented frame (or a zero-size suspended
+surface), so a recovered surface cannot wait indefinitely for unrelated input.

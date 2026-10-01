@@ -512,7 +512,8 @@ silently shortened note list. All gameplay members keep independent judging.
 Known ceiling: CPU selection and membership comparison still cost work per
 frame; visible geometry and GPU fill remain proportional to displayed content.
 The desktop Navigator is integrated by the scoped-panel implementation below;
-menu toolkit migration remains unfinished.
+Selection now uses retained reactive nodes as described below; other menus and
+full widget toolkit migration remain unfinished.
 Cargo compilation is source evidence only; shader execution, native rendering
 and frame-time/upload benchmarks remain deferred by the user. This trial does
 not establish that this architecture is fastest on any device.
@@ -534,5 +535,41 @@ Known ceiling: cancellation is cooperative at metadata task boundaries and canno
 interrupt an in-progress filesystem/native metadata operation. Pending operations
 fence ordinary navigation; application close cancels scopes and drains workers.
 The current fixed route graph has maximum stack depth four; expanding navigation
-requires updating its admission graph and bounded depth. Reactive toolkit/menu
-binding migration and actual GUI/OS lifecycle acceptance remain separate work.
+requires updating its admission graph and bounded depth. Selection's retained
+binding is integrated below; other menus and actual GUI/OS lifecycle acceptance
+remain separate work.
+
+
+## Retained Selection presentation
+
+Selection creates its fixed nodes once per retained Navigator instance, using
+floem_reactive 0.2.0 signals/memos/effects on the UI thread. Immutable catalog
+labels and diagnostics are prepared once at startup. Selected-row, hovered
+control, armed control, error and backend-pending states have independent
+signals. Row/button memos suppress unchanged geometry; changing an error cannot
+repaint chart rows. Page changes can affect all fifteen visible row slots.
+Starting Play or Closing releases Selection's reactive scope; opening Settings
+retains it, and Back restores it with the same screen identity.
+
+Node geometry is retained in immutable packets and concatenated in painter
+order only after dependency changes or scene restoration. An unchanged redraw
+uses the existing composed scene and skips rectangle-instance uploads. Upload
+identity includes both scene allocation identity and a checked epoch, avoiding
+cross-scene or counter-wrap aliasing. Idle Selection waits for native window or
+input events; gameplay still uses its configured cadence and actual-song-time
+GPU playfield uniforms.
+
+This introduces only the MIT standalone Floem reactive engine, not its released
+wgpu22/forked-winit host. The existing wgpu27/winit0.30 host and native resource
+owners remain. Settings, Records, Display, Players and Devices still use the
+previous drawing path. A changed node currently causes full composed rectangle
+buffer upload, not a partial GPU update; concatenation and fill cost remain
+proportional to visible geometry. GUI execution, dependency disposal behavior
+and performance measurements remain user-deferred; source compilation alone
+cannot establish those outcomes. See the
+[screen-lifecycle contract](REQ__screen-lifecycle.md#retained-reactive-selection-screen).
+
+Event-driven Selection retries drawing at the configured cadence after transient
+surface acquisition timeout, outdated configuration or lost-surface recreation.
+It enters idle Wait only after a presented frame (or a zero-size suspended
+surface), so a recovered surface cannot wait indefinitely for unrelated input.
