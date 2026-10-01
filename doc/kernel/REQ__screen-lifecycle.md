@@ -10,7 +10,8 @@ admission leaves the active route and drafts unchanged.
 
 Selection may open Settings or native Play. Settings may open Display, Records,
 Players or an output device picker. The Players keyboard picker retains its
-Players parent; other settings children retain Settings only. Back exits the
+Players parent; other settings children retain the Settings/Selection ancestry
+without a Players draft. Back exits the
 current child and resumes its immediate parent. Sibling children cannot replace
 one another directly. Apply commits a validated draft before returning to
 Selection; Back discards it. Records Watch enters replay Play after validation
@@ -46,7 +47,8 @@ that exact parent. Replacing a route and retrying a play do not append duplicate
 history entries. A transition that fails validation/resource preparation must
 not mutate the back stack. Returning from Results to Selection releases the
 joined play owner rather than resurrect an already-finished Play route.
-Closing clears navigation only after game and metadata owners drain.
+Closing invalidates navigation and UI scopes immediately. Application-owned
+game and metadata resources remain until their workers drain.
 
 Widget layout, text editing, focus and controls should use a suitable existing
 Rust toolkit where integration is clearer than retaining custom widget plumbing.
@@ -82,5 +84,40 @@ licensing needs a separate distribution decision; no default GPL UI dependency
 is introduced into the ASIO-free MIT distribution by this requirement.
 
 The confirmed decision is update semantics; framework adoption is not complete.
-The current typed route model is a foundation; desktop integration, back-stack
-and reactive-UI acceptance remain unfinished.
+The desktop now uses the typed Navigator and retained instance back stack for
+draw/input/transition routing. Actual GUI lifecycle acceptance and reactive
+menu/widget toolkit migration remain unfinished.
+
+
+## Scoped reusable panels
+
+Independent panels such as Records, Players and Devices own their typed draft
+state and task-cancellation scope. Small controls and the GPU playfield inherit
+the containing screen lifetime. There is no lifecycle state machine per button
+or note. Panels request navigation from the single Navigator; they do not own
+separate global navigation stacks.
+
+The Navigator retains actual screen entries with stable, non-reused instance
+IDs. Opening a child hides its parent without recreating the parent's draft.
+Back resumes that same parent entry. Closing Settings releases its children
+before the Settings scope. Entering Play from Records releases that entire
+menu branch; Results retains completed play data, and retry creates a fresh
+play entry rather than adding duplicate history.
+
+Every metadata operation captures the initiating screen ID and cancellation
+permit. Work checks cancellation before beginning and before returning its
+result. Dropping a scope cancels its permits; completed results are admitted
+only for the still-active initiating instance. Closing invalidates all UI
+instances, cancels permits and drains already-running operations. A filesystem
+call already in progress remains non-interruptible and must be joined before
+process exit. Suspended UI retains drafts and defers metadata presentation until
+resume; Closing still drains workers.
+
+Ordinary transitions are rejected while suspended or metadata is pending.
+Data preparation and worker spawn complete before route commit; failure retains
+the old route and drafts. Cleanup must never drop a running native play owner.
+Native owners remain application session resources and publish their final
+snapshot after join before Results, retry or return to Selection.
+
+This lifecycle integration does not select or introduce a reactive UI toolkit.
+Retained reactive menu/widget binding remains a separate implementation step.

@@ -511,7 +511,28 @@ silently shortened note list. All gameplay members keep independent judging.
 
 Known ceiling: CPU selection and membership comparison still cost work per
 frame; visible geometry and GPU fill remain proportional to displayed content.
-Menu toolkit migration and navigator integration are separate unfinished work.
+The desktop Navigator is integrated by the scoped-panel implementation below;
+menu toolkit migration remains unfinished.
 Cargo compilation is source evidence only; shader execution, native rendering
 and frame-time/upload benchmarks remain deferred by the user. This trial does
 not establish that this architecture is fastest on any device.
+
+
+## Reusable panel lifetime integration
+
+Records, Display, Players, Devices and Settings draft data use typed PanelScope
+ownership. The desktop dispatches from one ScreenNavigator route; retained
+parent Options never independently select a visible screen or input recipient.
+Actual back-stack instance IDs survive parent return; child exit cancels its
+metadata permits and clears stale gestures/hits. Metadata results require the
+active initiating instance and an uncancelled permit. Closing releases all UI
+scopes while game/metadata owners drain separately before exit. Platform suspend
+retains drafts and defers metadata presentation; resume restores focus from the
+native window and admits completed session Results after join.
+
+Known ceiling: cancellation is cooperative at metadata task boundaries and cannot
+interrupt an in-progress filesystem/native metadata operation. Pending operations
+fence ordinary navigation; application close cancels scopes and drains workers.
+The current fixed route graph has maximum stack depth four; expanding navigation
+requires updating its admission graph and bounded depth. Reactive toolkit/menu
+binding migration and actual GUI/OS lifecycle acceptance remain separate work.
