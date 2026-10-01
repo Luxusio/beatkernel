@@ -17,6 +17,7 @@ asio-sdk = ["beatkernel-platform/asio-sdk"]
 beatkernel = { path = "../../crates/beatkernel" }
 beatkernel-platform = { path = "../../crates/beatkernel-platform" }
 beatkernel-bms = { path = "../../adapters/beatkernel-bms" }
+encoding_rs = "=0.8.35"
 wgpu = { version = "=27.0.1", optional = true }
 bytemuck = { version = "=1.24.0", features = ["derive"], optional = true }
 winit = { version = "=0.30.13", optional = true }

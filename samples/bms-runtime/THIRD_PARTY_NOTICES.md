@@ -1,6 +1,6 @@
-# Graphics dependencies
+# Application dependencies
 
-Project-authored code remains MIT. Direct graphics/window dependencies use
+Project-authored code remains MIT. Direct application dependencies use
 the licenses below; distributing a binary must preserve their applicable
 notices and licenses. This does not introduce a GPL requirement for builds
 without the optional ASIO SDK. Transitive packages retain their own licenses;
@@ -14,6 +14,7 @@ these direct notices are not a complete binary license inventory.
 | pollster 0.4.0 | MIT | [license](third-party/pollster-0.4.0-LICENSE.txt) |
 | floem_reactive 0.2.0 | MIT | [license](third-party/floem-reactive-0.2.0-LICENSE.txt) |
 | ab_glyph 0.2.32 | Apache-2.0 | [license](third-party/ab-glyph-0.2.32-LICENSE.txt) |
+| encoding_rs 0.8.35 | MIT AND BSD-3-Clause | [MIT](third-party/encoding-rs-0.8.35-LICENSE-MIT.txt), [WHATWG](third-party/encoding-rs-0.8.35-LICENSE-WHATWG.txt) |
 
 The texts are copied from the pinned published packages. The floem_reactive
 package declares MIT but omits the license text; its retained text comes from
