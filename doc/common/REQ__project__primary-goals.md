@@ -16,6 +16,15 @@ Windows' [stream-management contract](https://learn.microsoft.com/en-us/windows/
 
 ## BMS application scope
 
+The user describes the product as a Rust cross-platform rhythm-game engine.
+BeatKernel's shared timing/input/judging/audio/replay primitives are the engine
+foundation; the BMS application is its first game composition. Build reusable
+components bottom-up, then combine them into higher-level features. Keep chart
+formats, game rules, BMS lane arrangements and app navigation outside the generic
+core. Generic GPU primitives currently develop inside the one app crate's
+graphics modules; do not claim these are already a separate general engine UI
+API or extract new crates before concrete reuse requires that boundary.
+
 On 2026-10-01 the user selected a single BMS application crate containing all
 application features: UI, configuration, loading, play sessions, replay,
 device selection, multiplayer and record competition. Organize these features
@@ -27,7 +36,8 @@ tools. Multiple execution threads do not require multiple crates.
 
 The existing application source is `samples/bms-runtime`. Moving it to
 `apps/bms-runtime` is a proposed layout, not an implemented migration.
-This decision does not establish a completed UI or separated input/game thread.
+Native input acquisition and judging currently share the game owner; the desktop
+main thread and audio output workers are independent of it.
 
 The application must provide three competition modes:
 
@@ -48,8 +58,12 @@ The [unified BMS competition application](../kernel/REQ__bms-competition.md) now
 has source for saved own/other opponents, actual stage-result summaries and
 two-peer TCP progress exchange, composed into the three native play loops and
 the primary application entry point. Current multiplayer is casual,
-unauthenticated and uses independent local starts. A graphical UI, authoritative
-online ranking and synchronized-room start remain unimplemented. Source checks
+unauthenticated and uses independent local starts. The [graphical player](../kernel/REQ__bms-player.md)
+now has source for selection and actual game snapshot rendering via winit/wgpu.
+On 2026-10-01 the user approved native-first GPU rendering with future WASM reuse;
+portable renderer/game logic are separated from native and browser I/O adapters.
+Graphical device settings, a complete browser player, authoritative online
+ranking and synchronized-room start remain unimplemented. Source checks
 do not establish executed replay/socket/native acceptance. These modes do not
 replace outstanding kernel acceptance or lift the user's verification deferral.
 

@@ -4,8 +4,10 @@ The BMS application stays one crate (`samples/bms-runtime`) with internal
 modules and one primary executable. It composes the core, platform and BMS
 adapter crates. Existing diagnostic binaries remain available. Native play,
 offline rendering, replay inspection/output, saved-record competition and
-live multiplayer are modes of this application; this increment uses terminal
-status rather than introducing a graphical UI.
+live multiplayer are modes of this application. The graphical `player` mode
+uses the [desktop presentation contract](REQ__bms-player.md); terminal modes
+remain available. Saved/remote opponent summaries currently remain terminal
+output rather than graphical opponent panels.
 
 ## Saved-record opponents
 
@@ -45,14 +47,15 @@ thread-lifecycle regression execution remain required acceptance evidence.
 
 ## Application usage and thread ownership
 
-The primary `beatkernel-bms-runtime` binary now dispatches `play`, `replay`,
+The primary `beatkernel-bms-runtime` binary now dispatches `player`, `play`, `replay`,
 `play-replay`, `render`, `render-replay` and `compete` within the same process.
 Legacy positional offline-render arguments remain supported. Use each mode's
 `--help` for its native device, buffer and timing options. `play` chooses the
 current host's existing native composition and creates its input/window/run-loop
-and Runtime on the named `bms-game` thread. The main thread currently waits for
-that owner; terminal diagnostics may originate from the game thread. This is
-not a completed independently rendered graphical UI. Native audio remains on
+and Runtime on the named `bms-game` thread. In terminal `play` the main thread
+waits for that owner; graphical `player` instead owns the winit event loop and
+wgpu rendering on the main thread, consuming latest game snapshots. Terminal
+diagnostics may originate from the game thread. Native audio remains on
 its output worker/callback; selected multiplayer uses `bms-multiplayer`.
 
 All three native play compositions accept repeated `--ghost-self PATH` and

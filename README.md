@@ -70,13 +70,14 @@ have native source implementations; Linux/macOS native runtime evidence is pendi
 ## Unified BMS application
 
 The existing `beatkernel-bms-runtime` crate now provides one primary executable
-with `play`, `replay`, `play-replay`, `render`, `render-replay` and `compete` modes.
+with `player`, `play`, `replay`, `play-replay`, `render`, `render-replay` and `compete` modes.
 No extra app, UI or networking crate is added. `play --help` prints this host's
 native device/buffer options. Native play accepts saved opponents and optional
 two-player TCP progress exchange:
 
 ```sh
 cargo run -p beatkernel-bms-runtime -- play --help
+cargo run -p beatkernel-bms-runtime -- player --help
 cargo run -p beatkernel-bms-runtime -- compete --chart song.bms --local-replay now.bkr --ghost-self past.bkr --ghost-other other.bkr --song-ns 10000000000
 ```
 
@@ -86,11 +87,33 @@ eight opponents. Capture files using `--record-replay NEW_FILE`. Peers select
 same chart and judging profile and their own explicit native device options.
 Use an explicit reachable IP for another machine. Network loss leaves local
 play running; remote progress is self-reported and song starts are independent.
-The primary `play` mode owns input/judging on a game thread, native output keeps
-its audio worker/callback, and socket I/O has its own worker. The current UI is
-terminal output; graphical UI and ranked online services are not implemented.
+The graphical `player` mode uses `winit` on the main thread and `wgpu` to draw
+notes, holds, judgment feedback and counters from actual game snapshots.
+Use `player --library DIR` or `player --chart PATH` with the same explicit native
+device/buffer/binding options as `play`. Up/Down select, Enter starts, and
+Escape/focus loss cancels. Device settings currently require command-line options.
+`--gpu-backend auto|vulkan|dx12|metal|gl` selects graphics discovery;
+`--present fifo|immediate|mailbox` selects presentation (default FIFO), with errors
+for unsupported explicit choices. `--ui-fps` and `--ui-lookahead-ms` control drawing.
+Native input/judging stays on the game thread, audio keeps its output
+worker/callback, and socket I/O has its own worker. Terminal `play` remains
+available. Ranked online services are not implemented.
 See the [competition contract](doc/kernel/REQ__bms-competition.md) for limits.
-Current source compilation does not establish executed multiplayer or playback.
+See the [player contract](doc/kernel/REQ__bms-player.md) for lifecycle and scope.
+Source compilation does not establish executed GUI, multiplayer or playback.
+
+GPU geometry and async renderer initialization are exposed by the `graphics`
+feature, independently of desktop window ownership. This supports later WASM
+reuse; a browser player still needs canvas/startup/input/audio/files/network
+adapters. Check the reusable library with:
+
+```sh
+cargo check -p beatkernel-bms-runtime --lib --no-default-features --features graphics --target wasm32-unknown-unknown --locked
+```
+
+Headless commands build with `--no-default-features`. Project-authored code is
+MIT; preserve the [graphics dependency notices](samples/bms-runtime/THIRD_PARTY_NOTICES.md),
+including winit's Apache-2.0 license, when distributing binaries.
 
 ## Build and verify
 
