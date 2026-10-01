@@ -93,4 +93,6 @@ exists. Queue admission remains distinct from execution. A failure may leave a p
 in the caller's writer; already graded state/output is not rolled back or retried.
 This library renders no native audio and establishes no physical timing guarantee.
 
-Shared default preparation resolves literal regular assets first, then bounded compatible WAV/FLAC extension variants only if the literal is missing. Original BMS references stay opaque in the adapter. Explicit/custom exact lookup remains available, and containment/read/codec/storage errors reject instead of trying another existing candidate.
+Shared default preparation resolves literal regular assets first, then bounded compatible WAV/FLAC/OGG extension variants only if the literal is missing. Original BMS references stay opaque in the adapter. Explicit/custom exact lookup remains available, and containment/read/codec/storage errors reject instead of trying another existing candidate.
+
+Shared preparation decodes complete single-stream Ogg/Vorbis content before native playback, with bounded encoded/PCM storage and source format retained. It rejects container corruption, missing EOS, nonzero-origin frame-count mismatch, chains/multiplexing and unsupported Ogg codecs. Codec/setup scratch is separate from owned PCM limits; tests are authored for later execution.
