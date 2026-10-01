@@ -2,7 +2,6 @@
 #[cfg(test)]
 #[path = "font_fixture.rs"]
 mod font_fixture;
-use beatkernel::judge::JudgeOutcome;
 use beatkernel_bms_runtime::ui::{
     atoms::{rect, text},
     catalog_search::CatalogSearch,
@@ -4318,13 +4317,7 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
         );
         if let Some(event) = snapshot.last_judge {
             if (i128::from(now.as_nanos()) - i128::from(event.at.as_nanos())).abs() <= 700_000_000 {
-                let (label, color) = match event.outcome {
-                    JudgeOutcome::Hit { grade, delta } => (
-                        format!("HIT G{} {:+.2} MS", grade.0, delta.as_nanos() as f64 / 1e6),
-                        0x74e5c5,
-                    ),
-                    JudgeOutcome::Miss { .. } => ("MISS".into(), 0xff8e8e),
-                };
+                let (label, color) = beatkernel_bms_runtime::timing_display::judge_label(&event);
                 text(pixels, 160, 550, &label, 2, color);
             }
         }

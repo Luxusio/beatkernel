@@ -471,12 +471,7 @@ pub fn local_players_with_competition(
             .as_ref()
             .or_else(|| player.recent_results.last())
         {
-            let (label, color) = match event.outcome {
-                JudgeOutcome::Hit { grade, .. } => {
-                    (format!("G{} #{}", grade.0, event.object.0), 0x74e5c5)
-                }
-                JudgeOutcome::Miss { .. } => (format!("MISS #{}", event.object.0), 0xff8e8e),
-            };
+            let (label, color) = crate::timing_display::judge_label(event);
             clipped_text(scene, line(56, 7), &label, 1, color);
         }
         let comparisons = if show {
@@ -525,14 +520,34 @@ pub fn scoreboard(pixels: &mut Scene, score: &ScoreSummary, recent_results: &[Ju
     molecules::counter(pixels, 750, 325, "COMBO", score.combo, 0x9bb1cf);
     molecules::counter(pixels, 750, 415, "MAX COMBO", score.max_combo, 0x9bb1cf);
     for (index, event) in recent_results.iter().rev().take(4).enumerate() {
-        let (label, color) = match event.outcome {
-            JudgeOutcome::Hit { grade, .. } => {
-                (format!("G{} #{}", grade.0, event.object.0), 0x74e5c5)
-            }
-            JudgeOutcome::Miss { .. } => (format!("MISS #{}", event.object.0), 0xff8e8e),
-        };
+        let (label, color) = crate::timing_display::judge_label(event);
         text(pixels, 750, 520 + index * 22, &label, 1, color);
     }
+    let (bias, absolute) = crate::timing_display::summary(&score.timing);
+    clipped_text(
+        pixels,
+        Bounds {
+            x: 750,
+            y: 620,
+            width: 186,
+            height: 7,
+        },
+        &bias,
+        1,
+        0x9bb1cf,
+    );
+    clipped_text(
+        pixels,
+        Bounds {
+            x: 750,
+            y: 634,
+            width: 186,
+            height: 7,
+        },
+        &absolute,
+        1,
+        0x9bb1cf,
+    );
 }
 /// Competition mode reserves the sidebar for every recorded/remote prefix.
 pub fn competition_scoreboard(
@@ -575,6 +590,32 @@ pub fn competition_scoreboard(
             color,
         );
     }
+
+    let (bias, absolute) = crate::timing_display::summary(&score.timing);
+    clipped_text(
+        scene,
+        Bounds {
+            x: 750,
+            y: 258,
+            width: 186,
+            height: 7,
+        },
+        &bias,
+        1,
+        0x9bb1cf,
+    );
+    clipped_text(
+        scene,
+        Bounds {
+            x: 750,
+            y: 268,
+            width: 186,
+            height: 7,
+        },
+        &absolute,
+        1,
+        0x9bb1cf,
+    );
     competition_summary(
         scene,
         snapshot,
@@ -1039,6 +1080,65 @@ mod tests {
         scene.clear();
         assert!(local_players(&mut scene, &players, 1_000_000_000, 0).is_err());
         assert!(scene.rectangles().is_empty());
+    }
+    #[test]
+    fn accepted_timing_sidebar_stays_inside_normal_and_competition_bounds() {
+        let chart = chart();
+        let mut event = feedback_event(&chart, false);
+        let JudgeOutcome::Hit { grade, .. } = event.outcome else {
+            unreachable!()
+        };
+        event.outcome = JudgeOutcome::Hit {
+            grade,
+            delta: beatkernel::time::Duration::from_nanos(-1_234_567),
+        };
+        let mut score = ScoreSummary::default();
+        score.observe(&[event]).unwrap();
+        let mut scene = Scene::new(960, 720);
+        scoreboard(&mut scene, &score, &[event]);
+        let summary: Vec<_> = scene
+            .rectangles()
+            .iter()
+            .filter(|rect| rect.bounds[1] >= 620.0)
+            .collect();
+        assert!(!summary.is_empty());
+        assert!(summary.iter().all(|rect| inside(
+            &rect.bounds,
+            Bounds {
+                x: 750,
+                y: 620,
+                width: 186,
+                height: 21
+            }
+        )));
+        assert!(
+            scene
+                .rectangles()
+                .iter()
+                .any(|rect| rect.color == rgba(0x87bfff))
+        );
+        scene.clear();
+        competition_scoreboard(
+            &mut scene,
+            &score,
+            &comparisons(NetworkStatus::Connected, 0),
+        )
+        .unwrap();
+        let summary: Vec<_> = scene
+            .rectangles()
+            .iter()
+            .filter(|rect| rect.bounds[1] >= 258.0 && rect.bounds[1] < 280.0)
+            .collect();
+        assert!(!summary.is_empty());
+        assert!(summary.iter().all(|rect| inside(
+            &rect.bounds,
+            Bounds {
+                x: 750,
+                y: 258,
+                width: 186,
+                height: 19
+            }
+        )));
     }
     #[test]
     fn relocated_notes_hold_caps_and_labels_remain_inside_playfield_bounds() {

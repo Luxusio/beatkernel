@@ -1538,3 +1538,173 @@ fn actual_hold_results_preserve_old_progress_and_match_replay_prefixes() {
         Some(NoteState::Completed)
     );
 }
+
+#[test]
+fn actual_early_late_and_timeout_results_match_full_and_visual_replay_timing() {
+    use beatkernel::{
+        input::{
+            Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector, EventMeta,
+            GameControlId, PhysicalControlId, PhysicalInputEvent,
+        },
+        judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
+        runtime::Runtime,
+        time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
+        transport::{Rate, Transport},
+    };
+    struct Identity;
+    impl ClockMapper for Identity {
+        fn map(&self, from: ClockPoint, to: ClockDomainId) -> Option<Timestamp> {
+            (from.domain == to).then_some(from.timestamp)
+        }
+        fn quality(&self) -> ClockMappingQuality {
+            ClockMappingQuality::Exact
+        }
+    }
+    let source = beatkernel_bms::parse(
+        "#BPM 120\n#WAV01 tap.wav\n#00111:01\n#00112:01\n#00213:01\n",
+        beatkernel_bms::ParseOptions::default(),
+    )
+    .unwrap();
+    let compiled = source.compile().unwrap();
+    let profile = JudgeProfile::new(
+        vec![JudgeWindow {
+            grade: JudgeGrade(7),
+            early: Duration::from_nanos(100_000_000),
+            late: Duration::from_nanos(100_000_000),
+        }],
+        Duration::ZERO,
+    )
+    .unwrap();
+    let judge = JudgeEngine::new(compiled.chart.clone(), source.rules(), profile).unwrap();
+    let limits = competition_live::replay_limits().unwrap();
+    let mut capture =
+        replay_capture::LiveReplayCapture::new(&judge, ClockDomainId(17), limits).unwrap();
+    let bindings = BindingMap::from_bindings([(4, 0x11), (5, 0x12)].into_iter().map(
+        |(key, game)| Binding {
+            device: DeviceSelector::Exact(DeviceId(3)),
+            physical: PhysicalControlId::keyboard(key),
+            game_control: GameControlId(game),
+        },
+    ))
+    .unwrap();
+    let (producer, _consumer) = command_queue(1).unwrap();
+    let mut runtime = Runtime::new(
+        ClockDomainId(17),
+        ClockDomainId(17),
+        Transport::new(Timestamp::ZERO, Timestamp::ZERO, Rate::NORMAL),
+        bindings,
+        judge,
+        producer,
+        vec![],
+        0,
+    )
+    .unwrap();
+    let point = |ns| ClockPoint {
+        domain: ClockDomainId(17),
+        timestamp: Timestamp::from_nanos(ns),
+    };
+    let mut reports = Vec::new();
+    for (sequence, (key, ns)) in [(4, 1_990_000_000), (5, 2_020_000_000)]
+        .into_iter()
+        .enumerate()
+    {
+        reports.push(
+            runtime
+                .process_input(
+                    PhysicalInputEvent::Button(ButtonEvent {
+                        meta: EventMeta::new(DeviceId(3), point(ns), sequence as u64),
+                        control: PhysicalControlId::keyboard(key),
+                        state: ButtonState::Down,
+                    }),
+                    &Identity,
+                    point(ns),
+                )
+                .unwrap(),
+        );
+    }
+    reports.push(
+        runtime
+            .advance_to(point(4_200_000_000), &Identity, point(4_200_000_000))
+            .unwrap(),
+    );
+    let mut live = competition::ScoreSummary::default();
+    for report in &reports {
+        assert!(report.judge_error.is_none());
+        assert_eq!(report.judge_events.len(), 1);
+        live.observe(&report.judge_events).unwrap();
+        capture.record_report(report).unwrap();
+    }
+    assert_eq!((live.hits, live.misses), (2, 1));
+    assert_eq!(
+        (
+            live.timing.count(),
+            live.timing.early(),
+            live.timing.late(),
+            live.timing.exact()
+        ),
+        (2, 1, 1, 0)
+    );
+    assert_eq!(live.timing.mean_ns(), Some(5_000_000));
+    assert_eq!(live.timing.mean_absolute_ns(), Some(15_000_000));
+    assert_eq!(
+        timing_display::summary(&live.timing),
+        ("BIAS +5.000 MS".into(), "MEAN ABS 15.000 MS".into())
+    );
+    let file = capture.into_file();
+    let bytes = beatkernel::replay::codec::encode_replay(&file, limits).unwrap();
+    let file = beatkernel::replay::codec::decode_replay(&bytes, limits).unwrap();
+    let mut restored = replay_playback::reconstruct(&source, file.clone(), limits).unwrap();
+    restored.seek_cursor(file.records.len()).unwrap();
+    let mut summary = competition::ScoreSummary::default();
+    summary.observe(restored.results()).unwrap();
+    assert_eq!(summary, live);
+    assert_eq!(
+        restored.engine().stable_hash().unwrap(),
+        runtime.judge().stable_hash().unwrap()
+    );
+    let mut visual = replay_visual::ReplayVisual::new(&source, &file, limits).unwrap();
+    let mut prefix = competition::ScoreSummary::default();
+    prefix
+        .observe(
+            &visual
+                .advance_to(Timestamp::from_nanos(1_990_000_000))
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!((prefix.timing.count(), prefix.timing.early()), (1, 1));
+    assert_eq!(prefix.timing.mean_ns(), Some(-10_000_000));
+    prefix
+        .observe(
+            &visual
+                .advance_to(Timestamp::from_nanos(2_020_000_000))
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(prefix.timing, live.timing);
+    prefix
+        .observe(
+            &visual
+                .advance_to(Timestamp::from_nanos(4_200_000_000))
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(prefix, live); // Timeout changes counts, never fabricates an error sample.
+    restored.seek_cursor(0).unwrap();
+    let mut empty = competition::ScoreSummary::default();
+    empty.observe(restored.results()).unwrap();
+    assert_eq!(empty.timing.count(), 0);
+    let (publisher, viewer) = player::channel();
+    player::with_publisher(publisher, || {
+        player::publish_chart(&source, &compiled.chart).map_err(|e| e.to_string())?;
+        for report in &reports {
+            player::publish_report(report).map_err(|e| e.to_string())?;
+        }
+        player::publish_pause(player::PauseState::Running);
+        let shown = viewer.take_latest().unwrap();
+        assert_eq!(shown.score.timing, live.timing);
+        assert_eq!(shown.players[0].score.timing, live.timing);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(viewer.take_latest().unwrap().score.timing, live.timing);
+}

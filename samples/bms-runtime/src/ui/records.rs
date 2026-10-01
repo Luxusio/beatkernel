@@ -239,6 +239,7 @@ struct Preview {
     misses: u64,
     combo: u64,
     max_combo: u64,
+    timing: crate::timing::TimingSummary,
 }
 impl From<&RecordPreview> for Preview {
     fn from(value: &RecordPreview) -> Self {
@@ -250,6 +251,7 @@ impl From<&RecordPreview> for Preview {
             misses: value.score.misses,
             combo: value.score.combo,
             max_combo: value.score.max_combo,
+            timing: value.score.timing,
         }
     }
 }
@@ -436,6 +438,9 @@ impl RecordsView {
                         1,
                         0x9bb1cf,
                     );
+                    let (bias, absolute) = crate::timing_display::summary(&preview.timing);
+                    text(scene, 24, 582, &bias, 1, 0x9bb1cf);
+                    text(scene, 24, 598, &absolute, 1, 0x9bb1cf);
                 } else {
                     text(
                         scene,
@@ -802,6 +807,71 @@ mod fixtures {
         view.compose(&mut scene, &mut hits).unwrap();
         assert!(!hits.iter().any(|(id, _)| matches!(id.0, 57 | 52 | 53 | 59)));
         assert!(hits.iter().any(|(id, _)| id.0 == 56));
+    }
+    #[test]
+    fn timing_only_preview_updates_one_retained_node_and_unchanged_preview_stays_cached() {
+        use beatkernel::{
+            chart::ObjectId,
+            judge::{JudgeEvent, JudgeGrade, JudgeOutcome, JudgeStage},
+            time::Duration,
+        };
+        let view = RecordsView::new(ScreenInstanceId(8), 960, 720).unwrap();
+        let catalog = catalog(1);
+        let directory = LineEditor::new("records", 4096).unwrap();
+        let mut preview = RecordPreview {
+            path: catalog.entries[0].clone(),
+            records: 1,
+            recorded_until: Some(Timestamp::ZERO),
+            start: Timestamp::ZERO,
+            score: ScoreSummary::default(),
+        };
+        let mut update = frame(&directory, &catalog);
+        update.selected = Some(0);
+        update.preview = Some(&preview);
+        view.update(update).unwrap();
+        let mut scene = Scene::new(960, 720);
+        let mut hits = Vec::new();
+        view.compose(&mut scene, &mut hits).unwrap();
+        let before = view.nodes.paints();
+        preview
+            .score
+            .timing
+            .observe(&[JudgeEvent {
+                object: ObjectId(1),
+                stage: JudgeStage::Instant,
+                outcome: JudgeOutcome::Hit {
+                    grade: JudgeGrade(7),
+                    delta: Duration::from_nanos(-1_234_567),
+                },
+                at: Timestamp::ZERO,
+                input: None,
+            }])
+            .unwrap();
+        let mut update = frame(&directory, &catalog);
+        update.selected = Some(0);
+        update.preview = Some(&preview);
+        view.update(update).unwrap();
+        let after = view.nodes.paints();
+        assert_eq!(
+            after
+                .iter()
+                .zip(&before)
+                .filter(|(new, old)| new != old)
+                .count(),
+            1
+        );
+        scene.clear();
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert!(scene.rectangles().iter().any(|rect| rect.bounds[0] >= 24.0
+            && rect.bounds[0] < 400.0
+            && rect.bounds[1] >= 582.0
+            && rect.bounds[1] < 589.0));
+        let mut same = frame(&directory, &catalog);
+        same.selected = Some(0);
+        same.preview = Some(&preview);
+        view.update(same).unwrap();
+        assert_eq!(view.nodes.paints(), after);
+        assert!(!view.dirty());
     }
     #[test]
     fn invalid_frames_are_atomic_and_restore_disposal_keeps_shared_node_contract() {
