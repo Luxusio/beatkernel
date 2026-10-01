@@ -63,6 +63,82 @@ fn wav(channels: u16, samples: &[i16]) -> Vec<u8> {
 #[path = "../src/flac_fixture.rs"]
 mod flac_fixture;
 
+#[path = "../src/vorbis_fixture.rs"]
+#[allow(dead_code)] // Decoder-only corruption helpers are shared with unit fixtures.
+mod vorbis_fixture;
+
+#[test]
+fn default_vorbis_reference_variants_preserve_pcm_extent_and_literal_errors() {
+    let dir = Directory::new();
+    std::fs::create_dir(dir.0.join("assets")).unwrap();
+    let encoded = vorbis_fixture::packed_audio(1, 48);
+    dir.write("assets/日本.OgG", &encoded);
+    dir.write("head.wav", &wav(1, &[16384, -8192]));
+    let path = dir.write(
+        "chart.bms",
+        "#BPM 60\n#WAV01 head.wav\n#WAV02 assets\\日本.wav\n#00011:01\n#00001:02\n".as_bytes(),
+    );
+    let format = AudioFormat::new(24_000, 2).unwrap();
+    let prepare = || load_prepared(&path, format, limits(), ChannelPolicy::MonoToStereo);
+    let prepared = prepare().unwrap();
+    assert_eq!(prepared.source.samples[&2], "assets\\日本.wav");
+    let bgm = prepared.bank.get(SampleId(2)).unwrap();
+    assert_eq!(bgm.format(), format);
+    assert_eq!(bgm.frames(), 48);
+    assert_eq!(bgm.samples(), &[0.0; 96]);
+    let mut output = Vec::new();
+    let report = offline::render_offline(
+        prepared,
+        offline::OfflineOptions {
+            frames: 49,
+            block_frames: 7,
+            command_capacity: 4,
+            max_voices: 2,
+        },
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(report.hits, 1);
+    let mut expected = vec![0.0f32; 98];
+    expected[..4].copy_from_slice(&[0.5, 0.5, -0.25, -0.25]);
+    assert_eq!(
+        output,
+        expected
+            .iter()
+            .flat_map(|sample| sample.to_le_bytes())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        load_prepared_with_decoder(
+            &path,
+            format,
+            limits(),
+            ChannelPolicy::MonoToStereo,
+            &DefaultAssetDecoder
+        )
+        .is_err()
+    );
+    // Content selects Vorbis even under the literal WAV reference.
+    dir.write("assets/日本.wav", &encoded);
+    assert_eq!(
+        prepare().unwrap().bank.get(SampleId(2)).unwrap().frames(),
+        48
+    );
+    dir.write("assets/日本.wav", b"OggSdamaged");
+    assert!(prepare().is_err()); // A valid alternate never conceals a damaged literal.
+    // Ogg is not silently passed to the strict WAV-only codec.
+    assert!(
+        WavDecoder
+            .decode(Path::new("test.wav"), &encoded, limits())
+            .is_err()
+    );
+    let cap = PcmLimits::new(383, 4096, 8).unwrap();
+    dir.write("assets/日本.wav", &encoded);
+    assert!(load_prepared(&path, format, cap, ChannelPolicy::MonoToStereo).is_err());
+    let exact_cap = PcmLimits::new(384, 4096, 8).unwrap();
+    assert!(load_prepared(&path, format, exact_cap, ChannelPolicy::MonoToStereo).is_ok());
+}
+
 #[test]
 fn converted_mixed_case_flac_default_lookup_preserves_chart_identity_and_rendered_pcm() {
     let dir = Directory::new();

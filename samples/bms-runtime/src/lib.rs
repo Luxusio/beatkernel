@@ -98,6 +98,10 @@ pub mod texture;
 /// Atomic Design-style presentation compositions, independent of native I/O.
 #[cfg(feature = "graphics")]
 pub mod ui;
+/// Complete single-stream Ogg/Vorbis assets decoded during preparation.
+pub mod vorbis_decode;
+#[cfg(test)]
+mod vorbis_fixture;
 
 use beatkernel::{
     audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, VoiceId},
@@ -165,7 +169,7 @@ impl AssetDecoder for WavDecoder {
     }
 }
 
-/// Default off-thread asset decoding by native FLAC signature or strict WAV.
+/// Default off-thread asset decoding by FLAC/Ogg signatures or strict WAV.
 /// Other formats reject; neither extension replacement nor resampling occurs here.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DefaultAssetDecoder;
@@ -178,13 +182,15 @@ impl AssetDecoder for DefaultAssetDecoder {
     ) -> Result<PcmSample, Box<dyn Error>> {
         if encoded.starts_with(b"fLaC") {
             flac_decode::FlacDecoder.decode(path, encoded, limits)
+        } else if encoded.starts_with(b"OggS") {
+            vorbis_decode::VorbisDecoder.decode(path, encoded, limits)
         } else {
             WavDecoder.decode(path, encoded, limits)
         }
     }
 }
 
-/// Prepare a bounded UTF-8 or Shift-JIS BMS chart and its referenced WAV/FLAC assets off-thread.
+/// Prepare a bounded UTF-8 or Shift-JIS BMS and referenced WAV/FLAC/Vorbis assets off-thread.
 pub fn load_prepared(
     path: &Path,
     format: AudioFormat,
