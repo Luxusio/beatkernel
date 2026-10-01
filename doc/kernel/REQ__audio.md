@@ -62,6 +62,49 @@ native playback has passed verification. Native device control belongs to
   and command behavior for commands admitted to the mixer before their execution
   frames, including at 44.1 kHz and nonzero origins.
 
+### Explicit scheduling pause
+
+CommandProducer::request_pause(bool) sets desired state independently of the
+command ring. A full ring or a paused consumer cannot prevent a resume request.
+Requests may coalesce before the mixer renders; command admission counters and
+ring slots do not change. Runtime::request_audio_pause and the solo/local
+runtime adapters reach this same producer. These methods control audio only:
+the application must separately coordinate Transport, input and judging.
+
+The mixer adopts the desired state at the start of a valid nonempty block,
+after checking buffer alignment, limits and cursor arithmetic. Empty or rejected
+renders do not acknowledge requests, consume commands or change output/state.
+An explicitly paused block emits zero PCM and advances the physical output
+cursor and rendered-frame counter. It does not drain the ring, execute pending
+commands, advance PCM heads or alter rate, active voices and the Seek anchor.
+Resume continues the exact rational heads and original ordered command targets.
+SetRate ZERO remains distinct: it silences/freezes heads while scheduled commands
+and the playback cursor continue, preserving its previous contract.
+
+RenderReport.start_frame/frames and counters.rendered_frames always count
+physical output, including inserted silence. playback_start_frame/playback_frames
+count scheduling progress excluding that silence; paused blocks report zero
+playback_frames. Report.paused is the applied render state, and shared native
+telemetry preserves all three fields. A successful nonempty report is evidence
+of rendering, not physical presentation or an application pause acknowledgement.
+
+Before the first explicit pause, physical and playback grids coincide. After
+pause, AudioCommand.at continues on the original scheduling grid relative to
+MixerConfig.origin, excluding paused physical frames. Pending commands therefore
+need no timestamp rewrite. New commands mapped from native physical time must
+be converted to this playback grid by the session coordinator. Rolling native
+BGM admission uses completed playback frames and waits during paused reports;
+native physical clock/presentation observations retain their output grid.
+
+Known ceiling: this is the audio scheduling primitive. The BMS native owner still
+needs presentation-confirmed pause boundaries, Transport/input fencing and
+replay policy before exposing live pause in the UI. Output already buffered in
+a native device may continue to present after a render pause begins. Paused
+queue storage remains bounded; callers must stop generating gameplay commands
+until coordinated resume. No callback allocation, lock, rate rewrite or worker
+thread is introduced; native/GUI/timing and allocation fixtures remain unexecuted
+under the user's deferred verification policy.
+
 ### Exact phase and boundary arithmetic
 
 Sample heads retain an integer frame and an exact rational fractional remainder.

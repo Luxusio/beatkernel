@@ -735,3 +735,21 @@ so hidden views cannot consume text. Matching runs only when the query changes.
 Known ceiling: normalized title/artist text is cached once, adding catalog-sized
 memory. Matching is linear per query edit; Unicode lowercase substring matching
 is not locale collation, full case folding, accent removal or fuzzy ranking.
+
+## Live pause integration boundary
+
+The mixer now supports explicit queue pause that preserves PCM heads and future
+commands while physical output advances with silence. Solo and local runtime
+owners can request it through their shared producer; native BGM feeders use
+reported playback progress and hold admission on paused reports. The audio
+contract defines the separate physical and playback frame grids.
+
+This foundation does not expose a pause hotkey or freeze UI song time. Before
+live pause is enabled, the native session coordinator must confirm the actual
+presentation boundary, pause/resume its shared Transport, fence paused input and
+automatic judging, map resumed keysound scheduling onto the playback grid and
+preserve capture/replay determinism. All local members must share that boundary;
+no per-player audio pause or independent transport is introduced. Cancellation
+must still drain/join a paused output owner. Existing live playback is unchanged
+until a coordinator requests pause. Complete live pause, loops and native timing
+acceptance remain unfinished.
