@@ -675,8 +675,16 @@ performance; execution remains user-deferred.
 
 ## Shared retained UI component base
 
-Desktop `--title-font PATH` selects a caller-provided font for catalog titles.
-Preparation reads at most 32 MiB, caches the first 1024 scalars of each title
+Selection rows show a nonempty artist below its title while retaining the same
+catalog identity, row hit bounds and projection-driven repaint. Empty artists
+retain one-line layout. Bitmap mode uses a smaller artist line; supplied-font
+mode uses two fixed-scale line origins within the existing row spacing.
+Known ceiling: arbitrary supplied fonts can overhang their declared metrics;
+text still clips to the viewport rather than each row. Per-row clipping and
+font shaping remain future widget work.
+
+Desktop `--title-font PATH` selects a caller-provided font for catalog titles and artists.
+Preparation reads at most 32 MiB, caches the first 1024 scalars of each title and artist
 in a fixed 14-pixel, 1024-square atlas with 4096 cached-character capacity, and
 fails explicitly before window/native startup on invalid or excessive data.
 The immutable font cache is uploaded once per renderer; retained title rows
@@ -693,7 +701,11 @@ a fixed pixel scale, preparing glyphs into a bounded RGBA atlas for the existing
 GPU texture path. Font bytes, dimensions, scale and cached glyph count have
 explicit limits. Cache hits reuse metrics/UVs; rejected glyphs preserve prior
 pixels, allocations and cache entries. Baseline bounds and advances are retained,
-whitespace needs no pixels, and missing glyphs are explicitly reported. Raster
+whitespace needs no pixels, and missing glyphs are explicitly reported. Non-whitespace
+characters resolving to the same font glyph identity reuse its metrics and atlas
+placement, including missing glyph zero. The character cache limit remains unchanged;
+whitespace never acquires geometry from an alias, and failed preparation preserves
+both identity and character caches. Raster
 and packing run outside input/audio callbacks. No font is bundled; native font
 discovery, broader widget integration, fallback/shaping and actual multilingual
 GUI acceptance remain unfinished. Self-authored font fixtures are prepared for

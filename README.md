@@ -131,8 +131,9 @@ Focused search Home/End moves its text cursor.
 Native IME input supports search, settings values and profile paths. Composition
 previews stay separate from saved drafts; switching fields or leaving the active
 screen discards them. Existing bitmap glyph fallback still applies.
-Use `player --library DIR --title-font PATH` to draw catalog titles with a
-caller-provided TrueType/OpenType font. Titles use a fixed 14-pixel prepared
+Selection rows show artist metadata below the title when available.
+Use `player --library DIR --title-font PATH` to draw catalog titles and artists with a
+caller-provided TrueType/OpenType font. Both use a fixed 14-pixel prepared
 atlas, uploaded once per renderer and rebuilt with its texture binding on
 renderer recovery. Invalid or excessive font data fails before window startup.
 Other controls retain the bitmap font; shaping and fallback remain pending.
