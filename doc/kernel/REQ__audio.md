@@ -83,8 +83,9 @@ and the playback cursor continue, preserving its previous contract.
 
 RenderReport.start_frame/frames and counters.rendered_frames always count
 physical output, including inserted silence. playback_start_frame/playback_frames
-count scheduling progress excluding that silence; paused blocks report zero
-playback_frames. Report.paused is the applied render state, and shared native
+count scheduling progress excluding that silence. Fully silent paused blocks
+report zero playback_frames; a block straddling an immutable playback end reports
+its actual active prefix. Report.paused is the applied state at block end, and shared native
 telemetry preserves all three fields. A successful nonempty report is evidence
 of rendering, not physical presentation or an application pause acknowledgement.
 
@@ -109,6 +110,27 @@ thread is introduced; native/GUI/timing and allocation fixtures remain unexecute
 under the user's deferred verification policy.
 
 ### Exact phase and boundary arithmetic
+
+MixerConfig optionally fixes an exclusive playback_end_frame before construction.
+The default has no end fence. The mixer executes frames strictly below that
+endpoint, zeros the suffix of a straddling block, and freezes the playback cursor,
+voices, rational sample heads, pending commands and song anchor at the endpoint.
+Physical output frames/counters continue through silence. A block ending exactly
+at the endpoint may report playback_frames==frames with paused=true; otherwise
+paused prefix extent is 0..frames. Valid nonempty render adopts this state; empty
+and invalid render do not consume commands or change acknowledgement. A zero end
+consumes no commands. Manual queue pause may occur earlier, but resume cannot
+lift the immutable end; fresh session construction owns repetition.
+
+Native boundary models derive a straddling pause from the reported playback end,
+not its block start, and still wait for actual presentation crossing. Repeated
+coalesced partial reports cannot advance a frozen prefix. This adds no callback
+allocation, deallocation, lock, queue command or telemetry wire field.
+Known ceiling: the fence is an audio component. Native BMS owners still need
+explicit endpoint intent, Transport/input/judging/capture admission and cleanup
+integration before graphical loops can claim an exact native endpoint. Playback
+frame mapping rounds upward once and cannot provide subframe acoustic precision;
+gapless repetition and native timing/allocation execution remain unverified.
 
 Sample heads retain an integer frame and an exact rational fractional remainder.
 The increment is the reduced ratio of source sample rate times signed playback

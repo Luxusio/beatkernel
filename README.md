@@ -151,6 +151,10 @@ end and F11 toggles observed-position repetition. Crossing the observed end
 preflights, cancels, drains and joins the old owner before restarting at the
 exact marked start. Coalesced UI observations can overshoot the end and reopening
 leaves a gap; this is not gapless playback. F5 and explicit cancel disable loops.
+The mixer now also accepts an immutable exclusive playback-frame end: a block
+crossing it renders only the active prefix and emits silence afterward. Checked
+loop-end mapping and native acknowledgement models support that boundary;
+live loop owners and judging still need to be connected to this exact fence.
 Settings Records browses an explicit directory and previews a selected recording
 against the current chart, judging profile and practice start before attaching
 it as My Record or Other Record. Changes stay in the settings draft until Apply.

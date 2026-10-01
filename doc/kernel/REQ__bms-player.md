@@ -750,6 +750,15 @@ or native completion before an observed crossing do not trigger another attempt.
 Sample-exact native loop-end fencing, gapless looping and native execution
 acceptance remain unfinished.
 
+The audio foundation supports an immutable exclusive playback frame end supplied
+before Mixer construction. PracticeLoop maps its matching session start, explicit
+preroll and nonzero sample rate to that endpoint using checked integer ceiling
+arithmetic. The first frame at or after the marked end is silent; mapping applies
+original start/preroll once and excludes physical pause gaps. Native pause models
+accept the actual active-prefix/silent-tail report and acknowledge its playback
+end only after presentation crossing. This primitive is not yet wired into live
+loop owner/judging admission; the observed UI loop retains the ceiling above.
+
 ## Catalog search and filtered selection
 
 Selection exposes a 256-byte single-line search field (F3 or click). Whitespace
