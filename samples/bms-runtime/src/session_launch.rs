@@ -1,5 +1,8 @@
 //! Immutable native invocations for fresh graphical sessions, without device ownership.
-use crate::settings::{MAX_FIELDS, MAX_TOTAL_BYTES, MAX_VALUE_BYTES};
+use crate::{
+    practice::PracticeStart,
+    settings::{MAX_FIELDS, MAX_TOTAL_BYTES, MAX_VALUE_BYTES},
+};
 use std::{path::Path, sync::Arc};
 
 /// A session and its checked retry ordinal. Native parsers admit actual options.
@@ -60,6 +63,29 @@ impl SessionLaunch {
             attempt,
         })
     }
+    /// Creates a fresh retry at an exact bookmark while retaining the original
+    /// invocation for subsequent ordinary retries and recording path derivation.
+    pub fn retry_from(&self, start: PracticeStart) -> Result<Self, String> {
+        let mut retry = self.retry()?;
+        let mut start_index = None;
+        for (index, pair) in retry.args.chunks_exact(2).enumerate() {
+            if pair[0] == "--replay" {
+                return Err("replay watching cannot restart from a practice bookmark".into());
+            }
+            if pair[0] == "--start-ns" && start_index.replace(index * 2 + 1).is_some() {
+                return Err("practice restart requires at most one start option".into());
+            }
+        }
+        let value = start.nanoseconds().to_string();
+        if let Some(index) = start_index {
+            retry.args[index] = value;
+        } else {
+            retry.args.push("--start-ns".into());
+            retry.args.push(value);
+        }
+        validate(&retry.args)?;
+        Ok(retry)
+    }
 }
 fn validate(args: &[String]) -> Result<(), String> {
     if args.len() % 2 != 0 || args.len() / 2 > MAX_FIELDS + 1 {
@@ -100,6 +126,112 @@ mod fixtures {
     use super::*;
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| (*s).into()).collect()
+    }
+    #[test]
+    fn bookmark_retries_preserve_options_capture_base_and_pinned_f5_start() {
+        let original = args(&[
+            "--chart",
+            "songs/a.bms",
+            "--start-ns",
+            "123",
+            "--local-player",
+            "4294967295:keyboard:path",
+            "--local-player",
+            "7:other",
+            "--bind",
+            "11:04",
+            "--bind",
+            "12:05",
+            "--backend",
+            "asio",
+            "--buffer-frames",
+            "512",
+            "--network-player",
+            "peer",
+            "--record-replay",
+            "records/my.take.bkr",
+        ]);
+        let first = SessionLaunch::new(original.clone()).unwrap();
+        let second = first
+            .retry_from(PracticeStart::from_nanoseconds(i64::MAX).unwrap())
+            .unwrap();
+        assert_eq!(second.attempt(), 1);
+        let mut expected = original.clone();
+        expected[3] = i64::MAX.to_string();
+        *expected.last_mut().unwrap() = "records/my.take.retry1.bkr".into();
+        assert_eq!(second.args(), expected);
+        assert!(Arc::ptr_eq(&first.original, &second.original));
+        let third = second
+            .retry_from(PracticeStart::from_nanoseconds(604_800_000_000_001).unwrap())
+            .unwrap();
+        assert_eq!(third.args()[3], "604800000000001");
+        assert_eq!(third.args().last().unwrap(), "records/my.take.retry2.bkr");
+        let f5 = third.retry().unwrap();
+        assert_eq!(f5.args()[3], "123");
+        assert_eq!(f5.args().last().unwrap(), "records/my.take.retry3.bkr");
+        assert_eq!(first.args(), original);
+        assert_eq!(second.args()[3], i64::MAX.to_string());
+    }
+    #[test]
+    fn missing_start_is_appended_once_and_ordinary_retry_restores_absence() {
+        let original = args(&["--chart", "a.bms", "--ghost-other", "past.bkr"]);
+        let launch = SessionLaunch::new(original.clone()).unwrap();
+        let start = PracticeStart::from_nanoseconds(72_000_000_000_001).unwrap();
+        let restarted = launch.retry_from(start).unwrap();
+        let mut expected = original.clone();
+        expected.extend(args(&["--start-ns", "72000000000001"]));
+        assert_eq!(restarted.args(), expected);
+        let again = restarted
+            .retry_from(PracticeStart::from_nanoseconds(0).unwrap())
+            .unwrap();
+        assert_eq!(again.args().len(), original.len() + 2);
+        assert_eq!(again.args().last().unwrap(), "0");
+        assert_eq!(again.retry().unwrap().args(), original);
+        assert_eq!(launch.args(), original);
+    }
+    #[test]
+    fn watch_duplicate_capacity_and_ordinal_fail_without_changing_pinned_launch() {
+        let start = PracticeStart::from_nanoseconds(i64::MAX).unwrap();
+        for values in [
+            args(&["--chart", "a", "--replay", "old.bkr"]),
+            args(&["--chart", "a", "--start-ns", "0", "--start-ns", "1"]),
+        ] {
+            let launch = SessionLaunch::new(values.clone()).unwrap();
+            assert!(launch.retry_from(start).is_err());
+            assert_eq!(launch.args(), values);
+            assert_eq!(launch.attempt(), 0);
+        }
+        let mut exhausted = SessionLaunch::new(args(&["--chart", "a"])).unwrap();
+        exhausted.attempt = u32::MAX;
+        assert!(exhausted.retry_from(start).is_err());
+        assert_eq!(exhausted.attempt(), u32::MAX);
+        let mut fields = args(&["--chart", "a"]);
+        for _ in 0..MAX_FIELDS {
+            fields.extend(args(&["--bind", "11:04"]));
+        }
+        let launch = SessionLaunch::new(fields.clone()).unwrap();
+        assert!(launch.retry_from(start).is_err());
+        assert_eq!(launch.args(), fields);
+        let mut full = args(&["--chart", "a"]);
+        let mut remaining = MAX_TOTAL_BYTES + MAX_VALUE_BYTES - 1;
+        while remaining > 0 {
+            let bytes = remaining.min(MAX_VALUE_BYTES);
+            full.extend(["--bind".into(), "x".repeat(bytes)]);
+            remaining -= bytes;
+        }
+        let launch = SessionLaunch::new(full.clone()).unwrap();
+        assert!(launch.retry_from(start).is_err());
+        assert_eq!(launch.args(), full);
+        let base = format!("{}.bkr", "a".repeat(MAX_VALUE_BYTES - 4));
+        let launch = SessionLaunch::new(vec![
+            "--chart".into(),
+            "a".into(),
+            "--record-replay".into(),
+            base.clone(),
+        ])
+        .unwrap();
+        assert!(launch.retry_from(start).is_err());
+        assert_eq!(launch.args()[3], base);
     }
     #[test]
     fn retry_preserves_the_pinned_chart_roster_and_native_options() {

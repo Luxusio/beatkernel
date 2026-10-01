@@ -6,6 +6,13 @@ const NANOS: u64 = 1_000_000_000;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PracticeStart(i64);
 impl PracticeStart {
+    /// Preserves an observed original-song position exactly, without rounding.
+    pub fn from_nanoseconds(nanoseconds: i64) -> Result<Self, String> {
+        if nanoseconds < 0 {
+            return Err("practice start requires nonnegative nanoseconds".into());
+        }
+        Ok(Self(nanoseconds))
+    }
     /// Parses seconds, M:SS or H:MM:SS and an optional 1..9-digit fraction.
     /// Empty means zero. No signs, whitespace, exponent, rounding or float math.
     pub fn parse(value: &str) -> Result<Self, String> {
@@ -125,6 +132,19 @@ fn decimal(value: &str) -> Result<u64, String> {
 mod fixtures {
     use super::*;
     use crate::settings::{MAX_VALUE_BYTES, SettingsHost};
+    #[test]
+    fn observed_integer_positions_remain_exact_through_display_and_settings() {
+        let mut settings = NativeSettings::from_args(&[], SettingsHost::Linux).unwrap();
+        for nanos in [0, 1, 72_000_000_000_001, 604_800_000_000_001, i64::MAX] {
+            let start = PracticeStart::from_nanoseconds(nanos).unwrap();
+            assert_eq!(start.nanoseconds(), nanos);
+            assert_eq!(PracticeStart::parse(&start.formatted()).unwrap(), start);
+            start.apply_to(&mut settings).unwrap();
+            assert_eq!(PracticeStart::from_settings(&settings).unwrap(), start);
+        }
+        assert!(PracticeStart::from_nanoseconds(-1).is_err());
+        assert!(PracticeStart::from_nanoseconds(i64::MIN).is_err());
+    }
     #[test]
     fn formats_precision_long_positions_and_maximum_roundtrip_exactly() {
         for (text, nanos) in [
