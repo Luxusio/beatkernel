@@ -660,6 +660,17 @@ performance; execution remains user-deferred.
 
 ## Shared retained UI component base
 
+Portable font preparation accepts caller-provided TrueType/OpenType bytes and
+a fixed pixel scale, preparing glyphs into a bounded RGBA atlas for the existing
+GPU texture path. Font bytes, dimensions, scale and cached glyph count have
+explicit limits. Cache hits reuse metrics/UVs; rejected glyphs preserve prior
+pixels, allocations and cache entries. Baseline bounds and advances are retained,
+whitespace needs no pixels, and missing glyphs are explicitly reported. Raster
+and packing run outside input/audio callbacks. No font is bundled; native font
+selection, retained text integration, fallback/shaping and actual multilingual
+GUI acceptance remain unfinished. Self-authored font fixtures are prepared for
+later execution; compilation alone does not establish visual behavior.
+
 All seven migrated views (Selection, Practice, Settings, Display, Records,
 Players and Devices) use the same RetainedNodes geometry storage/binding/composition implementation. Individual
 views retain their signal dependencies, data model and explicit scope disposal;
