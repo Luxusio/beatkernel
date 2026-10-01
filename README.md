@@ -105,7 +105,8 @@ See the [competition contract](doc/kernel/REQ__bms-competition.md) for limits.
 Solo play resolves omitted devices automatically: system/default audio output
 and a usable keyboard. Device assignment is reserved for multiple local players;
 three/four and larger rosters use the same collection-based model. Linux terminal play accepts repeated `--local-input PATH` for 2..64 players;
-GUI roster/assignment and Windows/macOS multi-input acquisition remain unfinished. The shared execution primitive
+The graphical player draws independent local panels with pages for larger
+rosters. GUI roster/assignment and Windows/macOS multi-input acquisition remain unfinished. The shared execution primitive
 owns independent core runtimes with one authoritative song transport and output
 producer; native solo playback now uses the same composition.
 F2 or Settings opens a bounded advanced draft editor for devices, buffers, timing,

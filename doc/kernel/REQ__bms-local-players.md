@@ -50,7 +50,8 @@ Validate member limits/identities, exact multi-player binding selectors and
 disjoint player/BGM voice identities during setup. Checked namespace allocation
 happens outside real-time callbacks. Existing native solo compositions use the
 same group through an adapter. Linux terminal local sessions compose multiple
-devices with this group; GUI and other native platforms still require wiring.
+devices with this group and publishes the same member reports to graphical
+panels. Roster assignment UI and other native platforms still require wiring.
 
 Group telemetry retention is limited to 65536 samples per member and 1048576
 samples in aggregate; zero retains counters only. Each member's judge/history
@@ -79,10 +80,10 @@ Stop the cohort on synchronization loss, disconnect, late input or partial
 group failure. Only after all judges and shared output drain finish is the
 cohort complete. Save separate .p<ID>.bkr recordings after native cleanup.
 
-This integration starts with Linux terminal play. Graphical multi-player
-presentation/assignment and Windows/macOS native multi-input integration remain
-required work. GUI multi-input and combined local-network sessions currently
-fail explicitly before resource acquisition rather than claim partial support.
+This integration starts with Linux terminal play and its graphical publication.
+Graphical roster assignment and Windows/macOS native multi-input integration
+remain required work. Combined local-network sessions currently fail explicitly
+before resource acquisition rather than claim partial support.
 Native execution and file/recording acceptance remain deferred.
 
 ## Known ceiling
@@ -96,3 +97,23 @@ scale per player; only the PCM bank, BGM schedule and output are shared once.
 The pending merge bound excludes allocator bookkeeping and an in-flight or
 rejected event owned by the caller. Configured lag cannot bound arbitrary OS
 input delivery latency; late input fails explicitly.
+
+## Local-player presentation
+
+The existing latest-state channel carries a stable-ID collection of1..64 local
+members, each with exact prepared chart/time and independent actual score and
+recent128 judgments. Shared charts use one Arc; terminal status/cancellation
+belongs to the session and retains all members through native cleanup. Solo
+calls keep their existing shape and populate one member. Unknown/duplicate
+report identities fail before application; display coalescing never affects
+core judgment/replay or audio admission. No summed score represents the group.
+
+Graphical play draws2..4 independent panels on one page, and larger rosters in
+pages of at most4 members. PageUp/PageDown and explicit page buttons remain
+available while playing and on results. Page changes are UI-only; native input
+continues for every member. Notes and text stay within each panel and retain
+original song-time projection. Prepared-chart and report publication occur on
+the game owner, never audio callbacks or UI event timestamps. Linux local mode
+can attach this presentation; explicit devices currently come from CLI/profile.
+Roster assignment UI and Windows/macOS multi-input remain required later work.
+Native UI/GPU/execution acceptance is still user-deferred.

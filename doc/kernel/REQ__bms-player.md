@@ -307,6 +307,17 @@ policies do not certify native support; actual preparation can fail explicitly.
 Shared Runtime composition has source integration and native solo adoption.
 Linux terminal composition now provides simultaneous evdev acquisition and
 per-player judging/replay using the shared output. Player assignment UI,
-multiple-player presentation and Windows/macOS multi-input composition remain
-required implementation work. Linux terminal local-input mode rejects an attached
-GUI or network competition explicitly before device acquisition.
+Windows/macOS multi-input composition remain required implementation work.
+Linux local-input mode now publishes independent members to the graphical player;
+network competition with a local group still fails before device acquisition.
+
+## Collection-based local display
+
+Extend the existing latest-state bridge and view organisms with player-tagged
+charts/results rather than another runtime/UI framework. Solo retains its
+layout. Local groups use independent panels, at most four visible per page;
+3/4 use the same grid and larger groups retain all state while changing page.
+Page controls affect display only and work through results; cancellation and
+worker drain remain session-wide. Linux native local sessions publish actual
+member reports including committed failure prefixes before cleanup. Current
+explicit local inputs are provided via CLI/profile until roster UI is added.

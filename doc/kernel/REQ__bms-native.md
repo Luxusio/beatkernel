@@ -237,5 +237,7 @@ same selected chart, using shared --bind physical positions with exact per-playe
 devices. This replaces --evdev in local sessions; neither is implicitly shared
 between players. Common PCM/output configuration and BGM remain single owners.
 Each player's voice namespace, judge, capture and completion remain independent.
-The primary solo app behavior stays automatic. Multi-player GUI and network
-combination require later integration and fail explicitly for now.
+The primary solo app behavior stays automatic. Linux local native reports can
+attach the existing graphical bridge for independent panels. Explicit devices
+currently come from CLI/profile until roster assignment UI is added. Network
+combination still requires later integration and fails explicitly for now.
