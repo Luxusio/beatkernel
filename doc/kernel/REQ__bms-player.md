@@ -304,4 +304,6 @@ Conservative Linux app defaults are 48000 Hz, stereo, 256-frame period and
 two channels. Omitted channel treatment permits mono-to-stereo. ASIO has no
 OS-default driver and remains an explicitly selected advanced backend. These
 policies do not certify native support; actual preparation can fail explicitly.
-Multiple-runtime local play and roster UI remain required implementation work.
+Shared Runtime composition has source integration and native solo adoption.
+Multiple simultaneous native acquisition, player assignment UI and complete
+local multiplayer sessions remain required implementation work.

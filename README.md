@@ -105,7 +105,9 @@ See the [competition contract](doc/kernel/REQ__bms-competition.md) for limits.
 Solo play resolves omitted devices automatically: system/default audio output
 and a usable keyboard. Device assignment is reserved for multiple local players;
 three/four and larger rosters use the same collection-based model. Multiple
-local Runtime integration remains work in progress.
+local device/UI wiring remains work in progress. The shared execution primitive
+owns independent core runtimes with one authoritative song transport and output
+producer; native solo playback now uses the same composition.
 F2 or Settings opens a bounded advanced draft editor for devices, buffers, timing,
 bindings and competition options. Apply validates through the existing native
 parser and updates the next session; Back discards. Missing device/binding
