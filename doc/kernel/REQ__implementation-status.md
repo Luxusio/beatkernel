@@ -18,7 +18,10 @@ Graphical retry source retains accepted invocation state and starts a fresh nati
 session after cleanup, with independent recording stems. Configured fresh practice starts now retain original targets and select overlapping
 BGM suffixes. Section recordings now store their original-song start and restore
 logical replay, matching ghosts and audio preparation from original assets in
-source. Live scrubbing/loops and acoustic restart acceptance remain unfinished.
+source. Settings Records now discovers direct saved-record files and previews
+their actual recorded prefixes against the current chart/profile/section on
+the serialized metadata worker, before adding own/other ghosts to the draft.
+Live scrubbing/loops and acoustic restart acceptance remain unfinished.
 It records implementation locations, not independent review or phase acceptance.
 The [full-plan acceptance evidence](REQ__plan-acceptance-evidence.md) maps every
 §24 completion condition and §17 verification category to current source and

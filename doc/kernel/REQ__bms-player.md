@@ -402,6 +402,31 @@ still reject collisions. Retry keeps the configured practice start. Live scrubbi
 historical play state remains separate work. Acoustic restart accuracy still
 requires native acceptance under the section-restart contract.
 
+## Graphical saved-record selection
+
+Settings exposes Records for the selected chart. Its directory editor starts at
+the chart parent and allows explicit locations. Scan lists direct regular .bkr
+files (ASCII case-insensitive extension), bounded to 4096 inspected entries and
+256 results, with visible truncation. Relative chart names default to directory
+".". Records can also be opened with F4 while in Settings; Tab switches between
+directory and list, Enter scans/previews, and PageUp/PageDown changes pages.
+The serialized metadata worker performs directory enumeration and selected-file
+reconstruction, using the shared 64 MiB/one-million-operation replay limits.
+The UI shows actual recorded prefix time, operations and hits/misses/combo.
+It never labels a prefix as full-song completion. Chart/rules/runtime, profile
+and practice start must match the current draft before Own/Other attachment.
+Attachment adds one of at most eight ghost paths to the draft; Apply remains
+separate. Clear removes draft ghost paths. Back closes the chooser and retains
+attachments in the settings draft; settings Back discards the entire draft.
+Pending work blocks navigation/editing/apply/start; directory or row changes
+invalidate the preview, and failures preserve settings and show the error.
+All keyboard/mouse actions use the existing graphical interaction components.
+No gameplay timestamps, native devices or audio are accessed by this chooser.
+
+Known ceiling: directory enumeration inspects at most 4096 direct entries and
+returns at most 256 records, without recursive search — add incremental paging
+when a single record directory routinely exceeds these limits.
+
 ## Configured fresh practice start
 
 Nonzero practice sessions display PRACTICE in the graphical header.

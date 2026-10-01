@@ -128,6 +128,9 @@ F5 retries the selected start. Earlier note heads/crossing holds are excluded, a
 overlapping automatic BGM resumes from original PCM frames. Section recordings
 store their start for logical replay, matching ghosts and recorded audio output.
 Live scrubbing/loops remain work.
+Settings Records browses an explicit directory and previews a selected recording
+against the current chart, judging profile and practice start before attaching
+it as My Record or Other Record. Changes stay in the settings draft until Apply.
 F2 or Settings opens a bounded advanced draft editor for devices, buffers, timing,
 bindings and competition options. Apply validates through the existing native
 parser and updates the next session; Back discards. Missing device/binding
