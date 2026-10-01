@@ -478,3 +478,41 @@ mod fixtures {
         );
     }
 }
+
+#[cfg(test)]
+mod chart_seed_projection_fixtures {
+    use super::*;
+    #[test]
+    fn live_defaults_keep_seed_but_watch_uses_recorded_provenance() {
+        for host in [
+            SettingsHost::Windows,
+            SettingsHost::Linux,
+            SettingsHost::Macos,
+        ] {
+            let args = [
+                "--chart",
+                "random.bms",
+                "--chart-seed",
+                "18446744073709551615",
+            ]
+            .map(String::from);
+            let defaults = NativeDefaults::for_validation();
+            let live = complete(&args, host, &defaults).unwrap();
+            assert_eq!(
+                NativeSettings::from_args(&live, host).unwrap().chart_seed(),
+                Ok(u64::MAX)
+            );
+            let watch = args
+                .into_iter()
+                .chain(["--replay".into(), "record.bkr".into()])
+                .collect::<Vec<_>>();
+            let projected = replay_args(&watch, host, &defaults).unwrap();
+            assert!(!projected.iter().any(|arg| arg == "--chart-seed"));
+            assert!(
+                projected
+                    .chunks_exact(2)
+                    .any(|pair| pair == ["--replay", "record.bkr"])
+            );
+        }
+    }
+}

@@ -528,3 +528,49 @@ mod fixtures {
         assert!(directory.retry().is_err());
     }
 }
+
+#[cfg(test)]
+mod chart_seed_retry_fixtures {
+    use super::*;
+    #[test]
+    fn retries_bookmarks_and_loops_preserve_the_pinned_branch() {
+        let original = SessionLaunch::new(
+            [
+                "--chart",
+                "random.bms",
+                "--chart-seed",
+                "18446744073709551615",
+                "--record-replay",
+                "seed.bkr",
+            ]
+            .map(String::from)
+            .to_vec(),
+        )
+        .unwrap();
+        let retry = original.retry().unwrap();
+        let bookmarked = retry
+            .retry_from(PracticeStart::from_nanoseconds(10).unwrap())
+            .unwrap();
+        let region = PracticeLoop::new(
+            PracticeStart::from_nanoseconds(20).unwrap(),
+            PracticeStart::from_nanoseconds(30).unwrap(),
+        )
+        .unwrap();
+        let repeated = bookmarked.retry_loop(region).unwrap();
+        for launch in [
+            &original,
+            &retry,
+            &bookmarked,
+            &repeated,
+            &repeated.retry().unwrap(),
+        ] {
+            let seeds = launch
+                .args()
+                .chunks_exact(2)
+                .filter(|pair| pair[0] == "--chart-seed")
+                .collect::<Vec<_>>();
+            assert_eq!(seeds.len(), 1);
+            assert_eq!(seeds[0][1], "18446744073709551615");
+        }
+    }
+}

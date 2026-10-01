@@ -46,6 +46,14 @@ pub fn overlay_native_args(
     Ok(NativeSettings::from_args(&merged, host)?.native_args())
 }
 
+/// Parses an explicit native chart seed without signs or implicit truncation.
+pub fn parse_chart_seed(value: &str) -> Result<u64, String> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("chart seed must be unsigned decimal u64".into());
+    }
+    value.parse().map_err(|_| "chart seed exceeds u64".into())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingsField {
     pub flag: &'static str,
@@ -56,6 +64,11 @@ pub struct SettingsField {
 type Spec = (&'static str, &'static str, &'static str);
 
 const COMMON: &[Spec] = &[
+    (
+        "--chart-seed",
+        "CHART BRANCH SEED",
+        "Empty uses 0. Unsigned decimal u64; retries and recordings preserve the same BMS RANDOM branches.",
+    ),
     (
         "--start-ns",
         "PRACTICE START (NS)",
@@ -364,6 +377,19 @@ impl NativeSettings {
             return Err("native settings exceed field or total byte limits".into());
         }
         Ok(Self { fields })
+    }
+    /// Empty draft means the native default; incomplete text fails at apply/launch.
+    pub fn chart_seed(&self) -> Result<u64, String> {
+        let value = self
+            .fields
+            .iter()
+            .find(|row| row.flag == "--chart-seed")
+            .map_or("", |row| row.value.as_str());
+        if value.is_empty() {
+            Ok(0)
+        } else {
+            parse_chart_seed(value)
+        }
     }
     pub fn fields(&self) -> &[SettingsField] {
         &self.fields
@@ -985,5 +1011,69 @@ mod opponent_fixtures {
                 .is_err()
         );
         assert_eq!(bytes.native_args(), before);
+    }
+}
+
+#[cfg(test)]
+mod chart_seed_fixtures {
+    use super::*;
+    #[test]
+    fn full_u64_seed_default_draft_and_overlay_are_explicit() {
+        for host in [
+            SettingsHost::Windows,
+            SettingsHost::Linux,
+            SettingsHost::Macos,
+        ] {
+            let mut draft = NativeSettings::from_args(&[], host).unwrap();
+            assert_eq!(draft.chart_seed(), Ok(0));
+            let row = draft
+                .fields()
+                .iter()
+                .position(|row| row.flag == "--chart-seed")
+                .unwrap();
+            for text in ["0", "3", "0003", "18446744073709551615"] {
+                draft.set_value(row, text).unwrap();
+                assert_eq!(draft.chart_seed().unwrap(), text.parse::<u64>().unwrap());
+                assert!(
+                    draft
+                        .native_args()
+                        .chunks_exact(2)
+                        .any(|pair| pair == ["--chart-seed", text])
+                );
+            }
+            draft.set_value(row, "incomplete").unwrap();
+            assert!(draft.chart_seed().is_err()); // Editing stays reversible; apply validates.
+            draft.set_value(row, "").unwrap();
+            assert_eq!(draft.chart_seed(), Ok(0));
+            let base = ["--chart-seed", "18446744073709551615"].map(String::from);
+            let overrides = ["--chart-seed", "3"].map(String::from);
+            let merged = overlay_native_args(&base, &overrides, host).unwrap();
+            assert_eq!(
+                NativeSettings::from_args(&merged, host)
+                    .unwrap()
+                    .chart_seed(),
+                Ok(3)
+            );
+            assert_eq!(merged, overrides);
+            assert!(
+                NativeSettings::from_args(
+                    &["--chart-seed", "0", "--chart-seed", "3"].map(String::from),
+                    host
+                )
+                .is_err()
+            );
+        }
+        for text in [
+            "",
+            "-1",
+            "+1",
+            " 1",
+            "1 ",
+            "1.0",
+            "١",
+            "18446744073709551616",
+        ] {
+            assert!(parse_chart_seed(text).is_err(), "{text}");
+        }
     }
 }

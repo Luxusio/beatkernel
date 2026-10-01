@@ -660,3 +660,39 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod chart_seed_profile_fixtures {
+    use super::*;
+    #[test]
+    fn existing_profile_schemas_roundtrip_source_seeds_for_every_host() {
+        for host in [
+            SettingsHost::Windows,
+            SettingsHost::Linux,
+            SettingsHost::Macos,
+        ] {
+            for seed in ["0", "0003", "18446744073709551615"] {
+                let native =
+                    NativeSettings::from_args(&["--chart-seed".into(), seed.into()], host).unwrap();
+                let v1 = encode_profile(&native, host).unwrap();
+                let restored = decode_profile(&v1, host).unwrap();
+                assert_eq!(restored.native_args(), native.native_args());
+                assert_eq!(restored.chart_seed().unwrap(), seed.parse::<u64>().unwrap());
+                let v2 = encode_player_profile(
+                    &PlayerProfile {
+                        native,
+                        presentation: PresentationSettings::default(),
+                    },
+                    host,
+                )
+                .unwrap();
+                let restored = decode_player_profile(&v2, host).unwrap();
+                assert_eq!(
+                    restored.native.chart_seed().unwrap(),
+                    seed.parse::<u64>().unwrap()
+                );
+                assert_eq!(encode_player_profile(&restored, host).unwrap(), v2);
+            }
+        }
+    }
+}

@@ -229,6 +229,39 @@ impl LiveCompetition {
         domain: ClockDomainId,
         start: Timestamp,
     ) -> Result<Option<Self>> {
+        Self::prepare_for_at_with_chart_seed(player, options, source, judge, domain, start, 0)
+    }
+
+    /// Prepares solo comparisons with explicit BMS source branch provenance.
+    pub fn prepare_at_with_chart_seed(
+        options: &CompetitionOptions,
+        source: &BmsChart,
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        start: Timestamp,
+        chart_seed: u64,
+    ) -> Result<Option<Self>> {
+        Self::prepare_for_at_with_chart_seed(
+            PlayerId(1),
+            options,
+            source,
+            judge,
+            domain,
+            start,
+            chart_seed,
+        )
+    }
+
+    /// Shares the selected branch seed across capture, ghosts and network identity.
+    pub fn prepare_for_at_with_chart_seed(
+        player: PlayerId,
+        options: &CompetitionOptions,
+        source: &BmsChart,
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        start: Timestamp,
+        chart_seed: u64,
+    ) -> Result<Option<Self>> {
         if player.0 == 0 {
             return Err("competition player ID must be nonzero".into());
         }
@@ -236,7 +269,8 @@ impl LiveCompetition {
             return Ok(None);
         }
         let limits = replay_limits()?;
-        let capture = LiveReplayCapture::new_at(judge, domain, limits, start)?;
+        let capture =
+            LiveReplayCapture::new_at_with_chart_seed(judge, domain, limits, start, chart_seed)?;
         let header = capture.header().clone();
         let mut competition = Competition::new(header.clone(), 8)?;
         options.load_opponents(source, &mut competition, limits)?;
