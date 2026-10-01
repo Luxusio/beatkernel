@@ -251,3 +251,12 @@ Known ceiling: ten visible rows per panel and the fixed logical viewport remain.
 Changed packets are concatenated and the full rectangle buffer uploads. Native
 execution, live practice controls, browser adapters and complete acceptance are
 still unfinished. No measured performance or GUI execution is claimed.
+
+## Practice restart lifetime
+
+A live session bookmark belongs to Game and survives fresh retry replacement
+of that session. F8 shares F5's prepared invocation, cancellation, final-snapshot
+drain and joined-owner replacement boundary. Preflight failure retains the
+current session and bookmark. Closing and explicit cancellation discard prepared
+replacement, and failed cleanup cannot auto-start another owner. UI nodes own no
+audio seek state or clocks. F5 continues to use the original pinned start.

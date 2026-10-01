@@ -697,3 +697,25 @@ Known ceiling: ten visible rows per panel and the fixed logical viewport remain.
 Changed packets are concatenated and the full rectangle buffer uploads. Native
 execution, live practice controls, browser adapters and complete acceptance are
 still unfinished. No measured performance or GUI execution is claimed.
+
+## Live practice bookmark restart
+
+During live Play, F7/Mark records the latest accepted native song timestamp as
+a session bookmark. Loading, missing time, negative time, replay Watch and
+cancellation do not create a bookmark. This is an observed snapshot position;
+UI wall time and floating display text never substitute for native time.
+
+F8/Restart Mark prepares a fresh invocation with that exact original-song
+--start-ns. Native parser preflight completes before cancellation. The previous
+owner cancels, drains audio/input and joins before the fresh owner starts. A
+cleanup failure prevents automatic replacement; explicit cancel discards the
+prepared replacement. The bookmark follows fresh retries of this chart and
+can be reused at Results. F5 preserves the originally pinned start instead.
+Recording retry names continue to derive from the original base and ordinal.
+
+The bookmark is owned by the session, not the settings draft. New chart launches
+start with no bookmark; replay Watch cannot use this live practice override.
+Known ceiling: snapshot delivery is coalesced, so the mark is the latest observed
+position rather than the exact physical key event time. This creates a fresh
+transport rather than seeking/pause-resuming a live driver. Loops, live pause,
+browser host and full native timing acceptance remain unfinished.
