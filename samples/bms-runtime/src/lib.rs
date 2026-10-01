@@ -2,6 +2,8 @@
 #![forbid(unsafe_code)]
 /// Actual ASIO replay presentation observations retained until their host upper frontier.
 pub mod asio_replay;
+/// Contained exact or compatible asset filename lookup during preparation.
+pub mod asset_paths;
 /// Rolling BGM admission on an explicitly configured output frame grid.
 pub mod bgm;
 /// Strict bounded application chart decoding before the UTF-8 parser.
@@ -108,7 +110,7 @@ use std::{
     error::Error,
     fs::File,
     io::Read,
-    path::{Component, Path, PathBuf},
+    path::Path,
 };
 
 /// Fully prepared chart and owned assets; all timestamps remain in song time.
@@ -189,7 +191,14 @@ pub fn load_prepared(
     pcm_limits: PcmLimits,
     channels: ChannelPolicy,
 ) -> Result<PreparedBms, Box<dyn Error>> {
-    load_prepared_with_decoder(path, format, pcm_limits, channels, &DefaultAssetDecoder)
+    load_prepared_with_decoder_and_paths(
+        path,
+        format,
+        pcm_limits,
+        channels,
+        &DefaultAssetDecoder,
+        asset_paths::AssetPathPolicy::AudioVariants,
+    )
 }
 
 /// Prepare using an explicit codec, retaining the same path and storage policy.
@@ -202,6 +211,27 @@ pub fn load_prepared_with_decoder(
     pcm_limits: PcmLimits,
     channels: ChannelPolicy,
     decoder: &dyn AssetDecoder,
+) -> Result<PreparedBms, Box<dyn Error>> {
+    load_prepared_with_decoder_and_paths(
+        path,
+        format,
+        pcm_limits,
+        channels,
+        decoder,
+        asset_paths::AssetPathPolicy::Exact,
+    )
+}
+
+/// Prepare with an explicit codec and exact/compatible contained file policy.
+/// Original BMS references and chart identity stay unchanged; the decoder sees
+/// the selected canonical regular file. Existing-path errors never fall through.
+pub fn load_prepared_with_decoder_and_paths(
+    path: &Path,
+    format: AudioFormat,
+    pcm_limits: PcmLimits,
+    channels: ChannelPolicy,
+    decoder: &dyn AssetDecoder,
+    paths: asset_paths::AssetPathPolicy,
 ) -> Result<PreparedBms, Box<dyn Error>> {
     let chart_path = std::fs::canonicalize(path)?;
     let root = chart_path.parent().ok_or("chart has no parent")?;
@@ -229,7 +259,7 @@ pub fn load_prepared_with_decoder(
             .samples
             .get(&u16::try_from(sample.0)?)
             .ok_or("referenced sample has no WAV definition")?;
-        let asset_path = resolve_asset(root, name)?;
+        let asset_path = asset_paths::resolve_asset(root, name, paths)?;
         let encoded = bounded_read(&asset_path, 64 * 1024 * 1024)?;
         let pcm = decoder.decode(&asset_path, &encoded, pcm_limits)?;
         let pcm = prepare_channels(pcm, format, pcm_limits, channels)?;
@@ -311,26 +341,6 @@ fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, Box<dyn Error>> {
         bytes.extend_from_slice(&block[..count]);
     }
     Ok(bytes)
-}
-
-fn resolve_asset(root: &Path, name: &str) -> Result<PathBuf, Box<dyn Error>> {
-    let portable = name.replace('\\', "/");
-    if portable.as_bytes().get(1) == Some(&b':') {
-        return Err("drive-qualified asset path rejected".into());
-    }
-    let relative = Path::new(&portable);
-    if relative.as_os_str().is_empty()
-        || relative
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
-    {
-        return Err("absolute/parent asset path rejected".into());
-    }
-    let resolved = std::fs::canonicalize(root.join(relative))?;
-    if !resolved.starts_with(root) {
-        return Err("asset symlink escapes chart directory".into());
-    }
-    Ok(resolved)
 }
 
 fn prepare_channels(

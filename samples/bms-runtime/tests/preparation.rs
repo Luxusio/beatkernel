@@ -64,6 +64,102 @@ fn wav(channels: u16, samples: &[i16]) -> Vec<u8> {
 mod flac_fixture;
 
 #[test]
+fn converted_mixed_case_flac_default_lookup_preserves_chart_identity_and_rendered_pcm() {
+    let dir = Directory::new();
+    std::fs::create_dir(dir.0.join("assets")).unwrap();
+    dir.write(
+        "assets/日本.FlAc",
+        &flac_fixture::flac16(24_000, 1, &[16384, -8192], Some(2)),
+    );
+    let path = dir.write(
+        "chart.bms",
+        "#BPM 60\n#WAV01 assets\\日本.wav\n#00011:01\n".as_bytes(),
+    );
+    let format = AudioFormat::new(24_000, 2).unwrap();
+    assert!(
+        load_prepared_with_decoder(
+            &path,
+            format,
+            limits(),
+            ChannelPolicy::MonoToStereo,
+            &DefaultAssetDecoder
+        )
+        .is_err()
+    ); // Existing custom-codec entry stays Exact.
+    assert!(
+        load_prepared_with_decoder_and_paths(
+            &path,
+            format,
+            limits(),
+            ChannelPolicy::MonoToStereo,
+            &DefaultAssetDecoder,
+            asset_paths::AssetPathPolicy::Exact
+        )
+        .is_err()
+    );
+    let converted = load_prepared(&path, format, limits(), ChannelPolicy::MonoToStereo).unwrap();
+    assert_eq!(converted.source.samples[&1], "assets\\日本.wav");
+    assert_eq!(
+        converted.bank.get(SampleId(1)).unwrap().samples(),
+        &[0.5, 0.5, -0.25, -0.25]
+    );
+    let identity = |prepared: &PreparedBms| {
+        let profile = beatkernel::judge::JudgeProfile::new(
+            vec![beatkernel::judge::JudgeWindow {
+                grade: beatkernel::judge::JudgeGrade(7),
+                early: beatkernel::time::Duration::ZERO,
+                late: beatkernel::time::Duration::ZERO,
+            }],
+            beatkernel::time::Duration::ZERO,
+        )
+        .unwrap();
+        let judge = beatkernel::judge::JudgeEngine::new(
+            prepared.compiled.chart.clone(),
+            prepared.source.rules(),
+            profile,
+        )
+        .unwrap();
+        replay_capture::LiveReplayCapture::new(
+            &judge,
+            beatkernel::time::ClockDomainId(17),
+            competition_live::replay_limits().unwrap(),
+        )
+        .unwrap()
+        .into_file()
+        .header
+    };
+    let original_identity = identity(&converted);
+    dir.write("assets/日本.wav", &wav(1, &[16384, -8192]));
+    let exact = load_prepared(&path, format, limits(), ChannelPolicy::MonoToStereo).unwrap();
+    assert_eq!(identity(&exact), original_identity);
+    let mut results = Vec::new();
+    for prepared in [converted, exact] {
+        let mut bytes = Vec::new();
+        let report = offline::render_offline(
+            prepared,
+            offline::OfflineOptions {
+                frames: 2,
+                block_frames: 1,
+                command_capacity: 4,
+                max_voices: 1,
+            },
+            &mut bytes,
+        )
+        .unwrap();
+        assert_eq!(report.hits, 1);
+        let samples: Vec<_> = bytes
+            .chunks_exact(4)
+            .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap()))
+            .collect();
+        assert_eq!(samples, [0.5, 0.5, -0.25, -0.25]);
+        results.push(bytes);
+    }
+    assert_eq!(results[0], results[1]);
+    dir.write("assets/日本.wav", b"damaged original");
+    assert!(load_prepared(&path, format, limits(), ChannelPolicy::MonoToStereo).is_err());
+}
+
+#[test]
 fn default_flac_and_wav_assets_feed_actual_runtime_mixer_without_tail_loading() {
     let dir = Directory::new();
     dir.write("head.wav", &wav(1, &[16384, -8192]));
