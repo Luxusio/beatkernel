@@ -16,6 +16,10 @@ these direct notices are not a complete binary license inventory.
 | ab_glyph 0.2.32 | Apache-2.0 | [license](third-party/ab-glyph-0.2.32-LICENSE.txt) |
 | encoding_rs 0.8.35 | MIT AND BSD-3-Clause | [MIT](third-party/encoding-rs-0.8.35-LICENSE-MIT.txt), [WHATWG](third-party/encoding-rs-0.8.35-LICENSE-WHATWG.txt) |
 | claxon 0.4.3 | Apache-2.0 | [license](third-party/claxon-0.4.3-LICENSE.txt) |
+| lewton 0.10.2 | MIT | [license](third-party/lewton-0.10.2-LICENSE.txt) |
+| ogg 0.8.0 (container reader) | BSD-3-Clause | [license](third-party/ogg-0.8.0-LICENSE.txt) |
+| tinyvec 1.13.3 (codec dependency) | MIT | [license](third-party/tinyvec-1.13.3-LICENSE.txt) |
+| byteorder 1.5.0 (codec dependency) | MIT | [license](third-party/byteorder-1.5.0-LICENSE.txt) |
 
 The texts are copied from the pinned published packages. The floem_reactive
 package declares MIT but omits the license text; its retained text comes from
@@ -27,3 +31,8 @@ not a dependency. minifb is no longer included by this application.
 Claxon includes Copyright 2014 Ruud van Asseldonk; its exact published Apache-2.0
 license is retained above. The codec is linked only in the application preparation
 layer, and is not a dependency of the core or BMS adapter.
+
+Lewton and the newly resolved codec dependencies above are linked in application
+preparation only. Their exact published license texts are retained; Ogg's BSD
+notice remains applicable to redistribution. These codecs introduce no GPL
+dependency. Project-authored source remains MIT.
