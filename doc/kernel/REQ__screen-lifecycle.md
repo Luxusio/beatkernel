@@ -290,6 +290,15 @@ still unfinished. No measured performance or GUI execution is claimed.
 
 ## Practice restart lifetime
 
+An observed practice loop retains its start/end region across successful fresh
+Game replacements. The active Play route alone may request repetition from an
+accepted Playing snapshot after the end; pending pause/restart and UI lifecycle
+guards fence admission. Cancellation, failure and ordinary pinned F5 retry
+disable repetition. Cleanup and join of the old owner still precede replacement;
+the loop creates no additional owner or screen stack. New chart launches reset
+the region. Snapshot cadence may overshoot the end and fresh owners leave a gap;
+sample-exact native looping and execution acceptance remain open.
+
 A live session bookmark belongs to Game and survives fresh retry replacement
 of that session. F8 shares F5's prepared invocation, cancellation, final-snapshot
 drain and joined-owner replacement boundary. Preflight failure retains the

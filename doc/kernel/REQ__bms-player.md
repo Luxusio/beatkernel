@@ -475,7 +475,8 @@ Recordings identify the filtered pristine section judge and store positive
 original-song starts in v2 options. Standalone logical replay and recorded audio
 output reconstruct that section automatically from the original chart/assets.
 Ghosts require the same start; full-song and different-section identities fail.
-Zero-start v1 recordings remain supported. Bounded loops, live scrubbing, pause/resume and historical
+Zero-start v1 recordings remain supported. Observed practice loops and acknowledged
+native pause are described below. Sample-exact loops, live scrubbing and historical
 hold-state restoration remain player work. Acoustic restart acceptance is deferred.
 
 ## Screen lifecycle
@@ -717,8 +718,37 @@ The bookmark is owned by the session, not the settings draft. New chart launches
 start with no bookmark; replay Watch cannot use this live practice override.
 Known ceiling: snapshot delivery is coalesced, so the mark is the latest observed
 position rather than the exact physical key event time. This creates a fresh
-transport rather than seeking/pause-resuming a live driver. Loops, live pause,
+transport rather than seeking/pause-resuming a live driver. Observed loops and
+presentation-derived pause are described below; sample-exact native loops,
 browser host and full native timing acceptance remain unfinished.
+
+## Observed practice loop
+
+Live practice also permits observed-position repetition. F7 marks the start,
+F10 marks a strictly later end from the latest accepted native song position,
+and F11 enables or disables repetition of that complete region. Changing the
+start clears the old end and disables repetition. Invalid end marks preserve
+the previous region. Watch and network sessions cannot configure repetitions;
+local cohorts repeat through their shared owner and saved ghosts remain usable.
+
+While enabled, the first observed Playing position at or beyond the end requests
+the same checked fresh restart at the start bookmark. Native preflight must
+succeed before cancellation; pending restart prevents duplicate requests. The
+old owner drains and joins before the next attempt acquires audio/input. The
+region follows successful replacements; each attempt derives its recording path
+from the original base and increasing ordinal. F5 disables repetition and keeps
+the original pinned start. Explicit cancel, failed preflight, failed cleanup or
+failed replacement disables repetition. Paused or pending pause phases cannot
+trigger repetition, including a desired pause request awaiting acknowledgement;
+hidden/suspended/closing UI cannot request a restart. Pause and loop controls
+occupy separate footer rectangles and do not overlap Cancel/Return hit targets.
+
+Known ceiling: this initial loop uses coalesced native-position observations
+on the UI cadence. Output and judging may progress beyond the end before the
+request; teardown, reopening and loading introduce a gap. Missing observations
+or native completion before an observed crossing do not trigger another attempt.
+Sample-exact native loop-end fencing, gapless looping and native execution
+acceptance remain unfinished.
 
 ## Catalog search and filtered selection
 
@@ -825,5 +855,5 @@ Missing/regressing/unrepresentable clock relations, native device failure and
 raw queue SYN_DROPPED/resync terminate and drain the session with its valid
 recorded prefix. Waiting for output presentation can grow a raw-input backlog;
 input loss is never silently repaired. ASIO/network pause policy,
-loops/browser/full widget host and full native/GUI/replay acceptance remain
+sample-exact native loops/browser/full widget host and full native/GUI/replay acceptance remain
 unfinished. Source compilation and authored fixtures are not execution proof.

@@ -145,7 +145,12 @@ network competition, using native-frontier acknowledgement, shared Transport
 fencing and paused-key reconciliation. Replay Watch supports the same F9 control
 when an actual output/host clock pair is available, freezing recorded progress
 and sounds together. ASIO and network pause,
-live scrubbing and loops remain work; native/GUI execution is still unverified.
+live scrubbing and sample-exact native loops remain work; native/GUI execution is
+still unverified. In live nonnetwork play, F7 marks a loop start, F10 marks a later
+end and F11 toggles observed-position repetition. Crossing the observed end
+preflights, cancels, drains and joins the old owner before restarting at the
+exact marked start. Coalesced UI observations can overshoot the end and reopening
+leaves a gap; this is not gapless playback. F5 and explicit cancel disable loops.
 Settings Records browses an explicit directory and previews a selected recording
 against the current chart, judging profile and practice start before attaching
 it as My Record or Other Record. Changes stay in the settings draft until Apply.
