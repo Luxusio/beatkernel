@@ -298,6 +298,18 @@ Contributors need a working Rust 1.98.1 or newer toolchain with rustfmt, Clippy 
 Native settings now include a source-integrated audio output metadata picker.
 Discovery and profile file operations share one serialized worker outside the
 UI/game/audio owners. Explicit selection sets only the next-session draft ID;
-actual device preparation remains authoritative. Keyboard enumeration and
-executed discovery/UI acceptance remain pending. See the
+actual device preparation remains authoritative. Keyboard metadata discovery has source integration; roster UI, multiple local
+Runtime composition and executed discovery/UI acceptance remain pending. See the
 [player contract](../kernel/REQ__bms-player.md).
+
+## Solo and local multiplayer device policy
+
+The user corrected the app setup policy: one local player must not be asked to
+select devices. Use automatic native input and the system/default audio output.
+For multiple local players, assign disjoint input devices per player, while
+audio output and song timing stay shared. Model a scalable player collection,
+including three/four and more, instead of hardcoded P1/P2 fields. Low-level
+platform requests remain explicit after off-thread app resolution; advanced
+manual configuration stays optional. Current roster primitives and solo default
+preparation do not yet establish executable multi-runtime local play. See the
+[local-player contract](../kernel/REQ__bms-local-players.md).

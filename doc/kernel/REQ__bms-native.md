@@ -223,3 +223,11 @@ capture creation has no captured file; startup failures after creation may save 
 empty valid prefix. Control-thread recording may allocate and encode candidate
 records. Replay contains accepted judge operations rather than physical audio output
 or device latency evidence. Portable CLI fixtures are authored/compiled only.
+
+Windows supports optional --keyboard-path EXACT_INTERFACE_PATH. An absent
+option retains Any-keyboard bindings; an explicit path must resolve exactly
+one attached Raw Input keyboard at session preparation. Bind its session ID,
+ignore other input sources before runtime admission, and fail on removal rather
+than substituting another attachment. The GUI stores native interface paths,
+not enumeration-time runtime IDs. Source integration does not prove executed
+keyboard filtering, removal or timing behavior.

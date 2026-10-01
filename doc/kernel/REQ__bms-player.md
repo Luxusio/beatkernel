@@ -98,9 +98,10 @@ when no game owner exists. Apply uses the same pure native option parser as
 playback, then changes the next session's arguments; Back/Escape discards the
 draft. Missing required values or incompatible backend options remain explicit
 errors. This parser validation does not certify device availability. Empty
-fields omit the option, preserving native defaults or required-value errors.
+fields omit the option, allowing app defaults before strict native preparation.
 Device IDs, rates, channel layouts, buffer/period requests, binding rows and
-timing options remain explicit; there is no automatic device/key substitution.
+timing options remain advanced overrides; omitted device IDs use the solo
+automatic preparation policy below. No in-session device substitution occurs.
 Bound drafts to 128 fields, 4096 UTF-8 bytes per value and 64 KiB total value
 bytes. Keep values intact as flag/value pairs rather than parsing shell text.
 Cursor movement and deletion honor UTF-8 scalar boundaries; reject controls and
@@ -211,7 +212,7 @@ compilation may proceed; actual GUI rendering/focus/close/restart/input/audio,
 replay/network execution and independent reviews/QA remain required later.
 This presentation increment does not by itself prove the full player complete.
 Graphical native settings and audio output metadata selectors now have source
-integration; enumerated keyboard selectors, persistence of GPU/UI presentation settings and expanded
+integration; multi-player assignment UI, persistence of GPU/UI presentation settings and expanded
 transport/practice controls remain player work. Native profiles have source
 integration with file-I/O and interruption acceptance still pending. Existing
 casual multiplayer has independent local starts and unauthenticated progress;
@@ -228,7 +229,7 @@ warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warni
 
 - Settings validation checks syntax and cross-option constraints, not resource
   availability — actual device/file checks remain in native preparation.
-- Keyboard device IDs and HID usage bindings still require typed values; clipboard
+- HID usage bindings still require typed values; clipboard
   and IME composition remain absent — extend these while retaining
   bounded drafts and next-session-only application.
 - Profile operations drain on close rather than being forcibly interrupted —
@@ -263,3 +264,44 @@ warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warni
   arrays only when observed draw-call cost justifies that design.
 - Texture admission counts raw RGBA bytes, excluding driver allocation overhead
   — add backend memory accounting if a hard VRAM budget is required.
+
+## Native keyboard metadata selection
+
+For multiple local players, input assignment will use the same bounded catalog
+and serialized settings worker as audio metadata selection. Solo play does not
+prompt for input device selection. Optional advanced configuration changes only --keyboard-path on
+Windows, --evdev on Linux or --keyboard-registry on macOS in the draft. No
+query registers gameplay input, reads key events, grabs devices or changes
+input clocks. Metadata does not certify acquisition access or future attachment
+availability. Refresh clears selection; disabled rows remain visible.
+
+Windows optionally selects one exact Raw Input interface path; omitting that
+option retains the existing Any-keyboard behavior. Native preparation resolves
+one attached keyboard to its session DeviceId. A selected-device removal fails
+the session; another keyboard or reconnect never silently replaces it.
+Linux candidates require read-only metadata access and keyboard key capability;
+unavailable candidates are disabled. macOS uses IOKit service metadata without
+an opened IOHID acquisition manager. All actual acquisition stays on its game
+owner. Native discovery and gameplay acceptance remain deferred.
+
+## Automatic solo preparation
+
+The user corrected manual-only device setup: a single local player uses
+automatic input and the system/default audio endpoint. Device assignment is
+required only when multiple local players need disjoint input routes. Manual
+audio selection remains an advanced override, never a mandatory first step.
+The primary app resolves omitted native arguments on the game worker before
+calling strict platform compositions. GUI syntax checks do not query devices.
+Windows uses the active multimedia default WASAPI endpoint and shared mode,
+with Any-keyboard input unless an advanced override is supplied. Linux uses
+ALSA default and the first readable standard keyboard in numeric event order.
+macOS uses the actual system default output and the first ordered keyboard
+registry identity. Supplied identities/settings remain exact; acquisition
+failure never silently substitutes a different device during play.
+
+Conservative Linux app defaults are 48000 Hz, stereo, 256-frame period and
+1024-frame buffer. macOS preserves current output rate/buffer and uses up to
+two channels. Omitted channel treatment permits mono-to-stereo. ASIO has no
+OS-default driver and remains an explicitly selected advanced backend. These
+policies do not certify native support; actual preparation can fail explicitly.
+Multiple-runtime local play and roster UI remain required implementation work.

@@ -89,7 +89,7 @@ Use an explicit reachable IP for another machine. Network loss leaves local
 play running; remote progress is self-reported and song starts are independent.
 The graphical `player` mode uses `winit` on the main thread and `wgpu` to draw
 notes, holds, judgment feedback and counters from actual game snapshots.
-Use `player --library DIR` or `player --chart PATH` with the same explicit native
+Use `player --library DIR` or `player --chart PATH` with optional advanced native
 device/buffer/binding options as `play`. Up/Down select, Enter starts, and
 Escape/focus loss cancels. Native settings can also be edited before play.
 Catalog rows can also be clicked; Start, Cancel, Return and Exit buttons use
@@ -102,14 +102,19 @@ Native input/judging stays on the game thread, audio keeps its output
 worker/callback, and socket I/O has its own worker. Terminal `play` remains
 available. Ranked online services are not implemented.
 See the [competition contract](doc/kernel/REQ__bms-competition.md) for limits.
-F2 or Settings opens a bounded draft editor for native devices, buffers, timing,
+Solo play resolves omitted devices automatically: system/default audio output
+and a usable keyboard. Device assignment is reserved for multiple local players;
+three/four and larger rosters use the same collection-based model. Multiple
+local Runtime integration remains work in progress.
+F2 or Settings opens a bounded advanced draft editor for devices, buffers, timing,
 bindings and competition options. Apply validates through the existing native
 parser and updates the next session; Back discards. Missing device/binding
-configuration can be entered there before starting. Audio Devices queries native
+configuration can be overridden there before starting; device selection is optional. Audio Devices queries native
 output metadata on the settings worker; select an entry and Use Device to copy
 its exact ID into the draft. Apply remains separate. ASIO discovery requires an
-explicit registry view. Keyboard device selection, clipboard and IME composition
-remain pending. `--profile PATH` loads saved
+explicit registry view. Keyboard metadata discovery is source-integrated for
+automatic preparation and future per-player assignment. Clipboard and IME
+composition remain pending. `--profile PATH` loads saved
 native options; explicit native arguments replace matching profile entries.
 Settings Load/Save use an editable path and the same serialized settings worker. Save stores
 the draft; Apply remains separate. Profiles retain the OS identity and exclude
