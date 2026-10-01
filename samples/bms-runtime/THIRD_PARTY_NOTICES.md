@@ -20,6 +20,8 @@ these direct notices are not a complete binary license inventory.
 | ogg 0.8.0 (container reader) | BSD-3-Clause | [license](third-party/ogg-0.8.0-LICENSE.txt) |
 | tinyvec 1.13.3 (codec dependency) | MIT | [license](third-party/tinyvec-1.13.3-LICENSE.txt) |
 | byteorder 1.5.0 (codec dependency) | MIT | [license](third-party/byteorder-1.5.0-LICENSE.txt) |
+| nanomp3 0.2.0 | MIT | [license](third-party/nanomp3-0.2.0-LICENSE-MIT.txt) |
+| nanomp3-core 0.2.0 (codec dependency) | MIT | [license](third-party/nanomp3-core-0.2.0-LICENSE-MIT.txt) |
 
 The texts are copied from the pinned published packages. The floem_reactive
 package declares MIT but omits the license text; its retained text comes from
@@ -36,3 +38,9 @@ Lewton and the newly resolved codec dependencies above are linked in application
 preparation only. Their exact published license texts are retained; Ogg's BSD
 notice remains applicable to redistribution. These codecs introduce no GPL
 dependency. Project-authored source remains MIT.
+
+The MP3 packages use the selected MIT terms above. Only their scalar MPEG
+Layer III decoder and metadata functions are linked, without the optional
+SIMD, Layer I/II, allocation-backed readers or native C build. Their exact
+published MIT notices are retained. Core and BMS adapter dependencies do not
+include these application codecs.
