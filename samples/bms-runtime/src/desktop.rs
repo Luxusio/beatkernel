@@ -8,6 +8,8 @@ use beatkernel_bms_runtime::ui::{
 };
 use beatkernel_bms_runtime::{
     device_catalog::{DeviceCatalog, DeviceRequest},
+    local_players::PlayerId,
+    local_setup::LocalSetup,
     player, player_chart,
     settings::{NativeSettings, SettingsHost},
 };
@@ -243,6 +245,8 @@ pub(super) fn run(
         validate,
         query_devices,
         picker: None,
+        local_setup: None,
+        accepted_local: None,
         settings: None,
         profile_io: None,
         entries,
@@ -274,6 +278,7 @@ pub(super) fn run(
 const SETTINGS_ROWS: usize = 10;
 struct SettingsDraft {
     values: NativeSettings,
+    cached_local: Option<LocalSetup>,
     selected: usize,
     editor: LineEditor,
     profile: LineEditor,
@@ -328,13 +333,20 @@ fn edit_line(
     }
     Ok(())
 }
+struct LocalDraft {
+    model: LocalSetup,
+    selected: usize,
+    first: usize,
+}
+
 struct DevicePicker {
     catalog: DeviceCatalog,
+    player: Option<PlayerId>,
     first: usize,
     selected: Option<usize>,
 }
 enum ProfileResult {
-    Devices(DeviceCatalog),
+    Devices(DeviceCatalog, Option<PlayerId>),
     Loaded(NativeSettings),
     Saved,
 }
@@ -374,6 +386,8 @@ struct Desktop {
     validate: Native,
     query_devices: QueryDevices,
     picker: Option<DevicePicker>,
+    local_setup: Option<LocalDraft>,
+    accepted_local: Option<LocalSetup>,
     settings: Option<SettingsDraft>,
     profile_io: Option<ProfileOperation>,
     entries: Vec<Entry>,
@@ -409,6 +423,7 @@ impl Desktop {
             )?;
             Ok::<_, String>(SettingsDraft {
                 values,
+                cached_local: self.accepted_local.clone(),
                 selected: 0,
                 editor,
                 profile: LineEditor::new(
@@ -435,6 +450,139 @@ impl Desktop {
         self.gesture.cancel();
         self.hits.clear();
     }
+    fn open_local(&mut self) {
+        let result = (|| {
+            let draft = self.settings.as_ref().ok_or("settings unavailable")?;
+            let parsed = LocalSetup::from_settings(&draft.values, settings_host())?;
+            let model = draft
+                .cached_local
+                .as_ref()
+                .filter(|old| {
+                    old.players() == parsed.players()
+                        || (old.players().len() == 1 && parsed.players().len() == 1)
+                })
+                .cloned()
+                .unwrap_or(parsed);
+            Ok::<_, String>(LocalDraft {
+                model,
+                selected: 0,
+                first: 0,
+            })
+        })();
+        match result {
+            Ok(local) => {
+                self.local_setup = Some(local);
+                self.local_error(None);
+            }
+            Err(error) => self.local_error(Some(error)),
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn local_error(&mut self, error: Option<String>) {
+        if let Some(draft) = &mut self.settings {
+            draft.error = error;
+            draft.message = None;
+        }
+    }
+    fn resize_local(&mut self, increase: bool) {
+        let result = (|| {
+            let local = self.local_setup.as_mut().ok_or("local setup unavailable")?;
+            let count = local.model.players().len();
+            let next = if increase {
+                count.checked_add(1).ok_or("player count overflow")?
+            } else {
+                count.saturating_sub(1).max(1)
+            };
+            local.model.resize(next)?;
+            local.selected = local.selected.min(next - 1);
+            local.first = local.selected / SETTINGS_ROWS * SETTINGS_ROWS;
+            Ok::<(), String>(())
+        })();
+        self.local_error(result.err());
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn clear_local(&mut self) {
+        let result = (|| {
+            let local = self.local_setup.as_mut().ok_or("local setup unavailable")?;
+            let player = local
+                .model
+                .players()
+                .get(local.selected)
+                .ok_or("player unavailable")?
+                .id;
+            local.model.clear(player)
+        })();
+        self.local_error(result.err());
+    }
+    fn local_page(&mut self, forward: bool) {
+        if let Some(local) = &mut self.local_setup {
+            let last =
+                local.model.players().len().saturating_sub(1) / SETTINGS_ROWS * SETTINGS_ROWS;
+            local.first = if forward {
+                (local.first + SETTINGS_ROWS).min(last)
+            } else {
+                local.first.saturating_sub(SETTINGS_ROWS)
+            };
+            local.selected = local.first;
+        }
+    }
+    fn local_key(&mut self, key: KeyCode, repeat: bool) {
+        match key {
+            KeyCode::Escape if !repeat => self.local_setup = None,
+            KeyCode::Enter if !repeat => self.finish_local(),
+            KeyCode::Equal | KeyCode::NumpadAdd if !repeat => self.resize_local(true),
+            KeyCode::Minus | KeyCode::NumpadSubtract if !repeat => self.resize_local(false),
+            KeyCode::Space if !repeat => self.device_request(true),
+            KeyCode::Delete if !repeat => self.clear_local(),
+            KeyCode::PageUp => self.local_page(false),
+            KeyCode::PageDown => self.local_page(true),
+            KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                if let Some(local) = &mut self.local_setup {
+                    local.selected = if key == KeyCode::ArrowUp {
+                        local.selected.saturating_sub(1)
+                    } else {
+                        (local.selected + 1).min(local.model.players().len() - 1)
+                    };
+                    local.first = local.selected / SETTINGS_ROWS * SETTINGS_ROWS;
+                }
+            }
+            _ => {}
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn finish_local(&mut self) {
+        let result = (|| {
+            let local = self.local_setup.as_ref().ok_or("local setup unavailable")?;
+            let draft = self.settings.as_ref().ok_or("settings unavailable")?;
+            let values = local.model.settings(&draft.values)?;
+            self.validate_settings(&values)?;
+            let editor = LineEditor::new(
+                &values.fields().first().ok_or("settings empty")?.value,
+                4096,
+            )?;
+            Ok::<_, String>((values, editor, local.model.clone()))
+        })();
+        match result {
+            Ok((values, editor, model)) => {
+                if let Some(draft) = &mut self.settings {
+                    draft.values = values;
+                    draft.cached_local = Some(model);
+                    draft.selected = 0;
+                    draft.editor = editor;
+                    draft.profile_focused = false;
+                    draft.error = None;
+                    draft.message = Some("PLAYERS READY - APPLY TO USE".into());
+                }
+                self.local_setup = None;
+            }
+            Err(error) => self.local_error(Some(error)),
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
     fn validate_settings(&self, values: &NativeSettings) -> Result<Vec<String>, String> {
         let args = without_chart(&values.native_args());
         let path = self
@@ -447,6 +595,14 @@ impl Desktop {
         Ok(args)
     }
     fn device_request(&mut self, keyboard: bool) {
+        if keyboard
+            && self
+                .local_setup
+                .as_ref()
+                .is_some_and(|local| local.model.players().len() == 1)
+        {
+            return;
+        }
         if self.profile_io.is_some() || self.game.is_some() {
             return;
         }
@@ -459,12 +615,27 @@ impl Desktop {
             } else {
                 DeviceRequest::from_settings(&draft.values, settings_host())?
             };
+            let player = self
+                .picker
+                .as_ref()
+                .and_then(|picker| picker.player)
+                .or_else(|| {
+                    request
+                        .is_keyboard()
+                        .then(|| {
+                            self.local_setup
+                                .as_ref()
+                                .and_then(|local| local.model.players().get(local.selected))
+                                .map(|member| member.id)
+                        })
+                        .flatten()
+                });
             let query = self.query_devices;
             thread::Builder::new()
                 .name("bms-devices".into())
                 .spawn(move || {
                     query(request)
-                        .map(ProfileResult::Devices)
+                        .map(|catalog| ProfileResult::Devices(catalog, player))
                         .map_err(|error| error.to_string())
                 })
                 .map_err(|error| error.to_string())
@@ -489,7 +660,19 @@ impl Desktop {
     fn use_device(&mut self) {
         let result = (|| {
             let picker = self.picker.as_ref().ok_or("device catalog unavailable")?;
-            let index = picker.selected.ok_or("select an audio device first")?;
+            let index = picker.selected.ok_or("select a device first")?;
+            if let Some(player) = picker.player {
+                self.local_setup
+                    .as_mut()
+                    .ok_or("local setup unavailable")?
+                    .model
+                    .assign(player, &picker.catalog, index)?;
+                if let Some(draft) = &mut self.settings {
+                    draft.error = None;
+                    draft.message = Some("KEYBOARD ASSIGNED - DONE TO KEEP".into());
+                }
+                return Ok(());
+            }
             let draft = self.settings.as_mut().ok_or("settings unavailable")?;
             // Prepare editor before changing the accepted draft.
             let editor = LineEditor::new(&picker.catalog.choices()[index].id, 4096)?;
@@ -630,9 +813,10 @@ impl Desktop {
             .unwrap_or_else(|_| Err("profile worker panicked".into()));
         if let Some(draft) = &mut self.settings {
             match result {
-                Ok(ProfileResult::Devices(catalog)) => {
+                Ok(ProfileResult::Devices(catalog, player)) => {
                     self.picker = Some(DevicePicker {
                         catalog,
+                        player,
                         first: 0,
                         selected: None,
                     });
@@ -652,6 +836,7 @@ impl Desktop {
                     match editor {
                         Ok(editor) => {
                             draft.values = values;
+                            draft.cached_local = None;
                             draft.selected = 0;
                             draft.editor = editor;
                             draft.profile_focused = false;
@@ -678,6 +863,7 @@ impl Desktop {
         match result {
             Ok(args) => {
                 self.options.native = args;
+                self.accepted_local = draft.cached_local.clone();
                 self.options.profile = (!draft.profile.value().is_empty())
                     .then(|| PathBuf::from(draft.profile.value()));
                 self.settings = None;
@@ -798,8 +984,33 @@ impl Desktop {
             }
             return;
         }
+        if self.local_setup.is_some() {
+            match id.0 {
+                30 => self.finish_local(),
+                31 => self.local_setup = None,
+                32 => self.resize_local(false),
+                33 => self.resize_local(true),
+                34 => self.device_request(true),
+                35 => self.clear_local(),
+                36 => self.local_page(false),
+                37 => self.local_page(true),
+                row if row >= 20000 => {
+                    if let Some(local) = &mut self.local_setup {
+                        let index = (row - 20000) as usize;
+                        if index < local.model.players().len() {
+                            local.selected = index;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            self.gesture.cancel();
+            self.hits.clear();
+            return;
+        }
         if self.settings.is_some() {
             match id.0 {
+                17 => self.open_local(),
                 16 => self.device_request(false),
 
                 13 => self.profile_request(false),
@@ -931,6 +1142,10 @@ impl Desktop {
             self.picker_key(key, repeat);
             return;
         }
+        if self.local_setup.is_some() {
+            self.local_key(key, repeat);
+            return;
+        }
         if self.settings.is_some() {
             self.settings_key(key, repeat);
             return;
@@ -1015,6 +1230,16 @@ impl Desktop {
                 pixels,
                 picker,
                 self.settings.as_ref().expect("picker has draft"),
+                &mut self.hits,
+                &self.gesture,
+                point,
+                self.profile_io.is_some(),
+            );
+        } else if let Some(local) = &self.local_setup {
+            draw_local(
+                pixels,
+                local,
+                self.settings.as_ref().expect("local has draft"),
                 &mut self.hits,
                 &self.gesture,
                 point,
@@ -1363,6 +1588,7 @@ impl ApplicationHandler for Desktop {
                     && !self.closing
                     && self.profile_io.is_none()
                     && self.picker.is_none()
+                    && self.local_setup.is_none()
                 {
                     let value = event.text.as_deref().or_else(|| match &event.logical_key {
                         Key::Character(value) => Some(value.as_str()),
@@ -1418,6 +1644,146 @@ impl ApplicationHandler for Desktop {
     }
 }
 
+fn draw_local(
+    scene: &mut Scene,
+    local: &LocalDraft,
+    draft: &SettingsDraft,
+    hits: &mut Vec<(ControlId, Bounds)>,
+    gesture: &Gesture,
+    point: Option<(f64, f64)>,
+    pending: bool,
+) {
+    text(
+        scene,
+        24,
+        65,
+        "PLAYERS - +/- COUNT - SPACE ASSIGN - ENTER DONE - ESC BACK",
+        1,
+        0x9bb1cf,
+    );
+    let players = local.model.players();
+    let solo = players.len() == 1;
+    text(
+        scene,
+        24,
+        91,
+        &format!(
+            "{} PLAYERS  ROWS {}-{} OF {}",
+            players.len(),
+            local.first + 1,
+            (local.first + SETTINGS_ROWS).min(players.len()),
+            players.len()
+        ),
+        1,
+        0xd8b36b,
+    );
+    for (index, player) in players
+        .iter()
+        .enumerate()
+        .skip(local.first)
+        .take(SETTINGS_ROWS)
+    {
+        let bounds = Bounds {
+            x: 24,
+            y: 120 + (index - local.first) as i64 * 39,
+            width: 906,
+            height: 34,
+        };
+        let label = if solo {
+            "SOLO - INPUT AUTOMATIC".to_owned()
+        } else {
+            format!(
+                "P{}  {}",
+                player.id.0,
+                player.input().unwrap_or("NO KEYBOARD ASSIGNED")
+            )
+        };
+        if local.selected == index {
+            rect(scene, bounds.x - 4, bounds.y, 4, bounds.height, 0x74e5c5);
+        }
+        if pending {
+            molecules::button(scene, bounds, &label, false, false);
+        } else {
+            control(
+                scene,
+                hits,
+                gesture,
+                point,
+                ControlId(20000 + index as u64),
+                bounds,
+                &label,
+            );
+        }
+    }
+    text(
+        scene,
+        24,
+        535,
+        if solo {
+            "SOLO STARTS WITHOUT DEVICE SELECTION"
+        } else {
+            "ASSIGN A DISTINCT KEYBOARD TO EACH PLAYER"
+        },
+        1,
+        0x9bb1cf,
+    );
+    for (id, x, label) in [(36, 620, "PREVIOUS"), (37, 780, "NEXT")] {
+        let available = if id == 36 {
+            local.first > 0
+        } else {
+            local.first + SETTINGS_ROWS < players.len()
+        };
+        if available {
+            let bounds = Bounds {
+                x,
+                y: 550,
+                width: 150,
+                height: 34,
+            };
+            if pending {
+                molecules::button(scene, bounds, label, false, false);
+            } else {
+                control(scene, hits, gesture, point, ControlId(id), bounds, label);
+            }
+        }
+    }
+    for (id, x, label) in [
+        (30, 24, "DONE"),
+        (31, 174, "BACK"),
+        (32, 324, "REMOVE"),
+        (33, 474, "ADD"),
+        (34, 624, "ASSIGN KEYBOARD"),
+        (35, 784, "CLEAR"),
+    ] {
+        if solo && matches!(id, 34 | 35) {
+            continue;
+        }
+        let bounds = Bounds {
+            x,
+            y: 620,
+            width: if id >= 34 { 150 } else { 140 },
+            height: 34,
+        };
+        let unavailable = pending
+            || (id == 32 && solo)
+            || (id == 33
+                && players.len() == beatkernel_bms_runtime::local_players::MAX_LOCAL_PLAYERS);
+        if unavailable {
+            molecules::button(scene, bounds, label, false, false);
+        } else {
+            control(scene, hits, gesture, point, ControlId(id), bounds, label);
+        }
+    }
+    if pending {
+        text(scene, 24, 590, "LOADING KEYBOARDS", 1, 0xd8b36b);
+    }
+    if let Some(error) = &draft.error {
+        text(scene, 24, 690, error, 1, 0xff8e8e);
+    } else if let Some(message) = &draft.message {
+        text(scene, 24, 690, message, 1, 0x74e5c5);
+    }
+}
+
 fn draw_devices(
     scene: &mut Scene,
     picker: &DevicePicker,
@@ -1439,6 +1805,9 @@ fn draw_devices(
         1,
         0x9bb1cf,
     );
+    if let Some(player) = picker.player {
+        text(scene, 690, 65, &format!("FOR P{}", player.0), 1, 0x74e5c5);
+    }
     let first = picker.first;
     text(
         scene,
@@ -1500,14 +1869,7 @@ fn draw_devices(
         }
     }
     if pending {
-        text(
-            scene,
-            24,
-            665,
-            "SETTINGS OPERATION - WAITING FOR WORKER",
-            1,
-            0xd8b36b,
-        );
+        text(scene, 24, 665, "LOADING DEVICES", 1, 0xd8b36b);
     }
     if let Some(error) = &draft.error {
         text(scene, 24, 690, error, 1, 0xff8e8e);
@@ -1530,7 +1892,7 @@ fn draw_settings(
         1,
         0x9bb1cf,
     );
-    for (id, x, label) in [(16, 730, "AUDIO OVERRIDE")] {
+    for (id, x, label) in [(17, 515, "PLAYERS"), (16, 730, "AUDIO OVERRIDE")] {
         let bounds = Bounds {
             x,
             y: 60,
@@ -1634,14 +1996,7 @@ fn draw_settings(
         );
     }
     if pending {
-        text(
-            scene,
-            24,
-            665,
-            "SETTINGS OPERATION - WAITING FOR WORKER",
-            1,
-            0xd8b36b,
-        );
+        text(scene, 24, 665, "LOADING DEVICES", 1, 0xd8b36b);
     } else if let Some(message) = &draft.message {
         text(scene, 24, 665, message, 1, 0x74e5c5);
     }
@@ -1772,6 +2127,65 @@ mod tests {
         assert_eq!(local_page(64, 15, false), 14);
     }
     #[test]
+    fn local_setup_solo_hides_assignment_and_pending_group_fences_controls() {
+        let values = NativeSettings::from_args(&[], SettingsHost::Linux).unwrap();
+        let draft = SettingsDraft {
+            values: values.clone(),
+            cached_local: None,
+            selected: 0,
+            editor: LineEditor::new("", 4096).unwrap(),
+            profile: LineEditor::new("", 4096).unwrap(),
+            profile_focused: false,
+            message: None,
+            error: None,
+        };
+        let mut local = LocalDraft {
+            model: LocalSetup::from_settings(&values, SettingsHost::Linux).unwrap(),
+            selected: 0,
+            first: 0,
+        };
+        let mut scene = Scene::new(960, 720);
+        let mut hits = Vec::new();
+        draw_local(
+            &mut scene,
+            &local,
+            &draft,
+            &mut hits,
+            &Gesture::default(),
+            None,
+            false,
+        );
+        assert!(!hits.iter().any(|(id, _)| matches!(id.0, 34 | 35)));
+        assert!(scene.status().is_ok());
+        local.model.resize(4).unwrap();
+        hits.clear();
+        scene.clear();
+        draw_local(
+            &mut scene,
+            &local,
+            &draft,
+            &mut hits,
+            &Gesture::default(),
+            None,
+            false,
+        );
+        assert_eq!(hits.iter().filter(|(id, _)| id.0 >= 20000).count(), 4);
+        assert!(hits.iter().any(|(id, _)| id.0 == 34));
+        hits.clear();
+        scene.clear();
+        draw_local(
+            &mut scene,
+            &local,
+            &draft,
+            &mut hits,
+            &Gesture::default(),
+            None,
+            true,
+        );
+        assert!(hits.is_empty());
+        assert!(scene.status().is_ok());
+    }
+    #[test]
     fn profile_option_is_ui_owned_and_native_overrides_replace_repeated_groups() {
         let args = [
             "--library",
@@ -1816,6 +2230,7 @@ mod tests {
                 .unwrap();
         let editor = LineEditor::new("device", 4096).unwrap();
         let mut draft = SettingsDraft {
+            cached_local: None,
             values,
             selected: 0,
             editor,
