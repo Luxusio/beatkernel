@@ -4299,12 +4299,13 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
         organisms::scoreboard(pixels, &snapshot.score, &snapshot.recent_results);
     }
     if let (Some(chart), Some(now)) = (&snapshot.chart, snapshot.song_time) {
-        organisms::playfield_with_feedback(
+        organisms::playfield_with_state(
             pixels,
             chart,
             now,
             lookahead,
             &snapshot.recent_results,
+            snapshot.pressed_lanes,
         )?;
         text(
             pixels,
@@ -5794,6 +5795,7 @@ mod tests {
                     last_judge: None,
                     recent_results: Vec::new(),
                     competition: None,
+                    pressed_lanes: 0,
                 })
                 .collect(),
             ..Default::default()
@@ -6088,6 +6090,7 @@ mod tests {
                 last_judge: None,
                 recent_results: Vec::new(),
                 competition: None,
+                pressed_lanes: 0,
             })
             .collect();
         assert!(!local_comparisons_available(&players));

@@ -854,6 +854,32 @@ fn durable_source_seed_restores_real_capture_assets_pcm_and_replay() {
         .unwrap();
     assert!(report.judge_error.is_none());
     assert_eq!(report.judge_events.len(), 1);
+    let mut live_pressed = pressed_keys::PressedKeys::default();
+    live_pressed.apply(&report.bound_inputs).unwrap();
+    assert_eq!(live_pressed.mask(), 1); // Actual admitted BMS 11 button.
+    let (publisher, viewer) = player::channel();
+    player::with_publisher(publisher, || {
+        player::publish_chart(&live.source, &live.compiled.chart)
+            .map_err(|error| error.to_string())?;
+        viewer.take_latest();
+        player::publish_report(&report).map_err(|error| error.to_string())?;
+        player::publish_pause(player::PauseState::Running); // Force actual state handoff.
+        let shown = viewer.take_latest().unwrap();
+        assert_eq!(shown.pressed_lanes, live_pressed.mask());
+        assert_eq!(shown.players[0].pressed_lanes, live_pressed.mask());
+        player::publish_pause(player::PauseState::Paused);
+        assert_eq!(viewer.take_latest().unwrap().pressed_lanes, 0);
+        player::publish_pause(player::PauseState::Running);
+        assert_eq!(
+            viewer.take_latest().unwrap().pressed_lanes,
+            live_pressed.mask()
+        );
+        Ok(())
+    })
+    .unwrap();
+    let finished = viewer.take_latest().unwrap();
+    assert_eq!(finished.pressed_lanes, 0);
+    assert_eq!(finished.players[0].pressed_lanes, 0);
     let live_results = report.judge_events.clone();
     let display_chart =
         player_chart::PlayerChart::from_compiled(&live.source, &live.compiled.chart).unwrap();
@@ -869,6 +895,8 @@ fn durable_source_seed_restores_real_capture_assets_pcm_and_replay() {
     capture.record_report(&report).unwrap();
     let advanced = runtime.advance_to(point(1), &Identity, point(1)).unwrap();
     capture.record_report(&advanced).unwrap();
+    live_pressed.apply(&advanced.bound_inputs).unwrap();
+    assert_eq!(live_pressed.mask(), 1);
     let live_feedback =
         judge_feedback::project(&display_chart, advanced.song_time, &live_results).unwrap();
     assert_eq!(live_feedback[0].unwrap().age_ns, 1);
@@ -879,6 +907,18 @@ fn durable_source_seed_restores_real_capture_assets_pcm_and_replay() {
     )
     .unwrap();
     assert_eq!(file, recorded);
+    let mut visual = replay_visual::ReplayVisual::new(&live.source, &file, replay_limits).unwrap();
+    assert_eq!(visual.pressed_lanes(), 0);
+    visual.advance_to(Timestamp::from_nanos(-1)).unwrap();
+    assert_eq!(visual.pressed_lanes(), 0);
+    visual.advance_to(advanced.song_time).unwrap();
+    assert_eq!(visual.pressed_lanes(), live_pressed.mask());
+    let prior = visual.pressed_lanes();
+    assert!(visual.advance_to(Timestamp::ZERO).is_err());
+    assert_eq!(visual.pressed_lanes(), prior);
+    let fresh = replay_visual::ReplayVisual::new(&live.source, &file, replay_limits).unwrap();
+    assert_eq!(fresh.pressed_lanes(), 0);
+
     assert_eq!(file.header.seed, 0); // Judge-rule seed stays distinct.
     assert_eq!(
         replay_playback::decode_chart_setup(&file.header.options)

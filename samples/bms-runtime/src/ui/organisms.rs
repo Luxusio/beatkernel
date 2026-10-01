@@ -53,7 +53,19 @@ pub fn playfield_with_feedback(
     lookahead: i64,
     recent: &[JudgeEvent],
 ) -> Result<(), String> {
-    playfield_in_with_feedback(
+    playfield_with_state(pixels, chart, now, lookahead, recent, 0)
+}
+
+/// Actual admitted button state, independent of recent judge events.
+pub fn playfield_with_state(
+    pixels: &mut Scene,
+    chart: &PlayerChart,
+    now: Timestamp,
+    lookahead: i64,
+    recent: &[JudgeEvent],
+    pressed_lanes: u32,
+) -> Result<(), String> {
+    playfield_in_with_state(
         pixels,
         chart,
         now,
@@ -65,6 +77,7 @@ pub fn playfield_with_feedback(
             height: LINE - TOP + 28,
         },
         recent,
+        pressed_lanes,
     )
 }
 
@@ -90,6 +103,20 @@ pub fn playfield_in_with_feedback(
     bounds: Bounds,
     recent: &[JudgeEvent],
 ) -> Result<(), String> {
+    playfield_in_with_state(pixels, chart, now, lookahead, bounds, recent, 0)
+}
+
+/// Channel masks are checked before drawing; chart order includes scratch lanes.
+pub fn playfield_in_with_state(
+    pixels: &mut Scene,
+    chart: &PlayerChart,
+    now: Timestamp,
+    lookahead: i64,
+    bounds: Bounds,
+    recent: &[JudgeEvent],
+    pressed_lanes: u32,
+) -> Result<(), String> {
+    crate::pressed_keys::validate_mask(pressed_lanes)?;
     let feedback = crate::judge_feedback::project(chart, now, recent)?;
     if lookahead <= 0 {
         return Err("playfield lookahead must be positive".into());
@@ -136,6 +163,14 @@ pub fn playfield_in_with_feedback(
     for lane in 0..lanes {
         let (left, right) = partition_lane(lane, lanes, bounds.x, bounds.width);
         let background: u32 = if lane % 2 == 0 { 0x1d2734 } else { 0x18212c };
+        if crate::pressed_keys::lane_bit(beatkernel::input::GameControlId(u32::from(
+            chart.lanes[lane],
+        )))
+        .is_some_and(|bit| pressed_lanes & bit != 0)
+        {
+            // Draw over notes, below judgment feedback and the white line.
+            rect(pixels, left + 1, line - 22, right - left - 3, 16, 0x416ca0);
+        }
         if let Some(feedback) = feedback[lane] {
             let color = match feedback.event.outcome {
                 JudgeOutcome::Hit { .. } => 0x74e5c5,
@@ -331,6 +366,7 @@ pub fn local_players_with_competition(
                 .iter()
                 .any(|other| other.player == player.player)
             || player.recent_results.len() > 128
+            || crate::pressed_keys::validate_mask(player.pressed_lanes).is_err()
         {
             return Err("invalid local presentation identities/result capacity".into());
         }
@@ -410,7 +446,7 @@ pub fn local_players_with_competition(
         }
         let field_offset = 72 + summary_height;
         match (player.chart.as_ref(), player.song_time) {
-            (Some(chart), Some(now)) => playfield_in_with_feedback(
+            (Some(chart), Some(now)) => playfield_in_with_state(
                 scene,
                 chart,
                 now,
@@ -422,6 +458,7 @@ pub fn local_players_with_competition(
                     height: bounds.height - field_offset - 8,
                 },
                 &player.recent_results,
+                player.pressed_lanes,
             )?,
             _ => clipped_text(
                 scene,
@@ -689,6 +726,7 @@ mod tests {
                 last_judge: Some(event),
                 recent_results: vec![event],
                 competition: None,
+                pressed_lanes: 0,
             })
             .collect();
         scene.clear();
@@ -713,6 +751,98 @@ mod tests {
         assert!(local_players(&mut scene, &malformed, 1_000_000_000, 0).is_err());
         assert!(scene.rectangles().is_empty());
         assert!(scene.playfields().is_empty());
+    }
+    #[test]
+    fn admitted_press_bands_map_scratch_channels_and_reject_masks_before_geometry() {
+        let source = beatkernel_bms::parse(
+            "#BPM 120\n#WAV01 tap.wav\n#00016:01\n#00011:01\n#00021:01\n",
+            beatkernel_bms::ParseOptions::default(),
+        )
+        .unwrap();
+        let chart = PlayerChart::from_compiled(&source, &source.compile().unwrap().chart).unwrap();
+        let mask = (1 << 5) | (1 << 9); // scratch 16 and second-side key 21
+        let mut scene = Scene::new(960, 720);
+        playfield_with_state(
+            &mut scene,
+            &chart,
+            Timestamp::ZERO,
+            1_000_000_000,
+            &[],
+            mask,
+        )
+        .unwrap();
+        let bands: Vec<_> = scene
+            .rectangles()
+            .iter()
+            .filter(|rect| rect.color == rgba(0x416ca0))
+            .collect();
+        assert_eq!(bands.len(), 2);
+        for channel in [0x16, 0x21] {
+            let lane = chart
+                .lanes
+                .iter()
+                .position(|&candidate| candidate == channel)
+                .unwrap();
+            let (left, right) = lane_bounds(lane, chart.lanes.len());
+            assert!(bands.iter().any(|band| band.bounds
+                == [
+                    (left + 1) as f32,
+                    (LINE - 22) as f32,
+                    (right - left - 3) as f32,
+                    16.0
+                ]));
+        }
+        assert_eq!(scene.rectangles().last().unwrap().color, rgba(0xffffff));
+        scene.clear();
+        assert!(
+            playfield_with_state(
+                &mut scene,
+                &chart,
+                Timestamp::ZERO,
+                1_000_000_000,
+                &[],
+                1 << 18
+            )
+            .is_err()
+        );
+        assert!(scene.rectangles().is_empty());
+        assert!(scene.playfields().is_empty());
+        playfield(&mut scene, &chart, Timestamp::ZERO, 1_000_000_000).unwrap();
+        assert!(
+            scene
+                .rectangles()
+                .iter()
+                .all(|rect| rect.color != rgba(0x416ca0))
+        );
+        let chart = std::sync::Arc::new(chart);
+        let players: Vec<_> = [(3, 1 << 5), (u32::MAX, 1 << 9)]
+            .into_iter()
+            .map(|(id, pressed_lanes)| LocalPlayerSnapshot {
+                player: crate::local_players::PlayerId(id),
+                chart: Some(std::sync::Arc::clone(&chart)),
+                song_time: Some(Timestamp::ZERO),
+                score: Default::default(),
+                last_judge: None,
+                recent_results: vec![],
+                competition: None,
+                pressed_lanes,
+            })
+            .collect();
+        scene.clear();
+        local_players(&mut scene, &players, 1_000_000_000, 0).unwrap();
+        let bands: Vec<_> = scene
+            .rectangles()
+            .iter()
+            .filter(|rect| rect.color == rgba(0x416ca0))
+            .collect();
+        assert_eq!(bands.len(), 2);
+        assert!(inside(&bands[0].bounds, panel_bounds(0, 2)));
+        assert!(inside(&bands[1].bounds, panel_bounds(1, 2)));
+        let mut invalid = players;
+        invalid[1].pressed_lanes = 1 << 31;
+        scene.clear();
+        assert!(local_players(&mut scene, &invalid, 1_000_000_000, 0).is_err());
+        assert!(scene.rectangles().is_empty());
     }
     #[test]
     fn relocated_notes_hold_caps_and_labels_remain_inside_playfield_bounds() {
@@ -783,6 +913,7 @@ mod tests {
                 last_judge: None,
                 recent_results: Vec::new(),
                 competition: None,
+                pressed_lanes: 0,
             })
             .collect();
         let mut scene = Scene::new(960, 720);
@@ -919,6 +1050,7 @@ mod tests {
                 last_judge: None,
                 recent_results: Vec::new(),
                 competition: Some(comparisons(NetworkStatus::Connected, i64::MIN)),
+                pressed_lanes: 0,
             })
             .collect();
         let mut scene = Scene::new(960, 720);

@@ -972,7 +972,11 @@ fn run(options: Options) -> Result<()> {
                 if let Some(boundary) = pause.observe(rendered, pair)? {
                     if boundary.paused {
                         let events = visual.advance_to(boundary.song)?;
-                        player::publish_replay_prefix(boundary.song, &events)?;
+                        player::publish_replay_prefix_with_pressed(
+                            boundary.song,
+                            &events,
+                            visual.pressed_lanes(),
+                        )?;
                     }
                     player::publish_pause(if boundary.paused {
                         player::PauseState::Paused
@@ -998,7 +1002,11 @@ fn run(options: Options) -> Result<()> {
                     };
                     if let Some(song) = song {
                         let events = visual.advance_to(song)?;
-                        player::publish_replay_prefix(song, &events)?;
+                        player::publish_replay_prefix_with_pressed(
+                            song,
+                            &events,
+                            visual.pressed_lanes(),
+                        )?;
                     }
                 }
             }

@@ -20,6 +20,7 @@ pub struct ReplayVisual {
     cursor: usize,
     start: Timestamp,
     observed: Option<Timestamp>,
+    pressed: crate::pressed_keys::PressedKeys,
 }
 impl ReplayVisual {
     /// Validates codec bounds and setup before cloning, and every operation before use.
@@ -32,6 +33,14 @@ impl ReplayVisual {
         // Whole-log judge validation must precede native output. The clone is
         // bounded by canonical validation above, not trusted caller extents.
         drop(reconstruct(source, file.clone(), limits)?);
+        let mut pressed = crate::pressed_keys::PressedKeys::default();
+        for record in &file.records {
+            if let ReplayOperation::Input(input) = &record.operation {
+                pressed.apply(std::slice::from_ref(input))?;
+            }
+        }
+        // Keep preallocated bounded storage, but start at the empty prefix.
+        pressed.clear();
         let (_, start) = decode_setup(&file.header.options)?;
         Ok(Self {
             engine,
@@ -39,10 +48,14 @@ impl ReplayVisual {
             cursor: 0,
             start,
             observed: None,
+            pressed,
         })
     }
     pub const fn start(&self) -> Timestamp {
         self.start
+    }
+    pub fn pressed_lanes(&self) -> u32 {
+        self.pressed.mask()
     }
     pub fn recorded_until(&self) -> Option<Timestamp> {
         self.records.last().map(|record| record.song_time)
@@ -61,7 +74,11 @@ impl ReplayVisual {
             .filter(|record| record.song_time <= song)
         {
             let events = match &record.operation {
-                ReplayOperation::Input(input) => self.engine.push_input(input, record.song_time)?,
+                ReplayOperation::Input(input) => {
+                    let events = self.engine.push_input(input, record.song_time)?;
+                    self.pressed.apply(std::slice::from_ref(input))?;
+                    events
+                }
                 ReplayOperation::Advance => self.engine.advance_to(record.song_time)?,
             };
             results.extend(events);
@@ -135,6 +152,51 @@ mod fixtures {
                 state: ButtonState::Down,
             }),
         })
+    }
+    #[test]
+    fn replay_pressed_owners_release_independently_and_equal_targets_do_not_reapply() {
+        let mut file = file();
+        let operation = |device, key, state, seq| {
+            let ReplayOperation::Input(mut event) = input(0x11, seq) else {
+                unreachable!()
+            };
+            let PhysicalInputEvent::Button(mut button) = event.physical else {
+                unreachable!()
+            };
+            button.meta.source = DeviceId(device);
+            button.control = PhysicalControlId::keyboard(key);
+            button.state = state;
+            event.physical = PhysicalInputEvent::Button(button);
+            ReplayOperation::Input(event)
+        };
+        file.records = [
+            operation(1, 4, ButtonState::Down, 1),
+            operation(2, 5, ButtonState::Down, 2),
+            operation(1, 4, ButtonState::Up, 3),
+            operation(2, 5, ButtonState::Repeat, 4),
+            operation(2, 5, ButtonState::Up, 5),
+            operation(3, 6, ButtonState::Repeat, 6),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(index, operation)| ReplayRecord {
+            ordinal: index as u64,
+            song_time: Timestamp::from_nanos(150_000_000 + index as i64),
+            operation,
+        })
+        .collect();
+        let mut visual = ReplayVisual::new(&source(), &file, limits()).unwrap();
+        assert_eq!(visual.pressed_lanes(), 0);
+        for (index, expected) in [1, 1, 1, 1, 0, 0].into_iter().enumerate() {
+            let target = file.records[index].song_time;
+            visual.advance_to(target).unwrap();
+            assert_eq!(visual.pressed_lanes(), expected);
+            assert!(visual.advance_to(target).unwrap().is_empty());
+            assert_eq!(visual.pressed_lanes(), expected);
+        }
+        assert!(visual.finished());
+        assert!(visual.advance_to(Timestamp::ZERO).is_err());
+        assert_eq!(visual.pressed_lanes(), 0);
     }
     #[test]
     fn paused_native_mixer_prefix_resumes_equal_time_operations_without_duplicate_results() {
