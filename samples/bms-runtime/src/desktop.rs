@@ -7,11 +7,13 @@ use beatkernel_bms_runtime::ui::{
     text_input::LineEditor,
 };
 use beatkernel_bms_runtime::{
+    competition::OpponentKind,
     device_catalog::{DeviceCatalog, DeviceRequest},
     local_players::PlayerId,
     local_setup::LocalSetup,
     player, player_chart,
     presentation_settings::PresentationSettings,
+    record_catalog::{RecordCatalog, RecordPreview},
     session_launch::SessionLaunch,
     settings::{NativeSettings, SettingsHost},
     settings_profile::PlayerProfile,
@@ -232,7 +234,7 @@ pub(super) fn run(
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
-            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry after cleanup; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F4 in settings: records; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry after cleanup; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
         );
         return Ok(());
     }
@@ -297,6 +299,7 @@ pub(super) fn run(
         options,
         active_backend,
         display: None,
+        records: None,
         native,
         validate,
         query_devices,
@@ -344,6 +347,9 @@ struct SettingsDraft {
     error: Option<String>,
 }
 impl SettingsDraft {
+    fn refresh_selected(&mut self) -> Result<(), String> {
+        self.select(self.selected.min(self.values.fields().len() - 1))
+    }
     fn select(&mut self, index: usize) -> Result<(), String> {
         let field = self
             .values
@@ -427,6 +433,93 @@ impl DisplayDraft {
     }
 }
 
+struct RecordsDraft {
+    chart: PathBuf,
+    directory: LineEditor,
+    directory_focused: bool,
+    catalog: Option<RecordCatalog>,
+    selected: Option<usize>,
+    first: usize,
+    preview: Option<RecordPreview>,
+    error: Option<String>,
+    message: Option<String>,
+}
+impl RecordsDraft {
+    fn new(chart: PathBuf) -> Result<Self, String> {
+        let parent = chart
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(std::path::Path::new("."));
+        let directory = LineEditor::new(
+            parent.to_str().ok_or("record directory must be UTF-8")?,
+            4096,
+        )?;
+        Ok(Self {
+            chart,
+            directory,
+            directory_focused: true,
+            catalog: None,
+            selected: None,
+            first: 0,
+            preview: None,
+            error: None,
+            message: None,
+        })
+    }
+    fn selected_path(&self) -> Option<&PathBuf> {
+        self.catalog.as_ref()?.entries.get(self.selected?)
+    }
+    fn valid_preview(&self) -> Option<&RecordPreview> {
+        self.preview
+            .as_ref()
+            .filter(|preview| self.selected_path() == Some(&preview.path))
+    }
+    fn select(&mut self, index: usize) {
+        if self
+            .catalog
+            .as_ref()
+            .is_some_and(|catalog| index < catalog.entries.len())
+        {
+            if self.selected != Some(index) {
+                self.preview = None;
+                self.message = None;
+            }
+            self.selected = Some(index);
+            self.directory_focused = false;
+            self.first = index / SETTINGS_ROWS * SETTINGS_ROWS;
+        }
+    }
+    fn page(&mut self, forward: bool) {
+        let count = self
+            .catalog
+            .as_ref()
+            .map_or(0, |catalog| catalog.entries.len());
+        if count == 0 {
+            return;
+        }
+        let first = if forward {
+            (self.first + SETTINGS_ROWS).min((count - 1) / SETTINGS_ROWS * SETTINGS_ROWS)
+        } else {
+            self.first.saturating_sub(SETTINGS_ROWS)
+        };
+        self.select(first);
+    }
+    fn edit(&mut self, key: Option<KeyCode>, value: Option<&str>) {
+        if !self.directory_focused {
+            return;
+        }
+        let before = self.directory.value().to_owned();
+        self.error = edit_line(&mut self.directory, key, value).err();
+        if self.directory.value() != before {
+            self.catalog = None;
+            self.preview = None;
+            self.selected = None;
+            self.first = 0;
+            self.message = None;
+        }
+    }
+}
+
 struct LocalDraft {
     model: LocalSetup,
     selected: usize,
@@ -442,6 +535,8 @@ struct DevicePicker {
 enum ProfileResult {
     Devices(DeviceCatalog, Option<PlayerId>),
     Loaded(PlayerProfile),
+    Records(RecordCatalog),
+    Record(RecordPreview),
     Saved,
 }
 struct ProfileOperation(Option<JoinHandle<Result<ProfileResult, String>>>);
@@ -478,6 +573,7 @@ struct Desktop {
     options: Options,
     active_backend: BackendChoice,
     display: Option<DisplayDraft>,
+    records: Option<RecordsDraft>,
     native: Native,
     validate: Native,
     query_devices: QueryDevices,
@@ -548,7 +644,8 @@ impl Desktop {
         self.hits.clear();
     }
     fn open_local(&mut self) {
-        if self.display.is_some()
+        if self.records.is_some()
+            || self.display.is_some()
             || self.profile_io.is_some()
             || self.game.is_some()
             || self.picker.is_some()
@@ -699,7 +796,7 @@ impl Desktop {
         Ok(args)
     }
     fn device_request(&mut self, keyboard: bool) {
-        if self.display.is_some() {
+        if self.records.is_some() || self.display.is_some() {
             return;
         }
         if keyboard
@@ -853,7 +950,8 @@ impl Desktop {
         }
     }
     fn profile_request(&mut self, save: bool) {
-        if self.profile_io.is_some()
+        if self.records.is_some()
+            || self.profile_io.is_some()
             || self.game.is_some()
             || self.display.is_some()
             || self.picker.is_some()
@@ -929,8 +1027,37 @@ impl Desktop {
             .expect("profile worker")
             .join()
             .unwrap_or_else(|_| Err("profile worker panicked".into()));
+        if let Some(records) = &mut self.records {
+            if !self.closing {
+                match result {
+                    Ok(ProfileResult::Records(catalog)) => {
+                        records.selected = (!catalog.entries.is_empty()).then_some(0);
+                        records.first = 0;
+                        records.preview = None;
+                        records.directory_focused = false;
+                        records.catalog = Some(catalog);
+                        records.error = None;
+                    }
+                    Ok(ProfileResult::Record(preview)) => {
+                        if records.selected_path() == Some(&preview.path) {
+                            records.preview = Some(preview);
+                            records.error = None;
+                        }
+                    }
+                    Err(error) => {
+                        records.preview = None;
+                        records.error = Some(error);
+                    }
+                    _ => {}
+                }
+            }
+            self.gesture.cancel();
+            self.hits.clear();
+            return;
+        }
         if let Some(draft) = &mut self.settings {
             match result {
+                Ok(ProfileResult::Records(_) | ProfileResult::Record(_)) => {}
                 Ok(ProfileResult::Devices(catalog, player)) => {
                     self.picker = Some(DevicePicker {
                         catalog,
@@ -973,7 +1100,8 @@ impl Desktop {
         self.hits.clear();
     }
     fn apply_settings(&mut self) {
-        if self.profile_io.is_some()
+        if self.records.is_some()
+            || self.profile_io.is_some()
             || self.game.is_some()
             || self.display.is_some()
             || self.picker.is_some()
@@ -1023,8 +1151,204 @@ impl Desktop {
         self.gesture.cancel();
         self.hits.clear();
     }
+    fn records_admitted(&self) -> bool {
+        self.active
+            && !self.closing
+            && !self.suspended
+            && !self.occluded
+            && self.profile_io.is_none()
+            && self.game.is_none()
+            && self.settings.is_some()
+            && self.display.is_none()
+            && self.picker.is_none()
+            && self.local_setup.is_none()
+    }
+    fn open_records(&mut self) {
+        if !self.records_admitted() || self.records.is_some() {
+            return;
+        }
+        let result = self
+            .entries
+            .get(self.selected)
+            .ok_or_else(|| "select a chart before opening records".to_owned())
+            .and_then(|entry| RecordsDraft::new(entry.path.clone()));
+        match result {
+            Ok(records) => self.records = Some(records),
+            Err(error) => {
+                if let Some(draft) = &mut self.settings {
+                    draft.error = Some(error);
+                }
+            }
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn records_request(&mut self, preview: bool) {
+        if !self.records_admitted() {
+            return;
+        }
+        let result = (|| {
+            let records = self.records.as_ref().ok_or("records unavailable")?;
+            if records.directory.value().is_empty() {
+                return Err("enter a record directory".into());
+            }
+            let directory = PathBuf::from(records.directory.value());
+            let selected = if preview {
+                Some(
+                    records
+                        .selected_path()
+                        .ok_or("select a record first")?
+                        .clone(),
+                )
+            } else {
+                None
+            };
+            let chart = records.chart.clone();
+            let settings = self
+                .settings
+                .as_ref()
+                .ok_or("settings unavailable")?
+                .values
+                .clone();
+            thread::Builder::new()
+                .name("bms-profile".into())
+                .spawn(move || match selected {
+                    Some(path) => {
+                        RecordPreview::inspect(&path, &chart, &settings).map(ProfileResult::Record)
+                    }
+                    None => RecordCatalog::scan(&directory).map(ProfileResult::Records),
+                })
+                .map_err(|error| error.to_string())
+        })();
+        match result {
+            Ok(worker) => {
+                self.profile_io = Some(ProfileOperation(Some(worker)));
+                if let Some(records) = &mut self.records {
+                    records.preview = None;
+                    records.error = None;
+                    records.message = None;
+                    if !preview {
+                        records.catalog = None;
+                        records.selected = None;
+                        records.first = 0;
+                    }
+                }
+            }
+            Err(error) => {
+                if let Some(records) = &mut self.records {
+                    records.error = Some(error);
+                }
+            }
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn attach_record(&mut self, kind: OpponentKind) {
+        if !self.records_admitted() {
+            return;
+        }
+        let result = (|| {
+            let records = self.records.as_ref().ok_or("records unavailable")?;
+            let path = records
+                .valid_preview()
+                .ok_or("preview the selected compatible record first")?
+                .path
+                .to_str()
+                .ok_or("record path must be UTF-8")?
+                .to_owned();
+            let draft = self.settings.as_mut().ok_or("settings unavailable")?;
+            draft.values.add_opponent(kind, &path)?;
+            draft.refresh_selected()?;
+            Ok::<_, String>(())
+        })();
+        if let Some(records) = &mut self.records {
+            match result {
+                Ok(()) => {
+                    records.error = None;
+                    records.message = Some("RECORD ADDED TO DRAFT - APPLY IS SEPARATE".into());
+                }
+                Err(error) => records.error = Some(error),
+            }
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn clear_records(&mut self) {
+        if !self.records_admitted() {
+            return;
+        }
+        if let Some(draft) = &mut self.settings {
+            draft.values.clear_opponents();
+            if let Err(error) = draft.refresh_selected() {
+                draft.error = Some(error);
+            }
+        }
+        if let Some(records) = &mut self.records {
+            records.error = None;
+            records.message = Some("GHOSTS CLEARED FROM DRAFT - APPLY IS SEPARATE".into());
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn records_key(&mut self, key: KeyCode, repeat: bool) {
+        match key {
+            KeyCode::Escape if !repeat => self.records = None,
+            KeyCode::Enter if !repeat => self.records_request(
+                self.records
+                    .as_ref()
+                    .is_some_and(|records| !records.directory_focused),
+            ),
+            KeyCode::Tab => {
+                if let Some(records) = &mut self.records {
+                    records.directory_focused = !records.directory_focused;
+                }
+            }
+            KeyCode::PageUp => {
+                if let Some(records) = &mut self.records {
+                    records.page(false);
+                }
+            }
+            KeyCode::PageDown => {
+                if let Some(records) = &mut self.records {
+                    records.page(true);
+                }
+            }
+            KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                if let Some(records) = &mut self.records {
+                    if !records.directory_focused {
+                        let count = records
+                            .catalog
+                            .as_ref()
+                            .map_or(0, |catalog| catalog.entries.len());
+                        if count > 0 {
+                            let index = records.selected.unwrap_or(0);
+                            records.select(if key == KeyCode::ArrowUp {
+                                index.saturating_sub(1)
+                            } else {
+                                (index + 1).min(count - 1)
+                            });
+                        }
+                    }
+                }
+            }
+            KeyCode::ArrowLeft
+            | KeyCode::ArrowRight
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::Backspace
+            | KeyCode::Delete => {
+                if let Some(records) = &mut self.records {
+                    records.edit(Some(key), None);
+                }
+            }
+            _ => {}
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
     fn open_display(&mut self) {
-        if self.game.is_some()
+        if self.records.is_some()
+            || self.game.is_some()
             || self.profile_io.is_some()
             || self.picker.is_some()
             || self.local_setup.is_some()
@@ -1166,6 +1490,36 @@ impl Desktop {
         if self.profile_io.is_some() {
             return;
         }
+        if self.records.is_some() {
+            if !self.records_admitted() {
+                return;
+            }
+            match id.0 {
+                50 => self.records_request(false),
+                51 => self.records_request(true),
+                52 => self.attach_record(OpponentKind::Own),
+                53 => self.attach_record(OpponentKind::Other),
+                54 => self.clear_records(),
+                55 => self.records = None,
+                56 => self.records.as_mut().expect("records routing").page(false),
+                57 => self.records.as_mut().expect("records routing").page(true),
+                58 => {
+                    self.records
+                        .as_mut()
+                        .expect("records routing")
+                        .directory_focused = true
+                }
+                50000..=50255 => self
+                    .records
+                    .as_mut()
+                    .expect("records routing")
+                    .select((id.0 - 50000) as usize),
+                _ => {}
+            }
+            self.gesture.cancel();
+            self.hits.clear();
+            return;
+        }
         if self.display.is_some() {
             match id.0 {
                 40 => self.finish_display(),
@@ -1235,6 +1589,7 @@ impl Desktop {
         }
         if self.settings.is_some() {
             match id.0 {
+                19 => self.open_records(),
                 18 => self.open_display(),
                 17 => self.open_local(),
                 16 => self.device_request(false),
@@ -1434,7 +1789,16 @@ impl Desktop {
     }
     fn key(&mut self, key: KeyCode, repeat: bool) {
         self.gesture.cancel();
-        if !self.active || self.closing || self.profile_io.is_some() {
+        if !self.active
+            || self.closing
+            || self.suspended
+            || self.occluded
+            || self.profile_io.is_some()
+        {
+            return;
+        }
+        if self.records.is_some() {
+            self.records_key(key, repeat);
             return;
         }
         if self.display.is_some() {
@@ -1450,6 +1814,10 @@ impl Desktop {
             return;
         }
         if self.settings.is_some() {
+            if key == KeyCode::F4 && !repeat {
+                self.open_records();
+                return;
+            }
             self.settings_key(key, repeat);
             return;
         }
@@ -1495,7 +1863,7 @@ impl Desktop {
         }
     }
     fn start(&mut self) -> Result<(), String> {
-        if self.profile_io.is_some() {
+        if self.records.is_some() || self.settings.is_some() || self.profile_io.is_some() {
             return Err("profile operation is pending".into());
         }
         let entry = &self.entries[self.selected];
@@ -1528,7 +1896,19 @@ impl Desktop {
         }) {
             text(pixels, 450, 26, "PRACTICE", 2, 0xd8b36b);
         }
-        if let Some(display) = &self.display {
+        if let Some(records) = &self.records {
+            draw_records(
+                pixels,
+                records,
+                &mut self.hits,
+                &self.gesture,
+                point,
+                self.profile_io.is_some(),
+                self.settings
+                    .as_ref()
+                    .map_or(0, |draft| saved_opponents(&draft.values)),
+            );
+        } else if let Some(display) = &self.display {
             draw_display(
                 pixels,
                 display,
@@ -1945,6 +2325,7 @@ impl ApplicationHandler for Desktop {
                             | KeyCode::End
                             | KeyCode::Backspace
                             | KeyCode::Delete
+                            | KeyCode::F4
                     )
                 );
                 if let PhysicalKey::Code(key) = event.physical_key {
@@ -1954,6 +2335,8 @@ impl ApplicationHandler for Desktop {
                     && !navigation
                     && self.active
                     && !self.closing
+                    && !self.suspended
+                    && !self.occluded
                     && self.profile_io.is_none()
                     && self.picker.is_none()
                     && self.local_setup.is_none()
@@ -1963,7 +2346,9 @@ impl ApplicationHandler for Desktop {
                         _ => None,
                     });
                     if let Some(value) = value {
-                        if let Some(display) = &mut self.display {
+                        if let Some(records) = &mut self.records {
+                            records.edit(None, Some(value));
+                        } else if let Some(display) = &mut self.display {
                             display.edit(None, Some(value));
                         } else if let Some(draft) = &mut self.settings {
                             draft.edit(None, Some(value));
@@ -2313,6 +2698,251 @@ fn draw_display(
     }
 }
 
+fn saved_opponents(settings: &NativeSettings) -> usize {
+    settings
+        .fields()
+        .iter()
+        .filter(|field| {
+            matches!(field.flag, "--ghost-self" | "--ghost-other") && !field.value.is_empty()
+        })
+        .count()
+}
+fn draw_records(
+    scene: &mut Scene,
+    records: &RecordsDraft,
+    hits: &mut Vec<(ControlId, Bounds)>,
+    gesture: &Gesture,
+    point: Option<(f64, f64)>,
+    pending: bool,
+    opponents: usize,
+) {
+    text(scene, 24, 65, "RECORDS - RECORDED PREFIX", 2, 0x9bb1cf);
+    text(scene, 24, 120, "DIRECTORY", 1, 0xf0f4ff);
+    let directory_bounds = Bounds {
+        x: 160,
+        y: 108,
+        width: 770,
+        height: 34,
+    };
+    molecules::text_field(
+        scene,
+        &records.directory,
+        directory_bounds,
+        records.directory_focused && !pending,
+    );
+    if !pending {
+        hits.push((ControlId(58), directory_bounds));
+    }
+    text(
+        scene,
+        24,
+        151,
+        "TAB DIRECTORY/LIST   ENTER SCAN/PREVIEW   PGUP/PGDN PAGE",
+        1,
+        0x9bb1cf,
+    );
+    if let Some(catalog) = &records.catalog {
+        for (index, path) in catalog
+            .entries
+            .iter()
+            .enumerate()
+            .skip(records.first)
+            .take(SETTINGS_ROWS)
+        {
+            let bounds = Bounds {
+                x: 24,
+                y: 170 + (index - records.first) as i64 * 30,
+                width: 906,
+                height: 28,
+            };
+            rect(
+                scene,
+                bounds.x,
+                bounds.y,
+                bounds.width,
+                bounds.height,
+                if records.selected == Some(index) {
+                    0x29475e
+                } else {
+                    0x1d2734
+                },
+            );
+            let label = path
+                .file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy();
+            // Existing text-field renderer clips Unicode scalar labels to bounds.
+            molecules::text_field_value(
+                scene,
+                &label,
+                Bounds {
+                    height: 30,
+                    ..bounds
+                },
+            );
+            if records.selected == Some(index) {
+                rect(scene, bounds.x, bounds.y, 4, bounds.height, 0x74e5c5);
+            }
+            if !pending {
+                hits.push((ControlId(50000 + index as u64), bounds));
+            }
+        }
+        if catalog.entries.is_empty() {
+            text(scene, 24, 180, "NO DIRECT .BKR RECORDS", 1, 0x9bb1cf);
+        }
+        text(
+            scene,
+            24,
+            485,
+            &format!(
+                "{} RECORDS{}",
+                catalog.entries.len(),
+                if catalog.truncated {
+                    " - DIRECTORY LIMIT REACHED"
+                } else {
+                    ""
+                }
+            ),
+            1,
+            0xd8b36b,
+        );
+        if !pending {
+            for (id, x, label, available) in [
+                (56, 620, "PREVIOUS", records.first > 0),
+                (
+                    57,
+                    780,
+                    "NEXT",
+                    records.first + SETTINGS_ROWS < catalog.entries.len(),
+                ),
+            ] {
+                if available {
+                    control(
+                        scene,
+                        hits,
+                        gesture,
+                        point,
+                        ControlId(id),
+                        Bounds {
+                            x,
+                            y: 475,
+                            width: 150,
+                            height: 30,
+                        },
+                        label,
+                    );
+                }
+            }
+        }
+    }
+    if pending {
+        text(scene, 24, 520, "LOADING RECORDS", 2, 0xd8b36b);
+    } else if let Some(preview) = records.valid_preview() {
+        text(
+            scene,
+            24,
+            518,
+            &format!(
+                "OPERATIONS {}   START {:.3} S",
+                preview.records,
+                preview.start.as_nanos() as f64 / 1e9
+            ),
+            1,
+            0xb6cce6,
+        );
+        text(
+            scene,
+            24,
+            534,
+            &format!(
+                "UNTIL {}",
+                preview
+                    .recorded_until
+                    .map_or("UNKNOWN".into(), |at| format!(
+                        "{:.3} S",
+                        at.as_nanos() as f64 / 1e9
+                    ))
+            ),
+            1,
+            0xb6cce6,
+        );
+        text(
+            scene,
+            24,
+            550,
+            &format!(
+                "HITS {} MISSES {}",
+                preview.score.hits, preview.score.misses
+            ),
+            1,
+            0x9bb1cf,
+        );
+        text(
+            scene,
+            24,
+            566,
+            &format!(
+                "COMBO {} MAX {}",
+                preview.score.combo, preview.score.max_combo
+            ),
+            1,
+            0x9bb1cf,
+        );
+    } else {
+        text(
+            scene,
+            24,
+            520,
+            "PREVIEW A COMPATIBLE RECORD BEFORE ADDING",
+            1,
+            0x9bb1cf,
+        );
+    }
+    text(
+        scene,
+        24,
+        592,
+        &format!("SAVED GHOSTS {opponents}/8 - DRAFT ONLY"),
+        1,
+        0x9bb1cf,
+    );
+    for (id, x, width, label, available) in [
+        (50, 24, 130, "SCAN", true),
+        (51, 164, 130, "PREVIEW", records.selected_path().is_some()),
+        (52, 304, 130, "ADD OWN", records.valid_preview().is_some()),
+        (53, 444, 140, "ADD OTHER", records.valid_preview().is_some()),
+        (54, 594, 140, "CLEAR ALL", true),
+        (55, 754, 176, "BACK", true),
+    ] {
+        let bounds = Bounds {
+            x,
+            y: 620,
+            width,
+            height: 34,
+        };
+        if pending || !available {
+            molecules::button(scene, bounds, label, false, false);
+        } else {
+            control(scene, hits, gesture, point, ControlId(id), bounds, label);
+        }
+    }
+    if let Some(message) = &records.message {
+        text(scene, 24, 665, message, 1, 0x74e5c5);
+    }
+    if let Some(error) = &records.error {
+        molecules::text_field_value(
+            scene,
+            error,
+            Bounds {
+                x: 24,
+                y: 682,
+                width: 906,
+                height: 30,
+            },
+        );
+    }
+}
+
 fn draw_settings(
     scene: &mut Scene,
     draft: &SettingsDraft,
@@ -2321,16 +2951,17 @@ fn draw_settings(
     point: Option<(f64, f64)>,
     pending: bool,
 ) -> Result<(), String> {
-    text(scene, 24, 65, "SETTINGS - APPLY / BACK", 1, 0x9bb1cf);
+    text(scene, 24, 65, "SETTINGS / F4 RECORDS", 1, 0x9bb1cf);
     for (id, x, label) in [
-        (18, 355, "DISPLAY"),
-        (17, 550, "PLAYERS"),
-        (16, 745, "AUDIO"),
+        (19, 290, "RECORDS"),
+        (18, 455, "DISPLAY"),
+        (17, 620, "PLAYERS"),
+        (16, 785, "AUDIO"),
     ] {
         let bounds = Bounds {
             x,
             y: 60,
-            width: 185,
+            width: 145,
             height: 34,
         };
         if !pending {
@@ -2343,7 +2974,7 @@ fn draw_settings(
     text(
         scene,
         24,
-        91,
+        102,
         &format!(
             "FIELDS {}-{} OF {}   UP/DOWN OR TAB SELECT",
             first + 1,
@@ -2662,6 +3293,128 @@ mod tests {
             game_error_caption(Some(&game)),
             "ERROR - ENTER RETURNS TO SELECTION"
         );
+    }
+    fn record_preview_fixture(path: PathBuf) -> RecordPreview {
+        RecordPreview {
+            path,
+            records: 7,
+            recorded_until: Some(beatkernel::time::Timestamp::from_nanos(1_000_000_000)),
+            start: beatkernel::time::Timestamp::ZERO,
+            score: Default::default(),
+        }
+    }
+    #[test]
+    fn record_selection_paging_and_directory_edits_invalidate_attachment() {
+        let mut records = RecordsDraft::new(PathBuf::from("song.bms")).unwrap();
+        assert_eq!(records.directory.value(), ".");
+        records.catalog = Some(RecordCatalog {
+            entries: (0..26)
+                .map(|index| PathBuf::from(format!("r{index}.bkr")))
+                .collect(),
+            truncated: true,
+        });
+        records.select(0);
+        records.preview = Some(record_preview_fixture(PathBuf::from("r0.bkr")));
+        assert!(records.valid_preview().is_some());
+        records.page(true);
+        assert_eq!(records.selected, Some(10));
+        assert_eq!(records.first, 10);
+        assert!(records.preview.is_none());
+        records.page(true);
+        assert_eq!(records.first, 20);
+        records.page(true);
+        assert_eq!(records.first, 20);
+        records.page(false);
+        assert_eq!(records.first, 10);
+        records.preview = Some(record_preview_fixture(PathBuf::from("r0.bkr")));
+        assert!(records.valid_preview().is_none());
+        records.directory_focused = true;
+        records.edit(None, Some("\n"));
+        assert!(records.error.is_some());
+        assert!(records.catalog.is_some());
+        records.edit(Some(KeyCode::Home), None);
+        records.edit(None, Some("archive/"));
+        assert!(records.catalog.is_none());
+        assert!(records.preview.is_none());
+        assert_eq!(records.selected, None);
+        assert_eq!(records.first, 0);
+    }
+    #[test]
+    fn record_controls_require_current_preview_and_pending_fences_every_action() {
+        let mut records = RecordsDraft::new(PathBuf::from("song.bms")).unwrap();
+        records.catalog = Some(RecordCatalog {
+            entries: vec![PathBuf::from("r.bkr")],
+            truncated: false,
+        });
+        records.select(0);
+        let mut scene = Scene::new(960, 720);
+        let mut hits = Vec::new();
+        draw_records(
+            &mut scene,
+            &records,
+            &mut hits,
+            &Gesture::default(),
+            None,
+            false,
+            0,
+        );
+        assert!(!hits.iter().any(|(id, _)| matches!(id.0, 52 | 53)));
+        records.preview = Some(record_preview_fixture(PathBuf::from("r.bkr")));
+        scene.clear();
+        hits.clear();
+        draw_records(
+            &mut scene,
+            &records,
+            &mut hits,
+            &Gesture::default(),
+            None,
+            false,
+            8,
+        );
+        assert!(hits.iter().any(|(id, _)| *id == ControlId(52)));
+        assert!(hits.iter().any(|(id, _)| *id == ControlId(53)));
+        assert!(
+            hits.iter()
+                .all(|(id, _)| matches!(id.0,50..=58|50000..=50255))
+        );
+        scene.clear();
+        hits.clear();
+        draw_records(
+            &mut scene,
+            &records,
+            &mut hits,
+            &Gesture::default(),
+            None,
+            true,
+            8,
+        );
+        assert!(hits.is_empty());
+    }
+    #[test]
+    fn cleared_ghost_field_refreshes_the_settings_editor_without_resurrecting_path() {
+        let mut values = NativeSettings::from_args(&[], SettingsHost::Linux).unwrap();
+        values.add_opponent(OpponentKind::Own, "r.bkr").unwrap();
+        let selected = values
+            .fields()
+            .iter()
+            .position(|field| field.flag == "--ghost-self")
+            .unwrap();
+        let mut draft = SettingsDraft {
+            values,
+            presentation: Default::default(),
+            cached_local: None,
+            selected,
+            editor: LineEditor::new("r.bkr", 4096).unwrap(),
+            profile: LineEditor::new("", 4096).unwrap(),
+            profile_focused: false,
+            message: None,
+            error: None,
+        };
+        assert_eq!(saved_opponents(&draft.values), 1);
+        draft.values.clear_opponents();
+        draft.refresh_selected().unwrap();
+        assert_eq!(draft.editor.value(), "");
+        assert_eq!(saved_opponents(&draft.values), 0);
     }
     #[test]
     fn display_modal_isolated_edits_back_and_pending_controls() {
