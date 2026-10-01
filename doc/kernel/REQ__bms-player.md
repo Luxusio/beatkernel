@@ -719,3 +719,19 @@ Known ceiling: snapshot delivery is coalesced, so the mark is the latest observe
 position rather than the exact physical key event time. This creates a fresh
 transport rather than seeking/pause-resuming a live driver. Loops, live pause,
 browser host and full native timing acceptance remain unfinished.
+
+## Catalog search and filtered selection
+
+Selection exposes a 256-byte single-line search field (F3 or click). Whitespace
+separated tokens must each occur in the combined lowercased title and artist.
+The original catalog order and entry identity remain; a changed query retains
+the selected entry when matched, otherwise selects the first match. Zero matches
+admit neither Play nor Records for a previously selected hidden chart.
+
+Up/Down navigates matches. Enter exits search editing before a subsequent Enter
+starts play; Escape clears search and exits editing before ordinary close.
+Settings Back and Play return preserve the query, while navigation clears focus
+so hidden views cannot consume text. Matching runs only when the query changes.
+Known ceiling: normalized title/artist text is cached once, adding catalog-sized
+memory. Matching is linear per query edit; Unicode lowercase substring matching
+is not locale collation, full case folding, accent removal or fuzzy ranking.

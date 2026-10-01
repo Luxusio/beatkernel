@@ -120,6 +120,10 @@ stable `--local-player ID:INTERFACE_PATH` assignments with one Raw Input pump.
 macOS uses stable --local-player ID:REGISTRY assignments over IOHID and CoreAudio. The shared execution primitive
 owns independent core runtimes with one authoritative song transport and output
 producer; native solo playback now uses the same composition.
+Selection F3 or the search field filters title and artist with whitespace-separated
+substring tokens. Up/Down navigates matches; Enter exits search editing before
+playing, and Escape clears it before ordinary close. Empty results cannot play
+or open Records for a hidden chart. Search survives Settings Back and Play return.
 F5 or Retry starts the same chart again after the previous native session has
 finished cleanup. The accepted chart/device/timing/roster options stay pinned;
 recorded retries use distinct .retry<N>.bkr stems and create-new saves.

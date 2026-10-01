@@ -260,3 +260,11 @@ drain and joined-owner replacement boundary. Preflight failure retains the
 current session and bookmark. Closing and explicit cancellation discard prepared
 replacement, and failed cleanup cannot auto-start another owner. UI nodes own no
 audio seek state or clocks. F5 continues to use the original pinned start.
+
+## Selection search focus
+
+Selection search retains its app-owned query and original catalog identities
+across Settings Back and fresh sessions. Text editing is admitted only while
+Selection is active and its search field is focused. Every route commit clears
+search focus. Filtered hit IDs still identify original catalog entries, and
+hidden/nonmatching entries cannot be selected through stale click IDs.
