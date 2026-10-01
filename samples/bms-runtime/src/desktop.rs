@@ -2,6 +2,7 @@
 use beatkernel::judge::JudgeOutcome;
 use beatkernel_bms_runtime::ui::{
     atoms::{rect, text},
+    catalog_search::CatalogSearch,
     devices::{DevicesFrame, DevicesView},
     display::{BUTTONS as DISPLAY_BUTTONS, DisplayFrame, DisplayView},
     interaction::{Bounds, ControlId, Gesture, logical_point},
@@ -275,7 +276,7 @@ pub(super) fn run(
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
-            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F4 in settings: records; F6 in settings: practice;  W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry pinned start; F7: mark live position; F8: restart mark after cleanup; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F3 in selection: search; F4 in settings: records; F6 in settings: practice;  W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry pinned start; F7: mark live position; F8: restart mark after cleanup; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
         );
         return Ok(());
     }
@@ -334,7 +335,7 @@ pub(super) fn run(
             Vec::<String>::new(),
         )
     };
-    let selection_items = entries
+    let selection_items: Arc<[SelectionItem]> = entries
         .iter()
         .map(|entry| SelectionItem {
             title: entry.title.clone(),
@@ -343,6 +344,8 @@ pub(super) fn run(
         .collect::<Vec<_>>()
         .into();
     let selection_diagnostics = diagnostics.into();
+    let catalog_search = CatalogSearch::new(&selection_items)?;
+    let search_editor = LineEditor::new("", 256)?;
     let event_loop = EventLoop::new()?;
     let active_backend = options.backend;
     let mut app = Desktop {
@@ -369,6 +372,9 @@ pub(super) fn run(
         entries,
         selected: 0,
         selection_items,
+        catalog_search,
+        search_editor,
+        search_focused: false,
         selection_diagnostics,
         selection_view: None,
         painted_reactive: None,
@@ -724,6 +730,9 @@ struct Desktop {
     entries: Vec<Entry>,
     selected: usize,
     selection_items: Arc<[SelectionItem]>,
+    catalog_search: CatalogSearch,
+    search_editor: LineEditor,
+    search_focused: bool,
     selection_diagnostics: Arc<[String]>,
     selection_view: Option<SelectionView>,
     painted_reactive: Option<ScreenInstanceId>,
@@ -780,6 +789,7 @@ impl Desktop {
     /// Native owners are drained separately and survive application Closing.
     fn commit_route(&mut self, next: ScreenNavigator) {
         self.navigator = next;
+        self.set_search_focus(false);
         self.gesture.cancel();
         self.invalidate_hits();
         self.pointer = None;
@@ -1500,9 +1510,10 @@ impl Desktop {
             return;
         }
         let result = self.prepare_route(ScreenRoute::Records).and_then(|next| {
-            self.entries
-                .get(self.selected)
-                .ok_or_else(|| "select a chart before opening records".to_owned())
+            self.catalog_search
+                .selected()
+                .and_then(|index| self.entries.get(index))
+                .ok_or_else(|| "select a matching chart before opening records".to_owned())
                 .and_then(|entry| RecordsDraft::new(entry.path.clone()))
                 .map(|records| (next, records))
         });
@@ -2175,9 +2186,15 @@ impl Desktop {
             {
                 self.request_restart(true)
             }
+            80 if self.navigator.route() == ScreenRoute::Selection => self.set_search_focus(true),
             5 if self.navigator.route() == ScreenRoute::Selection => self.open_settings(),
-            1 if self.navigator.route() == ScreenRoute::Selection && !self.entries.is_empty() => {
-                self.key(KeyCode::Enter, false)
+            1 if self.navigator.route() == ScreenRoute::Selection
+                && self.catalog_search.selected().is_some() =>
+            {
+                self.set_search_focus(false);
+                if let Err(error) = self.start() {
+                    self.failure = Some(error);
+                }
             }
             2 if self.game.as_ref().is_some_and(|game| !game.joined) => self.cancel(),
             3 if matches!(self.navigator.route(), ScreenRoute::Results { .. }) => {
@@ -2189,8 +2206,9 @@ impl Desktop {
             }
             row if row >= 100 && self.navigator.route() == ScreenRoute::Selection => {
                 if let Ok(index) = usize::try_from(row - 100) {
-                    if index < self.entries.len() {
+                    if self.catalog_search.select(index).is_ok() {
                         self.selected = index;
+                        self.set_search_focus(false);
                     }
                 }
             }
@@ -2372,10 +2390,79 @@ impl Desktop {
             }
         }
     }
+    fn set_search_focus(&mut self, focused: bool) {
+        if self.search_focused != focused {
+            self.search_focused = focused;
+            if let Some(window) = &self.window {
+                window.set_ime_allowed(focused);
+            }
+        }
+    }
+    fn edit_search(&mut self, key: Option<KeyCode>, value: Option<&str>) {
+        if !self.ui_ready()
+            || self.navigator.route() != ScreenRoute::Selection
+            || !self.search_focused
+        {
+            return;
+        }
+        let mut editor = self.search_editor.clone();
+        let result = edit_line(&mut editor, key, value)
+            .and_then(|()| self.catalog_search.set_query(editor.value()));
+        match result {
+            Ok(()) => {
+                self.search_editor = editor;
+                if let Some(index) = self.catalog_search.selected() {
+                    self.selected = index;
+                }
+                self.failure = None;
+            }
+            Err(error) => self.failure = Some(error),
+        }
+        self.invalidate_hits();
+    }
     fn key(&mut self, key: KeyCode, repeat: bool) {
         self.gesture.cancel();
         if !self.ui_ready() {
             return;
+        }
+        if self.navigator.route() == ScreenRoute::Selection {
+            if key == KeyCode::F3 && !repeat {
+                self.set_search_focus(true);
+                self.invalidate_hits();
+                return;
+            }
+            if self.search_focused {
+                match key {
+                    KeyCode::Escape if !repeat => {
+                        self.search_editor =
+                            LineEditor::new("", 256).expect("empty bounded search");
+                        if let Err(error) = self.catalog_search.set_query("") {
+                            self.failure = Some(error);
+                        }
+                        if let Some(index) = self.catalog_search.selected() {
+                            self.selected = index;
+                        }
+                        self.set_search_focus(false);
+                        self.invalidate_hits();
+                        return;
+                    }
+                    KeyCode::Enter if !repeat => {
+                        self.set_search_focus(false);
+                        self.invalidate_hits();
+                        return;
+                    }
+                    KeyCode::ArrowLeft
+                    | KeyCode::ArrowRight
+                    | KeyCode::Home
+                    | KeyCode::End
+                    | KeyCode::Backspace
+                    | KeyCode::Delete => {
+                        self.edit_search(Some(key), None);
+                        return;
+                    }
+                    _ => {}
+                }
+            }
         }
         if self.navigator.route() == ScreenRoute::Records {
             self.records_key(key, repeat);
@@ -2473,11 +2560,14 @@ impl Desktop {
             match key {
                 KeyCode::F2 if !repeat => self.open_settings(),
                 KeyCode::Escape if !repeat => self.request_close(),
-                KeyCode::ArrowUp => self.selected = self.selected.saturating_sub(1),
-                KeyCode::ArrowDown if !self.entries.is_empty() => {
-                    self.selected = (self.selected + 1).min(self.entries.len() - 1)
+                KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                    self.catalog_search.step(key == KeyCode::ArrowDown);
+                    if let Some(index) = self.catalog_search.selected() {
+                        self.selected = index;
+                    }
+                    self.invalidate_hits();
                 }
-                KeyCode::Enter if !repeat && !self.entries.is_empty() => {
+                KeyCode::Enter if !repeat && self.catalog_search.selected().is_some() => {
                     if let Err(error) = self.start() {
                         self.failure = Some(error);
                     }
@@ -2491,7 +2581,14 @@ impl Desktop {
             return Err("chart selection is not active".into());
         }
         let next = self.prepare_route(ScreenRoute::Play { replay: false })?;
-        let entry = &self.entries[self.selected];
+        let index = self
+            .catalog_search
+            .selected()
+            .ok_or("no matching chart selected")?;
+        let entry = self
+            .entries
+            .get(index)
+            .ok_or("selected chart unavailable")?;
         let path = entry
             .path
             .to_str()
@@ -2558,6 +2655,8 @@ impl Desktop {
             .selection_view
             .as_ref()
             .ok_or("Selection view unavailable")?;
+        view.set_projection(self.catalog_search.indices(), self.catalog_search.cursor())?;
+        view.set_search(&self.search_editor, self.search_focused)?;
         view.update(frame);
         if view.dirty() || self.painted_reactive != Some(id) {
             view.compose(&mut self.scene, &mut self.hits)?;
@@ -3150,6 +3249,11 @@ impl ApplicationHandler for Desktop {
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = Some((position.x, position.y))
             }
+            WindowEvent::Ime(winit::event::Ime::Commit(value)) => {
+                if self.navigator.route() == ScreenRoute::Selection && self.search_focused {
+                    self.edit_search(None, Some(&value));
+                }
+            }
             WindowEvent::CursorLeft { .. } => {
                 self.pointer = None;
                 self.gesture.cancel();
@@ -3207,6 +3311,9 @@ impl ApplicationHandler for Desktop {
                                 if let Some(practice) = &mut self.practice {
                                     practice.edit(None, Some(value));
                                 }
+                            }
+                            ScreenRoute::Selection if self.search_focused => {
+                                self.edit_search(None, Some(value))
                             }
                             ScreenRoute::Records => {
                                 if let Some(records) = &mut self.records {
@@ -3605,6 +3712,13 @@ mod tests {
                 artist: String::new(),
             }]
             .into(),
+            catalog_search: CatalogSearch::new(&[SelectionItem {
+                title: "FIXTURE".into(),
+                artist: String::new(),
+            }])
+            .unwrap(),
+            search_editor: LineEditor::new("", 256).unwrap(),
+            search_focused: false,
             selection_diagnostics: Arc::from([]),
             selection_view: None,
             painted_reactive: None,
@@ -3624,6 +3738,76 @@ mod tests {
             hits: Vec::new(),
         }
     }
+    #[test]
+    fn filtered_selection_preserves_catalog_identity_and_empty_results_cannot_play_or_open_records()
+    {
+        let mut app = lifecycle_fixture();
+        app.entries.push(Entry {
+            path: "other.bms".into(),
+            title: "OTHER SONG".into(),
+            artist: "ARTIST".into(),
+        });
+        app.selection_items = app
+            .entries
+            .iter()
+            .map(|entry| SelectionItem {
+                title: entry.title.clone(),
+                artist: entry.artist.clone(),
+            })
+            .collect::<Vec<_>>()
+            .into();
+        app.catalog_search = CatalogSearch::new(&app.selection_items).unwrap();
+        app.key(KeyCode::F3, false);
+        app.edit_search(None, Some("other artist"));
+        assert_eq!(app.catalog_search.selected(), Some(1));
+        assert_eq!(app.selected, 1);
+        app.draw().unwrap();
+        assert!(app.hits.iter().any(|(id, _)| *id == ControlId(101)));
+        assert!(!app.hits.iter().any(|(id, _)| *id == ControlId(100)));
+        app.activate(ControlId(100));
+        assert_eq!(app.selected, 1);
+        app.key(KeyCode::Enter, false);
+        assert!(!app.search_focused);
+        assert!(app.game.is_none());
+        app.open_settings();
+        assert!(!app.search_focused);
+        app.edit_search(None, Some("hidden"));
+        assert_eq!(app.search_editor.value(), "other artist");
+        app.back();
+        app.draw().unwrap();
+        assert_eq!(app.catalog_search.selected(), Some(1));
+        app.key(KeyCode::F3, false);
+        app.edit_search(None, Some(" missing"));
+        app.draw().unwrap();
+        assert_eq!(app.catalog_search.selected(), None);
+        assert!(!app.hits.iter().any(|(id, _)| *id == ControlId(1)));
+        assert!(app.start().is_err());
+        app.open_settings();
+        app.open_records();
+        assert_eq!(app.navigator.route(), ScreenRoute::Settings);
+        assert!(app.records.is_none());
+        app.back();
+        app.key(KeyCode::F3, false);
+        app.key(KeyCode::Escape, false);
+        assert_eq!(app.search_editor.value(), "");
+        assert_eq!(app.catalog_search.selected(), Some(0));
+        assert!(!app.closing());
+        fn reject_start(_: &[String]) -> Result<(), Box<dyn Error>> {
+            Err("START BUTTON REACHED PREFLIGHT".into())
+        }
+        app.validate = reject_start;
+        app.set_search_focus(true);
+        app.activate(ControlId(1));
+        assert!(!app.search_focused);
+        assert!(
+            app.failure
+                .as_deref()
+                .unwrap()
+                .contains("START BUTTON REACHED PREFLIGHT")
+        );
+        assert!(app.game.is_none());
+    }
+
     #[test]
     fn selection_reuses_geometry_and_scope_after_settings_back() {
         let mut app = lifecycle_fixture();
