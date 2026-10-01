@@ -8,13 +8,19 @@ publish = false
 default-run = "beatkernel-bms-runtime"
 
 [features]
-default = []
+default = ["desktop"]
+desktop = ["graphics", "dep:winit", "dep:pollster"]
+graphics = ["dep:wgpu", "dep:bytemuck"]
 asio-sdk = ["beatkernel-platform/asio-sdk"]
 
 [dependencies]
 beatkernel = { path = "../../crates/beatkernel" }
 beatkernel-platform = { path = "../../crates/beatkernel-platform" }
 beatkernel-bms = { path = "../../adapters/beatkernel-bms" }
+wgpu = { version = "=27.0.1", optional = true }
+bytemuck = { version = "=1.24.0", features = ["derive"], optional = true }
+winit = { version = "=0.30.13", optional = true }
+pollster = { version = "=0.4.0", optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "=0.59.0", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Performance", "Win32_System_Threading", "Win32_UI_Input", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }

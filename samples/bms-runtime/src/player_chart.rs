@@ -1,0 +1,491 @@
+//! Bounded chart catalog and exact-time data for desktop presentation.
+use beatkernel::{
+    chart::{CompiledChart, ObjectId},
+    time::Timestamp,
+};
+use beatkernel_bms::BmsChart;
+use std::{
+    collections::BTreeMap,
+    error::Error,
+    fmt, fs,
+    path::{Path, PathBuf},
+};
+
+/// Maximum number of notes returned for one desktop frame.
+pub const MAX_VISIBLE_NOTES: usize = 2048;
+
+/// A note from the actual compiled gameplay chart.
+#[derive(Clone, Debug)]
+pub struct PlayerNote {
+    /// Chart-local gameplay identity.
+    pub object: ObjectId,
+    /// Index into the presentation's ordered lane list.
+    pub lane_index: usize,
+    /// Exact compiled head time.
+    pub start: Timestamp,
+    /// Exact compiled hold endpoint, if present.
+    pub end: Option<Timestamp>,
+}
+
+/// Presentation data prepared once, outside gameplay/audio callbacks.
+#[derive(Clone, Debug)]
+pub struct PlayerChart {
+    /// Original Unicode title.
+    pub title: String,
+    /// Original Unicode artist.
+    pub artist: String,
+    /// Original BMS channels in left-to-right scratch/key order.
+    pub lanes: Vec<u8>,
+    /// Notes ordered by compiled head timestamp, then identity.
+    pub notes: Vec<PlayerNote>,
+    /// Latest gameplay endpoint, in song nanoseconds.
+    pub duration_ns: i64,
+    // A range-maximum tree prunes ended holds without scanning the old prefix.
+    endpoint_tree: Vec<i64>,
+    tree_leaves: usize,
+}
+
+/// A chart/catalog preparation failure with a user-visible explanation.
+#[derive(Debug)]
+pub struct PlayerChartError(pub String);
+impl fmt::Display for PlayerChartError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl Error for PlayerChartError {}
+
+fn lane_order(channel: u8) -> (u8, u8) {
+    let side = channel >> 4;
+    let column = channel & 15;
+    // Scratch belongs at the outside edge on each side of a double-play chart.
+    let rank = if column == 6 {
+        if side == 1 {
+            0
+        } else {
+            10
+        }
+    } else {
+        column
+    };
+    (side, rank)
+}
+
+impl PlayerChart {
+    /// Projects actual compiled IDs and times through adapter-owned lane data.
+    pub fn from_compiled(
+        source: &BmsChart,
+        chart: &CompiledChart,
+    ) -> Result<Self, PlayerChartError> {
+        let mut by_id = BTreeMap::new();
+        for note in &source.notes {
+            if by_id.insert(note.object, note.lane.channel()).is_some() {
+                return Err(PlayerChartError(format!(
+                    "duplicate BMS object {}",
+                    note.object.0
+                )));
+            }
+        }
+        if by_id.len() != chart.objects().len() {
+            return Err(PlayerChartError(
+                "BMS lane mapping and compiled chart differ".into(),
+            ));
+        }
+        let mut lanes: Vec<u8> = by_id.values().copied().collect();
+        lanes.sort_by_key(|channel| lane_order(*channel));
+        lanes.dedup();
+        let lane_indices: BTreeMap<_, _> = lanes
+            .iter()
+            .enumerate()
+            .map(|(index, lane)| (*lane, index))
+            .collect();
+        let mut notes = Vec::with_capacity(chart.objects().len());
+        for object in chart.objects() {
+            let lane = by_id.remove(&object.id).ok_or_else(|| {
+                PlayerChartError(format!("missing BMS lane for object {}", object.id.0))
+            })?;
+            notes.push(PlayerNote {
+                object: object.id,
+                lane_index: lane_indices[&lane],
+                start: object.time.start,
+                end: object.time.end,
+            });
+        }
+        notes.sort_by_key(|note| (note.start, note.object));
+        let tree_leaves = notes.len().max(1).next_power_of_two();
+        let mut endpoint_tree = vec![i64::MIN; tree_leaves * 2];
+        let mut duration_ns = 0;
+        for (index, note) in notes.iter().enumerate() {
+            let end = note.end.unwrap_or(note.start).as_nanos();
+            endpoint_tree[tree_leaves + index] = end;
+            duration_ns = duration_ns.max(end);
+        }
+        for index in (1..tree_leaves).rev() {
+            endpoint_tree[index] = endpoint_tree[index * 2].max(endpoint_tree[index * 2 + 1]);
+        }
+        Ok(Self {
+            title: source.metadata.get("TITLE").cloned().unwrap_or_default(),
+            artist: source.metadata.get("ARTIST").cloned().unwrap_or_default(),
+            lanes,
+            notes,
+            duration_ns,
+            endpoint_tree,
+            tree_leaves,
+        })
+    }
+
+    /// Returns bounded head/body overlaps in the inclusive requested time window.
+    /// Negative window extents return no notes. Wide arithmetic preserves windows
+    /// that extend beyond the representable timestamp range.
+    pub fn visible_notes(
+        &self,
+        now: Timestamp,
+        lookahead_ns: i64,
+        behind_ns: i64,
+        max: usize,
+    ) -> Vec<&PlayerNote> {
+        if lookahead_ns < 0 || behind_ns < 0 || max == 0 {
+            return Vec::new();
+        }
+        let lower = i128::from(now.as_nanos()) - i128::from(behind_ns);
+        let upper = i128::from(now.as_nanos()) + i128::from(lookahead_ns);
+        let end = self
+            .notes
+            .partition_point(|note| i128::from(note.start.as_nanos()) <= upper);
+        let mut visible = Vec::with_capacity(max.min(MAX_VISIBLE_NOTES).min(end));
+        self.collect_visible(
+            1,
+            0,
+            self.tree_leaves,
+            end,
+            lower,
+            max.min(MAX_VISIBLE_NOTES),
+            &mut visible,
+        );
+        visible
+    }
+
+    fn collect_visible<'a>(
+        &'a self,
+        node: usize,
+        first: usize,
+        last: usize,
+        end: usize,
+        lower: i128,
+        max: usize,
+        visible: &mut Vec<&'a PlayerNote>,
+    ) {
+        if first >= end || visible.len() >= max || i128::from(self.endpoint_tree[node]) < lower {
+            return;
+        }
+        if last - first == 1 {
+            if let Some(note) = self.notes.get(first) {
+                visible.push(note);
+            }
+            return;
+        }
+        let middle = first + (last - first) / 2;
+        self.collect_visible(node * 2, first, middle, end, lower, max, visible);
+        self.collect_visible(node * 2 + 1, middle, last, end, lower, max, visible);
+    }
+}
+
+/// A selectable chart without loaded audio assets.
+#[derive(Clone, Debug)]
+pub struct LibraryEntry {
+    /// Actual chart path.
+    pub path: PathBuf,
+    /// Original title, or file name if absent.
+    pub title: String,
+    /// Original artist.
+    pub artist: String,
+}
+
+/// Bounded library contents and visible parse/traversal diagnostics.
+#[derive(Clone, Debug)]
+pub struct ChartLibrary {
+    /// Deterministically sorted supported charts.
+    pub entries: Vec<LibraryEntry>,
+    /// Errors and reached limits; sound assets are never opened.
+    pub diagnostics: Vec<String>,
+}
+
+/// Scans an explicit directory without following symlinks or loading WAV files.
+/// Limits: 128 directories, depth eight, 1024 chart files, 8192 directory entries
+/// and 64 MiB aggregate advertised chart bytes (individual reader cap: 8 MiB).
+pub fn scan_library(root: &Path) -> Result<ChartLibrary, PlayerChartError> {
+    let metadata = fs::symlink_metadata(root)
+        .map_err(|error| PlayerChartError(format!("{}: {error}", root.display())))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(PlayerChartError(
+            "library root must be a non-symlink directory".into(),
+        ));
+    }
+    let mut library = ChartLibrary {
+        entries: Vec::new(),
+        diagnostics: Vec::new(),
+    };
+    let mut pending = vec![(root.to_path_buf(), 0usize)];
+    let mut directories = 1usize;
+    let mut visited = 0usize;
+    let mut files = 0usize;
+    let mut bytes = 0u64;
+    let mut entry_limit = false;
+    'scan: while let Some((directory, depth)) = pending.pop() {
+        let reader = match fs::read_dir(&directory) {
+            Ok(reader) => reader,
+            Err(error) => {
+                library
+                    .diagnostics
+                    .push(format!("{}: {error}", directory.display()));
+                continue;
+            }
+        };
+        let mut paths = Vec::new();
+        for entry in reader {
+            if visited == 8192 {
+                library
+                    .diagnostics
+                    .push("library directory-entry limit reached (8192)".into());
+                entry_limit = true;
+                break;
+            }
+            visited += 1;
+            match entry {
+                Ok(entry) => paths.push(entry.path()),
+                Err(error) => library
+                    .diagnostics
+                    .push(format!("{}: {error}", directory.display())),
+            }
+        }
+        paths.sort();
+        let mut children = Vec::new();
+        for path in paths {
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    library
+                        .diagnostics
+                        .push(format!("{}: {error}", path.display()));
+                    continue;
+                }
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_dir() {
+                if depth == 8 || directories == 128 {
+                    library.diagnostics.push(format!(
+                        "{}: library directory/depth limit reached",
+                        path.display()
+                    ));
+                } else {
+                    directories += 1;
+                    children.push((path, depth + 1));
+                }
+                continue;
+            }
+            if !metadata.is_file()
+                || !path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        matches!(
+                            extension.to_ascii_lowercase().as_str(),
+                            "bms" | "bme" | "bml"
+                        )
+                    })
+            {
+                continue;
+            }
+            if files == 1024 {
+                library
+                    .diagnostics
+                    .push("library chart-file limit reached (1024)".into());
+                break 'scan;
+            }
+            files += 1;
+            if metadata.len() > 8 * 1024 * 1024 {
+                library.diagnostics.push(format!(
+                    "{}: BMS text exceeds parser byte cap",
+                    path.display()
+                ));
+                continue;
+            }
+            if bytes + metadata.len() > 64 * 1024 * 1024 {
+                library
+                    .diagnostics
+                    .push("library aggregate chart-byte limit reached (64 MiB)".into());
+                break 'scan;
+            }
+            bytes += metadata.len();
+            match crate::competition_live::load_chart(&path) {
+                Ok(chart) => library.entries.push(LibraryEntry {
+                    title: chart
+                        .metadata
+                        .get("TITLE")
+                        .filter(|title| !title.is_empty())
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            path.file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into_owned()
+                        }),
+                    artist: chart.metadata.get("ARTIST").cloned().unwrap_or_default(),
+                    path,
+                }),
+                Err(error) => library
+                    .diagnostics
+                    .push(format!("{}: {error}", path.display())),
+            }
+        }
+        if entry_limit {
+            break;
+        }
+        pending.extend(children.into_iter().rev());
+    }
+    library.entries.sort_by(|left, right| {
+        (&left.title, &left.artist, &left.path).cmp(&(&right.title, &right.artist, &right.path))
+    });
+    Ok(library)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use beatkernel_bms::{parse, ParseOptions};
+
+    fn model(text: &str) -> PlayerChart {
+        let source = parse(text, ParseOptions::default()).unwrap();
+        PlayerChart::from_compiled(&source, &source.compile().unwrap().chart).unwrap()
+    }
+
+    #[test]
+    fn unicode_lane_order_and_exact_hold_overlap() {
+        let chart = model("#TITLE 별빛\n#ARTIST 作曲家\n#BPM 60\n#LNTYPE 1\n#WAV01 tap.wav\n#00016:01\n#00021:01\n#00026:01\n#00051:0101\n");
+        assert_eq!(
+            (chart.title.as_str(), chart.artist.as_str()),
+            ("별빛", "作曲家")
+        );
+        assert_eq!(chart.lanes, vec![0x16, 0x11, 0x21, 0x26]);
+        let visible = chart.visible_notes(Timestamp::from_nanos(1_000_000_000), 0, 0, 10);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].start, Timestamp::ZERO);
+        assert_eq!(visible[0].end, Some(Timestamp::from_nanos(2_000_000_000)));
+        assert!(chart
+            .visible_notes(Timestamp::from_nanos(2_000_000_001), 0, 0, 10)
+            .is_empty());
+    }
+
+    #[test]
+    fn wide_windows_and_frame_cap() {
+        let chart = model("#BPM 60\n#WAV01 tap.wav\n#00011:0101\n");
+        assert_eq!(
+            chart
+                .visible_notes(Timestamp::MAX, i64::MAX, i64::MAX, 10)
+                .len(),
+            2
+        );
+        assert!(chart
+            .visible_notes(Timestamp::MIN, i64::MAX, i64::MAX, 10)
+            .is_empty());
+        assert_eq!(
+            chart.visible_notes(Timestamp::ZERO, i64::MAX, 0, 1).len(),
+            1
+        );
+        assert!(chart.visible_notes(Timestamp::ZERO, -1, 0, 10).is_empty());
+        let dense = model(&format!(
+            "#BPM 60\n#WAV01 tap.wav\n#00011:{}\n",
+            "01".repeat(2400)
+        ));
+        assert_eq!(
+            dense
+                .visible_notes(Timestamp::ZERO, i64::MAX, 0, usize::MAX)
+                .len(),
+            MAX_VISIBLE_NOTES
+        );
+    }
+
+    #[test]
+    fn mismatched_compiled_mapping_is_rejected() {
+        let mut source = parse(
+            "#BPM 60\n#WAV01 tap.wav\n#00011:01\n",
+            ParseOptions::default(),
+        )
+        .unwrap();
+        let compiled = source.compile().unwrap();
+        source.notes[0].object = ObjectId(999);
+        assert!(PlayerChart::from_compiled(&source, &compiled.chart).is_err());
+    }
+
+    struct TempLibrary(PathBuf);
+    impl TempLibrary {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "beatkernel-player-catalog-{}-{sequence}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for TempLibrary {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn library_keeps_unicode_sort_and_parse_diagnostics_without_assets() {
+        let root = TempLibrary::new();
+        fs::create_dir(root.0.join("nested")).unwrap();
+        fs::write(
+            root.0.join("z.bms"),
+            "#TITLE 별빛\n#ARTIST 作曲家\n#BPM 60\n#WAV01 nonexistent.wav\n#00011:01\n",
+        )
+        .unwrap();
+        fs::write(root.0.join("nested/a.BME"), "#TITLE Alpha\n#BPM 60\n").unwrap();
+        fs::write(root.0.join("invalid.bms"), [0xff, 0xfe]).unwrap();
+        fs::write(root.0.join("ignore.txt"), "not a chart").unwrap();
+        let library = scan_library(&root.0).unwrap();
+        assert_eq!(library.entries.len(), 2);
+        assert_eq!(library.entries[0].title, "Alpha");
+        assert_eq!(library.entries[1].artist, "作曲家");
+        assert_eq!(library.diagnostics.len(), 1);
+        assert!(library.diagnostics[0].contains("invalid.bms"));
+        assert!(scan_library(&root.0.join("z.bms")).is_err());
+    }
+
+    #[test]
+    fn directory_depth_is_finite_and_visible() {
+        let root = TempLibrary::new();
+        let mut path = root.0.clone();
+        for _ in 0..9 {
+            path.push("deeper");
+            fs::create_dir(&path).unwrap();
+        }
+        fs::write(path.join("unvisited.bms"), "#BPM 60\n").unwrap();
+        let library = scan_library(&root.0).unwrap();
+        assert!(library.entries.is_empty());
+        assert!(library
+            .diagnostics
+            .iter()
+            .any(|message| message.contains("directory/depth limit")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_files_directories_and_roots_are_not_followed() {
+        use std::os::unix::fs::symlink;
+        let root = TempLibrary::new();
+        let outside = TempLibrary::new();
+        fs::write(outside.0.join("song.bms"), "#BPM 60\n").unwrap();
+        symlink(&outside.0, root.0.join("directory-link")).unwrap();
+        symlink(outside.0.join("song.bms"), root.0.join("song.bms")).unwrap();
+        assert!(scan_library(&root.0).unwrap().entries.is_empty());
+        assert!(scan_library(&root.0.join("directory-link")).is_err());
+    }
+}

@@ -6,10 +6,17 @@ pub mod bgm;
 pub mod competition;
 /// Application competition options and native runtime observation.
 pub mod competition_live;
+/// Reusable asynchronous native/Web GPU presentation, separate from game I/O.
+#[cfg(feature = "graphics")]
+pub mod graphics;
 /// Bounded two-player progress exchange on a dedicated socket worker.
 pub mod multiplayer;
 /// Synthetic offline composition using the same runtime and mixer as native apps.
 pub mod offline;
+/// Actual game-to-UI presentation and cancellation outside audio callbacks.
+pub mod player;
+/// Bounded chart catalog and exact compiled lane display data.
+pub mod player_chart;
 /// Song-time command planning from actual recorded BMS judgment.
 pub mod replay_audio;
 /// Bounded capture of the actual native runtime's accepted judgment operations.
@@ -18,6 +25,12 @@ pub mod replay_capture;
 pub mod replay_playback;
 /// Bounded PCM rendering of captured BMS play through the actual core Mixer.
 pub mod replay_render;
+/// Bounded platform-independent geometry for GPU presentation.
+#[cfg(feature = "graphics")]
+pub mod scene;
+/// Atomic Design-style presentation compositions, independent of native I/O.
+#[cfg(feature = "graphics")]
+pub mod ui;
 
 use beatkernel::{
     audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, VoiceId},
