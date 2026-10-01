@@ -89,7 +89,7 @@ pub(super) fn prepare(args: &[String]) -> Result<Vec<String>> {
             defaults.channels = u16::try_from(device.output_channels.min(2))?;
             defaults.buffer_frames = device.buffer_frames;
         }
-        if get("--keyboard-registry").is_none() {
+        if get("--keyboard-registry").is_none() && get("--local-player").is_none() {
             let mut devices = keyboard_devices(1024, 4096)?;
             devices.sort_by_key(|d| d.registry_entry);
             defaults.keyboard = devices

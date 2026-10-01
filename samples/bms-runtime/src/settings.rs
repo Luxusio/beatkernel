@@ -32,7 +32,7 @@ pub fn overlay_native_args(
     let input_family = |flag: &str| match host {
         SettingsHost::Linux => matches!(flag, "--evdev" | "--local-input" | "--local-player"),
         SettingsHost::Windows => matches!(flag, "--keyboard-path" | "--local-player"),
-        SettingsHost::Macos => false,
+        SettingsHost::Macos => matches!(flag, "--keyboard-registry" | "--local-player"),
     };
     let replaces_input = overrides.chunks_exact(2).any(|pair| input_family(&pair[0]));
     let merged: Vec<_> = base
@@ -272,6 +272,11 @@ const LINUX: &[Spec] = &[
     ),
 ];
 const MACOS: &[Spec] = &[
+    (
+        "--local-player",
+        "LOCAL PLAYER REGISTRY",
+        "Repeat ID:REGISTRY for2..64 distinct keyboards. Solo remains automatic.",
+    ),
     (
         "--device",
         "AUDIO DEVICE ID",
@@ -575,6 +580,24 @@ mod tests {
                 .map(|field| field.value.len())
                 .sum::<usize>(),
             MAX_TOTAL_BYTES
+        );
+    }
+    #[test]
+    fn macos_registry_and_group_overrides_replace_the_input_family() {
+        let solo = args(&["--keyboard-registry", "900", "--device", "4"]);
+        let group = args(&["--local-player", "1:100", "--local-player", "9:200"]);
+        let merged = overlay_native_args(&solo, &group, SettingsHost::Macos).unwrap();
+        assert!(!merged.iter().any(|arg| arg == "--keyboard-registry"));
+        let restored = overlay_native_args(
+            &merged,
+            &args(&["--keyboard-registry", "300"]),
+            SettingsHost::Macos,
+        )
+        .unwrap();
+        assert!(!restored.iter().any(|arg| arg == "--local-player"));
+        assert_eq!(
+            restored,
+            args(&["--device", "4", "--keyboard-registry", "300"])
         );
     }
 }

@@ -58,7 +58,9 @@ pub fn complete(
         }
         SettingsHost::Macos => {
             add("--device", defaults.device.clone());
-            add("--keyboard-registry", defaults.keyboard.clone());
+            if get("--local-player").is_none() {
+                add("--keyboard-registry", defaults.keyboard.clone());
+            }
             add("--rate", defaults.rate.to_string());
             add("--channels", defaults.channels.to_string());
             add("--buffer-frames", defaults.buffer_frames.to_string());
@@ -185,5 +187,28 @@ mod fixtures {
         .unwrap();
         assert!(!solo.iter().any(|s| s == "--keyboard-path"));
         assert!(solo.chunks_exact(2).any(|p| p == ["--mode", "shared"]));
+    }
+    #[test]
+    fn macos_group_defaults_never_inject_a_solo_registry() {
+        let group = vec![
+            "--local-player".into(),
+            "1:100".into(),
+            "--local-player".into(),
+            "9:200".into(),
+        ];
+        let complete = super::complete(
+            &group,
+            SettingsHost::Macos,
+            &NativeDefaults::for_validation(),
+        )
+        .unwrap();
+        assert!(!complete.iter().any(|arg| arg == "--keyboard-registry"));
+        assert_eq!(
+            complete
+                .iter()
+                .filter(|arg| arg.as_str() == "--local-player")
+                .count(),
+            2
+        );
     }
 }

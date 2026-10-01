@@ -41,9 +41,6 @@ impl LocalSetup {
         if !raw.is_empty() && host != SettingsHost::Linux {
             return Err("legacy local-input assignments require Linux".into());
         }
-        if host == SettingsHost::Macos {
-            return Err("multiple native local players currently require Windows or Linux".into());
-        }
         if !(2..=MAX_LOCAL_PLAYERS).contains(&count) {
             return Err("local assignments require 2..64 players".into());
         }
@@ -54,7 +51,7 @@ impl LocalSetup {
         {
             return Err("local assignments cannot be mixed with a solo keyboard override".into());
         }
-        let assignments = if !raw.is_empty() {
+        let assignments: Vec<(PlayerId, String)> = if !raw.is_empty() {
             raw.into_iter()
                 .enumerate()
                 .map(|(index, path)| (PlayerId(index as u32 + 1), path.to_owned()))
@@ -65,6 +62,15 @@ impl LocalSetup {
                 .map(parse_assignment)
                 .collect::<Result<Vec<_>, _>>()?
         };
+        if host == SettingsHost::Macos {
+            let mut seen = std::collections::HashSet::new();
+            for (_, registry) in &assignments {
+                validate_registry(registry)?;
+                if !seen.insert(registry.parse::<u64>().map_err(|_| "invalid registry")?) {
+                    return Err("duplicate keyboard registry identity".into());
+                }
+            }
+        }
         Ok(Self {
             host,
             roster: LocalPlayers::from_assignments(host, MAX_LOCAL_PLAYERS, assignments)?,
@@ -77,11 +83,8 @@ impl LocalSetup {
     }
 
     /// Retains surviving IDs; newly grown members never reuse retired IDs.
-    /// Unsupported native hosts reject group growth before changing the roster.
+    /// Count and identity limits reject growth before changing the roster.
     pub fn resize(&mut self, count: usize) -> Result<(), String> {
-        if count > 1 && self.host == SettingsHost::Macos {
-            return Err("multiple native local players currently require Windows or Linux".into());
-        }
         self.roster.resize(count)
     }
 
@@ -107,6 +110,16 @@ impl LocalSetup {
             .ok_or("keyboard row unavailable")?;
         if !choice.selectable {
             return Err("keyboard device is not selectable".into());
+        }
+        if self.host == SettingsHost::Macos {
+            validate_registry(&choice.id)?;
+            let registry = choice.id.parse::<u64>().map_err(|_| "invalid registry")?;
+            if self.players().iter().any(|member| {
+                member.id != player
+                    && member.input().and_then(|id| id.parse::<u64>().ok()) == Some(registry)
+            }) {
+                return Err("duplicate keyboard registry identity".into());
+            }
         }
         self.roster.assign(player, self.host, &choice.id)
     }
@@ -138,6 +151,15 @@ impl LocalSetup {
     }
 }
 
+fn validate_registry(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || !value.bytes().all(|b| b.is_ascii_digit())
+        || value.parse::<u64>().map_or(true, |id| id == 0)
+    {
+        return Err("keyboard registry requires a positive ASCII decimal u64".into());
+    }
+    Ok(())
+}
 fn validate_settings_host(settings: &NativeSettings, host: SettingsHost) -> Result<(), String> {
     // NativeSettings retains empty schema fields; checking the keyboard schema
     // detects a foreign empty draft as well as foreign configured native flags.
@@ -481,10 +503,8 @@ mod fixtures {
         for host in [SettingsHost::Macos] {
             let base = NativeSettings::from_args(&[], host).unwrap();
             let mut setup = LocalSetup::from_settings(&base, host).unwrap();
-            let before = setup.players().to_vec();
-            assert!(setup.resize(2).is_err());
-            assert_eq!(setup.players(), before);
-            assert!(setup.settings(&base).is_ok());
+            setup.resize(2).unwrap();
+            assert!(setup.settings(&base).is_err());
         }
     }
 
@@ -666,9 +686,65 @@ mod fixtures {
         );
         assert!(setup.settings(&settings(&[])).is_err());
         let mac = NativeSettings::from_args(&[], SettingsHost::Macos).unwrap();
-        let mut unsupported = LocalSetup::from_settings(&mac, SettingsHost::Macos).unwrap();
-        let before = unsupported.players().to_vec();
-        assert!(unsupported.resize(2).is_err());
-        assert_eq!(unsupported.players(), before);
+        let mut unassigned = LocalSetup::from_settings(&mac, SettingsHost::Macos).unwrap();
+        unassigned.resize(2).unwrap();
+        assert!(unassigned.settings(&mac).is_err());
+    }
+    #[test]
+    fn macos_four_players_use_exact_registries_and_preserve_solo_override() {
+        let base = NativeSettings::from_args(
+            &["--keyboard-registry".into(), "900".into()],
+            SettingsHost::Macos,
+        )
+        .unwrap();
+        let mut setup = LocalSetup::from_settings(&base, SettingsHost::Macos).unwrap();
+        setup.resize(4).unwrap();
+        let devices = catalog(
+            DeviceRequest::MacosKeyboard,
+            &[
+                ("100", true),
+                ("101", true),
+                ("102", true),
+                ("18446744073709551615", true),
+                ("0100", true),
+                ("+3", true),
+            ],
+        );
+        let ids: Vec<_> = setup.players().iter().map(|p| p.id).collect();
+        setup.assign(ids[0], &devices, 0).unwrap();
+        assert!(setup.assign(ids[1], &devices, 4).is_err());
+        assert!(setup.assign(ids[1], &devices, 5).is_err());
+        for (index, id) in ids.iter().enumerate().skip(1) {
+            setup.assign(*id, &devices, index).unwrap();
+        }
+        let exported = setup.settings(&base).unwrap();
+        assert!(
+            !exported
+                .native_args()
+                .iter()
+                .any(|a| a == "--keyboard-registry")
+        );
+        assert_eq!(
+            LocalSetup::from_settings(&exported, SettingsHost::Macos)
+                .unwrap()
+                .players(),
+            setup.players()
+        );
+        setup.resize(1).unwrap();
+        assert_eq!(
+            setup.settings(&base).unwrap().native_args(),
+            base.native_args()
+        );
+        let aliases = NativeSettings::from_args(
+            &[
+                "--local-player".into(),
+                "1:100".into(),
+                "--local-player".into(),
+                "2:0100".into(),
+            ],
+            SettingsHost::Macos,
+        )
+        .unwrap();
+        assert!(LocalSetup::from_settings(&aliases, SettingsHost::Macos).is_err());
     }
 }
