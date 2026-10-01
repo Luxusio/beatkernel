@@ -152,6 +152,12 @@ impl SampleBank {
             .map(|index| &self.samples[index].1)
     }
 
+    /// Transfers setup-time assets without copying decoded PCM buffers.
+    /// The bank is consumed; rendering owners must already be stopped.
+    pub fn into_samples(self) -> impl Iterator<Item = (SampleId, PcmSample)> {
+        self.samples.into_iter()
+    }
+
     /// Chosen output format; individual assets retain their own sample rates.
     pub const fn format(&self) -> AudioFormat {
         self.format
