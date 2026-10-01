@@ -1,0 +1,11 @@
+# Seeded BMS conditional preparation
+
+BMS RANDOM/SETRANDOM and IF/ELSEIF/ELSE/ENDIF/ENDRANDOM resolve during parsing, before exact timing compilation and asset preparation. Existing parser and player entry points select seed zero; explicit seed APIs permit deterministic caller-selected alternatives. No per-frame random choice or alternate judging engine is introduced.
+
+Inactive payload does not define samples, tempos, STOPs, notes or BGM. Physical source bounds and conditional syntax validation still apply; selected objects retain their original line diagnostics. Same seed uses the specified SplitMix64 algorithm across platforms, followed by multiply-high reduction into 1..n. Nested inactive RANDOM consumes no draw. Random scopes can end implicitly at EOF; IF cannot. Combined nesting is capped at 128. SWITCH/fallthrough and legacy permissive IF override semantics remain unsupported.
+
+The application exposes seeded shared chart loading and default audio preparation. Existing decoder/path customization remains seed zero. Resolved gameplay/setup identity detects differing selected charts; current capture header seed remains zero and represents the unchanged judge-rule seed. No GUI seed controls or replay-file chart-seed serialization/restoration are claimed. An explicit-seed caller must supply the same resolved source when reconstructing its recording.
+
+Original fixtures cover stable choices, inactive/nested branches, malformed controls, resource caps, physical diagnostics and actual selected asset preparation plus compiled/captured/reconstructed identity. They are prepared for later execution under the user's verification deferral. Source compilation does not establish codec, native output, device latency or end-to-end player acceptance. The overall task remains open/PENDING.
+
+Allowed verification: `cargo check --workspace --all-targets --locked`; application all-target source checks for Windows x86_64 GNU and macOS x86_64; application all-target no-default-features; WASM library no-default-features with graphics. All five exited zero. Scoped Rust formatting and diff whitespace checks passed. Existing macOS block dependency future-compatibility and WASM cadence dead-code warnings remain. No test execution, native playback, formal review/security/QA, task verification/close or push took place.
