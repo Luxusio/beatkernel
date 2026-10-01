@@ -3,18 +3,11 @@ use super::{
     atoms::{rect, text},
     interaction::{Bounds, ControlId},
     molecules::{button, text_field},
+    retained::RetainedNodes,
     text_input::LineEditor,
 };
-use crate::{
-    practice::PracticeStart,
-    scene::{GeometrySnapshot, Scene},
-    screen_lifecycle::ScreenInstanceId,
-};
-use floem_reactive::{Memo, RwSignal, Scope, SignalGet, SignalUpdate};
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use crate::{practice::PracticeStart, scene::Scene, screen_lifecycle::ScreenInstanceId};
+use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PracticeFrame {
@@ -23,13 +16,7 @@ pub struct PracticeFrame {
     pub hovered: Option<ControlId>,
     pub armed: Option<ControlId>,
 }
-struct Packet {
-    geometry: Result<GeometrySnapshot, String>,
-    hits: Vec<(ControlId, Bounds)>,
-    #[cfg(test)]
-    paints: usize,
-}
-type Node = Rc<RefCell<Packet>>;
+
 /// Fixed main-thread node tree retained for its Navigator instance.
 /// Done updates the parent draft; Apply and pinned F5 remain coordinator-owned.
 pub struct PracticeView {
@@ -39,8 +26,7 @@ pub struct PracticeView {
     error: RwSignal<Option<String>>,
     hovered: RwSignal<Option<ControlId>>,
     armed: RwSignal<Option<ControlId>>,
-    nodes: Vec<Node>,
-    dirty: Rc<Cell<bool>>,
+    nodes: RetainedNodes,
 }
 impl PracticeView {
     pub fn new(id: ScreenInstanceId, width: u32, height: u32) -> Result<Self, String> {
@@ -48,6 +34,7 @@ impl PracticeView {
             return Err("Practice requires the 960x720 logical viewport".into());
         }
         let editor = LineEditor::new("0:00", 64)?;
+        let nodes = RetainedNodes::new(width, height)?;
         let scope = Scope::new();
         let mut view = Self {
             id,
@@ -56,53 +43,48 @@ impl PracticeView {
             error: scope.create_rw_signal(None),
             hovered: scope.create_rw_signal(None),
             armed: scope.create_rw_signal(None),
-            nodes: Vec::new(),
-            dirty: Rc::new(Cell::new(true)),
+            nodes,
         };
-        view.nodes.push(Rc::new(RefCell::new(paint_packet(
-            width,
-            height,
-            |scene, _| {
-                rect(scene, 0, 0, 960, 720, 0x10151e);
-                text(scene, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
-                text(scene, 24, 65, "PRACTICE START", 2, 0xf0f4ff);
-                text(
-                    scene,
-                    24,
-                    105,
-                    "SECONDS / M:SS / H:MM:SS  FRACTION UP TO 9 DIGITS",
-                    2,
-                    0x9bb1cf,
-                );
-                text(
-                    scene,
-                    24,
-                    270,
-                    "DONE UPDATES SETTINGS DRAFT; APPLY CHANGES THE NEXT SESSION",
-                    1,
-                    0x9bb1cf,
-                );
-                text(
-                    scene,
-                    24,
-                    292,
-                    "F5 RETRIES THE PINNED SESSION; BACK DISCARDS THESE EDITS",
-                    1,
-                    0x9bb1cf,
-                );
-                text(
-                    scene,
-                    24,
-                    314,
-                    "FULL SONG RESETS THIS EDITOR TO ZERO",
-                    1,
-                    0x9bb1cf,
-                );
-            },
-        ))));
+        view.nodes.static_node(|scene, _| {
+            rect(scene, 0, 0, 960, 720, 0x10151e);
+            text(scene, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
+            text(scene, 24, 65, "PRACTICE START", 2, 0xf0f4ff);
+            text(
+                scene,
+                24,
+                105,
+                "SECONDS / M:SS / H:MM:SS  FRACTION UP TO 9 DIGITS",
+                2,
+                0x9bb1cf,
+            );
+            text(
+                scene,
+                24,
+                270,
+                "DONE UPDATES SETTINGS DRAFT; APPLY CHANGES THE NEXT SESSION",
+                1,
+                0x9bb1cf,
+            );
+            text(
+                scene,
+                24,
+                292,
+                "F5 RETRIES THE PINNED SESSION; BACK DISCARDS THESE EDITS",
+                1,
+                0x9bb1cf,
+            );
+            text(
+                scene,
+                24,
+                314,
+                "FULL SONG RESETS THIS EDITOR TO ZERO",
+                1,
+                0x9bb1cf,
+            );
+        });
         let editor = view.editor;
         let memo = scope.create_memo(move |_| editor.get());
-        view.reactive_node(memo, width, height, |editor, scene, hits| {
+        view.nodes.bind(scope, memo, |editor, scene, hits| {
             let bounds = Bounds {
                 x: 24,
                 y: 150,
@@ -118,8 +100,6 @@ impl PracticeView {
         });
         for (id, x, label) in [(71, 24, "DONE"), (72, 220, "BACK"), (73, 416, "FULL SONG")] {
             view.button_node(
-                width,
-                height,
                 ControlId(id),
                 Bounds {
                     x,
@@ -132,14 +112,12 @@ impl PracticeView {
         }
         let error = view.error;
         let memo = scope.create_memo(move |_| error.get());
-        view.reactive_node(memo, width, height, |error, scene, _| {
+        view.nodes.bind(scope, memo, |error, scene, _| {
             if let Some(error) = error {
                 text(scene, 24, 450, &error, 1, 0xffaaaa);
             }
         });
-        for node in &view.nodes {
-            node.borrow().geometry.as_ref().map_err(Clone::clone)?;
-        }
+        view.nodes.validate()?;
         Ok(view)
     }
     pub const fn id(&self) -> ScreenInstanceId {
@@ -160,7 +138,7 @@ impl PracticeView {
         }
     }
     pub fn dirty(&self) -> bool {
-        self.dirty.get()
+        self.nodes.dirty()
     }
     /// Concatenates retained geometry in painter order, also for forced restore.
     /// A partial composition never clears dirty status.
@@ -169,57 +147,19 @@ impl PracticeView {
         scene: &mut Scene,
         hits: &mut Vec<(ControlId, Bounds)>,
     ) -> Result<(), String> {
-        self.dirty.set(true);
-        scene.clear();
-        hits.clear();
-        for node in &self.nodes {
-            let node = node.borrow();
-            scene.append_geometry(node.geometry.as_ref().map_err(Clone::clone)?)?;
-            hits.extend_from_slice(&node.hits);
-        }
-        self.dirty.set(false);
-        Ok(())
+        self.nodes.compose(scene, hits)
     }
-    fn reactive_node<T: Clone + 'static>(
-        &mut self,
-        memo: Memo<T>,
-        width: u32,
-        height: u32,
-        paint: impl Fn(T, &mut Scene, &mut Vec<(ControlId, Bounds)>) + 'static,
-    ) {
-        let node = Rc::new(RefCell::new(paint_packet(width, height, |_, _| {})));
-        self.nodes.push(Rc::clone(&node));
-        let dirty = Rc::clone(&self.dirty);
-        self.scope.create_effect(move |_| {
-            let value = memo.get();
-            let packet = paint_packet(width, height, |scene, hits| paint(value, scene, hits));
-            #[cfg(test)]
-            let packet = {
-                let mut packet = packet;
-                packet.paints = node.borrow().paints + 1;
-                packet
-            };
-            *node.borrow_mut() = packet;
-            dirty.set(true);
-        });
-    }
-    fn button_node(
-        &mut self,
-        width: u32,
-        height: u32,
-        id: ControlId,
-        bounds: Bounds,
-        label: &'static str,
-    ) {
+    fn button_node(&mut self, id: ControlId, bounds: Bounds, label: &'static str) {
         let hovered = self.hovered;
         let armed = self.armed;
         let memo = self
             .scope
             .create_memo(move |_| (hovered.get() == Some(id), armed.get() == Some(id)));
-        self.reactive_node(memo, width, height, move |(hovered, armed), scene, hits| {
-            button(scene, bounds, label, hovered, armed);
-            hits.push((id, bounds));
-        });
+        self.nodes
+            .bind(self.scope, memo, move |(hovered, armed), scene, hits| {
+                button(scene, bounds, label, hovered, armed);
+                hits.push((id, bounds));
+            });
     }
 }
 impl Drop for PracticeView {
@@ -227,22 +167,6 @@ impl Drop for PracticeView {
         self.scope.dispose();
     }
 }
-fn paint_packet(
-    width: u32,
-    height: u32,
-    paint: impl FnOnce(&mut Scene, &mut Vec<(ControlId, Bounds)>),
-) -> Packet {
-    let mut scene = Scene::with_capacity(width, height, 64);
-    let mut hits = Vec::new();
-    paint(&mut scene, &mut hits);
-    Packet {
-        geometry: scene.geometry_snapshot(),
-        hits,
-        #[cfg(test)]
-        paints: 1,
-    }
-}
-
 #[cfg(test)]
 mod fixtures {
     use super::*;
@@ -255,7 +179,7 @@ mod fixtures {
         }
     }
     fn paints(view: &PracticeView) -> Vec<usize> {
-        view.nodes.iter().map(|node| node.borrow().paints).collect()
+        view.nodes.paints()
     }
     #[test]
     fn editor_error_and_buttons_repaint_only_their_retained_dependencies() {
@@ -312,7 +236,7 @@ mod fixtures {
         view.compose(&mut scene, &mut hits).unwrap();
         assert_eq!(scene.rectangles().len(), count);
         assert_eq!(paints(&view), before);
-        let weak = Rc::downgrade(&view.nodes[1]);
+        let weak = view.nodes.weak_dirty();
         assert!(weak.strong_count() >= 2);
         drop(view);
         assert!(weak.upgrade().is_none());

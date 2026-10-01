@@ -3,18 +3,16 @@ use super::{
     atoms::{rect, text},
     interaction::{Bounds, ControlId},
     molecules::{button, text_field, text_field_value},
+    retained::RetainedNodes,
     text_input::LineEditor,
 };
 use crate::{
-    scene::{GeometrySnapshot, Scene},
+    scene::Scene,
     screen_lifecycle::ScreenInstanceId,
     settings::{MAX_FIELDS, SettingsField},
 };
-use floem_reactive::{Memo, RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
+use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
+use std::rc::Rc;
 
 /// The shared authoritative button layout for painting and hover projection.
 pub const BUTTONS: [(ControlId, Bounds, &'static str); 10] = [
@@ -140,13 +138,7 @@ struct Row {
     focused: bool,
     pending: bool,
 }
-struct Packet {
-    geometry: Result<GeometrySnapshot, String>,
-    hits: Vec<(ControlId, Bounds)>,
-    #[cfg(test)]
-    paints: usize,
-}
-type Node = Rc<RefCell<Packet>>;
+
 /// Stable bindings per Settings instance, retained while its children are open.
 /// Rc geometry storage keeps this scope on the UI thread; no I/O occurs in effects.
 pub struct SettingsView {
@@ -163,8 +155,7 @@ pub struct SettingsView {
     pending: RwSignal<bool>,
     hovered: RwSignal<Option<ControlId>>,
     armed: RwSignal<Option<ControlId>>,
-    nodes: Vec<Node>,
-    dirty: Rc<Cell<bool>>,
+    nodes: RetainedNodes,
 }
 impl SettingsView {
     pub fn new(id: ScreenInstanceId, width: u32, height: u32) -> Result<Self, String> {
@@ -172,6 +163,7 @@ impl SettingsView {
             return Err("Settings requires the 960x720 logical viewport".into());
         }
         let empty = LineEditor::new("", 4096)?;
+        let nodes = RetainedNodes::new(width, height)?;
         let scope = Scope::new();
         let mut view = Self {
             id,
@@ -190,25 +182,20 @@ impl SettingsView {
             pending: scope.create_rw_signal(false),
             hovered: scope.create_rw_signal(None),
             armed: scope.create_rw_signal(None),
-            nodes: Vec::new(),
-            dirty: Rc::new(Cell::new(true)),
+            nodes,
         };
-        view.nodes.push(Rc::new(RefCell::new(paint_packet(
-            width,
-            height,
-            |scene, _| {
-                rect(scene, 0, 0, 960, 720, 0x10151e);
-                text(scene, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
-                text(scene, 24, 65, "F4 RECORDS / F6 PRACTICE", 1, 0x9bb1cf);
-            },
-        ))));
+        view.nodes.static_node(|scene, _| {
+            rect(scene, 0, 0, 960, 720, 0x10151e);
+            text(scene, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
+            text(scene, 24, 65, "F4 RECORDS / F6 PRACTICE", 1, 0x9bb1cf);
+        });
         for (id, bounds, label) in BUTTONS.iter().take(5).copied() {
-            view.button_node(width, height, id, bounds, label);
+            view.button_node(id, bounds, label);
         }
         let count = view.count;
         let selected = view.selected;
         let memo = scope.create_memo(move |_| (selected.get() / 10 * 10, count.get()));
-        view.reactive_node(memo, width, height, |(first, count), scene, _| {
+        view.nodes.bind(scope, memo, |(first, count), scene, _| {
             if count > 0 {
                 text(
                     scene,
@@ -252,7 +239,7 @@ impl SettingsView {
                         }
                     })
             });
-            view.reactive_node(memo, width, height, move |row, scene, hits| {
+            view.nodes.bind(scope, memo, move |row, scene, hits| {
                 if let Some(row) = row {
                     let y = 120 + slot as i64 * 39;
                     text(scene, 24, (y + 10) as usize, row.field.label, 1, 0xf0f4ff);
@@ -280,7 +267,7 @@ impl SettingsView {
                 .get(selected.get())
                 .and_then(|signal| signal.with(|field| field.as_ref().map(|field| field.hint)))
         });
-        view.reactive_node(memo, width, height, |hint, scene, _| {
+        view.nodes.bind(scope, memo, |hint, scene, _| {
             if let Some(hint) = hint {
                 text(scene, 24, 525, hint, 1, 0x9bb1cf);
             }
@@ -289,11 +276,8 @@ impl SettingsView {
         let focused = view.profile_focused;
         let pending = view.pending;
         let memo = scope.create_memo(move |_| (profile.get(), focused.get(), pending.get()));
-        view.reactive_node(
-            memo,
-            width,
-            height,
-            |(profile, focused, pending), scene, hits| {
+        view.nodes
+            .bind(scope, memo, |(profile, focused, pending), scene, hits| {
                 let bounds = Bounds {
                     x: 160,
                     y: 558,
@@ -305,10 +289,9 @@ impl SettingsView {
                 if !pending {
                     hits.push((ControlId(15), bounds));
                 }
-            },
-        );
+            });
         for (id, bounds, label) in BUTTONS.iter().skip(5).copied() {
-            view.button_node(width, height, id, bounds, label);
+            view.button_node(id, bounds, label);
         }
         let pending = view.pending;
         let message = view.message;
@@ -319,23 +302,22 @@ impl SettingsView {
                 (false, message.get())
             }
         });
-        view.reactive_node(memo, width, height, |(pending, message), scene, _| {
-            if pending {
-                text(scene, 24, 665, "LOADING DEVICES", 1, 0xd8b36b);
-            } else if let Some(message) = message {
-                text(scene, 24, 665, &message, 1, 0x74e5c5);
-            }
-        });
+        view.nodes
+            .bind(scope, memo, |(pending, message), scene, _| {
+                if pending {
+                    text(scene, 24, 665, "LOADING DEVICES", 1, 0xd8b36b);
+                } else if let Some(message) = message {
+                    text(scene, 24, 665, &message, 1, 0x74e5c5);
+                }
+            });
         let error = view.error;
         let memo = scope.create_memo(move |_| error.get());
-        view.reactive_node(memo, width, height, |error, scene, _| {
+        view.nodes.bind(scope, memo, |error, scene, _| {
             if let Some(error) = error {
                 text(scene, 24, 690, &error, 1, 0xff8e8e);
             }
         });
-        for node in &view.nodes {
-            node.borrow().geometry.as_ref().map_err(Clone::clone)?;
-        }
+        view.nodes.validate()?;
         Ok(view)
     }
     pub const fn id(&self) -> ScreenInstanceId {
@@ -395,55 +377,16 @@ impl SettingsView {
         Ok(())
     }
     pub fn dirty(&self) -> bool {
-        self.dirty.get()
+        self.nodes.dirty()
     }
     pub fn compose(
         &self,
         scene: &mut Scene,
         hits: &mut Vec<(ControlId, Bounds)>,
     ) -> Result<(), String> {
-        self.dirty.set(true);
-        scene.clear();
-        hits.clear();
-        for node in &self.nodes {
-            let node = node.borrow();
-            scene.append_geometry(node.geometry.as_ref().map_err(Clone::clone)?)?;
-            hits.extend_from_slice(&node.hits);
-        }
-        self.dirty.set(false);
-        Ok(())
+        self.nodes.compose(scene, hits)
     }
-    fn reactive_node<T: Clone + 'static>(
-        &mut self,
-        memo: Memo<T>,
-        width: u32,
-        height: u32,
-        paint: impl Fn(T, &mut Scene, &mut Vec<(ControlId, Bounds)>) + 'static,
-    ) {
-        let node = Rc::new(RefCell::new(paint_packet(width, height, |_, _| {})));
-        self.nodes.push(Rc::clone(&node));
-        let dirty = Rc::clone(&self.dirty);
-        self.scope.create_effect(move |_| {
-            let value = memo.get();
-            let packet = paint_packet(width, height, |scene, hits| paint(value, scene, hits));
-            #[cfg(test)]
-            let packet = {
-                let mut packet = packet;
-                packet.paints = node.borrow().paints + 1;
-                packet
-            };
-            *node.borrow_mut() = packet;
-            dirty.set(true);
-        });
-    }
-    fn button_node(
-        &mut self,
-        width: u32,
-        height: u32,
-        id: ControlId,
-        bounds: Bounds,
-        label: &'static str,
-    ) {
+    fn button_node(&mut self, id: ControlId, bounds: Bounds, label: &'static str) {
         let hovered = self.hovered;
         let armed = self.armed;
         let pending = self.pending;
@@ -454,10 +397,9 @@ impl SettingsView {
                 (hovered.get() == Some(id), armed.get() == Some(id), false)
             }
         });
-        self.reactive_node(
+        self.nodes.bind(
+            self.scope,
             memo,
-            width,
-            height,
             move |(hovered, armed, pending), scene, hits| {
                 button(scene, bounds, label, hovered, armed);
                 if !pending {
@@ -472,22 +414,6 @@ impl Drop for SettingsView {
         self.scope.dispose();
     }
 }
-fn paint_packet(
-    width: u32,
-    height: u32,
-    paint: impl FnOnce(&mut Scene, &mut Vec<(ControlId, Bounds)>),
-) -> Packet {
-    let mut scene = Scene::with_capacity(width, height, 64);
-    let mut hits = Vec::new();
-    paint(&mut scene, &mut hits);
-    Packet {
-        geometry: scene.geometry_snapshot(),
-        hits,
-        #[cfg(test)]
-        paints: 1,
-    }
-}
-
 #[cfg(test)]
 mod fixtures {
     use super::*;
@@ -520,7 +446,7 @@ mod fixtures {
         }
     }
     fn paints(view: &SettingsView) -> Vec<usize> {
-        view.nodes.iter().map(|node| node.borrow().paints).collect()
+        view.nodes.paints()
     }
     #[test]
     fn editor_cursor_status_and_profile_focus_invalidate_only_their_dependencies() {
@@ -567,7 +493,7 @@ mod fixtures {
         let mut update = frame(&fields, &editor, &profile);
         update.selected = 12;
         view.update(update).unwrap();
-        let identities = view.nodes.iter().map(Rc::as_ptr).collect::<Vec<_>>();
+        let identities = view.nodes.identities();
         let mut scene = Scene::with_capacity(960, 720, 64);
         let mut hits = Vec::new();
         view.compose(&mut scene, &mut hits).unwrap();
@@ -591,10 +517,7 @@ mod fixtures {
             hits[5..11].iter().map(|(id, _)| id.0).collect::<Vec<_>>(),
             (1020..1026).collect::<Vec<_>>()
         );
-        assert_eq!(
-            view.nodes.iter().map(Rc::as_ptr).collect::<Vec<_>>(),
-            identities
-        );
+        assert_eq!(view.nodes.identities(), identities);
         let short = fields[..2].to_vec();
         view.update(frame(&short, &editor, &profile)).unwrap();
         assert!(view.fields[25].with_untracked(|field| field.is_none()));
@@ -663,7 +586,7 @@ mod fixtures {
         assert_eq!(paints(&view), before);
         assert!(!view.dirty());
         assert_eq!(scene.rectangles()[0].bounds, [0.0, 0.0, 960.0, 720.0]);
-        let weak = Rc::downgrade(&view.nodes[7]);
+        let weak = view.nodes.weak_dirty();
         assert!(weak.strong_count() >= 2);
         drop(view);
         assert!(weak.upgrade().is_none());

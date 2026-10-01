@@ -72,6 +72,13 @@ impl RetainedNodes {
             dirty.set(true);
         });
     }
+    /// Checks immediate packet errors before a constructed view is published.
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        for packet in &self.packets {
+            packet.borrow().geometry.as_ref().map_err(Clone::clone)?;
+        }
+        Ok(())
+    }
     pub(crate) fn dirty(&self) -> bool {
         self.dirty.get()
     }
@@ -92,6 +99,13 @@ impl RetainedNodes {
         }
         self.dirty.set(false);
         Ok(())
+    }
+    #[cfg(test)]
+    pub(crate) fn identities(&self) -> Vec<usize> {
+        self.packets
+            .iter()
+            .map(|packet| Rc::as_ptr(packet) as usize)
+            .collect()
     }
     #[cfg(test)]
     pub(crate) fn paints(&self) -> Vec<usize> {
@@ -118,5 +132,69 @@ fn paint_packet(
         hits,
         #[cfg(test)]
         paints: 1,
+    }
+}
+
+#[cfg(test)]
+mod fixtures {
+    use super::*;
+    use floem_reactive::SignalUpdate;
+    #[test]
+    fn initial_and_reactive_packet_errors_remain_dirty_until_recovered_composition() {
+        let scope = Scope::new();
+        let overflow = scope.create_rw_signal(true);
+        let memo = scope.create_memo(move |_| overflow.get());
+        let mut nodes = RetainedNodes::new(960, 720).unwrap();
+        nodes.static_node(|scene, hits| {
+            scene.rect(0, 0, 10, 10, 0);
+            hits.push((
+                ControlId(1),
+                Bounds {
+                    x: 0,
+                    y: 0,
+                    width: 10,
+                    height: 10,
+                },
+            ));
+        });
+        nodes.bind(scope, memo, |overflow, scene, hits| {
+            let count = if overflow {
+                crate::scene::MAX_RECTANGLES + 1
+            } else {
+                1
+            };
+            for _ in 0..count {
+                scene.rect(10, 0, 10, 10, 0xffffff);
+            }
+            hits.push((
+                ControlId(2),
+                Bounds {
+                    x: 10,
+                    y: 0,
+                    width: 10,
+                    height: 10,
+                },
+            ));
+        });
+        assert!(nodes.validate().is_err());
+        assert!(nodes.dirty());
+        let mut scene = Scene::with_capacity(960, 720, 64);
+        let mut hits = Vec::new();
+        assert!(nodes.compose(&mut scene, &mut hits).is_err());
+        assert!(nodes.dirty());
+        let identities = nodes.identities();
+        overflow.set(false);
+        assert!(nodes.validate().is_ok());
+        nodes.compose(&mut scene, &mut hits).unwrap();
+        assert!(!nodes.dirty());
+        assert_eq!(nodes.identities(), identities);
+        assert_eq!(scene.rectangles().len(), 2);
+        assert_eq!(scene.rectangles()[0].bounds, [0.0, 0.0, 10.0, 10.0]);
+        assert_eq!(scene.rectangles()[1].bounds, [10.0, 0.0, 10.0, 10.0]);
+        assert_eq!(
+            hits.iter().map(|(id, _)| id.0).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        scope.dispose();
     }
 }

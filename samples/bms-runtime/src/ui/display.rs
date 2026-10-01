@@ -154,6 +154,7 @@ impl DisplayView {
                 text(scene, 24, 690, &error, 1, 0xff8e8e);
             }
         });
+        view.nodes.validate()?;
         Ok(view)
     }
     pub const fn id(&self) -> ScreenInstanceId {

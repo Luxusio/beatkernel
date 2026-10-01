@@ -3,17 +3,11 @@ use super::{
     atoms::{rect, text},
     interaction::{Bounds, ControlId},
     molecules::button,
+    retained::RetainedNodes,
 };
-use crate::{
-    scene::{GeometrySnapshot, Scene},
-    screen_lifecycle::ScreenInstanceId,
-};
-use floem_reactive::{Memo, RwSignal, Scope, SignalGet, SignalUpdate};
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-    sync::Arc,
-};
+use crate::{scene::Scene, screen_lifecycle::ScreenInstanceId};
+use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate};
+use std::sync::Arc;
 
 pub struct SelectionItem {
     pub title: String,
@@ -27,13 +21,6 @@ pub struct SelectionFrame {
     pub error: Option<String>,
     pub backend_pending: bool,
 }
-struct Packet {
-    geometry: Result<GeometrySnapshot, String>,
-    hits: Vec<(ControlId, Bounds)>,
-    #[cfg(test)]
-    paints: usize,
-}
-type Node = Rc<RefCell<Packet>>;
 
 /// One fixed node tree per retained screen instance; never moved to a worker.
 /// Effects produce only geometry, with no native I/O, handles or gameplay clocks.
@@ -45,8 +32,7 @@ pub struct SelectionView {
     armed: RwSignal<Option<ControlId>>,
     error: RwSignal<Option<String>>,
     backend_pending: RwSignal<bool>,
-    nodes: Vec<Node>,
-    dirty: Rc<Cell<bool>>,
+    nodes: RetainedNodes,
 }
 impl SelectionView {
     pub fn new(
@@ -67,6 +53,7 @@ impl SelectionView {
         {
             return Err("Selection catalog control identity overflow".into());
         }
+        let nodes = RetainedNodes::new(width, height)?;
         let scope = Scope::new();
         let mut view = Self {
             id,
@@ -76,16 +63,13 @@ impl SelectionView {
             armed: scope.create_rw_signal(None),
             error: scope.create_rw_signal(None),
             backend_pending: scope.create_rw_signal(false),
-            nodes: Vec::new(),
-            dirty: Rc::new(Cell::new(true)),
+            nodes,
         };
-        view.static_node(width, height, |scene, _| {
-            rect(scene, 0, 0, 960, 720, 0x10151e)
-        });
-        view.static_node(width, height, |scene, _| {
-            text(scene, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff)
-        });
-        view.static_node(width, height, |scene, _| {
+        view.nodes
+            .static_node(|scene, _| rect(scene, 0, 0, 960, 720, 0x10151e));
+        view.nodes
+            .static_node(|scene, _| text(scene, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff));
+        view.nodes.static_node(|scene, _| {
             text(
                 scene,
                 24,
@@ -100,9 +84,8 @@ impl SelectionView {
             items.len(),
             diagnostics.len()
         );
-        view.static_node(width, height, move |scene, _| {
-            text(scene, 24, 96, &count, 2, 0xd8b36b)
-        });
+        view.nodes
+            .static_node(move |scene, _| text(scene, 24, 96, &count, 2, 0xd8b36b));
         for slot in 0..15 {
             let selected = view.selected;
             let rows = Arc::clone(&items);
@@ -115,7 +98,7 @@ impl SelectionView {
                     .map(|index| (index, index == selected))
             });
             let rows = Arc::clone(&items);
-            view.reactive_node(memo, width, height, move |value, scene, hits| {
+            view.nodes.bind(scope, memo, move |value, scene, hits| {
                 if let Some((index, selected)) = value {
                     let y = 140 + slot * 34;
                     let bounds = Bounds {
@@ -141,18 +124,16 @@ impl SelectionView {
         }
         for (index, diagnostic) in diagnostics.iter().take(2).enumerate() {
             let diagnostic = diagnostic.clone();
-            view.static_node(width, height, move |scene, _| {
+            view.nodes.static_node(move |scene, _| {
                 text(scene, 24, 654 + index * 22, &diagnostic, 1, 0xd8b36b)
             });
         }
         if items.is_empty() {
-            view.static_node(width, height, |scene, _| {
+            view.nodes.static_node(|scene, _| {
                 text(scene, 24, 150, "NO SUPPORTED CHARTS FOUND", 2, 0xff8e8e)
             });
         } else {
             view.button_node(
-                width,
-                height,
                 ControlId(1),
                 Bounds {
                     x: 550,
@@ -164,8 +145,6 @@ impl SelectionView {
             );
         }
         view.button_node(
-            width,
-            height,
             ControlId(5),
             Bounds {
                 x: 750,
@@ -176,8 +155,6 @@ impl SelectionView {
             "SETTINGS",
         );
         view.button_node(
-            width,
-            height,
             ControlId(4),
             Bounds {
                 x: 750,
@@ -189,7 +166,7 @@ impl SelectionView {
         );
         let pending = view.backend_pending;
         let memo = scope.create_memo(move |_| pending.get());
-        view.reactive_node(memo, width, height, |pending, scene, _| {
+        view.nodes.bind(scope, memo, |pending, scene, _| {
             if pending {
                 text(
                     scene,
@@ -203,7 +180,7 @@ impl SelectionView {
         });
         let error = view.error;
         let memo = scope.create_memo(move |_| error.get());
-        view.reactive_node(memo, width, height, |error, scene, _| {
+        view.nodes.bind(scope, memo, |error, scene, _| {
             if let Some(error) = error {
                 text(
                     scene,
@@ -217,9 +194,7 @@ impl SelectionView {
             }
         });
         // Check immediate effects before handing ownership to the coordinator.
-        for node in &view.nodes {
-            node.borrow().geometry.as_ref().map_err(Clone::clone)?;
-        }
+        view.nodes.validate()?;
         Ok(view)
     }
     pub const fn id(&self) -> ScreenInstanceId {
@@ -245,7 +220,7 @@ impl SelectionView {
         }
     }
     pub fn dirty(&self) -> bool {
-        self.dirty.get()
+        self.nodes.dirty()
     }
     /// Reuses retained packets in painter order, including forced scene restore.
     /// Failure leaves the view dirty so the coordinator cannot cache partial output.
@@ -254,66 +229,19 @@ impl SelectionView {
         scene: &mut Scene,
         hits: &mut Vec<(ControlId, Bounds)>,
     ) -> Result<(), String> {
-        self.dirty.set(true);
-        scene.clear();
-        hits.clear();
-        for node in &self.nodes {
-            let node = node.borrow();
-            scene.append_geometry(node.geometry.as_ref().map_err(Clone::clone)?)?;
-            hits.extend_from_slice(&node.hits);
-        }
-        self.dirty.set(false);
-        Ok(())
+        self.nodes.compose(scene, hits)
     }
-    fn static_node(
-        &mut self,
-        width: u32,
-        height: u32,
-        paint: impl FnOnce(&mut Scene, &mut Vec<(ControlId, Bounds)>),
-    ) {
-        self.nodes
-            .push(Rc::new(RefCell::new(paint_packet(width, height, paint))));
-    }
-    fn reactive_node<T: Clone + 'static>(
-        &mut self,
-        memo: Memo<T>,
-        width: u32,
-        height: u32,
-        paint: impl Fn(T, &mut Scene, &mut Vec<(ControlId, Bounds)>) + 'static,
-    ) {
-        let node = Rc::new(RefCell::new(paint_packet(width, height, |_, _| {})));
-        self.nodes.push(Rc::clone(&node));
-        let dirty = Rc::clone(&self.dirty);
-        self.scope.create_effect(move |_| {
-            let value = memo.get();
-            let packet = paint_packet(width, height, |scene, hits| paint(value, scene, hits));
-            #[cfg(test)]
-            let packet = {
-                let mut packet = packet;
-                packet.paints = node.borrow().paints + 1;
-                packet
-            };
-            *node.borrow_mut() = packet;
-            dirty.set(true);
-        });
-    }
-    fn button_node(
-        &mut self,
-        width: u32,
-        height: u32,
-        id: ControlId,
-        bounds: Bounds,
-        label: &'static str,
-    ) {
+    fn button_node(&mut self, id: ControlId, bounds: Bounds, label: &'static str) {
         let hovered = self.hovered;
         let armed = self.armed;
         let memo = self
             .scope
             .create_memo(move |_| (hovered.get() == Some(id), armed.get() == Some(id)));
-        self.reactive_node(memo, width, height, move |(hovered, armed), scene, hits| {
-            button(scene, bounds, label, hovered, armed);
-            hits.push((id, bounds));
-        });
+        self.nodes
+            .bind(self.scope, memo, move |(hovered, armed), scene, hits| {
+                button(scene, bounds, label, hovered, armed);
+                hits.push((id, bounds));
+            });
     }
 }
 impl Drop for SelectionView {
@@ -321,22 +249,6 @@ impl Drop for SelectionView {
         self.scope.dispose();
     }
 }
-fn paint_packet(
-    width: u32,
-    height: u32,
-    paint: impl FnOnce(&mut Scene, &mut Vec<(ControlId, Bounds)>),
-) -> Packet {
-    let mut scene = Scene::with_capacity(width, height, 64);
-    let mut hits = Vec::new();
-    paint(&mut scene, &mut hits);
-    Packet {
-        geometry: scene.geometry_snapshot(),
-        hits,
-        #[cfg(test)]
-        paints: 1,
-    }
-}
-
 #[cfg(test)]
 mod fixtures {
     use super::*;
@@ -366,7 +278,7 @@ mod fixtures {
         .unwrap()
     }
     fn paints(view: &SelectionView) -> Vec<usize> {
-        view.nodes.iter().map(|node| node.borrow().paints).collect()
+        view.nodes.paints()
     }
     #[test]
     fn unchanged_state_and_unrelated_status_do_not_repaint_rows_or_buttons() {
@@ -452,8 +364,8 @@ mod fixtures {
     #[test]
     fn drop_disposes_subscription_captures_and_bad_viewport_rejects() {
         let view = view(3);
-        let weak = Rc::downgrade(&view.nodes[4]);
-        assert!(weak.strong_count() >= 2); // View and the retained effect closure.
+        let weak = view.nodes.weak_dirty();
+        assert!(weak.strong_count() >= 2); // View and retained effect closures share the dirty token.
         drop(view);
         assert!(weak.upgrade().is_none());
         assert!(
