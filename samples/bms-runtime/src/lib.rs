@@ -13,6 +13,11 @@ pub mod device_catalog;
 /// Original bitmap glyph atlas data, prepared outside rendering callbacks.
 #[cfg(feature = "graphics")]
 pub mod font;
+/// Bounded portable font rasterization and immutable glyph atlas placement.
+#[cfg(feature = "graphics")]
+pub mod font_atlas;
+#[cfg(all(feature = "graphics", test))]
+mod font_atlas_fixtures;
 /// Reusable asynchronous native/Web GPU presentation, separate from game I/O.
 #[cfg(feature = "graphics")]
 pub mod graphics;

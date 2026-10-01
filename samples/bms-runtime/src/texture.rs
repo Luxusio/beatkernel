@@ -50,6 +50,9 @@ impl RgbaImage {
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
     }
+    pub(crate) fn pixels_mut(&mut self) -> &mut [u8] {
+        &mut self.pixels
+    }
     pub fn byte_len(&self) -> u64 {
         self.pixels.len() as u64
     }
