@@ -641,25 +641,6 @@ mod native {
         }
         Err("no valid native CoreAudio presentation seed within two seconds".into())
     }
-    pub(super) fn schedule(audio: &CoreAudioStream) -> Result<ClockPoint> {
-        let report = audio
-            .last_render_report()
-            .ok_or("successful core render boundary unavailable for keysound scheduling")?;
-        let end = report
-            .start_frame
-            .checked_add(u64::try_from(report.frames)?)
-            .ok_or("rendered frame boundary overflow")?;
-        let applied = audio.configuration();
-        let offset =
-            (u128::from(end) * 1_000_000_000).div_ceil(u128::from(applied.format.sample_rate()));
-        let at = i128::from(applied.output_origin.as_nanos())
-            .checked_add(i128::try_from(offset)?)
-            .ok_or("output scheduling timestamp overflow")?;
-        Ok(ClockPoint {
-            domain: applied.output_domain,
-            timestamp: Timestamp::from_nanos(i64::try_from(at)?),
-        })
-    }
     fn playback_schedule(pause: &NativePause, stream: &CoreAudioStream) -> Result<ClockPoint> {
         Ok(pause.scheduling_point(
             stream

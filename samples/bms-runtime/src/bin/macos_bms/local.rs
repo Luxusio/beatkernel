@@ -1,5 +1,5 @@
 //! Actual macOS local cohort: one IOHID owner, one shared CoreAudio output.
-use super::native::{ExplicitDomains, HOST, M_NATIVE, OUTPUT, observe, output_origin, schedule};
+use super::native::{ExplicitDomains, HOST, M_NATIVE, OUTPUT, observe, output_origin};
 use super::*;
 use beatkernel::{
     audio::{AudioCommand, CommandProducer, Mixer, MixerConfig, PcmLimits, command_queue},
@@ -18,6 +18,8 @@ use beatkernel_bms_runtime::{
     local_input::InputMerger,
     local_players::{MAX_LOCAL_PLAYERS, PlayerId},
     local_runtime::{InputResult, MemberConfig, PlayerReport, RuntimeGroup, VoiceAllocator},
+    playback_pause::{NativePause, PauseKeyboard, PausePhase},
+    player::{self, PauseState},
     replay_capture::LiveReplayCapture,
 };
 use beatkernel_platform::{
@@ -227,12 +229,102 @@ fn observe_reports(reports: &[PlayerReport], states: &mut [PlayerState]) -> Resu
     }
 }
 
+fn playback_schedule(pause: &NativePause, stream: &CoreAudioStream) -> Result<ClockPoint> {
+    Ok(pause.scheduling_point(
+        stream
+            .last_render_report()
+            .or_else(|| pause.last_render_report())
+            .ok_or("local mixer playback boundary unavailable")?,
+    )?)
+}
+fn process_event(
+    event: beatkernel::input::PhysicalInputEvent,
+    group: &mut RuntimeGroup,
+    pause: &NativePause,
+    stream: &CoreAudioStream,
+    states: &mut [PlayerState],
+) -> Result<()> {
+    match group.process_input(event, &ExplicitDomains, playback_schedule(pause, stream)?) {
+        Ok(InputResult::Processed(reports)) => observe_reports(&reports, states),
+        Ok(InputResult::Ignored { device }) => {
+            Err(format!("merged source {device:?} has no local runtime owner").into())
+        }
+        Err(failure) => {
+            if let Err(error) = observe_reports(&failure.completed_reports, states) {
+                eprintln!("partial group report observation: {error}");
+            }
+            Err(failure.into())
+        }
+    }
+}
+fn advance_group(
+    at: ClockPoint,
+    group: &mut RuntimeGroup,
+    pause: &NativePause,
+    stream: &CoreAudioStream,
+    states: &mut [PlayerState],
+) -> Result<()> {
+    match group.advance_to(at, &ExplicitDomains, playback_schedule(pause, stream)?) {
+        Ok(reports) => observe_reports(&reports, states),
+        Err(failure) => {
+            if let Err(error) = observe_reports(&failure.completed_reports, states) {
+                eprintln!("partial group deadline observation: {error}");
+            }
+            Err(failure.into())
+        }
+    }
+}
+fn reconcile_resume(
+    keyboard: &mut PauseKeyboard,
+    at: ClockPoint,
+    group: &mut RuntimeGroup,
+    pause: &NativePause,
+    stream: &CoreAudioStream,
+    states: &mut [PlayerState],
+) -> Result<()> {
+    for event in keyboard.resume(at)? {
+        process_event(event, group, pause, stream, states)?;
+    }
+    Ok(())
+}
+fn update_discipline(
+    discipline: &mut PresentationDiscipline,
+    now: ClockPoint,
+    group: &mut RuntimeGroup,
+) -> Result<()> {
+    if let DisciplineUpdate::Applied {
+        base_rate_ppm,
+        correction_ppm,
+        applied_rate_ppm,
+        phase_error_ns,
+        limited,
+    } = discipline.update(now, group.transport_mut())?
+    {
+        println!(
+            "shared discipline measured={base_rate_ppm:+}ppm correction={correction_ppm:+}ppm applied={applied_rate_ppm:+}ppm phase={phase_error_ns}ns limited={limited}"
+        );
+    }
+    Ok(())
+}
+/// An actual pause commit may precede the configured lag watermark. Wait for
+/// that first safe frontier; subsequent merger queries still detect regression.
+fn lag_reaches(now: ClockPoint, boundary: ClockPoint, lag: i64) -> Result<bool> {
+    if now.domain != boundary.domain || !(0..=1_000_000_000).contains(&lag) {
+        return Err("local pause lag has invalid domain or extent".into());
+    }
+    let frontier = i128::from(now.timestamp.as_nanos())
+        .checked_sub(i128::from(lag))
+        .ok_or("local pause lag arithmetic overflow")?;
+    Ok(frontier >= i128::from(boundary.timestamp.as_nanos()))
+}
+
 pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> Result<()> {
     admit_mode(
         options.local_players.len(),
         competition_options.network.is_some(),
     )?;
     let count = options.local_players.len();
+    let song_origin = options.song_origin()?;
     let clock = MachClock::new(M_NATIVE, HOST)?;
     // Declared before native owners so delivery observations report after cleanup.
     let mut delivery = DeliverySession(beatkernel::telemetry::InputDeliveryTelemetry::new(
@@ -448,7 +540,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             DisciplineConfig::default(),
             output_origin(),
             HOST,
-            options.song_origin()?,
+            song_origin,
         )?;
         let pair = seed_group(
             &stream,
@@ -467,7 +559,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         let mut group = RuntimeGroup::new(
             HOST,
             OUTPUT,
-            Transport::new(host_origin.timestamp, options.song_origin()?, Rate::NORMAL),
+            Transport::new(host_origin.timestamp, song_origin, Rate::NORMAL),
             producer,
             configs,
             4096,
@@ -478,18 +570,68 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             .seconds
             .map(|seconds| Instant::now() + WallDuration::from_secs(seconds));
         let mut last_progress = None;
+        let mut pause = NativePause::new(output_origin(), HOST, options.format.sample_rate())?;
+        let mut keyboard = PauseKeyboard::new();
+        let mut paused_boundary: Option<ClockPoint> = None;
+        let mut resume_boundary: Option<ClockPoint> = None;
+        let mut pause_committed = false;
+        let mut pause_lag_reached = false;
+        player::publish_pause(PauseState::Running);
+
         let pump = (|| -> Result<()> {
             while deadline.is_none_or(|deadline| Instant::now() < deadline)
                 && !beatkernel_bms_runtime::player::cancelled()
             {
+                player::retry_pause_publication();
                 input.poll(WallDuration::from_millis(1))?;
                 check_group(&input, &options.local_players, &selected)?;
                 if let Some(pair) = observe(&stream, &clock)? {
                     discipline.observe_clock_pair(pair)?;
                 }
+                let reference = discipline
+                    .latest_pair()
+                    .ok_or("local pause requires native clock relation")?;
+                if (pause.phase() == PausePhase::Running || pause_committed)
+                    && resume_boundary.is_none()
+                    && pause.request(player::pause_requested(), reference)?
+                {
+                    let desired = pause.phase() == PausePhase::Pausing;
+                    group.request_audio_pause(desired);
+                    player::publish_pause(if desired {
+                        PauseState::Pausing
+                    } else {
+                        PauseState::Resuming
+                    });
+                }
+                if let Some(boundary) = pause.observe(stream.last_render_report(), reference)? {
+                    if boundary.paused {
+                        group.transport_mut().pause(boundary.host.timestamp)?;
+                        paused_boundary = Some(boundary.host);
+                        pause_committed = false;
+                        pause_lag_reached = false;
+                    } else {
+                        group.transport_mut().resume(boundary.host.timestamp)?;
+                        resume_boundary = Some(boundary.host);
+                        paused_boundary = None;
+                        pause_committed = false;
+                        discipline = PresentationDiscipline::new(
+                            DisciplineConfig::default(),
+                            output_origin(),
+                            HOST,
+                            pause.song_origin_after_pause(song_origin)?,
+                        )?;
+                        discipline.observe_clock_pair(reference)?;
+                    }
+                }
                 feed_rendered(&mut bgm, stream.last_render_report(), |command| {
                     group.enqueue_audio(command)
                 })?;
+                if pause.last_render_report().is_none()
+                    || matches!(pause.phase(), PausePhase::Pausing | PausePhase::Resuming)
+                {
+                    std::thread::sleep(WallDuration::from_millis(1));
+                    continue;
+                }
                 let mut backlog = true;
                 // Conservative true after exactly256 popped records: the next
                 // bounded iteration confirms empty before allowing deadlines.
@@ -526,56 +668,106 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 if now.timestamp < host_origin.timestamp {
                     continue;
                 }
-                if let DisciplineUpdate::Applied {
-                    base_rate_ppm,
-                    correction_ppm,
-                    applied_rate_ppm,
-                    phase_error_ns,
-                    limited,
-                } = discipline.update(now, group.transport_mut())?
-                {
-                    println!(
-                        "shared discipline measured={base_rate_ppm:+}ppm correction={correction_ppm:+}ppm applied={applied_rate_ppm:+}ppm phase={phase_error_ns}ns limited={limited}"
-                    );
+                if pause.phase() == PausePhase::Paused {
+                    if !pause_committed && !backlog {
+                        let at = paused_boundary.ok_or("local paused boundary unavailable")?;
+                        while let Some(event) = merger.pop_ready(at)? {
+                            let host = ClockPoint {
+                                domain: event.meta().clock_domain,
+                                timestamp: event.meta().timestamp,
+                            };
+                            discipline.validate_host(host)?;
+                            if host.timestamp >= at.timestamp {
+                                keyboard.observe_paused(event)?;
+                            } else if keyboard.accept(&event)? {
+                                process_event(event, &mut group, &pause, &stream, &mut states)?;
+                            }
+                        }
+                        advance_group(at, &mut group, &pause, &stream, &mut states)?;
+                        merger.commit(at)?;
+                        pause_committed = true;
+                        player::publish_pause(PauseState::Paused);
+                    }
+                    if pause_committed {
+                        if !pause_lag_reached {
+                            pause_lag_reached = lag_reaches(
+                                now,
+                                paused_boundary.ok_or("local paused boundary unavailable")?,
+                                options.advance_lag,
+                            )?;
+                        }
+                        if pause_lag_reached {
+                            if let Some(frontier) =
+                                merger.watermark(now, options.advance_lag, backlog)?
+                            {
+                                while let Some(event) = merger.pop_ready(frontier)? {
+                                    keyboard.observe_paused(event)?;
+                                }
+                            }
+                        }
+                    }
+                    std::thread::sleep(WallDuration::from_millis(1));
+                    continue;
                 }
-                if let Some(frontier) = merger.watermark(now, options.advance_lag, backlog)? {
+                if let Some(at) = resume_boundary {
+                    if !lag_reaches(now, at, options.advance_lag)? {
+                        std::thread::sleep(WallDuration::from_millis(1));
+                        continue;
+                    }
+                }
+                let frontier = merger.watermark(now, options.advance_lag, backlog)?;
+                if resume_boundary.is_some_and(|at| {
+                    frontier.is_none_or(|frontier| frontier.timestamp < at.timestamp)
+                }) {
+                    std::thread::sleep(WallDuration::from_millis(1));
+                    continue;
+                }
+                let was_resuming = resume_boundary.is_some();
+                if !was_resuming {
+                    update_discipline(&mut discipline, now, &mut group)?;
+                }
+                if let Some(frontier) = frontier {
                     while let Some(event) = merger.pop_ready(frontier)? {
                         let host = ClockPoint {
                             domain: event.meta().clock_domain,
                             timestamp: event.meta().timestamp,
                         };
                         discipline.validate_host(host)?;
-                        match group.process_input(event, &ExplicitDomains, schedule(&stream)?) {
-                            Ok(InputResult::Processed(reports)) => {
-                                observe_reports(&reports, &mut states)?
+                        if let Some(at) = resume_boundary {
+                            if host.timestamp < at.timestamp {
+                                keyboard.observe_paused(event)?;
+                                continue;
                             }
-                            Ok(InputResult::Ignored { device }) => {
-                                return Err(format!(
-                                    "merged source {device:?} has no local runtime owner"
-                                )
-                                .into());
-                            }
-                            Err(failure) => {
-                                if let Err(error) =
-                                    observe_reports(&failure.completed_reports, &mut states)
-                                {
-                                    eprintln!("partial group report observation: {error}");
-                                }
-                                return Err(failure.into());
-                            }
+                            reconcile_resume(
+                                &mut keyboard,
+                                at,
+                                &mut group,
+                                &pause,
+                                &stream,
+                                &mut states,
+                            )?;
+                            resume_boundary = None;
+                            player::publish_pause(PauseState::Running);
+                        }
+                        if keyboard.accept(&event)? {
+                            process_event(event, &mut group, &pause, &stream, &mut states)?;
                         }
                     }
-                    match group.advance_to(frontier, &ExplicitDomains, schedule(&stream)?) {
-                        Ok(reports) => observe_reports(&reports, &mut states)?,
-                        Err(failure) => {
-                            if let Err(error) =
-                                observe_reports(&failure.completed_reports, &mut states)
-                            {
-                                eprintln!("partial group deadline observation: {error}");
-                            }
-                            return Err(failure.into());
-                        }
+                    if let Some(at) = resume_boundary.take() {
+                        reconcile_resume(
+                            &mut keyboard,
+                            at,
+                            &mut group,
+                            &pause,
+                            &stream,
+                            &mut states,
+                        )?;
+                        player::publish_pause(PauseState::Running);
                     }
+                    if was_resuming {
+                        update_discipline(&mut discipline, now, &mut group)?;
+                    }
+                    advance_group(frontier, &mut group, &pause, &stream, &mut states)?;
                     merger.commit(frontier)?;
                     let second = states[0].last_song.as_nanos().div_euclid(1_000_000_000);
                     if last_progress != Some(second) {
@@ -675,6 +867,141 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
 #[cfg(test)]
 mod fixtures {
     use super::*;
+    use beatkernel::input::{
+        BackendId, ButtonEvent, ButtonState, EventMeta, NativeEventMeta, PhysicalInputEvent,
+    };
+    fn host(ns: i64) -> ClockPoint {
+        ClockPoint {
+            domain: HOST,
+            timestamp: Timestamp::from_nanos(ns),
+        }
+    }
+    fn paused_button(
+        device: DeviceId,
+        key: u16,
+        state: ButtonState,
+        ns: i64,
+        sequence: u64,
+    ) -> PhysicalInputEvent {
+        let mut meta = EventMeta::new(device, host(ns), sequence);
+        meta.native = Some(NativeEventMeta {
+            backend: BackendId(7),
+            code: Some(key as u32),
+            timestamp: Some(ClockPoint {
+                domain: M_NATIVE,
+                timestamp: Timestamp::from_nanos(ns * 100),
+            }),
+        });
+        PhysicalInputEvent::Button(ButtonEvent {
+            meta,
+            control: PhysicalControlId::keyboard(key),
+            state,
+        })
+    }
+    #[test]
+    fn four_fresh_registry_devices_keep_independent_paused_levels_and_native_release_provenance() {
+        let requested = [
+            (PlayerId(7), 900),
+            (PlayerId(u32::MAX), 901),
+            (PlayerId(1000), 902),
+            (PlayerId(3), 903),
+        ];
+        let attached = [
+            (Some(900), DeviceId(11), true),
+            (Some(901), DeviceId(22), true),
+            (Some(902), DeviceId(33), true),
+            (Some(903), DeviceId(44), true),
+        ];
+        let ids = resolve_registries(&requested, &attached).unwrap().unwrap();
+        let mut keyboard = PauseKeyboard::new();
+        let mut merger = InputMerger::new(HOST, host(0), ids.clone(), 16).unwrap();
+        for &device in &ids {
+            assert!(
+                keyboard
+                    .accept(&paused_button(device, 4, ButtonState::Down, 1, 1))
+                    .unwrap()
+            );
+        }
+        merger.commit(host(10)).unwrap();
+        let release = paused_button(DeviceId(11), 4, ButtonState::Up, 19, 2);
+        for event in [
+            release.clone(),
+            paused_button(DeviceId(33), 4, ButtonState::Up, 18, 2),
+            paused_button(DeviceId(44), 5, ButtonState::Down, 19, 2),
+            paused_button(DeviceId(11), 4, ButtonState::Down, 21, 3),
+        ] {
+            merger.admit(event, host(30)).unwrap();
+        }
+        assert_eq!(merger.watermark(host(30), 2, true).unwrap(), None);
+        let frontier = merger.watermark(host(30), 2, false).unwrap().unwrap();
+        let mut boundary = Some(host(20));
+        let mut admitted = Vec::new();
+        while let Some(event) = merger.pop_ready(frontier).unwrap() {
+            if let Some(at) = boundary {
+                if event.meta().timestamp < at.timestamp {
+                    keyboard.observe_paused(event).unwrap();
+                    continue;
+                }
+                admitted.extend(keyboard.resume(at).unwrap());
+                boundary = None;
+            }
+            if keyboard.accept(&event).unwrap() {
+                admitted.push(event);
+            }
+        }
+        assert_eq!(admitted.len(), 3);
+        assert_eq!(admitted[0].meta().source, DeviceId(11));
+        assert_eq!(admitted[1].meta().source, DeviceId(33));
+        assert_eq!(admitted[0].meta().native, release.meta().native);
+        assert_eq!(admitted[0].meta().original_clock_point, Some(host(19)));
+        assert_eq!(admitted[0].meta().timestamp, host(20).timestamp);
+        assert_eq!(admitted[2].meta().timestamp, host(21).timestamp);
+        assert!(
+            !keyboard
+                .accept(&paused_button(DeviceId(44), 5, ButtonState::Repeat, 31, 3))
+                .unwrap()
+        );
+        assert!(
+            keyboard
+                .accept(&paused_button(DeviceId(22), 4, ButtonState::Repeat, 31, 2))
+                .unwrap()
+        );
+        merger.commit(frontier).unwrap();
+    }
+    #[test]
+    fn actual_pause_commit_and_short_resume_wait_for_exact_safe_lag_frontiers() {
+        let mut merger =
+            InputMerger::new(HOST, host(0), vec![DeviceId(11), DeviceId(22)], 4).unwrap();
+        merger.commit(host(10_000_000)).unwrap();
+        assert!(!lag_reaches(host(10_500_000), host(10_000_000), 2_000_000).unwrap());
+        assert!(lag_reaches(host(12_000_000), host(10_000_000), 2_000_000).unwrap());
+        assert_eq!(
+            merger
+                .watermark(host(12_000_000), 2_000_000, false)
+                .unwrap(),
+            Some(host(10_000_000))
+        );
+        assert!(!lag_reaches(host(12_000_000), host(11_000_000), 2_000_000).unwrap());
+        assert!(lag_reaches(host(13_000_000), host(11_000_000), 2_000_000).unwrap());
+        assert!(
+            merger
+                .watermark(host(11_000_000), 2_000_000, false)
+                .is_err()
+        );
+        assert!(!lag_reaches(host(i64::MIN), host(i64::MIN), 1).unwrap());
+        assert!(
+            lag_reaches(
+                host(0),
+                ClockPoint {
+                    domain: OUTPUT,
+                    timestamp: Timestamp::ZERO
+                },
+                0
+            )
+            .is_err()
+        );
+        assert!(lag_reaches(host(0), host(0), 1_000_000_001).is_err());
+    }
     #[test]
     fn four_registry_assignments_resolve_fresh_ids_and_fence_aliases() {
         let requested = [
