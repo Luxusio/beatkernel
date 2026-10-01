@@ -31,6 +31,7 @@ struct Options {
     offset: i64,
     preroll: i64,
     start_ns: i64,
+    end_ns: Option<i64>,
     bgm_lookahead: i64,
     advance_lag: i64,
     voices: usize,
@@ -38,6 +39,22 @@ struct Options {
 }
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 impl Options {
+    fn playback_end(&self) -> Result<Option<u64>> {
+        use beatkernel_bms_runtime::{practice::PracticeStart, practice_loop::PracticeLoop};
+        self.end_ns
+            .map(|end| {
+                let start = PracticeStart::from_nanoseconds(self.start_ns)?;
+                Ok(
+                    PracticeLoop::new(start, PracticeStart::from_nanoseconds(end)?)?
+                        .playback_end_frame(
+                            start,
+                            beatkernel::time::Duration::from_nanos(self.preroll),
+                            self.format.sample_rate(),
+                        )?,
+                )
+            })
+            .transpose()
+    }
     fn song_origin(&self) -> Result<beatkernel::time::Timestamp> {
         Ok(beatkernel::time::Timestamp::from_nanos(
             self.start_ns
@@ -63,6 +80,7 @@ fn parse(args: &[String]) -> Result<Options> {
         (150_000_000i64, 150_000_000i64, 0i64, 3_000_000_000i64);
     let mut advance_lag = 2_000_000i64;
     let mut start_ns = 0i64;
+    let mut end_ns = None;
     let mut bgm_lookahead = 3_000_000_000i64;
     let mut voices = 256usize;
     let mut mono_stereo = false;
@@ -179,6 +197,12 @@ fn parse(args: &[String]) -> Result<Options> {
                 start_ns = value.parse::<i64>()?;
             }
             "--preroll-ns" => preroll = value.parse()?,
+            "--end-ns" => {
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err("end-ns must be unsigned decimal nanoseconds".into());
+                }
+                end_ns = Some(value.parse::<i64>()?);
+            }
             "--advance-lag-ns" => advance_lag = value.parse()?,
             "--voices" => voices = value.parse()?,
             "--channel-policy" => {
@@ -211,6 +235,9 @@ fn parse(args: &[String]) -> Result<Options> {
     if !local_inputs.is_empty() && (local_inputs.len() < 2 || evdev.is_some()) {
         return Err("use 2..64 --local-input or --local-player assignments, mutually exclusive with --evdev".into());
     }
+    if end_ns.is_some_and(|end| end <= start_ns) {
+        return Err("end-ns must follow start-ns".into());
+    }
     let evdev = evdev
         .or_else(|| local_inputs.first().cloned())
         .ok_or("explicit --evdev or multiple local assignments required")?;
@@ -236,6 +263,7 @@ fn parse(args: &[String]) -> Result<Options> {
         offset,
         preroll,
         start_ns,
+        end_ns,
         bgm_lookahead,
         advance_lag,
         voices,
@@ -415,8 +443,41 @@ fn main() -> Result<()> {
 /// Validate settings through the same parsers as play, without opening any resources.
 #[allow(dead_code)] // Standalone native binaries have no settings screen.
 pub(crate) fn validate_args(args: &[String]) -> Result<()> {
-    let (_, native) = beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
-    parse(&native).map(|_| ())
+    let (competition, native) =
+        beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
+    validate_finite_modes(&parse(&native)?, &competition)
+}
+
+fn validate_finite_modes(
+    options: &Options,
+    competition: &beatkernel_bms_runtime::competition_live::CompetitionOptions,
+) -> Result<()> {
+    options.playback_end()?;
+    if options.end_ns.is_some()
+        && (!options.local_inputs.is_empty() || competition.network.is_some())
+    {
+        return Err(
+            "end-ns currently requires Linux solo playback without network competition".into(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn finite_session_done(
+    end_ns: Option<i64>,
+    presented: Option<ClockPoint>,
+    watermark: ClockPoint,
+    song: Timestamp,
+    backlog: bool,
+    resuming: bool,
+) -> bool {
+    end_ns.is_some_and(|end| song.as_nanos() >= end)
+        && presented.is_some_and(|boundary| {
+            boundary.domain == watermark.domain && watermark.timestamp >= boundary.timestamp
+        })
+        && !backlog
+        && !resuming
 }
 
 pub(crate) fn run_args(args: &[String]) -> Result<()> {
@@ -424,11 +485,12 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
         println!(
-            "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --start-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; network competition is not yet supported for local groups. Native float32 ALSA, no fallback. Physical timing Unknown."
+            "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned, strictly after start, and currently solo/nonnetwork only; it completes a finite prefix after native presentation and input drain, without forcing unfinished notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; network competition is not yet supported for local groups. Native float32 ALSA, no fallback. Physical timing Unknown."
         );
         return Ok(());
     }
     let options = parse(&args)?;
+    validate_finite_modes(&options, &competition_options)?;
     #[cfg(target_os = "linux")]
     {
         if options.local_inputs.is_empty() {
@@ -594,6 +656,7 @@ mod native {
             4096, HOST,
         )?);
         let song_origin = options.song_origin()?;
+        let playback_end = options.playback_end()?;
         let pause_supported = competition_options.network.is_none();
         let prepared = load_prepared(
             &options.chart,
@@ -611,13 +674,17 @@ mod native {
             PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
         )?;
         println!("prepared practice section={section:?}");
-        let mut completion = beatkernel_bms_runtime::completion::SongCompletion::prepare(
-            &prepared,
-            options.late,
-            options.offset,
-            options.preroll,
-            OUTPUT,
-        )?;
+        let mut completion = if options.end_ns.is_none() {
+            Some(beatkernel_bms_runtime::completion::SongCompletion::prepare(
+                &prepared,
+                options.late,
+                options.offset,
+                options.preroll,
+                OUTPUT,
+            )?)
+        } else {
+            None
+        };
         for warning in &prepared.source.warnings {
             eprintln!("BMS warning line{}: {}", warning.line, warning.message);
         }
@@ -679,18 +746,21 @@ mod native {
         )?);
         bgm.feed(0, capacity - SLACK, |command| producer.try_push(command))?;
         let mixer = Mixer::new(
-            MixerConfig::new(
-                options.format,
-                OUTPUT,
-                Timestamp::ZERO,
-                AudioLimits::new(
-                    capacity,
-                    options.voices,
-                    capacity,
-                    options.period as usize,
-                    capacity,
-                )?,
-            ),
+            {
+                let config = MixerConfig::new(
+                    options.format,
+                    OUTPUT,
+                    Timestamp::ZERO,
+                    AudioLimits::new(
+                        capacity,
+                        options.voices,
+                        capacity,
+                        options.period as usize,
+                        capacity,
+                    )?,
+                );
+                playback_end.map_or(config, |end| config.with_playback_end_frame(end))
+            },
             prepared.bank,
             consumer,
         )?;
@@ -780,6 +850,9 @@ mod native {
                 prepared.sounds,
                 4096,
             )?;
+            if let Some(end) = options.end_ns {
+                runtime.set_song_end(Timestamp::from_nanos(end))?;
+            }
             let deadline = options
                 .seconds
                 .map(|seconds| Instant::now() + WallDuration::from_secs(seconds));
@@ -787,6 +860,25 @@ mod native {
             let mut last_operation = host_origin;
             let mut last_progress = None;
             let mut pause = NativePause::new(output_origin(), HOST, options.format.sample_rate())?;
+            if let Some(end) = playback_end {
+                pause = pause.with_playback_end_frame(end)?;
+            }
+            let mut native_end = playback_end
+                .map(|end| {
+                    beatkernel_bms_runtime::native_end::NativeEnd::new(
+                        output_origin(),
+                        HOST,
+                        options.format.sample_rate(),
+                        end,
+                    )
+                })
+                .transpose()?;
+            let mut end_boundary = if let Some(end) = &mut native_end {
+                end.observe(stream.last_render_report(), pair)?
+            } else {
+                None
+            };
+            let mut end_rendered = false;
             let mut keyboard = PauseKeyboard::new();
             let mut paused_boundary: Option<ClockPoint> = None;
             let mut resume_boundary: Option<ClockPoint> = None;
@@ -806,7 +898,16 @@ mod native {
                     let reference = discipline
                         .latest_pair()
                         .ok_or("pause requires native clock relation")?;
+                    let rendered = stream.last_render_report();
+                    if let Some(end) = &mut native_end {
+                        end_rendered |= rendered
+                            .is_some_and(|report| report.playback_end_physical_frame.is_some());
+                        if let Some(boundary) = end.observe(rendered, reference)? {
+                            end_boundary = Some(boundary);
+                        }
+                    }
                     if pause_supported
+                        && !end_rendered
                         && (pause.phase() == PausePhase::Running || pause_committed)
                         && resume_boundary.is_none()
                         && pause.request(player::pause_requested(), reference)?
@@ -819,11 +920,13 @@ mod native {
                             PauseState::Resuming
                         });
                     }
-                    if let Some(boundary) = pause.observe(stream.last_render_report(), reference)? {
+                    if let Some(boundary) = pause.observe(rendered, reference)? {
                         if boundary.paused {
-                            runtime.transport_mut().pause(boundary.host.timestamp)?;
-                            paused_boundary = Some(boundary.host);
-                            pause_committed = false;
+                            if !end_rendered {
+                                runtime.transport_mut().pause(boundary.host.timestamp)?;
+                                paused_boundary = Some(boundary.host);
+                                pause_committed = false;
+                            }
                         } else {
                             runtime.transport_mut().resume(boundary.host.timestamp)?;
                             resume_boundary = Some(boundary.host);
@@ -891,6 +994,11 @@ mod native {
                                 }
                                 discipline.validate_host(host)?;
                                 delivery.observe(host, acquired_now)?;
+                                if end_boundary.is_some_and(|boundary| {
+                                    host.timestamp >= boundary.host.timestamp
+                                }) {
+                                    continue;
+                                }
                                 if let Some(at) = resume_boundary {
                                     if host.timestamp < at.timestamp {
                                         keyboard.observe_paused(event)?;
@@ -957,7 +1065,9 @@ mod native {
                             player::publish_pause(PauseState::Paused);
                         }
                     }
-                    if pause.phase() == PausePhase::Paused || resume_boundary.is_some() {
+                    if (pause.phase() == PausePhase::Paused && !end_rendered)
+                        || resume_boundary.is_some()
+                    {
                         std::thread::sleep(WallDuration::from_millis(1));
                         continue;
                     }
@@ -1005,17 +1115,32 @@ mod native {
                         }
                         print_report(report, &mut capture, &mut competition)?;
                     }
-                    if completion.observe(
-                        runtime.judge(),
+                    if finite_session_done(
+                        options.end_ns,
+                        end_boundary.map(|boundary| boundary.host),
+                        last_operation,
                         last_song,
-                        bgm.report(),
-                        stream.last_render_report(),
-                        discipline.latest_pair().map(|pair| pair.source),
-                    )? {
+                        backlog,
+                        resume_boundary.is_some(),
+                    ) {
                         println!(
-                            "full song completed: terminal judge, drained BGM/mixer and native presentation frontier"
+                            "finite song prefix completed: native endpoint presented and input frontier drained; remaining notes are not forced complete"
                         );
                         break;
+                    }
+                    if let Some(completion) = &mut completion {
+                        if completion.observe(
+                            runtime.judge(),
+                            last_song,
+                            bgm.report(),
+                            stream.last_render_report(),
+                            discipline.latest_pair().map(|pair| pair.source),
+                        )? {
+                            println!(
+                                "full song completed: terminal judge, drained BGM/mixer and native presentation frontier"
+                            );
+                            break;
+                        }
                     }
                     std::thread::sleep(WallDuration::from_millis(1));
                 }
@@ -1081,6 +1206,331 @@ mod fixtures {
             domain: ClockDomainId(1),
             timestamp: Timestamp::from_nanos(n),
         }
+    }
+    #[test]
+    fn finite_end_is_exclusive_unsigned_and_mapped_once_from_original_section() {
+        let base = args();
+        assert_eq!(parse(&base).unwrap().playback_end().unwrap(), None);
+        let mut configured = base.clone();
+        configured.extend([
+            "--start-ns".into(),
+            "604800000000000".into(),
+            "--end-ns".into(),
+            "604800001000001".into(),
+            "--preroll-ns".into(),
+            "0".into(),
+        ]);
+        let options = parse(&configured).unwrap();
+        let expected =
+            (u128::from(options.format.sample_rate()) * 1_000_001).div_ceil(1_000_000_000);
+        assert_eq!(options.playback_end().unwrap(), Some(expected as u64));
+        assert!(validate_args(&configured).is_ok());
+        for value in ["", "-1", "+1", "0", "1.5", "9223372036854775808"] {
+            let mut invalid = base.clone();
+            invalid.extend(["--end-ns".into(), value.into()]);
+            assert!(validate_args(&invalid).is_err());
+        }
+        let mut duplicate = base;
+        duplicate.extend(["--end-ns".into(), "2".into(), "--end-ns".into(), "3".into()]);
+        assert!(validate_args(&duplicate).is_err());
+    }
+    #[test]
+    fn unsupported_finite_cohort_and_network_modes_fail_during_settings_preflight() {
+        let mut local = args();
+        let index = local.iter().position(|flag| flag == "--evdev").unwrap();
+        local.drain(index..index + 2);
+        local.extend([
+            "--local-input".into(),
+            "/dev/input/event4".into(),
+            "--local-input".into(),
+            "/dev/input/event5".into(),
+        ]);
+        assert!(validate_args(&local).is_ok());
+        local.extend(["--end-ns".into(), "2000000".into()]);
+        assert!(
+            validate_args(&local)
+                .unwrap_err()
+                .to_string()
+                .contains("requires Linux solo")
+        );
+        let mut network = args();
+        network.extend(["--mp-host".into(), "127.0.0.1:39001".into()]);
+        assert!(validate_args(&network).is_ok());
+        network.extend(["--end-ns".into(), "2000000".into()]);
+        assert!(
+            validate_args(&network)
+                .unwrap_err()
+                .to_string()
+                .contains("requires Linux solo")
+        );
+    }
+
+    #[test]
+    fn finite_native_pause_resume_judging_capture_and_replay_share_the_retained_prefix() {
+        use beatkernel::{
+            audio::{
+                Mixer, MixerConfig, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId,
+                command_queue,
+            },
+            chart::{
+                Beat, Bpm, InteractionId, ObjectId, ObjectMetadata, SourceChart, SourceObject,
+                VisualId,
+            },
+            input::{
+                Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector, EventMeta,
+                GameControlId, PhysicalControlId, PhysicalInputEvent,
+            },
+            interaction::InstantEvaluator,
+            judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeStage, JudgeWindow, Rule},
+            replay::{ReplaySession, codec::ReplayCodecLimits},
+            runtime::SoundBinding,
+            time::{ClockMapper, ClockMappingQuality, Duration},
+            transport::{Rate, Transport},
+        };
+        use beatkernel_bms_runtime::{
+            local_runtime::SoloRuntime, native_end::NativeEnd, playback_pause::NativePause,
+            replay_capture::LiveReplayCapture,
+        };
+        struct Identity;
+        impl ClockMapper for Identity {
+            fn map(&self, _: ClockPoint, _: ClockDomainId) -> Option<Timestamp> {
+                None
+            }
+            fn quality(&self) -> ClockMappingQuality {
+                ClockMappingQuality::Exact
+            }
+        }
+        let judge = || {
+            let mut source = SourceChart::new(1000, Bpm::new(60, 1).unwrap()).unwrap();
+            for id in [1, 2] {
+                source.objects.push(SourceObject {
+                    id: ObjectId(id),
+                    start: Beat::new(id as i64).unwrap(),
+                    end: None,
+                    interaction: InteractionId(1),
+                    visual: VisualId(1),
+                    audio: None,
+                    metadata: ObjectMetadata::default(),
+                });
+            }
+            JudgeEngine::new(
+                source.compile().unwrap(),
+                vec![Rule {
+                    interaction: InteractionId(1),
+                    control: GameControlId(1),
+                    evaluator: Box::new(InstantEvaluator),
+                }],
+                JudgeProfile::new(
+                    vec![JudgeWindow {
+                        grade: JudgeGrade(1),
+                        early: Duration::ZERO,
+                        late: Duration::ZERO,
+                    }],
+                    Duration::ZERO,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        };
+        let output = |ns| ClockPoint {
+            domain: ClockDomainId(2),
+            timestamp: Timestamp::from_nanos(ns),
+        };
+        let pair = |ns| ClockPair {
+            source: output(ns),
+            target: point(ns + 100),
+        };
+        let format = AudioFormat::new(1000, 1).unwrap();
+        let pcm_limits = PcmLimits::new(1024, 1024, 2).unwrap();
+        let mut bank = SampleBank::new(format, pcm_limits).unwrap();
+        bank.insert(
+            SampleId(1),
+            PcmSample::new(format, vec![0.5; 8], pcm_limits).unwrap(),
+        )
+        .unwrap();
+        let (producer, consumer) = command_queue(8).unwrap();
+        let mut mixer = Mixer::new(
+            MixerConfig::new(
+                format,
+                ClockDomainId(2),
+                Timestamp::ZERO,
+                AudioLimits::new(8, 2, 8, 16, 8).unwrap(),
+            )
+            .with_playback_end_frame(2),
+            bank,
+            consumer,
+        )
+        .unwrap();
+        let engine = judge();
+        let limits = ReplayCodecLimits::new(
+            65536,
+            128,
+            4096,
+            beatkernel::input::CodecLimits::new(4096, 4096).unwrap(),
+        )
+        .unwrap();
+        let mut capture = LiveReplayCapture::new(&engine, ClockDomainId(1), limits).unwrap();
+        let mut runtime = SoloRuntime::new(
+            ClockDomainId(1),
+            ClockDomainId(2),
+            Transport::new(Timestamp::from_nanos(100), Timestamp::ZERO, Rate::NORMAL),
+            BindingMap::from_bindings([Binding {
+                device: DeviceSelector::Exact(DeviceId(1)),
+                physical: PhysicalControlId::keyboard(4),
+                game_control: GameControlId(1),
+            }])
+            .unwrap(),
+            engine,
+            producer,
+            vec![SoundBinding {
+                object: ObjectId(1),
+                stage: JudgeStage::Instant,
+                sample: SampleId(1),
+                voice: VoiceId(1),
+                gain: 1.0,
+            }],
+            8,
+        )
+        .unwrap();
+        runtime
+            .set_song_end(Timestamp::from_nanos(2_000_000))
+            .unwrap();
+        let mut pause = NativePause::new(output(0), ClockDomainId(1), 1000)
+            .unwrap()
+            .with_playback_end_frame(2)
+            .unwrap();
+        let mut end = NativeEnd::new(output(0), ClockDomainId(1), 1000, 2).unwrap();
+        let first = mixer.render(&mut [0.0]).unwrap();
+        pause.observe(Some(first), pair(0)).unwrap();
+        end.observe(Some(first), pair(0)).unwrap();
+        let input = PhysicalInputEvent::Button(ButtonEvent {
+            meta: EventMeta::new(DeviceId(1), point(1_000_100), 1),
+            control: PhysicalControlId::keyboard(4),
+            state: ButtonState::Down,
+        });
+        let hit = runtime
+            .process_input(input, &Identity, output(1_000_000))
+            .unwrap();
+        assert_eq!(hit.judge_events.len(), 1);
+        capture.record_report(&hit).unwrap();
+        assert!(pause.request(true, pair(0)).unwrap());
+        runtime.request_audio_pause(true);
+        let paused = mixer.render(&mut [0.0; 3]).unwrap();
+        let at = pause
+            .observe(Some(paused), pair(1_000_000))
+            .unwrap()
+            .unwrap();
+        runtime.transport_mut().pause(at.host.timestamp).unwrap();
+        assert!(
+            end.observe(Some(paused), pair(1_000_000))
+                .unwrap()
+                .is_none()
+        );
+        assert!(pause.request(false, pair(3_000_000)).unwrap());
+        runtime.request_audio_pause(false);
+        let mut pcm = [1.0; 4];
+        let crossing = mixer.render(&mut pcm).unwrap();
+        assert_eq!(pcm, [0.5, 0.0, 0.0, 0.0]);
+        assert_eq!(crossing.playback_end_physical_frame, Some(5));
+        let latest = mixer.render(&mut [0.0]).unwrap();
+        let resumed = pause
+            .observe(Some(latest), pair(4_000_000))
+            .unwrap()
+            .unwrap();
+        assert!(!resumed.paused);
+        runtime
+            .transport_mut()
+            .resume(resumed.host.timestamp)
+            .unwrap();
+        assert!(
+            end.observe(Some(latest), pair(4_000_000))
+                .unwrap()
+                .is_none()
+        );
+        let report = runtime
+            .advance_to(point(5_000_100), &Identity, output(2_000_000))
+            .unwrap();
+        assert!(report.song_end_reached && report.judge_events.is_empty());
+        capture.record_report(&report).unwrap();
+        assert!(!finite_session_done(
+            Some(2_000_000),
+            None,
+            point(5_000_100),
+            report.song_time,
+            false,
+            false
+        ));
+        let boundary = end.observe(None, pair(6_000_000)).unwrap().unwrap();
+        assert_eq!(boundary.host, point(5_000_100));
+        assert!(!finite_session_done(
+            Some(2_000_000),
+            Some(boundary.host),
+            point(5_000_100),
+            report.song_time,
+            true,
+            false
+        ));
+        assert!(finite_session_done(
+            Some(2_000_000),
+            Some(boundary.host),
+            point(5_000_100),
+            report.song_time,
+            false,
+            false
+        ));
+        let file = capture.into_file();
+        let replay = ReplaySession::from_records(file.header, judge(), file.records).unwrap();
+        assert_eq!(replay.results().len(), 1);
+        assert_eq!(
+            replay.engine().stable_hash().unwrap(),
+            runtime.judge().stable_hash().unwrap()
+        );
+    }
+
+    #[test]
+    fn finite_completion_requires_presented_boundary_drained_input_and_logical_end() {
+        let end = Some(2_000_000);
+        let boundary = Some(point(2_001_000));
+        let song = Timestamp::from_nanos(2_000_000);
+        assert!(finite_session_done(
+            end,
+            boundary,
+            point(2_001_000),
+            song,
+            false,
+            false
+        ));
+        for (e, b, at, s, backlog, resuming) in [
+            (None, boundary, point(2_001_000), song, false, false),
+            (end, None, point(2_001_000), song, false, false),
+            (end, boundary, point(2_000_999), song, false, false),
+            (
+                end,
+                boundary,
+                point(2_001_000),
+                Timestamp::from_nanos(1_999_999),
+                false,
+                false,
+            ),
+            (end, boundary, point(2_001_000), song, true, false),
+            (end, boundary, point(2_001_000), song, false, true),
+        ] {
+            assert!(!finite_session_done(e, b, at, s, backlog, resuming));
+        }
+        let mut wrong = point(2_001_000);
+        wrong.domain = ClockDomainId(99);
+        assert!(!finite_session_done(
+            end, boundary, wrong, song, false, false
+        ));
+        // Missing physical proof cannot be replaced by a far-future timer.
+        assert!(!finite_session_done(
+            end,
+            None,
+            point(i64::MAX),
+            Timestamp::MAX,
+            false,
+            false
+        ));
     }
     #[test]
     fn practice_start_is_unsigned_bounded_singleton_and_retains_checked_song_origin() {
