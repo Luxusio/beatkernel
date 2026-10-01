@@ -866,6 +866,15 @@ fn durable_source_seed_restores_real_capture_assets_pcm_and_replay() {
         player::publish_pause(player::PauseState::Running); // Force actual state handoff.
         let shown = viewer.take_latest().unwrap();
         assert_eq!(shown.pressed_lanes, live_pressed.mask());
+        assert_eq!(
+            shown.note_progress.as_ref().unwrap().state(0),
+            Some(note_progress::NoteState::Completed)
+        );
+        assert_eq!(
+            shown.players[0].note_progress.as_ref().unwrap().state(0),
+            Some(note_progress::NoteState::Completed)
+        );
+
         assert_eq!(shown.players[0].pressed_lanes, live_pressed.mask());
         player::publish_pause(player::PauseState::Paused);
         assert_eq!(viewer.take_latest().unwrap().pressed_lanes, 0);
@@ -880,6 +889,11 @@ fn durable_source_seed_restores_real_capture_assets_pcm_and_replay() {
     let finished = viewer.take_latest().unwrap();
     assert_eq!(finished.pressed_lanes, 0);
     assert_eq!(finished.players[0].pressed_lanes, 0);
+    assert_eq!(
+        finished.note_progress.as_ref().unwrap().state(0),
+        Some(note_progress::NoteState::Completed)
+    );
+
     let live_results = report.judge_events.clone();
     let display_chart =
         player_chart::PlayerChart::from_compiled(&live.source, &live.compiled.chart).unwrap();
@@ -1335,4 +1349,192 @@ fn shared_local_seeded_chart_keeps_every_capture_and_record_preview_compatible()
             );
         }
     }
+}
+
+#[test]
+fn actual_hold_results_preserve_old_progress_and_match_replay_prefixes() {
+    use beatkernel::{
+        input::{
+            Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector, EventMeta,
+            PhysicalControlId, PhysicalInputEvent,
+        },
+        judge::{JudgeEngine, JudgeGrade, JudgeOutcome, JudgeProfile, JudgeWindow, MissReason},
+        runtime::Runtime,
+        time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
+        transport::{Rate, Transport},
+    };
+    use note_progress::{NoteProgress, NoteState};
+    struct Identity;
+    impl ClockMapper for Identity {
+        fn map(&self, from: ClockPoint, to: ClockDomainId) -> Option<Timestamp> {
+            (from.domain == to).then_some(from.timestamp)
+        }
+        fn quality(&self) -> ClockMappingQuality {
+            ClockMappingQuality::Exact
+        }
+    }
+    let source = beatkernel_bms::parse(
+        "#BPM 60\n#WAV01 hold.wav\n#00051:0101\n#00012:01\n",
+        beatkernel_bms::ParseOptions::default(),
+    )
+    .unwrap();
+    let compiled = source.compile().unwrap();
+    let display = std::sync::Arc::new(
+        player_chart::PlayerChart::from_compiled(&source, &compiled.chart).unwrap(),
+    );
+    let hold_index = display
+        .notes
+        .iter()
+        .position(|note| note.end.is_some())
+        .unwrap();
+    let instant_index = display
+        .notes
+        .iter()
+        .position(|note| note.end.is_none())
+        .unwrap();
+    let profile = JudgeProfile::new(
+        vec![JudgeWindow {
+            grade: JudgeGrade(1),
+            early: Duration::from_nanos(100_000_000),
+            late: Duration::from_nanos(100_000_000),
+        }],
+        Duration::ZERO,
+    )
+    .unwrap();
+    let judge = JudgeEngine::new(compiled.chart.clone(), source.rules(), profile).unwrap();
+    let limits = competition_live::replay_limits().unwrap();
+    let mut capture =
+        replay_capture::LiveReplayCapture::new(&judge, ClockDomainId(17), limits).unwrap();
+    let bindings = BindingMap::from_bindings([(4, 0x11), (5, 0x12)].into_iter().map(
+        |(key, game)| Binding {
+            device: DeviceSelector::Exact(DeviceId(3)),
+            physical: PhysicalControlId::keyboard(key),
+            game_control: beatkernel::input::GameControlId(game),
+        },
+    ))
+    .unwrap();
+    let (producer, _consumer) = command_queue(1).unwrap();
+    let mut runtime = Runtime::new(
+        ClockDomainId(17),
+        ClockDomainId(17),
+        Transport::new(Timestamp::ZERO, Timestamp::ZERO, Rate::NORMAL),
+        bindings,
+        judge,
+        producer,
+        vec![],
+        0,
+    )
+    .unwrap();
+    let point = |ns| ClockPoint {
+        domain: ClockDomainId(17),
+        timestamp: Timestamp::from_nanos(ns),
+    };
+    let mut live = NoteProgress::new(std::sync::Arc::clone(&display)).unwrap();
+    let pending = live.clone();
+    let mut reports = Vec::new();
+    let mut prefixes = Vec::new();
+    for (index, (key, state, ns)) in [
+        (4, ButtonState::Down, 0),
+        (5, ButtonState::Down, 0),
+        (4, ButtonState::Up, 500_000_000),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let report = runtime
+            .process_input(
+                PhysicalInputEvent::Button(ButtonEvent {
+                    meta: EventMeta::new(DeviceId(3), point(ns), index as u64),
+                    control: PhysicalControlId::keyboard(key),
+                    state,
+                }),
+                &Identity,
+                point(ns),
+            )
+            .unwrap();
+        assert!(report.judge_error.is_none());
+        assert_eq!(report.judge_events.len(), 1);
+        if index == 2 {
+            assert_eq!(report.judge_events[0].stage, JudgeStage::HoldTail);
+            assert_eq!(
+                report.judge_events[0].outcome,
+                JudgeOutcome::Miss {
+                    reason: MissReason::EarlyRelease
+                }
+            );
+        }
+        capture.record_report(&report).unwrap();
+        live.apply(&report.judge_events);
+        prefixes.push(live.clone());
+        reports.push(report);
+    }
+    assert_eq!(pending.state(hold_index), Some(NoteState::Pending));
+    assert_eq!(prefixes[0].state(hold_index), Some(NoteState::Holding));
+    assert_eq!(prefixes[0].state(instant_index), Some(NoteState::Pending));
+    assert_eq!(prefixes[1].state(instant_index), Some(NoteState::Completed));
+    assert_eq!(live.state(hold_index), Some(NoteState::Completed));
+    let file = capture.into_file();
+    let encoded = beatkernel::replay::codec::encode_replay(&file, limits).unwrap();
+    let file = beatkernel::replay::codec::decode_replay(&encoded, limits).unwrap();
+    let mut visual = replay_visual::ReplayVisual::new(&source, &file, limits).unwrap();
+    let mut replay = NoteProgress::new(std::sync::Arc::clone(&display)).unwrap();
+    replay.apply(&visual.advance_to(Timestamp::ZERO).unwrap());
+    assert_eq!(replay.state(hold_index), prefixes[1].state(hold_index));
+    assert_eq!(
+        replay.state(instant_index),
+        prefixes[1].state(instant_index)
+    );
+    replay.apply(
+        &visual
+            .advance_to(Timestamp::from_nanos(500_000_000))
+            .unwrap(),
+    );
+    assert_eq!(replay.state(hold_index), live.state(hold_index));
+    assert_eq!(replay.state(instant_index), live.state(instant_index));
+    let mut restored = replay_playback::reconstruct(&source, file.clone(), limits).unwrap();
+    restored.seek_cursor(file.records.len()).unwrap();
+    assert_eq!(
+        restored.engine().stable_hash().unwrap(),
+        runtime.judge().stable_hash().unwrap()
+    );
+    restored.seek_cursor(0).unwrap();
+    let mut fresh = NoteProgress::new(std::sync::Arc::clone(&display)).unwrap();
+    fresh.apply(restored.results());
+    assert_eq!(fresh.state(hold_index), Some(NoteState::Pending));
+    let (publisher, viewer) = player::channel();
+    player::with_publisher(publisher, || {
+        player::publish_chart(&source, &compiled.chart).map_err(|e| e.to_string())?;
+        for report in &reports {
+            player::publish_report(report).map_err(|e| e.to_string())?;
+        }
+        player::publish_pause(player::PauseState::Running);
+        let shown = viewer.take_latest().unwrap();
+        assert_eq!(
+            shown.note_progress.as_ref().unwrap().state(hold_index),
+            Some(NoteState::Completed)
+        );
+        player::publish_pause(player::PauseState::Paused);
+        assert_eq!(
+            viewer
+                .take_latest()
+                .unwrap()
+                .note_progress
+                .as_ref()
+                .unwrap()
+                .state(hold_index),
+            Some(NoteState::Completed)
+        );
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(
+        viewer
+            .take_latest()
+            .unwrap()
+            .note_progress
+            .as_ref()
+            .unwrap()
+            .state(hold_index),
+        Some(NoteState::Completed)
+    );
 }

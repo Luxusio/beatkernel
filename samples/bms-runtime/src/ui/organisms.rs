@@ -65,7 +65,20 @@ pub fn playfield_with_state(
     recent: &[JudgeEvent],
     pressed_lanes: u32,
 ) -> Result<(), String> {
-    playfield_in_with_state(
+    playfield_with_progress(pixels, chart, now, lookahead, recent, pressed_lanes, None)
+}
+
+/// Full playfield with exact prepared-chart-local object progress.
+pub fn playfield_with_progress(
+    pixels: &mut Scene,
+    chart: &PlayerChart,
+    now: Timestamp,
+    lookahead: i64,
+    recent: &[JudgeEvent],
+    pressed_lanes: u32,
+    progress: Option<&crate::note_progress::NoteProgress>,
+) -> Result<(), String> {
+    playfield_in_with_progress(
         pixels,
         chart,
         now,
@@ -78,6 +91,7 @@ pub fn playfield_with_state(
         },
         recent,
         pressed_lanes,
+        progress,
     )
 }
 
@@ -116,6 +130,32 @@ pub fn playfield_in_with_state(
     recent: &[JudgeEvent],
     pressed_lanes: u32,
 ) -> Result<(), String> {
+    playfield_in_with_progress(
+        pixels,
+        chart,
+        now,
+        lookahead,
+        bounds,
+        recent,
+        pressed_lanes,
+        None,
+    )
+}
+
+/// Exact progress is checked before lane geometry or GPU note admission.
+pub fn playfield_in_with_progress(
+    pixels: &mut Scene,
+    chart: &PlayerChart,
+    now: Timestamp,
+    lookahead: i64,
+    bounds: Bounds,
+    recent: &[JudgeEvent],
+    pressed_lanes: u32,
+    progress: Option<&crate::note_progress::NoteProgress>,
+) -> Result<(), String> {
+    if progress.is_some_and(|state| !state.matches_chart(chart)) {
+        return Err("note progress belongs to another prepared chart".into());
+    }
     crate::pressed_keys::validate_mask(pressed_lanes)?;
     let feedback = crate::judge_feedback::project(chart, now, recent)?;
     if lookahead <= 0 {
@@ -159,7 +199,7 @@ pub fn playfield_in_with_state(
             0xa9bdd5,
         );
     }
-    pixels.playfield(chart, now, lookahead, bounds)?;
+    pixels.playfield_with_progress(chart, now, lookahead, bounds, progress)?;
     for lane in 0..lanes {
         let (left, right) = partition_lane(lane, lanes, bounds.x, bounds.width);
         let background: u32 = if lane % 2 == 0 { 0x1d2734 } else { 0x18212c };
@@ -374,6 +414,13 @@ pub fn local_players_with_competition(
     let count = visible.len();
     for player in &players[visible.clone()] {
         if let (Some(chart), Some(now)) = (&player.chart, player.song_time) {
+            if player
+                .note_progress
+                .as_ref()
+                .is_some_and(|state| !state.matches_chart(chart))
+            {
+                return Err("local note progress belongs to another prepared chart".into());
+            }
             crate::judge_feedback::project(chart, now, &player.recent_results)?;
         }
     }
@@ -446,7 +493,7 @@ pub fn local_players_with_competition(
         }
         let field_offset = 72 + summary_height;
         match (player.chart.as_ref(), player.song_time) {
-            (Some(chart), Some(now)) => playfield_in_with_state(
+            (Some(chart), Some(now)) => playfield_in_with_progress(
                 scene,
                 chart,
                 now,
@@ -459,6 +506,7 @@ pub fn local_players_with_competition(
                 },
                 &player.recent_results,
                 player.pressed_lanes,
+                player.note_progress.as_ref(),
             )?,
             _ => clipped_text(
                 scene,
@@ -727,6 +775,7 @@ mod tests {
                 recent_results: vec![event],
                 competition: None,
                 pressed_lanes: 0,
+                note_progress: None,
             })
             .collect();
         scene.clear();
@@ -826,6 +875,7 @@ mod tests {
                 recent_results: vec![],
                 competition: None,
                 pressed_lanes,
+                note_progress: None,
             })
             .collect();
         scene.clear();
@@ -842,6 +892,152 @@ mod tests {
         invalid[1].pressed_lanes = 1 << 31;
         scene.clear();
         assert!(local_players(&mut scene, &invalid, 1_000_000_000, 0).is_err());
+        assert!(scene.rectangles().is_empty());
+    }
+    #[test]
+    fn authoritative_progress_hides_completed_notes_and_keeps_active_hold_body_tail() {
+        use crate::note_progress::{NoteProgress, NoteState};
+        use beatkernel::judge::JudgeStage;
+        let chart = std::sync::Arc::new(chart());
+        let instant = feedback_event(&chart, false);
+        let hold = chart.notes.iter().find(|note| note.end.is_some()).unwrap();
+        let head = JudgeEvent {
+            object: hold.object,
+            stage: JudgeStage::HoldHead,
+            ..instant
+        };
+        let tail = JudgeEvent {
+            stage: JudgeStage::HoldTail,
+            ..head
+        };
+        let mut progress = NoteProgress::new(std::sync::Arc::clone(&chart)).unwrap();
+        let pending = progress.clone();
+        let mut scene = Scene::new(960, 720);
+        playfield_with_progress(
+            &mut scene,
+            &chart,
+            Timestamp::ZERO,
+            1_000_000_000,
+            &[],
+            0,
+            Some(&progress),
+        )
+        .unwrap();
+        assert_eq!(scene.playfields()[0].instances.len(), 4);
+        let untouched = std::sync::Arc::clone(&scene.playfields()[0].instances);
+        progress.apply(&[head]);
+        scene.clear();
+        playfield_with_progress(
+            &mut scene,
+            &chart,
+            Timestamp::ZERO,
+            1_000_000_000,
+            &[],
+            0,
+            Some(&progress),
+        )
+        .unwrap();
+        assert_eq!(scene.playfields()[0].instances.len(), 3);
+        assert!(!std::sync::Arc::ptr_eq(
+            &untouched,
+            &scene.playfields()[0].instances
+        )); // Same note membership, new head flag.
+        progress.apply(&[instant, head]);
+        assert_eq!(
+            progress.state(chart.note_index_by_object(hold.object).unwrap()),
+            Some(NoteState::Holding)
+        );
+        scene.clear();
+        playfield_with_progress(
+            &mut scene,
+            &chart,
+            Timestamp::ZERO,
+            1_000_000_000,
+            &[instant, head],
+            0,
+            Some(&progress),
+        )
+        .unwrap();
+        let held_instances = std::sync::Arc::clone(&scene.playfields()[0].instances);
+        assert_eq!(held_instances.len(), 2);
+        assert_eq!(held_instances[0].appearance[0], 0.0); // body
+        assert_eq!(held_instances[1].appearance[0], 1.0); // tail
+        scene.clear();
+        playfield_with_progress(
+            &mut scene,
+            &chart,
+            Timestamp::from_nanos(1),
+            1_000_000_000,
+            &[],
+            0,
+            Some(&progress),
+        )
+        .unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &held_instances,
+            &scene.playfields()[0].instances
+        ));
+        progress.apply(&[tail]);
+        scene.clear();
+        playfield_with_progress(
+            &mut scene,
+            &chart,
+            Timestamp::from_nanos(1),
+            1_000_000_000,
+            &[],
+            0,
+            Some(&progress),
+        )
+        .unwrap();
+        assert!(scene.playfields()[0].instances.is_empty());
+        scene.clear();
+        playfield_with_progress(
+            &mut scene,
+            &chart,
+            Timestamp::ZERO,
+            1_000_000_000,
+            &[],
+            0,
+            Some(&pending),
+        )
+        .unwrap();
+        assert_eq!(scene.playfields()[0].instances.len(), 4); // Fresh/reconstructed old prefix.
+        let foreign = std::sync::Arc::new((*chart).clone());
+        scene.clear();
+        assert!(
+            playfield_with_progress(
+                &mut scene,
+                &foreign,
+                Timestamp::ZERO,
+                1_000_000_000,
+                &[],
+                0,
+                Some(&progress)
+            )
+            .is_err()
+        );
+        assert!(scene.rectangles().is_empty());
+        assert!(scene.playfields().is_empty());
+        let mut players: Vec<_> = [(3, progress.clone()), (u32::MAX, pending)]
+            .into_iter()
+            .map(|(id, note_progress)| LocalPlayerSnapshot {
+                player: crate::local_players::PlayerId(id),
+                chart: Some(std::sync::Arc::clone(&chart)),
+                song_time: Some(Timestamp::ZERO),
+                score: Default::default(),
+                last_judge: None,
+                recent_results: vec![],
+                competition: None,
+                pressed_lanes: 0,
+                note_progress: Some(note_progress),
+            })
+            .collect();
+        local_players(&mut scene, &players, 1_000_000_000, 0).unwrap();
+        assert!(scene.playfields()[0].instances.is_empty());
+        assert_eq!(scene.playfields()[1].instances.len(), 4);
+        players[1].chart = Some(foreign);
+        scene.clear();
+        assert!(local_players(&mut scene, &players, 1_000_000_000, 0).is_err());
         assert!(scene.rectangles().is_empty());
     }
     #[test]
@@ -914,6 +1110,7 @@ mod tests {
                 recent_results: Vec::new(),
                 competition: None,
                 pressed_lanes: 0,
+                note_progress: None,
             })
             .collect();
         let mut scene = Scene::new(960, 720);
@@ -1051,6 +1248,7 @@ mod tests {
                 recent_results: Vec::new(),
                 competition: Some(comparisons(NetworkStatus::Connected, i64::MIN)),
                 pressed_lanes: 0,
+                note_progress: None,
             })
             .collect();
         let mut scene = Scene::new(960, 720);

@@ -30,7 +30,7 @@ pub(crate) struct PlayfieldCache {
 }
 
 struct Cached {
-    notes: Vec<PlayerNote>,
+    notes: Vec<(PlayerNote, bool)>,
     lanes: usize,
     bounds: Bounds,
     lookahead: i64,
@@ -49,9 +49,16 @@ impl PlayfieldCache {
         now: Timestamp,
         lookahead: i64,
     ) -> PlayfieldFrame {
-        self.frame_inner(notes.iter().copied(), lanes, bounds, now, lookahead)
+        self.frame_inner(
+            notes.iter().map(|&note| (note, false)),
+            lanes,
+            bounds,
+            now,
+            lookahead,
+        )
     }
 
+    #[cfg(test)]
     pub fn frame_indexed(
         &mut self,
         notes: &[PlayerNote],
@@ -61,8 +68,28 @@ impl PlayfieldCache {
         now: Timestamp,
         lookahead: i64,
     ) -> PlayfieldFrame {
+        self.frame_indexed_with_progress(notes, indices, lanes, bounds, now, lookahead, None)
+    }
+
+    pub fn frame_indexed_with_progress(
+        &mut self,
+        notes: &[PlayerNote],
+        indices: &[usize],
+        lanes: usize,
+        bounds: Bounds,
+        now: Timestamp,
+        lookahead: i64,
+        progress: Option<&crate::note_progress::NoteProgress>,
+    ) -> PlayfieldFrame {
         self.frame_inner(
-            indices.iter().map(|&index| &notes[index]),
+            indices.iter().map(|&index| {
+                (
+                    &notes[index],
+                    progress.is_some_and(|state| {
+                        state.state(index) == Some(crate::note_progress::NoteState::Holding)
+                    }),
+                )
+            }),
             lanes,
             bounds,
             now,
@@ -72,7 +99,7 @@ impl PlayfieldCache {
 
     fn frame_inner<'a>(
         &mut self,
-        notes: impl ExactSizeIterator<Item = &'a PlayerNote> + Clone,
+        notes: impl ExactSizeIterator<Item = (&'a PlayerNote, bool)> + Clone,
         lanes: usize,
         bounds: Bounds,
         now: Timestamp,
@@ -95,7 +122,7 @@ impl PlayfieldCache {
                     .notes
                     .iter()
                     .zip(notes.clone())
-                    .all(|(old, new)| old == new)
+                    .all(|(old, (new, consumed))| old.0 == *new && old.1 == consumed)
         });
         if !reuse {
             let mut instances = Vec::with_capacity(notes.len() * 3);
@@ -108,7 +135,7 @@ impl PlayfieldCache {
                 (line as f64 - delta as f64 * (line - top) as f64 / lookahead as f64)
                     .clamp(top as f64 - margin, line as f64 + 15.0 + margin) as f32
             };
-            for note in notes.clone() {
+            for (note, head_consumed) in notes.clone() {
                 let left = bounds.x
                     + (note.lane_index as i128 * i128::from(bounds.width) / lanes as i128) as i64;
                 let right = bounds.x
@@ -131,10 +158,14 @@ impl PlayfieldCache {
                     push(left + 6, right - left - 12, 0.0, 0x357e98);
                     push(left + 3, right - left - 6, 1.0, 0x87e7ff);
                 }
-                push(left + 3, right - left - 6, 2.0, 0x74e5c5);
+                if !head_consumed {
+                    push(left + 3, right - left - 6, 2.0, 0x74e5c5);
+                }
             }
             self.state = Some(Cached {
-                notes: notes.cloned().collect(),
+                notes: notes
+                    .map(|(note, consumed)| (note.clone(), consumed))
+                    .collect(),
                 lanes,
                 bounds,
                 lookahead,

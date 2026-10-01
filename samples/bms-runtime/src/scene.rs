@@ -168,12 +168,24 @@ impl Scene {
 
     /// Insert a retained GPU note layer at this exact position in painter order.
     /// Cache lifetime crosses `clear`; membership/geometry/seek invalidate it.
+    #[cfg(test)]
     pub(crate) fn playfield(
         &mut self,
         chart: &crate::player_chart::PlayerChart,
         now: beatkernel::time::Timestamp,
         lookahead: i64,
         bounds: crate::ui::interaction::Bounds,
+    ) -> Result<(), String> {
+        self.playfield_with_progress(chart, now, lookahead, bounds, None)
+    }
+
+    pub(crate) fn playfield_with_progress(
+        &mut self,
+        chart: &crate::player_chart::PlayerChart,
+        now: beatkernel::time::Timestamp,
+        lookahead: i64,
+        bounds: crate::ui::interaction::Bounds,
+        progress: Option<&crate::note_progress::NoteProgress>,
     ) -> Result<(), String> {
         if lookahead <= 0 {
             return Err("playfield lookahead must be positive".into());
@@ -184,10 +196,11 @@ impl Scene {
                 "scene exceeds {MAX_PLAYFIELDS} displayed playfields"
             ));
         }
-        chart.visible_note_indices_checked(
+        chart.visible_note_indices_with_progress_checked(
             now,
             lookahead,
             150_000_000,
+            progress,
             &mut self.visible_note_indices,
         )?;
         if self
@@ -197,13 +210,14 @@ impl Scene {
         {
             return Err("playfield note references an unavailable lane".into());
         }
-        let frame = self.playfield_caches[slot].frame_indexed(
+        let frame = self.playfield_caches[slot].frame_indexed_with_progress(
             &chart.notes,
             &self.visible_note_indices,
             chart.lanes.len(),
             bounds,
             now,
             lookahead,
+            progress,
         );
         self.playfields.push(frame);
         self.batches.push(DrawBatch {
