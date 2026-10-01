@@ -1,7 +1,7 @@
 //! Bounded UTF-8 scalar editing for menus, independent of platform key events.
 pub const MAX_LINE_BYTES: usize = 4096;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineEditor {
     value: String,
     cursor: usize,

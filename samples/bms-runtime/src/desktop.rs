@@ -4,6 +4,7 @@ use beatkernel_bms_runtime::ui::{
     atoms::{rect, text},
     interaction::{Bounds, ControlId, Gesture, logical_point},
     molecules, organisms,
+    practice::{PracticeFrame, PracticeView},
     selection::{SelectionFrame, SelectionItem, SelectionView},
     text_input::LineEditor,
 };
@@ -14,6 +15,7 @@ use beatkernel_bms_runtime::{
     local_setup::LocalSetup,
     panel_scope::{PanelScope, TaskPermit},
     player, player_chart,
+    practice::PracticeStart,
     presentation_settings::PresentationSettings,
     record_catalog::{RecordCatalog, RecordPreview},
     screen_lifecycle::{ScreenInstanceId, ScreenNavigator, ScreenPhase, ScreenRoute},
@@ -242,7 +244,7 @@ pub(super) fn run(
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
-            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F4 in settings: records; W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry after cleanup; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F4 in settings: records; F6 in settings: practice;  W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry after cleanup; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
         );
         return Ok(());
     }
@@ -316,6 +318,7 @@ pub(super) fn run(
         options,
         active_backend,
         display: None,
+        practice: None,
         records: None,
         native,
         validate,
@@ -332,7 +335,7 @@ pub(super) fn run(
         selection_items,
         selection_diagnostics,
         selection_view: None,
-        painted_selection: None,
+        painted_reactive: None,
         window: None,
         renderer: None,
         instance: None,
@@ -451,6 +454,26 @@ impl DisplayDraft {
     }
     fn edit(&mut self, key: Option<KeyCode>, value: Option<&str>) {
         self.error = edit_line(&mut self.editors[self.selected], key, value).err();
+    }
+}
+
+struct PracticeDraft {
+    editor: LineEditor,
+    error: Option<String>,
+    view: PracticeView,
+}
+impl PracticeDraft {
+    fn edit(&mut self, key: Option<KeyCode>, value: Option<&str>) {
+        self.error = edit_line(&mut self.editor, key, value).err();
+    }
+    fn reset(&mut self) {
+        match LineEditor::new("0:00", 64) {
+            Ok(editor) => {
+                self.editor = editor;
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
+        }
     }
 }
 
@@ -645,6 +668,7 @@ struct Desktop {
     options: Options,
     active_backend: BackendChoice,
     display: Option<PanelScope<DisplayDraft>>,
+    practice: Option<PanelScope<PracticeDraft>>,
     records: Option<PanelScope<RecordsDraft>>,
     native: Native,
     validate: Native,
@@ -661,7 +685,7 @@ struct Desktop {
     selection_items: Arc<[SelectionItem]>,
     selection_diagnostics: Arc<[String]>,
     selection_view: Option<SelectionView>,
-    painted_selection: Option<ScreenInstanceId>,
+    painted_reactive: Option<ScreenInstanceId>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     instance: Option<wgpu::Instance>,
@@ -717,6 +741,7 @@ impl Desktop {
         release_panel(&mut self.picker, &self.navigator);
         release_panel(&mut self.records, &self.navigator);
         release_panel(&mut self.display, &self.navigator);
+        release_panel(&mut self.practice, &self.navigator);
         release_panel(&mut self.local_setup, &self.navigator);
         release_panel(&mut self.settings, &self.navigator);
         if self
@@ -726,7 +751,7 @@ impl Desktop {
         {
             self.selection_view = None;
         }
-        self.painted_selection = None;
+        self.painted_reactive = None;
         if !matches!(
             self.navigator.route(),
             ScreenRoute::Play { .. } | ScreenRoute::Results { .. } | ScreenRoute::Closing
@@ -1630,6 +1655,90 @@ impl Desktop {
         self.gesture.cancel();
         self.hits.clear();
     }
+    fn open_practice(&mut self) {
+        if !self.ui_ready() || self.navigator.route() != ScreenRoute::Settings {
+            return;
+        }
+        let result = (|| {
+            let next = self.prepare_route(ScreenRoute::Practice)?;
+            let start = PracticeStart::from_settings(
+                &self.settings.as_ref().ok_or("settings unavailable")?.values,
+            )?;
+            let practice = PracticeDraft {
+                editor: LineEditor::new(&start.formatted(), 64)?,
+                error: None,
+                view: PracticeView::new(
+                    next.active_id().ok_or("practice instance unavailable")?,
+                    WIDTH as u32,
+                    HEIGHT as u32,
+                )?,
+            };
+            Ok::<_, String>((next, practice))
+        })();
+        match result {
+            Ok((next, practice)) => {
+                self.commit_route(next);
+                self.practice = Some(PanelScope::new(
+                    self.navigator.active_id().expect("practice route"),
+                    practice,
+                ));
+            }
+            Err(error) => self.local_error(Some(error)),
+        }
+    }
+    fn finish_practice(&mut self) {
+        let result = (|| {
+            let next = self.prepare_route(ScreenRoute::Settings)?;
+            let practice = self.practice.as_ref().ok_or("practice unavailable")?;
+            let start = PracticeStart::parse(practice.editor.value())?;
+            let settings = self.settings.as_ref().ok_or("settings unavailable")?;
+            let mut values = settings.values.clone();
+            start.apply_to(&mut values)?;
+            let editor = if values
+                .fields()
+                .get(settings.selected)
+                .is_some_and(|field| field.flag == "--start-ns")
+            {
+                LineEditor::new(&values.fields()[settings.selected].value, 4096)?
+            } else {
+                settings.editor.clone()
+            };
+            Ok::<_, String>((next, values, editor))
+        })();
+        match result {
+            Ok((next, values, editor)) => {
+                if let Some(settings) = &mut self.settings {
+                    settings.values = values;
+                    settings.editor = editor;
+                    settings.error = None;
+                    settings.message = Some("PRACTICE DRAFT UPDATED - APPLY IS SEPARATE".into());
+                }
+                self.commit_route(next);
+            }
+            Err(error) => {
+                if let Some(practice) = &mut self.practice {
+                    practice.error = Some(error);
+                }
+            }
+        }
+    }
+    fn practice_key(&mut self, key: KeyCode, repeat: bool) {
+        match key {
+            KeyCode::Escape if !repeat => self.back(),
+            KeyCode::Enter if !repeat => self.finish_practice(),
+            KeyCode::ArrowLeft
+            | KeyCode::ArrowRight
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::Backspace
+            | KeyCode::Delete => {
+                if let Some(practice) = &mut self.practice {
+                    practice.edit(Some(key), None);
+                }
+            }
+            _ => {}
+        }
+    }
     fn open_display(&mut self) {
         if !self.ui_ready() || self.navigator.route() != ScreenRoute::Settings {
             return;
@@ -1812,6 +1921,20 @@ impl Desktop {
             self.hits.clear();
             return;
         }
+        if self.navigator.route() == ScreenRoute::Practice {
+            match id.0 {
+                71 => self.finish_practice(),
+                72 => self.back(),
+                73 => {
+                    if let Some(practice) = &mut self.practice {
+                        practice.reset();
+                    }
+                }
+                _ => {}
+            }
+            self.gesture.cancel();
+            return;
+        }
         if self.navigator.route() == ScreenRoute::Display {
             match id.0 {
                 40 => self.finish_display(),
@@ -1879,6 +2002,7 @@ impl Desktop {
         }
         if self.navigator.route() == ScreenRoute::Settings {
             match id.0 {
+                74 => self.open_practice(),
                 19 => self.open_records(),
                 18 => self.open_display(),
                 17 => self.open_local(),
@@ -2141,6 +2265,10 @@ impl Desktop {
             self.records_key(key, repeat);
             return;
         }
+        if self.navigator.route() == ScreenRoute::Practice {
+            self.practice_key(key, repeat);
+            return;
+        }
         if self.navigator.route() == ScreenRoute::Display {
             self.display_key(key, repeat);
             return;
@@ -2154,6 +2282,10 @@ impl Desktop {
             return;
         }
         if self.navigator.route() == ScreenRoute::Settings {
+            if key == KeyCode::F6 && !repeat {
+                self.open_practice();
+                return;
+            }
             if key == KeyCode::F4 && !repeat {
                 self.open_records();
                 return;
@@ -2243,9 +2375,11 @@ impl Desktop {
         self.game = Some(game);
         Ok(())
     }
-    fn selection_waits_for_events(&self) -> bool {
-        self.navigator.route() == ScreenRoute::Selection
-            && self.navigator.phase() == ScreenPhase::Active
+    fn reactive_waits_for_events(&self) -> bool {
+        matches!(
+            self.navigator.route(),
+            ScreenRoute::Selection | ScreenRoute::Practice
+        ) && self.navigator.phase() == ScreenPhase::Active
             && !self.occluded
             && self.profile_io.is_none()
             && self
@@ -2270,7 +2404,7 @@ impl Desktop {
                 WIDTH as u32,
                 HEIGHT as u32,
             )?);
-            self.painted_selection = None;
+            self.painted_reactive = None;
         }
         let frame = SelectionFrame {
             selected: self.selected,
@@ -2286,9 +2420,34 @@ impl Desktop {
             .as_ref()
             .ok_or("Selection view unavailable")?;
         view.update(frame);
-        if view.dirty() || self.painted_selection != Some(id) {
+        if view.dirty() || self.painted_reactive != Some(id) {
             view.compose(&mut self.scene, &mut self.hits)?;
-            self.painted_selection = Some(id);
+            self.painted_reactive = Some(id);
+        }
+        self.render_scene()
+    }
+    fn draw_practice(&mut self) -> Result<(), String> {
+        let id = self
+            .navigator
+            .active_id()
+            .ok_or("practice instance unavailable")?;
+        let hovered = self.hit();
+        let armed = [ControlId(71), ControlId(72), ControlId(73)]
+            .into_iter()
+            .find(|&id| self.gesture.is_armed(id));
+        let practice = self.practice.as_ref().ok_or("practice data unavailable")?;
+        if practice.view.id() != id {
+            return Err("practice instance is stale".into());
+        }
+        practice.view.update(PracticeFrame {
+            editor: practice.editor.clone(),
+            error: practice.error.clone(),
+            hovered,
+            armed,
+        });
+        if practice.view.dirty() || self.painted_reactive != Some(id) {
+            practice.view.compose(&mut self.scene, &mut self.hits)?;
+            self.painted_reactive = Some(id);
         }
         self.render_scene()
     }
@@ -2300,7 +2459,10 @@ impl Desktop {
         if route == ScreenRoute::Selection {
             return self.draw_selection();
         }
-        self.painted_selection = None;
+        if route == ScreenRoute::Practice {
+            return self.draw_practice();
+        }
+        self.painted_reactive = None;
         let point = self.point();
         self.hits.clear();
         self.scene.clear();
@@ -2630,7 +2792,7 @@ impl ApplicationHandler for Desktop {
                 }
             }
             WindowEvent::Resized(size) => {
-                self.painted_selection = None;
+                self.painted_reactive = None;
                 self.gesture.cancel();
                 self.pointer = None;
                 self.hits.clear();
@@ -2696,6 +2858,11 @@ impl ApplicationHandler for Desktop {
                     });
                     if let Some(value) = value {
                         match self.navigator.route() {
+                            ScreenRoute::Practice => {
+                                if let Some(practice) = &mut self.practice {
+                                    practice.edit(None, Some(value));
+                                }
+                            }
                             ScreenRoute::Records => {
                                 if let Some(records) = &mut self.records {
                                     records.edit(None, Some(value));
@@ -2744,7 +2911,7 @@ impl ApplicationHandler for Desktop {
             event_loop.exit();
             return;
         }
-        if self.selection_waits_for_events() {
+        if self.reactive_waits_for_events() {
             event_loop.set_control_flow(ControlFlow::Wait);
         } else if self.closing() || self.is_suspended() || self.occluded {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
@@ -3339,17 +3506,18 @@ fn draw_settings(
     point: Option<(f64, f64)>,
     pending: bool,
 ) -> Result<(), String> {
-    text(scene, 24, 65, "SETTINGS / F4 RECORDS", 1, 0x9bb1cf);
+    text(scene, 24, 65, "F4 RECORDS / F6 PRACTICE", 1, 0x9bb1cf);
     for (id, x, label) in [
-        (19, 290, "RECORDS"),
-        (18, 455, "DISPLAY"),
-        (17, 620, "PLAYERS"),
-        (16, 785, "AUDIO"),
+        (74, 265, "PRACTICE"),
+        (19, 401, "RECORDS"),
+        (18, 537, "DISPLAY"),
+        (17, 673, "PLAYERS"),
+        (16, 809, "AUDIO"),
     ] {
         let bounds = Bounds {
             x,
             y: 60,
-            width: 145,
+            width: 125,
             height: 34,
         };
         if !pending {
@@ -3623,6 +3791,7 @@ mod tests {
             options: Options::parse(&[]).unwrap(),
             active_backend: BackendChoice::Auto,
             display: None,
+            practice: None,
             records: None,
             native: native_unavailable,
             validate: validate_only,
@@ -3647,7 +3816,7 @@ mod tests {
             .into(),
             selection_diagnostics: Arc::from([]),
             selection_view: None,
-            painted_selection: None,
+            painted_reactive: None,
             window: None,
             renderer: None,
             instance: None,
@@ -3667,28 +3836,123 @@ mod tests {
     #[test]
     fn selection_reuses_geometry_and_scope_after_settings_back() {
         let mut app = lifecycle_fixture();
-        assert!(app.selection_waits_for_events());
+        assert!(app.reactive_waits_for_events());
         app.draw().unwrap();
         let selection_id = app.selection_view.as_ref().unwrap().id();
         app.draw().unwrap();
-        assert_eq!(app.painted_selection, Some(selection_id));
+        assert_eq!(app.painted_reactive, Some(selection_id));
         assert!(!app.selection_view.as_ref().unwrap().dirty());
         app.open_settings();
-        assert!(!app.selection_waits_for_events());
+        assert!(!app.reactive_waits_for_events());
         assert_eq!(app.selection_view.as_ref().unwrap().id(), selection_id);
         app.draw().unwrap();
         app.back();
-        assert!(app.selection_waits_for_events());
+        assert!(app.reactive_waits_for_events());
         assert_eq!(app.navigator.active_id(), Some(selection_id));
-        assert!(app.painted_selection.is_none());
+        assert!(app.painted_reactive.is_none());
         app.draw().unwrap();
-        assert_eq!(app.painted_selection, Some(selection_id));
+        assert_eq!(app.painted_reactive, Some(selection_id));
         assert!(app.hits.iter().any(|(id, _)| *id == ControlId(100)));
         app.draw().unwrap();
         assert!(!app.selection_view.as_ref().unwrap().dirty());
         app.request_close();
         assert!(app.selection_view.is_none());
-        assert!(!app.selection_waits_for_events());
+        assert!(!app.reactive_waits_for_events());
+    }
+
+    #[test]
+    fn practice_done_commits_precise_start_only_to_parent_draft() {
+        let mut app = lifecycle_fixture();
+        app.open_settings();
+        let parent = app.navigator.active_id();
+        let settings = app.settings.as_mut().unwrap();
+        let index = settings
+            .values
+            .fields()
+            .iter()
+            .position(|field| field.flag == "--start-ns")
+            .unwrap();
+        settings.select(index).unwrap();
+        let previous = settings.values.native_args();
+        app.open_practice();
+        assert_eq!(app.navigator.route(), ScreenRoute::Practice);
+        let child = app.navigator.active_id();
+        app.practice.as_mut().unwrap().editor = LineEditor::new("168:00:00.000000001", 64).unwrap();
+        app.draw().unwrap();
+        assert!(app.reactive_waits_for_events());
+        assert!(!app.practice.as_ref().unwrap().view.dirty());
+        assert!(app.hits.iter().any(|(id, _)| *id == ControlId(71)));
+        app.practice_key(KeyCode::Home, false);
+        app.draw().unwrap();
+        assert_eq!(app.navigator.active_id(), child);
+        app.finish_practice();
+        assert_eq!(app.navigator.active_id(), parent);
+        assert!(app.practice.is_none());
+        let settings = app.settings.as_ref().unwrap();
+        assert_eq!(settings.values.fields()[index].value, "604800000000001");
+        assert_eq!(settings.editor.value(), "604800000000001");
+        assert!(
+            settings
+                .message
+                .as_deref()
+                .unwrap()
+                .contains("APPLY IS SEPARATE")
+        );
+        assert_eq!(
+            settings
+                .values
+                .native_args()
+                .chunks_exact(2)
+                .filter(|pair| pair[0] != "--start-ns")
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>(),
+            previous
+        );
+        assert!(!app.options.native.iter().any(|flag| flag == "--start-ns"));
+    }
+
+    #[test]
+    fn practice_invalid_done_back_and_reset_preserve_draft_boundaries() {
+        let mut app = lifecycle_fixture();
+        app.open_settings();
+        let parent = app.navigator.active_id();
+        let previous = app.settings.as_ref().unwrap().values.native_args();
+        app.open_practice();
+        let child = app.navigator.active_id();
+        app.practice.as_mut().unwrap().editor = LineEditor::new("0:00.0000000001", 64).unwrap();
+        app.finish_practice();
+        assert_eq!(app.navigator.active_id(), child);
+        assert!(app.practice.as_ref().unwrap().error.is_some());
+        assert_eq!(
+            app.settings.as_ref().unwrap().values.native_args(),
+            previous
+        );
+        app.back();
+        assert_eq!(app.navigator.active_id(), parent);
+        assert_eq!(
+            app.settings.as_ref().unwrap().values.native_args(),
+            previous
+        );
+        app.open_practice();
+        app.practice.as_mut().unwrap().editor = LineEditor::new("20:00:00", 64).unwrap();
+        app.activate(ControlId(73));
+        assert_eq!(app.practice.as_ref().unwrap().editor.value(), "0:00");
+        assert_eq!(
+            app.settings.as_ref().unwrap().values.native_args(),
+            previous
+        );
+        app.finish_practice();
+        assert_eq!(app.navigator.active_id(), parent);
+        assert_eq!(
+            PracticeStart::from_settings(&app.settings.as_ref().unwrap().values)
+                .unwrap()
+                .nanoseconds(),
+            0
+        );
+        app.open_practice();
+        app.request_close();
+        assert!(app.practice.is_none());
     }
 
     #[test]

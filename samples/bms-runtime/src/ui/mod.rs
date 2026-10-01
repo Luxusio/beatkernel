@@ -4,5 +4,6 @@ pub mod atoms;
 pub mod interaction;
 pub mod molecules;
 pub mod organisms;
+pub mod practice;
 pub mod selection;
 pub mod text_input;
