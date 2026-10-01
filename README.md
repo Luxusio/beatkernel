@@ -139,10 +139,11 @@ F8/Restart Mark preflights that exact start and waits for native cleanup before
 creating a fresh session. The mark survives retries of this session, including
 Results. F5 keeps the original pinned start. Replay Watch cannot override its
 recorded start. Snapshot delivery is coalesced, so marks use the latest observed
-position, not the physical key event timestamp. Linux ALSA, Windows WASAPI
-shared/exclusive and macOS CoreAudio solo without network competition expose
+position, not the physical key event timestamp. Linux ALSA solo/local 2..64,
+Windows WASAPI shared/exclusive solo and macOS CoreAudio solo without network
+competition expose
 F9/Pause with native-frontier acknowledgement, shared Transport fencing and
-paused-key reconciliation. ASIO, local-cohort and replay Watch pause,
+paused-key reconciliation. Windows/macOS local-cohort, ASIO and replay Watch pause,
 live scrubbing and loops remain work; native/GUI execution is still unverified.
 Settings Records browses an explicit directory and previews a selected recording
 against the current chart, judging profile and practice start before attaching

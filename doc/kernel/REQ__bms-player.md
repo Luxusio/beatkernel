@@ -739,15 +739,30 @@ is not locale collation, full case folding, accent removal or fuzzy ranking.
 ## Presentation-derived live pause
 
 F9 or the Pause/Resume button requests live pause when the native owner announces
-support. Linux ALSA, Windows WASAPI shared/exclusive and macOS CoreAudio solo
-without network competition implement the same acknowledged boundary and key
-reconciliation flow; saved-record ghosts remain supported. ASIO, local
-multi-player cohorts and replay Watch announce no pause capability. ASIO requires
+support. Linux ALSA solo/local 2..64, Windows WASAPI shared/exclusive solo and
+macOS CoreAudio solo without network competition implement the same acknowledged
+boundary and key reconciliation flow; saved-record ghosts remain supported.
+Windows/macOS local multi-player cohorts, ASIO and replay Watch announce no
+pause capability. ASIO requires
 a validated presentation relation; backend selection cannot invent that
 relation. Cross-platform native acceptance and cohort integration remain open.
+Linux local cohorts use one native pause coordinator, one shared Transport and
+one mixer. Each source still maps to its original player, including sparse IDs
+and u32::MAX. Partial group failures retain the already committed member reports
+before terminating the whole cohort. Paused idle periods add no member advance
+or capture records, and group completion remains disabled until resume input
+reconciliation finishes.
 When extended to local multi-player play, all members must use the same
 acknowledged boundary, shared Transport and output; independent per-player
 pause clocks are prohibited.
+Local input retains its fair acquisition and global timestamp ordering.
+Pause commits one shared boundary only after every source drains. Paused key
+levels remain per device, with independent judges, scores and captures. Resume
+must wait for the configured input-lag frontier to reach the acknowledged resume
+boundary before reconciling releases and admitting subsequent original events;
+pause must not bypass the merger's chronology or late-input policy.
+While paused, ordered input is removed through the lag frontier into key levels,
+without advancing the committed judge frontier past the shared pause boundary.
 
 UI requests change desired state only. The owner publishes Running, Pausing,
 Paused and Resuming; controls are disabled during pending transitions, cancellation,
