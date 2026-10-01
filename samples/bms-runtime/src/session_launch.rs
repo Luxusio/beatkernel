@@ -1,6 +1,7 @@
 //! Immutable native invocations for fresh graphical sessions, without device ownership.
 use crate::{
     practice::PracticeStart,
+    practice_loop::PracticeLoop,
     settings::{MAX_FIELDS, MAX_TOTAL_BYTES, MAX_VALUE_BYTES},
 };
 use std::{path::Path, sync::Arc};
@@ -62,6 +63,43 @@ impl SessionLaunch {
             args,
             attempt,
         })
+    }
+    /// Creates one fresh finite owner from the pinned original invocation.
+    /// Repeating a region never accumulates prior endpoints or capture suffixes.
+    pub fn retry_loop(&self, region: PracticeLoop) -> Result<Self, String> {
+        let mut retry = self.retry()?;
+        let mut indices = [None, None];
+        for (index, pair) in retry.args.chunks_exact(2).enumerate() {
+            match pair[0].as_str() {
+                "--replay" | "--mp-host" | "--mp-join" => {
+                    return Err("finite practice loops require live nonnetwork playback".into());
+                }
+                "--backend" if pair[1] == "asio" => {
+                    return Err("finite practice loops require validated native presentation, unavailable for ASIO".into());
+                }
+                "--start-ns" | "--end-ns" => {
+                    let slot = usize::from(pair[0] == "--end-ns");
+                    if indices[slot].replace(index * 2 + 1).is_some() {
+                        return Err(
+                            "practice loop requires at most one start and end option".into()
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (slot, flag, value) in [
+            (0, "--start-ns", region.start().nanoseconds()),
+            (1, "--end-ns", region.end().nanoseconds()),
+        ] {
+            if let Some(index) = indices[slot] {
+                retry.args[index] = value.to_string();
+            } else {
+                retry.args.extend([flag.into(), value.to_string()]);
+            }
+        }
+        validate(&retry.args)?;
+        Ok(retry)
     }
     /// Creates a fresh retry at an exact bookmark while retaining the original
     /// invocation for subsequent ordinary retries and recording path derivation.
@@ -126,6 +164,133 @@ mod fixtures {
     use super::*;
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| (*s).into()).collect()
+    }
+    fn region(start: i64, end: i64) -> PracticeLoop {
+        PracticeLoop::new(
+            PracticeStart::from_nanoseconds(start).unwrap(),
+            PracticeStart::from_nanoseconds(end).unwrap(),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn finite_retries_replace_both_endpoints_and_derive_capture_from_pinned_original() {
+        let original = args(&[
+            "--chart",
+            "songs/a.bms",
+            "--start-ns",
+            "123",
+            "--end-ns",
+            "456",
+            "--local-player",
+            "4294967295:keyboard:path",
+            "--local-player",
+            "7:other",
+            "--bind",
+            "11:04",
+            "--bind",
+            "12:05",
+            "--backend",
+            "wasapi",
+            "--buffer-frames",
+            "512",
+            "--preroll-ns",
+            "3000000000",
+            "--record-replay",
+            "records/my.take.bkr",
+        ]);
+        let launch = SessionLaunch::new(original.clone()).unwrap();
+        let first = launch
+            .retry_loop(region(72_000_000_000_001, 604_800_000_000_001))
+            .unwrap();
+        let mut expected = original.clone();
+        expected[3] = "72000000000001".into();
+        expected[5] = "604800000000001".into();
+        *expected.last_mut().unwrap() = "records/my.take.retry1.bkr".into();
+        assert_eq!(first.args(), expected);
+        let second = first.retry_loop(region(i64::MAX - 1, i64::MAX)).unwrap();
+        expected[3] = (i64::MAX - 1).to_string();
+        expected[5] = i64::MAX.to_string();
+        *expected.last_mut().unwrap() = "records/my.take.retry2.bkr".into();
+        assert_eq!(second.args(), expected);
+        assert_eq!(second.attempt(), 2);
+        assert!(Arc::ptr_eq(&launch.original, &second.original));
+        let ordinary = second.retry().unwrap();
+        let mut pinned = original.clone();
+        *pinned.last_mut().unwrap() = "records/my.take.retry3.bkr".into();
+        assert_eq!(ordinary.args(), pinned);
+        assert_eq!(launch.args(), original);
+        assert_eq!(launch.attempt(), 0);
+        assert_eq!(first.args()[3], "72000000000001");
+    }
+    #[test]
+    fn finite_retry_appends_missing_endpoints_once_and_ordinary_retry_restores_unlimited() {
+        for original in [
+            args(&["--chart", "a.bms"]),
+            args(&["--chart", "a.bms", "--start-ns", "7"]),
+            args(&["--chart", "a.bms", "--end-ns", "9"]),
+        ] {
+            let launch = SessionLaunch::new(original.clone()).unwrap();
+            let first = launch.retry_loop(region(0, 1)).unwrap();
+            let second = first.retry_loop(region(2, 3)).unwrap();
+            assert_eq!(first.args().len(), second.args().len());
+            for (flag, value) in [("--start-ns", "2"), ("--end-ns", "3")] {
+                let pairs: Vec<_> = second
+                    .args()
+                    .chunks_exact(2)
+                    .filter(|pair| pair[0] == flag)
+                    .collect();
+                assert_eq!(pairs.len(), 1);
+                assert_eq!(pairs[0][1], value);
+            }
+            assert_eq!(second.retry().unwrap().args(), original);
+            assert_eq!(launch.args(), original);
+        }
+    }
+    #[test]
+    fn finite_retry_duplicate_unsupported_modes_and_capacity_fail_without_mutation() {
+        for original in [
+            args(&["--chart", "a", "--start-ns", "0", "--start-ns", "1"]),
+            args(&["--chart", "a", "--end-ns", "1", "--end-ns", "2"]),
+            args(&["--chart", "a", "--replay", "watch.bkr"]),
+            args(&["--chart", "a", "--mp-host", "127.0.0.1:34567"]),
+            args(&["--chart", "a", "--mp-join", "127.0.0.1:34567"]),
+            args(&["--chart", "a", "--backend", "asio"]),
+        ] {
+            let launch = SessionLaunch::new(original.clone()).unwrap();
+            assert!(launch.retry_loop(region(0, 1)).is_err());
+            assert_eq!(launch.args(), original);
+            assert_eq!(launch.attempt(), 0);
+        }
+        let mut fields = args(&["--chart", "a"]);
+        for _ in 0..MAX_FIELDS {
+            fields.extend(args(&["--bind", "11:04"]));
+        }
+        let full = SessionLaunch::new(fields.clone()).unwrap();
+        assert!(full.retry_loop(region(0, 1)).is_err());
+        assert_eq!(full.args(), fields);
+        let mut total = args(&["--chart", "a"]);
+        let mut remaining = MAX_TOTAL_BYTES + MAX_VALUE_BYTES - 1;
+        while remaining > 0 {
+            let bytes = remaining.min(MAX_VALUE_BYTES);
+            total.extend(["--bind".into(), "x".repeat(bytes)]);
+            remaining -= bytes;
+        }
+        let full = SessionLaunch::new(total.clone()).unwrap();
+        assert!(full.retry_loop(region(i64::MAX - 1, i64::MAX)).is_err());
+        assert_eq!(full.args(), total);
+        let mut exhausted = SessionLaunch::new(args(&["--chart", "a"])).unwrap();
+        exhausted.attempt = u32::MAX;
+        assert!(exhausted.retry_loop(region(0, 1)).is_err());
+        assert_eq!(exhausted.attempt(), u32::MAX);
+        let original = args(&[
+            "--chart",
+            "a",
+            "--record-replay",
+            &format!("{}.bkr", "a".repeat(MAX_VALUE_BYTES - 4)),
+        ]);
+        let full = SessionLaunch::new(original.clone()).unwrap();
+        assert!(full.retry_loop(region(0, 1)).is_err());
+        assert_eq!(full.args(), original);
     }
     #[test]
     fn bookmark_retries_preserve_options_capture_base_and_pinned_f5_start() {

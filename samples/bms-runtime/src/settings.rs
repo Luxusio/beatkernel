@@ -62,6 +62,11 @@ const COMMON: &[Spec] = &[
         "Empty starts the full song. Nonnegative original song position; earlier note heads are excluded.",
     ),
     (
+        "--end-ns",
+        "PRACTICE END (NS)",
+        "Empty plays without an endpoint. Unsigned original song position after start; native presentation and input drain finish this prefix.",
+    ),
+    (
         "--bind",
         "KEY BINDING",
         "Lane hex:HID usage hex, e.g. 11:04. Add one row per used lane.",
@@ -443,7 +448,11 @@ impl NativeSettings {
             return Err("native settings exceed 128 fields".into());
         }
         let index = self.fields.len();
-        self.fields.push(field(COMMON[0], String::new()));
+        let spec = *COMMON
+            .iter()
+            .find(|spec| spec.0 == "--bind")
+            .expect("binding schema");
+        self.fields.push(field(spec, String::new()));
         Ok(index)
     }
     /// Empty fields omit the option. Selection supplies --chart separately;
@@ -574,6 +583,92 @@ mod tests {
             overlay_native_args(&base, &args(&["--unsupported", "x"]), SettingsHost::Linux)
                 .is_err()
         );
+    }
+    #[test]
+    fn end_profile_overlay_and_binding_rows_preserve_exact_endpoints_on_every_host() {
+        use crate::{
+            presentation_settings::PresentationSettings,
+            settings_profile::{
+                PlayerProfile, decode_player_profile, decode_profile, encode_player_profile,
+                encode_profile,
+            },
+        };
+        for host in [
+            SettingsHost::Linux,
+            SettingsHost::Windows,
+            SettingsHost::Macos,
+        ] {
+            let supplied = args(&[
+                "--start-ns",
+                "604800000000001",
+                "--end-ns",
+                "9223372036854775807",
+                "--bind",
+                "11:04",
+            ]);
+            let mut model = NativeSettings::from_args(&supplied, host).unwrap();
+            let row = model.add_binding().unwrap();
+            assert_eq!(model.fields()[row].flag, "--bind");
+            model.set_value(row, "12:05").unwrap();
+            let mut expected = supplied.clone();
+            expected.extend(args(&["--bind", "12:05"]));
+            assert_eq!(model.native_args(), expected);
+            let encoded = encode_profile(&model, host).unwrap();
+            let restored = decode_profile(&encoded, host).unwrap();
+            assert_eq!(restored.native_args(), expected);
+            let combined = encode_player_profile(
+                &PlayerProfile {
+                    native: restored.clone(),
+                    presentation: PresentationSettings::default(),
+                },
+                host,
+            )
+            .unwrap();
+            let restored = decode_player_profile(&combined, host).unwrap().native;
+            assert_eq!(restored.native_args(), expected);
+            let overlaid = overlay_native_args(
+                &restored.native_args(),
+                &args(&["--end-ns", "9223372036854775806"]),
+                host,
+            )
+            .unwrap();
+            assert_eq!(
+                overlaid
+                    .chunks_exact(2)
+                    .filter(|pair| pair[0] == "--end-ns")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                overlaid
+                    .chunks_exact(2)
+                    .find(|pair| pair[0] == "--end-ns")
+                    .unwrap()[1],
+                "9223372036854775806"
+            );
+            let unlimited = overlay_native_args(&overlaid, &args(&["--end-ns", ""]), host).unwrap();
+            assert!(!unlimited.chunks_exact(2).any(|pair| pair[0] == "--end-ns"));
+            assert_eq!(
+                unlimited
+                    .chunks_exact(2)
+                    .filter(|pair| pair[0] == "--bind")
+                    .count(),
+                2
+            );
+            let blank = NativeSettings::from_args(&[], host).unwrap();
+            assert!(blank.native_args().is_empty());
+            assert_eq!(
+                blank
+                    .fields()
+                    .iter()
+                    .find(|row| row.flag == "--end-ns")
+                    .unwrap()
+                    .value,
+                ""
+            );
+            // Editable draft values do not duplicate native parser authority.
+            assert!(NativeSettings::from_args(&args(&["--end-ns", "invalid draft"]), host).is_ok());
+        }
     }
     #[test]
     fn exact_values_and_repeat_order_survive_without_chart_or_defaults() {
