@@ -44,9 +44,14 @@ Live multiplayer requires a separate network session layer within the app;
 server topology, result authority, authentication, ranking policy, anti-cheat
 and synchronization tolerances remain unresolved design choices.
 
-These competition modes are future application requirements, not implemented
-capabilities. They do not replace outstanding kernel acceptance or lift the
-user's verification deferral.
+The [unified BMS competition application](../kernel/REQ__bms-competition.md) now
+has source for saved own/other opponents, actual stage-result summaries and
+two-peer TCP progress exchange, composed into the three native play loops and
+the primary application entry point. Current multiplayer is casual,
+unauthenticated and uses independent local starts. A graphical UI, authoritative
+online ranking and synchronized-room start remain unimplemented. Source checks
+do not establish executed replay/socket/native acceptance. These modes do not
+replace outstanding kernel acceptance or lift the user's verification deferral.
 
 ## Implementation continuation policy
 

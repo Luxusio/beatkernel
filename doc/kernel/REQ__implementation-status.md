@@ -3,6 +3,13 @@
 This inventory maps the ordered [plan](../../plan.md) to source present on
 2026-10-01, including native BMS replay, live ASIO composition and the
 subsequent Runtime-driven visual example.
+The [unified BMS competition application](REQ__bms-competition.md) additionally
+implements own/other saved opponents and two-peer TCP progress exchange within
+the existing app crate. The main binary dispatches all modes; native play owns
+input/judging on a game thread, with separate native output and network owners.
+The current UI is terminal output, and peer progress is unauthenticated with
+independent local starts. Host, Windows GNU and macOS x86_64 source checks pass;
+actual socket exchange, gameplay and fixture execution remain deferred.
 It records implementation locations, not independent review or phase acceptance.
 The [full-plan acceptance evidence](REQ__plan-acceptance-evidence.md) maps every
 §24 completion condition and §17 verification category to current source and

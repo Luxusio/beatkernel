@@ -67,6 +67,31 @@ with unsafe confined to native FFI; portable input modules prohibit unsafe.
 Windows acquisition has native guest evidence. Linux acquisition and ALSA output
 have native source implementations; Linux/macOS native runtime evidence is pending.
 
+## Unified BMS application
+
+The existing `beatkernel-bms-runtime` crate now provides one primary executable
+with `play`, `replay`, `play-replay`, `render`, `render-replay` and `compete` modes.
+No extra app, UI or networking crate is added. `play --help` prints this host's
+native device/buffer options. Native play accepts saved opponents and optional
+two-player TCP progress exchange:
+
+```sh
+cargo run -p beatkernel-bms-runtime -- play --help
+cargo run -p beatkernel-bms-runtime -- compete --chart song.bms --local-replay now.bkr --ghost-self past.bkr --ghost-other other.bkr --song-ns 10000000000
+```
+
+Add `--ghost-self FILE` or `--ghost-other FILE` to native `play` options, up to
+eight opponents. Capture files using `--record-replay NEW_FILE`. Peers select
+`--mp-host 127.0.0.1:9000` and `--mp-join 127.0.0.1:9000` respectively, with the
+same chart and judging profile and their own explicit native device options.
+Use an explicit reachable IP for another machine. Network loss leaves local
+play running; remote progress is self-reported and song starts are independent.
+The primary `play` mode owns input/judging on a game thread, native output keeps
+its audio worker/callback, and socket I/O has its own worker. The current UI is
+terminal output; graphical UI and ranked online services are not implemented.
+See the [competition contract](doc/kernel/REQ__bms-competition.md) for limits.
+Current source compilation does not establish executed multiplayer or playback.
+
 ## Build and verify
 
 Rust 1.98.1 or newer is required. `rust-toolchain.toml` pins Rust 1.98.1 with
