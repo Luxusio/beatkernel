@@ -63,7 +63,8 @@ now has source for selection and actual game snapshot rendering via winit/wgpu.
 On 2026-10-01 the user approved native-first GPU rendering with future WASM reuse;
 portable renderer/game logic are separated from native and browser I/O adapters.
 Graphical settings now edit explicit native options through the existing
-parsers; persistent profiles and enumerated device selectors remain pending.
+parsers, with explicit native profile Load/Save and CLI overlay source.
+Enumerated device selectors and persistence of GPU/UI settings remain pending.
 A complete browser player, authoritative online ranking and synchronized-room
 start remain unimplemented. Source checks
 do not establish executed replay/socket/native acceptance. These modes do not

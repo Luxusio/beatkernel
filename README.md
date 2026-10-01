@@ -106,7 +106,11 @@ F2 or Settings opens a bounded draft editor for native devices, buffers, timing,
 bindings and competition options. Apply validates through the existing native
 parser and updates the next session; Back discards. Missing device/binding
 configuration can be entered there before starting. Device enumeration,
-persistent profiles, clipboard and IME composition remain pending.
+clipboard and IME composition remain pending. `--profile PATH` loads saved
+native options; explicit native arguments replace matching profile entries.
+Settings Load/Save use an editable path and a separate file worker. Save stores
+the draft; Apply remains separate. Profiles retain the OS identity and exclude
+chart selection and GPU/UI settings. Actual file-I/O acceptance remains pending.
 See the [player contract](doc/kernel/REQ__bms-player.md) for lifecycle and scope.
 Source compilation does not establish executed GUI, multiplayer or playback.
 

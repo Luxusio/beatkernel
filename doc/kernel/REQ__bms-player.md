@@ -105,8 +105,8 @@ Bound drafts to 128 fields, 4096 UTF-8 bytes per value and 64 KiB total value
 bytes. Keep values intact as flag/value pairs rather than parsing shell text.
 Cursor movement and deletion honor UTF-8 scalar boundaries; reject controls and
 newlines. Current glyph fallback still applies to non-ASCII text. Clipboard,
-IME composition, multilingual shaping, enumerated device selectors and durable
-settings persistence remain future work. Editing never acquires devices or
+IME composition, multilingual shaping and enumerated device selectors remain
+future work. Native profile persistence is described below. Editing never acquires devices or
 changes native input/audio owners.
 The next primitives are validated RGBA8 texture resources and clipped sprite
 quads. Solid, glyph and custom texture quads preserve painter order through
@@ -142,10 +142,36 @@ the newer dependency graph is compatible.
 
 ## Controls and rendering behavior
 
+Native settings profiles are explicit user-selected files. `--profile PATH`
+loads a host-tagged versioned UTF-8 profile before opening the window; explicit
+native CLI values replace the matching profile flag group, including all
+repeated bindings/opponents for that flag. Profiles contain native options
+only; chart/library selection and GPU/UI presentation settings stay separate.
+Load/Save in Settings use an editable path. Load replaces the draft, Save
+persists the syntax-validated draft, and Apply separately changes the next
+session. No profile is written automatically. Errors preserve the previous
+draft or saved file. GUI profile I/O runs on an operation worker while the main
+thread keeps drawing; pending operations fence settings/game mutations and
+must drain before exit. File bytes are bounded, not filesystem wall time.
+
+The profile codec preserves UTF-8 values and repeat ordering as tab-separated
+records, bounded to 72 KiB encoded data plus existing draft limits. Unknown
+version/host/options, malformed records and nonregular/symlink leaf files fail
+explicitly. Save refuses existing malformed, foreign or wrong-host profiles,
+writes and syncs a uniquely owned sibling file, then renames it into place for
+replacement. New files are published with a create-only hard link, preventing
+replacement of a concurrently created target. Filesystems without hard-link
+support fail new-file publication explicitly. Pre-publication failures retain
+the old target; temporary cleanup is limited to the owned file and is best
+effort on filesystem errors. This uses the filesystem's rename/link semantics; it does
+not promise interprocess locking, directory crash durability or cancellation
+of an in-flight OS file operation. Native resource availability remains checked
+by actual game preparation.
+
 `player (--library DIR | --chart PATH) NATIVE_OPTIONS` selects the graphical
 mode; no arguments open the current directory catalog. Native configuration
 can be supplied as flag/value pairs or edited through F2/the Settings button.
-The settings screen shows twelve rows per page; Up/Down or Tab select a field,
+The settings screen shows ten rows per page; Up/Down or Tab select a field,
 Left/Right/Home/End move its caret, Backspace/Delete edit, Enter/Apply validates,
 and Escape/Back discards. Add Binding creates another explicit lane/key row.
 Existing repeatable opponent rows are preserved. `play --help` describes the
@@ -169,8 +195,9 @@ compilation may proceed; actual GUI rendering/focus/close/restart/input/audio,
 replay/network execution and independent reviews/QA remain required later.
 This presentation increment does not by itself prove the full player complete.
 Graphical native settings now have source integration; enumerated device
-selectors, reusable persistent configuration and expanded transport/practice
-controls remain player work. Existing
+selectors, persistence of GPU/UI presentation settings and expanded
+transport/practice controls remain player work. Native profiles have source
+integration with file-I/O and interruption acceptance still pending. Existing
 casual multiplayer has independent local starts and unauthenticated progress;
 this screen does not establish ranked online play.
 
@@ -185,9 +212,14 @@ warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warni
 
 - Settings validation checks syntax and cross-option constraints, not resource
   availability — actual device/file checks remain in native preparation.
-- Settings currently require typed device IDs and HID usage bindings; persistence,
-  clipboard and IME composition remain absent — extend these while retaining
+- Settings currently require typed device IDs and HID usage bindings; clipboard
+  and IME composition remain absent — extend these while retaining
   bounded drafts and next-session-only application.
+- Profile operations drain on close rather than being forcibly interrupted —
+  assess filesystem stall behavior during deferred native acceptance.
+- New-profile publication requires hard-link support; concurrent replacement
+  writers need external coordination and directory crash durability is not
+  promised — verify target filesystem behavior during deferred file acceptance.
 
 - Catalog reads are capped per file at 8 MiB; aggregate accounting uses
   advertised file sizes — tighten aggregate accounting if concurrent file
