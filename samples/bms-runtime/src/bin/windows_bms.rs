@@ -66,6 +66,7 @@ struct Options {
     late: i64,
     offset: i64,
     preroll: i64,
+    chart_seed: u64,
     start_ns: i64,
     end_ns: Option<i64>,
     bgm_lookahead: i64,
@@ -189,6 +190,7 @@ fn parse(args: &[String]) -> Result<Options> {
     let mut late = 150_000_000i64;
     let mut offset = 0i64;
     let mut preroll = 3_000_000_000i64;
+    let mut chart_seed = 0u64;
     let mut start_ns = 0i64;
     let mut end_ns = None;
     let mut bgm_lookahead = 3_000_000_000i64;
@@ -356,6 +358,9 @@ fn parse(args: &[String]) -> Result<Options> {
                     return Err("BGM lookahead must be positive i64 nanoseconds".into());
                 }
             }
+            "--chart-seed" => {
+                chart_seed = beatkernel_bms_runtime::settings::parse_chart_seed(value)?;
+            }
             "--start-ns" => {
                 if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
                     return Err("start-ns must be unsigned decimal nanoseconds".into());
@@ -511,6 +516,7 @@ fn parse(args: &[String]) -> Result<Options> {
         late,
         offset,
         preroll,
+        chart_seed,
         start_ns,
         end_ns,
         bgm_lookahead,
@@ -712,7 +718,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
             "Local play: repeat --local-player ID:EXACT_INTERFACE_PATH for 2..64 distinct keyboards, without --keyboard-path. Stable positive u32 IDs are preserved in GUI scores and .p<ID>.bkr replay files. --advance-lag-ns 0..1000000000 (default 2000000) controls the common input frontier. Network + local groups is unsupported; saved ghosts are per-player. Native commands compose the graphical player's actual runtime."
         );
         println!(
-            "windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --start-ns N --end-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Optional --end-ns unsigned strictly after start completes a native-presented, input-drained finite prefix for solo or local WASAPI/SDK-enabled ASIO; ASIO waits for the actual crossing block upper presentation interval. Network finite sessions are pending. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Optional --keyboard-path EXACT_INTERFACE_PATH selects one physical keyboard; omitted accepts any physical keyboard. Explicit device removal fails the session. Focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured."
+            "windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --start-ns N --end-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Optional --end-ns unsigned strictly after start completes a native-presented, input-drained finite prefix for solo or local WASAPI/SDK-enabled ASIO; ASIO waits for the actual crossing block upper presentation interval. Network finite sessions are pending. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Optional --keyboard-path EXACT_INTERFACE_PATH selects one physical keyboard; omitted accepts any physical keyboard. Explicit device removal fails the session. Focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured."
         );
         return Ok(());
     }
@@ -741,7 +747,7 @@ mod native {
         transport::Rate,
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
-    use beatkernel_bms_runtime::{ChannelPolicy, load_prepared};
+    use beatkernel_bms_runtime::{ChannelPolicy, load_prepared_with_seed};
     use beatkernel_bms_runtime::{
         playback_pause::{NativePause, PauseKeyboard, PausePhase},
         player::{self, PauseState},
@@ -1153,7 +1159,7 @@ mod native {
                 )
             })
             .transpose()?;
-        let prepared = load_prepared(
+        let prepared = load_prepared_with_seed(
             &options.chart,
             pcm,
             PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
@@ -1162,6 +1168,7 @@ mod native {
             } else {
                 ChannelPolicy::Exact
             },
+            options.chart_seed,
         )?;
         let (prepared, section) = beatkernel_bms_runtime::section_start::prepare_at(
             prepared,
@@ -1238,12 +1245,13 @@ mod native {
             )?,
         )?;
         let mut competition =
-            beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_at(
+            beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_at_with_chart_seed(
                 &competition_options,
                 &prepared.source,
                 &judge,
                 HOST,
                 Timestamp::from_nanos(options.start_ns),
+                options.chart_seed,
             )?;
         const LIVE_SLACK: usize = 1024;
         let capacity = AudioLimits::MAX_COMMANDS;
@@ -1323,11 +1331,12 @@ mod native {
                     beatkernel::input::CodecLimits::new(65536, 32768)?,
                 )?;
                 capture = Some(
-                    beatkernel_bms_runtime::replay_capture::LiveReplayCapture::new_at(
+                    beatkernel_bms_runtime::replay_capture::LiveReplayCapture::new_at_with_chart_seed(
                         &judge,
                         HOST,
                         limits,
                         Timestamp::from_nanos(options.start_ns),
+                        options.chart_seed,
                     )?,
                 );
             }
@@ -1988,6 +1997,68 @@ mod preroll_fixtures {
         assert_eq!(inbox.back(), Some(&first));
     }
     use beatkernel::audio::{SampleId, VoiceId};
+    #[test]
+    fn chart_seed_is_shared_unsigned_u64_singleton_for_solo_and_local() {
+        let base = arguments(None);
+        assert_eq!(parse(&base).unwrap().chart_seed, 0);
+        let mut local: Vec<String> = base
+            .chunks_exact(2)
+            .filter(|pair| pair[0] != "--keyboard-path")
+            .flat_map(|pair| pair.iter().cloned())
+            .collect();
+        local.extend([
+            "--local-player".into(),
+            "3:registry:3".into(),
+            "--local-player".into(),
+            "4294967295:registry:4294967295".into(),
+        ]);
+        assert_eq!(parse(&local).unwrap().chart_seed, 0);
+        for original in [&base, &local] {
+            for seed in [0_u64, 3, u64::MAX] {
+                let mut configured = (*original).clone();
+                configured.extend(["--chart-seed".into(), seed.to_string()]);
+                let options = parse(&configured).unwrap();
+                assert_eq!(options.chart_seed, seed);
+                assert_eq!(options.start_ns, 0);
+                assert_eq!(options.bindings[&0x11], 4);
+                if original == &local {
+                    assert_eq!(
+                        options
+                            .local_players
+                            .iter()
+                            .map(|player| player.0.0)
+                            .collect::<Vec<_>>(),
+                        vec![3, u32::MAX]
+                    );
+                }
+            }
+            for value in [
+                "",
+                "-1",
+                "+1",
+                "1.0",
+                "1e2",
+                " 3",
+                "3 ",
+                "18446744073709551616",
+            ] {
+                let mut invalid = (*original).clone();
+                invalid.extend(["--chart-seed".into(), value.into()]);
+                assert!(parse(&invalid).is_err(), "{value}");
+            }
+            let mut missing = (*original).clone();
+            missing.push("--chart-seed".into());
+            assert!(parse(&missing).is_err());
+            let mut duplicate = (*original).clone();
+            duplicate.extend([
+                "--chart-seed".into(),
+                "0".into(),
+                "--chart-seed".into(),
+                "3".into(),
+            ]);
+            assert!(parse(&duplicate).is_err());
+        }
+    }
     #[test]
     fn practice_start_is_unsigned_bounded_singleton_and_retains_checked_song_origin() {
         let base = arguments(None);

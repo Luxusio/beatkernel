@@ -14,7 +14,7 @@ use beatkernel_bms_runtime::{
     competition::ScoreSummary,
     competition_live::{CompetitionOptions, LiveCompetition},
     completion::SongCompletion,
-    load_prepared,
+    load_prepared_with_seed,
     local_input::InputMerger,
     local_players::{MAX_LOCAL_PLAYERS, PlayerId},
     local_runtime::{InputResult, MemberConfig, PlayerReport, RuntimeGroup, VoiceAllocator},
@@ -320,7 +320,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             )
         })
         .transpose()?;
-    let prepared = load_prepared(
+    let prepared = load_prepared_with_seed(
         &options.chart,
         pcm,
         PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
@@ -329,6 +329,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         } else {
             ChannelPolicy::Exact
         },
+        options.chart_seed,
     )?;
     let (prepared, section) = beatkernel_bms_runtime::section_start::prepare_at(
         prepared,
@@ -406,7 +407,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             .map(|base| replay_path(base, player))
             .transpose()?;
         let capture = if path.is_some() {
-            Some(LiveReplayCapture::new_at(
+            Some(LiveReplayCapture::new_at_with_chart_seed(
                 &judge,
                 HOST,
                 ReplayCodecLimits::new(
@@ -416,6 +417,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                     beatkernel::input::CodecLimits::new(65536, 32768)?,
                 )?,
                 Timestamp::from_nanos(options.start_ns),
+                options.chart_seed,
             )?)
         } else {
             None
@@ -423,13 +425,14 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         states.push(PlayerState {
             player,
             capture,
-            competition: LiveCompetition::prepare_for_at(
+            competition: LiveCompetition::prepare_for_at_with_chart_seed(
                 player,
                 &competition_options,
                 &prepared.source,
                 &judge,
                 HOST,
                 Timestamp::from_nanos(options.start_ns),
+                options.chart_seed,
             )?,
             completion: if options.end_ns.is_none() {
                 Some(SongCompletion::prepare(
