@@ -305,5 +305,8 @@ two channels. Omitted channel treatment permits mono-to-stereo. ASIO has no
 OS-default driver and remains an explicitly selected advanced backend. These
 policies do not certify native support; actual preparation can fail explicitly.
 Shared Runtime composition has source integration and native solo adoption.
-Multiple simultaneous native acquisition, player assignment UI and complete
-local multiplayer sessions remain required implementation work.
+Linux terminal composition now provides simultaneous evdev acquisition and
+per-player judging/replay using the shared output. Player assignment UI,
+multiple-player presentation and Windows/macOS multi-input composition remain
+required implementation work. Linux terminal local-input mode rejects an attached
+GUI or network competition explicitly before device acquisition.

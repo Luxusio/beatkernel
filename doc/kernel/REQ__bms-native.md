@@ -231,3 +231,11 @@ ignore other input sources before runtime admission, and fail on removal rather
 than substituting another attachment. The GUI stores native interface paths,
 not enumeration-time runtime IDs. Source integration does not prove executed
 keyboard filtering, removal or timing behavior.
+
+Linux supports repeated --local-input PATH for 2..64 same-host players on the
+same selected chart, using shared --bind physical positions with exact per-player
+devices. This replaces --evdev in local sessions; neither is implicitly shared
+between players. Common PCM/output configuration and BGM remain single owners.
+Each player's voice namespace, judge, capture and completion remain independent.
+The primary solo app behavior stays automatic. Multi-player GUI and network
+combination require later integration and fail explicitly for now.
