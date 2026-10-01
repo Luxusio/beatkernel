@@ -83,6 +83,18 @@ impl LiveReplayCapture {
         limits: ReplayCodecLimits,
         start: Timestamp,
     ) -> Result<Self, CaptureError> {
+        Self::new_at_with_chart_seed(judge, domain, limits, start, 0)
+    }
+
+    /// Captures explicit BMS branch provenance separately from the rule seed.
+    /// Zero preserves v1/v2 bytes; nonzero uses v3 with seed then section start.
+    pub fn new_at_with_chart_seed(
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        limits: ReplayCodecLimits,
+        start: Timestamp,
+        chart_seed: u64,
+    ) -> Result<Self, CaptureError> {
         if start.as_nanos() < 0 {
             return Err(CaptureError::InvalidStart);
         }
@@ -93,7 +105,9 @@ impl LiveReplayCapture {
         let mut identity = b"bms-judge-setup/v1:".to_vec();
         identity.extend_from_slice(&hash.to_le_bytes());
         let profile = judge.profile();
-        let (prefix, start_bytes): (&[u8], usize) = if start == Timestamp::ZERO {
+        let (prefix, start_bytes): (&[u8], usize) = if chart_seed != 0 {
+            (b"bms-judge-profile/v3:", 16)
+        } else if start == Timestamp::ZERO {
             (b"bms-judge-profile/v1:", 0)
         } else {
             (b"bms-judge-profile/v2:", 8)
@@ -116,7 +130,10 @@ impl LiveReplayCapture {
         options
             .try_reserve_exact(options_size - options.len())
             .map_err(|_| ReplayCodecError::AllocationFailed)?;
-        if start != Timestamp::ZERO {
+        if chart_seed != 0 {
+            options.extend_from_slice(&chart_seed.to_le_bytes());
+        }
+        if chart_seed != 0 || start != Timestamp::ZERO {
             options.extend_from_slice(&start.as_nanos().to_le_bytes());
         }
         options.extend_from_slice(&profile.input_offset().as_nanos().to_le_bytes());
@@ -257,7 +274,11 @@ mod section_fixtures {
     use beatkernel_bms::{ParseOptions, parse};
 
     fn judge() -> JudgeEngine {
-        let source = parse("#BPM 120\n#00011:01\n#00112:01\n", ParseOptions::default()).unwrap();
+        let source = parse(
+            "#BPM 120\n#WAV01 head.wav\n#00011:01\n#00112:01\n",
+            ParseOptions::default(),
+        )
+        .unwrap();
         JudgeEngine::new(
             source.compile().unwrap().chart,
             source.rules(),
@@ -275,6 +296,82 @@ mod section_fixtures {
     }
     fn limits(header: usize) -> ReplayCodecLimits {
         ReplayCodecLimits::new(8192, 8, header, CodecLimits::new(4096, 1024).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn chart_seed_zero_preserves_legacy_and_nonzero_has_literal_v3_extent() {
+        let judge = judge();
+        let domain = ClockDomainId(17);
+        for start in [Timestamp::ZERO, Timestamp::from_nanos(i64::MAX)] {
+            let old = LiveReplayCapture::new_at(&judge, domain, limits(4096), start).unwrap();
+            let zero =
+                LiveReplayCapture::new_at_with_chart_seed(&judge, domain, limits(4096), start, 0)
+                    .unwrap();
+            assert_eq!(
+                encode_replay(&old.into_file(), limits(4096)).unwrap(),
+                encode_replay(&zero.into_file(), limits(4096)).unwrap()
+            );
+            for seed in [1, u64::MAX] {
+                let capture = LiveReplayCapture::new_at_with_chart_seed(
+                    &judge,
+                    domain,
+                    limits(4096),
+                    start,
+                    seed,
+                )
+                .unwrap();
+                let mut literal = b"bms-judge-profile/v3:".to_vec();
+                literal.extend_from_slice(&seed.to_le_bytes());
+                literal.extend_from_slice(&start.as_nanos().to_le_bytes());
+                literal.extend_from_slice(&(-19_i64).to_le_bytes());
+                literal.extend_from_slice(&1_u64.to_le_bytes());
+                literal.extend_from_slice(&7_u32.to_le_bytes());
+                literal.extend_from_slice(&11_i64.to_le_bytes());
+                literal.extend_from_slice(&23_i64.to_le_bytes());
+                assert_eq!(capture.header().options, literal);
+                assert_eq!(capture.header().seed, 0);
+                let (profile, decoded_start, decoded_seed) =
+                    crate::replay_playback::decode_chart_setup(&literal).unwrap();
+                assert_eq!(&profile, judge.profile());
+                assert_eq!(decoded_start, start);
+                assert_eq!(decoded_seed, seed);
+                let header = capture.header();
+                let cap = header.chart_identity.len()
+                    + header.rules_identity.len()
+                    + header.options.len()
+                    + env!("CARGO_PKG_VERSION").len();
+                assert!(
+                    LiveReplayCapture::new_at_with_chart_seed(
+                        &judge,
+                        domain,
+                        limits(cap),
+                        start,
+                        seed
+                    )
+                    .is_ok()
+                );
+                assert!(matches!(
+                    LiveReplayCapture::new_at_with_chart_seed(
+                        &judge,
+                        domain,
+                        limits(cap - 1),
+                        start,
+                        seed
+                    ),
+                    Err(CaptureError::Codec(ReplayCodecError::HeaderTooLarge))
+                ));
+            }
+        }
+        assert!(matches!(
+            LiveReplayCapture::new_at_with_chart_seed(
+                &judge,
+                domain,
+                limits(4096),
+                Timestamp::from_nanos(-1),
+                1
+            ),
+            Err(CaptureError::InvalidStart)
+        ));
     }
 
     #[test]

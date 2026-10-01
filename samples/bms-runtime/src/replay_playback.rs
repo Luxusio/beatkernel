@@ -119,20 +119,40 @@ pub fn decode_profile(options: &[u8]) -> Result<JudgeProfile, PlaybackError> {
 /// Decodes the profile and original-song practice start without shifting input times.
 /// V1 means zero; v2 requires a positive i64 little-endian start before the v1 body.
 pub fn decode_setup(options: &[u8]) -> Result<(JudgeProfile, Timestamp), PlaybackError> {
-    let (bytes, start) = if let Some(bytes) = options.strip_prefix(b"bms-judge-profile/v1:") {
-        (bytes, Timestamp::ZERO)
-    } else if let Some(bytes) = options.strip_prefix(b"bms-judge-profile/v2:") {
-        let encoded = bytes
-            .get(..8)
-            .ok_or(PlaybackError::Metadata("truncated section start"))?;
-        let start = i64::from_le_bytes(encoded.try_into().expect("checked section start"));
-        if start <= 0 {
-            return Err(PlaybackError::Metadata("v2 section start must be positive"));
-        }
-        (&bytes[8..], Timestamp::from_nanos(start))
-    } else {
-        return Err(PlaybackError::Metadata("unsupported profile schema"));
-    };
+    let (profile, start, _) = decode_chart_setup(options)?;
+    Ok((profile, start))
+}
+
+/// Decodes canonical profile, original-song start and BMS branch seed.
+/// Legacy v1/v2 imply seed zero; v3 requires a nonzero seed and nonnegative start.
+pub fn decode_chart_setup(options: &[u8]) -> Result<(JudgeProfile, Timestamp, u64), PlaybackError> {
+    let (bytes, start, chart_seed) =
+        if let Some(bytes) = options.strip_prefix(b"bms-judge-profile/v1:") {
+            (bytes, Timestamp::ZERO, 0)
+        } else if let Some(bytes) = options.strip_prefix(b"bms-judge-profile/v2:") {
+            let encoded = bytes
+                .get(..8)
+                .ok_or(PlaybackError::Metadata("truncated section start"))?;
+            let start = i64::from_le_bytes(encoded.try_into().expect("checked section start"));
+            if start <= 0 {
+                return Err(PlaybackError::Metadata("v2 section start must be positive"));
+            }
+            (&bytes[8..], Timestamp::from_nanos(start), 0)
+        } else if let Some(bytes) = options.strip_prefix(b"bms-judge-profile/v3:") {
+            let encoded = bytes
+                .get(..16)
+                .ok_or(PlaybackError::Metadata("truncated chart seed/start"))?;
+            let seed = u64::from_le_bytes(encoded[..8].try_into().expect("checked chart seed"));
+            let start = i64::from_le_bytes(encoded[8..].try_into().expect("checked section start"));
+            if seed == 0 || start < 0 {
+                return Err(PlaybackError::Metadata(
+                    "v3 requires nonzero chart seed and nonnegative start",
+                ));
+            }
+            (&bytes[16..], Timestamp::from_nanos(start), seed)
+        } else {
+            return Err(PlaybackError::Metadata("unsupported profile schema"));
+        };
     let fixed = bytes
         .get(..16)
         .ok_or(PlaybackError::Metadata("truncated profile header"))?;
@@ -178,6 +198,7 @@ pub fn decode_setup(options: &[u8]) -> Result<(JudgeProfile, Timestamp), Playbac
     Ok((
         JudgeProfile::new(windows, Duration::from_nanos(offset))?,
         start,
+        chart_seed,
     ))
 }
 
@@ -219,11 +240,17 @@ pub fn validate_setup(
     if file.header.seed != 0 {
         return Err(PlaybackError::IdentityMismatch("BMS rule seed"));
     }
-    let (profile, start) = decode_setup(&file.header.options)?;
+    let (profile, start, chart_seed) = decode_chart_setup(&file.header.options)?;
     let selected = crate::section_start::source_at(source, start)?;
     let compiled = selected.compile()?;
     let judge = JudgeEngine::new(compiled.chart, selected.rules(), profile)?;
-    let expected = LiveReplayCapture::new_at(&judge, file.header.normalized_clock, limits, start)?;
+    let expected = LiveReplayCapture::new_at_with_chart_seed(
+        &judge,
+        file.header.normalized_clock,
+        limits,
+        start,
+        chart_seed,
+    )?;
     if expected.header() != &file.header {
         return Err(PlaybackError::IdentityMismatch(
             "compiled judge setup/profile",
@@ -265,7 +292,104 @@ mod section_fixtures {
             .into_file()
     }
     fn source() -> BmsChart {
-        parse("#BPM 120\n#00011:01\n#00112:01\n", ParseOptions::default()).unwrap()
+        parse(
+            "#BPM 120\n#WAV01 head.wav\n#00011:01\n#00112:01\n",
+            ParseOptions::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn v3_metadata_is_canonical_and_legacy_wrappers_preserve_shapes() {
+        let legacy = file(&source(), Timestamp::ZERO).header.options;
+        let mut valid = b"bms-judge-profile/v3:".to_vec();
+        valid.extend_from_slice(&u64::MAX.to_le_bytes());
+        valid.extend_from_slice(&i64::MAX.to_le_bytes());
+        valid.extend_from_slice(&legacy[b"bms-judge-profile/v1:".len()..]);
+        assert_eq!(
+            decode_chart_setup(&valid).unwrap(),
+            (profile(), Timestamp::from_nanos(i64::MAX), u64::MAX)
+        );
+        assert_eq!(
+            decode_setup(&valid).unwrap(),
+            (profile(), Timestamp::from_nanos(i64::MAX))
+        );
+        assert_eq!(decode_profile(&valid).unwrap(), profile());
+        assert_eq!(decode_chart_setup(&legacy).unwrap().2, 0);
+        assert_eq!(
+            decode_chart_setup(&file(&source(), Timestamp::from_nanos(1)).header.options)
+                .unwrap()
+                .2,
+            0
+        );
+        for length in 0..valid.len() {
+            assert!(decode_chart_setup(&valid[..length]).is_err());
+        }
+        let prefix = b"bms-judge-profile/v3:".len();
+        let mut zero_seed = valid.clone();
+        zero_seed[prefix..prefix + 8].fill(0);
+        assert!(decode_chart_setup(&zero_seed).is_err());
+        let mut negative = valid.clone();
+        negative[prefix + 8..prefix + 16].copy_from_slice(&(-1_i64).to_le_bytes());
+        assert!(decode_chart_setup(&negative).is_err());
+        for count in [0_u64, u64::MAX] {
+            let mut invalid = valid.clone();
+            invalid[prefix + 24..prefix + 32].copy_from_slice(&count.to_le_bytes());
+            assert!(decode_chart_setup(&invalid).is_err());
+        }
+        let mut invalid = valid.clone();
+        invalid[prefix + 36..prefix + 44].copy_from_slice(&(-1_i64).to_le_bytes());
+        assert!(decode_chart_setup(&invalid).is_err());
+        let mut trailing = valid;
+        trailing.push(0);
+        assert!(decode_chart_setup(&trailing).is_err());
+    }
+
+    #[test]
+    fn seeded_selected_chart_reconstructs_and_seeks_without_changing_rule_seed() {
+        use beatkernel::replay::{ReplayOperation, ReplayRecord};
+        use beatkernel_bms::parse_seeded;
+        let text =
+            "#BPM 120\n#WAV01 head.wav\n#RANDOM 2\n#IF 1\n#00111:01\n#ELSE\n#00112:01\n#ENDIF";
+        let selected = parse_seeded(text, ParseOptions::default(), 3).unwrap();
+        let other = parse_seeded(text, ParseOptions::default(), 0).unwrap();
+        let start = Timestamp::from_nanos(1_000_000_000);
+        let section = crate::section_start::source_at(&selected, start).unwrap();
+        let judge =
+            JudgeEngine::new(section.compile().unwrap().chart, section.rules(), profile()).unwrap();
+        let mut recorded = LiveReplayCapture::new_at_with_chart_seed(
+            &judge,
+            ClockDomainId(17),
+            limits(),
+            start,
+            3,
+        )
+        .unwrap()
+        .into_file();
+        recorded.records.push(ReplayRecord {
+            ordinal: 0,
+            song_time: Timestamp::from_nanos(3_000_000_000),
+            operation: ReplayOperation::Advance,
+        });
+        let mut replay = reconstruct(&selected, recorded.clone(), limits()).unwrap();
+        let results = replay.results().to_vec();
+        assert_eq!(results.len(), 1);
+        let hash = replay.engine().stable_hash().unwrap();
+        replay.seek_cursor(0).unwrap();
+        assert!(replay.results().is_empty());
+        replay.seek_cursor(1).unwrap();
+        assert_eq!(replay.results(), results);
+        assert_eq!(replay.engine().stable_hash().unwrap(), hash);
+        assert!(matches!(
+            reconstruct(&other, recorded.clone(), limits()),
+            Err(PlaybackError::IdentityMismatch(_))
+        ));
+        let mut rule_seed = recorded;
+        rule_seed.header.seed = 3;
+        assert!(matches!(
+            reconstruct(&selected, rule_seed, limits()),
+            Err(PlaybackError::IdentityMismatch("BMS rule seed"))
+        ));
     }
 
     #[test]
@@ -465,7 +589,7 @@ mod section_fixtures {
         trailing.push(0);
         assert!(decode_setup(&trailing).is_err());
         let mut unknown = valid.clone();
-        unknown[b"bms-judge-profile/v".len()] = b'3';
+        unknown[b"bms-judge-profile/v".len()] = b'4';
         assert!(decode_setup(&unknown).is_err());
         for count in [0_u64, u64::MAX] {
             let mut malformed = valid.clone();
@@ -524,7 +648,11 @@ mod section_fixtures {
         for changed in variants {
             assert!(reconstruct(&source, changed, limits()).is_err());
         }
-        let changed = parse("#BPM 120\n#00011:01\n#00113:01\n", ParseOptions::default()).unwrap();
+        let changed = parse(
+            "#BPM 120\n#WAV01 head.wav\n#00011:01\n#00113:01\n",
+            ParseOptions::default(),
+        )
+        .unwrap();
         assert!(matches!(
             reconstruct(&changed, section, limits()),
             Err(PlaybackError::IdentityMismatch(_))
