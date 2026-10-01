@@ -48,6 +48,32 @@ pub fn logical_point(
     ))
 }
 
+/// Accumulates normalized wheel lines without device or clock ownership.
+/// Each event emits at most 15 signed steps. Movement beyond that cap is
+/// discarded rather than retained as a backlog for later unrelated events.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WheelSteps {
+    remainder: f64,
+}
+impl WheelSteps {
+    /// Positive lines return positive steps; fractional reversal cancels the
+    /// current remainder. Nonfinite input clears the remainder and emits zero.
+    pub fn push(&mut self, lines: f64) -> i32 {
+        if !lines.is_finite() {
+            self.reset();
+            return 0;
+        }
+        let total = (self.remainder + lines).clamp(-15.0, 15.0);
+        let steps = total.trunc();
+        self.remainder = total - steps;
+        steps as i32
+    }
+    /// Clears fractional movement when its admitting UI scope changes.
+    pub fn reset(&mut self) {
+        self.remainder = 0.0;
+    }
+}
+
 #[derive(Default)]
 pub struct Gesture {
     armed: Option<ControlId>,
@@ -71,6 +97,60 @@ impl Gesture {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wheel_fractions_emit_signed_whole_steps_and_reversal_cancels_remainder() {
+        let mut wheel = WheelSteps::default();
+        for _ in 0..3 {
+            assert_eq!(wheel.push(0.25), 0);
+        }
+        assert_eq!(wheel.push(0.25), 1);
+        assert_eq!(wheel.push(-0.75), 0);
+        assert_eq!(wheel.push(-0.25), -1);
+        assert_eq!(wheel.push(0.75), 0);
+        assert_eq!(wheel.push(-0.25), 0);
+        assert_eq!(wheel.push(-0.75), 0);
+        assert_eq!(wheel.push(-0.75), -1);
+        assert_eq!(wheel.push(0.5), 0);
+        assert_eq!(wheel.push(-0.5), 0);
+        assert_eq!(wheel.push(0.0), 0);
+        assert_eq!(wheel.push(2.75), 2);
+        assert_eq!(wheel.push(0.25), 1);
+    }
+    #[test]
+    fn wheel_reset_and_nonfinite_events_remove_partial_movement() {
+        let mut wheel = WheelSteps::default();
+        wheel.push(0.75);
+        wheel.reset();
+        assert_eq!(wheel.push(0.25), 0);
+        assert_eq!(wheel.push(0.75), 1);
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(wheel.push(-0.75), 0);
+            assert_eq!(wheel.push(invalid), 0);
+            assert_eq!(wheel.push(-0.25), 0);
+            assert_eq!(wheel.push(-0.75), -1);
+        }
+    }
+    #[test]
+    fn wheel_extreme_events_cap_once_without_delayed_steps_or_excess_fraction() {
+        let mut wheel = WheelSteps::default();
+        for (lines, expected) in [
+            (f64::MAX, 15),
+            (-f64::MAX, -15),
+            (1e100, 15),
+            (-1e100, -15),
+            (15.75, 15),
+            (-15.75, -15),
+        ] {
+            wheel.push(0.75);
+            assert_eq!(wheel.push(lines), expected);
+            assert_eq!(wheel.push(0.0), 0);
+            assert_eq!(wheel.push(0.25), 0);
+            assert_eq!(wheel.push(0.75), 1);
+        }
+        assert_eq!(wheel.push(15.0), 15);
+        assert_eq!(wheel.push(-15.0), -15);
+        assert_eq!(wheel.push(-0.0), 0);
+    }
     #[test]
     fn pointer_mapping_matches_stretch_and_excludes_invalid_extents_and_edges() {
         assert_eq!(
