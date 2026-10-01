@@ -1,0 +1,9 @@
+# LNOBJ holds through the shared gameplay path
+
+The separate BMS adapter accepts a case-insensitive `#LNOBJ xx` selecting a nonzero two-digit base36 endpoint. Exact rational channel merging precedes per-lane pairing; the nearest preceding ordinary visible note becomes the head. Earlier and final unpaired ordinary notes stay instant. Endpoints across measures are supported, and malformed/orphan/consecutive markers fail with source-line diagnostics.
+
+LNOBJ and paired LNTYPE1 produce the same existing Hold interaction rules. Combined per-lane ranges reject overlap, touching endpoints and ordinary notes within holds. Head WAV definitions remain required; optional tail tokens remain metadata and never sound automatically. Channel01 still requires normal BGM sample definitions. This mute-tail choice differs from the extension creator's [original RDM behavior](https://nvyu.net/rdm/jp/rby_ex.php), which can sound the endpoint as BGM. The supported subset does not claim universal BMS compatibility.
+
+Prepared parser fixtures cover nearest heads, source ordering, measures, both player sides and scratch lanes, duplicate policies, invalid markers, mixed holds, bounds and exact BPM/STOP timing. App fixtures drive actual Runtime input reports into LiveReplayCapture, reconstruct the replay, compare HoldHead/HoldTail results and engine hashes, seek backward/forward, reject changed chart identity, and project the compiled endpoint into PlayerChart visibility. The BPM60→120 plus STOP48 case ends at exactly 2.5 seconds, without a separate endpoint note or alternate UI clock.
+
+Fixtures are authored for later execution. Source compilation establishes build compatibility only; test execution, native GUI/audio/device behavior, latency and performance remain unverified under the user's execution deferral. No dependency, crate, replay format or native driver change is introduced.

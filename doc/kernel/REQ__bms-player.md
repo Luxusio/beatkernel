@@ -1041,3 +1041,7 @@ Enabling a marked practice loop preflights a fresh pinned invocation with exact 
 
 ### Precise practice section editor
 F6 Practice edits retained start and optional end fields independently, with Tab/click focus and exact seconds/M:SS/H:MM:SS up to nine decimal places. Empty end plays through song end; a configured end must be strictly later than start. Done atomically updates both original-song nanosecond fields in the parent settings draft, preserving unrelated options. Invalid range/capacity preserves that draft and child error state. Apply remains separate; Back discards. Full Song sets start zero and clears end; Through End clears only end. Views repaint only changed dependencies and dispose with screen scope. Native mode validation remains authoritative on Apply/start; Network finite configurations are unsupported; SDK-enabled Windows ASIO admits finite prefixes. Prepare focused regression fixtures for later execution; GUI/device execution remains deferred.
+
+## LNOBJ gameplay composition
+
+LNOBJ chart endpoints project through the same compiled Hold objects, PlayerChart lane/body display, JudgeEngine and captured-operation replay reconstruction as LNTYPE1. No separate replay judge or UI clock is introduced. Endpoint markers are retained metadata and are unsounded, without requiring an endpoint WAV asset. Exact tempo/STOP timing and existing strict held-lane overlap/resource rules apply; parser and actual player/replay composition fixtures are prepared for later execution.

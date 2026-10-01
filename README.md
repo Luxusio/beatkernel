@@ -804,8 +804,10 @@ timestamped callback API. Report framing conversion requires a declared ID layou
 preserving the original envelope instead of guessing from payload bytes.
 
 The [BMS adapter](doc/kernel/REQ__bms-adapter.md) parses bounded UTF-8 text,
-base/direct/extended BPM, STOP, measure lengths, layered BGM and paired LNTYPE1
-holds with exact rational subdivision. Unsupported commands fail explicitly;
+base/direct/extended BPM, STOP, measure lengths, layered BGM, paired LNTYPE1
+and LNOBJ holds with exact rational subdivision. LNOBJ endpoints close the nearest
+preceding visible head on their lane; endpoint tokens are retained as metadata
+and remain silent even when their WAV is defined. Unsupported commands fail explicitly;
 this is a documented subset, not universal BMS compatibility. It returns real
 SourceChart/rules/sample mappings without opening assets or depending on platform.
 The [offline sample](doc/kernel/REQ__bms-sample.md) uses shared WAV preparation,
