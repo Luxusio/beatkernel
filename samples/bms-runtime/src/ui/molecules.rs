@@ -1,7 +1,50 @@
 //! Small compositions of drawing atoms, reusable across screens.
 use super::atoms::{rect, text};
+use super::interaction::Bounds;
 use crate::scene::Scene;
 use std::ops::RangeInclusive;
+
+/// A view-only button. The menu owner handles hit testing and activation.
+pub fn button(scene: &mut Scene, bounds: Bounds, label: &str, hovered: bool, pressed: bool) {
+    if bounds.width <= 0 || bounds.height <= 0 {
+        return;
+    }
+    let color = if pressed {
+        0x42688a
+    } else if hovered {
+        0x354e6c
+    } else {
+        0x263d59
+    };
+    rect(
+        scene,
+        bounds.x,
+        bounds.y,
+        bounds.width,
+        bounds.height,
+        color,
+    );
+    if bounds.height < 30 {
+        return;
+    }
+    let characters = usize::try_from(bounds.width.saturating_sub(16) / 12).unwrap_or(usize::MAX);
+    let end = label
+        .char_indices()
+        .nth(characters)
+        .map_or(label.len(), |(index, _)| index);
+    text(
+        scene,
+        usize::try_from(bounds.x.max(0))
+            .unwrap_or(usize::MAX)
+            .saturating_add(8),
+        usize::try_from(bounds.y.max(0))
+            .unwrap_or(usize::MAX)
+            .saturating_add(8),
+        &label[..end],
+        2,
+        0xf0f4ff,
+    );
+}
 
 pub fn counter(scene: &mut Scene, x: usize, y: usize, label: &str, value: u64, color: u32) {
     text(scene, x, y, label, 2, color);

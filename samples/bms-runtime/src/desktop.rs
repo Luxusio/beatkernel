@@ -2,7 +2,8 @@
 use beatkernel::judge::JudgeOutcome;
 use beatkernel_bms_runtime::ui::{
     atoms::{rect, text},
-    organisms,
+    interaction::{logical_point, Bounds, ControlId, Gesture},
+    molecules, organisms,
 };
 use beatkernel_bms_runtime::{
     graphics::{self, BackendChoice, Presentation, Renderer},
@@ -19,7 +20,7 @@ use std::{
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::{ElementState, WindowEvent},
+    event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
@@ -216,6 +217,9 @@ pub(super) fn run(args: &[String], native: Native) -> Result<(), Box<dyn Error>>
         failure: None,
         fatal: None,
         next_frame: Instant::now(),
+        pointer: None,
+        gesture: Gesture::default(),
+        hits: Vec::with_capacity(17),
     };
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.fatal {
@@ -242,9 +246,54 @@ struct Desktop {
     failure: Option<String>,
     fatal: Option<String>,
     next_frame: Instant,
+    pointer: Option<(f64, f64)>,
+    gesture: Gesture,
+    hits: Vec<(ControlId, Bounds)>,
 }
 impl Desktop {
+    fn point(&self) -> Option<(f64, f64)> {
+        let window = self.window.as_ref()?;
+        let size = window.inner_size();
+        logical_point(
+            self.pointer?,
+            (size.width, size.height),
+            (WIDTH as u32, HEIGHT as u32),
+        )
+    }
+    fn hit(&self) -> Option<ControlId> {
+        if !self.active || self.closing || self.suspended || self.occluded {
+            return None;
+        }
+        let point = self.point()?;
+        self.hits
+            .iter()
+            .rev()
+            .find(|(_, bounds)| bounds.contains(point))
+            .map(|(id, _)| *id)
+    }
+    fn activate(&mut self, id: ControlId) {
+        match id.0 {
+            1 if self.game.is_none() && !self.entries.is_empty() => self.key(KeyCode::Enter, false),
+            2 if self.game.as_ref().is_some_and(|game| !game.joined) => self.cancel(),
+            3 if self.game.as_ref().is_some_and(|game| game.joined) => {
+                self.key(KeyCode::Enter, false)
+            }
+            4 if self.game.is_none() => {
+                self.closing = true;
+                self.cancel();
+            }
+            row if row >= 100 && self.game.is_none() => {
+                if let Ok(index) = usize::try_from(row - 100) {
+                    if index < self.entries.len() {
+                        self.selected = index;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     fn cancel(&mut self) {
+        self.gesture.cancel();
         if let Some(game) = &mut self.game {
             if !game.joined {
                 game.viewer.cancel();
@@ -288,6 +337,7 @@ impl Desktop {
         }
     }
     fn key(&mut self, key: KeyCode, repeat: bool) {
+        self.gesture.cancel();
         if !self.active || self.closing {
             return;
         }
@@ -356,18 +406,51 @@ impl Desktop {
         Ok(())
     }
     fn draw(&mut self) -> Result<(), String> {
+        let point = self.point();
+        self.hits.clear();
         self.scene.clear();
         let pixels = &mut self.scene;
         rect(pixels, 0, 0, WIDTH as i64, HEIGHT as i64, 0x10151e);
         text(pixels, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
         if let Some(game) = &self.game {
             draw_game(pixels, game, self.options.lookahead)?;
+            if game.joined {
+                control(
+                    pixels,
+                    &mut self.hits,
+                    &self.gesture,
+                    point,
+                    ControlId(3),
+                    Bounds {
+                        x: 750,
+                        y: 65,
+                        width: 180,
+                        height: 34,
+                    },
+                    "RETURN",
+                );
+            } else if !game.cancelling {
+                control(
+                    pixels,
+                    &mut self.hits,
+                    &self.gesture,
+                    point,
+                    ControlId(2),
+                    Bounds {
+                        x: 750,
+                        y: 65,
+                        width: 180,
+                        height: 34,
+                    },
+                    "CANCEL",
+                );
+            }
         } else {
             text(
                 pixels,
                 24,
                 65,
-                "UP/DOWN SELECT   ENTER PLAY   ESC EXIT",
+                "UP/DOWN SELECT  ENTER PLAY  ESC EXIT",
                 2,
                 0x9bb1cf,
             );
@@ -390,6 +473,15 @@ impl Desktop {
                     rect(pixels, 18, y as i64 - 6, 924, 30, 0x263d59);
                 }
                 text(pixels, 28, y, &entry.title, 2, 0xf0f4ff);
+                self.hits.push((
+                    ControlId(100 + row as u64),
+                    Bounds {
+                        x: 18,
+                        y: y as i64 - 6,
+                        width: 924,
+                        height: 30,
+                    },
+                ));
             }
             for (index, diagnostic) in self.diagnostics.iter().take(2).enumerate() {
                 text(pixels, 24, 654 + index * 22, diagnostic, 1, 0xd8b36b);
@@ -397,6 +489,36 @@ impl Desktop {
             if self.entries.is_empty() {
                 text(pixels, 24, 150, "NO SUPPORTED CHARTS FOUND", 2, 0xff8e8e);
             }
+            if !self.entries.is_empty() {
+                control(
+                    pixels,
+                    &mut self.hits,
+                    &self.gesture,
+                    point,
+                    ControlId(1),
+                    Bounds {
+                        x: 550,
+                        y: 65,
+                        width: 180,
+                        height: 34,
+                    },
+                    "START",
+                );
+            }
+            control(
+                pixels,
+                &mut self.hits,
+                &self.gesture,
+                point,
+                ControlId(4),
+                Bounds {
+                    x: 750,
+                    y: 65,
+                    width: 180,
+                    height: 34,
+                },
+                "EXIT",
+            );
         }
         if let Some(error) = &self.failure {
             text(
@@ -481,6 +603,7 @@ impl ApplicationHandler for Desktop {
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
         self.suspended = true;
         self.active = false;
+        self.pointer = None;
         self.cancel();
         self.renderer = None;
         self.instance = None;
@@ -503,14 +626,45 @@ impl ApplicationHandler for Desktop {
             WindowEvent::Focused(active) => {
                 self.active = active;
                 if !active {
+                    self.pointer = None;
                     self.cancel();
                 }
             }
-            WindowEvent::Occluded(occluded) => self.occluded = occluded,
+            WindowEvent::Occluded(occluded) => {
+                self.occluded = occluded;
+                if occluded {
+                    self.gesture.cancel();
+                }
+            }
             WindowEvent::Resized(size) => {
+                self.gesture.cancel();
+                self.pointer = None;
+                self.hits.clear();
                 if let Some(renderer) = &mut self.renderer {
                     if let Err(error) = renderer.resize(size.width, size.height) {
                         self.fail(error);
+                    }
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.pointer = Some((position.x, position.y))
+            }
+            WindowEvent::CursorLeft { .. } => {
+                self.pointer = None;
+                self.gesture.cancel();
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                let hit = self.hit();
+                match state {
+                    ElementState::Pressed => self.gesture.press(hit),
+                    ElementState::Released => {
+                        if let Some(id) = self.gesture.release(hit) {
+                            self.activate(id);
+                        }
                     }
                 }
             }
@@ -557,6 +711,25 @@ impl ApplicationHandler for Desktop {
         // Unexpected OS exit still joins native owners through Game::drop.
         self.game = None;
     }
+}
+
+fn control(
+    scene: &mut Scene,
+    hits: &mut Vec<(ControlId, Bounds)>,
+    gesture: &Gesture,
+    point: Option<(f64, f64)>,
+    id: ControlId,
+    bounds: Bounds,
+    label: &str,
+) {
+    molecules::button(
+        scene,
+        bounds,
+        label,
+        point.is_some_and(|point| bounds.contains(point)),
+        gesture.is_armed(id),
+    );
+    hits.push((id, bounds));
 }
 
 fn window_title(title: &str, artist: &str) -> String {
