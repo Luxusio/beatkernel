@@ -28,6 +28,7 @@ pub mod local_setup;
 pub mod multiplayer;
 /// Omitted solo option defaults, independent of native discovery.
 pub mod native_defaults;
+pub mod native_end;
 /// Synthetic offline composition using the same runtime and mixer as native apps.
 pub mod offline;
 /// Typed UI panel ownership and cancellation permits for off-thread work.
