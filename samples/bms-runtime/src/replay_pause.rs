@@ -130,6 +130,74 @@ mod fixtures {
         }
     }
     #[test]
+    fn actual_straddling_mixer_end_freezes_replay_song_only_after_native_crossing() {
+        use beatkernel::audio::{
+            AudioCommand, AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, PcmSample,
+            SampleBank, SampleId, VoiceId, command_queue,
+        };
+        let format = AudioFormat::new(1000, 1).unwrap();
+        let limits = AudioLimits::new(4, 2, 4, 16, 4).unwrap();
+        let pcm = PcmLimits::new(64, 128, 1).unwrap();
+        let mut bank = SampleBank::new(format, pcm).unwrap();
+        bank.insert(
+            SampleId(1),
+            PcmSample::new(format, vec![0.5; 16], pcm).unwrap(),
+        )
+        .unwrap();
+        let (mut producer, consumer) = command_queue(4).unwrap();
+        for (voice, at) in [(1, 0), (2, 4_000_000)] {
+            producer
+                .try_push(AudioCommand::Play {
+                    voice: VoiceId(voice),
+                    sample: SampleId(1),
+                    at: Timestamp::from_nanos(at),
+                    gain: 1.0,
+                })
+                .unwrap();
+        }
+        let config = MixerConfig::new(format, ClockDomainId(1), Timestamp::ZERO, limits)
+            .with_playback_end_frame(4);
+        let mut mixer = Mixer::new(config, bank, consumer).unwrap();
+        let mut pause = ReplayPause::new(
+            point(1, 0),
+            ClockDomainId(2),
+            1000,
+            Timestamp::from_nanos(50_000_000),
+            Duration::from_nanos(3_000_000),
+        )
+        .unwrap();
+        pause.request(true, pair(0)).unwrap();
+        let mut output = [99.0; 10];
+        let rendered = mixer.render(&mut output).unwrap();
+        assert_eq!(output, [0.5, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(rendered.playback_frames, 4);
+        assert!(rendered.paused);
+        assert_eq!(rendered.counters.commands_applied, 1);
+        assert_eq!(rendered.pending_commands, 1);
+        assert_eq!(
+            pause.observe(Some(rendered), pair(3_000_000)).unwrap(),
+            None
+        );
+        assert_eq!(pause.presentation_song(point(1, 3_000_000)).unwrap(), None);
+        let boundary = pause.observe(None, pair(4_000_000)).unwrap().unwrap();
+        assert_eq!(boundary.song, Timestamp::from_nanos(51_000_000));
+        assert!(boundary.paused);
+        assert_eq!(
+            pause.observe(Some(rendered), pair(9_000_000)).unwrap(),
+            None
+        );
+        let mut silence = [99.0; 3];
+        let frozen = mixer.render(&mut silence).unwrap();
+        assert_eq!(silence, [0.0; 3]);
+        assert_eq!(frozen.playback_start_frame, 4);
+        assert_eq!(frozen.playback_frames, 0);
+        assert_eq!(pause.observe(Some(frozen), pair(12_000_000)).unwrap(), None);
+        producer.request_pause(false);
+        assert_eq!(mixer.render(&mut silence).unwrap().playback_frames, 0);
+        assert_eq!(silence, [0.0; 3]);
+        assert_eq!(pause.presentation_song(point(1, 15_000_000)).unwrap(), None);
+    }
+    #[test]
     fn coalesced_resume_preserves_frozen_song_prefix_but_later_presentation_can_advance() {
         let mut pause = ReplayPause::new(
             point(1, 0),

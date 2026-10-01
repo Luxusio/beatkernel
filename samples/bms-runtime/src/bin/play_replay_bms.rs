@@ -422,7 +422,7 @@ fn playback_render_cursor(report: &RenderReport) -> Result<u64> {
         .ok_or("replay playback frame overflow")?;
     if report.playback_start_frame > report.start_frame
         || end > physical
-        || (report.paused && report.playback_frames != 0)
+        || report.playback_frames > report.frames
         || (!report.paused && report.playback_frames != report.frames)
     {
         return Err("replay physical/playback render grids differ".into());
@@ -1011,6 +1011,10 @@ mod fixtures {
         };
         assert_eq!(completed_render_cursor(&report).unwrap(), 110);
         assert_eq!(playback_render_cursor(&report).unwrap(), 40);
+        report.playback_frames = 4;
+        assert_eq!(playback_render_cursor(&report).unwrap(), 44);
+        report.playback_frames = 11;
+        assert!(playback_render_cursor(&report).is_err());
         report.start_frame = 110;
         report.paused = false;
         report.playback_frames = 10;

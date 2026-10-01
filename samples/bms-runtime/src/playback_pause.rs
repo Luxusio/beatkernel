@@ -138,7 +138,9 @@ impl NativePause {
             .start_frame
             .checked_sub(report.playback_start_frame)
             .ok_or(PauseError("playback grid exceeds physical grid"))?;
-        if report.playback_frames != if report.paused { 0 } else { report.frames } {
+        if report.playback_frames > report.frames
+            || (!report.paused && report.playback_frames != report.frames)
+        {
             return Err(PauseError("render pause extent is inconsistent"));
         }
         self.point(physical)?;
@@ -193,7 +195,7 @@ impl NativePause {
     ) -> Result<Option<PauseBoundary>, PauseError> {
         self.check_pair(pair)?;
         if let Some(report) = report {
-            let (_, _, gap) = self.check_report(report)?;
+            let (_, playback, gap) = self.check_report(report)?;
             if matches!(self.phase, PausePhase::Running | PausePhase::Pausing)
                 && !report.paused
                 && gap != self.gap
@@ -202,7 +204,10 @@ impl NativePause {
                     "active render changed the acknowledged pause gap",
                 ));
             }
-            if self.phase == PausePhase::Paused && report.playback_start_frame != self.frozen {
+            if self.phase == PausePhase::Paused
+                && (playback != self.frozen
+                    || (report.playback_frames > 0 && self.last_report != Some(report)))
+            {
                 return Err(PauseError(
                     "paused render changed the frozen playback frame",
                 ));
@@ -221,11 +226,10 @@ impl NativePause {
                         return Err(PauseError("pause gap regressed"));
                     }
                     self.boundary = Some(PendingBoundary {
-                        physical: report
-                            .playback_start_frame
+                        physical: playback
                             .checked_add(self.gap)
                             .ok_or(PauseError("pause boundary overflow"))?,
-                        playback: report.playback_start_frame,
+                        playback,
                         gap: self.gap,
                     });
                 }
@@ -481,6 +485,48 @@ mod fixtures {
             producer_disconnected: false,
             counters: AudioCounters::default(),
         }
+    }
+    #[test]
+    fn straddling_pause_uses_prefix_end_and_repeated_cached_prefix_cannot_advance_frozen_time() {
+        let mut pause = NativePause::new(point(1, 0), ClockDomainId(2), 1000).unwrap();
+        pause.request(true, pair(0)).unwrap();
+        let mut partial = report(0, 0, 10, true);
+        partial.playback_frames = 4;
+        assert_eq!(pause.observe(Some(partial), pair(3_000_000)).unwrap(), None);
+        let boundary = pause.observe(None, pair(4_000_000)).unwrap().unwrap();
+        assert_eq!(boundary.host, point(2, 4_010_000));
+        assert_eq!(boundary.playback_frame, 4);
+        assert_eq!(
+            pause.scheduling_point(partial).unwrap(),
+            point(1, 4_000_000)
+        );
+        assert_eq!(pause.observe(Some(partial), pair(9_000_000)).unwrap(), None);
+        assert_eq!(
+            pause
+                .observe(Some(report(10, 4, 5, true)), pair(14_000_000))
+                .unwrap(),
+            None
+        );
+        let before = pause.clone();
+        let mut advancing = report(15, 4, 2, true);
+        advancing.playback_frames = 1;
+        assert!(pause.observe(Some(advancing), pair(16_000_000)).is_err());
+        assert_eq!(pause.last_render_report(), before.last_render_report());
+        assert_eq!(pause.phase(), PausePhase::Paused);
+        let mut rewound_prefix = report(15, 0, 4, true);
+        rewound_prefix.playback_frames = 4;
+        assert!(
+            pause
+                .observe(Some(rewound_prefix), pair(16_000_000))
+                .is_err()
+        );
+        assert_eq!(pause.last_render_report(), before.last_render_report());
+        let mut overlong = partial;
+        overlong.playback_frames = 11;
+        assert!(pause.scheduling_point(overlong).is_err());
+        let mut incomplete_active = partial;
+        incomplete_active.paused = false;
+        assert!(pause.scheduling_point(incomplete_active).is_err());
     }
     #[test]
     fn coalesced_reports_wait_for_native_crossing_and_recover_first_boundaries() {
