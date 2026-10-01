@@ -961,6 +961,114 @@ fn durable_source_seed_restores_real_capture_assets_pcm_and_replay() {
 }
 
 #[test]
+fn switch_fallthrough_restores_selected_assets_and_pcm_from_recorded_seed() {
+    use beatkernel::{
+        judge::JudgeEngine,
+        replay::codec::{decode_replay, encode_replay},
+        time::{ClockDomainId, Timestamp},
+    };
+    let dir = Directory::new();
+    dir.write("head.wav", &wav(1, &[16384, -8192]));
+    dir.write("bgm.wav", &wav(1, &[8192, -4096]));
+    let path = dir.write(
+        "switch.bms",
+        b"#BPM 60\n#SWITCH 5\n#CASE 1\n#WAV01 head.wav\n#00011:01\n#CASE 2\n#WAV02 bgm.wav\n#00001:02\n#SKIP\n#CASE 3\n#WAV03 absent.wav\n#00013:03\n#DEF\n#WAV04 missing.wav\n#00012:04\n#ENDSW\n",
+    );
+    let format = AudioFormat::new(24_000, 1).unwrap();
+    // Seed3 selects CASE1, falls through CASE2, then SKIP masks missing assets.
+    // Seed0 chooses 5 and reaches DEF, whose selected asset really is missing.
+    assert!(load_prepared(&path, format, limits(), ChannelPolicy::Exact).is_err());
+    let prepared =
+        load_prepared_with_seed(&path, format, limits(), ChannelPolicy::Exact, 3).unwrap();
+    assert_eq!(prepared.source.notes.len(), 1);
+    assert_eq!(prepared.source.notes[0].line, 5);
+    assert_eq!(prepared.source.notes[0].sample, SampleId(1));
+    assert_eq!(prepared.source.bgm.len(), 1);
+    assert_eq!(prepared.source.samples.len(), 2);
+    assert_eq!(
+        prepared.bank.get(SampleId(1)).unwrap().samples(),
+        &[0.5, -0.25]
+    );
+    assert_eq!(
+        prepared.bank.get(SampleId(2)).unwrap().samples(),
+        &[0.25, -0.125]
+    );
+    assert!(prepared.bank.get(SampleId(3)).is_none());
+    assert!(prepared.bank.get(SampleId(4)).is_none());
+    let identity = captured_setup_identity(&prepared);
+    let profile = replay_playback::decode_profile(&identity.options).unwrap();
+    let judge = JudgeEngine::new(
+        prepared.compiled.chart.clone(),
+        prepared.source.rules(),
+        profile,
+    )
+    .unwrap();
+    let replay_limits = competition_live::replay_limits().unwrap();
+    let recorded = replay_capture::LiveReplayCapture::new_at_with_chart_seed(
+        &judge,
+        ClockDomainId(17),
+        replay_limits,
+        Timestamp::ZERO,
+        3,
+    )
+    .unwrap()
+    .into_file();
+    let file = decode_replay(
+        &encode_replay(&recorded, replay_limits).unwrap(),
+        replay_limits,
+    )
+    .unwrap();
+    assert_eq!(file, recorded);
+    assert_eq!(
+        replay_playback::decode_chart_setup(&file.header.options)
+            .unwrap()
+            .2,
+        3
+    );
+    let restored = load_prepared_for_replay(
+        &path,
+        format,
+        limits(),
+        ChannelPolicy::Exact,
+        &file,
+        replay_limits,
+    )
+    .unwrap();
+    assert_eq!(restored.source.source, prepared.source.source);
+    assert_eq!(captured_setup_identity(&restored), identity);
+    let selected = competition_live::load_chart_with_seed(&path, 3).unwrap();
+    replay_playback::validate_setup(&selected, &file, replay_limits).unwrap();
+    let default = competition_live::load_chart(&path).unwrap();
+    assert_eq!(default.notes[0].sample, SampleId(4));
+    assert!(replay_playback::validate_setup(&default, &file, replay_limits).is_err());
+    let mut replay = replay_playback::reconstruct(&restored.source, file, replay_limits).unwrap();
+    replay.seek(Timestamp::ZERO).unwrap();
+    // The ordinary runtime and mixer must sum precisely the selected key and BGM.
+    for prepared in [prepared, restored] {
+        let mut output = Vec::new();
+        let report = offline::render_offline(
+            prepared,
+            offline::OfflineOptions {
+                frames: 3,
+                block_frames: 1,
+                command_capacity: 4,
+                max_voices: 2,
+            },
+            &mut output,
+        )
+        .unwrap();
+        assert_eq!(report.hits, 1);
+        assert_eq!(
+            output,
+            [0.75f32, -0.375, 0.0]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
 fn shared_local_seeded_chart_keeps_every_capture_and_record_preview_compatible() {
     use beatkernel::{
         input::{
