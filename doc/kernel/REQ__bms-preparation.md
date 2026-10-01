@@ -8,8 +8,8 @@ submission, clock mapping or callback work. Callers choose output format and
 PCM limits. The default decoder supports the core's strict RIFF WAVE
 PCM16/24/32 and IEEE float32 subset; other codecs require a caller decoder.
 
-Chart text is bounded to the default parser's 8 MiB maximum, is valid UTF-8 and
-uses default bounded ParseOptions. Each encoded referenced asset is bounded to
+Chart text is bounded to the default parser's 8 MiB maximum, is decoded through the shared UTF-8-first/strict-Shift-JIS application policy and
+uses default bounded ParseOptions. Decoded UTF-8 separately obeys the same cap. Each encoded referenced asset is bounded to
 64 MiB before decoding. PCM per-asset, total-bank and asset-count limits are
 caller controlled and also apply after explicit channel expansion. Only WAV
 identities referenced by gameplay heads/instant notes or BGM are loaded;
@@ -45,3 +45,10 @@ explicit mono expansion, reference-only loading, custom decoding, bounded PCM,
 path rejection and more than 4096 chart notes. They are compiled but remain
 unexecuted during the user's verification deferral. No native playback, QA,
 review or runtime result is claimed by preparation authoring.
+
+
+## Shared chart character decoding
+
+Application file loaders accept valid UTF-8 first, stripping a single initial UTF-8 BOM; that BOM requires valid UTF-8. Without a BOM, invalid UTF-8 is decoded strictly as WHATWG Shift_JIS (Windows legacy extensions) before the unchanged text parser. UTF-16/32 BOMs, malformed/truncated bytes and replacement decoding reject. Explicit Utf8/ShiftJis modes are available at the shared decoding API; native/GUI/offline/replay loading uses the same Auto policy. This is a deterministic two-encoding preference, not general charset detection; ambiguous bytes that are valid UTF-8 retain that interpretation.
+
+Encoded input and decoded UTF-8 independently obey the parser's 8 MiB cap; output expansion and reader growth fail before parsing. Conversion runs during preparation, with a bounded scratch buffer and capped output allocation, outside audio/input callbacks. Metadata and asset paths preserve decoded Unicode and separator bytes; sound containment and strict parser/resource policies remain in force. Pure literal-byte and real parser/replay composition fixtures are prepared for later execution; build checks do not establish native path/font behavior.

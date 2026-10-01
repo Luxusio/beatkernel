@@ -1,0 +1,11 @@
+# Shared legacy chart text loading
+
+Application chart loading now shares one strict, bounded decoder before the unchanged UTF-8 BMS adapter. Catalog/native/GUI/records/competition loads, actual asset preparation, and the logical replay utility use the same UTF-8-first/Shift-JIS fallback policy. UTF-8 BOMs strip once and require valid UTF-8; UTF-16/32 BOMs and malformed/truncated sequences reject. The explicit API also provides UTF-8 or Shift-JIS modes. Metadata and asset paths retain decoded Unicode, separators and original line order. Core/adapter dependencies, judging, sound containment and replay formats are unchanged.
+
+Both encoded bytes and decoded UTF-8 obey the parser's 8 MiB cap; readers detect growth and interrupted/errors, and strict streaming conversion caps output allocation. Only preparation does this work. The pinned app-only encoding_rs 0.8.35 dependency implements the WHATWG Shift_JIS mapping; its MIT and WHATWG BSD notices are retained under the existing app third-party directory. See the upstream [decoder API](https://docs.rs/encoding_rs/0.8.35/encoding_rs/struct.Decoder.html) and [license expression](https://github.com/hsivonen/encoding_rs/blob/v0.8.35/Cargo.toml).
+
+Literal byte/reader fixtures cover Japanese metadata/assets, legacy extensions, ambiguous modes, BOMs, invalid data and limits. The actual Runtime/live-capture/reconstruction fixture compares normalized UTF-8, BOM and Shift-JIS charts through HoldHead/HoldTail, BPM/STOP timing, identical captured identities/operations, seek and engine hashes. A temporary-file preparation fixture also checks actual catalog metadata and Unicode-named WAV resolution/PCM against the same UTF-8 chart, prepared for later filesystem execution. Fixtures are compiled for later execution; no native filesystem/font/audio evidence or test pass is claimed.
+
+## Known ceiling
+
+Auto is a deterministic preference for valid UTF-8, otherwise strict Shift-JIS, rather than general charset detection. Ambiguous UTF-8-valid legacy bytes require callers to select the explicit decoding API mode; the current product loaders use Auto. UTF-16, EUC-JP, other legacy encodings and text shaping/font coverage are outside this change. Native asset-path behavior, physical timing and performance remain unverified under the user's execution deferral.

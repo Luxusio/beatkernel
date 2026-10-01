@@ -1045,3 +1045,10 @@ F6 Practice edits retained start and optional end fields independently, with Tab
 ## LNOBJ gameplay composition
 
 LNOBJ chart endpoints project through the same compiled Hold objects, PlayerChart lane/body display, JudgeEngine and captured-operation replay reconstruction as LNTYPE1. No separate replay judge or UI clock is introduced. Endpoint markers are retained metadata and are unsounded, without requiring an endpoint WAV asset. Exact tempo/STOP timing and existing strict held-lane overlap/resource rules apply; parser and actual player/replay composition fixtures are prepared for later execution.
+
+
+## Shared chart character decoding
+
+Application file loaders accept valid UTF-8 first, stripping a single initial UTF-8 BOM; that BOM requires valid UTF-8. Without a BOM, invalid UTF-8 is decoded strictly as WHATWG Shift_JIS (Windows legacy extensions) before the unchanged text parser. UTF-16/32 BOMs, malformed/truncated bytes and replacement decoding reject. Explicit Utf8/ShiftJis modes are available at the shared decoding API; native/GUI/offline/replay loading uses the same Auto policy. This is a deterministic two-encoding preference, not general charset detection; ambiguous bytes that are valid UTF-8 retain that interpretation.
+
+Encoded input and decoded UTF-8 independently obey the parser's 8 MiB cap; output expansion and reader growth fail before parsing. Conversion runs during preparation, with a bounded scratch buffer and capped output allocation, outside audio/input callbacks. Metadata and asset paths preserve decoded Unicode and separator bytes; sound containment and strict parser/resource policies remain in force. Pure literal-byte and real parser/replay composition fixtures are prepared for later execution; build checks do not establish native path/font behavior.
