@@ -487,6 +487,12 @@ fn save_capture(
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    run_args(&args)
+}
+
+pub(crate) fn run_args(args: &[String]) -> Result<()> {
+    let (competition_options, args) =
+        beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
         println!("windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive --seconds N --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Seconds is loop duration after calibration, including remaining preroll. Bind every used BMS lane explicitly; Any physical keyboard, focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured.");
         return Ok(());
@@ -494,11 +500,11 @@ fn main() -> Result<()> {
     let options = parse(&args)?;
     #[cfg(target_os = "windows")]
     {
-        native::run(options)
+        native::run(options, competition_options)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = options;
+        let _ = (options, competition_options);
         Err("windows_bms native playback requires Windows".into())
     }
 }
@@ -832,9 +838,13 @@ mod native {
     fn print_report(
         report: RuntimeReport,
         capture: &mut Option<beatkernel_bms_runtime::replay_capture::LiveReplayCapture>,
+        competition: &mut Option<beatkernel_bms_runtime::competition_live::LiveCompetition>,
     ) -> Result<()> {
         if let Some(capture) = capture.as_mut() {
             capture.record_report(&report)?;
+        }
+        if let Some(competition) = competition.as_mut() {
+            competition.observe(&report)?;
         }
         for result in report.judge_events {
             println!("judge={result:?}");
@@ -850,7 +860,10 @@ mod native {
         }
         Ok(())
     }
-    pub(super) fn run(options: Options) -> Result<()> {
+    pub(super) fn run(
+        options: Options,
+        competition_options: beatkernel_bms_runtime::competition_live::CompetitionOptions,
+    ) -> Result<()> {
         let clock = QpcClock::new(HOST)?;
         // Declared before device owners so every exit reports after their cleanup.
         let mut delivery = DeliverySession(beatkernel::telemetry::InputDeliveryTelemetry::new(
@@ -904,6 +917,12 @@ mod native {
                 }],
                 Duration::from_nanos(options.offset),
             )?,
+        )?;
+        let mut competition = beatkernel_bms_runtime::competition_live::LiveCompetition::prepare(
+            &competition_options,
+            &prepared.source,
+            &judge,
+            HOST,
         )?;
         const LIVE_SLACK: usize = 1024;
         let capacity = AudioLimits::MAX_COMMANDS;
@@ -1073,6 +1092,7 @@ mod native {
                                     stream.schedule(pcm.sample_rate())?,
                                 )?,
                                 &mut capture,
+                                &mut competition,
                             )?;
                         }
                         continue;
@@ -1129,7 +1149,7 @@ mod native {
                     }
                     last_progress_second = Some(second);
                 }
-                print_report(report, &mut capture)?;
+                print_report(report, &mut capture, &mut competition)?;
                 std::thread::sleep(WallDuration::from_millis(1));
             }
             println!(
@@ -1152,6 +1172,9 @@ mod native {
         }
         if let Err(error) = &close {
             eprintln!("Raw Input unregister error: {error}");
+        }
+        if let Some(competition) = competition.as_mut() {
+            competition.finish();
         }
         let save = save_capture(
             capture,

@@ -703,11 +703,15 @@ fn run(options: Options) -> Result<()> {
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    run_args(&args)
+}
+
+pub(crate) fn run_args(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
         println!("play_replay_bms --chart PATH --replay PATH --device ID --seconds N --rate HZ --channels N [--backend wasapi|asio|alsa|coreaudio --asio-view native|32|64 --output-channels 0,1 --buffer-frames N --period-frames N --mode shared|exclusive --shared-policy engine-period|legacy --preroll-ns N --lookahead-ns N --command-capacity N --voices N --max-records N --max-bytes N]\nASIO requires Windows + asio-sdk, explicit braced CLSID/view/output channels, rejects mode/shared-policy/period, buffer default driver preferred.\nHost backend: WASAPI on Windows, ALSA on Linux, CoreAudio on macOS. No input acquisition. Exact float32 rate/channels; no endpoint/mode fallback.\nLinux requires explicit buffer/period; macOS requires numeric AudioDeviceID and buffer, rejects period. Mode/shared-policy are Windows only, default shared engine-period; explicit shared-policy rejects exclusive. Windows buffer/period default to device settings, and unsupported requested combinations reject.\nDefaults: preroll 3000000000ns, lookahead 3000000000ns, commands 65536, voices 4096, records 1000000, replay bytes 67108864. Nonnegative i64 preroll, positive i64 lookahead, positive checked finite seconds and capacities.\nSeconds is wall playback duration after Start including preroll; no automatic tail drain. Finite horizons/credit can fail on stalls/dense cues; final admission/core/native diagnostics remain separate. Source implementation is not native sound or physical timing evidence.");
         return Ok(());
     }
-    run(parse(&args, host_backend())?)
+    run(parse(args, host_backend())?)
 }
 
 #[cfg(test)]
@@ -1096,9 +1100,8 @@ mod asio_native {
                 control.channel_info(*channel, false)?
             );
         }
-        let host_clock = beatkernel_platform::windows::clock::QpcClock::new(
-            beatkernel::time::ClockDomainId(1),
-        )?;
+        let host_clock =
+            beatkernel_platform::windows::clock::QpcClock::new(beatkernel::time::ClockDomainId(1))?;
         let stream = AsioStream::prepare_with_clock(control, mixer, channels, request, host_clock)?;
         Ok(Box::new(Stream {
             stream,

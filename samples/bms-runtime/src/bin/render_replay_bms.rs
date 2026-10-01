@@ -149,11 +149,15 @@ fn run(options: Options) -> Result<()> {
 }
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    run_args(&args)
+}
+
+pub(crate) fn run_args(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
         println!("render_replay_bms --chart PATH --replay PATH --output NEW_PATH --seconds N --rate HZ [--channels N --preroll-ns N --block-frames N --command-capacity N --voices N --max-records N --max-bytes N]\nDefaults: channels 2 (Exact asset layout), preroll 3000000000ns, block frames 4096, command capacity 65536, voices 4096, max records 1000000, max bytes 67108864.\nSeconds is a positive finite checked output duration including preroll; rate is nonzero. Preroll is nonnegative i64 nanoseconds; capacities are positive checked integers within core limits.\nLoads bounded WAV assets and matching logical replay, writes new raw interleaved f32le without overwriting. Failures may leave a partial new file.\nJudge counts/hash describe the full replay; admitted sounds and PCM are cut off by the requested extent. No native playback, physical timing, or past dropped-audio reproduction.");
         return Ok(());
     }
-    run(parse(&args)?)
+    run(parse(args)?)
 }
 
 #[cfg(test)]

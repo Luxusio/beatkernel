@@ -1,4 +1,23 @@
-//! Offline BMS composition: synthetic input, shared WAV preparation, packed PCM.
+//! Unified BMS application; legacy positional arguments retain offline rendering.
+mod app;
+#[allow(dead_code)]
+#[path = "bin/linux_bms.rs"]
+mod linux_play;
+#[allow(dead_code)]
+#[path = "bin/macos_bms.rs"]
+mod macos_play;
+#[allow(dead_code)]
+#[path = "bin/play_replay_bms.rs"]
+mod replay_player;
+#[allow(dead_code)]
+#[path = "bin/render_replay_bms.rs"]
+mod replay_renderer;
+#[allow(dead_code)]
+#[path = "bin/replay_bms.rs"]
+mod replay_tool;
+#[allow(dead_code)]
+#[path = "bin/windows_bms.rs"]
+mod windows_play;
 use beatkernel::audio::{AudioFormat, PcmLimits};
 use beatkernel_bms_runtime::{
     load_prepared,
@@ -11,6 +30,10 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    app::run(&args)
+}
+
+fn render_offline_args(args: &[String]) -> Result<()> {
     if args == ["--help"] {
         println!("beatkernel-bms-runtime CHART.bms NEW_OUTPUT.f32le SECONDS RATE [CHANNELS]\nOffline synthetic input with shared bounded WAV preparation and chronological PCM rendering; no native playback.\nCHANNELS defaults to 2; choose 1 for mono assets. Asset channels must match exactly.\nOutput is newly created raw interleaved f32le; rendering failure may leave a partial file.\nConcurrent voices and outstanding commands are bounded independently from total chart notes.");
         return Ok(());

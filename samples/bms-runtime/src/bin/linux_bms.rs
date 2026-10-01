@@ -312,6 +312,12 @@ fn save_capture(
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    run_args(&args)
+}
+
+pub(crate) fn run_args(args: &[String]) -> Result<()> {
+    let (competition_options, args) =
+        beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
         println!("linux_bms --chart PATH --evdev NODE --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N --seconds N --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Seconds is loop duration after startup. Exact one-node keyboard bindings; native float32 ALSA, no fallback. Physical timing Unknown.");
         return Ok(());
@@ -319,11 +325,11 @@ fn main() -> Result<()> {
     let options = parse(&args)?;
     #[cfg(target_os = "linux")]
     {
-        native::run(options)
+        native::run(options, competition_options)
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = options;
+        let _ = (options, competition_options);
         Err("linux_bms native playback requires Linux".into())
     }
 }
@@ -421,9 +427,13 @@ mod native {
     fn print_report(
         report: RuntimeReport,
         capture: &mut Option<beatkernel_bms_runtime::replay_capture::LiveReplayCapture>,
+        competition: &mut Option<beatkernel_bms_runtime::competition_live::LiveCompetition>,
     ) -> Result<()> {
         if let Some(capture) = capture.as_mut() {
             capture.record_report(&report)?;
+        }
+        if let Some(competition) = competition.as_mut() {
+            competition.observe(&report)?;
         }
         for result in report.judge_events {
             println!("judge={result:?}");
@@ -436,7 +446,10 @@ mod native {
         }
         Ok(())
     }
-    pub(super) fn run(options: Options) -> Result<()> {
+    pub(super) fn run(
+        options: Options,
+        competition_options: beatkernel_bms_runtime::competition_live::CompetitionOptions,
+    ) -> Result<()> {
         let clock = MonotonicClock::new(HOST);
         // Declared before device owners so every exit reports after their cleanup.
         let mut delivery = DeliverySession(beatkernel::telemetry::InputDeliveryTelemetry::new(
@@ -479,6 +492,12 @@ mod native {
                 }],
                 Duration::from_nanos(options.offset),
             )?,
+        )?;
+        let mut competition = beatkernel_bms_runtime::competition_live::LiveCompetition::prepare(
+            &competition_options,
+            &prepared.source,
+            &judge,
+            HOST,
         )?;
         const SLACK: usize = 1024;
         let capacity = AudioLimits::MAX_COMMANDS;
@@ -640,6 +659,7 @@ mod native {
                                         schedule(&stream)?,
                                     )?,
                                     &mut capture,
+                                    &mut competition,
                                 )?;
                                 last_operation = host;
                             }
@@ -680,7 +700,7 @@ mod native {
                             }
                             last_progress = Some(second);
                         }
-                        print_report(report, &mut capture)?;
+                        print_report(report, &mut capture, &mut competition)?;
                     }
                     std::thread::sleep(WallDuration::from_millis(1));
                 }
@@ -701,6 +721,9 @@ mod native {
         }
         // Final input counters were read above; close evdev before file I/O.
         drop(input);
+        if let Some(competition) = competition.as_mut() {
+            competition.finish();
+        }
         let save = save_capture(
             capture,
             options.record_replay.as_deref(),

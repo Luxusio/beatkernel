@@ -144,11 +144,15 @@ fn run(options: Options) -> Result<()> {
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    run_args(&args)
+}
+
+pub(crate) fn run_args(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
         println!("replay_bms --chart PATH --replay PATH [--max-records N] [--max-bytes N] [--cursor N | --song-ns N]\nLogical replay inspection through the same BMS JudgeEngine; no PCM assets, native devices or output writes.\nDefaults: max records 1000000, max bytes 67108864 (64 MiB); limits require positive usize values. Chart uses bounded default BMS parser limits (8 MiB text).\nCursor is an exact operation boundary including zero; song-ns is signed nanoseconds and may produce the core's explicit boundary timeout advance.\nRequires matching chart, stored profile, rules and runtime version; setup hash is noncryptographic. Physical input-to-sound timing remains unknown.");
         return Ok(());
     }
-    run(parse(&args)?)
+    run(parse(args)?)
 }
 
 #[cfg(test)]
