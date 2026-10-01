@@ -4,6 +4,7 @@ use beatkernel_bms_runtime::ui::{
     atoms::{rect, text},
     interaction::{Bounds, ControlId, Gesture, logical_point},
     molecules, organisms,
+    selection::{SelectionFrame, SelectionItem, SelectionView},
     text_input::LineEditor,
 };
 use beatkernel_bms_runtime::{
@@ -300,6 +301,15 @@ pub(super) fn run(
             Vec::<String>::new(),
         )
     };
+    let selection_items = entries
+        .iter()
+        .map(|entry| SelectionItem {
+            title: entry.title.clone(),
+            artist: entry.artist.clone(),
+        })
+        .collect::<Vec<_>>()
+        .into();
+    let selection_diagnostics = diagnostics.into();
     let event_loop = EventLoop::new()?;
     let active_backend = options.backend;
     let mut app = Desktop {
@@ -318,8 +328,11 @@ pub(super) fn run(
         settings: None,
         profile_io: None,
         entries,
-        diagnostics,
         selected: 0,
+        selection_items,
+        selection_diagnostics,
+        selection_view: None,
+        painted_selection: None,
         window: None,
         renderer: None,
         instance: None,
@@ -644,8 +657,11 @@ struct Desktop {
     settings: Option<PanelScope<SettingsDraft>>,
     profile_io: Option<ProfileOperation>,
     entries: Vec<Entry>,
-    diagnostics: Vec<String>,
     selected: usize,
+    selection_items: Arc<[SelectionItem]>,
+    selection_diagnostics: Arc<[String]>,
+    selection_view: Option<SelectionView>,
+    painted_selection: Option<ScreenInstanceId>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     instance: Option<wgpu::Instance>,
@@ -703,6 +719,14 @@ impl Desktop {
         release_panel(&mut self.display, &self.navigator);
         release_panel(&mut self.local_setup, &self.navigator);
         release_panel(&mut self.settings, &self.navigator);
+        if self
+            .selection_view
+            .as_ref()
+            .is_some_and(|view| !self.navigator.retains(view.id()))
+        {
+            self.selection_view = None;
+        }
+        self.painted_selection = None;
         if !matches!(
             self.navigator.route(),
             ScreenRoute::Play { .. } | ScreenRoute::Results { .. } | ScreenRoute::Closing
@@ -2219,12 +2243,65 @@ impl Desktop {
         self.game = Some(game);
         Ok(())
     }
+    fn selection_waits_for_events(&self) -> bool {
+        self.navigator.route() == ScreenRoute::Selection
+            && self.navigator.phase() == ScreenPhase::Active
+            && !self.occluded
+            && self.profile_io.is_none()
+            && self
+                .renderer
+                .as_ref()
+                .is_none_or(|renderer| !renderer.needs_redraw())
+    }
+    fn draw_selection(&mut self) -> Result<(), String> {
+        let id = self
+            .navigator
+            .active_id()
+            .ok_or("Selection instance unavailable")?;
+        if self
+            .selection_view
+            .as_ref()
+            .is_none_or(|view| view.id() != id)
+        {
+            self.selection_view = Some(SelectionView::new(
+                id,
+                Arc::clone(&self.selection_items),
+                Arc::clone(&self.selection_diagnostics),
+                WIDTH as u32,
+                HEIGHT as u32,
+            )?);
+            self.painted_selection = None;
+        }
+        let frame = SelectionFrame {
+            selected: self.selected,
+            hovered: self.hit(),
+            armed: [ControlId(1), ControlId(5), ControlId(4)]
+                .into_iter()
+                .find(|&id| self.gesture.is_armed(id)),
+            error: self.failure.clone(),
+            backend_pending: self.active_backend != self.options.backend,
+        };
+        let view = self
+            .selection_view
+            .as_ref()
+            .ok_or("Selection view unavailable")?;
+        view.update(frame);
+        if view.dirty() || self.painted_selection != Some(id) {
+            view.compose(&mut self.scene, &mut self.hits)?;
+            self.painted_selection = Some(id);
+        }
+        self.render_scene()
+    }
     fn draw(&mut self) -> Result<(), String> {
         if self.navigator.phase() != ScreenPhase::Active {
             return Ok(());
         }
-        let point = self.point();
         let route = self.navigator.route();
+        if route == ScreenRoute::Selection {
+            return self.draw_selection();
+        }
+        self.painted_selection = None;
+        let point = self.point();
         self.hits.clear();
         self.scene.clear();
         let pixels = &mut self.scene;
@@ -2428,103 +2505,7 @@ impl Desktop {
                 );
             }
         } else {
-            text(
-                pixels,
-                24,
-                65,
-                "UP/DOWN SELECT  ENTER PLAY  F2 SETTINGS",
-                2,
-                0x9bb1cf,
-            );
-            text(
-                pixels,
-                24,
-                96,
-                &format!(
-                    "{} CHARTS   {} SCAN DIAGNOSTICS",
-                    self.entries.len(),
-                    self.diagnostics.len()
-                ),
-                2,
-                0xd8b36b,
-            );
-            let first = self.selected.saturating_sub(8);
-            for (row, entry) in self.entries.iter().enumerate().skip(first).take(15) {
-                let y = 140 + (row - first) * 34;
-                if row == self.selected {
-                    rect(pixels, 18, y as i64 - 6, 924, 30, 0x263d59);
-                }
-                text(pixels, 28, y, &entry.title, 2, 0xf0f4ff);
-                self.hits.push((
-                    ControlId(100 + row as u64),
-                    Bounds {
-                        x: 18,
-                        y: y as i64 - 6,
-                        width: 924,
-                        height: 30,
-                    },
-                ));
-            }
-            for (index, diagnostic) in self.diagnostics.iter().take(2).enumerate() {
-                text(pixels, 24, 654 + index * 22, diagnostic, 1, 0xd8b36b);
-            }
-            if self.entries.is_empty() {
-                text(pixels, 24, 150, "NO SUPPORTED CHARTS FOUND", 2, 0xff8e8e);
-            }
-            if !self.entries.is_empty() {
-                control(
-                    pixels,
-                    &mut self.hits,
-                    &self.gesture,
-                    point,
-                    ControlId(1),
-                    Bounds {
-                        x: 550,
-                        y: 65,
-                        width: 180,
-                        height: 34,
-                    },
-                    "START",
-                );
-            }
-            control(
-                pixels,
-                &mut self.hits,
-                &self.gesture,
-                point,
-                ControlId(5),
-                Bounds {
-                    x: 750,
-                    y: 102,
-                    width: 180,
-                    height: 30,
-                },
-                "SETTINGS",
-            );
-            control(
-                pixels,
-                &mut self.hits,
-                &self.gesture,
-                point,
-                ControlId(4),
-                Bounds {
-                    x: 750,
-                    y: 65,
-                    width: 180,
-                    height: 34,
-                },
-                "EXIT",
-            );
-        }
-        if route == ScreenRoute::Selection && self.active_backend != self.options.backend {
-            text(
-                pixels,
-                24,
-                700,
-                "GPU BACKEND PENDING - SAVE PROFILE AND RESTART",
-                1,
-                0xd8b36b,
-            );
+            return Err("screen has no drawable presentation".into());
         }
         if let Some(error) = &self.failure {
             text(
@@ -2537,6 +2518,9 @@ impl Desktop {
             );
             text(pixels, 24, 682, error, 1, 0xffaaaa);
         }
+        self.render_scene()
+    }
+    fn render_scene(&mut self) -> Result<(), String> {
         if let Some(renderer) = &mut self.renderer {
             renderer.render(&self.scene)?;
             if renderer.needs_surface_recreation() {
@@ -2622,6 +2606,7 @@ impl ApplicationHandler for Desktop {
         if self.window.as_ref().is_none_or(|window| window.id() != id) {
             return;
         }
+        let request_redraw = !matches!(&event, WindowEvent::RedrawRequested);
         match event {
             WindowEvent::CloseRequested => {
                 self.request_close();
@@ -2645,6 +2630,7 @@ impl ApplicationHandler for Desktop {
                 }
             }
             WindowEvent::Resized(size) => {
+                self.painted_selection = None;
                 self.gesture.cancel();
                 self.pointer = None;
                 self.hits.clear();
@@ -2742,6 +2728,11 @@ impl ApplicationHandler for Desktop {
             }
             _ => {}
         }
+        if request_redraw && !self.closing() && !self.is_suspended() && !self.occluded {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.collect_game();
@@ -2753,7 +2744,9 @@ impl ApplicationHandler for Desktop {
             event_loop.exit();
             return;
         }
-        if self.closing() || self.is_suspended() || self.occluded {
+        if self.selection_waits_for_events() {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        } else if self.closing() || self.is_suspended() || self.occluded {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + Duration::from_millis(4),
             ));
@@ -3646,8 +3639,15 @@ mod tests {
                 title: "FIXTURE".into(),
                 artist: String::new(),
             }],
-            diagnostics: vec![],
             selected: 0,
+            selection_items: vec![SelectionItem {
+                title: "FIXTURE".into(),
+                artist: String::new(),
+            }]
+            .into(),
+            selection_diagnostics: Arc::from([]),
+            selection_view: None,
+            painted_selection: None,
             window: None,
             renderer: None,
             instance: None,
@@ -3664,6 +3664,33 @@ mod tests {
             hits: Vec::new(),
         }
     }
+    #[test]
+    fn selection_reuses_geometry_and_scope_after_settings_back() {
+        let mut app = lifecycle_fixture();
+        assert!(app.selection_waits_for_events());
+        app.draw().unwrap();
+        let selection_id = app.selection_view.as_ref().unwrap().id();
+        app.draw().unwrap();
+        assert_eq!(app.painted_selection, Some(selection_id));
+        assert!(!app.selection_view.as_ref().unwrap().dirty());
+        app.open_settings();
+        assert!(!app.selection_waits_for_events());
+        assert_eq!(app.selection_view.as_ref().unwrap().id(), selection_id);
+        app.draw().unwrap();
+        app.back();
+        assert!(app.selection_waits_for_events());
+        assert_eq!(app.navigator.active_id(), Some(selection_id));
+        assert!(app.painted_selection.is_none());
+        app.draw().unwrap();
+        assert_eq!(app.painted_selection, Some(selection_id));
+        assert!(app.hits.iter().any(|(id, _)| *id == ControlId(100)));
+        app.draw().unwrap();
+        assert!(!app.selection_view.as_ref().unwrap().dirty());
+        app.request_close();
+        assert!(app.selection_view.is_none());
+        assert!(!app.selection_waits_for_events());
+    }
+
     #[test]
     fn desktop_parent_draft_is_retained_but_only_active_panel_receives_input() {
         let mut app = lifecycle_fixture();

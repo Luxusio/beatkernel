@@ -123,6 +123,7 @@ dependencies = [
  "beatkernel-bms",
  "beatkernel-platform",
  "bytemuck",
+ "floem_reactive",
  "pollster",
  "wgpu",
  "windows-sys 0.59.0",
@@ -429,6 +430,15 @@ name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
+
+[[package]]
+name = "floem_reactive"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6b9dd30efe54c413d07e3af6b410afb4b098ff70e79cfd0d13b6f3f2246448a"
+dependencies = [
+ "smallvec",
+]
 
 [[package]]
 name = "foldhash"

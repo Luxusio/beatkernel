@@ -12,6 +12,11 @@ these direct notices are not a complete binary license inventory.
 | winit 0.30.13 | Apache-2.0 | [license](third-party/winit-0.30.13-LICENSE.txt) |
 | bytemuck 1.24.0 | MIT | [license](third-party/bytemuck-1.24.0-LICENSE.txt) |
 | pollster 0.4.0 | MIT | [license](third-party/pollster-0.4.0-LICENSE.txt) |
+| floem_reactive 0.2.0 | MIT | [license](third-party/floem-reactive-0.2.0-LICENSE.txt) |
 
-The texts are copied from the pinned published packages. minifb is no longer
-included by this application.
+The texts are copied from the pinned published packages. The floem_reactive
+package declares MIT but omits the license text; its retained text comes from
+`floem-0.2.0/LICENSE` in the published parent project's
+[0.2.0 package](https://crates.io/crates/floem/0.2.0).
+Only the standalone reactive engine is linked; the Floem window/widget host is
+not a dependency. minifb is no longer included by this application.
