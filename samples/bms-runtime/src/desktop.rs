@@ -4299,7 +4299,13 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
         organisms::scoreboard(pixels, &snapshot.score, &snapshot.recent_results);
     }
     if let (Some(chart), Some(now)) = (&snapshot.chart, snapshot.song_time) {
-        organisms::playfield(pixels, chart, now, lookahead)?;
+        organisms::playfield_with_feedback(
+            pixels,
+            chart,
+            now,
+            lookahead,
+            &snapshot.recent_results,
+        )?;
         text(
             pixels,
             24,

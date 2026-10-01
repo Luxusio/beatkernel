@@ -855,10 +855,23 @@ fn durable_source_seed_restores_real_capture_assets_pcm_and_replay() {
     assert!(report.judge_error.is_none());
     assert_eq!(report.judge_events.len(), 1);
     let live_results = report.judge_events.clone();
+    let display_chart =
+        player_chart::PlayerChart::from_compiled(&live.source, &live.compiled.chart).unwrap();
+    let initial_feedback =
+        judge_feedback::project(&display_chart, report.song_time, &live_results).unwrap();
+    assert_eq!(initial_feedback[0].unwrap().event, live_results[0]);
+    assert_eq!(initial_feedback[0].unwrap().age_ns, 0);
+    assert!(initial_feedback.iter().skip(1).all(Option::is_none));
+    assert_eq!(
+        judge_feedback::project(&display_chart, report.song_time, &live_results).unwrap(),
+        initial_feedback
+    ); // Equal reported song time preserves the pulse while paused.
     capture.record_report(&report).unwrap();
-    capture
-        .record_report(&runtime.advance_to(point(1), &Identity, point(1)).unwrap())
-        .unwrap();
+    let advanced = runtime.advance_to(point(1), &Identity, point(1)).unwrap();
+    capture.record_report(&advanced).unwrap();
+    let live_feedback =
+        judge_feedback::project(&display_chart, advanced.song_time, &live_results).unwrap();
+    assert_eq!(live_feedback[0].unwrap().age_ns, 1);
     let recorded = capture.into_file();
     let file = decode_replay(
         &encode_replay(&recorded, replay_limits).unwrap(),
@@ -893,12 +906,38 @@ fn durable_source_seed_restores_real_capture_assets_pcm_and_replay() {
     session.seek_cursor(file.records.len()).unwrap();
     assert_eq!(session.results(), live_results);
     assert_eq!(
+        judge_feedback::project(
+            &display_chart,
+            file.records.last().unwrap().song_time,
+            session.results()
+        )
+        .unwrap(),
+        live_feedback
+    );
+    assert_eq!(
         session.engine().stable_hash().unwrap(),
         runtime.judge().stable_hash().unwrap()
     );
     session.seek_cursor(0).unwrap();
+    assert!(
+        judge_feedback::project(&display_chart, Timestamp::ZERO, session.results())
+            .unwrap()
+            .iter()
+            .all(Option::is_none)
+    );
     session.seek_cursor(file.records.len()).unwrap();
     assert_eq!(session.results(), live_results);
+    for now in [
+        Timestamp::from_nanos(-1),
+        Timestamp::from_nanos(judge_feedback::FEEDBACK_LIFETIME_NS),
+    ] {
+        assert!(
+            judge_feedback::project(&display_chart, now, session.results())
+                .unwrap()
+                .iter()
+                .all(Option::is_none)
+        );
+    }
     let mut output = Vec::new();
     let report = replay_render::render_replay(
         restored,

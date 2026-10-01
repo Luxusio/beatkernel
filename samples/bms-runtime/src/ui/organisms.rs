@@ -42,7 +42,18 @@ pub fn playfield(
     now: Timestamp,
     lookahead: i64,
 ) -> Result<(), String> {
-    playfield_in(
+    playfield_with_feedback(pixels, chart, now, lookahead, &[])
+}
+
+/// Full-size playfield with the actual local member's recent judge events.
+pub fn playfield_with_feedback(
+    pixels: &mut Scene,
+    chart: &PlayerChart,
+    now: Timestamp,
+    lookahead: i64,
+    recent: &[JudgeEvent],
+) -> Result<(), String> {
+    playfield_in_with_feedback(
         pixels,
         chart,
         now,
@@ -53,6 +64,7 @@ pub fn playfield(
             width: 640,
             height: LINE - TOP + 28,
         },
+        recent,
     )
 }
 
@@ -66,6 +78,19 @@ pub fn playfield_in(
     lookahead: i64,
     bounds: Bounds,
 ) -> Result<(), String> {
+    playfield_in_with_feedback(pixels, chart, now, lookahead, bounds, &[])
+}
+
+/// Bounded lane feedback is admitted before any playfield geometry is painted.
+pub fn playfield_in_with_feedback(
+    pixels: &mut Scene,
+    chart: &PlayerChart,
+    now: Timestamp,
+    lookahead: i64,
+    bounds: Bounds,
+    recent: &[JudgeEvent],
+) -> Result<(), String> {
+    let feedback = crate::judge_feedback::project(chart, now, recent)?;
     if lookahead <= 0 {
         return Err("playfield lookahead must be positive".into());
     }
@@ -85,13 +110,14 @@ pub fn playfield_in(
     let line = bounds.y + bounds.height - 24;
     for lane in 0..lanes {
         let (left, right) = partition_lane(lane, lanes, bounds.x, bounds.width);
+        let background = if lane % 2 == 0 { 0x1d2734 } else { 0x18212c };
         rect(
             pixels,
             left,
             top,
             right - left - 1,
             line - top + 24,
-            if lane % 2 == 0 { 0x1d2734 } else { 0x18212c },
+            background,
         );
         clipped_text(
             pixels,
@@ -107,6 +133,26 @@ pub fn playfield_in(
         );
     }
     pixels.playfield(chart, now, lookahead, bounds)?;
+    for lane in 0..lanes {
+        let (left, right) = partition_lane(lane, lanes, bounds.x, bounds.width);
+        let background: u32 = if lane % 2 == 0 { 0x1d2734 } else { 0x18212c };
+        if let Some(feedback) = feedback[lane] {
+            let color = match feedback.event.outcome {
+                JudgeOutcome::Hit { .. } => 0x74e5c5,
+                JudgeOutcome::Miss { .. } => 0xef6372,
+            };
+            let lifetime = crate::judge_feedback::FEEDBACK_LIFETIME_NS;
+            let mut faded = 0u32;
+            for shift in [16, 8, 0] {
+                let source = i64::from((color >> shift) & 255);
+                let target = i64::from((background >> shift) & 255);
+                let channel =
+                    (source * (lifetime - feedback.age_ns) + target * feedback.age_ns) / lifetime;
+                faded |= (channel as u32) << shift;
+            }
+            rect(pixels, left + 1, line - 6, right - left - 3, 6, faded);
+        }
+    }
     rect(pixels, bounds.x, line, bounds.width, 3, 0xffffff);
     pixels.status()
 }
@@ -290,6 +336,11 @@ pub fn local_players_with_competition(
         }
     }
     let count = visible.len();
+    for player in &players[visible.clone()] {
+        if let (Some(chart), Some(now)) = (&player.chart, player.song_time) {
+            crate::judge_feedback::project(chart, now, &player.recent_results)?;
+        }
+    }
     for (index, player) in players[visible].iter().enumerate() {
         let bounds = panel_bounds(index, count);
         rect(
@@ -359,7 +410,7 @@ pub fn local_players_with_competition(
         }
         let field_offset = 72 + summary_height;
         match (player.chart.as_ref(), player.song_time) {
-            (Some(chart), Some(now)) => playfield_in(
+            (Some(chart), Some(now)) => playfield_in_with_feedback(
                 scene,
                 chart,
                 now,
@@ -370,6 +421,7 @@ pub fn local_players_with_competition(
                     width: bounds.width - 20,
                     height: bounds.height - field_offset - 8,
                 },
+                &player.recent_results,
             )?,
             _ => clipped_text(
                 scene,
@@ -454,7 +506,7 @@ mod tests {
     use super::*;
     fn chart() -> PlayerChart {
         let source = beatkernel_bms::parse(
-            "#BPM 120\n#TITLE A LONG TITLE FOR PLAYER PANELS\n#00011:0100\n#00051:0202\n",
+            "#BPM 120\n#TITLE A LONG TITLE FOR PLAYER PANELS\n#WAV01 tap.wav\n#WAV02 hold.wav\n#00012:0100\n#00051:0202\n",
             beatkernel_bms::ParseOptions::default(),
         )
         .unwrap();
@@ -465,6 +517,202 @@ mod tests {
             && rectangle[1] >= bounds.y as f32
             && rectangle[0] + rectangle[2] <= (bounds.x + bounds.width) as f32
             && rectangle[1] + rectangle[3] <= (bounds.y + bounds.height) as f32
+    }
+
+    fn feedback_event(chart: &PlayerChart, miss: bool) -> JudgeEvent {
+        use beatkernel::judge::{JudgeGrade, JudgeStage, MissReason};
+        let note = chart.notes.iter().find(|note| note.end.is_none()).unwrap();
+        JudgeEvent {
+            object: note.object,
+            stage: JudgeStage::Instant,
+            at: Timestamp::ZERO,
+            input: None,
+            outcome: if miss {
+                JudgeOutcome::Miss {
+                    reason: MissReason::HeadTimeout,
+                }
+            } else {
+                JudgeOutcome::Hit {
+                    grade: JudgeGrade(1),
+                    delta: beatkernel::time::Duration::ZERO,
+                }
+            },
+        }
+    }
+    fn rgba(color: u32) -> [f32; 4] {
+        [
+            ((color >> 16) & 255) as f32 / 255.0,
+            ((color >> 8) & 255) as f32 / 255.0,
+            (color & 255) as f32 / 255.0,
+            1.0,
+        ]
+    }
+
+    #[test]
+    fn feedback_strip_uses_actual_lane_fade_and_preserves_note_line_order() {
+        let chart = chart();
+        let event = feedback_event(&chart, false);
+        let note = chart.note_by_object(event.object).unwrap();
+        let (left, right) = partition_lane(note.lane_index, chart.lanes.len(), 80, 640);
+        let mut scene = Scene::new(960, 720);
+        playfield_with_feedback(&mut scene, &chart, Timestamp::ZERO, 1_000_000_000, &[event])
+            .unwrap();
+        let strip = scene
+            .rectangles()
+            .iter()
+            .find(|rect| {
+                rect.bounds
+                    == [
+                        (left + 1) as f32,
+                        (LINE - 6) as f32,
+                        (right - left - 3) as f32,
+                        6.0,
+                    ]
+            })
+            .unwrap();
+        assert_eq!(strip.color, rgba(0x74e5c5));
+        assert_eq!(
+            scene.rectangles().last().unwrap().bounds,
+            [80.0, LINE as f32, 640.0, 3.0]
+        );
+        let note_batch = scene
+            .batches()
+            .iter()
+            .position(|batch| batch.playfield == Some(0))
+            .unwrap();
+        assert!(note_batch > 0);
+        assert!(note_batch < scene.batches().len() - 1);
+        let strip_index = scene
+            .rectangles()
+            .iter()
+            .position(|rect| {
+                rect.bounds
+                    == [
+                        (left + 1) as f32,
+                        (LINE - 6) as f32,
+                        (right - left - 3) as f32,
+                        6.0,
+                    ]
+            })
+            .unwrap();
+        assert!(
+            scene.batches()[note_batch + 1..]
+                .iter()
+                .any(|batch| batch.playfield.is_none()
+                    && (batch.first as usize) <= strip_index
+                    && strip_index < (batch.first + batch.count) as usize)
+        );
+        scene.clear();
+        playfield_with_feedback(
+            &mut scene,
+            &chart,
+            Timestamp::from_nanos(75_000_000),
+            1_000_000_000,
+            &[event],
+        )
+        .unwrap();
+        let strip = scene
+            .rectangles()
+            .iter()
+            .find(|rect| rect.bounds[1] == (LINE - 6) as f32 && rect.bounds[3] == 6.0)
+            .unwrap();
+        // This actual tap occupies odd lane1 (background18212c); exact integer half fade.
+        assert_eq!(note.lane_index, 1);
+        assert_eq!(strip.color, rgba(0x468378));
+        scene.clear();
+        playfield_with_feedback(
+            &mut scene,
+            &chart,
+            Timestamp::from_nanos(crate::judge_feedback::FEEDBACK_LIFETIME_NS),
+            1_000_000_000,
+            &[event],
+        )
+        .unwrap();
+        assert!(
+            !scene
+                .rectangles()
+                .iter()
+                .any(|rect| rect.bounds[1] == (LINE - 6) as f32 && rect.bounds[3] == 6.0)
+        );
+        scene.clear();
+        playfield(&mut scene, &chart, Timestamp::ZERO, 1_000_000_000).unwrap();
+        assert!(
+            !scene
+                .rectangles()
+                .iter()
+                .any(|rect| rect.bounds[1] == (LINE - 6) as f32 && rect.bounds[3] == 6.0)
+        );
+    }
+
+    #[test]
+    fn feedback_errors_precede_geometry_and_sparse_members_keep_own_results() {
+        let chart = std::sync::Arc::new(chart());
+        let hit = feedback_event(&chart, false);
+        let miss = feedback_event(&chart, true);
+        let mut scene = Scene::new(960, 720);
+        scene.rect(0, 0, 1, 1, 0);
+        let rectangles = scene.rectangles().len();
+        let batches = scene.batches().len();
+        assert!(
+            playfield_with_feedback(
+                &mut scene,
+                &chart,
+                Timestamp::ZERO,
+                1_000_000_000,
+                &vec![hit; 129]
+            )
+            .is_err()
+        );
+        assert_eq!(scene.rectangles().len(), rectangles);
+        assert_eq!(scene.batches().len(), batches);
+        assert!(scene.playfields().is_empty());
+        let mut invalid = (*chart).clone();
+        invalid
+            .notes
+            .iter_mut()
+            .find(|note| note.object == hit.object)
+            .unwrap()
+            .lane_index = usize::MAX;
+        assert!(
+            playfield_with_feedback(&mut scene, &invalid, Timestamp::ZERO, 1_000_000_000, &[hit])
+                .is_err()
+        );
+        assert_eq!(scene.rectangles().len(), rectangles);
+        assert_eq!(scene.batches().len(), batches);
+        let players: Vec<_> = [(3, hit), (u32::MAX, miss)]
+            .into_iter()
+            .map(|(id, event)| LocalPlayerSnapshot {
+                player: crate::local_players::PlayerId(id),
+                chart: Some(std::sync::Arc::clone(&chart)),
+                song_time: Some(Timestamp::ZERO),
+                score: ScoreSummary::default(),
+                last_judge: Some(event),
+                recent_results: vec![event],
+                competition: None,
+            })
+            .collect();
+        scene.clear();
+        local_players(&mut scene, &players, 1_000_000_000, 0).unwrap();
+        let strips: Vec<_> = scene
+            .rectangles()
+            .iter()
+            .filter(|rectangle| {
+                rectangle.bounds[3] == 6.0
+                    && [rgba(0x74e5c5), rgba(0xef6372)].contains(&rectangle.color)
+            })
+            .collect();
+        assert_eq!(strips.len(), 2);
+        assert_eq!(strips[0].color, rgba(0x74e5c5));
+        assert_eq!(strips[1].color, rgba(0xef6372));
+        assert!(inside(&strips[0].bounds, panel_bounds(0, 2)));
+        assert!(inside(&strips[1].bounds, panel_bounds(1, 2)));
+        assert_eq!(scene.playfields().len(), 2);
+        let mut malformed = players.clone();
+        malformed[1].recent_results = vec![miss; 129];
+        scene.clear();
+        assert!(local_players(&mut scene, &malformed, 1_000_000_000, 0).is_err());
+        assert!(scene.rectangles().is_empty());
+        assert!(scene.playfields().is_empty());
     }
     #[test]
     fn relocated_notes_hold_caps_and_labels_remain_inside_playfield_bounds() {
