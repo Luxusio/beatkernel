@@ -73,6 +73,10 @@ pub enum RuntimeError {
     Transport(TransportError),
     /// Sound configuration contains a nonfinite gain.
     InvalidGain,
+    /// A logical song endpoint must be nonnegative.
+    InvalidSongEnd,
+    /// Endpoint setup is immutable after configuration or a committed operation.
+    SongEndConfigurationLocked,
 }
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -90,6 +94,9 @@ pub struct RuntimeReport {
     pub bound_inputs: Vec<GameInputEvent>,
     /// Unoffset transport song time.
     pub song_time: Timestamp,
+    /// Raw mapped position reached the configured logical end. This is not
+    /// native completion evidence; `judge_error` remains authoritative.
+    pub song_end_reached: bool,
     /// Independently supplied and normalized output scheduling point.
     pub audio_at: ClockPoint,
     /// Mapper's declared relation quality (same-domain identity is exact).
@@ -117,6 +124,7 @@ pub struct Runtime {
     sounds: Vec<SoundBinding>,
     last_host: Option<Timestamp>,
     last_song: Option<Timestamp>,
+    song_end: Option<Timestamp>,
     sequences: HashMap<DeviceId, u64>,
     telemetry: RuntimeTelemetry,
 }
@@ -147,14 +155,35 @@ impl Runtime {
             sounds,
             last_host: None,
             last_song: None,
+            song_end: None,
             sequences: HashMap::new(),
             telemetry: RuntimeTelemetry::new(telemetry_capacity),
         })
     }
 
+    /// Installs one immutable logical endpoint before any committed operation.
+    /// Transport anchors may be placeholders during shared-owner composition;
+    /// session start/end compatibility is validated by the outer owner.
+    pub fn set_song_end(&mut self, end: Timestamp) -> Result<(), RuntimeError> {
+        if self.song_end.is_some() || self.last_host.is_some() {
+            return Err(RuntimeError::SongEndConfigurationLocked);
+        }
+        if end.as_nanos() < 0 {
+            return Err(RuntimeError::InvalidSongEnd);
+        }
+        self.song_end = Some(end);
+        Ok(())
+    }
+    /// Configured logical song endpoint, independent of native playback state.
+    pub const fn song_end(&self) -> Option<Timestamp> {
+        self.song_end
+    }
+
     /// Normalizes, binds, judges and publishes at an independently supplied output time.
     /// Queue failures do not fail the operation or revert judge state. Binding fanout
     /// stops at its first judge error; inspect `judge_error` before continuing.
+    /// At/after a configured end, acquisition is still validated/committed but
+    /// binding is skipped and the actual judge advances only to that end.
     pub fn process_input(
         &mut self,
         mut input: PhysicalInputEvent,
@@ -178,7 +207,7 @@ impl Runtime {
                     });
                 }
             }
-            let mut report = self.prepare(host, audio_at, mapper, input_quality)?;
+            let (mut report, mapped_song) = self.prepare(host, audio_at, mapper, input_quality)?;
             if incoming.domain != self.host_domain {
                 let meta = input.meta_mut();
                 meta.original_clock_point.get_or_insert(incoming);
@@ -186,26 +215,33 @@ impl Runtime {
                 meta.clock_domain = host.domain;
             }
             self.sequences.insert(meta.source, meta.sequence);
-            self.commit_time(host.timestamp, report.song_time);
+            self.commit_time(host.timestamp, mapped_song);
             let counters = self.telemetry.counters_mut();
             counters.inputs = counters.inputs.saturating_add(1);
-            for bound in self.bindings.map(&input) {
-                match self.judge.push_input(&bound, report.song_time) {
-                    Ok(events) => {
-                        report.bound_inputs.push(bound);
-                        report.judge_events.extend(events);
-                    }
-                    Err(error) => {
-                        report.judge_error = Some(error);
-                        break;
+            if report.song_end_reached {
+                match self.judge.advance_to(report.song_time) {
+                    Ok(events) => report.judge_events = events,
+                    Err(error) => report.judge_error = Some(error),
+                }
+            } else {
+                for bound in self.bindings.map(&input) {
+                    match self.judge.push_input(&bound, report.song_time) {
+                        Ok(events) => {
+                            report.bound_inputs.push(bound);
+                            report.judge_events.extend(events);
+                        }
+                        Err(error) => {
+                            report.judge_error = Some(error);
+                            break;
+                        }
                     }
                 }
+                if report.bound_inputs.is_empty() && report.judge_error.is_none() {
+                    let counters = self.telemetry.counters_mut();
+                    counters.unbound = counters.unbound.saturating_add(1);
+                }
+                report.input = Some(input);
             }
-            if report.bound_inputs.is_empty() && report.judge_error.is_none() {
-                let counters = self.telemetry.counters_mut();
-                counters.unbound = counters.unbound.saturating_add(1);
-            }
-            report.input = Some(input);
             self.publish(&mut report);
             Ok(report)
         })();
@@ -223,11 +259,11 @@ impl Runtime {
         let started = Instant::now();
         let result = (|| {
             let (host, quality) = normalize(host, self.host_domain, mapper)?;
-            let mut report = self.prepare(host, audio_at, mapper, quality)?;
+            let (mut report, mapped_song) = self.prepare(host, audio_at, mapper, quality)?;
             match self.judge.advance_to(report.song_time) {
                 Ok(events) => {
                     report.judge_events = events;
-                    self.commit_time(host.timestamp, report.song_time);
+                    self.commit_time(host.timestamp, mapped_song);
                 }
                 Err(error) => report.judge_error = Some(error),
             }
@@ -244,7 +280,7 @@ impl Runtime {
         audio_at: ClockPoint,
         mapper: &dyn ClockMapper,
         input_mapping_quality: ClockMappingQuality,
-    ) -> Result<RuntimeReport, RuntimeError> {
+    ) -> Result<(RuntimeReport, Timestamp), RuntimeError> {
         if self.last_host.is_some_and(|last| host.timestamp < last) {
             return Err(RuntimeError::NonMonotonicHost);
         }
@@ -263,18 +299,23 @@ impl Runtime {
             return Err(RuntimeError::RequiresReplayRestore);
         }
         let (audio_at, audio_mapping_quality) = normalize(audio_at, self.audio_domain, mapper)?;
-        Ok(RuntimeReport {
-            input: None,
-            bound_inputs: Vec::new(),
+        let song_end_reached = self.song_end.is_some_and(|end| song_time >= end);
+        Ok((
+            RuntimeReport {
+                input: None,
+                bound_inputs: Vec::new(),
+                song_time: self.song_end.map_or(song_time, |end| song_time.min(end)),
+                song_end_reached,
+                audio_at,
+                input_mapping_quality,
+                audio_mapping_quality,
+                judge_events: Vec::new(),
+                judge_error: None,
+                audio_commands: Vec::new(),
+                audio_failures: Vec::new(),
+            },
             song_time,
-            audio_at,
-            input_mapping_quality,
-            audio_mapping_quality,
-            judge_events: Vec::new(),
-            judge_error: None,
-            audio_commands: Vec::new(),
-            audio_failures: Vec::new(),
-        })
+        ))
     }
 
     fn commit_time(&mut self, host: Timestamp, song: Timestamp) {
@@ -373,7 +414,7 @@ impl Runtime {
         &mut self.judge
     }
     /// Replaces both gameplay owners after explicit replay reconstruction.
-    /// Resets input chronology and acquisition sequences; leaves telemetry,
+    /// Resets input chronology, acquisition sequences and song-end setup; leaves telemetry,
     /// bindings and already queued audio commands intact. The caller must
     /// separately synchronize audio output when restoring a timeline.
     pub fn replace_state(
@@ -385,6 +426,7 @@ impl Runtime {
         let previous_transport = std::mem::replace(&mut self.transport, transport);
         self.last_host = None;
         self.last_song = None;
+        self.song_end = None;
         self.sequences.clear();
         (previous_judge, previous_transport)
     }

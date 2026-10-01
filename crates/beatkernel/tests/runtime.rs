@@ -1,7 +1,7 @@
 use beatkernel::{
     audio::{
-        command_queue, AudioCommand, AudioFormat, AudioLimits, CommandConsumer, Mixer, MixerConfig,
-        PcmLimits, PcmSample, QueuePushError, SampleBank, SampleId, VoiceId,
+        AudioCommand, AudioFormat, AudioLimits, CommandConsumer, Mixer, MixerConfig, PcmLimits,
+        PcmSample, QueuePushError, SampleBank, SampleId, VoiceId, command_queue,
     },
     chart::{
         Beat, Bpm, InteractionId, ObjectId, ObjectMetadata, SourceChart, SourceObject, VisualId,
@@ -127,6 +127,244 @@ fn input(device: u64, nanos: i64, sequence: u64) -> PhysicalInputEvent {
 }
 
 #[test]
+fn song_end_excludes_exact_boundary_input_without_fabricating_note_completion() {
+    let (mut runtime, mut consumer) = fixture(4);
+    runtime
+        .set_song_end(Timestamp::from_nanos(2_000_000))
+        .unwrap();
+    let original_transport = runtime.transport().clone();
+    let report = runtime
+        .process_input(input(99, 2_000_000, 7), &Clocks, point(2, 1_003_000_000))
+        .unwrap();
+    assert!(report.song_end_reached);
+    assert_eq!(report.song_time, Timestamp::from_nanos(2_000_000));
+    assert!(report.input.is_none());
+    assert!(report.bound_inputs.is_empty());
+    assert!(report.judge_events.is_empty());
+    assert!(report.judge_error.is_none());
+    assert!(report.audio_commands.is_empty());
+    assert!(consumer.try_pop().is_err());
+    assert_eq!(runtime.transport().anchors(), original_transport.anchors());
+    assert_eq!(report.input_mapping_quality, Clocks.quality());
+    assert_eq!(report.audio_mapping_quality, Clocks.quality());
+    assert_eq!(report.audio_at, point(3, 3_000_000));
+    assert_eq!(runtime.telemetry().counters().inputs, 1);
+    assert_eq!(runtime.telemetry().counters().unbound, 0);
+    let snapshot = runtime.judge().stable_hash().unwrap();
+    let later = runtime
+        .advance_to(point(2, 1_010_000_000), &Clocks, point(3, 10_000_000))
+        .unwrap();
+    assert!(later.song_end_reached);
+    assert!(later.judge_events.is_empty());
+    assert_eq!(later.song_time, report.song_time);
+    assert_eq!(runtime.judge().stable_hash().unwrap(), snapshot);
+}
+
+#[test]
+fn strictly_earlier_hit_reaches_pcm_but_end_and_late_inputs_only_advance_actual_judge() {
+    let (mut runtime, consumer) = fixture(4);
+    runtime
+        .set_song_end(Timestamp::from_nanos(2_000_001))
+        .unwrap();
+    let early = runtime
+        .process_input(input(1, 2_000_000, 1), &Clocks, point(3, 3_000_000))
+        .unwrap();
+    assert!(!early.song_end_reached);
+    assert!(early.input.is_some());
+    assert_eq!(early.judge_events.len(), 1);
+    let ended = runtime
+        .process_input(input(2, 2_000_001, 1), &Clocks, point(3, 4_000_000))
+        .unwrap();
+    assert!(ended.song_end_reached);
+    assert!(ended.input.is_none());
+    assert_eq!(ended.judge_events.len(), 1);
+    assert!(ended.audio_commands.is_empty());
+    assert!(ended.audio_failures.is_empty());
+    let later = runtime
+        .process_input(input(2, 8_000_000, 2), &Clocks, point(3, 9_000_000))
+        .unwrap();
+    assert_eq!(later.song_time, ended.song_time);
+    assert!(later.judge_events.is_empty());
+    assert!(later.input.is_none());
+    assert_eq!(runtime.telemetry().counters().inputs, 3);
+    assert_eq!(runtime.telemetry().counters().unbound, 0);
+    assert_eq!(runtime.telemetry().counters().judge_results, 2);
+    assert_eq!(runtime.telemetry().counters().audio_commands, 1);
+    let format = AudioFormat::new(1000, 1).unwrap();
+    let pcm_limits = PcmLimits::new(1024, 4096, 4).unwrap();
+    let mut bank = SampleBank::new(format, pcm_limits).unwrap();
+    bank.insert(
+        SampleId(1),
+        PcmSample::new(format, vec![0.25, 0.5], pcm_limits).unwrap(),
+    )
+    .unwrap();
+    let mut mixer = Mixer::new(
+        MixerConfig::new(
+            format,
+            ClockDomainId(3),
+            Timestamp::ZERO,
+            AudioLimits::new(4, 2, 4, 16, 4).unwrap(),
+        ),
+        bank,
+        consumer,
+    )
+    .unwrap();
+    let mut pcm = [99.0; 7];
+    mixer.render(&mut pcm).unwrap();
+    assert_eq!(pcm, [0.0, 0.0, 0.0, 0.25, 0.5, 0.0, 0.0]);
+}
+
+#[test]
+fn fenced_acquisition_still_validates_mapping_host_sequence_and_raw_song_regression() {
+    let (mut runtime, _consumer) = fixture(4);
+    runtime
+        .set_song_end(Timestamp::from_nanos(2_000_000))
+        .unwrap();
+    runtime
+        .process_input(input(1, 4_000_000, 5), &Clocks, point(3, 0))
+        .unwrap();
+    assert!(matches!(
+        runtime.process_input(input(1, 4_000_000, 4), &Clocks, point(3, 0)),
+        Err(RuntimeError::SequenceRegression { .. })
+    ));
+    assert_eq!(
+        runtime
+            .process_input(input(2, 3_000_000, 1), &Clocks, point(3, 0))
+            .unwrap_err(),
+        RuntimeError::NonMonotonicHost
+    );
+    assert!(matches!(
+        runtime.process_input(input(1, i64::MAX, 6), &Clocks, point(3, 0)),
+        Err(RuntimeError::UnmappedClock { .. })
+    ));
+    assert!(matches!(
+        runtime.process_input(input(1, 5_000_000, 6), &Clocks, point(99, 0)),
+        Err(RuntimeError::UnmappedClock { .. })
+    ));
+    assert_eq!(runtime.telemetry().counters().inputs, 1);
+    runtime
+        .transport_mut()
+        .seek(
+            Timestamp::from_nanos(1_005_000_000),
+            Timestamp::from_nanos(3_000_000),
+        )
+        .unwrap();
+    assert_eq!(
+        runtime
+            .process_input(input(1, 5_000_000, 6), &Clocks, point(3, 0))
+            .unwrap_err(),
+        RuntimeError::RequiresReplayRestore
+    );
+    assert_eq!(runtime.telemetry().counters().inputs, 1);
+    let (mut reverse, _consumer) = fixture(4);
+    reverse.set_song_end(Timestamp::ZERO).unwrap();
+    reverse
+        .transport_mut()
+        .set_rate(Timestamp::from_nanos(1_000_000_000), Rate::REVERSE)
+        .unwrap();
+    assert_eq!(
+        reverse
+            .advance_to(point(2, 1_000_000_000), &Clocks, point(3, 0))
+            .unwrap_err(),
+        RuntimeError::RequiresReplayRestore
+    );
+}
+
+#[test]
+fn endpoint_configuration_is_atomic_setup_only_and_restoration_clears_it() {
+    let (mut runtime, _consumer) = fixture(4);
+    assert_eq!(runtime.song_end(), None);
+    assert_eq!(
+        runtime.set_song_end(Timestamp::from_nanos(-1)),
+        Err(RuntimeError::InvalidSongEnd)
+    );
+    assert_eq!(runtime.song_end(), None);
+    runtime.set_song_end(Timestamp::ZERO).unwrap();
+    assert_eq!(
+        runtime.set_song_end(Timestamp::from_nanos(10)),
+        Err(RuntimeError::SongEndConfigurationLocked)
+    );
+    assert_eq!(runtime.song_end(), Some(Timestamp::ZERO));
+    let restored = runtime.judge().snapshot().unwrap();
+    let transport = runtime.transport().clone();
+    runtime
+        .advance_to(point(2, 1_000_000_001), &Clocks, point(3, 0))
+        .unwrap();
+    let mut exchanged = transport.clone();
+    runtime.exchange_transport(&mut exchanged);
+    let (mut producer, _unused_consumer) = command_queue(4).unwrap();
+    runtime.exchange_audio_producer(&mut producer);
+    assert_eq!(runtime.song_end(), Some(Timestamp::ZERO));
+    runtime.replace_state(
+        JudgeEngine::from_snapshot(&restored).unwrap(),
+        transport.clone(),
+    );
+    assert_eq!(runtime.song_end(), None);
+    runtime.set_song_end(Timestamp::from_nanos(20)).unwrap();
+    let (producer, _unused_consumer) = command_queue(4).unwrap();
+    runtime.replace_session(
+        JudgeEngine::from_snapshot(&restored).unwrap(),
+        transport,
+        producer,
+    );
+    assert_eq!(runtime.song_end(), None);
+    runtime
+        .advance_to(point(2, 1_000_000_000), &Clocks, point(3, 0))
+        .unwrap();
+    assert_eq!(
+        runtime.set_song_end(Timestamp::from_nanos(30)),
+        Err(RuntimeError::SongEndConfigurationLocked)
+    );
+    let (mut invalid, _consumer) = fixture(4);
+    assert!(
+        invalid
+            .advance_to(point(99, 0), &Clocks, point(3, 0))
+            .is_err()
+    );
+    invalid.set_song_end(Timestamp::ZERO).unwrap();
+    let (mut placeholder, _consumer) = fixture(4);
+    placeholder
+        .transport_mut()
+        .seek(
+            Timestamp::from_nanos(1_000_000_000),
+            Timestamp::from_nanos(100),
+        )
+        .unwrap();
+    placeholder.set_song_end(Timestamp::ZERO).unwrap();
+}
+
+#[test]
+fn end_reached_keeps_actual_judge_failure_authoritative_and_acquisition_committed() {
+    let (mut runtime, mut consumer) = fixture(4);
+    runtime
+        .set_song_end(Timestamp::from_nanos(2_000_000))
+        .unwrap();
+    // Caller-mutated judge chronology still requires explicit restoration;
+    // the logical fence cannot fabricate a successful earlier judge prefix.
+    runtime
+        .judge_mut()
+        .advance_to(Timestamp::from_nanos(3_000_000))
+        .unwrap();
+    let before = runtime.judge().stable_hash().unwrap();
+    let report = runtime
+        .process_input(input(1, 2_000_000, 7), &Clocks, point(3, 0))
+        .unwrap();
+    assert!(report.song_end_reached);
+    assert!(report.judge_error.is_some());
+    assert!(report.input.is_none());
+    assert!(report.judge_events.is_empty());
+    assert_eq!(runtime.judge().stable_hash().unwrap(), before);
+    assert_eq!(runtime.telemetry().counters().inputs, 1);
+    assert_eq!(runtime.telemetry().counters().unbound, 0);
+    assert_eq!(runtime.telemetry().counters().rejected, 1);
+    assert!(consumer.try_pop().is_err());
+    assert!(matches!(
+        runtime.process_input(input(1, 2_000_000, 6), &Clocks, point(3, 0)),
+        Err(RuntimeError::SequenceRegression { .. })
+    ));
+}
+
+#[test]
 fn physical_provenance_distinct_device_binding_and_audio_clock_reach_pcm() {
     let (mut runtime, consumer) = fixture(4);
     let report = runtime
@@ -195,11 +433,13 @@ fn full_queue_preserves_committed_judgment_and_exact_failed_command() {
         consumer.try_pop().unwrap().at(),
         Timestamp::from_nanos(3_000_000)
     );
-    assert!(runtime
-        .process_input(input(2, 2_000_000, 1), &Clocks, point(3, 5_000_000))
-        .unwrap()
-        .judge_events
-        .is_empty());
+    assert!(
+        runtime
+            .process_input(input(2, 2_000_000, 1), &Clocks, point(3, 5_000_000))
+            .unwrap()
+            .judge_events
+            .is_empty()
+    );
 }
 
 #[test]
