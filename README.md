@@ -91,7 +91,7 @@ The graphical `player` mode uses `winit` on the main thread and `wgpu` to draw
 notes, holds, judgment feedback and counters from actual game snapshots.
 Use `player --library DIR` or `player --chart PATH` with the same explicit native
 device/buffer/binding options as `play`. Up/Down select, Enter starts, and
-Escape/focus loss cancels. Device settings currently require command-line options.
+Escape/focus loss cancels. Native settings can also be edited before play.
 Catalog rows can also be clicked; Start, Cancel, Return and Exit buttons use
 the same session commands. Mouse hit testing follows the rendered logical
 viewport and never contributes gameplay input timestamps.
@@ -102,6 +102,11 @@ Native input/judging stays on the game thread, audio keeps its output
 worker/callback, and socket I/O has its own worker. Terminal `play` remains
 available. Ranked online services are not implemented.
 See the [competition contract](doc/kernel/REQ__bms-competition.md) for limits.
+F2 or Settings opens a bounded draft editor for native devices, buffers, timing,
+bindings and competition options. Apply validates through the existing native
+parser and updates the next session; Back discards. Missing device/binding
+configuration can be entered there before starting. Device enumeration,
+persistent profiles, clipboard and IME composition remain pending.
 See the [player contract](doc/kernel/REQ__bms-player.md) for lifecycle and scope.
 Source compilation does not establish executed GUI, multiplayer or playback.
 

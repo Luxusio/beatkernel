@@ -92,6 +92,22 @@ non-finite/outside positions and zero-sized windows cannot activate controls.
 Clicking a catalog row selects it. Start, Cancel, Return and Exit buttons use
 the existing session commands, with cleanup still required before another run.
 Pointer events are menu commands only and never produce gameplay timestamps.
+Native settings are composed from a bounded UTF-8 line editor, text-field
+presentation and a draft of the existing platform options. Settings open only
+when no game owner exists. Apply uses the same pure native option parser as
+playback, then changes the next session's arguments; Back/Escape discards the
+draft. Missing required values or incompatible backend options remain explicit
+errors. This parser validation does not certify device availability. Empty
+fields omit the option, preserving native defaults or required-value errors.
+Device IDs, rates, channel layouts, buffer/period requests, binding rows and
+timing options remain explicit; there is no automatic device/key substitution.
+Bound drafts to 128 fields, 4096 UTF-8 bytes per value and 64 KiB total value
+bytes. Keep values intact as flag/value pairs rather than parsing shell text.
+Cursor movement and deletion honor UTF-8 scalar boundaries; reject controls and
+newlines. Current glyph fallback still applies to non-ASCII text. Clipboard,
+IME composition, multilingual shaping, enumerated device selectors and durable
+settings persistence remain future work. Editing never acquires devices or
+changes native input/audio owners.
 The next primitives are validated RGBA8 texture resources and clipped sprite
 quads. Solid, glyph and custom texture quads preserve painter order through
 contiguous draw batches; they must not be reordered globally by texture.
@@ -128,8 +144,12 @@ the newer dependency graph is compatible.
 
 `player (--library DIR | --chart PATH) NATIVE_OPTIONS` selects the graphical
 mode; no arguments open the current directory catalog. Native configuration
-is still supplied as flag/value pairs, using `play --help` for the host's
-device/rate/buffer/binding controls. Up/Down select, Enter starts or returns to
+can be supplied as flag/value pairs or edited through F2/the Settings button.
+The settings screen shows twelve rows per page; Up/Down or Tab select a field,
+Left/Right/Home/End move its caret, Backspace/Delete edit, Enter/Apply validates,
+and Escape/Back discards. Add Binding creates another explicit lane/key row.
+Existing repeatable opponent rows are preserved. `play --help` describes the
+host's device/rate/buffer/binding controls. Up/Down select, Enter starts or returns to
 selection after cleanup, Escape cancels, and focus loss cancels active play.
 
 `--gpu-backend auto|vulkan|dx12|metal|gl` selects GPU discovery. Explicit
@@ -148,8 +168,9 @@ The user's verification deferral remains in force: fixture authoring and source
 compilation may proceed; actual GUI rendering/focus/close/restart/input/audio,
 replay/network execution and independent reviews/QA remain required later.
 This presentation increment does not by itself prove the full player complete.
-Graphical native-device settings, reusable persistent configuration and expanded
-transport/practice controls must be assessed as remaining player work. Existing
+Graphical native settings now have source integration; enumerated device
+selectors, reusable persistent configuration and expanded transport/practice
+controls remain player work. Existing
 casual multiplayer has independent local starts and unauthenticated progress;
 this screen does not establish ranked online play.
 
@@ -161,6 +182,12 @@ native or browser graphics/audio/input. WASM has existing unused native cadence
 warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warning.
 
 ## Known ceiling
+
+- Settings validation checks syntax and cross-option constraints, not resource
+  availability — actual device/file checks remain in native preparation.
+- Settings currently require typed device IDs and HID usage bindings; persistence,
+  clipboard and IME composition remain absent — extend these while retaining
+  bounded drafts and next-session-only application.
 
 - Catalog reads are capped per file at 8 MiB; aggregate accounting uses
   advertised file sizes — tighten aggregate accounting if concurrent file
