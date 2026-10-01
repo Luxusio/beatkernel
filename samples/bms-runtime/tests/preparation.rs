@@ -959,3 +959,193 @@ fn durable_source_seed_restores_real_capture_assets_pcm_and_replay() {
         Some(replay_playback::PlaybackError::Metadata(_))
     ));
 }
+
+#[test]
+fn shared_local_seeded_chart_keeps_every_capture_and_record_preview_compatible() {
+    use beatkernel::{
+        input::{
+            Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector, EventMeta,
+            PhysicalControlId, PhysicalInputEvent,
+        },
+        judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
+        time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
+        transport::{Rate, Transport},
+    };
+    use std::collections::BTreeMap;
+    struct Identity;
+    impl ClockMapper for Identity {
+        fn map(&self, from: ClockPoint, to: ClockDomainId) -> Option<Timestamp> {
+            (from.domain == to).then_some(from.timestamp)
+        }
+        fn quality(&self) -> ClockMappingQuality {
+            ClockMappingQuality::Exact
+        }
+    }
+    let point = ClockPoint {
+        domain: ClockDomainId(17),
+        timestamp: Timestamp::ZERO,
+    };
+    let dir = Directory::new();
+    dir.write("head.wav", &wav(1, &[16384]));
+    let path = dir.write("local.bms", b"#BPM 60\n#RANDOM 2\n#IF 1\n#WAV01 head.wav\n#00011:01\n#ELSE\n#WAV02 missing.wav\n#00012:02\n#ENDIF\n");
+    let prepared = load_prepared_with_seed(
+        &path,
+        AudioFormat::new(24_000, 1).unwrap(),
+        limits(),
+        ChannelPolicy::Exact,
+        3,
+    )
+    .unwrap();
+    let control = prepared.source.notes[0].lane.control();
+    let physical = PhysicalControlId::keyboard(7);
+    let replay_limits = competition_live::replay_limits().unwrap();
+    let draft = settings::NativeSettings::from_args(
+        &["--chart-seed".into(), "3".into()],
+        settings::SettingsHost::Linux,
+    )
+    .unwrap();
+    for count in [2usize, 3, 4, 64] {
+        let mut members = Vec::new();
+        let mut captures = BTreeMap::new();
+        for index in 0..count {
+            let id = if index + 1 == count {
+                u32::MAX
+            } else {
+                7 + index as u32
+            };
+            let player = local_players::PlayerId(id);
+            let judge = JudgeEngine::new(
+                prepared.compiled.chart.clone(),
+                prepared.source.rules(),
+                JudgeProfile::new(
+                    vec![JudgeWindow {
+                        grade: JudgeGrade(1),
+                        early: Duration::from_nanos(150_000_000),
+                        late: Duration::from_nanos(150_000_000),
+                    }],
+                    Duration::ZERO,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            captures.insert(
+                player,
+                replay_capture::LiveReplayCapture::new_at_with_chart_seed(
+                    &judge,
+                    point.domain,
+                    replay_limits,
+                    Timestamp::ZERO,
+                    3,
+                )
+                .unwrap(),
+            );
+            members.push(local_runtime::MemberConfig {
+                player,
+                device: Some(DeviceId(u64::from(id))),
+                bindings: BindingMap::from_bindings([Binding {
+                    device: DeviceSelector::Exact(DeviceId(u64::from(id))),
+                    physical,
+                    game_control: control,
+                }])
+                .unwrap(),
+                judge,
+                sounds: vec![],
+            });
+        }
+        let players = members
+            .iter()
+            .map(|member| member.player)
+            .collect::<Vec<_>>();
+        let (producer, _consumer) = command_queue(1).unwrap();
+        let mut group = local_runtime::RuntimeGroup::new(
+            point.domain,
+            point.domain,
+            Transport::new(Timestamp::ZERO, Timestamp::ZERO, Rate::NORMAL),
+            producer,
+            members,
+            0,
+            &[],
+        )
+        .unwrap();
+        for player in players {
+            let event = PhysicalInputEvent::Button(ButtonEvent {
+                meta: EventMeta::new(DeviceId(u64::from(player.0)), point, 0),
+                control: physical,
+                state: ButtonState::Down,
+            });
+            let local_runtime::InputResult::Processed(reports) =
+                group.process_input(event, &Identity, point).unwrap()
+            else {
+                panic!("assigned input must be processed")
+            };
+            assert_eq!(reports.len(), 1);
+            assert_eq!(reports[0].player, player);
+            assert_eq!(reports[0].report.judge_events.len(), 1);
+            captures
+                .get_mut(&player)
+                .unwrap()
+                .record_report(&reports[0].report)
+                .unwrap();
+        }
+        let mut header = None;
+        for (player, capture) in captures {
+            let file = capture.into_file();
+            assert_eq!(
+                replay_playback::decode_chart_setup(&file.header.options)
+                    .unwrap()
+                    .2,
+                3
+            );
+            if let Some(expected) = &header {
+                assert_eq!(&file.header, expected);
+            } else {
+                header = Some(file.header.clone());
+            }
+            let replay =
+                replay_playback::reconstruct(&prepared.source, file.clone(), replay_limits)
+                    .unwrap();
+            assert_eq!(replay.results().len(), 1);
+            assert_eq!(
+                replay.engine().stable_hash().unwrap(),
+                group.member_judge(player).unwrap().stable_hash().unwrap()
+            );
+            let record = dir.write(
+                &format!("local-{count}-{}.bkr", player.0),
+                &beatkernel::replay::codec::encode_replay(&file, replay_limits).unwrap(),
+            );
+            let preview = record_catalog::RecordPreview::inspect(&record, &path, &draft).unwrap();
+            assert_eq!(preview.score.hits, 1);
+            let wrong =
+                settings::NativeSettings::from_args(&[], settings::SettingsHost::Linux).unwrap();
+            assert!(
+                record_catalog::RecordPreview::inspect(&record, &path, &wrong)
+                    .unwrap_err()
+                    .contains("chart seed")
+            );
+            let mut competition = competition::Competition::new(file.header.clone(), 8).unwrap();
+            competition
+                .add_replay(
+                    &prepared.source,
+                    file.clone(),
+                    replay_limits,
+                    competition::OpponentKind::Own,
+                    "same-seed",
+                )
+                .unwrap();
+            let mut other_seed = file;
+            let prefix = b"bms-judge-profile/v3:".len();
+            other_seed.header.options[prefix..prefix + 8].copy_from_slice(&4u64.to_le_bytes());
+            assert!(
+                competition
+                    .add_replay(
+                        &prepared.source,
+                        other_seed,
+                        replay_limits,
+                        competition::OpponentKind::Other,
+                        "other-seed"
+                    )
+                    .is_err()
+            );
+        }
+    }
+}

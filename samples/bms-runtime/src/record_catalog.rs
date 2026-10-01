@@ -1,8 +1,8 @@
 //! Bounded saved-record discovery and logical prefix inspection on a metadata worker.
 use crate::{
     competition::ScoreSummary,
-    competition_live::{load_chart, replay_limits},
-    replay_playback::{decode_setup, read_replay, reconstruct},
+    competition_live::{load_chart_with_seed, replay_limits},
+    replay_playback::{decode_chart_setup, read_replay, reconstruct},
     settings::{MAX_VALUE_BYTES, NativeSettings},
 };
 use beatkernel::{
@@ -100,7 +100,9 @@ impl RecordPreview {
             return Err("saved record must be a regular file".into());
         }
         let file = read_replay(&mut reader, limits).map_err(|error| error.to_string())?;
-        let source = load_chart(chart).map_err(|error| error.to_string())?;
+        let (_, _, seed) =
+            decode_chart_setup(&file.header.options).map_err(|error| error.to_string())?;
+        let source = load_chart_with_seed(chart, seed).map_err(|error| error.to_string())?;
         Self::from_file(path, &source, settings, file)
     }
     fn from_file(
@@ -109,9 +111,12 @@ impl RecordPreview {
         settings: &NativeSettings,
         file: ReplayFile,
     ) -> Result<Self, String> {
-        let (profile, start) =
-            decode_setup(&file.header.options).map_err(|error| error.to_string())?;
+        let (profile, start, seed) =
+            decode_chart_setup(&file.header.options).map_err(|error| error.to_string())?;
         let (expected, expected_start) = draft_setup(settings)?;
+        if seed != settings.chart_seed()? {
+            return Err("saved record chart seed differs from the current draft".into());
+        }
         if profile != expected || start != expected_start {
             return Err("saved record profile or section differs from the current draft".into());
         }
@@ -216,7 +221,11 @@ mod fixtures {
         .unwrap()
     }
     fn source() -> beatkernel_bms::BmsChart {
-        parse("#BPM 120\n#00011:01\n#00112:01\n", ParseOptions::default()).unwrap()
+        parse(
+            "#BPM 120\n#WAV01 head.wav\n#00011:01\n#00112:01\n",
+            ParseOptions::default(),
+        )
+        .unwrap()
     }
     fn recording(settings: &NativeSettings, times: &[i64]) -> ReplayFile {
         let source = source();
@@ -224,10 +233,15 @@ mod fixtures {
         let selected = crate::section_start::source_at(&source, start).unwrap();
         let judge =
             JudgeEngine::new(selected.compile().unwrap().chart, selected.rules(), profile).unwrap();
-        let mut file =
-            LiveReplayCapture::new_at(&judge, ClockDomainId(17), replay_limits().unwrap(), start)
-                .unwrap()
-                .into_file();
+        let mut file = LiveReplayCapture::new_at_with_chart_seed(
+            &judge,
+            ClockDomainId(17),
+            replay_limits().unwrap(),
+            start,
+            settings.chart_seed().unwrap(),
+        )
+        .unwrap()
+        .into_file();
         file.records = times
             .iter()
             .enumerate()
@@ -238,6 +252,34 @@ mod fixtures {
             })
             .collect();
         file
+    }
+    #[test]
+    fn record_comparison_requires_the_draft_branch_seed() {
+        let draft = settings(&["--chart-seed", "3"]);
+        let file = recording(&draft, &[3_000_000_000]);
+        assert!(
+            RecordPreview::from_file(Path::new("record.bkr"), &source(), &draft, file.clone())
+                .is_ok()
+        );
+        assert!(
+            RecordPreview::from_file(
+                Path::new("record.bkr"),
+                &source(),
+                &settings(&[]),
+                file.clone()
+            )
+            .unwrap_err()
+            .contains("chart seed")
+        );
+        assert!(
+            RecordPreview::from_file(
+                Path::new("record.bkr"),
+                &source(),
+                &settings(&["--chart-seed", "18446744073709551615"]),
+                file
+            )
+            .is_err()
+        );
     }
     #[test]
     fn bounded_catalog_is_sorted_marks_overflow_and_rejects_unusable_paths() {
@@ -342,7 +384,11 @@ mod fixtures {
                 .is_err()
             );
         }
-        let changed = parse("#BPM 121\n#00011:01\n#00112:01\n", ParseOptions::default()).unwrap();
+        let changed = parse(
+            "#BPM 121\n#WAV01 head.wav\n#00011:01\n#00112:01\n",
+            ParseOptions::default(),
+        )
+        .unwrap();
         assert!(
             RecordPreview::from_file(Path::new("record.bkr"), &changed, &draft, file.clone())
                 .is_err()

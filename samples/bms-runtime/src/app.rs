@@ -3,8 +3,8 @@ use crate::Result;
 use beatkernel::time::Timestamp;
 use beatkernel_bms_runtime::{
     competition::Competition,
-    competition_live::{CompetitionOptions, load_chart, replay_limits},
-    replay_playback::{read_replay, reconstruct},
+    competition_live::{CompetitionOptions, load_chart_with_seed, replay_limits},
+    replay_playback::{decode_chart_setup, read_replay, reconstruct},
 };
 use std::{fs::File, path::Path};
 
@@ -160,12 +160,13 @@ fn compare(args: &[String]) -> Result<()> {
             flag => return Err(format!("unknown, duplicate or empty option {flag}").into()),
         }
     }
-    let source = load_chart(Path::new(chart.ok_or("--chart is required")?))?;
     let limits = replay_limits()?;
     let file = read_replay(
         &mut File::open(replay.ok_or("--local-replay is required")?)?,
         limits,
     )?;
+    let (_, _, seed) = decode_chart_setup(&file.header.options)?;
+    let source = load_chart_with_seed(Path::new(chart.ok_or("--chart is required")?), seed)?;
     let mut competition = Competition::new(file.header.clone(), 8)?;
     options.load_opponents(&source, &mut competition, limits)?;
     let mut local = reconstruct(&source, file, limits)?;
