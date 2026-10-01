@@ -33,6 +33,17 @@ pub enum PlayerStatus {
     Failed(String),
 }
 
+/// Native-owner pause capability and acknowledgement, independent of UI focus.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PauseState {
+    #[default]
+    Unavailable,
+    Running,
+    Pausing,
+    Paused,
+    Resuming,
+}
+
 /// Actual recorded-operation prefix, with a bounded display basename.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GhostSnapshot {
@@ -152,6 +163,7 @@ pub struct PlayerSnapshot {
     pub recent_results: Vec<JudgeEvent>,
     pub status: PlayerStatus,
     pub cancelled: bool,
+    pub pause: PauseState,
 }
 impl Default for PlayerSnapshot {
     fn default() -> Self {
@@ -164,12 +176,14 @@ impl Default for PlayerSnapshot {
             recent_results: Vec::new(),
             status: PlayerStatus::Loading,
             cancelled: false,
+            pause: PauseState::Unavailable,
         }
     }
 }
 struct Shared {
     latest: Mutex<Option<PlayerSnapshot>>,
     cancel: AtomicBool,
+    pause_requested: AtomicBool,
 }
 /// Sendable attachment token; native input/window objects never cross threads.
 #[derive(Clone)]
@@ -182,10 +196,17 @@ pub fn channel() -> (PlayerPublisher, PlayerViewer) {
     let shared = Arc::new(Shared {
         latest: Mutex::new(Some(PlayerSnapshot::default())),
         cancel: AtomicBool::new(false),
+        pause_requested: AtomicBool::new(false),
     });
     (PlayerPublisher(shared.clone()), PlayerViewer(shared))
 }
 impl PlayerViewer {
+    /// Desired state only; native snapshots acknowledge actual boundaries.
+    pub fn request_pause(&self, paused: bool) {
+        if !self.0.cancel.load(Ordering::Acquire) {
+            self.0.pause_requested.store(paused, Ordering::Release);
+        }
+    }
     /// Take the current coalesced snapshot; release its lock before any drawing.
     pub fn take_latest(&self) -> Option<PlayerSnapshot> {
         self.0.latest.lock().ok()?.take()
@@ -211,8 +232,47 @@ struct Session {
     snapshot: PlayerSnapshot,
     last_publish: Option<Instant>,
     chart_published: bool,
+    pause_dirty: bool,
 }
 thread_local! { static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) }; }
+
+/// Native owner reads desired state without UI locks; cancellation wins.
+pub fn pause_requested() -> bool {
+    SESSION.with(|session| {
+        session.borrow().as_ref().is_some_and(|session| {
+            !session.publisher.0.cancel.load(Ordering::Acquire)
+                && session.publisher.0.pause_requested.load(Ordering::Acquire)
+        })
+    })
+}
+
+/// Only an integrated native owner announces support and phase changes.
+pub fn publish_pause(pause: PauseState) {
+    SESSION.with(|session| {
+        if let Some(session) = session.borrow_mut().as_mut() {
+            if session.snapshot.pause != pause {
+                session.snapshot.pause = pause;
+                session.pause_dirty = true;
+            }
+            session.observe_cancellation(false);
+            if session.pause_dirty {
+                session.publish_latest(true);
+            }
+        }
+    });
+}
+
+/// Retry an acknowledgement lost to temporary UI slot contention, without
+/// cloning unchanged pause snapshots after successful delivery.
+pub fn retry_pause_publication() {
+    SESSION.with(|session| {
+        if let Some(session) = session.borrow_mut().as_mut() {
+            if session.pause_dirty {
+                session.publish_latest(true);
+            }
+        }
+    });
+}
 
 /// Attach native play on its owner thread. Terminal publication occurs only
 /// after the native function returns and its explicit/drop cleanup has run.
@@ -229,6 +289,7 @@ pub fn with_publisher<T>(
             snapshot: PlayerSnapshot::default(),
             last_publish: None,
             chart_published: false,
+            pause_dirty: false,
         });
         Ok::<(), String>(())
     })?;
@@ -488,6 +549,7 @@ impl Session {
                 self.snapshot.sync_legacy();
                 *slot = Some(self.snapshot.clone());
                 self.last_publish = Some(Instant::now());
+                self.pause_dirty = false;
             }
         }
     }
@@ -496,6 +558,48 @@ impl Session {
 #[cfg(test)]
 mod fixtures {
     use super::*;
+    #[test]
+    fn pause_requests_require_owner_ack_and_cancellation_wins_across_fresh_channels() {
+        let (publisher, viewer) = channel();
+        assert_eq!(viewer.take_latest().unwrap().pause, PauseState::Unavailable);
+        viewer.request_pause(true);
+        with_publisher(publisher, || {
+            assert!(pause_requested());
+            let held_slot = viewer.0.latest.lock().unwrap();
+            publish_pause(PauseState::Running);
+            drop(held_slot);
+            retry_pause_publication();
+            assert_eq!(viewer.take_latest().unwrap().pause, PauseState::Running);
+            publish_pause(PauseState::Pausing);
+            assert_eq!(viewer.take_latest().unwrap().pause, PauseState::Pausing);
+            publish_pause(PauseState::Paused);
+            assert_eq!(viewer.take_latest().unwrap().pause, PauseState::Paused);
+            viewer.request_pause(false);
+            assert!(!pause_requested());
+            publish_pause(PauseState::Resuming);
+            assert_eq!(viewer.take_latest().unwrap().pause, PauseState::Resuming);
+            viewer.cancel();
+            viewer.request_pause(true);
+            assert!(!pause_requested());
+            publish_pause(PauseState::Paused);
+            let stopped = viewer.take_latest().unwrap();
+            assert!(stopped.cancelled);
+            assert_eq!(stopped.status, PlayerStatus::Stopping);
+            Ok(())
+        })
+        .unwrap();
+        assert!(viewer.take_latest().unwrap().cancelled);
+        let (fresh, fresh_viewer) = channel();
+        with_publisher(fresh, || {
+            assert!(!pause_requested());
+            assert_eq!(
+                fresh_viewer.take_latest().unwrap().pause,
+                PauseState::Unavailable
+            );
+            Ok(())
+        })
+        .unwrap();
+    }
     fn comparisons() -> CompetitionSnapshot {
         CompetitionSnapshot {
             ghosts: vec![GhostSnapshot {

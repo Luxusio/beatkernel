@@ -1,0 +1,676 @@
+//! Native-frontier pause acknowledgement and bounded keyboard reconciliation.
+//! Boundary interpolation has unknown physical mapping error; no wall clock is read.
+use beatkernel::{
+    audio::RenderReport,
+    input::{ButtonEvent, ButtonState, DeviceId, PhysicalControlId, PhysicalInputEvent},
+    time::{ClockDomainId, ClockPair, ClockPoint, Timestamp},
+};
+use std::collections::HashMap;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PauseError(pub &'static str);
+impl std::fmt::Display for PauseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+impl std::error::Error for PauseError {}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PausePhase {
+    Running,
+    Pausing,
+    Paused,
+    Resuming,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PauseBoundary {
+    pub paused: bool,
+    pub host: ClockPoint,
+    pub playback_frame: u64,
+}
+#[derive(Clone, Copy, Debug)]
+struct PendingBoundary {
+    physical: u64,
+    playback: u64,
+    gap: u64,
+}
+#[derive(Clone, Debug)]
+pub struct NativePause {
+    origin: ClockPoint,
+    host: ClockDomainId,
+    rate: u32,
+    phase: PausePhase,
+    gap: u64,
+    frozen: u64,
+    reference: Option<ClockPair>,
+    last_pair: Option<ClockPair>,
+    last_report: Option<RenderReport>,
+    boundary: Option<PendingBoundary>,
+}
+impl NativePause {
+    pub fn new(
+        output_origin: ClockPoint,
+        host_domain: ClockDomainId,
+        sample_rate: u32,
+    ) -> Result<Self, PauseError> {
+        if output_origin.domain == host_domain || sample_rate == 0 || sample_rate > 1_000_000_000 {
+            return Err(PauseError(
+                "pause requires distinct domains and a representable nonzero frame grid",
+            ));
+        }
+        Ok(Self {
+            origin: output_origin,
+            host: host_domain,
+            rate: sample_rate,
+            phase: PausePhase::Running,
+            gap: 0,
+            frozen: 0,
+            reference: None,
+            last_pair: None,
+            last_report: None,
+            boundary: None,
+        })
+    }
+    pub fn phase(&self) -> PausePhase {
+        self.phase
+    }
+    /// Latest validated render evidence, retained across transient unavailable
+    /// telemetry reads. This never advances a cursor without a report.
+    pub fn last_render_report(&self) -> Option<RenderReport> {
+        self.last_report
+    }
+    fn check_pair(&self, pair: ClockPair) -> Result<(), PauseError> {
+        if pair.source.domain != self.origin.domain
+            || pair.target.domain != self.host
+            || pair.source.timestamp < self.origin.timestamp
+        {
+            return Err(PauseError(
+                "pause clock pair has wrong domain or precedes output origin",
+            ));
+        }
+        if self.last_pair.is_some_and(|old| {
+            pair.source.timestamp < old.source.timestamp
+                || pair.target.timestamp < old.target.timestamp
+        }) {
+            return Err(PauseError("pause clock observations regressed"));
+        }
+        Ok(())
+    }
+    pub fn request(&mut self, paused: bool, reference: ClockPair) -> Result<bool, PauseError> {
+        self.check_pair(reference)?;
+        let next = match (self.phase, paused) {
+            (PausePhase::Running, true) => PausePhase::Pausing,
+            (PausePhase::Paused, false) => PausePhase::Resuming,
+            _ => return Ok(false),
+        };
+        self.phase = next;
+        self.reference = Some(reference);
+        self.last_pair = Some(reference);
+        self.boundary = None;
+        Ok(true)
+    }
+    fn point(&self, frame: u64) -> Result<ClockPoint, PauseError> {
+        let nanos = i128::from(frame) * 1_000_000_000 / i128::from(self.rate);
+        let value = i128::from(self.origin.timestamp.as_nanos())
+            .checked_add(nanos)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or(PauseError("pause frame timestamp overflow"))?;
+        Ok(ClockPoint {
+            domain: self.origin.domain,
+            timestamp: Timestamp::from_nanos(value),
+        })
+    }
+    fn check_report(&self, report: RenderReport) -> Result<(u64, u64, u64), PauseError> {
+        let physical = report
+            .start_frame
+            .checked_add(
+                u64::try_from(report.frames).map_err(|_| PauseError("render extent overflow"))?,
+            )
+            .ok_or(PauseError("physical frame overflow"))?;
+        let playback = report
+            .playback_start_frame
+            .checked_add(
+                u64::try_from(report.playback_frames)
+                    .map_err(|_| PauseError("playback extent overflow"))?,
+            )
+            .ok_or(PauseError("playback frame overflow"))?;
+        let gap = report
+            .start_frame
+            .checked_sub(report.playback_start_frame)
+            .ok_or(PauseError("playback grid exceeds physical grid"))?;
+        if report.playback_frames != if report.paused { 0 } else { report.frames } {
+            return Err(PauseError("render pause extent is inconsistent"));
+        }
+        self.point(physical)?;
+        self.point(playback)?;
+        if let Some(old) = self.last_report {
+            let old_end = old
+                .start_frame
+                .checked_add(old.frames as u64)
+                .ok_or(PauseError("previous physical extent overflow"))?;
+            let old_play_end = old
+                .playback_start_frame
+                .checked_add(old.playback_frames as u64)
+                .ok_or(PauseError("previous playback extent overflow"))?;
+            if report.start_frame < old.start_frame
+                || physical < old_end
+                || playback < old_play_end
+                || gap < old.start_frame - old.playback_start_frame
+            {
+                return Err(PauseError("render report grid regressed"));
+            }
+        }
+        Ok((physical, playback, gap))
+    }
+    /// Returns the playback end cursor on the scheduling clock grid.
+    pub fn scheduling_point(&self, report: RenderReport) -> Result<ClockPoint, PauseError> {
+        let (_, playback, _) = self.check_report(report)?;
+        self.point(playback)
+    }
+    /// Applies the cumulative gap once, avoiding per-pause rounding drift.
+    pub fn song_origin_after_pause(&self, original: Timestamp) -> Result<Timestamp, PauseError> {
+        let gap = i128::from(self.gap) * 1_000_000_000 / i128::from(self.rate);
+        let value = i128::from(original.as_nanos())
+            .checked_sub(gap)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or(PauseError("paused song origin overflow"))?;
+        Ok(Timestamp::from_nanos(value))
+    }
+    pub fn observe(
+        &mut self,
+        report: Option<RenderReport>,
+        pair: ClockPair,
+    ) -> Result<Option<PauseBoundary>, PauseError> {
+        let mut next = self.clone();
+        let result = next.observe_inner(report, pair)?;
+        *self = next;
+        Ok(result)
+    }
+    fn observe_inner(
+        &mut self,
+        report: Option<RenderReport>,
+        pair: ClockPair,
+    ) -> Result<Option<PauseBoundary>, PauseError> {
+        self.check_pair(pair)?;
+        if let Some(report) = report {
+            let (_, _, gap) = self.check_report(report)?;
+            if matches!(self.phase, PausePhase::Running | PausePhase::Pausing)
+                && !report.paused
+                && gap != self.gap
+            {
+                return Err(PauseError(
+                    "active render changed the acknowledged pause gap",
+                ));
+            }
+            if self.phase == PausePhase::Paused && report.playback_start_frame != self.frozen {
+                return Err(PauseError(
+                    "paused render changed the frozen playback frame",
+                ));
+            }
+            match self.phase {
+                PausePhase::Running if report.paused => {
+                    return Err(PauseError("unexpected paused render while running"));
+                }
+                PausePhase::Paused if !report.paused => {
+                    return Err(PauseError("unexpected active render while paused"));
+                }
+                PausePhase::Pausing
+                    if report.paused && report.frames > 0 && self.boundary.is_none() =>
+                {
+                    if gap < self.gap {
+                        return Err(PauseError("pause gap regressed"));
+                    }
+                    self.boundary = Some(PendingBoundary {
+                        physical: report
+                            .playback_start_frame
+                            .checked_add(self.gap)
+                            .ok_or(PauseError("pause boundary overflow"))?,
+                        playback: report.playback_start_frame,
+                        gap: self.gap,
+                    });
+                }
+                PausePhase::Resuming
+                    if !report.paused && report.frames > 0 && self.boundary.is_none() =>
+                {
+                    if report.playback_start_frame < self.frozen || gap <= self.gap {
+                        return Err(PauseError(
+                            "resume report precedes the frozen playback frontier",
+                        ));
+                    }
+                    self.boundary = Some(PendingBoundary {
+                        physical: self
+                            .frozen
+                            .checked_add(gap)
+                            .ok_or(PauseError("resume boundary overflow"))?,
+                        playback: self.frozen,
+                        gap,
+                    });
+                }
+                _ => {}
+            }
+            self.last_report = Some(report);
+        }
+        self.last_pair = Some(pair);
+        let Some(boundary) = self.boundary else {
+            return Ok(None);
+        };
+        let output = self.point(boundary.physical)?;
+        let lower = self
+            .reference
+            .ok_or(PauseError("pause boundary lacks a native lower bracket"))?;
+        if output.timestamp < lower.source.timestamp {
+            return Err(PauseError(
+                "pause boundary precedes its native lower bracket",
+            ));
+        }
+        if pair.source.timestamp < output.timestamp {
+            return Ok(None);
+        }
+        let source_delta = i128::from(pair.source.timestamp.as_nanos())
+            - i128::from(lower.source.timestamp.as_nanos());
+        let host_delta = i128::from(pair.target.timestamp.as_nanos())
+            - i128::from(lower.target.timestamp.as_nanos());
+        if source_delta <= 0 || host_delta <= 0 {
+            return Err(PauseError(
+                "native boundary interpolation requires progress in both clocks",
+            ));
+        }
+        let offset =
+            i128::from(output.timestamp.as_nanos()) - i128::from(lower.source.timestamp.as_nanos());
+        let host = offset
+            .checked_mul(host_delta)
+            .map(|value| value / source_delta)
+            .and_then(|value| value.checked_add(i128::from(lower.target.timestamp.as_nanos())))
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or(PauseError("native boundary interpolation overflow"))?;
+        let paused = self.phase == PausePhase::Pausing;
+        self.phase = if paused {
+            self.frozen = boundary.playback;
+            PausePhase::Paused
+        } else {
+            self.gap = boundary.gap;
+            PausePhase::Running
+        };
+        self.boundary = None;
+        self.reference = None;
+        Ok(Some(PauseBoundary {
+            paused,
+            host: ClockPoint {
+                domain: self.host,
+                timestamp: Timestamp::from_nanos(host),
+            },
+            playback_frame: boundary.playback,
+        }))
+    }
+}
+
+const MAX_CONTROLS: usize = 65536;
+#[derive(Clone)]
+struct Key {
+    suppressed: bool,
+    down: bool,
+    event: ButtonEvent,
+    ordinal: u64,
+}
+/// Tracks accepted button levels; unknown repeats never become new presses.
+pub struct PauseKeyboard {
+    keys: HashMap<(DeviceId, PhysicalControlId), Key>,
+    domain: Option<ClockDomainId>,
+    next: u64,
+}
+impl Default for PauseKeyboard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl PauseKeyboard {
+    pub fn new() -> Self {
+        Self {
+            keys: HashMap::new(),
+            domain: None,
+            next: 0,
+        }
+    }
+    fn button(&self, event: &PhysicalInputEvent) -> Result<ButtonEvent, PauseError> {
+        let PhysicalInputEvent::Button(button) = event else {
+            return Err(PauseError("pause reconciliation supports only buttons"));
+        };
+        if self
+            .domain
+            .is_some_and(|domain| domain != button.meta.clock_domain)
+        {
+            return Err(PauseError("pause keyboard clock domain changed"));
+        }
+        Ok(button.clone())
+    }
+    fn insert(&mut self, button: &ButtonEvent, suppressed: bool) -> Result<(), PauseError> {
+        if self.keys.len() >= MAX_CONTROLS {
+            return Err(PauseError("pause keyboard control capacity exceeded"));
+        }
+        let next = self
+            .next
+            .checked_add(1)
+            .ok_or(PauseError("pause keyboard ordinal exhausted"))?;
+        self.keys
+            .try_reserve(1)
+            .map_err(|_| PauseError("pause keyboard allocation failed"))?;
+        self.keys.insert(
+            (button.meta.source, button.control),
+            Key {
+                suppressed,
+                down: true,
+                event: button.clone(),
+                ordinal: self.next,
+            },
+        );
+        self.next = next;
+        Ok(())
+    }
+    pub fn accept(&mut self, event: &PhysicalInputEvent) -> Result<bool, PauseError> {
+        let button = self.button(event)?;
+        let id = (button.meta.source, button.control);
+        let accepted = match self.keys.get(&id) {
+            Some(key) if key.suppressed => {
+                if button.state == ButtonState::Up {
+                    self.keys.remove(&id);
+                }
+                false
+            }
+            Some(_) => {
+                if button.state == ButtonState::Up {
+                    self.keys.remove(&id);
+                }
+                true
+            }
+            None if button.state == ButtonState::Down => {
+                self.insert(&button, false)?;
+                true
+            }
+            // Preserve ordinary runtime handling of unpaired releases/repeats.
+            // Neither event establishes a tracked held key.
+            None => true,
+        };
+        self.domain = Some(button.meta.clock_domain);
+        Ok(accepted)
+    }
+    pub fn observe_paused(&mut self, event: PhysicalInputEvent) -> Result<(), PauseError> {
+        let button = self.button(&event)?;
+        let id = (button.meta.source, button.control);
+        if let Some(key) = self.keys.get_mut(&id) {
+            if key.suppressed && button.state == ButtonState::Up {
+                self.keys.remove(&id);
+            } else {
+                key.down = button.state != ButtonState::Up;
+                key.event = button.clone();
+            }
+        } else if button.state == ButtonState::Down {
+            self.insert(&button, true)?;
+        }
+        self.domain = Some(button.meta.clock_domain);
+        Ok(())
+    }
+    /// Reconciles releases only. New paused presses remain suppressed until Up.
+    pub fn resume(&mut self, at: ClockPoint) -> Result<Vec<PhysicalInputEvent>, PauseError> {
+        if self.domain.is_some_and(|domain| domain != at.domain) {
+            return Err(PauseError("pause keyboard resume clock domain changed"));
+        }
+        let mut releases = Vec::new();
+        releases
+            .try_reserve_exact(self.keys.len())
+            .map_err(|_| PauseError("pause release allocation failed"))?;
+        for (id, key) in &self.keys {
+            if !key.suppressed && !key.down {
+                let mut event = key.event.clone();
+                if event.meta.timestamp > at.timestamp {
+                    return Err(PauseError("paused release follows resume frontier"));
+                }
+                event.state = ButtonState::Up;
+                event.meta.original_clock_point =
+                    event.meta.original_clock_point.or(Some(ClockPoint {
+                        domain: event.meta.clock_domain,
+                        timestamp: event.meta.timestamp,
+                    }));
+                event.meta.clock_domain = at.domain;
+                event.meta.timestamp = at.timestamp;
+                releases.push((*id, key.ordinal, event));
+            }
+        }
+        releases
+            .sort_by_key(|(_, ordinal, event)| (event.meta.source, event.meta.sequence, *ordinal));
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(releases.len())
+            .map_err(|_| PauseError("pause release output allocation failed"))?;
+        for (id, _, event) in releases {
+            self.keys.remove(&id);
+            output.push(PhysicalInputEvent::Button(event));
+        }
+        Ok(output)
+    }
+}
+
+#[cfg(test)]
+mod fixtures {
+    use super::*;
+    use beatkernel::{
+        audio::AudioCounters,
+        input::{AxisEvent, AxisMode, BackendId, EventMeta, NativeEventMeta},
+    };
+    fn point(domain: u32, ns: i64) -> ClockPoint {
+        ClockPoint {
+            domain: ClockDomainId(domain),
+            timestamp: Timestamp::from_nanos(ns),
+        }
+    }
+    fn pair(ns: i64) -> ClockPair {
+        ClockPair {
+            source: point(1, ns),
+            target: point(2, ns + 10_000),
+        }
+    }
+    fn report(physical: u64, playback: u64, frames: usize, paused: bool) -> RenderReport {
+        RenderReport {
+            start_frame: physical,
+            frames,
+            playback_start_frame: playback,
+            playback_frames: if paused { 0 } else { frames },
+            paused,
+            active_voices: 0,
+            pending_commands: 0,
+            song_position: Timestamp::ZERO,
+            producer_disconnected: false,
+            counters: AudioCounters::default(),
+        }
+    }
+    #[test]
+    fn coalesced_reports_wait_for_native_crossing_and_recover_first_boundaries() {
+        let mut pause = NativePause::new(point(1, 0), ClockDomainId(2), 1000).unwrap();
+        assert!(pause.request(true, pair(0)).unwrap());
+        assert!(!pause.request(false, pair(0)).unwrap());
+        assert_eq!(
+            pause
+                .observe(Some(report(12, 10, 4, true)), pair(8_000_000))
+                .unwrap(),
+            None
+        );
+        let boundary = pause.observe(None, pair(12_000_000)).unwrap().unwrap();
+        assert_eq!(
+            boundary,
+            PauseBoundary {
+                paused: true,
+                host: point(2, 10_010_000),
+                playback_frame: 10
+            }
+        );
+        assert_eq!(pause.phase(), PausePhase::Paused);
+        assert!(pause.request(false, pair(14_000_000)).unwrap());
+        let resumed = pause
+            .observe(Some(report(20, 12, 2, false)), pair(20_000_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resumed,
+            PauseBoundary {
+                paused: false,
+                host: point(2, 18_010_000),
+                playback_frame: 10
+            }
+        );
+        assert_eq!(pause.phase(), PausePhase::Running);
+        assert_eq!(
+            pause.scheduling_point(report(20, 12, 2, false)).unwrap(),
+            point(1, 14_000_000)
+        );
+        assert_eq!(
+            pause.song_origin_after_pause(Timestamp::ZERO).unwrap(),
+            Timestamp::from_nanos(-8_000_000)
+        );
+    }
+    #[test]
+    fn repeated_gap_rounding_is_cumulative_and_malformed_observations_are_atomic() {
+        let mut pause = NativePause::new(point(1, 0), ClockDomainId(2), 3).unwrap();
+        let mut reference = pair(0);
+        for index in 0..3u64 {
+            let play = index + 1;
+            let physical = play + index;
+            assert!(pause.request(true, reference).unwrap());
+            let crossing = pair(pause.point(physical).unwrap().timestamp.as_nanos() + 10);
+            pause
+                .observe(Some(report(physical, play, 1, true)), crossing)
+                .unwrap()
+                .unwrap();
+            assert!(pause.request(false, crossing).unwrap());
+            reference = pair(pause.point(physical + 1).unwrap().timestamp.as_nanos() + 10);
+            pause
+                .observe(Some(report(physical + 1, play, 1, false)), reference)
+                .unwrap()
+                .unwrap();
+        }
+        assert_eq!(
+            pause
+                .song_origin_after_pause(Timestamp::ZERO)
+                .unwrap()
+                .as_nanos(),
+            -1_000_000_000
+        );
+        let before = pause.clone();
+        assert!(
+            pause
+                .observe(Some(report(9, 6, 1, true)), reference)
+                .is_err()
+        );
+        assert_eq!(pause.phase(), before.phase());
+        assert_eq!(pause.last_report, before.last_report);
+        assert_eq!(pause.gap, before.gap);
+        let wrong = ClockPair {
+            source: point(9, 0),
+            target: point(2, 0),
+        };
+        assert!(pause.request(true, wrong).is_err());
+        assert_eq!(pause.phase(), PausePhase::Running);
+        assert!(
+            pause
+                .scheduling_point(report(u64::MAX, u64::MAX, 1, false))
+                .is_err()
+        );
+        assert!(NativePause::new(point(1, 0), ClockDomainId(1), 3).is_err());
+        assert!(NativePause::new(point(1, 0), ClockDomainId(2), 1_000_000_001).is_err());
+        let mut bracket = NativePause::new(point(1, 0), ClockDomainId(2), 1000).unwrap();
+        bracket.request(true, pair(20_000_000)).unwrap();
+        assert!(
+            bracket
+                .observe(Some(report(12, 10, 4, true)), pair(21_000_000))
+                .is_err()
+        );
+        assert_eq!(bracket.phase(), PausePhase::Pausing);
+        assert!(bracket.last_report.is_none());
+        let mut stagnant = NativePause::new(point(1, 0), ClockDomainId(2), 1000).unwrap();
+        stagnant.request(true, pair(0)).unwrap();
+        assert!(
+            stagnant
+                .observe(Some(report(0, 0, 1, true)), pair(0))
+                .is_err()
+        );
+    }
+    fn button(
+        device: u64,
+        key: u16,
+        state: ButtonState,
+        time: i64,
+        sequence: u64,
+    ) -> PhysicalInputEvent {
+        let mut meta = EventMeta::new(DeviceId(device), point(2, time), sequence);
+        meta.native = Some(NativeEventMeta {
+            backend: BackendId(7),
+            code: Some(key as u32),
+            timestamp: Some(point(9, time - 1)),
+        });
+        PhysicalInputEvent::Button(ButtonEvent {
+            meta,
+            control: PhysicalControlId::keyboard(key),
+            state,
+        })
+    }
+    #[test]
+    fn held_release_reconciliation_preserves_native_provenance_and_suppresses_new_keys() {
+        let mut keys = PauseKeyboard::new();
+        assert!(keys.accept(&button(2, 4, ButtonState::Down, 1, 1)).unwrap());
+        assert!(keys.accept(&button(1, 5, ButtonState::Down, 1, 1)).unwrap());
+        let released = button(2, 4, ButtonState::Up, 4, 4);
+        keys.observe_paused(released.clone()).unwrap();
+        keys.observe_paused(button(1, 5, ButtonState::Up, 3, 3))
+            .unwrap();
+        keys.observe_paused(button(3, 6, ButtonState::Down, 5, 5))
+            .unwrap();
+        keys.observe_paused(button(4, 7, ButtonState::Repeat, 6, 6))
+            .unwrap();
+        let reconciled = keys.resume(point(2, 10)).unwrap();
+        assert_eq!(reconciled.len(), 2);
+        assert_eq!(reconciled[0].meta().source, DeviceId(1));
+        assert_eq!(reconciled[1].meta().source, DeviceId(2));
+        assert_eq!(reconciled[1].meta().timestamp, Timestamp::from_nanos(10));
+        assert_eq!(reconciled[1].meta().native, released.meta().native);
+        assert_eq!(reconciled[1].meta().original_clock_point, Some(point(2, 4)));
+        assert!(
+            !keys
+                .accept(&button(3, 6, ButtonState::Repeat, 11, 6))
+                .unwrap()
+        );
+        assert!(!keys.accept(&button(3, 6, ButtonState::Up, 12, 7)).unwrap());
+        assert!(
+            keys.accept(&button(3, 6, ButtonState::Down, 13, 8))
+                .unwrap()
+        );
+        assert!(
+            keys.accept(&button(4, 7, ButtonState::Repeat, 14, 9))
+                .unwrap()
+        );
+        assert!(keys.resume(point(2, 15)).unwrap().is_empty());
+    }
+    #[test]
+    fn held_levels_restore_without_new_presses_and_bad_resume_is_atomic() {
+        let mut keys = PauseKeyboard::new();
+        keys.accept(&button(1, 4, ButtonState::Down, 1, 1)).unwrap();
+        keys.observe_paused(button(1, 4, ButtonState::Up, 2, 2))
+            .unwrap();
+        keys.observe_paused(button(1, 4, ButtonState::Repeat, 3, 3))
+            .unwrap();
+        assert!(keys.resume(point(2, 4)).unwrap().is_empty());
+        let mut up = button(1, 4, ButtonState::Up, 5, 5);
+        up.meta_mut().original_clock_point = Some(point(8, 50));
+        keys.observe_paused(up).unwrap();
+        assert!(keys.resume(point(1, 10)).is_err());
+        assert!(keys.resume(point(2, 4)).is_err());
+        let nonbutton = PhysicalInputEvent::Axis(AxisEvent {
+            meta: EventMeta::new(DeviceId(1), point(2, 10), 6),
+            control: PhysicalControlId::keyboard(4),
+            value: 0.0,
+            mode: AxisMode::Absolute,
+        });
+        assert!(keys.accept(&nonbutton).is_err());
+        let up = keys.resume(point(2, 10)).unwrap();
+        assert_eq!(up.len(), 1);
+        assert_eq!(up[0].meta().original_clock_point, Some(point(8, 50)));
+        assert!(keys.accept(&button(1, 4, ButtonState::Up, 11, 6)).unwrap());
+    }
+}

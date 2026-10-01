@@ -32,6 +32,8 @@ pub mod native_defaults;
 pub mod offline;
 /// Typed UI panel ownership and cancellation permits for off-thread work.
 pub mod panel_scope;
+/// Native presentation-derived pause and bounded keyboard reconciliation.
+pub mod playback_pause;
 /// Actual game-to-UI presentation and cancellation outside audio callbacks.
 pub mod player;
 /// Bounded chart catalog and exact compiled lane display data.
