@@ -7,9 +7,11 @@ use beatkernel::{
 };
 use beatkernel_bms_runtime::{
     bgm::{BgmConfig, BgmFeeder},
-    load_prepared,
+    completion::ReplayCompletion,
+    load_prepared, player,
     replay_audio::{completed_render_cursor, plan_audio},
     replay_playback::read_replay,
+    replay_visual::ReplayVisual,
     ChannelPolicy,
 };
 use beatkernel_platform::audio::{DeviceFormat, SampleEncoding, SharedPeriodPolicy};
@@ -66,7 +68,8 @@ struct Options {
     chart: PathBuf,
     replay: PathBuf,
     device: String,
-    seconds: u64,
+    seconds: Option<u64>,
+    channel_policy: ChannelPolicy,
     format: AudioFormat,
     buffer: Option<u32>,
     #[cfg_attr(not(any(target_os = "windows", target_os = "linux")), allow(dead_code))]
@@ -113,6 +116,7 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
     let mut voices = 4096usize;
     let mut max_records = 1_000_000usize;
     let mut max_bytes = 64 * 1024 * 1024usize;
+    let mut channel_policy = ChannelPolicy::Exact;
     let mut seen = HashSet::new();
     let mut args = args.iter();
     while let Some(flag) = args.next() {
@@ -175,10 +179,17 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
                 if count == 0 {
                     return Err("seconds must be positive u64".into());
                 }
-                Instant::now()
-                    .checked_add(WallDuration::from_secs(count))
-                    .ok_or("wall duration is not representable")?;
+                if count > i64::MAX as u64 / 1_000_000_000 {
+                    return Err("seconds exceeds the signed nanosecond duration range".into());
+                }
                 seconds = Some(count);
+            }
+            "--channel-policy" => {
+                channel_policy = match value.as_str() {
+                    "exact" => ChannelPolicy::Exact,
+                    "mono-stereo" => ChannelPolicy::MonoToStereo,
+                    _ => return Err("channel policy must be exact or mono-stereo".into()),
+                };
             }
             "--rate" => rate = Some(value.parse::<u32>()?),
             "--channels" => channels = Some(value.parse::<u16>()?),
@@ -267,6 +278,9 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
             }
         }
         Backend::Asio => {
+            if seconds.is_none() {
+                return Err("ASIO recorded playback requires explicit --seconds: this host has no validated native output-zero presentation epoch for visual progress or natural drain".into());
+            }
             if period.is_some() || mode_set || shared_set {
                 return Err("ASIO rejects period/mode/shared-policy flags".into());
             }
@@ -296,7 +310,7 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
             device.make_ascii_uppercase();
         }
         Backend::Unsupported => {
-            return Err("native replay output supports only Windows, Linux and macOS".into())
+            return Err("native replay output supports only Windows, Linux and macOS".into());
         }
     }
     let format = AudioFormat::new(
@@ -335,7 +349,8 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
         chart: chart.ok_or("--chart PATH is required")?,
         replay: replay.ok_or("--replay PATH is required")?,
         device,
-        seconds: seconds.ok_or("--seconds N is required")?,
+        seconds,
+        channel_policy,
         format,
         buffer,
         period,
@@ -354,9 +369,42 @@ trait NativeOutput {
     fn start(&mut self) -> Result<()>;
     fn stop(&mut self) -> Result<()>;
     fn poll(&mut self) -> Result<Option<RenderReport>>;
+    /// Reported native presentation in this fresh stream's zero-origin OUTPUT
+    /// domain. Missing associations cannot be replaced by software render time.
+    fn presented(&mut self) -> Result<Option<ClockPoint>>;
     fn last_render(&mut self) -> Option<RenderReport>;
     fn final_check(&mut self) -> Result<()>;
     fn print_native(&mut self);
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn output_position(position: u64, frequency: u64) -> Result<ClockPoint> {
+    if frequency == 0 {
+        return Err("native presentation frequency is zero".into());
+    }
+    let ns = i128::from(position)
+        .checked_mul(1_000_000_000)
+        .ok_or("native presentation position overflow")?
+        / i128::from(frequency);
+    Ok(ClockPoint {
+        domain: OUTPUT,
+        timestamp: Timestamp::from_nanos(
+            i64::try_from(ns).map_err(|_| "native presentation exceeds timestamp range")?,
+        ),
+    })
+}
+
+fn presentation_song(point: ClockPoint, start: Timestamp, preroll: Duration) -> Result<Timestamp> {
+    if point.domain != OUTPUT || point.timestamp.as_nanos() < 0 {
+        return Err("native presentation differs from zero-origin output domain".into());
+    }
+    let song = i128::from(start.as_nanos())
+        .checked_add(i128::from(point.timestamp.as_nanos()))
+        .and_then(|value| value.checked_sub(i128::from(preroll.as_nanos())))
+        .ok_or("replay presentation song arithmetic overflow")?;
+    Ok(Timestamp::from_nanos(i64::try_from(song).map_err(
+        |_| "replay presentation song exceeds timestamp range",
+    )?))
 }
 
 #[cfg(target_os = "windows")]
@@ -382,7 +430,7 @@ mod native {
                 AudioStreamStatus::Running => {}
                 AudioStreamStatus::Stopped if final_check => {}
                 status => {
-                    return Err(format!("WASAPI unexpected/terminal status: {status:?}").into())
+                    return Err(format!("WASAPI unexpected/terminal status: {status:?}").into());
                 }
             }
             if snapshot.telemetry_available && snapshot.counters.native_failures != 0 {
@@ -403,6 +451,21 @@ mod native {
             Self::check(snapshot, false)?;
             Ok(snapshot.render)
         }
+        fn presented(&mut self) -> Result<Option<ClockPoint>> {
+            let snapshot = self.0.snapshot();
+            Self::check(snapshot, false)?;
+            let Some(clock) = snapshot.clock else {
+                return Ok(None);
+            };
+            if clock.reading_quality
+                != beatkernel_platform::audio::AudioClockReadingQuality::Accurate
+            {
+                return Ok(None);
+            }
+            // A newly initialized one-start IAudioClient has its own position-zero
+            // epoch. Native clock units are frequency units, not assumed frames.
+            Ok(Some(output_position(clock.position, clock.frequency)?))
+        }
         fn last_render(&mut self) -> Option<RenderReport> {
             self.0.snapshot().render
         }
@@ -410,7 +473,11 @@ mod native {
             Self::check(self.0.snapshot(), true)
         }
         fn print_native(&mut self) {
-            println!("WASAPI applied={:?}; native snapshot={:?}; inferred counters are not acoustic proof", self.0.configuration(), self.0.snapshot());
+            println!(
+                "WASAPI applied={:?}; native snapshot={:?}; inferred counters are not acoustic proof",
+                self.0.configuration(),
+                self.0.snapshot()
+            );
         }
     }
     pub(super) fn open(options: &Options, mixer: Mixer) -> Result<Box<dyn NativeOutput>> {
@@ -490,6 +557,21 @@ mod native {
             self.check(false)?;
             Ok(self.0.last_render_report())
         }
+        fn presented(&mut self) -> Result<Option<ClockPoint>> {
+            self.check(false)?;
+            let Some(timing) = self.0.timing_snapshot() else {
+                return Ok(None);
+            };
+            Ok(beatkernel_platform::linux::alsa_presentation_pair(
+                timing,
+                ClockPoint {
+                    domain: OUTPUT,
+                    timestamp: Timestamp::ZERO,
+                },
+                self.0.configuration().format.sample_rate(),
+            )?
+            .map(|pair| pair.source))
+        }
         fn last_render(&mut self) -> Option<RenderReport> {
             self.0.last_render_report()
         }
@@ -497,7 +579,11 @@ mod native {
             self.check(true)
         }
         fn print_native(&mut self) {
-            println!("ALSA applied={:?}; independent native counters={:?}; retained core report does not prove native writes/acoustic output", self.0.configuration(), self.0.snapshot());
+            println!(
+                "ALSA applied={:?}; independent native counters={:?}; retained core report does not prove native writes/acoustic output",
+                self.0.configuration(),
+                self.0.snapshot()
+            );
         }
     }
     pub(super) fn open(options: &Options, mixer: Mixer) -> Result<Box<dyn NativeOutput>> {
@@ -530,7 +616,7 @@ mod native {
         audio::{CoreAudioRequest, CoreAudioStream},
         clock::MachClock,
     };
-    struct Stream(CoreAudioStream);
+    struct Stream(CoreAudioStream, MachClock);
     impl Stream {
         fn check(&self) -> Result<()> {
             let snapshot = self.0.snapshot();
@@ -553,6 +639,21 @@ mod native {
             self.check()?;
             Ok(self.0.last_render_report())
         }
+        fn presented(&mut self) -> Result<Option<ClockPoint>> {
+            self.check()?;
+            let Some(presentation) = self.0.snapshot().presentation else {
+                return Ok(None);
+            };
+            Ok(
+                beatkernel_platform::macos::presentation::coreaudio_presentation_pair(
+                    presentation,
+                    self.0.configuration(),
+                    HOST,
+                    &self.1,
+                )?
+                .map(|pair| pair.source),
+            )
+        }
         fn last_render(&mut self) -> Option<RenderReport> {
             self.0.last_render_report()
         }
@@ -560,7 +661,11 @@ mod native {
             self.check()
         }
         fn print_native(&mut self) {
-            println!("CoreAudio applied={:?}; native counters={:?}; retained render is distinct from callback delivery/acoustic output", self.0.configuration(), self.0.snapshot());
+            println!(
+                "CoreAudio applied={:?}; native counters={:?}; retained render is distinct from callback delivery/acoustic output",
+                self.0.configuration(),
+                self.0.snapshot()
+            );
         }
     }
     pub(super) fn open(options: &Options, mixer: Mixer) -> Result<Box<dyn NativeOutput>> {
@@ -575,7 +680,7 @@ mod native {
             "CoreAudio requested/applied exact float32 output={:?}",
             stream.configuration()
         );
-        Ok(Box::new(Stream(stream)))
+        Ok(Box::new(Stream(stream, clock)))
     }
 }
 
@@ -588,6 +693,9 @@ mod native {
 }
 
 fn run(options: Options) -> Result<()> {
+    if player::cancelled() {
+        return Ok(());
+    }
     if options.backend == Backend::Asio && !cfg!(all(target_os = "windows", feature = "asio-sdk")) {
         return Err(
             "ASIO requires Windows and sample feature asio-sdk with supplied SDK/MSVC toolchain"
@@ -605,7 +713,7 @@ fn run(options: Options) -> Result<()> {
         &options.chart,
         options.format,
         PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
-        ChannelPolicy::Exact,
+        options.channel_policy,
     )?;
     let prepared = beatkernel_bms_runtime::section_start::prepare_replay(
         prepared,
@@ -620,8 +728,20 @@ fn run(options: Options) -> Result<()> {
         domain: OUTPUT,
         timestamp: Timestamp::ZERO,
     };
+    let mut visual = ReplayVisual::new(&prepared.source, &file, limits)?;
+    player::publish_chart(&prepared.source, &prepared.compiled.chart)?;
+    let mut completion = ReplayCompletion::new(OUTPUT, options.format.sample_rate());
     let plan = plan_audio(&prepared, file, limits, origin, options.preroll)?;
-    println!("reconstructed logical replay: results={} hits={} recorded_until={:?} final_judge_hash={:#018x}; no live acquisition or original physical timing reproduction", plan.judge_events.len(), plan.judge_events.iter().filter(|event| matches!(event.outcome, beatkernel::judge::JudgeOutcome::Hit { .. })).count(), plan.recorded_until, plan.final_judge_hash);
+    println!(
+        "reconstructed logical replay: results={} hits={} recorded_until={:?} final_judge_hash={:#018x}; no live acquisition or original physical timing reproduction",
+        plan.judge_events.len(),
+        plan.judge_events
+            .iter()
+            .filter(|event| matches!(event.outcome, beatkernel::judge::JudgeOutcome::Hit { .. }))
+            .count(),
+        plan.recorded_until,
+        plan.final_judge_hash
+    );
     let mut feeder = BgmFeeder::from_output_commands(
         plan.commands,
         BgmConfig {
@@ -657,22 +777,58 @@ fn run(options: Options) -> Result<()> {
         prepared.bank,
         consumer,
     )?;
+    if player::cancelled() {
+        return Ok(());
+    }
     let mut stream = match native::open(&options, mixer) {
         Ok(stream) => stream,
         Err(error) => {
-            eprintln!("native open failed: {error}; feeder config={:?}; admitted prefix={:?}; no native output claimed", feeder.config(), feeder.report());
+            eprintln!(
+                "native open failed: {error}; feeder config={:?}; admitted prefix={:?}; no native output claimed",
+                feeder.config(),
+                feeder.report()
+            );
             return Err(error);
         }
     };
     let outcome = (|| -> Result<()> {
+        if player::cancelled() {
+            return Ok(());
+        }
         stream.start()?;
-        let deadline = Instant::now()
-            .checked_add(WallDuration::from_secs(options.seconds))
-            .ok_or("wall duration is not representable")?;
-        while Instant::now() < deadline {
-            if let Some(report) = stream.poll()? {
+        let deadline = options
+            .seconds
+            .map(|seconds| {
+                Instant::now()
+                    .checked_add(WallDuration::from_secs(seconds))
+                    .ok_or("wall duration is not representable")
+            })
+            .transpose()?;
+        println!(
+            "recorded visual start={:?}; recorded_until={:?}; seconds={:?}; native presentation is separate from acoustic proof",
+            visual.start(),
+            visual.recorded_until(),
+            options.seconds
+        );
+        loop {
+            if player::cancelled() || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                break;
+            }
+            let rendered = stream.poll()?;
+            if let Some(report) = rendered {
                 let cursor = completed_render_cursor(&report)?;
                 feeder.feed(cursor, 256, |command| producer.try_push(command))?;
+            }
+            let presented = stream.presented()?;
+            if let Some(point) = presented {
+                let song = presentation_song(point, visual.start(), options.preroll)?;
+                let events = visual.advance_to(song)?;
+                player::publish_replay_prefix(song, &events)?;
+            }
+            if deadline.is_none()
+                && completion.observe(visual.finished(), feeder.report(), rendered, presented)?
+            {
+                break;
             }
             std::thread::sleep(WallDuration::from_millis(1));
         }
@@ -682,7 +838,11 @@ fn run(options: Options) -> Result<()> {
     let final_native = stream.final_check();
     let report = stream.last_render();
     let final_core = report.as_ref().map(completed_render_cursor).transpose();
-    println!("final command admission config={:?}; summary={:?}; admission is separate from core execution/native delivery/acoustic output", feeder.config(), feeder.report());
+    println!(
+        "final command admission config={:?}; summary={:?}; admission is separate from core execution/native delivery/acoustic output",
+        feeder.config(),
+        feeder.report()
+    );
     match report {
         Some(report) => println!("last completed typed core RenderReport={report:?}"),
         None => println!("last completed core RenderReport unavailable; no zero cursor fabricated"),
@@ -714,10 +874,18 @@ fn main() -> Result<()> {
 
 pub(crate) fn run_args(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
-        println!("play_replay_bms --chart PATH --replay PATH --device ID --seconds N --rate HZ --channels N [--backend wasapi|asio|alsa|coreaudio --asio-view native|32|64 --output-channels 0,1 --buffer-frames N --period-frames N --mode shared|exclusive --shared-policy engine-period|legacy --preroll-ns N --lookahead-ns N --command-capacity N --voices N --max-records N --max-bytes N]\nASIO requires Windows + asio-sdk, explicit braced CLSID/view/output channels, rejects mode/shared-policy/period, buffer default driver preferred.\nHost backend: WASAPI on Windows, ALSA on Linux, CoreAudio on macOS. No input acquisition. Exact float32 rate/channels; no endpoint/mode fallback.\nLinux requires explicit buffer/period; macOS requires numeric AudioDeviceID and buffer, rejects period. Mode/shared-policy are Windows only, default shared engine-period; explicit shared-policy rejects exclusive. Windows buffer/period default to device settings, and unsupported requested combinations reject.\nDefaults: preroll 3000000000ns, lookahead 3000000000ns, commands 65536, voices 4096, records 1000000, replay bytes 67108864. Nonnegative i64 preroll, positive i64 lookahead, positive checked finite seconds and capacities.\nSeconds is wall playback duration after Start including preroll; no automatic tail drain. Finite horizons/credit can fail on stalls/dense cues; final admission/core/native diagnostics remain separate. Source implementation is not native sound or physical timing evidence.");
+        println!(
+            "play_replay_bms --chart PATH --replay PATH --device ID --rate HZ --channels N [--seconds N --channel-policy exact|mono-stereo --backend wasapi|asio|alsa|coreaudio --asio-view native|32|64 --output-channels 0,1 --buffer-frames N --period-frames N --mode shared|exclusive --shared-policy engine-period|legacy --preroll-ns N --lookahead-ns N --command-capacity N --voices N --max-records N --max-bytes N]\nASIO requires Windows + asio-sdk, explicit braced CLSID/view/output channels, rejects mode/shared-policy/period, buffer default driver preferred.\nHost backend: WASAPI on Windows, ALSA on Linux, CoreAudio on macOS. No input acquisition. Exact float32 output rate/channels; no endpoint/mode fallback. Channel policy defaults exact; mono-stereo explicitly duplicates mono assets into stereo.\nLinux requires explicit buffer/period; macOS requires numeric AudioDeviceID and buffer, rejects period. Mode/shared-policy are Windows only, default shared engine-period; explicit shared-policy rejects exclusive. Windows buffer/period default to device settings, and unsupported requested combinations reject.\nDefaults: preroll 3000000000ns, lookahead 3000000000ns, commands 65536, voices 4096, records 1000000, replay bytes 67108864. Nonnegative i64 preroll, positive i64 lookahead, positive checked finite seconds and capacities.\nOmit seconds to finish the actual recorded prefix and drain admitted PCM through native presentation. Seconds is an optional wall cutoff after Start including preroll and can truncate the prefix/tail. Presentation missing/degraded stays unavailable; cancellation remains available. ASIO currently lacks a validated output-zero epoch here, so visual progress/natural drain are unavailable and explicit diagnostic seconds is required. Finite horizons/credit can fail on stalls/dense cues; final admission/core/native diagnostics remain separate. Source implementation is not native sound or physical timing evidence."
+        );
         return Ok(());
     }
     run(parse(args, host_backend())?)
+}
+
+/// Syntax and finite configuration validation only; no file/device/clock access.
+#[allow(dead_code)] // Shared by the graphical app; standalone binary parses in run_args.
+pub(crate) fn validate_args(args: &[String]) -> Result<()> {
+    parse(args, host_backend()).map(|_| ())
 }
 
 #[cfg(test)]
@@ -869,6 +1037,134 @@ mod fixtures {
             invalid[index + 1] = value.into();
             assert!(parse(&invalid, Backend::Windows).is_err());
         }
+    }
+
+    #[test]
+    fn natural_drain_and_channel_policy_are_explicit_without_opening_paths() {
+        let mut natural = args(&[]);
+        let seconds = natural
+            .iter()
+            .position(|value| value == "--seconds")
+            .unwrap();
+        natural.drain(seconds..seconds + 2);
+        let parsed = parse(&natural, Backend::Windows).unwrap();
+        assert_eq!(parsed.seconds, None);
+        assert_eq!(parsed.channel_policy, ChannelPolicy::Exact);
+        natural.extend(["--channel-policy".to_owned(), "mono-stereo".to_owned()]);
+        assert_eq!(
+            parse(&natural, Backend::Windows).unwrap().channel_policy,
+            ChannelPolicy::MonoToStereo
+        );
+        assert_eq!(
+            parse(&args(&[]), Backend::Windows).unwrap().seconds,
+            Some(2)
+        );
+        assert!(parse(&args(&["--channel-policy", "automatic"]), Backend::Windows).is_err());
+        assert!(parse(
+            &args(&[
+                "--channel-policy",
+                "exact",
+                "--channel-policy",
+                "mono-stereo"
+            ]),
+            Backend::Windows
+        )
+        .is_err());
+        let seconds = i64::MAX as u64 / 1_000_000_000;
+        let mut bounded = args(&[]);
+        let index = bounded
+            .iter()
+            .position(|value| value == "--seconds")
+            .unwrap();
+        bounded[index + 1] = seconds.to_string();
+        assert!(parse(&bounded, Backend::Windows).is_ok());
+        bounded[index + 1] = (seconds + 1).to_string();
+        assert!(parse(&bounded, Backend::Windows).is_err());
+
+        let mut asio = args(&[
+            "--backend",
+            "asio",
+            "--asio-view",
+            "native",
+            "--output-channels",
+            "0,1",
+        ]);
+        let device = asio.iter().position(|value| value == "--device").unwrap();
+        asio[device + 1] = "{12345678-9ABC-DEF0-1234-56789ABCDEF0}".into();
+        assert!(parse(&asio, Backend::Windows).is_ok());
+        let seconds = asio.iter().position(|value| value == "--seconds").unwrap();
+        asio.drain(seconds..seconds + 2);
+        assert!(parse(&asio, Backend::Windows)
+            .unwrap_err()
+            .to_string()
+            .contains("output-zero presentation epoch"));
+    }
+
+    #[test]
+    fn reported_position_uses_native_units_and_checked_wide_arithmetic() {
+        assert_eq!(
+            output_position(1, 3).unwrap(),
+            ClockPoint {
+                domain: OUTPUT,
+                timestamp: Timestamp::from_nanos(333_333_333)
+            }
+        );
+        assert_eq!(
+            output_position(u64::MAX, u64::MAX)
+                .unwrap()
+                .timestamp
+                .as_nanos(),
+            1_000_000_000
+        );
+        let week = 7 * 24 * 60 * 60u64;
+        assert_eq!(
+            output_position(week * 48_000, 48_000)
+                .unwrap()
+                .timestamp
+                .as_nanos(),
+            week as i64 * 1_000_000_000
+        );
+        assert!(output_position(0, 0).is_err());
+        assert!(output_position(u64::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn section_start_and_preroll_apply_once_to_actual_presentation() {
+        let start = Timestamp::from_nanos(5_000_000_000);
+        let preroll = Duration::from_nanos(3_000_000_000);
+        let point = |ns| ClockPoint {
+            domain: OUTPUT,
+            timestamp: Timestamp::from_nanos(ns),
+        };
+        assert_eq!(
+            presentation_song(point(0), start, preroll)
+                .unwrap()
+                .as_nanos(),
+            2_000_000_000
+        );
+        assert_eq!(
+            presentation_song(point(3_000_000_000), start, preroll).unwrap(),
+            start
+        );
+        assert_eq!(
+            presentation_song(point(4_000_000_000), start, preroll)
+                .unwrap()
+                .as_nanos(),
+            6_000_000_000
+        );
+        assert!(presentation_song(
+            ClockPoint {
+                domain: ClockDomainId(0),
+                timestamp: Timestamp::ZERO
+            },
+            start,
+            preroll
+        )
+        .is_err());
+        assert!(presentation_song(point(-1), start, preroll).is_err());
+        assert!(
+            presentation_song(point(i64::MAX), Timestamp::from_nanos(1), Duration::ZERO).is_err()
+        );
     }
 }
 
@@ -1029,7 +1325,10 @@ mod asio_native {
         }
         fn stop(&mut self) -> Result<()> {
             let result = self.stream.stop();
-            println!("closed ASIO render-start QPC cadence={:?}; priming excluded, native delivery/acoustic jitter unmeasured", self.stream.render_cadence());
+            println!(
+                "closed ASIO render-start QPC cadence={:?}; priming excluded, native delivery/acoustic jitter unmeasured",
+                self.stream.render_cadence()
+            );
             if let Ok(snapshot) = self.stream.snapshot() {
                 if snapshot.render.is_some() {
                     self.retained = snapshot.render;
@@ -1046,6 +1345,15 @@ mod asio_native {
                 None
             })
         }
+        fn presented(&mut self) -> Result<Option<ClockPoint>> {
+            self.snapshot(false)?;
+            // The native ASIO sample counter is not bound to Mixer frame zero.
+            // This recorded host has no explicitly declared driver timestamp
+            // relation/epoch, so neither prepared frames nor callback receipts
+            // can establish presentation. Parser requires diagnostic seconds;
+            // cancellation remains available without inventing visual progress.
+            Ok(None)
+        }
         fn last_render(&mut self) -> Option<RenderReport> {
             if let Ok(snapshot) = self.stream.snapshot() {
                 if snapshot.render.is_some() {
@@ -1058,7 +1366,10 @@ mod asio_native {
             self.snapshot(true).map(|_| ())
         }
         fn print_native(&mut self) {
-            println!("ASIO final software-prepared progress/raw native diagnostics={:?}; prepared frames are not audible progress and raw native nanoseconds are not QPC", self.stream.snapshot());
+            println!(
+                "ASIO final software-prepared progress/raw native diagnostics={:?}; prepared frames are not audible progress and raw native nanoseconds are not QPC",
+                self.stream.snapshot()
+            );
         }
     }
     impl Drop for Stream {
@@ -1099,7 +1410,11 @@ mod asio_native {
             .output_channels
             .clone()
             .ok_or("ASIO output channels required")?;
-        println!("ASIO exact registration={registration:?}; requested buffer={request:?}; reported={constraints:?}; resolved frames={resolved}; reported rate={}; Mixer rate={}", control.sample_rate()?, options.format.sample_rate());
+        println!(
+            "ASIO exact registration={registration:?}; requested buffer={request:?}; reported={constraints:?}; resolved frames={resolved}; reported rate={}; Mixer rate={}",
+            control.sample_rate()?,
+            options.format.sample_rate()
+        );
         for channel in &channels {
             println!(
                 "ASIO selected native output={:?}",
