@@ -1105,3 +1105,29 @@ Completion-aware queries also prune fully completed subranges before descending 
 Live, local, replay and recorded-prefix ScoreSummary accumulation also retains exact scalar timing statistics from every accepted known Instant/HoldHead/HoldTail result. Misses and custom stages do not become synthetic samples. Negative calibrated judge deltas mean early, positive late and zero exact; each accepted hold stage counts separately and grade IDs remain unweighted. Checked u64 counts, i128 signed sums and u128 absolute sums preserve i64-minimum deltas and atomic overflow rejection. Mean truncates toward zero. Full-prefix statistics are independent of the 128-result HUD history and require no per-note signals, floating arithmetic or unbounded samples.
 
 Actual solo/local hit labels show EARLY/LATE/EXACT from the judge's delta, using integer milliseconds with three decimal digits (microsecond truncation, sign category preserved). Solo normal/competition sidebars and the retained records preview show signed bias and mean absolute error from the same summary. Records preview memoization includes timing-only changes. These are accepted-stage timing metrics, not all attempted input accuracy, measured device latency or automatic calibration. Existing score/ghost/replay identities, codecs and peer progress wire fields remain unchanged. Author extreme, stage, full-prefix, transactional, real Runtime/replay and retained Scene fixtures for later execution; native visual/performance acceptance remains pending.
+
+## BMS image and visual timeline foundation
+
+Retain BMP definitions (base36, including BMP00) as exact opaque paths without
+opening assets. Channels04/06/07 select base/poor/layer images on the original
+song timeline; zero tokens are rests, undefined nonzero references remain
+selections for later blank resource resolution. Poor selection is initially
+BMP00 only when defined; selecting poor does not automatically display it.
+Use checked core BPM/STOP timing and separate bounded visual resolution so
+adding visual subdivisions does not alter gameplay resolution, IDs, note/BGM
+times or the compiled resolution in replay identity. Existing line-sensitive
+object metadata still changes identity if source edits move gameplay lines.
+Seeded conditional admission and duplicate policies
+also govern visuals; include visual events in existing total source limits.
+
+Prepare channel indexes before play and query each last selection at or before
+the exact original-song timestamp. Pause, backwards seek and fresh practice
+restart use the same state projection as live/replay, without accumulated
+relative elapsed time or per-frame file IO. Store typed references, not GPU
+resources in chart state. Static raster decoding/loading, upload/rendering,
+video/crop/opacity extensions and miss-triggered poor-overlay policy remain
+pending; this foundation alone does not display backgrounds. Meaningful
+fixtures must be authored for later execution; source checks are compile only.
+
+Original BMP00/04/06 semantics: [author's BMS format](https://bm98.yaneu.com/bm98/bmsformat.html). Channel07 extension context:
+[hitkey command memo](https://hitkey.nekokan.dyndns.info/cmds.htm).
