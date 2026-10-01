@@ -15,6 +15,7 @@ these direct notices are not a complete binary license inventory.
 | floem_reactive 0.2.0 | MIT | [license](third-party/floem-reactive-0.2.0-LICENSE.txt) |
 | ab_glyph 0.2.32 | Apache-2.0 | [license](third-party/ab-glyph-0.2.32-LICENSE.txt) |
 | encoding_rs 0.8.35 | MIT AND BSD-3-Clause | [MIT](third-party/encoding-rs-0.8.35-LICENSE-MIT.txt), [WHATWG](third-party/encoding-rs-0.8.35-LICENSE-WHATWG.txt) |
+| claxon 0.4.3 | Apache-2.0 | [license](third-party/claxon-0.4.3-LICENSE.txt) |
 
 The texts are copied from the pinned published packages. The floem_reactive
 package declares MIT but omits the license text; its retained text comes from
@@ -22,3 +23,7 @@ package declares MIT but omits the license text; its retained text comes from
 [0.2.0 package](https://crates.io/crates/floem/0.2.0).
 Only the standalone reactive engine is linked; the Floem window/widget host is
 not a dependency. minifb is no longer included by this application.
+
+Claxon includes Copyright 2014 Ruud van Asseldonk; its exact published Apache-2.0
+license is retained above. The codec is linked only in the application preparation
+layer, and is not a dependency of the core or BMS adapter.
