@@ -385,3 +385,20 @@ accepts next-session options, while Back discards roster changes. Modal/pending
 operations fence underlying text/menu editing. Stable player IDs survive group
 resize/profile import and reach the real native runtime/replay filenames.
 Current multi-input source preparation supports Linux, Windows and macOS. Developer native/terminal commands do not replace graphical play.
+
+## Graphical whole-song retry
+
+F5 or Retry restarts the current chart from its beginning with the invocation
+accepted for that session. Prepare and validate the next invocation before
+cancelling; invalid requests leave ongoing play intact. Wait for the old game
+owner to finish native cleanup and join before creating a fresh publisher and
+native game owner. Old cleanup failure prevents automatic retry. Focus loss,
+suspend, close or explicit cancellation clears queued retries. The UI supplies
+no gameplay timestamps. Solo and local cohorts follow the same lifecycle.
+
+Recorded retry filenames derive from the original configured stem using
+.retry<N>.bkr, with a checked increasing ordinal. Existing create-new semantics
+still reject collisions. This whole-song action does not implement arbitrary
+section selection or establish acoustic restart accuracy; section restart still
+requires coordinated original-PCM selection, judge reconstruction and fresh
+native presentation calibration under the section-restart contract.

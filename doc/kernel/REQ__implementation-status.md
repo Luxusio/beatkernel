@@ -14,6 +14,9 @@ lookahead; version 1 loads with display defaults. Native Linux, Windows and macO
 groups compose independent player runtimes with one shared output. Peer progress
 is unauthenticated with independent local starts. Source checks exist;
 actual socket exchange, gameplay and fixture execution remain deferred.
+Graphical retry source retains accepted invocation state and starts a fresh native
+session after cleanup, with independent recording stems. Arbitrary section/practice
+selection and acoustic restart acceptance remain unfinished.
 It records implementation locations, not independent review or phase acceptance.
 The [full-plan acceptance evidence](REQ__plan-acceptance-evidence.md) maps every
 §24 completion condition and §17 verification category to current source and

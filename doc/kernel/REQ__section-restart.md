@@ -51,3 +51,14 @@ sample position and enforces finite calibration validity, as described in
 ../platform/REQ__wasapi-presentation.md. It creates a synthetic chart at that
 origin rather than restoring an imported recording. This source-level native
 composition does not replace pending native timing and restart measurements.
+
+## Graphical retry lifecycle prerequisite
+
+The BMS graphical player provides a whole-song retry action. It pins the chart
+and native options, validates a fresh invocation before cancellation, waits for
+the prior native owner to finish cleanup, and starts with a new publisher and
+native output session. Capture filenames derive from the original configured
+stem with .retry<N>.bkr. This action starts at the original song beginning;
+arbitrary section start still requires the coordinated PCM/judge/anchor operation
+above. Each fresh native composition retains its actual presentation calibration,
+whose acoustic accuracy and repeatability remain deferred acceptance work.

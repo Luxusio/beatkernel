@@ -120,6 +120,10 @@ stable `--local-player ID:INTERFACE_PATH` assignments with one Raw Input pump.
 macOS uses stable --local-player ID:REGISTRY assignments over IOHID and CoreAudio. The shared execution primitive
 owns independent core runtimes with one authoritative song transport and output
 producer; native solo playback now uses the same composition.
+F5 or Retry starts the same chart again after the previous native session has
+finished cleanup. The accepted chart/device/timing/roster options stay pinned;
+recorded retries use distinct .retry<N>.bkr stems and create-new saves.
+This action retries from the song beginning; arbitrary section controls remain work.
 F2 or Settings opens a bounded advanced draft editor for devices, buffers, timing,
 bindings and competition options. Apply validates through the existing native
 parser and updates the next session; Back discards. Missing device/binding
