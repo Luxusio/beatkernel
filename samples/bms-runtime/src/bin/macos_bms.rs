@@ -1,4 +1,4 @@
-//! Actual BMS/WAV assets, one explicit IORegistry input and exact CoreAudio output.
+//! Actual BMS/WAV assets, exact IORegistry input assignments and shared CoreAudio output.
 #[cfg(any(target_os = "macos", test))]
 use beatkernel::audio::AudioCommand;
 use beatkernel::{
@@ -19,6 +19,7 @@ struct Options {
     replay_max_bytes: usize,
     device: u32,
     keyboard_registry: u64,
+    local_players: Vec<(beatkernel_bms_runtime::local_players::PlayerId, u64)>,
     format: AudioFormat,
     buffer: u32,
     seconds: Option<u64>,
@@ -32,9 +33,31 @@ struct Options {
     voices: usize,
     mono_stereo: bool,
 }
+fn local_assignment(value: &str) -> Result<(beatkernel_bms_runtime::local_players::PlayerId, u64)> {
+    let (id, registry) = value
+        .split_once(':')
+        .ok_or("local-player requires ID:REGISTRY")?;
+    if id.is_empty()
+        || registry.is_empty()
+        || !id.bytes().all(|b| b.is_ascii_digit())
+        || !registry.bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err("local player and registry IDs require positive ASCII decimal integers".into());
+    }
+    let id = id.parse::<u32>()?;
+    let registry = registry.parse::<u64>()?;
+    if id == 0 || registry == 0 {
+        return Err("local player and registry IDs must be positive".into());
+    }
+    Ok((
+        beatkernel_bms_runtime::local_players::PlayerId(id),
+        registry,
+    ))
+}
 fn parse(args: &[String]) -> Result<Options> {
     let (mut chart, mut device, mut keyboard_registry) = (None, None, None);
     let (mut rate, mut channels, mut buffer, mut seconds) = (None, None, None, None);
+    let mut local_players = Vec::new();
     let mut bindings = BTreeMap::new();
     let mut keys = HashSet::new();
     let mut seen = HashSet::new();
@@ -50,7 +73,7 @@ fn parse(args: &[String]) -> Result<Options> {
     let mut args = args.iter();
     while let Some(flag) = args.next() {
         let value = args.next().ok_or("every option requires a value")?;
-        if flag != "--bind" && !seen.insert(flag.as_str()) {
+        if !matches!(flag.as_str(), "--bind" | "--local-player") && !seen.insert(flag.as_str()) {
             return Err(format!("duplicate option {flag}").into());
         }
         match flag.as_str() {
@@ -74,6 +97,19 @@ fn parse(args: &[String]) -> Result<Options> {
             }
             "--chart" if !value.is_empty() => chart = Some(PathBuf::from(value)),
             "--device" => device = Some(value.parse::<u32>()?),
+            "--local-player" => {
+                let assignment = local_assignment(value)?;
+                if local_players.len() >= beatkernel_bms_runtime::local_players::MAX_LOCAL_PLAYERS
+                    || local_players
+                        .iter()
+                        .any(|&(id, registry)| id == assignment.0 || registry == assignment.1)
+                {
+                    return Err(
+                        "local players require at most64 unique player and registry IDs".into(),
+                    );
+                }
+                local_players.push(assignment);
+            }
             "--keyboard-registry" => keyboard_registry = Some(value.parse::<u64>()?),
             "--rate" => rate = Some(value.parse::<u32>()?),
             "--channels" => channels = Some(value.parse::<u16>()?),
@@ -124,9 +160,18 @@ fn parse(args: &[String]) -> Result<Options> {
     }
     let buffer = buffer.ok_or("explicit --buffer-frames required")?;
     let device = device.ok_or("explicit --device required")?;
-    let keyboard_registry = keyboard_registry.ok_or("explicit --keyboard-registry required")?;
+    let keyboard_registry = if local_players.is_empty() {
+        keyboard_registry.ok_or("explicit --keyboard-registry required")?
+    } else {
+        if local_players.len() < 2 || keyboard_registry.is_some() {
+            return Err(
+                "local play requires 2..64 assignments and no solo keyboard override".into(),
+            );
+        }
+        0
+    };
     if device == 0
-        || keyboard_registry == 0
+        || (local_players.is_empty() && keyboard_registry == 0)
         || buffer == 0
         || buffer as usize > AudioLimits::MAX_RENDER_FRAMES
     {
@@ -151,6 +196,7 @@ fn parse(args: &[String]) -> Result<Options> {
         chart: chart.ok_or("explicit --chart required")?,
         device,
         keyboard_registry,
+        local_players,
         format: AudioFormat::new(
             rate.ok_or("explicit --rate required")?,
             channels.ok_or("explicit --channels required")?,
@@ -267,7 +313,11 @@ impl std::ops::DerefMut for BgmSession {
 #[cfg(target_os = "macos")]
 impl Drop for BgmSession {
     fn drop(&mut self) {
-        println!("BGM feeder config={:?}; final admission summary={:?}; admission does not prove execution/native delivery/acoustic output", self.config(), self.report());
+        println!(
+            "BGM feeder config={:?}; final admission summary={:?}; admission does not prove execution/native delivery/acoustic output",
+            self.config(),
+            self.report()
+        );
     }
 }
 #[cfg(target_os = "macos")]
@@ -306,8 +356,19 @@ impl Drop for DeliverySession {
     fn drop(&mut self) {
         let observed = self.observed_events();
         match self.summary() {
-            Some(summary) => println!("IOHID-event-to-runtime delivery age: observed_events={observed}; retained samples={} p50={}ns p95={}ns p99={}ns max={}ns; HOST={:?}, capacity={}; separate from CPU processing; physical input-to-sound unknown", summary.samples, summary.p50_ns, summary.p95_ns, summary.p99_ns, summary.max_ns, self.domain(), self.capacity()),
-            None => println!("IOHID-event-to-runtime delivery age: observed_events={observed}; retained summary unavailable; no zero observation substituted; separate from CPU processing; physical input-to-sound unknown"),
+            Some(summary) => println!(
+                "IOHID-event-to-runtime delivery age: observed_events={observed}; retained samples={} p50={}ns p95={}ns p99={}ns max={}ns; HOST={:?}, capacity={}; separate from CPU processing; physical input-to-sound unknown",
+                summary.samples,
+                summary.p50_ns,
+                summary.p95_ns,
+                summary.p99_ns,
+                summary.max_ns,
+                self.domain(),
+                self.capacity()
+            ),
+            None => println!(
+                "IOHID-event-to-runtime delivery age: observed_events={observed}; retained summary unavailable; no zero observation substituted; separate from CPU processing; physical input-to-sound unknown"
+            ),
         }
     }
 }
@@ -324,7 +385,14 @@ fn save_capture(
     let path = path.ok_or("enabled replay capture missing save path")?;
     let records = capture.records().len();
     let bytes = capture.encoded_bytes();
-    println!("replay capture: records={records}, encoded_bytes={bytes}, status={}, path={path:?}; accepted judge operations, physical output unverified", if failed_session { "valid prefix of failed session" } else { "complete recorded session" });
+    println!(
+        "replay capture: records={records}, encoded_bytes={bytes}, status={}, path={path:?}; accepted judge operations, physical output unverified",
+        if failed_session {
+            "valid prefix of failed session"
+        } else {
+            "complete recorded session"
+        }
+    );
     let written = capture.save_new(path)?;
     println!("replay create_new saved {written} bytes to {path:?}");
     Ok(())
@@ -338,18 +406,31 @@ fn main() -> Result<()> {
 /// Validate settings through the same parsers as play, without opening any resources.
 #[allow(dead_code)] // Standalone native binaries have no settings screen.
 pub(crate) fn validate_args(args: &[String]) -> Result<()> {
-    let (_, native) = beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
-    parse(&native).map(|_| ())
+    let (competition, native) =
+        beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
+    let options = parse(&native)?;
+    if !options.local_players.is_empty() && competition.network.is_some() {
+        return Err("network competition currently supports one local participant only".into());
+    }
+    Ok(())
 }
 
 pub(crate) fn run_args(args: &[String]) -> Result<()> {
     let (competition_options, args) =
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
-        println!("macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact one-registry attachment, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown.");
+        println!(
+            "Graphical player is bms-player; this is a native developer composition. Local mode: replace --keyboard-registry with repeated --local-player ID:REGISTRY (2..64 distinct keyboards).\n"
+        );
+        println!(
+            "macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact solo or assigned local registry attachments, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown."
+        );
         return Ok(());
     }
     let options = parse(&args)?;
+    if !options.local_players.is_empty() && competition_options.network.is_some() {
+        return Err("network competition currently supports one local participant only".into());
+    }
     #[cfg(target_os = "macos")]
     {
         native::run(options, competition_options)
@@ -365,7 +446,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
 mod native {
     use super::*;
     use beatkernel::{
-        audio::{command_queue, Mixer, MixerConfig, PcmLimits},
+        audio::{Mixer, MixerConfig, PcmLimits, command_queue},
         input::{Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId},
         judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
         runtime::RuntimeReport,
@@ -373,7 +454,7 @@ mod native {
         transport::{Rate, Transport},
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
-    use beatkernel_bms_runtime::{load_prepared, ChannelPolicy};
+    use beatkernel_bms_runtime::{ChannelPolicy, load_prepared};
     use beatkernel_platform::{
         audio::presentation::discipline::{
             DisciplineConfig, DisciplineUpdate, PresentationDiscipline,
@@ -386,10 +467,10 @@ mod native {
         },
     };
     use std::time::{Duration as WallDuration, Instant};
-    const M_NATIVE: ClockDomainId = ClockDomainId(1);
-    const HOST: ClockDomainId = ClockDomainId(2);
-    const OUTPUT: ClockDomainId = ClockDomainId(3);
-    struct ExplicitDomains;
+    pub(super) const M_NATIVE: ClockDomainId = ClockDomainId(1);
+    pub(super) const HOST: ClockDomainId = ClockDomainId(2);
+    pub(super) const OUTPUT: ClockDomainId = ClockDomainId(3);
+    pub(super) struct ExplicitDomains;
     impl ClockMapper for ExplicitDomains {
         fn map(&self, _: ClockPoint, _: ClockDomainId) -> Option<Timestamp> {
             None
@@ -398,7 +479,7 @@ mod native {
             ClockMappingQuality::Unknown
         }
     }
-    fn output_origin() -> ClockPoint {
+    pub(super) fn output_origin() -> ClockPoint {
         ClockPoint {
             domain: OUTPUT,
             timestamp: Timestamp::ZERO,
@@ -451,7 +532,7 @@ mod native {
             input.poll(WallDuration::from_millis(1))?;
         }
     }
-    fn observe(audio: &CoreAudioStream, clock: &MachClock) -> Result<Option<ClockPair>> {
+    pub(super) fn observe(audio: &CoreAudioStream, clock: &MachClock) -> Result<Option<ClockPair>> {
         let snapshot = audio.snapshot();
         if snapshot.configuration_changed || snapshot.callback_failures != 0 {
             return Err(format!("CoreAudio configuration/callback failure: {snapshot:?}").into());
@@ -491,7 +572,7 @@ mod native {
         }
         Err("no valid native CoreAudio presentation seed within two seconds".into())
     }
-    fn schedule(audio: &CoreAudioStream) -> Result<ClockPoint> {
+    pub(super) fn schedule(audio: &CoreAudioStream) -> Result<ClockPoint> {
         let report = audio
             .last_render_report()
             .ok_or("successful core render boundary unavailable for keysound scheduling")?;
@@ -537,6 +618,9 @@ mod native {
         options: Options,
         competition_options: beatkernel_bms_runtime::competition_live::CompetitionOptions,
     ) -> Result<()> {
+        if !options.local_players.is_empty() {
+            return super::local_native::run(options, competition_options);
+        }
         let clock = MachClock::new(M_NATIVE, HOST)?;
         // Declared before device owners so every exit reports after their cleanup.
         let mut delivery = DeliverySession(beatkernel::telemetry::InputDeliveryTelemetry::new(
@@ -656,8 +740,23 @@ mod native {
                 return Err(error.into());
             }
         };
-        println!("requested/applied CoreAudio={:?}; exact selected attachment={selected:?}; explicit keyboard bindings={:?}; windows={}/{}ns offset={}ns preroll={}ns advance_lag={}ns voices={} channels={} queue/pending={} live_slack={SLACK}",audio.configuration(),options.bindings,
-            options.early,options.late,options.offset,options.preroll,options.advance_lag,options.voices,if options.mono_stereo{"mono-stereo"}else{"exact"},capacity);
+        println!(
+            "requested/applied CoreAudio={:?}; exact selected attachment={selected:?}; explicit keyboard bindings={:?}; windows={}/{}ns offset={}ns preroll={}ns advance_lag={}ns voices={} channels={} queue/pending={} live_slack={SLACK}",
+            audio.configuration(),
+            options.bindings,
+            options.early,
+            options.late,
+            options.offset,
+            options.preroll,
+            options.advance_lag,
+            options.voices,
+            if options.mono_stereo {
+                "mono-stereo"
+            } else {
+                "exact"
+            },
+            capacity
+        );
         let mut other_devices = 0u64;
         let mut pre_origin = 0u64;
         let mut capture = None;
@@ -702,7 +801,11 @@ mod native {
                 Timestamp::from_nanos(-options.preroll),
                 Rate::NORMAL,
             );
-            println!("estimated output-zero host={origin:?}; actual seed={pair:?}; config={:?}; quality={:?}; future presentation retained, physical latency unmeasured",discipline.config(),discipline.quality());
+            println!(
+                "estimated output-zero host={origin:?}; actual seed={pair:?}; config={:?}; quality={:?}; future presentation retained, physical latency unmeasured",
+                discipline.config(),
+                discipline.quality()
+            );
             if options.preroll == 0 {
                 println!("zero preroll permits startup consumption of initial BGM/notes");
             }
@@ -755,7 +858,10 @@ mod native {
                         if !input_in_epoch(host, now, origin)? {
                             pre_origin = pre_origin.saturating_add(1);
                             if pre_origin == 1 {
-                                eprintln!("ignoring pre-output-origin selected input, original native provenance retained: {:?}",sample);
+                                eprintln!(
+                                    "ignoring pre-output-origin selected input, original native provenance retained: {:?}",
+                                    sample
+                                );
                             }
                             continue;
                         }
@@ -779,7 +885,9 @@ mod native {
                     discipline.validate_host(now)?;
                     if now.timestamp < origin.timestamp {
                         if !waiting_logged {
-                            println!("waiting for future estimated output origin {origin:?}; judge operations deferred");
+                            println!(
+                                "waiting for future estimated output origin {origin:?}; judge operations deferred"
+                            );
                             waiting_logged = true;
                         }
                         continue;
@@ -792,7 +900,10 @@ mod native {
                         limited,
                     } = discipline.update(now, runtime.transport_mut())?
                     {
-                        println!("discipline measured={base_rate_ppm:+}ppm correction={correction_ppm:+}ppm applied={applied_rate_ppm:+}ppm phase={phase_error_ns}ns limited={limited} quality={:?}",discipline.quality());
+                        println!(
+                            "discipline measured={base_rate_ppm:+}ppm correction={correction_ppm:+}ppm applied={applied_rate_ppm:+}ppm phase={phase_error_ns}ns limited={limited} quality={:?}",
+                            discipline.quality()
+                        );
                     }
                     if let Some(at) =
                         watermark(origin, last_operation, now, options.advance_lag, backlog)?
@@ -822,19 +933,36 @@ mod native {
                         audio.last_render_report(),
                         discipline.latest_pair().map(|pair| pair.source),
                     )? {
-                        println!("full song completed: terminal judge, drained BGM/mixer and native presentation frontier");
+                        println!(
+                            "full song completed: terminal judge, drained BGM/mixer and native presentation frontier"
+                        );
                         break;
                     }
                 }
                 Ok(())
             })();
-            println!("runtime processing={:?} counters={:?}; other-device ignored={other_devices}; pre-origin ignored={pre_origin}",runtime.telemetry().processing(),runtime.telemetry().counters());
+            println!(
+                "runtime processing={:?} counters={:?}; other-device ignored={other_devices}; pre-origin ignored={pre_origin}",
+                runtime.telemetry().processing(),
+                runtime.telemetry().counters()
+            );
             pump
         })();
         let stop = audio.stop();
         let close = input.close();
-        println!("final CoreAudio native snapshot={:?}; HID counters={:?}; other-device ignored={other_devices}; pre-origin ignored={pre_origin}; physical latency unmeasured",audio.snapshot(),input.counters());
-        match audio.last_render_report(){Some(report)=>println!("last successful typed core RenderReport={report:?}; core execution distinct from native delivery/physical sound"),None=>println!("last successful core RenderReport unavailable; no zero observation substituted")}
+        println!(
+            "final CoreAudio native snapshot={:?}; HID counters={:?}; other-device ignored={other_devices}; pre-origin ignored={pre_origin}; physical latency unmeasured",
+            audio.snapshot(),
+            input.counters()
+        );
+        match audio.last_render_report() {
+            Some(report) => println!(
+                "last successful typed core RenderReport={report:?}; core execution distinct from native delivery/physical sound"
+            ),
+            None => println!(
+                "last successful core RenderReport unavailable; no zero observation substituted"
+            ),
+        }
         if let Err(error) = &stop {
             eprintln!("CoreAudio stop error (existing context-retention policy): {error}");
         }
@@ -850,7 +978,9 @@ mod native {
             outcome.is_err() || stop.is_err() || close.is_err(),
         );
         if let Err(error) = &save {
-            eprintln!("replay save error after cleanup (valid captured prefix retained until save): {error}");
+            eprintln!(
+                "replay save error after cleanup (valid captured prefix retained until save): {error}"
+            );
         }
         outcome?;
         stop?;
@@ -859,6 +989,10 @@ mod native {
         Ok(())
     }
 }
+
+#[cfg(target_os = "macos")]
+#[path = "macos_bms/local.rs"]
+mod local_native;
 
 #[cfg(test)]
 mod fixtures {
@@ -974,6 +1108,62 @@ mod fixtures {
             assert!(parse(&duplicate).is_err());
         }
     }
+    #[test]
+    fn local_registry_assignments_preserve_ids_and_reject_aliases() {
+        let solo = args();
+        let base: Vec<String> = solo
+            .chunks_exact(2)
+            .filter(|pair| pair[0] != "--keyboard-registry")
+            .flat_map(|pair| pair.iter().cloned())
+            .collect();
+        let mut group = base.clone();
+        for value in [
+            "1:100",
+            "7:101",
+            "99:102",
+            "4294967295:18446744073709551615",
+        ] {
+            group.extend(["--local-player".into(), value.into()]);
+        }
+        let parsed = parse(&group).unwrap();
+        assert_eq!(parsed.keyboard_registry, 0);
+        assert_eq!(parsed.local_players.len(), 4);
+        assert_eq!(parsed.local_players[3].0.0, u32::MAX);
+        assert_eq!(parsed.local_players[3].1, u64::MAX);
+        assert!(validate_args(&group).is_ok());
+        let mut network = group.clone();
+        network.extend(["--mp-host".into(), "127.0.0.1:34567".into()]);
+        assert!(validate_args(&network).is_err());
+        for bad in [
+            "0:4",
+            "4:0",
+            "+4:4",
+            "4:+4",
+            "4:4:5",
+            "4294967296:4",
+            "4:18446744073709551616",
+            "1:500",
+            "20:0100",
+        ] {
+            let mut invalid = group.clone();
+            invalid.extend(["--local-player".into(), bad.into()]);
+            assert!(parse(&invalid).is_err(), "{bad}");
+        }
+        let mut mixed = group.clone();
+        mixed.extend(["--keyboard-registry".into(), "900".into()]);
+        assert!(parse(&mixed).is_err());
+        let mut single = base.clone();
+        single.extend(["--local-player".into(), "1:100".into()]);
+        assert!(parse(&single).is_err());
+        let mut maximum = base;
+        for id in 1..=64 {
+            maximum.extend(["--local-player".into(), format!("{id}:{id}")]);
+        }
+        assert_eq!(parse(&maximum).unwrap().local_players.len(), 64);
+        maximum.extend(["--local-player".into(), "65:65".into()]);
+        assert!(parse(&maximum).is_err());
+    }
+
     fn args() -> Vec<String> {
         [
             "--chart",
@@ -1046,16 +1236,18 @@ mod fixtures {
                 gain: 0.5
             }
         );
-        assert!(shift_bgm(
-            AudioCommand::Play {
-                voice: VoiceId(1),
-                sample: SampleId(1),
-                at: Timestamp::from_nanos(i64::MAX),
-                gain: 1.0
-            },
-            1
-        )
-        .is_err());
+        assert!(
+            shift_bgm(
+                AudioCommand::Play {
+                    voice: VoiceId(1),
+                    sample: SampleId(1),
+                    at: Timestamp::from_nanos(i64::MAX),
+                    gain: 1.0
+                },
+                1
+            )
+            .is_err()
+        );
     }
     #[test]
     fn future_output_origin_defers_deadlines_without_clamping_native_pair() {
@@ -1085,14 +1277,16 @@ mod fixtures {
             Some(point(1000))
         );
         assert!(estimated_origin(pair, point(0)).is_err());
-        assert!(estimated_origin(
-            ClockPair {
-                source: point(i64::MAX),
-                target: point(i64::MIN)
-            },
-            point(0)
-        )
-        .is_err());
+        assert!(
+            estimated_origin(
+                ClockPair {
+                    source: point(i64::MAX),
+                    target: point(i64::MIN)
+                },
+                point(0)
+            )
+            .is_err()
+        );
     }
     #[test]
     fn input_epoch_future_and_lag_backlog_guards_keep_original_time() {
@@ -1102,14 +1296,16 @@ mod fixtures {
         assert!(validate_input_chronology(point(100), point(100)).is_ok());
         assert!(validate_input_chronology(point(101), point(100)).is_ok());
         assert!(validate_input_chronology(point(99), point(100)).is_err());
-        assert!(validate_input_chronology(
-            ClockPoint {
-                domain: ClockDomainId(3),
-                timestamp: Timestamp::from_nanos(100)
-            },
-            point(100)
-        )
-        .is_err());
+        assert!(
+            validate_input_chronology(
+                ClockPoint {
+                    domain: ClockDomainId(3),
+                    timestamp: Timestamp::from_nanos(100)
+                },
+                point(100)
+            )
+            .is_err()
+        );
 
         assert_eq!(
             watermark(point(10), point(100), point(200), 50, false).unwrap(),
