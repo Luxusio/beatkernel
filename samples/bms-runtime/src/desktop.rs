@@ -11,9 +11,11 @@ use beatkernel_bms_runtime::{
     device_catalog::{DeviceCatalog, DeviceRequest},
     local_players::PlayerId,
     local_setup::LocalSetup,
+    panel_scope::{PanelScope, TaskPermit},
     player, player_chart,
     presentation_settings::PresentationSettings,
     record_catalog::{RecordCatalog, RecordPreview},
+    screen_lifecycle::{ScreenInstanceId, ScreenNavigator, ScreenPhase, ScreenRoute},
     session_launch::SessionLaunch,
     settings::{NativeSettings, SettingsHost},
     settings_profile::PlayerProfile,
@@ -323,10 +325,9 @@ pub(super) fn run(
         instance: None,
         scene: Scene::new(WIDTH as u32, HEIGHT as u32),
         game: None,
-        closing: false,
+        navigator: ScreenNavigator::default(),
         active: false,
         occluded: false,
-        suspended: false,
         failure: None,
         fatal: None,
         next_frame: Instant::now(),
@@ -546,12 +547,42 @@ enum ProfileResult {
     Record(RecordPreview),
     Saved,
 }
-struct ProfileOperation(Option<JoinHandle<Result<ProfileResult, String>>>);
+struct ProfileOperation {
+    owner: ScreenInstanceId,
+    permit: TaskPermit,
+    worker: Option<JoinHandle<Result<ProfileResult, String>>>,
+}
 impl Drop for ProfileOperation {
     fn drop(&mut self) {
-        if let Some(worker) = self.0.take() {
+        if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+    }
+}
+
+/// Check cancellation around a bounded metadata operation. An in-progress
+/// filesystem/native metadata call still drains; its late result is discarded.
+fn scoped_metadata(
+    permit: TaskPermit,
+    operation: impl FnOnce() -> Result<ProfileResult, String>,
+) -> Result<ProfileResult, String> {
+    if permit.is_cancelled() {
+        return Err("panel task cancelled".into());
+    }
+    let result = operation();
+    if permit.is_cancelled() {
+        Err("panel task cancelled".into())
+    } else {
+        result
+    }
+}
+
+fn release_panel<T>(panel: &mut Option<PanelScope<T>>, navigator: &ScreenNavigator) {
+    if panel
+        .as_ref()
+        .is_some_and(|panel| !navigator.retains(panel.id()))
+    {
+        *panel = None;
     }
 }
 
@@ -600,17 +631,17 @@ fn record_launch(
 struct Desktop {
     options: Options,
     active_backend: BackendChoice,
-    display: Option<DisplayDraft>,
-    records: Option<RecordsDraft>,
+    display: Option<PanelScope<DisplayDraft>>,
+    records: Option<PanelScope<RecordsDraft>>,
     native: Native,
     validate: Native,
     query_devices: QueryDevices,
     replay: Native,
     validate_replay: Native,
-    picker: Option<DevicePicker>,
-    local_setup: Option<LocalDraft>,
+    picker: Option<PanelScope<DevicePicker>>,
+    local_setup: Option<PanelScope<LocalDraft>>,
     accepted_local: Option<LocalSetup>,
-    settings: Option<SettingsDraft>,
+    settings: Option<PanelScope<SettingsDraft>>,
     profile_io: Option<ProfileOperation>,
     entries: Vec<Entry>,
     diagnostics: Vec<String>,
@@ -620,10 +651,9 @@ struct Desktop {
     instance: Option<wgpu::Instance>,
     scene: Scene,
     game: Option<Game>,
-    closing: bool,
+    navigator: ScreenNavigator,
     active: bool,
     occluded: bool,
-    suspended: bool,
     failure: Option<String>,
     fatal: Option<String>,
     next_frame: Instant,
@@ -632,18 +662,112 @@ struct Desktop {
     hits: Vec<(ControlId, Bounds)>,
 }
 impl Desktop {
+    fn closing(&self) -> bool {
+        self.navigator.phase() == ScreenPhase::Exiting
+    }
+    fn is_suspended(&self) -> bool {
+        self.navigator.phase() == ScreenPhase::Suspended
+    }
+    fn ui_ready(&self) -> bool {
+        self.active
+            && self.navigator.phase() == ScreenPhase::Active
+            && !self.occluded
+            && self.profile_io.is_none()
+    }
+    /// Prepare an atomic route change before data preparation or thread spawn.
+    fn prepare_route(&self, to: ScreenRoute) -> Result<ScreenNavigator, String> {
+        if to != ScreenRoute::Closing
+            && !matches!(to, ScreenRoute::Play { .. } | ScreenRoute::Results { .. })
+            && self.game.as_ref().is_some_and(|game| !game.joined)
+        {
+            return Err("navigation waits for native session cleanup".into());
+        }
+        let mut next = self.navigator.clone();
+        next.navigate(
+            to,
+            self.profile_io.is_some(),
+            self.game.as_ref().is_some_and(|game| game.joined),
+        )?;
+        Ok(next)
+    }
+    /// Only this boundary changes the active route and releases screen scopes.
+    /// Native owners are drained separately and survive application Closing.
+    fn commit_route(&mut self, next: ScreenNavigator) {
+        self.navigator = next;
+        self.gesture.cancel();
+        self.hits.clear();
+        self.pointer = None;
+        // Children leave before their retained parent state.
+        release_panel(&mut self.picker, &self.navigator);
+        release_panel(&mut self.records, &self.navigator);
+        release_panel(&mut self.display, &self.navigator);
+        release_panel(&mut self.local_setup, &self.navigator);
+        release_panel(&mut self.settings, &self.navigator);
+        if !matches!(
+            self.navigator.route(),
+            ScreenRoute::Play { .. } | ScreenRoute::Results { .. } | ScreenRoute::Closing
+        ) {
+            self.game = None;
+        }
+    }
+    fn navigate(&mut self, to: ScreenRoute) -> Result<(), String> {
+        let next = self.prepare_route(to)?;
+        self.commit_route(next);
+        Ok(())
+    }
+    fn back(&mut self) {
+        if let Some(to) = self.navigator.back_target() {
+            if let Err(error) = self.navigate(to) {
+                self.failure = Some(error);
+            }
+        }
+    }
+    fn request_close(&mut self) {
+        // Closing is always admitted, including pending tasks and native owners.
+        if let Ok(next) = self.prepare_route(ScreenRoute::Closing) {
+            self.commit_route(next);
+        }
+        self.cancel();
+    }
+    fn metadata_scope(&self) -> Result<(ScreenInstanceId, TaskPermit), String> {
+        let scope = match self.navigator.route() {
+            ScreenRoute::Settings => self
+                .settings
+                .as_ref()
+                .map(|scope| (scope.id(), scope.task_permit())),
+            ScreenRoute::Records => self
+                .records
+                .as_ref()
+                .map(|scope| (scope.id(), scope.task_permit())),
+            ScreenRoute::Players => self
+                .local_setup
+                .as_ref()
+                .map(|scope| (scope.id(), scope.task_permit())),
+            ScreenRoute::Devices { .. } => self
+                .picker
+                .as_ref()
+                .map(|scope| (scope.id(), scope.task_permit())),
+            _ => None,
+        }
+        .ok_or("metadata panel unavailable")?;
+        if !self.navigator.accepts(scope.0) {
+            return Err("metadata panel is not active".into());
+        }
+        Ok(scope)
+    }
     fn open_settings(&mut self) {
-        if self.game.is_some() || self.profile_io.is_some() {
+        if !self.ui_ready() || self.navigator.route() != ScreenRoute::Selection {
             return;
         }
         let result = (|| {
+            let next = self.prepare_route(ScreenRoute::Settings)?;
             let values =
                 NativeSettings::from_args(&without_chart(&self.options.native), settings_host())?;
             let editor = LineEditor::new(
                 &values.fields().first().ok_or("no settings fields")?.value,
                 4096,
             )?;
-            Ok::<_, String>(SettingsDraft {
+            let draft = SettingsDraft {
                 values,
                 presentation: self.options.display(),
                 cached_local: self.accepted_local.clone(),
@@ -661,11 +785,16 @@ impl Desktop {
                 profile_focused: false,
                 message: None,
                 error: None,
-            })
+            };
+            Ok::<_, String>((next, draft))
         })();
         match result {
-            Ok(draft) => {
-                self.settings = Some(draft);
+            Ok((next, draft)) => {
+                self.commit_route(next);
+                self.settings = Some(PanelScope::new(
+                    self.navigator.active_id().expect("settings route"),
+                    draft,
+                ));
                 self.failure = None;
             }
             Err(error) => self.failure = Some(error),
@@ -674,15 +803,11 @@ impl Desktop {
         self.hits.clear();
     }
     fn open_local(&mut self) {
-        if self.records.is_some()
-            || self.display.is_some()
-            || self.profile_io.is_some()
-            || self.game.is_some()
-            || self.picker.is_some()
-        {
+        if !self.ui_ready() || self.navigator.route() != ScreenRoute::Settings {
             return;
         }
         let result = (|| {
+            let next = self.prepare_route(ScreenRoute::Players)?;
             let draft = self.settings.as_ref().ok_or("settings unavailable")?;
             let parsed = LocalSetup::from_settings(&draft.values, settings_host())?;
             let model = draft
@@ -694,15 +819,20 @@ impl Desktop {
                 })
                 .cloned()
                 .unwrap_or(parsed);
-            Ok::<_, String>(LocalDraft {
+            let local = LocalDraft {
                 model,
                 selected: 0,
                 first: 0,
-            })
+            };
+            Ok::<_, String>((next, local))
         })();
         match result {
-            Ok(local) => {
-                self.local_setup = Some(local);
+            Ok((next, local)) => {
+                self.commit_route(next);
+                self.local_setup = Some(PanelScope::new(
+                    self.navigator.active_id().expect("players route"),
+                    local,
+                ));
                 self.local_error(None);
             }
             Err(error) => self.local_error(Some(error)),
@@ -761,7 +891,7 @@ impl Desktop {
     }
     fn local_key(&mut self, key: KeyCode, repeat: bool) {
         match key {
-            KeyCode::Escape if !repeat => self.local_setup = None,
+            KeyCode::Escape if !repeat => self.back(),
             KeyCode::Enter if !repeat => self.finish_local(),
             KeyCode::Equal | KeyCode::NumpadAdd if !repeat => self.resize_local(true),
             KeyCode::Minus | KeyCode::NumpadSubtract if !repeat => self.resize_local(false),
@@ -786,6 +916,7 @@ impl Desktop {
     }
     fn finish_local(&mut self) {
         let result = (|| {
+            let next = self.prepare_route(ScreenRoute::Settings)?;
             let local = self.local_setup.as_ref().ok_or("local setup unavailable")?;
             let draft = self.settings.as_ref().ok_or("settings unavailable")?;
             let values = local.model.settings(&draft.values)?;
@@ -794,10 +925,10 @@ impl Desktop {
                 &values.fields().first().ok_or("settings empty")?.value,
                 4096,
             )?;
-            Ok::<_, String>((values, editor, local.model.clone()))
+            Ok::<_, String>((next, values, editor, local.model.clone()))
         })();
         match result {
-            Ok((values, editor, model)) => {
+            Ok((next, values, editor, model)) => {
                 if let Some(draft) = &mut self.settings {
                     draft.values = values;
                     draft.cached_local = Some(model);
@@ -807,7 +938,7 @@ impl Desktop {
                     draft.error = None;
                     draft.message = Some("PLAYERS READY - APPLY TO USE".into());
                 }
-                self.local_setup = None;
+                self.commit_route(next);
             }
             Err(error) => self.local_error(Some(error)),
         }
@@ -826,7 +957,12 @@ impl Desktop {
         Ok(args)
     }
     fn device_request(&mut self, keyboard: bool) {
-        if self.records.is_some() || self.display.is_some() {
+        if !self.ui_ready()
+            || !matches!(
+                self.navigator.route(),
+                ScreenRoute::Settings | ScreenRoute::Players | ScreenRoute::Devices { .. }
+            )
+        {
             return;
         }
         if keyboard
@@ -835,9 +971,6 @@ impl Desktop {
                 .as_ref()
                 .is_some_and(|local| local.model.players().len() == 1)
         {
-            return;
-        }
-        if self.profile_io.is_some() || self.game.is_some() {
             return;
         }
         let result = (|| {
@@ -864,19 +997,31 @@ impl Desktop {
                         })
                         .flatten()
                 });
+            let (owner, permit) = self.metadata_scope()?;
+            let task = permit.clone();
+            self.prepare_route(ScreenRoute::Devices {
+                players: player.is_some(),
+            })?;
             let query = self.query_devices;
             thread::Builder::new()
                 .name("bms-devices".into())
                 .spawn(move || {
-                    query(request)
-                        .map(|catalog| ProfileResult::Devices(catalog, player))
-                        .map_err(|error| error.to_string())
+                    scoped_metadata(task, || {
+                        query(request)
+                            .map(|catalog| ProfileResult::Devices(catalog, player))
+                            .map_err(|error| error.to_string())
+                    })
+                })
+                .map(|worker| ProfileOperation {
+                    owner,
+                    permit,
+                    worker: Some(worker),
                 })
                 .map_err(|error| error.to_string())
         })();
         match result {
-            Ok(worker) => {
-                self.profile_io = Some(ProfileOperation(Some(worker)));
+            Ok(operation) => {
+                self.profile_io = Some(operation);
                 if let Some(draft) = &mut self.settings {
                     draft.error = None;
                     draft.message = None;
@@ -893,6 +1038,12 @@ impl Desktop {
     }
     fn use_device(&mut self) {
         let result = (|| {
+            let to = match self.navigator.route() {
+                ScreenRoute::Devices { players: true } => ScreenRoute::Players,
+                ScreenRoute::Devices { players: false } => ScreenRoute::Settings,
+                _ => return Err("device picker is not active".into()),
+            };
+            let next = self.prepare_route(to)?;
             let picker = self.picker.as_ref().ok_or("device catalog unavailable")?;
             let index = picker.selected.ok_or("select a device first")?;
             if let Some(player) = picker.player {
@@ -905,7 +1056,7 @@ impl Desktop {
                     draft.error = None;
                     draft.message = Some("KEYBOARD ASSIGNED - DONE TO KEEP".into());
                 }
-                return Ok(());
+                return Ok(next);
             }
             let draft = self.settings.as_mut().ok_or("settings unavailable")?;
             // Prepare editor before changing the accepted draft.
@@ -922,10 +1073,10 @@ impl Desktop {
             draft.profile_focused = false;
             draft.error = None;
             draft.message = Some("DEVICE SELECTED - APPLY TO USE".into());
-            Ok::<(), String>(())
+            Ok::<_, String>(next)
         })();
         match result {
-            Ok(()) => self.picker = None,
+            Ok(next) => self.commit_route(next),
             Err(error) => {
                 if let Some(draft) = &mut self.settings {
                     draft.error = Some(error);
@@ -949,8 +1100,7 @@ impl Desktop {
     fn picker_key(&mut self, key: KeyCode, repeat: bool) {
         match key {
             KeyCode::Escape if !repeat => {
-                self.picker = None;
-                self.hits.clear();
+                self.back();
             }
             KeyCode::Enter if !repeat => self.use_device(),
             KeyCode::PageUp => self.picker_page(false),
@@ -980,13 +1130,7 @@ impl Desktop {
         }
     }
     fn profile_request(&mut self, save: bool) {
-        if self.records.is_some()
-            || self.profile_io.is_some()
-            || self.game.is_some()
-            || self.display.is_some()
-            || self.picker.is_some()
-            || self.local_setup.is_some()
-        {
+        if !self.ui_ready() || self.navigator.route() != ScreenRoute::Settings {
             return;
         }
         if let Some(draft) = &mut self.settings {
@@ -1007,26 +1151,37 @@ impl Desktop {
                 presentation: draft.presentation,
             };
             let host = settings_host();
+            let (owner, permit) = self.metadata_scope()?;
+            let task = permit.clone();
             thread::Builder::new()
                 .name("bms-profile".into())
                 .spawn(move || {
-                    if save {
-                        beatkernel_bms_runtime::settings_profile::save_player_profile(
-                            &path, &values, host,
-                        )
-                        .map(|()| ProfileResult::Saved)
-                        .map_err(|error| error.to_string())
-                    } else {
-                        beatkernel_bms_runtime::settings_profile::load_player_profile(&path, host)
+                    scoped_metadata(task, || {
+                        if save {
+                            beatkernel_bms_runtime::settings_profile::save_player_profile(
+                                &path, &values, host,
+                            )
+                            .map(|()| ProfileResult::Saved)
+                            .map_err(|error| error.to_string())
+                        } else {
+                            beatkernel_bms_runtime::settings_profile::load_player_profile(
+                                &path, host,
+                            )
                             .map(ProfileResult::Loaded)
                             .map_err(|error| error.to_string())
-                    }
+                        }
+                    })
+                })
+                .map(|worker| ProfileOperation {
+                    owner,
+                    permit,
+                    worker: Some(worker),
                 })
                 .map_err(|error| error.to_string())
         })();
         match result {
-            Ok(worker) => {
-                self.profile_io = Some(ProfileOperation(Some(worker)));
+            Ok(operation) => {
+                self.profile_io = Some(operation);
                 if let Some(draft) = &mut self.settings {
                     draft.error = None;
                     draft.message = None;
@@ -1042,23 +1197,29 @@ impl Desktop {
         self.hits.clear();
     }
     fn collect_profile(&mut self) {
-        if !self.profile_io.as_ref().is_some_and(|operation| {
-            operation
-                .0
-                .as_ref()
-                .is_some_and(|worker| worker.is_finished())
-        }) {
+        // Retain completed work while suspended; Closing still drains it.
+        if self.is_suspended()
+            || !self.profile_io.as_ref().is_some_and(|operation| {
+                operation
+                    .worker
+                    .as_ref()
+                    .is_some_and(|worker| worker.is_finished())
+            })
+        {
             return;
         }
         let mut operation = self.profile_io.take().expect("finished profile operation");
         let result = operation
-            .0
+            .worker
             .take()
             .expect("profile worker")
             .join()
             .unwrap_or_else(|_| Err("profile worker panicked".into()));
-        if let Some(records) = &mut self.records {
-            if !self.closing {
+        if operation.permit.is_cancelled() || !self.navigator.accepts(operation.owner) {
+            return;
+        }
+        if self.navigator.route() == ScreenRoute::Records {
+            if let Some(records) = &mut self.records {
                 match result {
                     Ok(ProfileResult::Records(catalog)) => {
                         records.selected = (!catalog.entries.is_empty()).then_some(0);
@@ -1081,68 +1242,79 @@ impl Desktop {
                     _ => {}
                 }
             }
-            self.gesture.cancel();
-            self.hits.clear();
-            return;
-        }
-        if let Some(draft) = &mut self.settings {
+        } else {
             match result {
-                Ok(ProfileResult::Records(_) | ProfileResult::Record(_)) => {}
                 Ok(ProfileResult::Devices(catalog, player)) => {
-                    self.picker = Some(DevicePicker {
-                        catalog,
-                        player,
-                        first: 0,
-                        selected: None,
+                    let result = self.prepare_route(ScreenRoute::Devices {
+                        players: player.is_some(),
                     });
-                    draft.error = None;
-                    draft.message = None;
-                }
-                Ok(ProfileResult::Saved) => {
-                    draft.error = None;
-                    draft.message = Some("PROFILE SAVED - APPLY IS SEPARATE".into());
-                }
-                Ok(ProfileResult::Loaded(profile)) => {
-                    let values = profile.native;
-                    let editor = values
-                        .fields()
-                        .first()
-                        .ok_or_else(|| "profile has no fields".to_owned())
-                        .and_then(|field| LineEditor::new(&field.value, 4096));
-                    match editor {
-                        Ok(editor) => {
-                            draft.values = values;
-                            draft.presentation = profile.presentation;
-                            draft.cached_local = None;
-                            draft.selected = 0;
-                            draft.editor = editor;
-                            draft.profile_focused = false;
-                            draft.error = None;
-                            draft.message = Some("PROFILE LOADED - APPLY TO USE".into());
+                    match result {
+                        Ok(next) => {
+                            self.commit_route(next);
+                            let data = DevicePicker {
+                                catalog,
+                                player,
+                                first: 0,
+                                selected: None,
+                            };
+                            if let Some(picker) = &mut self.picker {
+                                **picker = data;
+                            } else {
+                                self.picker = Some(PanelScope::new(
+                                    self.navigator.active_id().expect("device route"),
+                                    data,
+                                ));
+                            }
+                            self.local_error(None);
                         }
-                        Err(error) => draft.error = Some(error),
+                        Err(error) => self.local_error(Some(error)),
                     }
                 }
-                Err(error) => draft.error = Some(error),
+                Ok(ProfileResult::Saved) => {
+                    if let Some(draft) = &mut self.settings {
+                        draft.error = None;
+                        draft.message = Some("PROFILE SAVED - APPLY IS SEPARATE".into());
+                    }
+                }
+                Ok(ProfileResult::Loaded(profile)) => {
+                    if let Some(draft) = &mut self.settings {
+                        let values = profile.native;
+                        let editor = values
+                            .fields()
+                            .first()
+                            .ok_or_else(|| "profile has no fields".to_owned())
+                            .and_then(|field| LineEditor::new(&field.value, 4096));
+                        match editor {
+                            Ok(editor) => {
+                                draft.values = values;
+                                draft.presentation = profile.presentation;
+                                draft.cached_local = None;
+                                draft.selected = 0;
+                                draft.editor = editor;
+                                draft.profile_focused = false;
+                                draft.error = None;
+                                draft.message = Some("PROFILE LOADED - APPLY TO USE".into());
+                            }
+                            Err(error) => draft.error = Some(error),
+                        }
+                    }
+                }
+                Err(error) => self.local_error(Some(error)),
+                _ => {}
             }
         }
         self.gesture.cancel();
         self.hits.clear();
     }
     fn apply_settings(&mut self) {
-        if self.records.is_some()
-            || self.profile_io.is_some()
-            || self.game.is_some()
-            || self.display.is_some()
-            || self.picker.is_some()
-            || self.local_setup.is_some()
-        {
+        if !self.ui_ready() || self.navigator.route() != ScreenRoute::Settings {
             return;
         }
         let Some(draft) = &self.settings else {
             return;
         };
         let result = (|| {
+            let next = self.prepare_route(ScreenRoute::Selection)?;
             let args = self.validate_settings(&draft.values)?;
             let presentation = draft.presentation;
             presentation.validate()?;
@@ -1150,26 +1322,26 @@ impl Desktop {
             let cached_local = draft.cached_local.clone();
             let profile =
                 (!draft.profile.value().is_empty()).then(|| PathBuf::from(draft.profile.value()));
-            Ok::<_, String>((args, presentation, cached_local, profile))
+            Ok::<_, String>((next, args, presentation, cached_local, profile))
         })();
         // All drafts and host/build validation are complete before GPU mutation.
         // No options are committed if the current surface rejects this mode.
-        let result = result.and_then(|(args, presentation, cached_local, profile)| {
+        let result = result.and_then(|(next, args, presentation, cached_local, profile)| {
             if presentation.presentation != self.options.presentation {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.set_presentation(presentation.presentation)?;
                 }
             }
-            Ok((args, presentation, cached_local, profile))
+            Ok((next, args, presentation, cached_local, profile))
         });
         match result {
-            Ok((args, presentation, cached_local, profile)) => {
+            Ok((next, args, presentation, cached_local, profile)) => {
                 self.options.native = args;
                 self.options.set_display(presentation);
                 self.next_frame = Instant::now();
                 self.accepted_local = cached_local;
                 self.options.profile = profile;
-                self.settings = None;
+                self.commit_route(next);
                 self.failure = None;
             }
             Err(error) => {
@@ -1182,28 +1354,32 @@ impl Desktop {
         self.hits.clear();
     }
     fn records_admitted(&self) -> bool {
-        self.active
-            && !self.closing
-            && !self.suspended
-            && !self.occluded
-            && self.profile_io.is_none()
-            && self.game.is_none()
+        self.ui_ready()
+            && matches!(
+                self.navigator.route(),
+                ScreenRoute::Settings | ScreenRoute::Records
+            )
             && self.settings.is_some()
-            && self.display.is_none()
-            && self.picker.is_none()
-            && self.local_setup.is_none()
     }
     fn open_records(&mut self) {
-        if !self.records_admitted() || self.records.is_some() {
+        if !self.records_admitted() || self.navigator.route() != ScreenRoute::Settings {
             return;
         }
-        let result = self
-            .entries
-            .get(self.selected)
-            .ok_or_else(|| "select a chart before opening records".to_owned())
-            .and_then(|entry| RecordsDraft::new(entry.path.clone()));
+        let result = self.prepare_route(ScreenRoute::Records).and_then(|next| {
+            self.entries
+                .get(self.selected)
+                .ok_or_else(|| "select a chart before opening records".to_owned())
+                .and_then(|entry| RecordsDraft::new(entry.path.clone()))
+                .map(|records| (next, records))
+        });
         match result {
-            Ok(records) => self.records = Some(records),
+            Ok((next, records)) => {
+                self.commit_route(next);
+                self.records = Some(PanelScope::new(
+                    self.navigator.active_id().expect("records route"),
+                    records,
+                ));
+            }
             Err(error) => {
                 if let Some(draft) = &mut self.settings {
                     draft.error = Some(error);
@@ -1240,19 +1416,27 @@ impl Desktop {
                 .ok_or("settings unavailable")?
                 .values
                 .clone();
+            let (owner, permit) = self.metadata_scope()?;
+            let task = permit.clone();
             thread::Builder::new()
                 .name("bms-profile".into())
-                .spawn(move || match selected {
-                    Some(path) => {
-                        RecordPreview::inspect(&path, &chart, &settings).map(ProfileResult::Record)
-                    }
-                    None => RecordCatalog::scan(&directory).map(ProfileResult::Records),
+                .spawn(move || {
+                    scoped_metadata(task, || match selected {
+                        Some(path) => RecordPreview::inspect(&path, &chart, &settings)
+                            .map(ProfileResult::Record),
+                        None => RecordCatalog::scan(&directory).map(ProfileResult::Records),
+                    })
+                })
+                .map(|worker| ProfileOperation {
+                    owner,
+                    permit,
+                    worker: Some(worker),
                 })
                 .map_err(|error| error.to_string())
         })();
         match result {
-            Ok(worker) => {
-                self.profile_io = Some(ProfileOperation(Some(worker)));
+            Ok(operation) => {
+                self.profile_io = Some(operation);
                 if let Some(records) = &mut self.records {
                     records.preview = None;
                     records.error = None;
@@ -1278,6 +1462,7 @@ impl Desktop {
             return;
         }
         let result = (|| {
+            let next = self.prepare_route(ScreenRoute::Play { replay: true })?;
             let records = self.records.as_ref().ok_or("records unavailable")?;
             let preview = records
                 .valid_preview()
@@ -1285,10 +1470,10 @@ impl Desktop {
             let draft = self.settings.as_ref().ok_or("settings unavailable")?;
             let launch = record_launch(&draft.values, &records.chart, &preview.path)?;
             (self.validate_replay)(launch.args()).map_err(|error| error.to_string())?;
-            spawn_game(self.replay, launch, 0, false, true)
+            spawn_game(self.replay, launch, 0, false, true).map(|game| (next, game))
         })();
         match result {
-            Ok(game) => {
+            Ok((next, game)) => {
                 if let Some(window) = &self.window {
                     let name = game
                         .launch
@@ -1300,9 +1485,8 @@ impl Desktop {
                         .unwrap_or_default();
                     window.set_title(&window_title(&name, "REPLAY"));
                 }
+                self.commit_route(next);
                 self.game = Some(game);
-                self.records = None;
-                self.settings = None;
                 self.failure = None;
             }
             Err(error) => {
@@ -1368,7 +1552,7 @@ impl Desktop {
             {
                 self.watch_record()
             }
-            KeyCode::Escape if !repeat => self.records = None,
+            KeyCode::Escape if !repeat => self.back(),
             KeyCode::Enter if !repeat => self.records_request(
                 self.records
                     .as_ref()
@@ -1423,48 +1607,56 @@ impl Desktop {
         self.hits.clear();
     }
     fn open_display(&mut self) {
-        if self.records.is_some()
-            || self.game.is_some()
-            || self.profile_io.is_some()
-            || self.picker.is_some()
-            || self.local_setup.is_some()
-            || self.display.is_some()
-        {
+        if !self.ui_ready() || self.navigator.route() != ScreenRoute::Settings {
             return;
         }
-        if let Some(draft) = &mut self.settings {
-            match DisplayDraft::new(draft.presentation) {
-                Ok(display) => self.display = Some(display),
-                Err(error) => draft.error = Some(error),
+        let result = (|| {
+            let next = self.prepare_route(ScreenRoute::Display)?;
+            let draft = self.settings.as_ref().ok_or("settings unavailable")?;
+            DisplayDraft::new(draft.presentation).map(|display| (next, display))
+        })();
+        match result {
+            Ok((next, display)) => {
+                self.commit_route(next);
+                self.display = Some(PanelScope::new(
+                    self.navigator.active_id().expect("display route"),
+                    display,
+                ));
             }
+            Err(error) => self.local_error(Some(error)),
         }
         self.gesture.cancel();
         self.hits.clear();
     }
     fn finish_display(&mut self) {
-        if self.profile_io.is_some() || self.game.is_some() {
-            return;
-        }
-        let Some(display) = &mut self.display else {
-            return;
-        };
-        match display.value() {
-            Ok(value) => {
+        let result = self.prepare_route(ScreenRoute::Settings).and_then(|next| {
+            self.display
+                .as_mut()
+                .ok_or("display unavailable")?
+                .value()
+                .map(|value| (next, value))
+        });
+        match result {
+            Ok((next, value)) => {
                 if let Some(draft) = &mut self.settings {
                     draft.presentation = value;
                     draft.error = None;
                     draft.message = Some("DISPLAY DRAFT UPDATED - APPLY IS SEPARATE".into());
                 }
-                self.display = None;
+                self.commit_route(next);
             }
-            Err(error) => display.error = Some(error),
+            Err(error) => {
+                if let Some(display) = &mut self.display {
+                    display.error = Some(error);
+                }
+            }
         }
         self.gesture.cancel();
         self.hits.clear();
     }
     fn display_key(&mut self, key: KeyCode, repeat: bool) {
         match key {
-            KeyCode::Escape if !repeat => self.display = None,
+            KeyCode::Escape if !repeat => self.back(),
             KeyCode::Enter if !repeat => self.finish_display(),
             KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::Tab => {
                 if let Some(display) = &mut self.display {
@@ -1492,8 +1684,7 @@ impl Desktop {
     fn settings_key(&mut self, key: KeyCode, repeat: bool) {
         match key {
             KeyCode::Escape if !repeat => {
-                self.settings = None;
-                self.hits.clear();
+                self.back();
             }
             KeyCode::Enter if !repeat => self.apply_settings(),
             KeyCode::ArrowUp | KeyCode::ArrowDown | KeyCode::Tab => {
@@ -1552,7 +1743,7 @@ impl Desktop {
         )
     }
     fn hit(&self) -> Option<ControlId> {
-        if !self.active || self.closing || self.suspended || self.occluded {
+        if !self.active || self.closing() || self.is_suspended() || self.occluded {
             return None;
         }
         let point = self.point()?;
@@ -1563,10 +1754,10 @@ impl Desktop {
             .map(|(id, _)| *id)
     }
     fn activate(&mut self, id: ControlId) {
-        if self.profile_io.is_some() {
+        if !self.ui_ready() {
             return;
         }
-        if self.records.is_some() {
+        if self.navigator.route() == ScreenRoute::Records {
             if !self.records_admitted() {
                 return;
             }
@@ -1576,7 +1767,7 @@ impl Desktop {
                 52 => self.attach_record(OpponentKind::Own),
                 53 => self.attach_record(OpponentKind::Other),
                 54 => self.clear_records(),
-                55 => self.records = None,
+                55 => self.back(),
                 59 => self.watch_record(),
                 56 => self.records.as_mut().expect("records routing").page(false),
                 57 => self.records.as_mut().expect("records routing").page(true),
@@ -1597,10 +1788,10 @@ impl Desktop {
             self.hits.clear();
             return;
         }
-        if self.display.is_some() {
+        if self.navigator.route() == ScreenRoute::Display {
             match id.0 {
                 40 => self.finish_display(),
-                41 => self.display = None,
+                41 => self.back(),
                 40000..=40003 => {
                     self.display.as_mut().expect("display routing").selected =
                         (id.0 - 40000) as usize
@@ -1611,13 +1802,11 @@ impl Desktop {
             self.hits.clear();
             return;
         }
-        if self.picker.is_some() {
+        if matches!(self.navigator.route(), ScreenRoute::Devices { .. }) {
             match id.0 {
                 20 => self.use_device(),
                 21 => {
-                    self.picker = None;
-                    self.gesture.cancel();
-                    self.hits.clear();
+                    self.back();
                 }
                 22 => self.device_request(false),
                 23 => self.picker_page(false),
@@ -1640,10 +1829,10 @@ impl Desktop {
             }
             return;
         }
-        if self.local_setup.is_some() {
+        if self.navigator.route() == ScreenRoute::Players {
             match id.0 {
                 30 => self.finish_local(),
-                31 => self.local_setup = None,
+                31 => self.back(),
                 32 => self.resize_local(false),
                 33 => self.resize_local(true),
                 34 => self.device_request(true),
@@ -1664,7 +1853,7 @@ impl Desktop {
             self.hits.clear();
             return;
         }
-        if self.settings.is_some() {
+        if self.navigator.route() == ScreenRoute::Settings {
             match id.0 {
                 19 => self.open_records(),
                 18 => self.open_display(),
@@ -1682,9 +1871,7 @@ impl Desktop {
                 }
                 10 => self.apply_settings(),
                 11 => {
-                    self.settings = None;
-                    self.gesture.cancel();
-                    self.hits.clear();
+                    self.back();
                 }
                 12 => {
                     if let Some(draft) = &mut self.settings {
@@ -1717,21 +1904,47 @@ impl Desktop {
             return;
         }
         match id.0 {
-            6 if self.game.is_some() => self.change_local_page(false),
-            7 if self.game.is_some() => self.change_local_page(true),
-            8 if self.game.is_some() => self.toggle_local_comparisons(),
-            9 if self.game.is_some() => self.request_retry(),
-            5 if self.game.is_none() => self.open_settings(),
-            1 if self.game.is_none() && !self.entries.is_empty() => self.key(KeyCode::Enter, false),
-            2 if self.game.as_ref().is_some_and(|game| !game.joined) => self.cancel(),
-            3 if self.game.as_ref().is_some_and(|game| game.joined) => {
+            6 if matches!(
+                self.navigator.route(),
+                ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
+            ) =>
+            {
+                self.change_local_page(false)
+            }
+            7 if matches!(
+                self.navigator.route(),
+                ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
+            ) =>
+            {
+                self.change_local_page(true)
+            }
+            8 if matches!(
+                self.navigator.route(),
+                ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
+            ) =>
+            {
+                self.toggle_local_comparisons()
+            }
+            9 if matches!(
+                self.navigator.route(),
+                ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
+            ) =>
+            {
+                self.request_retry()
+            }
+            5 if self.navigator.route() == ScreenRoute::Selection => self.open_settings(),
+            1 if self.navigator.route() == ScreenRoute::Selection && !self.entries.is_empty() => {
                 self.key(KeyCode::Enter, false)
             }
-            4 if self.game.is_none() => {
-                self.closing = true;
+            2 if self.game.as_ref().is_some_and(|game| !game.joined) => self.cancel(),
+            3 if matches!(self.navigator.route(), ScreenRoute::Results { .. }) => {
+                self.key(KeyCode::Enter, false)
+            }
+            4 if self.navigator.route() == ScreenRoute::Selection => {
+                self.request_close();
                 self.cancel();
             }
-            row if row >= 100 && self.game.is_none() => {
+            row if row >= 100 && self.navigator.route() == ScreenRoute::Selection => {
                 if let Ok(index) = usize::try_from(row - 100) {
                     if index < self.entries.len() {
                         self.selected = index;
@@ -1763,11 +1976,11 @@ impl Desktop {
         }
     }
     fn request_retry(&mut self) {
-        if !self.active
-            || self.closing
-            || self.suspended
-            || self.occluded
-            || self.profile_io.is_some()
+        if !self.ui_ready()
+            || !matches!(
+                self.navigator.route(),
+                ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
+            )
         {
             return;
         }
@@ -1810,6 +2023,13 @@ impl Desktop {
         if !old.joined || old.worker.is_some() {
             return;
         }
+        let next = match self.prepare_route(ScreenRoute::Play { replay: old.replay }) {
+            Ok(next) => next,
+            Err(error) => {
+                self.failure = Some(error);
+                return;
+            }
+        };
         // Spawn is the only fallible step; retain joined results on failure.
         let native = if old.replay { self.replay } else { self.native };
         match spawn_game(
@@ -1820,6 +2040,7 @@ impl Desktop {
             old.replay,
         ) {
             Ok(game) => {
+                self.commit_route(next);
                 self.game = Some(game);
                 self.failure = None;
             }
@@ -1828,14 +2049,14 @@ impl Desktop {
     }
     fn cancel(&mut self) {
         self.gesture.cancel();
+        self.hits.clear();
         if let Some(game) = &mut self.game {
             game.cancel();
         }
     }
     fn fail(&mut self, error: impl ToString) {
         self.fatal = Some(error.to_string());
-        self.closing = true;
-        self.cancel();
+        self.request_close();
     }
     fn collect_game(&mut self) {
         let mut retry = None;
@@ -1870,39 +2091,45 @@ impl Desktop {
                 retry = game.owner_finished(succeeded);
             }
         }
+        if self.navigator.phase() == ScreenPhase::Active {
+            if let Some(game) = &self.game {
+                if game.joined && matches!(self.navigator.route(), ScreenRoute::Play { .. }) {
+                    if let Err(error) = self.navigate(ScreenRoute::Results {
+                        replay: game.replay,
+                    }) {
+                        self.failure = Some(error);
+                    }
+                }
+            }
+        }
         if let Some(launch) = retry {
-            if self.active && !self.closing && !self.suspended && !self.occluded {
+            if self.active && !self.closing() && !self.is_suspended() && !self.occluded {
                 self.replace_joined_game(launch);
             }
         }
     }
     fn key(&mut self, key: KeyCode, repeat: bool) {
         self.gesture.cancel();
-        if !self.active
-            || self.closing
-            || self.suspended
-            || self.occluded
-            || self.profile_io.is_some()
-        {
+        if !self.ui_ready() {
             return;
         }
-        if self.records.is_some() {
+        if self.navigator.route() == ScreenRoute::Records {
             self.records_key(key, repeat);
             return;
         }
-        if self.display.is_some() {
+        if self.navigator.route() == ScreenRoute::Display {
             self.display_key(key, repeat);
             return;
         }
-        if self.picker.is_some() {
+        if matches!(self.navigator.route(), ScreenRoute::Devices { .. }) {
             self.picker_key(key, repeat);
             return;
         }
-        if self.local_setup.is_some() {
+        if self.navigator.route() == ScreenRoute::Players {
             self.local_key(key, repeat);
             return;
         }
-        if self.settings.is_some() {
+        if self.navigator.route() == ScreenRoute::Settings {
             if key == KeyCode::F4 && !repeat {
                 self.open_records();
                 return;
@@ -1910,34 +2137,53 @@ impl Desktop {
             self.settings_key(key, repeat);
             return;
         }
-        if self.game.is_some() && !repeat && matches!(key, KeyCode::PageUp | KeyCode::PageDown) {
+        if matches!(
+            self.navigator.route(),
+            ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
+        ) && !repeat
+            && matches!(key, KeyCode::PageUp | KeyCode::PageDown)
+        {
             self.change_local_page(key == KeyCode::PageDown);
             return;
         }
-        if self.game.is_some() && !repeat && key == KeyCode::KeyC {
+        if matches!(
+            self.navigator.route(),
+            ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
+        ) && !repeat
+            && key == KeyCode::KeyC
+        {
             self.toggle_local_comparisons();
             return;
         }
-        if self.game.is_some() && !repeat && key == KeyCode::F5 {
+        if matches!(
+            self.navigator.route(),
+            ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
+        ) && !repeat
+            && key == KeyCode::F5
+        {
             self.request_retry();
             return;
         }
-        if self.game.as_ref().is_some_and(|game| game.joined) {
+        if matches!(self.navigator.route(), ScreenRoute::Results { .. }) {
             if !repeat && matches!(key, KeyCode::Enter | KeyCode::Escape) {
-                self.game = None;
-                self.failure = None;
-                if let Some(window) = &self.window {
-                    window.set_title("BeatKernel BMS player");
+                match self.navigate(ScreenRoute::Selection) {
+                    Ok(()) => {
+                        self.failure = None;
+                        if let Some(window) = &self.window {
+                            window.set_title("BeatKernel BMS player");
+                        }
+                    }
+                    Err(error) => self.failure = Some(error),
                 }
             }
-        } else if self.game.is_some() {
+        } else if matches!(self.navigator.route(), ScreenRoute::Play { .. }) {
             if key == KeyCode::Escape && !repeat {
                 self.cancel();
             }
         } else {
             match key {
                 KeyCode::F2 if !repeat => self.open_settings(),
-                KeyCode::Escape if !repeat => self.closing = true,
+                KeyCode::Escape if !repeat => self.request_close(),
                 KeyCode::ArrowUp => self.selected = self.selected.saturating_sub(1),
                 KeyCode::ArrowDown if !self.entries.is_empty() => {
                     self.selected = (self.selected + 1).min(self.entries.len() - 1)
@@ -1952,9 +2198,10 @@ impl Desktop {
         }
     }
     fn start(&mut self) -> Result<(), String> {
-        if self.records.is_some() || self.settings.is_some() || self.profile_io.is_some() {
-            return Err("profile operation is pending".into());
+        if !self.ui_ready() || self.navigator.route() != ScreenRoute::Selection {
+            return Err("chart selection is not active".into());
         }
+        let next = self.prepare_route(ScreenRoute::Play { replay: false })?;
         let entry = &self.entries[self.selected];
         let path = entry
             .path
@@ -1968,11 +2215,16 @@ impl Desktop {
             window.set_title(&window_title(&entry.title, &entry.artist));
         }
         self.failure = None;
+        self.commit_route(next);
         self.game = Some(game);
         Ok(())
     }
     fn draw(&mut self) -> Result<(), String> {
+        if self.navigator.phase() != ScreenPhase::Active {
+            return Ok(());
+        }
         let point = self.point();
+        let route = self.navigator.route();
         self.hits.clear();
         self.scene.clear();
         let pixels = &mut self.scene;
@@ -1987,7 +2239,11 @@ impl Desktop {
         }) {
             text(pixels, 450, 26, "PRACTICE", 2, 0xd8b36b);
         }
-        if let Some(records) = &self.records {
+        if route == ScreenRoute::Records {
+            let records = self
+                .records
+                .as_ref()
+                .ok_or("records screen data unavailable")?;
             draw_records(
                 pixels,
                 records,
@@ -1999,7 +2255,11 @@ impl Desktop {
                     .as_ref()
                     .map_or(0, |draft| saved_opponents(&draft.values)),
             );
-        } else if let Some(display) = &self.display {
+        } else if route == ScreenRoute::Display {
+            let display = self
+                .display
+                .as_ref()
+                .ok_or("display screen data unavailable")?;
             draw_display(
                 pixels,
                 display,
@@ -2008,7 +2268,11 @@ impl Desktop {
                 point,
                 self.profile_io.is_some(),
             );
-        } else if let Some(picker) = &self.picker {
+        } else if matches!(route, ScreenRoute::Devices { .. }) {
+            let picker = self
+                .picker
+                .as_ref()
+                .ok_or("devices screen data unavailable")?;
             draw_devices(
                 pixels,
                 picker,
@@ -2018,7 +2282,11 @@ impl Desktop {
                 point,
                 self.profile_io.is_some(),
             );
-        } else if let Some(local) = &self.local_setup {
+        } else if route == ScreenRoute::Players {
+            let local = self
+                .local_setup
+                .as_ref()
+                .ok_or("players screen data unavailable")?;
             draw_local(
                 pixels,
                 local,
@@ -2028,7 +2296,11 @@ impl Desktop {
                 point,
                 self.profile_io.is_some(),
             );
-        } else if let Some(draft) = &self.settings {
+        } else if route == ScreenRoute::Settings {
+            let draft = self
+                .settings
+                .as_ref()
+                .ok_or("settings screen data unavailable")?;
             draw_settings(
                 pixels,
                 draft,
@@ -2037,7 +2309,14 @@ impl Desktop {
                 point,
                 self.profile_io.is_some(),
             )?;
-        } else if let Some(game) = &self.game {
+        } else if matches!(
+            route,
+            ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
+        ) {
+            let game = self
+                .game
+                .as_ref()
+                .ok_or("session screen data unavailable")?;
             draw_game(pixels, game, self.options.lookahead)?;
             let count = game.snapshot.as_ref().map_or(0, |s| s.players.len());
             if count > organisms::LOCAL_PLAYERS_PER_PAGE {
@@ -2237,10 +2516,7 @@ impl Desktop {
                 "EXIT",
             );
         }
-        if self.game.is_none()
-            && self.settings.is_none()
-            && self.active_backend != self.options.backend
-        {
+        if route == ScreenRoute::Selection && self.active_backend != self.options.backend {
             text(
                 pixels,
                 24,
@@ -2280,10 +2556,10 @@ impl Desktop {
 }
 impl ApplicationHandler for Desktop {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.closing {
+        if self.closing() {
             return;
         }
-        self.suspended = false;
+        self.navigator.resume();
         if self.window.is_none() {
             match event_loop.create_window(
                 Window::default_attributes()
@@ -2325,13 +2601,17 @@ impl ApplicationHandler for Desktop {
                 }
             }
         }
+        self.active = self
+            .window
+            .as_ref()
+            .is_some_and(|window| window.has_focus());
         self.next_frame = Instant::now();
         if let Some(window) = &self.window {
             window.request_redraw();
         }
     }
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        self.suspended = true;
+        self.navigator.suspend();
         self.active = false;
         self.pointer = None;
         self.cancel();
@@ -2344,12 +2624,10 @@ impl ApplicationHandler for Desktop {
         }
         match event {
             WindowEvent::CloseRequested => {
-                self.closing = true;
-                self.cancel();
+                self.request_close();
             }
             WindowEvent::Destroyed => {
-                self.closing = true;
-                self.cancel();
+                self.request_close();
                 self.renderer = None;
                 self.window = None;
             }
@@ -2399,7 +2677,7 @@ impl ApplicationHandler for Desktop {
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                let editing = self.settings.is_some();
+                let editing = self.navigator.active_id();
                 let navigation = matches!(
                     event.physical_key,
                     PhysicalKey::Code(
@@ -2422,32 +2700,39 @@ impl ApplicationHandler for Desktop {
                 if let PhysicalKey::Code(key) = event.physical_key {
                     self.key(key, event.repeat);
                 }
-                if editing
+                if editing.is_some_and(|id| self.navigator.accepts(id))
                     && !navigation
-                    && self.active
-                    && !self.closing
-                    && !self.suspended
-                    && !self.occluded
-                    && self.profile_io.is_none()
-                    && self.picker.is_none()
-                    && self.local_setup.is_none()
+                    && self.ui_ready()
                 {
                     let value = event.text.as_deref().or_else(|| match &event.logical_key {
                         Key::Character(value) => Some(value.as_str()),
                         _ => None,
                     });
                     if let Some(value) = value {
-                        if let Some(records) = &mut self.records {
-                            records.edit(None, Some(value));
-                        } else if let Some(display) = &mut self.display {
-                            display.edit(None, Some(value));
-                        } else if let Some(draft) = &mut self.settings {
-                            draft.edit(None, Some(value));
+                        match self.navigator.route() {
+                            ScreenRoute::Records => {
+                                if let Some(records) = &mut self.records {
+                                    records.edit(None, Some(value));
+                                }
+                            }
+                            ScreenRoute::Display => {
+                                if let Some(display) = &mut self.display {
+                                    display.edit(None, Some(value));
+                                }
+                            }
+                            ScreenRoute::Settings => {
+                                if let Some(draft) = &mut self.settings {
+                                    draft.edit(None, Some(value));
+                                }
+                            }
+                            _ => {}
                         }
                     }
                 }
             }
-            WindowEvent::RedrawRequested if !self.suspended && !self.closing && !self.occluded => {
+            WindowEvent::RedrawRequested
+                if !self.is_suspended() && !self.closing() && !self.occluded =>
+            {
                 self.collect_game();
                 if let Err(error) = self.draw() {
                     self.fail(error);
@@ -2461,14 +2746,14 @@ impl ApplicationHandler for Desktop {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.collect_game();
         self.collect_profile();
-        if self.closing
+        if self.closing()
             && self.game.as_ref().is_none_or(|game| game.joined)
             && self.profile_io.is_none()
         {
             event_loop.exit();
             return;
         }
-        if self.closing || self.suspended || self.occluded {
+        if self.closing() || self.is_suspended() || self.occluded {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + Duration::from_millis(4),
             ));
@@ -2485,7 +2770,7 @@ impl ApplicationHandler for Desktop {
         }
     }
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        self.cancel();
+        self.request_close();
         // Unexpected OS exit still joins native owners through Game::drop.
         self.game = None;
         self.profile_io = None;
@@ -3331,6 +3616,156 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn lifecycle_fixture() -> Desktop {
+        fn native_unavailable(_: &[String]) -> Result<(), Box<dyn Error>> {
+            Err("fixture must not open native playback".into())
+        }
+        fn validate_only(_: &[String]) -> Result<(), Box<dyn Error>> {
+            Ok(())
+        }
+        fn query_unavailable(_: DeviceRequest) -> Result<DeviceCatalog, Box<dyn Error>> {
+            Err("fixture must not query devices".into())
+        }
+        Desktop {
+            options: Options::parse(&[]).unwrap(),
+            active_backend: BackendChoice::Auto,
+            display: None,
+            records: None,
+            native: native_unavailable,
+            validate: validate_only,
+            query_devices: query_unavailable,
+            replay: native_unavailable,
+            validate_replay: validate_only,
+            picker: None,
+            local_setup: None,
+            accepted_local: None,
+            settings: None,
+            profile_io: None,
+            entries: vec![Entry {
+                path: PathBuf::from("fixture.bms"),
+                title: "FIXTURE".into(),
+                artist: String::new(),
+            }],
+            diagnostics: vec![],
+            selected: 0,
+            window: None,
+            renderer: None,
+            instance: None,
+            scene: Scene::new(WIDTH as u32, HEIGHT as u32),
+            game: None,
+            navigator: ScreenNavigator::default(),
+            active: true,
+            occluded: false,
+            failure: None,
+            fatal: None,
+            next_frame: Instant::now(),
+            pointer: None,
+            gesture: Gesture::default(),
+            hits: Vec::new(),
+        }
+    }
+    #[test]
+    fn desktop_parent_draft_is_retained_but_only_active_panel_receives_input() {
+        let mut app = lifecycle_fixture();
+        app.open_settings();
+        let settings_id = app.settings.as_ref().unwrap().id();
+        app.settings
+            .as_mut()
+            .unwrap()
+            .profile
+            .insert("kept-profile")
+            .unwrap();
+        let settings_permit = app.settings.as_ref().unwrap().task_permit();
+        app.open_display();
+        let display_id = app.display.as_ref().unwrap().id();
+        let display_permit = app.display.as_ref().unwrap().task_permit();
+        app.key(KeyCode::Tab, false);
+        assert_eq!(app.display.as_ref().unwrap().selected, 1);
+        assert_eq!(app.settings.as_ref().unwrap().selected, 0);
+        app.key(KeyCode::F4, false); // Hidden Settings cannot open its Records child.
+        assert_eq!(app.navigator.route(), ScreenRoute::Display);
+        assert!(app.records.is_none());
+        assert!(!app.navigator.accepts(settings_id));
+        assert!(app.navigator.accepts(display_id));
+        app.key(KeyCode::Escape, false);
+        assert!(app.display.is_none());
+        assert!(display_permit.is_cancelled());
+        assert!(!settings_permit.is_cancelled());
+        assert_eq!(app.settings.as_ref().unwrap().id(), settings_id);
+        assert_eq!(
+            app.settings.as_ref().unwrap().profile.value(),
+            "kept-profile"
+        );
+        app.open_local();
+        let before = app.navigator.clone();
+        let count = app.local_setup.as_ref().unwrap().model.players().len();
+        assert!(app.prepare_route(ScreenRoute::Records).is_err());
+        assert_eq!(app.navigator, before);
+        assert_eq!(
+            app.local_setup.as_ref().unwrap().model.players().len(),
+            count
+        );
+        let child_permit = app.local_setup.as_ref().unwrap().task_permit();
+        app.request_close();
+        assert!(child_permit.is_cancelled() && settings_permit.is_cancelled());
+        assert!(app.settings.is_none() && app.local_setup.is_none());
+        assert_eq!(app.navigator.route(), ScreenRoute::Closing);
+    }
+
+    #[test]
+    fn cancelled_metadata_never_starts_or_publishes_and_session_drain_is_separate() {
+        use std::cell::Cell;
+        let scope = PanelScope::new(ScreenInstanceId(99), ());
+        let permit = scope.task_permit();
+        drop(scope);
+        let called = Cell::new(false);
+        assert!(
+            scoped_metadata(permit, || {
+                called.set(true);
+                Ok(ProfileResult::Saved)
+            })
+            .is_err()
+        );
+        assert!(!called.get());
+        let scope = PanelScope::new(ScreenInstanceId(100), ());
+        let permit = scope.task_permit();
+        assert!(
+            scoped_metadata(permit, || {
+                called.set(true);
+                drop(scope); // Cancellation after work starts suppresses its result.
+                Ok(ProfileResult::Saved)
+            })
+            .is_err()
+        );
+        assert!(called.get());
+
+        let mut app = lifecycle_fixture();
+        let next = app
+            .prepare_route(ScreenRoute::Play { replay: false })
+            .unwrap();
+        app.commit_route(next);
+        app.game = Some(retry_fixture()); // No thread/device in this fixture.
+        assert!(
+            app.prepare_route(ScreenRoute::Results { replay: false })
+                .is_err()
+        );
+        assert!(app.prepare_route(ScreenRoute::Selection).is_err());
+        app.navigator.suspend();
+        app.game.as_mut().unwrap().owner_finished(true);
+        app.collect_game();
+        assert_eq!(app.navigator.route(), ScreenRoute::Play { replay: false });
+        app.navigator.resume();
+        app.collect_game();
+        assert_eq!(
+            app.navigator.route(),
+            ScreenRoute::Results { replay: false }
+        );
+        assert!(app.game.is_some());
+        app.key(KeyCode::Escape, false);
+        assert_eq!(app.navigator.route(), ScreenRoute::Selection);
+        assert!(app.game.is_none());
+    }
+
     #[test]
     fn watching_pins_record_and_retry_never_rewrites_capture_or_live_draft() {
         let values = NativeSettings::from_args(
