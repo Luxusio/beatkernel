@@ -63,3 +63,9 @@ images. BMP00/Poor selections do not imply continuous poor display. Video,
 crop/opacity and miss-triggered poor-overlay policies remain outside supported
 visual semantics. Authored parser/timing/seed/limit fixtures are source-compiled
 for later execution, not format conformance or native GPU acceptance.
+
+The application prepares exactly RGB (0,0,0) pixels with alpha zero for
+chart-declared Layer resources; the adapter preserves original definitions and
+timing. Raw Base/Poor pixels remain intact even when the same file is used by
+both roles. This is BeatKernel's RGBA8 rendering policy; historical thresholds,
+EXBMP and other player-specific extensions are not implied.

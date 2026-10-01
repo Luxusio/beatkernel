@@ -1137,8 +1137,9 @@ Original BMP00/04/06 semantics: [author's BMS format](https://bm98.yaneu.com/bm9
 Support BMP/PNG/JPEG raster signatures with bounded configurable decoding into
 straight RGBA8 before playback; preserve alpha and literal image orientation,
 without resizing. Use the maintained image codec with only these format
-features enabled. Videos, other formats and legacy black color-key transparency
-remain pending. Native Base/Layer upload/display uses bounded ownership below;
+features enabled. Videos and other formats remain pending. Exact-black Layer
+transparency follows the preparation policy below. Native Base/Layer
+upload/display uses bounded ownership below;
 prefetch/streaming improvements remain pending.
 
 An explicit portable ImageAssets preparation API opens only visual references
@@ -1182,7 +1183,7 @@ darkened below notes for readability; keep alpha, clipped field bounds, local
 member time, note/pressed/feedback/judgement painter order and original timing.
 Existing playfield wrappers retain plain lane geometry. Poor selection remains
 a selection until miss activation policy exists; do not display it continuously.
-Videos, additional raster formats and legacy black color-key policy remain
+Videos, additional raster formats and extended color-key policies remain
 pending. GPU upload on selection changes may stall the UI; there is no measured
 frame latency or native correctness claim until deferred execution.
 
@@ -1190,3 +1191,7 @@ Author fake resource-owner/cache and real Scene/native publisher fixtures for
 alias sharing, bounds, admission failure, selection/bank/page change, cleanup,
 renderer reset, original-time pause/seek and sparse local IDs. Source compilation
 is not native GPU/device acceptance.
+
+
+### Static BGA exact-black Layer preparation
+BeatKernel uses an explicit RGBA8 policy: chart-declared channel 07 Layer images make exactly RGB (0,0,0) transparent before GPU filtering. Base and Poor retain source pixels. Preparation happens once on the game owner; unchanged images share the original Arc and canonical aliases share any changed variant. Changed unique variants count toward the existing aggregate decoded-byte admission limit; retaining a raw image and its changed variant costs both buffers. No threshold, EXBMP, per-frame pixel scan, or video behavior is implied. Pure pixel, alias, capacity, cache-role and native publication fixtures are authored for later execution; source compilation does not establish GPU visual correctness.
