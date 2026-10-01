@@ -48,7 +48,7 @@ Saved opponents require the same compiled chart and judging profile. Multiplayer
 fn desktop(args: &[String]) -> Result<()> {
     #[cfg(feature = "desktop")]
     {
-        crate::desktop::run(args, native, validate_native)
+        crate::desktop::run(args, native, validate_native, crate::devices_native::query)
     }
     #[cfg(not(feature = "desktop"))]
     {

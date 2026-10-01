@@ -2,17 +2,18 @@
 use beatkernel::judge::JudgeOutcome;
 use beatkernel_bms_runtime::ui::{
     atoms::{rect, text},
-    interaction::{logical_point, Bounds, ControlId, Gesture},
+    interaction::{Bounds, ControlId, Gesture, logical_point},
     molecules, organisms,
     text_input::LineEditor,
 };
 use beatkernel_bms_runtime::{
-    graphics::{self, BackendChoice, Presentation, Renderer},
-    scene::Scene,
-};
-use beatkernel_bms_runtime::{
+    device_catalog::{DeviceCatalog, DeviceRequest},
     player, player_chart,
     settings::{NativeSettings, SettingsHost},
+};
+use beatkernel_bms_runtime::{
+    graphics::{self, BackendChoice, Presentation, Renderer},
+    scene::Scene,
 };
 use std::{
     error::Error,
@@ -33,6 +34,7 @@ use winit::{
 const WIDTH: usize = 960;
 const HEIGHT: usize = 720;
 type Native = fn(&[String]) -> Result<(), Box<dyn Error>>;
+type QueryDevices = fn(DeviceRequest) -> Result<DeviceCatalog, Box<dyn Error>>;
 
 struct Options {
     native: Vec<String>,
@@ -171,9 +173,16 @@ impl Drop for Game {
     }
 }
 
-pub(super) fn run(args: &[String], native: Native, validate: Native) -> Result<(), Box<dyn Error>> {
+pub(super) fn run(
+    args: &[String],
+    native: Native,
+    validate: Native,
+    query_devices: QueryDevices,
+) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
-        println!("player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nPass explicit native backend/device/rate/buffer/binding options as flag-value pairs.\nF2: settings; Up/Down: select; Enter: play/return; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options.");
+        println!(
+            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nPass explicit native backend/device/rate/buffer/binding options as flag-value pairs.\nF2: settings; Up/Down: select; Enter: play/return; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+        );
         return Ok(());
     }
     let mut options = Options::parse(args)?;
@@ -231,6 +240,8 @@ pub(super) fn run(args: &[String], native: Native, validate: Native) -> Result<(
         options,
         native,
         validate,
+        query_devices,
+        picker: None,
         settings: None,
         profile_io: None,
         entries,
@@ -316,7 +327,13 @@ fn edit_line(
     }
     Ok(())
 }
+struct DevicePicker {
+    catalog: DeviceCatalog,
+    first: usize,
+    selected: Option<usize>,
+}
 enum ProfileResult {
+    Devices(DeviceCatalog),
     Loaded(NativeSettings),
     Saved,
 }
@@ -354,6 +371,8 @@ struct Desktop {
     options: Options,
     native: Native,
     validate: Native,
+    query_devices: QueryDevices,
+    picker: Option<DevicePicker>,
     settings: Option<SettingsDraft>,
     profile_io: Option<ProfileOperation>,
     entries: Vec<Entry>,
@@ -426,6 +445,120 @@ impl Desktop {
         (self.validate)(&with_chart(&args, path)).map_err(|error| error.to_string())?;
         Ok(args)
     }
+    fn device_request(&mut self) {
+        if self.profile_io.is_some() || self.game.is_some() {
+            return;
+        }
+        let result = (|| {
+            let draft = self.settings.as_ref().ok_or("settings unavailable")?;
+            let request = DeviceRequest::from_settings(&draft.values, settings_host())?;
+            let query = self.query_devices;
+            thread::Builder::new()
+                .name("bms-devices".into())
+                .spawn(move || {
+                    query(request)
+                        .map(ProfileResult::Devices)
+                        .map_err(|error| error.to_string())
+                })
+                .map_err(|error| error.to_string())
+        })();
+        match result {
+            Ok(worker) => {
+                self.profile_io = Some(ProfileOperation(Some(worker)));
+                if let Some(draft) = &mut self.settings {
+                    draft.error = None;
+                    draft.message = None;
+                }
+            }
+            Err(error) => {
+                if let Some(draft) = &mut self.settings {
+                    draft.error = Some(error);
+                }
+            }
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn use_device(&mut self) {
+        let result = (|| {
+            let picker = self.picker.as_ref().ok_or("device catalog unavailable")?;
+            let index = picker.selected.ok_or("select an audio device first")?;
+            let draft = self.settings.as_mut().ok_or("settings unavailable")?;
+            // Prepare editor before changing the accepted draft.
+            let editor = LineEditor::new(&picker.catalog.choices()[index].id, 4096)?;
+            picker.catalog.apply(index, &mut draft.values)?;
+            let flag = if picker.catalog.request() == DeviceRequest::Alsa {
+                "--alsa"
+            } else {
+                "--device"
+            };
+            draft.selected = draft
+                .values
+                .fields()
+                .iter()
+                .position(|f| f.flag == flag)
+                .expect("catalog validated field");
+            draft.editor = editor;
+            draft.profile_focused = false;
+            draft.error = None;
+            draft.message = Some("DEVICE SELECTED - APPLY TO USE".into());
+            Ok::<(), String>(())
+        })();
+        match result {
+            Ok(()) => self.picker = None,
+            Err(error) => {
+                if let Some(draft) = &mut self.settings {
+                    draft.error = Some(error);
+                }
+            }
+        }
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn picker_page(&mut self, forward: bool) {
+        let picker = self.picker.as_mut().expect("picker page routing");
+        let last = picker.catalog.choices().len().saturating_sub(1) / SETTINGS_ROWS * SETTINGS_ROWS;
+        picker.first = if forward {
+            (picker.first + SETTINGS_ROWS).min(last)
+        } else {
+            picker.first.saturating_sub(SETTINGS_ROWS)
+        };
+        self.gesture.cancel();
+        self.hits.clear();
+    }
+    fn picker_key(&mut self, key: KeyCode, repeat: bool) {
+        match key {
+            KeyCode::Escape if !repeat => {
+                self.picker = None;
+                self.hits.clear();
+            }
+            KeyCode::Enter if !repeat => self.use_device(),
+            KeyCode::PageUp => self.picker_page(false),
+            KeyCode::PageDown => self.picker_page(true),
+            KeyCode::ArrowUp | KeyCode::ArrowDown => {
+                let picker = self.picker.as_mut().expect("picker key routing");
+                let count = picker.catalog.choices().len();
+                let next = match (picker.selected, key) {
+                    (None, KeyCode::ArrowUp) => (0..count)
+                        .rev()
+                        .find(|&i| picker.catalog.choices()[i].selectable),
+                    (None, _) => (0..count).find(|&i| picker.catalog.choices()[i].selectable),
+                    (Some(i), KeyCode::ArrowUp) => (0..i)
+                        .rev()
+                        .find(|&i| picker.catalog.choices()[i].selectable),
+                    (Some(i), _) => {
+                        (i + 1..count).find(|&i| picker.catalog.choices()[i].selectable)
+                    }
+                };
+                if let Some(index) = next {
+                    picker.selected = Some(index);
+                    picker.first = index / SETTINGS_ROWS * SETTINGS_ROWS;
+                }
+                self.hits.clear();
+            }
+            _ => {}
+        }
+    }
     fn profile_request(&mut self, save: bool) {
         if self.profile_io.is_some() || self.game.is_some() {
             return;
@@ -494,6 +627,15 @@ impl Desktop {
             .unwrap_or_else(|_| Err("profile worker panicked".into()));
         if let Some(draft) = &mut self.settings {
             match result {
+                Ok(ProfileResult::Devices(catalog)) => {
+                    self.picker = Some(DevicePicker {
+                        catalog,
+                        first: 0,
+                        selected: None,
+                    });
+                    draft.error = None;
+                    draft.message = None;
+                }
                 Ok(ProfileResult::Saved) => {
                     draft.error = None;
                     draft.message = Some("PROFILE SAVED - APPLY IS SEPARATE".into());
@@ -624,8 +766,38 @@ impl Desktop {
         if self.profile_io.is_some() {
             return;
         }
+        if self.picker.is_some() {
+            match id.0 {
+                20 => self.use_device(),
+                21 => {
+                    self.picker = None;
+                    self.gesture.cancel();
+                    self.hits.clear();
+                }
+                22 => self.device_request(),
+                23 => self.picker_page(false),
+                24 => self.picker_page(true),
+                row if row >= 10000 => {
+                    let picker = self.picker.as_mut().expect("picker routing");
+                    let index = (row - 10000) as usize;
+                    if picker
+                        .catalog
+                        .choices()
+                        .get(index)
+                        .is_some_and(|c| c.selectable)
+                    {
+                        picker.selected = Some(index);
+                    }
+                    self.gesture.cancel();
+                    self.hits.clear();
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.settings.is_some() {
             match id.0 {
+                16 => self.device_request(),
                 13 => self.profile_request(false),
                 14 => self.profile_request(true),
                 15 => {
@@ -741,6 +913,10 @@ impl Desktop {
         if !self.active || self.closing || self.profile_io.is_some() {
             return;
         }
+        if self.picker.is_some() {
+            self.picker_key(key, repeat);
+            return;
+        }
         if self.settings.is_some() {
             self.settings_key(key, repeat);
             return;
@@ -815,7 +991,17 @@ impl Desktop {
         let pixels = &mut self.scene;
         rect(pixels, 0, 0, WIDTH as i64, HEIGHT as i64, 0x10151e);
         text(pixels, 24, 20, "BEATKERNEL BMS PLAYER", 3, 0xf0f4ff);
-        if let Some(draft) = &self.settings {
+        if let Some(picker) = &self.picker {
+            draw_devices(
+                pixels,
+                picker,
+                self.settings.as_ref().expect("picker has draft"),
+                &mut self.hits,
+                &self.gesture,
+                point,
+                self.profile_io.is_some(),
+            );
+        } else if let Some(draft) = &self.settings {
             draw_settings(
                 pixels,
                 draft,
@@ -1102,6 +1288,8 @@ impl ApplicationHandler for Desktop {
                         KeyCode::Escape
                             | KeyCode::Enter
                             | KeyCode::Tab
+                            | KeyCode::PageUp
+                            | KeyCode::PageDown
                             | KeyCode::ArrowUp
                             | KeyCode::ArrowDown
                             | KeyCode::ArrowLeft
@@ -1120,6 +1308,7 @@ impl ApplicationHandler for Desktop {
                     && self.active
                     && !self.closing
                     && self.profile_io.is_none()
+                    && self.picker.is_none()
                 {
                     let value = event.text.as_deref().or_else(|| match &event.logical_key {
                         Key::Character(value) => Some(value.as_str()),
@@ -1175,6 +1364,98 @@ impl ApplicationHandler for Desktop {
     }
 }
 
+fn draw_devices(
+    scene: &mut Scene,
+    picker: &DevicePicker,
+    draft: &SettingsDraft,
+    hits: &mut Vec<(ControlId, Bounds)>,
+    gesture: &Gesture,
+    point: Option<(f64, f64)>,
+    pending: bool,
+) {
+    text(
+        scene,
+        24,
+        65,
+        "AUDIO OUTPUT DEVICES - UP/DOWN SELECT - ENTER USE - ESC BACK",
+        1,
+        0x9bb1cf,
+    );
+    let first = picker.first;
+    text(
+        scene,
+        24,
+        91,
+        &format!(
+            "{} OUTPUT ENTRIES - NO AUTOMATIC SELECTION",
+            picker.catalog.choices().len()
+        ),
+        1,
+        0xd8b36b,
+    );
+    organisms::device_list(
+        scene,
+        &picker.catalog,
+        picker.selected,
+        first,
+        SETTINGS_ROWS,
+    );
+    if !pending {
+        for (index, choice) in picker
+            .catalog
+            .choices()
+            .iter()
+            .enumerate()
+            .skip(first)
+            .take(SETTINGS_ROWS)
+        {
+            if choice.selectable {
+                hits.push((
+                    ControlId(10000 + index as u64),
+                    Bounds {
+                        x: 24,
+                        y: 120 + (index - first) as i64 * 39,
+                        width: 906,
+                        height: 34,
+                    },
+                ));
+            }
+        }
+    }
+    for (id, x, label) in [
+        (20, 24, "USE DEVICE"),
+        (21, 212, "BACK"),
+        (22, 400, "REFRESH"),
+        (23, 588, "PREV"),
+        (24, 776, "NEXT"),
+    ] {
+        let bounds = Bounds {
+            x,
+            y: 620,
+            width: 170,
+            height: 34,
+        };
+        if pending || (id == 20 && picker.selected.is_none()) {
+            molecules::button(scene, bounds, label, false, false);
+        } else {
+            control(scene, hits, gesture, point, ControlId(id), bounds, label);
+        }
+    }
+    if pending {
+        text(
+            scene,
+            24,
+            665,
+            "SETTINGS OPERATION - WAITING FOR WORKER",
+            1,
+            0xd8b36b,
+        );
+    }
+    if let Some(error) = &draft.error {
+        text(scene, 24, 690, error, 1, 0xff8e8e);
+    }
+}
+
 fn draw_settings(
     scene: &mut Scene,
     draft: &SettingsDraft,
@@ -1187,10 +1468,39 @@ fn draw_settings(
         scene,
         24,
         65,
-        "NATIVE SETTINGS - EMPTY OMITTED - ENTER APPLY - ESC BACK",
+        "NATIVE SETTINGS - ENTER APPLY - ESC BACK",
         1,
         0x9bb1cf,
     );
+    if !pending {
+        control(
+            scene,
+            hits,
+            gesture,
+            point,
+            ControlId(16),
+            Bounds {
+                x: 730,
+                y: 60,
+                width: 200,
+                height: 34,
+            },
+            "AUDIO DEVICES",
+        );
+    } else {
+        molecules::button(
+            scene,
+            Bounds {
+                x: 730,
+                y: 60,
+                width: 200,
+                height: 34,
+            },
+            "AUDIO DEVICES",
+            false,
+            false,
+        );
+    }
     let first = draft.selected / SETTINGS_ROWS * SETTINGS_ROWS;
     text(
         scene,
@@ -1286,7 +1596,7 @@ fn draw_settings(
             scene,
             24,
             665,
-            "PROFILE FILE OPERATION - WAITING FOR WORKER",
+            "SETTINGS OPERATION - WAITING FOR WORKER",
             1,
             0xd8b36b,
         );
@@ -1513,20 +1823,24 @@ mod tests {
                 Options::parse(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err()
             );
         }
-        assert!(Options::parse(&[
-            "--library".into(),
-            "charts".into(),
-            "--chart".into(),
-            "song.bms".into()
-        ])
-        .is_err());
+        assert!(
+            Options::parse(&[
+                "--library".into(),
+                "charts".into(),
+                "--chart".into(),
+                "song.bms".into()
+            ])
+            .is_err()
+        );
     }
     #[test]
     fn native_title_keeps_unicode_but_removes_control_characters_and_bounds_size() {
         assert!(window_title("곡\0제목", "아티스트").contains("곡제목"));
-        assert!(!window_title("bad\nname", "\0")
-            .chars()
-            .any(char::is_control));
+        assert!(
+            !window_title("bad\nname", "\0")
+                .chars()
+                .any(char::is_control)
+        );
         assert_eq!(window_title(&"A".repeat(1024), "").chars().count(), 256);
     }
 }

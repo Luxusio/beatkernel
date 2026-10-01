@@ -5,7 +5,7 @@ use super::{
 };
 use crate::{
     competition::ScoreSummary,
-    player_chart::{PlayerChart, MAX_VISIBLE_NOTES},
+    player_chart::{MAX_VISIBLE_NOTES, PlayerChart},
     scene::Scene,
 };
 use beatkernel::{
@@ -110,5 +110,55 @@ mod tests {
                 assert_eq!(lane_bounds(index - 1, lanes).1, lane_bounds(index, lanes).0);
             }
         }
+    }
+}
+
+/// Passive bounded catalog view; the application owns selection and hit routing.
+pub fn device_list(
+    scene: &mut Scene,
+    catalog: &crate::device_catalog::DeviceCatalog,
+    selected: Option<usize>,
+    first: usize,
+    max_rows: usize,
+) {
+    for (index, choice) in catalog
+        .choices()
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(max_rows.min(10))
+    {
+        let y = 120 + (index - first) as i64 * 39;
+        rect(
+            scene,
+            24,
+            y,
+            906,
+            34,
+            if selected == Some(index) {
+                0x29475e
+            } else {
+                0x1d2734
+            },
+        );
+        text(
+            scene,
+            32,
+            y as usize + 9,
+            &choice.label,
+            2,
+            if choice.selectable {
+                0xf0f4ff
+            } else {
+                0x687485
+            },
+        );
+    }
+    if catalog.choices().is_empty() {
+        text(scene, 24, 145, "NO OUTPUT DEVICES REPORTED", 2, 0x9bb1cf);
+    }
+    if let Some(choice) = selected.and_then(|index| catalog.choices().get(index)) {
+        text(scene, 24, 558, &choice.id, 1, 0xf0f4ff);
+        text(scene, 24, 585, &choice.detail, 1, 0x9bb1cf);
     }
 }

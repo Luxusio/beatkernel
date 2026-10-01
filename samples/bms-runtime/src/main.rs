@@ -2,6 +2,8 @@
 mod app;
 #[cfg(feature = "desktop")]
 mod desktop;
+#[cfg(feature = "desktop")]
+mod devices_native;
 #[allow(dead_code)]
 #[path = "bin/linux_bms.rs"]
 mod linux_play;

@@ -8,6 +8,8 @@ pub mod competition;
 pub mod competition_live;
 /// Actual judge completion and native output drain for full-song play.
 pub mod completion;
+/// Portable bounded audio device metadata and explicit draft selection.
+pub mod device_catalog;
 /// Original bitmap glyph atlas data, prepared outside rendering callbacks.
 #[cfg(feature = "graphics")]
 pub mod font;
@@ -49,7 +51,7 @@ use beatkernel::{
     judge::JudgeStage,
     runtime::SoundBinding,
 };
-use beatkernel_bms::{parse, BmsChart, CompiledBms, ParseOptions};
+use beatkernel_bms::{BmsChart, CompiledBms, ParseOptions, parse};
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
