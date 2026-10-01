@@ -458,14 +458,29 @@ operations disable it. Failed parser admission retains Records and its draft.
 Reported presentation remains distinct from acoustic timing proof. Execution
 acceptance is deferred.
 
-Known ceiling: the recorded ASIO host currently has no validated association
-between the driver's sample counter epoch and the Mixer output-zero epoch.
-Graphical Watch therefore rejects natural ASIO playback before native resources
-unless an explicit diagnostic seconds cutoff is provided. In that diagnostic
-mode, ASIO audio can run but graphical progress remains unavailable. WASAPI,
-ALSA and CoreAudio use their actual reported presentation observations; missing
-observations do not advance the graphical cursor and may postpone natural drain.
-Cancellation remains available. This is source behavior, not acoustic evidence.
+SDK-enabled ASIO Watch uses actual rendered-block presentation observations
+with an explicit multimedia-clock relation and caller-assessed timer, drift and
+output-latency errors. A bounded queue retains future blocks until fresh QPC
+reaches each observation's upper host interval, then advances the shared replay
+visual/completion cursor using its actual output frame. No raw native sample
+counter or prepared-frame count substitutes for audible presentation. Natural
+recorded-prefix completion is admitted without diagnostic seconds; ASIO pause
+remains unavailable. GUI Watch forwards the pinned clock assessments. Graphical
+finite retries likewise defer ASIO capability to the actual native parser rather
+than retaining an obsolete backend veto. Driver/MSVC and physical acceptance
+remain unverified; portable composition fixtures are prepared for later use.
+GUI Watch preserves ASIO exact frame buffers and derives omitted channels from
+the explicit output routing. When rate is omitted, query the selected trusted
+driver's actual integral rate before PCM/files, without creating a stream,
+starting callbacks or changing its rate; standalone replay rate stays explicit.
+
+Known ceiling: ASIO Watch retains at most 4096 distinct actual blocks awaiting
+presentation. Capacity exhaustion fails explicitly without dropping evidence.
+Missing observations freeze the last matured cursor and may delay natural
+completion; cancellation remains available. Repeated actual blocks do not grow
+the queue even when a refreshed anchor changes their assessed interval. No
+interpolation or raw native position establishes a new presented cursor.
+WASAPI, ALSA and CoreAudio keep their existing reported presentation paths.
 
 ## Configured fresh practice start
 

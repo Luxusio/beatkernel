@@ -663,10 +663,13 @@ Commands retain planned output times and are supplied from actual completed
 Mixer reports; explicit late/queue/native failures end through cleanup. The
 optional wall cutoff includes preroll. Omitting it finishes the actual recorded
 prefix and queued PCM tails through native presentation drain; this does not
-prove acoustic completion. ASIO currently requires explicit diagnostic seconds
-because its recorded host lacks a validated output-zero epoch for visual progress
-and natural drain. Native playback and physical timing remain unverified; only
-source checks have run.
+prove acoustic completion. SDK-enabled ASIO requires explicit multimedia-clock
+selection and timer/drift/output-latency assessments. Actual rendered blocks
+wait in a bounded queue until fresh QPC reaches their upper presentation interval,
+then advance recorded visuals and natural drain. GUI Watch preserves exact
+frame buffers and routing, and queries omitted rate from the selected driver
+before PCM loading. ASIO pause remains unsupported; physical accuracy and
+SDK/MSVC/driver execution remain unverified.
 
 The graphical app's Settings → Records → Preview → Watch uses the same playfield
 and native recorded audio. W watches when the record list has focus; F5 retries
