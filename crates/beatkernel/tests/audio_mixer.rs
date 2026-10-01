@@ -17,6 +17,16 @@ fn rig(
     limits: AudioLimits,
     origin: i64,
 ) -> (CommandProducer, Mixer) {
+    rig_end(output, source_rate, samples, limits, origin, None)
+}
+fn rig_end(
+    output: AudioFormat,
+    source_rate: u32,
+    samples: &[f32],
+    limits: AudioLimits,
+    origin: i64,
+    end: Option<u64>,
+) -> (CommandProducer, Mixer) {
     let pcm_limits = PcmLimits::new(4096, 8192, 4).unwrap();
     let mut bank = SampleBank::new(output, pcm_limits).unwrap();
     bank.insert(
@@ -30,8 +40,185 @@ fn rig(
     )
     .unwrap();
     let (producer, consumer) = command_queue(limits.queue_capacity()).unwrap();
-    let config = MixerConfig::new(output, ClockDomainId(71), ts(origin), limits);
+    let mut config = MixerConfig::new(output, ClockDomainId(71), ts(origin), limits);
+    if let Some(end) = end {
+        config = config.with_playback_end_frame(end);
+    }
     (producer, Mixer::new(config, bank, consumer).unwrap())
+}
+
+#[test]
+fn immutable_end_straddles_pcm_and_retains_commands_voices_and_song_anchor() {
+    let (mut producer, mut mixer) = rig_end(
+        AudioFormat::new(1000, 1).unwrap(),
+        1000,
+        &[0.1, 0.2, 0.3, 0.4, 0.5],
+        bounds(),
+        0,
+        Some(3),
+    );
+    assert_eq!(mixer.config().playback_end_frame(), Some(3));
+    for command in [
+        play(1, 0, 1.0),
+        stop(1, 3_000_000),
+        seek(3_000_000),
+        set_rate(Rate::REVERSE, 3_000_000),
+    ] {
+        producer.try_push(command).unwrap();
+    }
+    let mut output = [99.0; 5];
+    let report = mixer.render(&mut output).unwrap();
+    assert_eq!(output, [0.1, 0.2, 0.3, 0.0, 0.0]);
+    assert_eq!(
+        (report.frames, report.playback_frames, report.paused),
+        (5, 3, true)
+    );
+    assert_eq!(
+        (mixer.frame_cursor(), mixer.playback_frame_cursor()),
+        (5, 3)
+    );
+    assert_eq!(report.active_voices, 1);
+    assert_eq!(report.pending_commands, 3);
+    assert_eq!(report.counters.commands_applied, 1);
+    assert_eq!(report.song_position, Timestamp::ZERO);
+    producer.try_push(play(2, 3_000_000, 0.5)).unwrap();
+    producer.request_pause(false);
+    let frozen = mixer.render(&mut output).unwrap();
+    assert_eq!(output, [0.0; 5]);
+    assert_eq!(frozen.playback_frames, 0);
+    assert!(frozen.paused);
+    assert_eq!(
+        frozen.counters.commands_consumed,
+        report.counters.commands_consumed
+    );
+    assert_eq!(
+        frozen.counters.commands_applied,
+        report.counters.commands_applied
+    );
+    assert_eq!(frozen.pending_commands, 3);
+    assert_eq!(frozen.active_voices, 1);
+    assert_eq!(mixer.rate(), Rate::NORMAL);
+    assert_eq!(mixer.playback_frame_cursor(), 3);
+}
+
+#[test]
+fn exact_end_block_is_all_active_and_reports_paused_at_its_end() {
+    let (mut producer, mut mixer) = rig_end(
+        AudioFormat::new(1000, 1).unwrap(),
+        1000,
+        &[0.25; 8],
+        bounds(),
+        0,
+        Some(3),
+    );
+    producer.try_push(play(1, 0, 1.0)).unwrap();
+    let first = mixer.render(&mut [99.0; 2]).unwrap();
+    assert!(!first.paused);
+    let mut last = [99.0];
+    let end = mixer.render(&mut last).unwrap();
+    assert_eq!(last, [0.25]);
+    assert_eq!(
+        (end.playback_start_frame, end.playback_frames, end.paused),
+        (2, 1, true)
+    );
+    assert!(mixer.is_paused());
+    assert_eq!(mixer.render(&mut []).unwrap().playback_frames, 0);
+    assert_eq!(mono(&[0.25]).1.config().playback_end_frame(), None);
+}
+
+#[test]
+fn zero_endpoint_and_invalid_empty_renders_do_not_adopt_or_consume() {
+    let limits = AudioLimits::new(4, 2, 4, 2, 4).unwrap();
+    let (mut producer, mut mixer) = rig_end(
+        AudioFormat::new(1000, 2).unwrap(),
+        1000,
+        &[0.25; 8],
+        limits,
+        0,
+        Some(0),
+    );
+    producer.try_push(play(1, 0, 1.0)).unwrap();
+    let original = mixer.render(&mut []).unwrap();
+    assert!(!original.paused);
+    producer.request_pause(true);
+    let mut invalid = [99.0; 3];
+    assert_eq!(mixer.render(&mut invalid), Err(AudioError::InvalidBuffer));
+    assert_eq!(invalid, [99.0; 3]);
+    let mut large = [99.0; 6];
+    assert_eq!(mixer.render(&mut large), Err(AudioError::RenderCapacity));
+    assert_eq!(large, [99.0; 6]);
+    assert_eq!(mixer.render(&mut []).unwrap(), original);
+    producer.request_pause(false);
+    let mut output = [99.0; 4];
+    let end = mixer.render(&mut output).unwrap();
+    assert_eq!(output, [0.0; 4]);
+    assert!(end.paused);
+    assert_eq!(end.playback_frames, 0);
+    assert_eq!(end.counters.commands_consumed, 0);
+    assert_eq!(
+        (mixer.frame_cursor(), mixer.playback_frame_cursor()),
+        (2, 0)
+    );
+    assert_eq!(mixer.render(&mut []).unwrap().counters, end.counters);
+    assert_eq!(mixer.render(&mut invalid), Err(AudioError::InvalidBuffer));
+    assert!(mixer.is_paused());
+}
+
+#[test]
+fn manual_pause_fractional_heads_and_hard_end_are_partition_invariant() {
+    fn render(
+        first: &[usize],
+        pause: &[usize],
+        last: &[usize],
+    ) -> (Vec<f32>, AudioCounters, u64, u64) {
+        let (mut producer, mut mixer) = rig_end(
+            AudioFormat::new(1000, 1).unwrap(),
+            1000,
+            &[0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+            bounds(),
+            0,
+            Some(5),
+        );
+        producer
+            .try_push(set_rate(Rate::new(1, 2).unwrap(), 0))
+            .unwrap();
+        producer.try_push(play(1, 0, 1.0)).unwrap();
+        producer.try_push(stop(1, 5_000_000)).unwrap();
+        let mut pcm = Vec::new();
+        for &frames in first {
+            let mut block = vec![99.0; frames];
+            mixer.render(&mut block).unwrap();
+            pcm.extend(block);
+        }
+        producer.request_pause(true);
+        for &frames in pause {
+            let mut block = vec![99.0; frames];
+            mixer.render(&mut block).unwrap();
+            pcm.extend(block);
+        }
+        producer.request_pause(false);
+        for &frames in last {
+            let mut block = vec![99.0; frames];
+            mixer.render(&mut block).unwrap();
+            pcm.extend(block);
+        }
+        assert!(mixer.is_paused());
+        assert_eq!(mixer.render(&mut []).unwrap().pending_commands, 1);
+        (
+            pcm,
+            mixer.counters(),
+            mixer.frame_cursor(),
+            mixer.playback_frame_cursor(),
+        )
+    }
+    let whole = render(&[2], &[3], &[5]);
+    let partitioned = render(&[1, 1], &[1, 2], &[1, 1, 3]);
+    assert_eq!(whole, partitioned);
+    let expected = [0.0, 0.1, 0.0, 0.0, 0.0, 0.2, 0.3, 0.4, 0.0, 0.0];
+    for (actual, expected) in whole.0.iter().zip(expected) {
+        assert!((actual - expected).abs() < 1e-7);
+    }
+    assert_eq!((whole.2, whole.3), (10, 5));
 }
 fn mono(samples: &[f32]) -> (CommandProducer, Mixer) {
     rig(

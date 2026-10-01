@@ -64,6 +64,9 @@ fn ts(ns: i64) -> Timestamp {
     Timestamp::from_nanos(ns)
 }
 fn rig(limits: AudioLimits) -> (CommandProducer, Mixer) {
+    rig_end(limits, None)
+}
+fn rig_end(limits: AudioLimits, end: Option<u64>) -> (CommandProducer, Mixer) {
     let format = AudioFormat::new(1000, 1).unwrap();
     let pcm_limits = PcmLimits::new(64, 64, 1).unwrap();
     let mut bank = SampleBank::new(format, pcm_limits).unwrap();
@@ -73,8 +76,53 @@ fn rig(limits: AudioLimits) -> (CommandProducer, Mixer) {
     )
     .unwrap();
     let (producer, consumer) = command_queue(limits.queue_capacity()).unwrap();
-    let config = MixerConfig::new(format, ClockDomainId(9), Timestamp::ZERO, limits);
+    let mut config = MixerConfig::new(format, ClockDomainId(9), Timestamp::ZERO, limits);
+    if let Some(end) = end {
+        config = config.with_playback_end_frame(end);
+    }
     (producer, Mixer::new(config, bank, consumer).unwrap())
+}
+
+#[test]
+fn immutable_fence_prefix_silent_suffix_and_frozen_queue_remain_rt_safe() {
+    let (mut producer, mut mixer) = rig_end(AudioLimits::new(4, 1, 4, 8, 4).unwrap(), Some(3));
+    producer.try_push(play(1, 0)).unwrap();
+    producer.try_push(play(1, 3_000_000)).unwrap();
+    let mut one = [99.0];
+    render(&mut mixer, &mut one);
+    assert_eq!(one, [0.25]);
+    producer.request_pause(true);
+    let mut silence = [99.0; 2];
+    assert_eq!(render(&mut mixer, &mut silence).playback_frames, 0);
+    producer.request_pause(false);
+    let mut crossing = [99.0; 4];
+    let report = render(&mut mixer, &mut crossing);
+    assert_eq!(crossing, [0.5, 0.75, 0.0, 0.0]);
+    assert_eq!(report.playback_frames, 2);
+    assert!(report.paused);
+    assert_eq!(report.active_voices, 1);
+    assert_eq!(report.pending_commands, 1);
+    producer.try_push(play(2, 3_000_000)).unwrap();
+    producer.request_pause(false);
+    let frozen = render(&mut mixer, &mut crossing);
+    assert_eq!(crossing, [0.0; 4]);
+    assert_eq!(
+        frozen.counters.commands_consumed,
+        report.counters.commands_consumed
+    );
+    assert_eq!(frozen.pending_commands, 1);
+    assert_eq!(render(&mut mixer, &mut []).playback_frames, 0);
+    let mut invalid = [99.0; 9];
+    let (result, counts) = track(|| mixer.render(&mut invalid));
+    assert_eq!(counts, [0, 0, 0]);
+    assert_eq!(result, Err(AudioError::RenderCapacity));
+    assert_eq!(invalid, [99.0; 9]);
+    let (mut producer, mut zero) = rig_end(AudioLimits::new(1, 1, 1, 8, 1).unwrap(), Some(0));
+    producer.try_push(play(1, 0)).unwrap();
+    let report = render(&mut zero, &mut one);
+    assert_eq!(one, [0.0]);
+    assert!(report.paused);
+    assert_eq!(report.counters.commands_consumed, 0);
 }
 fn play(voice: u64, at: i64) -> AudioCommand {
     AudioCommand::Play {
