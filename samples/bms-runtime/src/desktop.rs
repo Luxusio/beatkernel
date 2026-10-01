@@ -167,6 +167,7 @@ struct Game {
     replay: bool,
     launch: SessionLaunch,
     prepared_retry: Option<SessionLaunch>,
+    practice_bookmark: Option<PracticeStart>,
 }
 
 impl Game {
@@ -183,6 +184,30 @@ impl Game {
     }
     fn retry_available(&self) -> bool {
         self.prepared_retry.is_none() && (self.joined || !self.cancelling)
+    }
+    fn practice_position(&self) -> Option<PracticeStart> {
+        if self.replay || self.joined || self.cancelling || self.prepared_retry.is_some() {
+            return None;
+        }
+        let snapshot = self.snapshot.as_ref()?;
+        if snapshot.status != player::PlayerStatus::Playing || snapshot.cancelled {
+            return None;
+        }
+        let nanos = snapshot.song_time?.as_nanos();
+        if nanos < 0 {
+            return None;
+        }
+        PracticeStart::from_nanoseconds(nanos).ok()
+    }
+    fn mark_practice(&mut self) -> Result<(), String> {
+        let position = self
+            .practice_position()
+            .ok_or("practice mark requires a live native song position")?;
+        self.practice_bookmark = Some(position);
+        Ok(())
+    }
+    fn practice_restart_available(&self) -> bool {
+        !self.replay && self.practice_bookmark.is_some() && self.retry_available()
     }
     fn cancel(&mut self) {
         self.prepared_retry = None;
@@ -227,6 +252,7 @@ fn spawn_game(
         replay,
         launch,
         prepared_retry: None,
+        practice_bookmark: None,
     })
 }
 
@@ -249,7 +275,7 @@ pub(super) fn run(
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
-            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F4 in settings: records; F6 in settings: practice;  W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry after cleanup; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F4 in settings: records; F6 in settings: practice;  W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry pinned start; F7: mark live position; F8: restart mark after cleanup; Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
         );
         return Ok(());
     }
@@ -2139,6 +2165,16 @@ impl Desktop {
             {
                 self.request_retry()
             }
+            60 if self.navigator.route() == (ScreenRoute::Play { replay: false }) => {
+                self.mark_practice()
+            }
+            61 if matches!(
+                self.navigator.route(),
+                ScreenRoute::Play { replay: false } | ScreenRoute::Results { replay: false }
+            ) =>
+            {
+                self.request_restart(true)
+            }
             5 if self.navigator.route() == ScreenRoute::Selection => self.open_settings(),
             1 if self.navigator.route() == ScreenRoute::Selection && !self.entries.is_empty() => {
                 self.key(KeyCode::Enter, false)
@@ -2182,7 +2218,20 @@ impl Desktop {
             }
         }
     }
+    fn mark_practice(&mut self) {
+        if !self.ui_ready() || self.navigator.route() != (ScreenRoute::Play { replay: false }) {
+            return;
+        }
+        if let Some(game) = &mut self.game {
+            self.failure = game.mark_practice().err();
+        }
+        self.gesture.cancel();
+        self.invalidate_hits();
+    }
     fn request_retry(&mut self) {
+        self.request_restart(false);
+    }
+    fn request_restart(&mut self, from_bookmark: bool) {
         if !self.ui_ready()
             || !matches!(
                 self.navigator.route(),
@@ -2194,7 +2243,7 @@ impl Desktop {
         let Some(game) = &self.game else {
             return;
         };
-        if !game.retry_available() {
+        if !game.retry_available() || (from_bookmark && !game.practice_restart_available()) {
             return;
         }
         // Preflight the exact retained invocation before signalling cancellation.
@@ -2203,7 +2252,13 @@ impl Desktop {
         } else {
             self.validate
         };
-        let prepared = game.launch.retry().and_then(|launch| {
+        let prepared = if from_bookmark {
+            game.launch
+                .retry_from(game.practice_bookmark.expect("bookmark admission"))
+        } else {
+            game.launch.retry()
+        }
+        .and_then(|launch| {
             validate(launch.args()).map_err(|error| error.to_string())?;
             Ok(launch)
         });
@@ -2239,6 +2294,7 @@ impl Desktop {
         };
         // Spawn is the only fallible step; retain joined results on failure.
         let native = if old.replay { self.replay } else { self.native };
+        let bookmark = old.practice_bookmark;
         match spawn_game(
             native,
             launch,
@@ -2246,7 +2302,8 @@ impl Desktop {
             old.local_comparisons,
             old.replay,
         ) {
-            Ok(game) => {
+            Ok(mut game) => {
+                game.practice_bookmark = bookmark;
                 self.commit_route(next);
                 self.game = Some(game);
                 self.failure = None;
@@ -2377,6 +2434,23 @@ impl Desktop {
             && key == KeyCode::F5
         {
             self.request_retry();
+            return;
+        }
+        if !repeat
+            && key == KeyCode::F7
+            && self.navigator.route() == (ScreenRoute::Play { replay: false })
+        {
+            self.mark_practice();
+            return;
+        }
+        if !repeat
+            && key == KeyCode::F8
+            && matches!(
+                self.navigator.route(),
+                ScreenRoute::Play { replay: false } | ScreenRoute::Results { replay: false }
+            )
+        {
+            self.request_restart(true);
             return;
         }
         if matches!(self.navigator.route(), ScreenRoute::Results { .. }) {
@@ -2841,6 +2915,51 @@ impl Desktop {
                         "COMPARISONS"
                     },
                 );
+            }
+            if !game.replay {
+                let mark_bounds = Bounds {
+                    x: 550,
+                    y: 20,
+                    width: 140,
+                    height: 30,
+                };
+                let restart_bounds = Bounds {
+                    x: 700,
+                    y: 20,
+                    width: 170,
+                    height: 30,
+                };
+                if game.practice_position().is_some() {
+                    control(
+                        pixels,
+                        &mut self.hits,
+                        &self.gesture,
+                        point,
+                        ControlId(60),
+                        mark_bounds,
+                        "MARK F7",
+                    );
+                } else {
+                    molecules::button(pixels, mark_bounds, "MARK F7", false, false);
+                }
+                if game.practice_restart_available() {
+                    control(
+                        pixels,
+                        &mut self.hits,
+                        &self.gesture,
+                        point,
+                        ControlId(61),
+                        restart_bounds,
+                        "RESTART F8",
+                    );
+                } else {
+                    molecules::button(pixels, restart_bounds, "RESTART F8", false, false);
+                }
+                let caption = game.practice_bookmark.map_or_else(
+                    || "F7 MARK / F8 RESTART MARK".to_owned(),
+                    |start| format!("MARK {}  F8 RESTART", start.formatted()),
+                );
+                text(pixels, 24, 102, &caption, 1, 0xd8b36b);
             }
             let retry_bounds = Bounds {
                 x: 410,
@@ -3932,8 +4051,79 @@ mod tests {
             ])
             .unwrap(),
             prepared_retry: None,
+            practice_bookmark: None,
         }
     }
+    #[test]
+    fn practice_mark_uses_exact_accepted_native_time_and_keeps_previous_mark_on_rejection() {
+        let mut game = retry_fixture();
+        assert!(game.mark_practice().is_err());
+        game.accept_snapshot(player::PlayerSnapshot {
+            song_time: Some(beatkernel::time::Timestamp::from_nanos(604_800_000_000_001)),
+            status: player::PlayerStatus::Playing,
+            ..Default::default()
+        });
+        game.mark_practice().unwrap();
+        let bookmark = game.practice_bookmark.unwrap();
+        assert_eq!(bookmark.nanoseconds(), 604_800_000_000_001);
+        assert!(game.practice_restart_available());
+        game.snapshot.as_mut().unwrap().song_time =
+            Some(beatkernel::time::Timestamp::from_nanos(-1));
+        assert!(game.mark_practice().is_err());
+        assert_eq!(game.practice_bookmark, Some(bookmark));
+        game.snapshot.as_mut().unwrap().song_time =
+            Some(beatkernel::time::Timestamp::from_nanos(i64::MAX));
+        game.snapshot.as_mut().unwrap().cancelled = true;
+        assert!(game.practice_position().is_none());
+        game.snapshot.as_mut().unwrap().cancelled = false;
+        game.replay = true;
+        assert!(game.mark_practice().is_err());
+        assert!(!game.practice_restart_available());
+        game.replay = false;
+        game.mark_practice().unwrap();
+        assert_eq!(game.practice_bookmark.unwrap().nanoseconds(), i64::MAX);
+        game.prepared_retry = Some(game.launch.retry_from(bookmark).unwrap());
+        game.cancelling = true;
+        assert!(game.practice_position().is_none());
+        assert!(!game.practice_restart_available());
+        assert!(game.owner_finished(false).is_none());
+        assert!(game.prepared_retry.is_none());
+        assert!(game.practice_restart_available());
+        assert!(game.practice_position().is_none());
+    }
+    #[test]
+    fn bookmark_native_preflight_failure_does_not_cancel_or_mutate_live_session() {
+        fn reject(_: &[String]) -> Result<(), Box<dyn Error>> {
+            Err("fixture rejects before native ownership".into())
+        }
+        let mut app = lifecycle_fixture();
+        let next = app
+            .prepare_route(ScreenRoute::Play { replay: false })
+            .unwrap();
+        app.commit_route(next);
+        let mut game = retry_fixture();
+        game.accept_snapshot(player::PlayerSnapshot {
+            song_time: Some(beatkernel::time::Timestamp::from_nanos(72_000_000_000_001)),
+            status: player::PlayerStatus::Playing,
+            ..Default::default()
+        });
+        game.mark_practice().unwrap();
+        let bookmark = game.practice_bookmark;
+        let original = game.launch.args().to_vec();
+        app.game = Some(game);
+        app.validate = reject;
+        app.request_restart(true);
+        let game = app.game.as_ref().unwrap();
+        assert!(!game.cancelling);
+        assert!(game.prepared_retry.is_none());
+        assert_eq!(game.practice_bookmark, bookmark);
+        assert_eq!(game.launch.args(), original);
+        assert_eq!(game.launch.attempt(), 0);
+        assert!(app.failure.as_deref().unwrap().contains("retry preflight"));
+        app.request_close();
+        assert!(app.game.as_ref().unwrap().prepared_retry.is_none());
+    }
+
     #[test]
     fn retry_admission_waits_for_owner_success_and_cancel_discards_prepared_launch() {
         let mut game = retry_fixture();
