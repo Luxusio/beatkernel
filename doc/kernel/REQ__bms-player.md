@@ -804,6 +804,20 @@ until authorized, while fixture authorship continues alongside implementation.
 
 ## Catalog search and filtered selection
 
+Catalog navigation supports Up/Down, PageUp/Down by fifteen displayed rows, and
+Home/End within the current search projection. Focused search Home/End moves
+the text cursor. Vertical wheel input over a visible chart row navigates that
+projection; native pixel deltas follow the renderer's physical/logical stretch.
+Fractional deltas accumulate, each event admits at most fifteen steps, and
+positive vertical deltas move earlier. Nonfinite input and lifecycle/focus/query
+changes clear the remainder. Inactive/hidden views and other controls cannot
+consume catalog scrolling. Scrolling cancels an armed click; no gameplay input
+or timestamp is produced. Rapid events use retained painter-order hit regions
+while central click hits await redraw, preserving search-field overlap rules.
+Navigation retains original chart identities and
+does not rebuild the cached search projection. Regression fixtures are prepared
+for later execution; source compilation alone is not GUI acceptance.
+
 Selection exposes a 256-byte single-line search field (F3 or click). Whitespace
 separated tokens must each occur in the combined lowercased title and artist.
 The original catalog order and entry identity remain; a changed query retains

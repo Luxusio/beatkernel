@@ -124,6 +124,10 @@ Selection F3 or the search field filters title and artist with whitespace-separa
 substring tokens. Up/Down navigates matches; Enter exits search editing before
 playing, and Escape clears it before ordinary close. Empty results cannot play
 or open Records for a hidden chart. Search survives Settings Back and Play return.
+Selection supports PageUp/Down by fifteen rows and Home/End within search
+results. Wheel over a chart row moves through those results, with fractional
+trackpad movement accumulated and at most one page admitted per event.
+Focused search Home/End moves its text cursor.
 F5 or Retry starts the same chart again after the previous native session has
 finished cleanup. The accepted chart/device/timing/roster options stay pinned;
 recorded retries use distinct .retry<N>.bkr stems and create-new saves.
