@@ -1,0 +1,11 @@
+# Converted sample paths through actual preparation
+
+Default preparation now looks up literal assets first and, only when genuinely absent, considers bounded same-stem WAV/FLAC extension variants. Original WAV/FLAC families take priority, and other recognized sound suffixes or extensionless names try WAV then FLAC. All 24 ASCII extension-case combinations are considered in deterministic mask order, retaining exact Unicode stems/directories and both slash styles. Unknown suffixes stay literal. DefaultAssetDecoder still decides codec from selected bytes, while original BMS references and compiled/replay identity remain unchanged.
+
+Each selected path must canonicalize inside the chart root and identify a regular file before reading. Existing corrupt/unsupported files, directories, dangling/escaping links and permission errors reject instead of trying a different existing candidate. Explicit AssetPathPolicy::Exact remains available through load_prepared_with_decoder_and_paths; the existing injected-codec entry load_prepared_with_decoder retains its old exact semantics. Shared native/live/replay/offline default preparation uses AudioVariants, with the same PCM/encoded limits and no callback IO or new dependency/crate.
+
+Prepared resolver fixtures cover bounded candidate order/case/Unicode/lexical errors and real exact/fallback/extensionless/missing/invalid/symlink paths. The actual preparation fixture loads a mixed-case Unicode FLAC filename from an original WAV reference, compares captured chart setup identity against the literal WAV equivalent, drives both through actual offline Runtime/Mixer and checks identical literal PCM. Exact-mode failure and damaged-original refusal are also prepared. Fixtures are compiled for later execution; no filesystem/native test pass is claimed.
+
+## Known ceiling
+
+This is bounded supported filename lookup, not recursive search or stem case folding. Codec availability remains strict WAV/native FLAC subset; OGG/MP3 decoding is unfinished. Lookup permits contained symlinks under the existing trusted static-directory policy, not a race-free sandbox against concurrent replacements. Windows filesystem case behavior and native endpoint playback remain unverified. At most 24 alternate candidate paths are probed per reference; no startup-time/performance bound is claimed.

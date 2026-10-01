@@ -843,7 +843,9 @@ disagreement fail explicitly; this does not establish a physical timing bound.
 loading with a native FLAC/strict WAV default and an injected off-thread decoder
 boundary. FLAC decoding preserves source rate/channels, checks decoded storage
 and surfaces corrupt/unsupported streams before playback. OGG/Vorbis, MP3 and
-other compressed formats remain unfinished. Asset extensions are not substituted. Explicit mono-to-stereo conversion
+other compressed formats remain unfinished. Missing literal references may resolve to bounded contained same-stem WAV/FLAC
+extension variants, including extension letter case. Existing-path and codec
+errors never fall through; explicit/custom exact lookup remains available. Explicit mono-to-stereo conversion
 is available without changing source frame positions.
 
 [Rolling BGM admission](doc/kernel/REQ__bms-bgm-admission.md) keeps native command
