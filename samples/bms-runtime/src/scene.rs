@@ -5,6 +5,30 @@ use crate::playfield_gpu::{MAX_PLAYFIELDS, PlayfieldCache, PlayfieldFrame};
 use crate::texture::TextureId;
 use std::sync::Arc;
 
+/// Immutable per-call clipping rectangle with checked exclusive endpoints.
+/// Signed origins are allowed; dimensions must be positive and representable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClipRect {
+    endpoints: [i64; 4],
+}
+impl ClipRect {
+    pub fn new(bounds: [i64; 4]) -> Result<Self, String> {
+        let [x, y, width, height] = bounds;
+        if width <= 0 || height <= 0 {
+            return Err("clip rectangle dimensions must be positive".into());
+        }
+        let right = x
+            .checked_add(width)
+            .ok_or("clip rectangle right endpoint overflow")?;
+        let bottom = y
+            .checked_add(height)
+            .ok_or("clip rectangle bottom endpoint overflow")?;
+        Ok(Self {
+            endpoints: [x, y, right, bottom],
+        })
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct DrawBatch {
     pub texture: TextureId,
@@ -194,6 +218,40 @@ impl Scene {
         uv: [f32; 4],
         tint: u32,
     ) -> Result<(), String> {
+        Self::validate_uv(uv)?;
+        self.push(texture, bounds, uv, tint);
+        self.status()
+    }
+
+    /// Crops to the viewport and this call's immutable clip in original sprite
+    /// coordinates. It never changes clipping for later sprites or siblings.
+    pub fn sprite_clipped(
+        &mut self,
+        texture: TextureId,
+        bounds: [i64; 4],
+        uv: [f32; 4],
+        tint: u32,
+        clip: ClipRect,
+    ) -> Result<(), String> {
+        Self::validate_uv(uv)?;
+        if let Some(endpoints) = self.clip_bounds(clip) {
+            self.push_in(texture, bounds, uv, tint, endpoints);
+        }
+        self.status()
+    }
+
+    pub(crate) fn clip_bounds(&self, clip: ClipRect) -> Option<[i64; 4]> {
+        let [left, top, right, bottom] = clip.endpoints;
+        let endpoints = [
+            left.max(0),
+            top.max(0),
+            right.min(i64::from(self.width)),
+            bottom.min(i64::from(self.height)),
+        ];
+        (endpoints[0] < endpoints[2] && endpoints[1] < endpoints[3]).then_some(endpoints)
+    }
+
+    fn validate_uv(uv: [f32; 4]) -> Result<(), String> {
         if uv.iter().any(|value| !value.is_finite() || *value < 0.0)
             || uv[2] <= 0.0
             || uv[3] <= 0.0
@@ -202,8 +260,7 @@ impl Scene {
         {
             return Err("sprite UV rectangle must lie inside normalized texture bounds".into());
         }
-        self.push(texture, bounds, uv, tint);
-        self.status()
+        Ok(())
     }
 
     pub(crate) fn glyph(&mut self, bounds: [i64; 4], uv: [f32; 4], color: u32) {
@@ -211,14 +268,31 @@ impl Scene {
     }
 
     fn push(&mut self, texture: TextureId, bounds: [i64; 4], uv: [f32; 4], color: u32) {
+        self.push_in(
+            texture,
+            bounds,
+            uv,
+            color,
+            [0, 0, i64::from(self.width), i64::from(self.height)],
+        );
+    }
+
+    fn push_in(
+        &mut self,
+        texture: TextureId,
+        bounds: [i64; 4],
+        uv: [f32; 4],
+        color: u32,
+        clip: [i64; 4],
+    ) {
         let [x, y, width, height] = bounds;
         if width <= 0 || height <= 0 {
             return;
         }
-        let left = x.clamp(0, i64::from(self.width));
-        let top = y.clamp(0, i64::from(self.height));
-        let right = x.saturating_add(width).clamp(0, i64::from(self.width));
-        let bottom = y.saturating_add(height).clamp(0, i64::from(self.height));
+        let left = x.clamp(clip[0], clip[2]);
+        let top = y.clamp(clip[1], clip[3]);
+        let right = x.saturating_add(width).clamp(clip[0], clip[2]);
+        let bottom = y.saturating_add(height).clamp(clip[1], clip[3]);
         if right <= left || bottom <= top {
             return;
         }
@@ -304,6 +378,196 @@ mod tests {
     use super::*;
 
     #[test]
+    fn clip_rect_checks_endpoints_and_intersects_signed_origins() {
+        for bounds in [
+            [0, 0, 0, 1],
+            [0, 0, 1, 0],
+            [0, 0, -1, 1],
+            [0, 0, 1, -1],
+            [i64::MAX, 0, 1, 1],
+            [0, i64::MAX, 1, 1],
+        ] {
+            assert!(ClipRect::new(bounds).is_err());
+        }
+        let scene = Scene::new(100, 100);
+        assert_eq!(
+            scene.clip_bounds(ClipRect::new([-20, -30, 80, 90]).unwrap()),
+            Some([0, 0, 60, 60])
+        );
+        assert_eq!(
+            scene.clip_bounds(ClipRect::new([80, 90, 100, 100]).unwrap()),
+            Some([80, 90, 100, 100])
+        );
+        assert_eq!(
+            scene.clip_bounds(ClipRect::new([100, 0, 1, 1]).unwrap()),
+            None
+        );
+        assert_eq!(
+            scene.clip_bounds(ClipRect::new([i64::MIN, 0, i64::MAX, 1]).unwrap()),
+            None
+        );
+        assert_eq!(
+            Scene::new(0, 100).clip_bounds(ClipRect::new([0, 0, 1, 1]).unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn sprite_clips_each_edge_and_all_edges_in_original_uv_coordinates() {
+        for (clip, bounds, uv) in [
+            (
+                [25, 0, 75, 100],
+                [25.0, 0.0, 75.0, 100.0],
+                [0.25, 0.0, 0.75, 1.0],
+            ),
+            (
+                [0, 25, 100, 75],
+                [0.0, 25.0, 100.0, 75.0],
+                [0.0, 0.25, 1.0, 0.75],
+            ),
+            (
+                [0, 0, 75, 100],
+                [0.0, 0.0, 75.0, 100.0],
+                [0.0, 0.0, 0.75, 1.0],
+            ),
+            (
+                [0, 0, 100, 75],
+                [0.0, 0.0, 100.0, 75.0],
+                [0.0, 0.0, 1.0, 0.75],
+            ),
+            (
+                [25, 25, 50, 50],
+                [25.0, 25.0, 50.0, 50.0],
+                [0.25, 0.25, 0.5, 0.5],
+            ),
+        ] {
+            let mut scene = Scene::new(100, 100);
+            scene
+                .sprite_clipped(
+                    TextureId::FONT,
+                    [0, 0, 100, 100],
+                    [0.0, 0.0, 1.0, 1.0],
+                    0xffffff,
+                    ClipRect::new(clip).unwrap(),
+                )
+                .unwrap();
+            assert_eq!(scene.rectangles()[0].bounds, bounds);
+            assert_eq!(scene.rectangles()[0].uv, uv);
+        }
+        let mut scene = Scene::new(100, 100);
+        scene
+            .sprite_clipped(
+                TextureId::FONT,
+                [-20, -20, 80, 80],
+                [0.25, 0.25, 0.5, 0.5],
+                0xffffff,
+                ClipRect::new([-20, -30, 80, 90]).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(scene.rectangles()[0].bounds, [0.0, 0.0, 60.0, 60.0]);
+        assert_eq!(scene.rectangles()[0].uv, [0.375, 0.375, 0.375, 0.375]);
+    }
+
+    #[test]
+    fn clipped_invalid_uv_and_invisible_bounds_preserve_geometry() {
+        let mut scene = Scene::new(100, 100);
+        scene.rect(0, 0, 1, 1, 0);
+        let epoch = scene.geometry_epoch;
+        let clip = ClipRect::new([100, 100, 1, 1]).unwrap();
+        for uv in [
+            [f32::NAN, 0.0, 1.0, 1.0],
+            [0.0, f32::INFINITY, 1.0, 1.0],
+            [-0.1, 0.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+            [0.5, 0.0, 0.75, 1.0],
+        ] {
+            assert!(
+                scene
+                    .sprite_clipped(TextureId::FONT, [0, 0, 1, 1], uv, 0, clip)
+                    .is_err()
+            );
+            assert_eq!(scene.geometry_epoch, epoch);
+            assert_eq!(scene.rectangles.len(), 1);
+            assert_eq!(scene.batches.len(), 1);
+            assert!(scene.status().is_ok());
+        }
+        scene
+            .sprite_clipped(TextureId::FONT, [0, 0, 1, 1], [0.0, 0.0, 1.0, 1.0], 0, clip)
+            .unwrap();
+        let clip = ClipRect::new([0, 0, 100, 100]).unwrap();
+        for bounds in [
+            [i64::MIN, 0, i64::MAX, 1],
+            [i64::MAX, 0, i64::MAX, 1],
+            [0, 0, -1, 1],
+        ] {
+            scene
+                .sprite_clipped(TextureId::FONT, bounds, [0.0, 0.0, 1.0, 1.0], 0, clip)
+                .unwrap();
+            assert_eq!(scene.geometry_epoch, epoch);
+        }
+        scene
+            .sprite_clipped(
+                TextureId::FONT,
+                [-1, -1, i64::MAX, i64::MAX],
+                [0.0, 0.0, 1.0, 1.0],
+                0,
+                clip,
+            )
+            .unwrap();
+        assert_eq!(scene.rectangles()[1].bounds, [0.0, 0.0, 100.0, 100.0]);
+        assert!(
+            scene.rectangles()[1]
+                .uv
+                .iter()
+                .all(|value| value.is_finite() && *value >= 0.0)
+        );
+    }
+
+    #[test]
+    fn clipped_packets_append_in_order_without_leaking_clip_to_siblings() {
+        let mut packet = Scene::with_capacity(100, 100, 4);
+        packet
+            .sprite_clipped(
+                TextureId::FONT,
+                [0, 0, 100, 100],
+                [0.0, 0.0, 1.0, 1.0],
+                0xff0000,
+                ClipRect::new([25, 25, 50, 50]).unwrap(),
+            )
+            .unwrap();
+        packet.rect(0, 0, 100, 100, 0x00ff00);
+        packet
+            .sprite(
+                TextureId::FONT,
+                [0, 0, 100, 100],
+                [0.0, 0.0, 1.0, 1.0],
+                0x0000ff,
+            )
+            .unwrap();
+        let packet = packet.geometry_snapshot().unwrap();
+        let mut scene = Scene::new(100, 100);
+        scene.append_geometry(&packet).unwrap();
+        scene.glyph([0, 0, 100, 100], [0.0, 0.0, 1.0, 1.0], 0xffffff);
+        assert_eq!(scene.rectangles()[0].bounds, [25.0, 25.0, 50.0, 50.0]);
+        for rectangle in &scene.rectangles()[1..] {
+            assert_eq!(rectangle.bounds, [0.0, 0.0, 100.0, 100.0]);
+            assert_eq!(rectangle.uv, [0.0, 0.0, 1.0, 1.0]);
+        }
+        assert_eq!(
+            scene
+                .batches()
+                .iter()
+                .map(|batch| (batch.texture, batch.first, batch.count))
+                .collect::<Vec<_>>(),
+            [
+                (TextureId::FONT, 0, 1),
+                (TextureId::WHITE, 1, 1),
+                (TextureId::FONT, 2, 2)
+            ]
+        );
+    }
+
+    #[test]
     fn clips_signed_extremes_and_preserves_painter_order() {
         let mut scene = Scene::new(960, 720);
         scene.rect(-5, -7, 10, 12, 0xff0000);
@@ -323,6 +587,18 @@ mod tests {
         }
         assert_eq!(scene.rectangles().len(), MAX_RECTANGLES);
         assert!(scene.status().is_err());
+        assert!(
+            scene
+                .sprite_clipped(
+                    TextureId::FONT,
+                    [0, 0, 1, 1],
+                    [0.0, 0.0, 1.0, 1.0],
+                    0,
+                    ClipRect::new([0, 0, 1, 1]).unwrap()
+                )
+                .is_err()
+        );
+        assert_eq!(scene.rectangles().len(), MAX_RECTANGLES);
         scene.clear();
         assert!(scene.status().is_ok());
         assert!(scene.rectangles().is_empty());
