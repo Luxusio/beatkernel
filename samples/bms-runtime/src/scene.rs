@@ -1,12 +1,14 @@
 //! Bounded, ordered geometry shared by native and browser renderers.
 
 pub const MAX_RECTANGLES: usize = 65_536;
+use crate::playfield_gpu::{MAX_PLAYFIELDS, PlayfieldCache, PlayfieldFrame};
 use crate::texture::TextureId;
 
 pub(crate) struct DrawBatch {
     pub texture: TextureId,
     pub first: u32,
     pub count: u32,
+    pub playfield: Option<usize>,
 }
 
 #[repr(C)]
@@ -23,6 +25,8 @@ pub struct Scene {
     rectangles: Vec<Rectangle>,
     batches: Vec<DrawBatch>,
     overflow: bool,
+    playfields: Vec<PlayfieldFrame>,
+    playfield_caches: Vec<PlayfieldCache>,
 }
 
 impl Scene {
@@ -33,6 +37,10 @@ impl Scene {
             rectangles: Vec::with_capacity(MAX_RECTANGLES),
             batches: Vec::with_capacity(MAX_RECTANGLES),
             overflow: false,
+            playfields: Vec::with_capacity(MAX_PLAYFIELDS),
+            playfield_caches: (0..MAX_PLAYFIELDS)
+                .map(|_| PlayfieldCache::default())
+                .collect(),
         }
     }
 
@@ -40,6 +48,44 @@ impl Scene {
         self.rectangles.clear();
         self.batches.clear();
         self.overflow = false;
+        self.playfields.clear();
+    }
+
+    /// Insert a retained GPU note layer at this exact position in painter order.
+    /// Cache lifetime crosses `clear`; membership/geometry/seek invalidate it.
+    pub(crate) fn playfield(
+        &mut self,
+        chart: &crate::player_chart::PlayerChart,
+        now: beatkernel::time::Timestamp,
+        lookahead: i64,
+        bounds: crate::ui::interaction::Bounds,
+    ) -> Result<(), String> {
+        if lookahead <= 0 {
+            return Err("playfield lookahead must be positive".into());
+        }
+        let slot = self.playfields.len();
+        if slot == MAX_PLAYFIELDS {
+            return Err(format!(
+                "scene exceeds {MAX_PLAYFIELDS} displayed playfields"
+            ));
+        }
+        let notes = chart.visible_notes_checked(now, lookahead, 150_000_000)?;
+        if notes
+            .iter()
+            .any(|note| note.lane_index >= chart.lanes.len())
+        {
+            return Err("playfield note references an unavailable lane".into());
+        }
+        let frame =
+            self.playfield_caches[slot].frame(&notes, chart.lanes.len(), bounds, now, lookahead);
+        self.playfields.push(frame);
+        self.batches.push(DrawBatch {
+            texture: TextureId::WHITE,
+            first: 0,
+            count: 0,
+            playfield: Some(slot),
+        });
+        Ok(())
     }
 
     /// Clips to the logical viewport. Capacity exhaustion is sticky until clear,
@@ -97,7 +143,7 @@ impl Scene {
         if let Some(batch) = self
             .batches
             .last_mut()
-            .filter(|batch| batch.texture == texture)
+            .filter(|batch| batch.playfield.is_none() && batch.texture == texture)
         {
             batch.count += 1;
         } else {
@@ -105,6 +151,7 @@ impl Scene {
                 texture,
                 first,
                 count: 1,
+                playfield: None,
             });
         }
         let horizontal = (i128::from(left) - i128::from(x)) as f64 / width as f64;
@@ -150,6 +197,9 @@ impl Scene {
     }
     pub(crate) fn batches(&self) -> &[DrawBatch] {
         &self.batches
+    }
+    pub(crate) fn playfields(&self) -> &[PlayfieldFrame] {
+        &self.playfields
     }
 }
 
@@ -223,12 +273,85 @@ mod tests {
                 (TextureId::FONT, 2, 2)
             ]
         );
-        assert!(scene
-            .sprite(TextureId::FONT, [0, 0, 1, 1], [f32::NAN, 0.0, 1.0, 1.0], 0)
-            .is_err());
+        assert!(
+            scene
+                .sprite(TextureId::FONT, [0, 0, 1, 1], [f32::NAN, 0.0, 1.0, 1.0], 0)
+                .is_err()
+        );
         assert_eq!(scene.rectangles().len(), 4);
         scene
             .sprite(TextureId::FONT, [0, 0, 1, 1], [0.2, 0.2, 0.8, 0.8], 0)
             .unwrap();
+    }
+
+    #[test]
+    fn retained_note_layer_splits_rectangles_and_survives_clear() {
+        let source = beatkernel_bms::parse(
+            "#BPM 60\n#00011:01\n",
+            beatkernel_bms::ParseOptions::default(),
+        )
+        .unwrap();
+        let chart = crate::player_chart::PlayerChart::from_compiled(
+            &source,
+            &source.compile().unwrap().chart,
+        )
+        .unwrap();
+        let bounds = crate::ui::interaction::Bounds {
+            x: 80,
+            y: 106,
+            width: 640,
+            height: 528,
+        };
+        let mut scene = Scene::new(960, 720);
+        scene.rect(0, 0, 1, 1, 0);
+        scene
+            .playfield(
+                &chart,
+                beatkernel::time::Timestamp::ZERO,
+                1_000_000_000,
+                bounds,
+            )
+            .unwrap();
+        scene.rect(0, 0, 1, 1, 0);
+        assert_eq!(scene.batches().len(), 3);
+        assert_eq!(scene.batches()[0].first, 0);
+        assert_eq!(scene.batches()[1].playfield, Some(0));
+        assert_eq!(scene.batches()[2].first, 1);
+        let cached = std::sync::Arc::clone(&scene.playfields()[0].instances);
+        scene.clear();
+        assert!(scene.playfields().is_empty());
+        scene
+            .playfield(
+                &chart,
+                beatkernel::time::Timestamp::ZERO,
+                1_000_000_000,
+                bounds,
+            )
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &cached,
+            &scene.playfields()[0].instances
+        ));
+        for _ in 1..MAX_PLAYFIELDS {
+            scene
+                .playfield(
+                    &chart,
+                    beatkernel::time::Timestamp::ZERO,
+                    1_000_000_000,
+                    bounds,
+                )
+                .unwrap();
+        }
+        assert!(
+            scene
+                .playfield(
+                    &chart,
+                    beatkernel::time::Timestamp::ZERO,
+                    1_000_000_000,
+                    bounds
+                )
+                .is_err()
+        );
+        assert_eq!(scene.playfields().len(), MAX_PLAYFIELDS);
     }
 }

@@ -15,7 +15,7 @@ use std::{
 pub const MAX_VISIBLE_NOTES: usize = 2048;
 
 /// A note from the actual compiled gameplay chart.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlayerNote {
     /// Chart-local gameplay identity.
     pub object: ObjectId,
@@ -60,11 +60,7 @@ fn lane_order(channel: u8) -> (u8, u8) {
     let column = channel & 15;
     // Scratch belongs at the outside edge on each side of a double-play chart.
     let rank = if column == 6 {
-        if side == 1 {
-            0
-        } else {
-            10
-        }
+        if side == 1 { 0 } else { 10 }
     } else {
         column
     };
@@ -144,6 +140,34 @@ impl PlayerChart {
         behind_ns: i64,
         max: usize,
     ) -> Vec<&PlayerNote> {
+        self.visible_notes_inner(now, lookahead_ns, behind_ns, max.min(MAX_VISIBLE_NOTES))
+    }
+
+    /// Presentation admission checks one extra overlap instead of silently
+    /// truncating dense charts. Gameplay judging is independent of this budget.
+    pub fn visible_notes_checked(
+        &self,
+        now: Timestamp,
+        lookahead_ns: i64,
+        behind_ns: i64,
+    ) -> Result<Vec<&PlayerNote>, String> {
+        let notes = self.visible_notes_inner(now, lookahead_ns, behind_ns, MAX_VISIBLE_NOTES + 1);
+        if notes.len() > MAX_VISIBLE_NOTES {
+            Err(format!(
+                "playfield exceeds {MAX_VISIBLE_NOTES} visible notes"
+            ))
+        } else {
+            Ok(notes)
+        }
+    }
+
+    fn visible_notes_inner(
+        &self,
+        now: Timestamp,
+        lookahead_ns: i64,
+        behind_ns: i64,
+        max: usize,
+    ) -> Vec<&PlayerNote> {
         if lookahead_ns < 0 || behind_ns < 0 || max == 0 {
             return Vec::new();
         }
@@ -152,16 +176,8 @@ impl PlayerChart {
         let end = self
             .notes
             .partition_point(|note| i128::from(note.start.as_nanos()) <= upper);
-        let mut visible = Vec::with_capacity(max.min(MAX_VISIBLE_NOTES).min(end));
-        self.collect_visible(
-            1,
-            0,
-            self.tree_leaves,
-            end,
-            lower,
-            max.min(MAX_VISIBLE_NOTES),
-            &mut visible,
-        );
+        let mut visible = Vec::with_capacity(max.min(end));
+        self.collect_visible(1, 0, self.tree_leaves, end, lower, max, &mut visible);
         visible
     }
 
@@ -354,7 +370,7 @@ pub fn scan_library(root: &Path) -> Result<ChartLibrary, PlayerChartError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beatkernel_bms::{parse, ParseOptions};
+    use beatkernel_bms::{ParseOptions, parse};
 
     fn model(text: &str) -> PlayerChart {
         let source = parse(text, ParseOptions::default()).unwrap();
@@ -363,7 +379,9 @@ mod tests {
 
     #[test]
     fn unicode_lane_order_and_exact_hold_overlap() {
-        let chart = model("#TITLE 별빛\n#ARTIST 作曲家\n#BPM 60\n#LNTYPE 1\n#WAV01 tap.wav\n#00016:01\n#00021:01\n#00026:01\n#00051:0101\n");
+        let chart = model(
+            "#TITLE 별빛\n#ARTIST 作曲家\n#BPM 60\n#LNTYPE 1\n#WAV01 tap.wav\n#00016:01\n#00021:01\n#00026:01\n#00051:0101\n",
+        );
         assert_eq!(
             (chart.title.as_str(), chart.artist.as_str()),
             ("별빛", "作曲家")
@@ -373,9 +391,11 @@ mod tests {
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].start, Timestamp::ZERO);
         assert_eq!(visible[0].end, Some(Timestamp::from_nanos(2_000_000_000)));
-        assert!(chart
-            .visible_notes(Timestamp::from_nanos(2_000_000_001), 0, 0, 10)
-            .is_empty());
+        assert!(
+            chart
+                .visible_notes(Timestamp::from_nanos(2_000_000_001), 0, 0, 10)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -387,9 +407,11 @@ mod tests {
                 .len(),
             2
         );
-        assert!(chart
-            .visible_notes(Timestamp::MIN, i64::MAX, i64::MAX, 10)
-            .is_empty());
+        assert!(
+            chart
+                .visible_notes(Timestamp::MIN, i64::MAX, i64::MAX, 10)
+                .is_empty()
+        );
         assert_eq!(
             chart.visible_notes(Timestamp::ZERO, i64::MAX, 0, 1).len(),
             1
@@ -404,6 +426,18 @@ mod tests {
                 .visible_notes(Timestamp::ZERO, i64::MAX, 0, usize::MAX)
                 .len(),
             MAX_VISIBLE_NOTES
+        );
+        assert!(
+            dense
+                .visible_notes_checked(Timestamp::ZERO, i64::MAX, 0)
+                .is_err()
+        );
+        assert_eq!(
+            chart
+                .visible_notes_checked(Timestamp::ZERO, i64::MAX, 0)
+                .unwrap()
+                .len(),
+            2
         );
     }
 
@@ -470,10 +504,12 @@ mod tests {
         fs::write(path.join("unvisited.bms"), "#BPM 60\n").unwrap();
         let library = scan_library(&root.0).unwrap();
         assert!(library.entries.is_empty());
-        assert!(library
-            .diagnostics
-            .iter()
-            .any(|message| message.contains("directory/depth limit")));
+        assert!(
+            library
+                .diagnostics
+                .iter()
+                .any(|message| message.contains("directory/depth limit"))
+        );
     }
 
     #[cfg(unix)]

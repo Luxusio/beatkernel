@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use crate::playfield_gpu::{MAX_NOTE_INSTANCES, MAX_PLAYFIELDS, NoteInstance};
 use crate::scene::{MAX_RECTANGLES, Rectangle, Scene};
 use crate::texture::{MAX_TEXTURE_BYTES, MAX_TEXTURES, RgbaImage, TextureId};
 
@@ -63,6 +64,8 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
+    note_pipeline: wgpu::RenderPipeline,
+    note_layers: Vec<NoteLayer>,
     instances: wgpu::Buffer,
     viewport: wgpu::Buffer,
     texture_layout: wgpu::BindGroupLayout,
@@ -78,6 +81,13 @@ struct TextureResource {
     _texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     bytes: u64,
+}
+
+struct NoteLayer {
+    instances: wgpu::Buffer,
+    uniform: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    uploaded: Option<Arc<[NoteInstance]>>,
 }
 
 fn admit_texture(count: usize, used_bytes: u64, image_bytes: u64) -> Result<u64, String> {
@@ -238,6 +248,88 @@ impl Renderer {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let note_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("BeatKernel local epoch playfield"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/playfield.wgsl").into()),
+        });
+        let note_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("BeatKernel playfield uniform"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(32),
+                },
+                count: None,
+            }],
+        });
+        let note_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("BeatKernel playfield pipeline layout"),
+            bind_group_layouts: &[&note_layout],
+            push_constant_ranges: &[],
+        });
+        let note_attributes = wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4];
+        let note_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("BeatKernel retained note instances"),
+            layout: Some(&note_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &note_shader,
+                entry_point: Some("vertex_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<NoteInstance>() as u64,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &note_attributes,
+                }],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &note_shader,
+                entry_point: Some("fragment_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview: None,
+            cache: None,
+        });
+        let note_layers = (0..MAX_PLAYFIELDS)
+            .map(|_| {
+                let instances = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("BeatKernel retained note buffer"),
+                    size: (MAX_NOTE_INSTANCES * std::mem::size_of::<NoteInstance>()) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("BeatKernel playfield drift"),
+                    size: 32,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("BeatKernel playfield drift binding"),
+                    layout: &note_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniform.as_entire_binding(),
+                    }],
+                });
+                NoteLayer {
+                    instances,
+                    uniform,
+                    bind_group,
+                    uploaded: None,
+                }
+            })
+            .collect();
         let viewport = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("BeatKernel logical viewport"),
             size: 16,
@@ -261,6 +353,8 @@ impl Renderer {
             queue,
             config,
             pipeline,
+            note_pipeline,
+            note_layers,
             instances,
             viewport,
             texture_layout,
@@ -495,6 +589,36 @@ impl Renderer {
             self.queue
                 .write_buffer(&self.instances, 0, bytemuck::cast_slice(rectangles));
         }
+        for (field, layer) in scene.playfields().iter().zip(&mut self.note_layers) {
+            if !layer
+                .uploaded
+                .as_ref()
+                .is_some_and(|old| Arc::ptr_eq(old, &field.instances))
+            {
+                if !field.instances.is_empty() {
+                    self.queue.write_buffer(
+                        &layer.instances,
+                        0,
+                        bytemuck::cast_slice(&field.instances),
+                    );
+                }
+                layer.uploaded = Some(Arc::clone(&field.instances));
+            }
+            self.queue.write_buffer(
+                &layer.uniform,
+                0,
+                bytemuck::cast_slice(&[
+                    dimensions[0],
+                    dimensions[1],
+                    field.drift,
+                    0.0,
+                    field.top,
+                    field.bottom,
+                    0.0,
+                    0.0,
+                ]),
+            );
+        }
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -523,12 +647,20 @@ impl Renderer {
                 color_attachments: &attachments,
                 ..Default::default()
             });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_vertex_buffer(0, self.instances.slice(..));
             for batch in scene.batches() {
-                let texture = &self.textures[&batch.texture];
-                pass.set_bind_group(0, &texture.bind_group, &[]);
-                pass.draw(0..6, batch.first..batch.first + batch.count);
+                if let Some(slot) = batch.playfield {
+                    let layer = &self.note_layers[slot];
+                    pass.set_pipeline(&self.note_pipeline);
+                    pass.set_vertex_buffer(0, layer.instances.slice(..));
+                    pass.set_bind_group(0, &layer.bind_group, &[]);
+                    pass.draw(0..6, 0..scene.playfields()[slot].instances.len() as u32);
+                } else {
+                    let texture = &self.textures[&batch.texture];
+                    pass.set_pipeline(&self.pipeline);
+                    pass.set_vertex_buffer(0, self.instances.slice(..));
+                    pass.set_bind_group(0, &texture.bind_group, &[]);
+                    pass.draw(0..6, batch.first..batch.first + batch.count);
+                }
             }
         }
         self.queue.submit([encoder.finish()]);

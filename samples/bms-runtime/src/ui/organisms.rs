@@ -7,7 +7,7 @@ use super::{
 use crate::{
     competition::{OpponentKind, ScoreSummary},
     player::{CompetitionSnapshot, LocalPlayerSnapshot, NetworkStatus},
-    player_chart::{MAX_VISIBLE_NOTES, PlayerChart},
+    player_chart::PlayerChart,
     scene::Scene,
 };
 use beatkernel::{
@@ -20,6 +20,7 @@ const LINE: i64 = 610;
 fn note_y(time: Timestamp, now: Timestamp, lookahead: i64) -> i64 {
     project_note(time, now, lookahead, TOP, LINE).clamp(-10_000, 10_000)
 }
+#[cfg(test)]
 fn project_note(time: Timestamp, now: Timestamp, lookahead: i64, top: i64, line: i64) -> i64 {
     let delta = i128::from(time.as_nanos()) - i128::from(now.as_nanos());
     (i128::from(line) - delta * i128::from(line - top) / i128::from(lookahead))
@@ -105,14 +106,7 @@ pub fn playfield_in(
             0xa9bdd5,
         );
     }
-    for note in chart.visible_notes(now, lookahead, 150_000_000, MAX_VISIBLE_NOTES) {
-        let (left, right) = partition_lane(note.lane_index, lanes, bounds.x, bounds.width);
-        let head = project_note(note.start, now, lookahead, top, line);
-        let tail = note
-            .end
-            .map(|end| project_note(end, now, lookahead, top, line));
-        molecules::note(pixels, (left, right), head, tail, top..=line + 15);
-    }
+    pixels.playfield(chart, now, lookahead, bounds)?;
     rect(pixels, bounds.x, line, bounds.width, 3, 0xffffff);
     pixels.status()
 }
@@ -483,6 +477,14 @@ mod tests {
         };
         let chart = chart();
         playfield_in(&mut scene, &chart, Timestamp::ZERO, 1_000_000_000, bounds).unwrap();
+        let field = &scene.playfields()[0];
+        assert_eq!((field.top, field.bottom, field.drift), (204.0, 351.0, 0.0));
+        assert_eq!(field.instances.len(), 4); // tap + hold body/tail/head
+        assert!(field.instances.iter().any(|instance| {
+            instance.appearance[0] == 0.0
+                && instance.geometry[2] == 336.0
+                && instance.geometry[3] == 204.0
+        }));
         assert!(
             scene
                 .rectangles()
@@ -492,6 +494,7 @@ mod tests {
         for now in [Timestamp::MIN, Timestamp::MAX] {
             scene.clear();
             playfield_in(&mut scene, &chart, now, 1, bounds).unwrap();
+            assert!(scene.playfields()[0].instances.is_empty());
             assert!(
                 scene
                     .rectangles()
