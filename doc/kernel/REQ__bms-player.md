@@ -212,8 +212,9 @@ compilation may proceed; actual GUI rendering/focus/close/restart/input/audio,
 replay/network execution and independent reviews/QA remain required later.
 This presentation increment does not by itself prove the full player complete.
 Graphical native settings and audio output metadata selectors now have source
-integration; multi-player assignment UI, persistence of GPU/UI presentation settings and expanded
-transport/practice controls remain player work. Native profiles have source
+integration, including Linux local-player assignment. Windows/macOS multi-input,
+persistence of GPU/UI presentation settings and expanded transport/practice
+controls remain player work. Native profiles have source
 integration with file-I/O and interruption acceptance still pending. Existing
 casual multiplayer has independent local starts and unauthenticated progress;
 this screen does not establish ranked online play.
@@ -267,7 +268,7 @@ warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warni
 
 ## Native keyboard metadata selection
 
-For multiple local players, input assignment will use the same bounded catalog
+For Linux multiple local players, input assignment uses the same bounded catalog
 and serialized settings worker as audio metadata selection. Solo play does not
 prompt for input device selection. Optional advanced configuration changes only --keyboard-path on
 Windows, --evdev on Linux or --keyboard-registry on macOS in the draft. No
@@ -306,8 +307,8 @@ OS-default driver and remains an explicitly selected advanced backend. These
 policies do not certify native support; actual preparation can fail explicitly.
 Shared Runtime composition has source integration and native solo adoption.
 Linux terminal composition now provides simultaneous evdev acquisition and
-per-player judging/replay using the shared output. Player assignment UI,
-Windows/macOS multi-input composition remain required implementation work.
+per-player judging/replay using the shared output and graphical assignment UI.
+Windows/macOS multi-input composition remains required implementation work.
 Linux local-input mode now publishes independent members to the graphical player;
 network competition with a local group still fails before device acquisition.
 
@@ -319,5 +320,17 @@ layout. Local groups use independent panels, at most four visible per page;
 3/4 use the same grid and larger groups retain all state while changing page.
 Page controls affect display only and work through results; cancellation and
 worker drain remain session-wide. Linux native local sessions publish actual
-member reports including committed failure prefixes before cleanup. Current
-explicit local inputs are provided via CLI/profile until roster UI is added.
+member reports including committed failure prefixes before cleanup. Linux local inputs can be assigned from Settings Players or imported via
+CLI/profile.
+
+## Player setup from the graphical settings screen
+
+Players opens a draft roster; increase/decrease count and select a member before
+Assign keyboard. The existing worker queries a typed catalog and Use assigns
+its exact native identity to that member. Solo hides the device chooser. Done
+validates every assignment before updating the settings draft; Apply separately
+accepts next-session options, while Back discards roster changes. Modal/pending
+operations fence underlying text/menu editing. Stable player IDs survive group
+resize/profile import and reach the real native runtime/replay filenames.
+Current multi-input preparation is Linux-only; other hosts fail count growth
+explicitly. Developer native/terminal commands do not replace graphical play.

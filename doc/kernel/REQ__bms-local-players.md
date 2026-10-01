@@ -23,8 +23,8 @@ assuming two panes. Removing a member/session route needs held-key cleanup.
 
 Portable roster/admission, solo automatic preparation and shared Runtime
 composition now have source integration. Linux terminal composition adds multiple
-simultaneous evdev sources. UI roster assignment and Windows/macOS multi-input
-acquisition remain unimplemented; source integration does not prove native
+simultaneous evdev sources with graphical roster assignment. Windows/macOS
+multi-input acquisition remains unimplemented; source integration does not prove native
 multiplayer acceptance.
 Actual discovery, filtering and multi-player acceptance remain deferred.
 
@@ -51,7 +51,8 @@ disjoint player/BGM voice identities during setup. Checked namespace allocation
 happens outside real-time callbacks. Existing native solo compositions use the
 same group through an adapter. Linux terminal local sessions compose multiple
 devices with this group and publishes the same member reports to graphical
-panels. Roster assignment UI and other native platforms still require wiring.
+panels. Settings Players supplies the Linux roster; other native platforms still
+require multiple-input wiring.
 
 Group telemetry retention is limited to 65536 samples per member and 1048576
 samples in aggregate; zero retains counters only. Each member's judge/history
@@ -81,8 +82,8 @@ group failure. Only after all judges and shared output drain finish is the
 cohort complete. Save separate .p<ID>.bkr recordings after native cleanup.
 
 This integration starts with Linux terminal play and its graphical publication.
-Graphical roster assignment and Windows/macOS native multi-input integration
-remain required work. Combined local-network sessions currently fail explicitly
+Graphical roster assignment has Linux source integration. Windows/macOS native
+multi-input integration remains required work. Combined local-network sessions currently fail explicitly
 before resource acquisition rather than claim partial support.
 Native execution and file/recording acceptance remain deferred.
 
@@ -114,6 +115,39 @@ available while playing and on results. Page changes are UI-only; native input
 continues for every member. Notes and text stay within each panel and retain
 original song-time projection. Prepared-chart and report publication occur on
 the game owner, never audio callbacks or UI event timestamps. Linux local mode
-can attach this presentation; explicit devices currently come from CLI/profile.
-Roster assignment UI and Windows/macOS multi-input remain required later work.
+attaches this presentation; Settings Players assigns devices or imports CLI/profile
+identities. Windows/macOS multi-input remain required later work.
 Native UI/GPU/execution acceptance is still user-deferred.
+
+## Graphical roster assignment
+
+The product is the graphical BMS player. Native terminal commands are developer
+compositions, not the intended rhythm-game interface. Settings Players opens a
+bounded local roster draft, with count increase/decrease, player selection and
+paging up to64. A single player keeps automatic input and does not show a device
+chooser. Each of2+ players needs a distinct explicitly assigned keyboard.
+Assignment uses the existing metadata worker and typed paged keyboard catalog,
+never UI timestamp acquisition. Query/refresh is serialized; pending controls
+and hidden text fields are fenced. Disabled devices cannot be assigned and
+already-used identities fail without changing the prior accepted draft.
+
+Done requires a sealed valid roster and changes only the settings draft; Apply
+sets the next session. Back discards local changes. Player IDs remain stable
+through retained members during resizing and imported profiles. Native Linux
+--local-player ID:PATH repeats preserve those IDs; legacy --local-input PATH
+retains sequential IDs. The two forms and solo --evdev cannot mix. Native fresh
+DeviceIds stay separate from stable player IDs and opened alias/availability
+checks remain authoritative. Returning to solo clears local assignments.
+
+Current multiple-input execution/assignment support is Linux; WinMac count
+growth explicitly reports unavailable acquisition until implemented. Audio
+configuration remains one shared optional advanced override. Profile value and
+aggregate settings caps remain in force, including ID/path encoding overhead.
+GUI rendering, metadata query and actual play acceptance remain user-deferred.
+
+Linux explicit profile overrides replace the entire input assignment family
+(--evdev, --local-input, --local-player) so selecting one form removes stale
+profile entries from the others. Conflicting forms supplied together remain an
+explicit native validation error. Within an accepted draft, exhausted player-ID
+space still permits retaining/shrinking existing u32::MAX IDs; growth fails
+atomically rather than reusing retired IDs.

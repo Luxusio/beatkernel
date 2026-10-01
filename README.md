@@ -99,14 +99,18 @@ viewport and never contributes gameplay input timestamps.
 `--present fifo|immediate|mailbox` selects presentation (default FIFO), with errors
 for unsupported explicit choices. `--ui-fps` and `--ui-lookahead-ms` control drawing.
 Native input/judging stays on the game thread, audio keeps its output
-worker/callback, and socket I/O has its own worker. Terminal `play` remains
-available. Ranked online services are not implemented.
+worker/callback, and socket I/O has its own worker. The graphical player is the product interface; native `play` commands remain
+available as developer compositions. Ranked online services are not implemented.
 See the [competition contract](doc/kernel/REQ__bms-competition.md) for limits.
 Solo play resolves omitted devices automatically: system/default audio output
 and a usable keyboard. Device assignment is reserved for multiple local players;
-three/four and larger rosters use the same collection-based model. Linux terminal play accepts repeated `--local-input PATH` for 2..64 players;
+three/four and larger rosters use the same collection-based model. Native Linux
+APIs accept repeated `--local-input PATH` or stable `--local-player ID:PATH` for
+2..64 players;
 The graphical player draws independent local panels with pages for larger
-rosters. GUI roster/assignment and Windows/macOS multi-input acquisition remain unfinished. The shared execution primitive
+rosters. Settings → Players provides count and distinct-keyboard assignment for Linux
+local groups, while solo keeps automatic input. Windows/macOS multi-input
+acquisition remains unfinished. The shared execution primitive
 owns independent core runtimes with one authoritative song transport and output
 producer; native solo playback now uses the same composition.
 F2 or Settings opens a bounded advanced draft editor for devices, buffers, timing,
@@ -116,7 +120,7 @@ configuration can be overridden there before starting; device selection is optio
 output metadata on the settings worker; select an entry and Use Device to copy
 its exact ID into the draft. Apply remains separate. ASIO discovery requires an
 explicit registry view. Keyboard metadata discovery is source-integrated for
-automatic preparation and future per-player assignment. Clipboard and IME
+automatic preparation and Linux per-player assignment. Clipboard and IME
 composition remain pending. `--profile PATH` loads saved
 native options; explicit native arguments replace matching profile entries.
 Settings Load/Save use an editable path and the same serialized settings worker. Save stores

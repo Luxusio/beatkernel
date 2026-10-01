@@ -238,6 +238,13 @@ devices. This replaces --evdev in local sessions; neither is implicitly shared
 between players. Common PCM/output configuration and BGM remain single owners.
 Each player's voice namespace, judge, capture and completion remain independent.
 The primary solo app behavior stays automatic. Linux local native reports can
-attach the existing graphical bridge for independent panels. Explicit devices
-currently come from CLI/profile until roster assignment UI is added. Network
+attach the existing graphical bridge for independent panels. Settings Players assigns exact devices; CLI/profile imports remain supported. Network
 combination still requires later integration and fails explicitly for now.
+
+
+Linux --local-player ID:PATH is an alternative repeated assignment form that
+preserves stable positive u32 player IDs into RuntimeGroup, graphical snapshots,
+scores and per-player replay suffixes. --local-input keeps sequential IDs. Both
+forms require2..64 unique devices and cannot mix or combine with solo --evdev.
+Fresh native DeviceIds remain separate from stable IDs. Device aliases and
+availability are checked from actual opened handles before output start.

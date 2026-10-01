@@ -1,0 +1,7 @@
+# Graphical local-player setup
+
+Settings Players provides a count control and a paged collection of player rows. Solo requires no device selection. Linux groups assign a distinct keyboard to each member through the existing serialized metadata worker/catalog; disabled or already-used devices fail without changing accepted assignments. Done seals and validates the roster into the settings draft, Apply sets the next session, and Back discards changes. Pending queries and modal views fence hidden field editing. Stable positive player IDs survive retained members during resizing and profile import, and the new native --local-player ID:PATH form carries them to actual runtime, graphical reports, scores and replay suffixes. Native acquisition IDs remain separate; old --local-input remains compatible. The graphical player is the product interface. Windows/macOS multi-input and execution acceptance remain unfinished.
+
+## Known ceiling
+
+Rosters are bounded to64 players, the setup list shows10 rows per page, and all existing settings/profile byte/field bounds remain in force including ID/path encoding overhead. Keyboard metadata can become stale; opened native devices remain authoritative and aliases/disconnection do not trigger replacement. Multiple-player acquisition currently requiresLinux, so unsupported-host count growth fails without mutation. Source compilation and authored fixtures do not establish executed UI, metadata, input, audio or recording behavior; actual tests/native/GUI/query/file/network and independent formal review/QA remain user-deferred.
