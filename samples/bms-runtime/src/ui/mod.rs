@@ -6,6 +6,7 @@ pub mod interaction;
 pub mod molecules;
 pub mod organisms;
 pub mod practice;
+pub mod records;
 mod retained;
 pub mod selection;
 pub mod settings;
