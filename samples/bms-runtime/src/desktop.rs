@@ -17,6 +17,8 @@ use beatkernel_bms_runtime::ui::{
 use beatkernel_bms_runtime::{
     competition::OpponentKind,
     device_catalog::{DeviceCatalog, DeviceRequest},
+    font_atlas::FontAtlas,
+    font_text::{FontText, MAX_TEXT_GLYPHS},
     local_players::PlayerId,
     local_setup::LocalSetup,
     panel_scope::{PanelScope, TaskPermit},
@@ -36,6 +38,7 @@ use beatkernel_bms_runtime::{
 };
 use std::{
     error::Error,
+    io::Read,
     path::PathBuf,
     sync::Arc,
     thread::{self, JoinHandle},
@@ -91,6 +94,7 @@ struct Options {
     backend: BackendChoice,
     presentation: Presentation,
     profile: Option<PathBuf>,
+    title_font: Option<PathBuf>,
     display_overrides: Vec<String>,
 }
 impl Options {
@@ -104,6 +108,7 @@ impl Options {
             backend: BackendChoice::Auto,
             presentation: Presentation::Fifo,
             profile: None,
+            title_font: None,
             display_overrides: Vec::new(),
         };
         let mut index = 0;
@@ -116,12 +121,21 @@ impl Options {
                 flag,
                 "--library"
                     | "--profile"
+                    | "--title-font"
                     | "--ui-lookahead-ms"
                     | "--ui-fps"
                     | "--gpu-backend"
                     | "--present"
             ) {
                 match flag {
+                    "--title-font" => {
+                        if value.is_empty() {
+                            return Err("--title-font path cannot be empty".into());
+                        }
+                        if options.title_font.replace(PathBuf::from(value)).is_some() {
+                            return Err("duplicate --title-font".into());
+                        }
+                    }
                     "--profile" => {
                         if value.is_empty() {
                             return Err("--profile path cannot be empty".into());
@@ -184,6 +198,15 @@ struct Entry {
     path: PathBuf,
     title: String,
     artist: String,
+}
+fn prepare_title_font(bytes: Vec<u8>, items: &[SelectionItem]) -> Result<Arc<FontAtlas>, String> {
+    let mut atlas = FontAtlas::new(bytes, 14.0, 1024, 1024, 4096)?;
+    for item in items {
+        for character in item.title.chars().take(MAX_TEXT_GLYPHS) {
+            atlas.prepare(character)?;
+        }
+    }
+    Ok(Arc::new(atlas))
 }
 struct Game {
     viewer: player::PlayerViewer,
@@ -383,7 +406,7 @@ pub(super) fn run(
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
-            "player (--library DIR | --chart PATH) [--profile PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F3 in selection: search; F4 in settings: records; F6 in settings: practice; W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry pinned start and disable loop; F7: mark live position/loop start; F8: restart mark after cleanup; F9: pause/resume when native owner supports it; F10: mark loop end; F11: toggle native finite loop (live nonnetwork only, joins before restart; reopening may leave a gap); Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+            "player (--library DIR | --chart PATH) [--profile PATH] [--title-font PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F3 in selection: search; F4 in settings: records; F6 in settings: practice; W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry pinned start and disable loop; F7: mark live position/loop start; F8: restart mark after cleanup; F9: pause/resume when native owner supports it; F10: mark loop end; F11: toggle native finite loop (live nonnetwork only, joins before restart; reopening may leave a gap); Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
         );
         return Ok(());
     }
@@ -453,6 +476,15 @@ pub(super) fn run(
     let selection_diagnostics = diagnostics.into();
     let catalog_search = CatalogSearch::new(&selection_items)?;
     let search_editor = LineEditor::new("", 256)?;
+    let title_font = if let Some(path) = &options.title_font {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?
+            .take(32 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)?;
+        Some(prepare_title_font(bytes, &selection_items)?)
+    } else {
+        None
+    };
     let event_loop = EventLoop::new()?;
     let active_backend = options.backend;
     let mut app = Desktop {
@@ -484,6 +516,8 @@ pub(super) fn run(
         search_focused: false,
         catalog_wheel: WheelSteps::default(),
         ime: ImeDraft::default(),
+        title_font,
+        font_text: None,
         selection_diagnostics,
         selection_view: None,
         painted_reactive: None,
@@ -881,6 +915,8 @@ struct Desktop {
     search_focused: bool,
     catalog_wheel: WheelSteps,
     ime: ImeDraft,
+    title_font: Option<Arc<FontAtlas>>,
+    font_text: Option<FontText>,
     selection_diagnostics: Arc<[String]>,
     selection_view: Option<SelectionView>,
     painted_reactive: Option<ScreenInstanceId>,
@@ -900,6 +936,11 @@ struct Desktop {
     hits: Vec<(ControlId, Bounds)>,
 }
 impl Desktop {
+    fn bind_title_font(&mut self, font: Option<FontText>) {
+        self.font_text = font;
+        self.selection_view = None;
+        self.invalidate_hits();
+    }
     fn invalidate_hits(&mut self) {
         self.sync_ime();
         self.hits.clear();
@@ -3074,12 +3115,13 @@ impl Desktop {
             .as_ref()
             .is_none_or(|view| view.id() != id)
         {
-            self.selection_view = Some(SelectionView::new(
+            self.selection_view = Some(SelectionView::new_with_font(
                 id,
                 Arc::clone(&self.selection_items),
                 Arc::clone(&self.selection_diagnostics),
                 WIDTH as u32,
                 HEIGHT as u32,
+                self.font_text.clone(),
             )?);
             self.painted_reactive = None;
         }
@@ -3668,7 +3710,7 @@ impl ApplicationHandler for Desktop {
         if self.renderer.is_none() {
             let window = self.window.as_ref().expect("created window").clone();
             // Native startup only. Reusable Renderer::new stays async for WASM hosts.
-            let result = (|| -> Result<(wgpu::Instance, Renderer), String> {
+            let result = (|| -> Result<(wgpu::Instance, Renderer, Option<FontText>), String> {
                 let instance = graphics::instance(self.active_backend)?;
                 let surface = instance
                     .create_surface(window.clone())
@@ -3680,10 +3722,19 @@ impl ApplicationHandler for Desktop {
                 ))?;
                 let size = window.inner_size();
                 renderer.resize(size.width, size.height)?;
-                Ok((instance, renderer))
+                let font_text = self
+                    .title_font
+                    .as_ref()
+                    .map(|atlas| {
+                        let texture = renderer.upload_texture(atlas.image())?;
+                        FontText::new(Arc::clone(atlas), texture)
+                    })
+                    .transpose()?;
+                Ok((instance, renderer, font_text))
             })();
             match result {
-                Ok((instance, renderer)) => {
+                Ok((instance, renderer, font_text)) => {
+                    self.bind_title_font(font_text);
                     self.instance = Some(instance);
                     self.renderer = Some(renderer);
                 }
@@ -4219,6 +4270,61 @@ fn draw_game(pixels: &mut Scene, game: &Game, lookahead: i64) -> Result<(), Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn title_font_option_is_ui_owned_and_rejects_empty_or_duplicate_paths() {
+        let args = [
+            "--chart",
+            "fixture.bms",
+            "--title-font",
+            "fonts/title.ttf",
+            "--bind",
+            "11:04",
+        ]
+        .map(String::from);
+        let options = Options::parse(&args).unwrap();
+        assert_eq!(options.title_font, Some(PathBuf::from("fonts/title.ttf")));
+        assert_eq!(options.native, ["--bind", "11:04"]);
+        for args in [
+            vec!["--title-font", ""],
+            vec!["--title-font", "one.ttf", "--title-font", "two.ttf"],
+            vec!["--title-font"],
+        ] {
+            assert!(
+                Options::parse(&args.into_iter().map(String::from).collect::<Vec<_>>()).is_err()
+            );
+        }
+        assert!(prepare_title_font(vec![0; 64], &[]).is_err());
+    }
+    #[test]
+    fn renderer_font_rebinding_discards_retained_titles_and_hits_but_keeps_search() {
+        let mut app = lifecycle_fixture();
+        app.search_editor.insert("FIX").unwrap();
+        app.selection_view = Some(
+            SelectionView::new(
+                ScreenInstanceId(7),
+                Arc::clone(&app.selection_items),
+                Arc::from([]),
+                WIDTH as u32,
+                HEIGHT as u32,
+            )
+            .unwrap(),
+        );
+        app.hits.push((
+            ControlId(100),
+            Bounds {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
+        ));
+        app.bind_title_font(None);
+        assert!(app.selection_view.is_none());
+        assert!(app.hits.is_empty());
+        assert!(app.painted_reactive.is_none());
+        assert_eq!(app.search_editor.value(), "FIX");
+        assert_eq!(app.entries[0].path, PathBuf::from("fixture.bms"));
+    }
     fn lifecycle_fixture() -> Desktop {
         fn native_unavailable(_: &[String]) -> Result<(), Box<dyn Error>> {
             Err("fixture must not open native playback".into())
@@ -4270,6 +4376,8 @@ mod tests {
             search_focused: false,
             catalog_wheel: WheelSteps::default(),
             ime: ImeDraft::default(),
+            title_font: None,
+            font_text: None,
             selection_diagnostics: Arc::from([]),
             selection_view: None,
             painted_reactive: None,
