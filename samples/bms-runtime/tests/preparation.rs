@@ -1933,6 +1933,87 @@ fn raster_bmp_pixel(rgb: [u8; 3]) -> Vec<u8> {
 }
 
 #[test]
+fn native_layer_preparation_preserves_raw_aliases_and_admits_variant_bytes_atomically() {
+    use beatkernel_bms::ImageId;
+    use image_assets::{ImageAssetLimits, ImageAssets};
+    use std::sync::Arc;
+    let dir = Directory::new();
+    dir.write("tap.wav", &wav(1, &[100, -100]));
+    dir.write("black.bmp", &raster_bmp_pixel([0, 0, 0]));
+    let path = dir.write("chart.bms", b"#BPM 120\n#WAV01 tap.wav\n#00011:01\n#BMP01 black.bmp\n#BMP02 ./black.bmp\n#BMP03 black.bmp\n#00004:010203\n#00007:0102\n");
+    let prepared = load_prepared(
+        &path,
+        AudioFormat::new(24_000, 2).unwrap(),
+        limits(),
+        ChannelPolicy::MonoToStereo,
+    )
+    .unwrap();
+    let identity = captured_setup_identity(&prepared);
+    let bank = ImageAssets::prepare(
+        &dir.0,
+        &prepared.source,
+        ImageAssetLimits {
+            max_decoded_bytes: 8,
+            ..ImageAssetLimits::default()
+        },
+    )
+    .unwrap();
+    assert_eq!((bank.unique_images(), bank.decoded_bytes()), (1, 8));
+    assert!(Arc::ptr_eq(
+        bank.get(ImageId(1)).unwrap(),
+        bank.get(ImageId(3)).unwrap()
+    ));
+    assert!(Arc::ptr_eq(
+        bank.get_layer(ImageId(1)).unwrap(),
+        bank.get_layer(ImageId(2)).unwrap()
+    ));
+    assert!(!Arc::ptr_eq(
+        bank.get(ImageId(1)).unwrap(),
+        bank.get_layer(ImageId(1)).unwrap()
+    ));
+    assert_eq!(bank.get(ImageId(1)).unwrap().pixels(), &[0, 0, 0, 255]);
+    assert_eq!(bank.get_layer(ImageId(1)).unwrap().pixels(), &[0, 0, 0, 0]);
+    assert!(bank.get_layer(ImageId(3)).is_none());
+    assert!(
+        ImageAssets::prepare(
+            &dir.0,
+            &prepared.source,
+            ImageAssetLimits {
+                max_decoded_bytes: 7,
+                ..ImageAssetLimits::default()
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(bank.get(ImageId(1)).unwrap().pixels(), &[0, 0, 0, 255]);
+    assert_eq!(identity, captured_setup_identity(&prepared));
+    let (publisher, viewer) = player::channel();
+    player::with_publisher(publisher, || {
+        player::publish_native_chart(
+            &path,
+            &prepared.source,
+            &prepared.compiled.chart,
+            &[local_players::PlayerId(1)],
+        )
+        .map_err(|e| e.to_string())?;
+        let published = viewer.take_latest().unwrap();
+        let images = published.images.as_ref().unwrap();
+        assert_eq!(images.decoded_bytes(), 8);
+        assert_eq!(images.get(ImageId(2)).unwrap().pixels(), &[0, 0, 0, 255]);
+        assert_eq!(
+            images.get_layer(ImageId(2)).unwrap().pixels(),
+            &[0, 0, 0, 0]
+        );
+        assert!(Arc::ptr_eq(
+            images.get_layer(ImageId(1)).unwrap(),
+            images.get_layer(ImageId(2)).unwrap()
+        ));
+        Ok(())
+    })
+    .unwrap();
+}
+
+#[test]
 fn prepared_audio_and_image_bank_share_real_chart_selection_without_frame_io() {
     use beatkernel::{audio::AudioFormat, time::Timestamp};
     use beatkernel_bms::ImageId;

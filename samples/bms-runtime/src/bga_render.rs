@@ -108,16 +108,20 @@ impl BgaTextureCache {
         let mut wanted: [Option<&Arc<RgbaImage>>; 8] = [None; 8];
         let mut count = 0;
         for state in states {
-            for id in [state.base, state.layer].into_iter().flatten() {
-                if let Some(image) = bank.get(id) {
-                    if !wanted[..count]
-                        .iter()
-                        .flatten()
-                        .any(|old| Arc::ptr_eq(old, image))
-                    {
-                        wanted[count] = Some(image);
-                        count += 1;
-                    }
+            for image in [
+                state.base.and_then(|id| bank.get(id)),
+                state.layer.and_then(|id| bank.get_layer(id)),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !wanted[..count]
+                    .iter()
+                    .flatten()
+                    .any(|old| Arc::ptr_eq(old, image))
+                {
+                    wanted[count] = Some(image);
+                    count += 1;
                 }
             }
         }
@@ -165,13 +169,20 @@ impl BgaTextureCache {
         let mut frames = [BgaFrame::default(); 4];
         for (frame, state) in frames.iter_mut().zip(states) {
             frame.active = state.base.is_some() || state.layer.is_some();
-            for (id, destination) in [
-                (state.base, &mut frame.base),
-                (state.layer, &mut frame.layer),
+            for (id, image, destination) in [
+                (
+                    state.base,
+                    state.base.and_then(|id| bank.get(id)),
+                    &mut frame.base,
+                ),
+                (
+                    state.layer,
+                    state.layer.and_then(|id| bank.get_layer(id)),
+                    &mut frame.layer,
+                ),
             ] {
-                if let Some(id) = id {
-                    *destination = bank
-                        .get(id)
+                if id.is_some() {
+                    *destination = image
                         .and_then(|image| {
                             self.entries
                                 .iter()
@@ -277,6 +288,7 @@ mod fixtures {
             ("red.bmp", [0, 0, 255]),
             ("blue.bmp", [255, 0, 0]),
             ("green.bmp", [0, 255, 0]),
+            ("black.bmp", [0, 0, 0]),
         ] {
             let mut data = vec![0u8; 58];
             data[..2].copy_from_slice(b"BM");
@@ -290,7 +302,7 @@ mod fixtures {
             data[54..57].copy_from_slice(&color);
             std::fs::write(path.join(name), data).unwrap();
         }
-        let chart=beatkernel_bms::parse("#BMP00 red.bmp\n#BMP01 red.bmp\n#BMP02 ./red.bmp\n#BMP03 blue.bmp\n#BMP04 green.bmp\n#00004:01020304\n#00104:05",ParseOptions::default()).unwrap();
+        let chart=beatkernel_bms::parse("#BMP00 red.bmp\n#BMP01 red.bmp\n#BMP02 ./red.bmp\n#BMP03 blue.bmp\n#BMP04 green.bmp\n#BMP06 black.bmp\n#BMP07 ./black.bmp\n#00004:010203040607\n#00007:010203040607\n#00104:05",ParseOptions::default()).unwrap();
         let bank =
             Arc::new(ImageAssets::prepare(&path, &chart, ImageAssetLimits::default()).unwrap());
         Bank { bank, path }
@@ -302,15 +314,17 @@ mod fixtures {
         live: BTreeSet<TextureId>,
         actions: Vec<&'static str>,
         fail_remove: bool,
+        pixels: Vec<Vec<u8>>,
     }
     impl TextureOwner for Owner {
-        fn upload(&mut self, _: &RgbaImage) -> Result<TextureId, String> {
+        fn upload(&mut self, image: &RgbaImage) -> Result<TextureId, String> {
             self.attempts += 1;
             self.actions.push("upload");
             if self.live.len() >= self.capacity {
                 return Err("fixture GPU budget".into());
             }
             let id = TextureId::allocate()?;
+            self.pixels.push(image.pixels().to_vec());
             self.live.insert(id);
             Ok(id)
         }
@@ -329,6 +343,50 @@ mod fixtures {
             layer: layer.map(ImageId),
             poor: Some(ImageId(0)),
         }
+    }
+    #[test]
+    fn raw_only_image_is_unavailable_in_layer_role_without_opaque_fallback() {
+        let bank = bank();
+        assert!(bank.bank.get(ImageId(0)).is_some());
+        let mut owner = Owner {
+            capacity: 8,
+            ..Owner::default()
+        };
+        let frames = BgaTextureCache::default()
+            .sync(Some(&bank.bank), &[state(1, Some(0))], &mut owner)
+            .unwrap();
+        assert!(frames[0].base.is_some());
+        assert!(frames[0].layer.is_none());
+        assert_eq!(frames[0].unavailable, 1);
+        assert_eq!(owner.attempts, 1);
+    }
+    #[test]
+    fn black_source_keeps_base_pixels_and_uploads_separate_transparent_layer() {
+        let bank = bank();
+        let mut owner = Owner {
+            capacity: 8,
+            ..Owner::default()
+        };
+        let mut cache = BgaTextureCache::default();
+        let frames = cache
+            .sync(
+                Some(&bank.bank),
+                &[state(6, Some(7)), state(7, Some(6))],
+                &mut owner,
+            )
+            .unwrap();
+        assert_eq!(owner.attempts, 2);
+        assert_eq!(owner.pixels, [vec![0, 0, 0, 255], vec![0, 0, 0, 0]]);
+        assert_ne!(frames[0].base, frames[0].layer);
+        assert_eq!(frames[0].base, frames[1].base);
+        assert_eq!(frames[0].layer, frames[1].layer);
+        assert_eq!(frames[0].unavailable, 0);
+        cache
+            .sync(Some(&bank.bank), &[state(7, Some(6))], &mut owner)
+            .unwrap();
+        assert_eq!(owner.attempts, 2);
+        cache.clear(&mut owner).unwrap();
+        assert!(owner.live.is_empty());
     }
     #[test]
     fn actual_bank_aliases_share_upload_and_steady_frames_change_release_before_upload() {
