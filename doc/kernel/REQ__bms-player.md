@@ -1,5 +1,21 @@
 # BMS desktop player
 
+Records displays the selected record's own/other opponent occurrence counts.
+Remove Own and Remove Other clear exactly the first matching kind and literal
+path in the parent settings draft; duplicates remain individually removable.
+No file is deleted or reopened. Removal needs selected membership, not a preview,
+and pending/hidden/closing Records cannot mutate the draft. Empty/missing/invalid
+targets preserve unrelated settings and row identities; invalid paths reject
+atomically. Cleared rows remain reusable by Add. Parent selected editor refreshes
+after removal so the path cannot be restored accidentally; Apply stays separate
+from draft changes and accepted native session options remain pinned.
+Retained membership/gates update without repainting catalog rows. Frame membership
+cannot exceed the actual bounded draft total and requires a selected path.
+An overfull manually edited draft remains visible and individually removable;
+Add is disabled at eight opponents. Native Apply still enforces accepted limits.
+Prepare exact-kind/duplicate/capacity/editor/gate/route/pending regression fixtures
+for later execution; source compilation is not native GUI acceptance.
+
 Windows Settings → Players uses exact keyboard catalog assignments for 2..64
 stable local members. Solo remains automatic. Each member publishes its actual
 chart/time/score/competition prefix through the existing graphical bridge, while

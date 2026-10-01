@@ -132,6 +132,10 @@ Native IME input supports search, settings values and profile paths. Composition
 previews stay separate from saved drafts; switching fields or leaving the active
 screen discards them. Existing bitmap glyph fallback still applies.
 Selection rows show artist metadata below the title when available.
+In Records, Remove Own and Remove Other remove one selected record occurrence
+from the competition draft without deleting its file. Selected own/other counts
+show duplicates; Apply remains separate. An overfull edited draft can still be
+repaired by removing records, while Add is disabled at eight opponents.
 Titles and artists clip to separate line bands within the row, including
 cropped glyph textures at the edges. Long text stays inside the row padding;
 overhanging glyphs may be cut rather than wrapped or shortened with an ellipsis.
