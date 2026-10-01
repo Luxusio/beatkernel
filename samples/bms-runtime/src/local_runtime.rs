@@ -71,6 +71,8 @@ pub struct RuntimeGroup {
     transport: Transport,
     producer: CommandProducer,
     poisoned: bool,
+    started: bool,
+    song_end: Option<Timestamp>,
 }
 
 /// Parks the member's disconnected placeholders while it uses shared owners.
@@ -187,7 +189,31 @@ impl RuntimeGroup {
             transport,
             producer,
             poisoned: false,
+            started: false,
+            song_end: None,
         })
+    }
+
+    /// Install one immutable original-song boundary before any member runs.
+    /// Private members are unconfigured and unprocessed while `started` is false.
+    pub fn set_song_end(&mut self, end: Timestamp) -> Result<(), String> {
+        if end.as_nanos() < 0 {
+            return Err("song end must be nonnegative".into());
+        }
+        if self.poisoned || self.started || self.song_end.is_some() {
+            return Err("shared song end configuration is locked".into());
+        }
+        for member in &mut self.members {
+            member
+                .runtime
+                .set_song_end(end)
+                .expect("validated private member setup cannot reject the shared end");
+        }
+        self.song_end = Some(end);
+        Ok(())
+    }
+    pub const fn song_end(&self) -> Option<Timestamp> {
+        self.song_end
     }
 
     fn ensure_usable(&self) -> Result<(), GroupError> {
@@ -218,6 +244,7 @@ impl RuntimeGroup {
             return Ok(InputResult::Ignored { device });
         };
         self.poisoned = true;
+        self.started = true;
         let player = self.members[index].player;
         let result = {
             let guard = OwnerGuard::new(
@@ -253,6 +280,7 @@ impl RuntimeGroup {
     ) -> Result<Vec<PlayerReport>, GroupError> {
         self.ensure_usable()?;
         self.poisoned = true;
+        self.started = true;
         let mut reports = Vec::with_capacity(self.members.len());
         for member in &mut self.members {
             let result = {
@@ -324,6 +352,12 @@ impl RuntimeGroup {
 /// Production solo adapter uses exactly the same cohort execution path.
 pub struct SoloRuntime(RuntimeGroup);
 impl SoloRuntime {
+    pub fn set_song_end(&mut self, end: Timestamp) -> Result<(), String> {
+        self.0.set_song_end(end)
+    }
+    pub const fn song_end(&self) -> Option<Timestamp> {
+        self.0.song_end()
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         host: ClockDomainId,
@@ -1124,6 +1158,273 @@ mod fixtures {
         };
         group.enqueue_audio(command).unwrap();
         assert_eq!(consumer.try_pop().unwrap(), command);
+    }
+
+    fn boundary_config(player: u32) -> MemberConfig {
+        let mut member = config(player);
+        let mut source = SourceChart::new(1000, Bpm::new(60, 1).unwrap()).unwrap();
+        for id in [1, 2] {
+            source.objects.push(SourceObject {
+                id: ObjectId(id),
+                start: Beat::new(id as i64).unwrap(),
+                end: None,
+                interaction: InteractionId(1),
+                visual: VisualId(1),
+                audio: None,
+                metadata: ObjectMetadata::default(),
+            });
+        }
+        member.judge = JudgeEngine::new(
+            source.compile().unwrap(),
+            vec![Rule {
+                interaction: InteractionId(1),
+                control: GameControlId(1),
+                evaluator: Box::new(InstantEvaluator),
+            }],
+            member.judge.profile().clone(),
+        )
+        .unwrap();
+        let mut second = member.sounds[0];
+        second.object = ObjectId(2);
+        member.sounds.push(second);
+        member
+    }
+
+    #[test]
+    fn finite_pcm_and_shared_judging_capture_only_the_original_song_prefix() {
+        use crate::replay_capture::LiveReplayCapture;
+        use beatkernel::{
+            audio::{
+                AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, PcmSample, SampleBank,
+            },
+            replay::{ReplayOperation, ReplaySession, codec::ReplayCodecLimits},
+        };
+        for count in [1, 2, 3, 4, 64] {
+            let ids = (0..count)
+                .map(|index| {
+                    if index == count - 1 {
+                        u32::MAX
+                    } else {
+                        7 + index as u32 * 999
+                    }
+                })
+                .collect::<Vec<_>>();
+            let limits = ReplayCodecLimits::new(
+                65536,
+                128,
+                4096,
+                beatkernel::input::CodecLimits::new(4096, 4096).unwrap(),
+            )
+            .unwrap();
+            let mut configs = ids.iter().copied().map(boundary_config).collect::<Vec<_>>();
+            let mut captures = configs
+                .iter()
+                .map(|member| {
+                    (
+                        member.player,
+                        LiveReplayCapture::new(&member.judge, ClockDomainId(1), limits).unwrap(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            for member in &mut configs {
+                for sound in &mut member.sounds {
+                    sound.gain = 1.0 / count as f32;
+                }
+            }
+            let audio = |ns| ClockPoint {
+                domain: ClockDomainId(2),
+                timestamp: Timestamp::from_nanos(ns),
+            };
+            let format = AudioFormat::new(1000, 1).unwrap();
+            let pcm_limits = PcmLimits::new(4096, 4096, 2).unwrap();
+            let mut bank = SampleBank::new(format, pcm_limits).unwrap();
+            bank.insert(
+                SampleId(1),
+                PcmSample::new(format, vec![0.5, 0.25], pcm_limits).unwrap(),
+            )
+            .unwrap();
+            let (producer, consumer) = command_queue(128).unwrap();
+            let mut mixer = Mixer::new(
+                MixerConfig::new(
+                    format,
+                    ClockDomainId(2),
+                    Timestamp::ZERO,
+                    AudioLimits::new(128, 64, 128, 16, 128).unwrap(),
+                )
+                .with_playback_end_frame(2),
+                bank,
+                consumer,
+            )
+            .unwrap();
+            let mut group = RuntimeGroup::new(
+                ClockDomainId(1),
+                ClockDomainId(2),
+                Transport::new(Timestamp::from_nanos(100), Timestamp::ZERO, Rate::NORMAL),
+                producer,
+                configs,
+                8,
+                &[],
+            )
+            .unwrap();
+            assert!(group.set_song_end(Timestamp::from_nanos(-1)).is_err());
+            assert_eq!(group.song_end(), None);
+            // Unknown input sources do not start or lock private member runtimes.
+            assert!(matches!(
+                group
+                    .process_input(input(0, 100), &Identity, audio(0))
+                    .unwrap(),
+                InputResult::Ignored { .. }
+            ));
+            group
+                .set_song_end(Timestamp::from_nanos(2_000_000))
+                .unwrap();
+            assert!(
+                group
+                    .set_song_end(Timestamp::from_nanos(3_000_000))
+                    .is_err()
+            );
+            assert_eq!(group.song_end(), Some(Timestamp::from_nanos(2_000_000)));
+            for id in &ids {
+                let InputResult::Processed(reports) = group
+                    .process_input(
+                        input(u64::from(*id), 1_000_100),
+                        &Identity,
+                        audio(1_000_000),
+                    )
+                    .unwrap()
+                else {
+                    panic!("assigned pre-end event ignored");
+                };
+                let tagged = &reports[0];
+                assert_eq!(tagged.player, PlayerId(*id));
+                assert!(!tagged.report.song_end_reached);
+                assert_eq!(tagged.report.judge_events.len(), 1);
+                assert_eq!(tagged.report.audio_commands.len(), 1);
+                captures
+                    .get_mut(&tagged.player)
+                    .unwrap()
+                    .record_report(&tagged.report)
+                    .unwrap();
+            }
+            for at in [2_000_100, 9_000_100] {
+                for id in &ids {
+                    let mut event = input(u64::from(*id), at);
+                    event.meta_mut().sequence = if at == 2_000_100 { 2 } else { 3 };
+                    let InputResult::Processed(reports) = group
+                        .process_input(event, &Identity, audio(2_000_000))
+                        .unwrap()
+                    else {
+                        panic!("assigned fenced acquisition ignored");
+                    };
+                    let tagged = &reports[0];
+                    assert!(tagged.report.song_end_reached);
+                    assert_eq!(tagged.report.song_time, Timestamp::from_nanos(2_000_000));
+                    assert!(tagged.report.input.is_none());
+                    assert!(tagged.report.bound_inputs.is_empty());
+                    assert!(tagged.report.judge_events.is_empty());
+                    assert!(tagged.report.audio_commands.is_empty());
+                    assert!(tagged.report.judge_error.is_none());
+                    captures
+                        .get_mut(&tagged.player)
+                        .unwrap()
+                        .record_report(&tagged.report)
+                        .unwrap();
+                }
+            }
+            for tagged in group
+                .advance_to(point(10_000_100), &Identity, audio(2_000_000))
+                .unwrap()
+            {
+                assert!(tagged.report.song_end_reached);
+                assert!(tagged.report.judge_events.is_empty());
+                captures
+                    .get_mut(&tagged.player)
+                    .unwrap()
+                    .record_report(&tagged.report)
+                    .unwrap();
+            }
+            let mut samples = [1.0; 5];
+            let rendered = mixer.render(&mut samples).unwrap();
+            assert_eq!(
+                (rendered.frames, rendered.playback_frames, rendered.paused),
+                (5, 2, true)
+            );
+            assert_eq!(samples[0], 0.0);
+            assert!((samples[1] - 0.5).abs() < 0.00001);
+            assert_eq!(&samples[2..], &[0.0; 3]);
+            group.request_audio_pause(false);
+            let mut tail = [1.0; 3];
+            let frozen = mixer.render(&mut tail).unwrap();
+            assert_eq!(frozen.playback_frames, 0);
+            assert_eq!(tail, [0.0; 3]);
+            for (player, capture) in captures {
+                let counters = group.member_telemetry(player).unwrap().counters();
+                assert_eq!(
+                    (
+                        counters.inputs,
+                        counters.unbound,
+                        counters.judge_results,
+                        counters.audio_commands
+                    ),
+                    (3, 0, 1, 1)
+                );
+                let file = capture.into_file();
+                assert_eq!(file.records.len(), 4);
+                assert!(file.records[1..].iter().all(|record| record.song_time
+                    == Timestamp::from_nanos(2_000_000)
+                    && matches!(record.operation, ReplayOperation::Advance)));
+                let replay = ReplaySession::from_records(
+                    file.header,
+                    boundary_config(player.0).judge,
+                    file.records,
+                )
+                .unwrap();
+                assert_eq!(replay.results().len(), 1);
+                // The note exactly at the exclusive end is neither hit nor fabricated as a miss.
+                assert_eq!(
+                    replay.engine().stable_hash().unwrap(),
+                    group.member_judge(player).unwrap().stable_hash().unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn solo_adapter_uses_the_same_immutable_end_and_capture_operation() {
+        let member = boundary_config(1);
+        let (producer, mut consumer) = command_queue(8).unwrap();
+        let mut solo = SoloRuntime::new(
+            ClockDomainId(1),
+            ClockDomainId(1),
+            Transport::new(Timestamp::from_nanos(100), Timestamp::ZERO, Rate::NORMAL),
+            member.bindings,
+            member.judge,
+            producer,
+            member.sounds,
+            8,
+        )
+        .unwrap();
+        assert!(solo.set_song_end(Timestamp::from_nanos(-1)).is_err());
+        solo.set_song_end(Timestamp::from_nanos(2_000_000)).unwrap();
+        let pre = solo
+            .process_input(input(1, 1_000_100), &Identity, point(1_000_100))
+            .unwrap();
+        assert!(pre.input.is_some());
+        assert_eq!(pre.judge_events.len(), 1);
+        assert!(consumer.try_pop().is_ok());
+        let mut end = input(1, 2_000_100);
+        end.meta_mut().sequence = 2;
+        let capped = solo
+            .process_input(end, &Identity, point(2_000_100))
+            .unwrap();
+        assert!(capped.song_end_reached && capped.input.is_none());
+        assert!(capped.judge_events.is_empty() && capped.audio_commands.is_empty());
+        assert_eq!(
+            consumer.try_pop(),
+            Err(beatkernel::audio::QueuePopError::Empty)
+        );
+        assert_eq!(solo.song_end(), Some(Timestamp::from_nanos(2_000_000)));
+        assert!(solo.set_song_end(Timestamp::from_nanos(3_000_000)).is_err());
     }
 
     #[test]

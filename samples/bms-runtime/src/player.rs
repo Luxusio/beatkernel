@@ -694,6 +694,7 @@ mod fixtures {
                 input: None,
                 bound_inputs: Vec::new(),
                 song_time,
+                song_end_reached: false,
                 audio_at: ClockPoint {
                     domain: ClockDomainId(2),
                     timestamp: song_time,
