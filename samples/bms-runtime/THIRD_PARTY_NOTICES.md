@@ -44,3 +44,33 @@ Layer III decoder and metadata functions are linked, without the optional
 SIMD, Layer I/II, allocation-backed readers or native C build. Their exact
 published MIT notices are retained. Core and BMS adapter dependencies do not
 include these application codecs.
+
+## Static image preparation codecs
+
+The image dependency is pinned with default features disabled and only BMP,
+PNG and JPEG enabled. The following new resolved package texts are retained
+from their published packages; previously resolved dependencies keep their
+existing notices. Main project code remains MIT.
+
+| Dependency | Selected license | Retained text |
+| --- | --- | --- |
+| adler2 2.0.1 | MIT | [license](third-party/adler2-2.0.1-LICENSE-MIT.txt) |
+| byteorder-lite 0.1.0 | MIT | [license](third-party/byteorder-lite-0.1.0-LICENSE-MIT.txt) |
+| crc32fast 1.5.2 | MIT | [license](third-party/crc32fast-1.5.2-LICENSE-MIT.txt) |
+| fdeflate 0.3.7 | MIT | [license](third-party/fdeflate-0.3.7-LICENSE-MIT.txt) |
+| flate2 1.1.10 | MIT | [license](third-party/flate2-1.1.10-LICENSE-MIT.txt) |
+| image 0.25.10 | MIT | [license](third-party/image-0.25.10-LICENSE-MIT.txt) |
+| miniz_oxide 0.8.9 | MIT | [license](third-party/miniz_oxide-0.8.9-LICENSE-MIT.txt) |
+| miniz_oxide 0.9.1 | MIT | [license](third-party/miniz_oxide-0.9.1-LICENSE-MIT.txt) |
+| moxcms 0.8.1 | BSD-3-Clause | [license](third-party/moxcms-0.8.1-LICENSE.txt) |
+| png 0.18.1 | MIT | [license](third-party/png-0.18.1-LICENSE-MIT.txt) |
+| pxfm 0.1.30 | BSD-3-Clause | [license](third-party/pxfm-0.1.30-LICENSE.txt) |
+| simd-adler32 0.3.10 | MIT | [license](third-party/simd-adler32-0.3.10-LICENSE.txt) |
+| zlib-rs 0.6.8 | Zlib | [license](third-party/zlib-rs-0.6.8-LICENSE.txt) |
+| zune-core 0.5.3 | MIT | [license](third-party/zune-core-0.5.3-LICENSE-MIT.txt) |
+| zune-jpeg 0.5.15 | MIT | [license](third-party/zune-jpeg-0.5.15-LICENSE-MIT.txt) |
+
+The miniz_oxide packages also retain their upstream umbrella LICENSE files
+beside the selected MIT text, including provenance for the original miniz
+implementation. This list covers new packages introduced by this phase, not
+a complete inventory of all transitive packages in every platform binary.
