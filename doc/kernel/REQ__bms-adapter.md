@@ -2,7 +2,7 @@
 
 `beatkernel-bms` is a separate MIT crate depending only on the core `beatkernel` crate. It reads already-decoded UTF-8 BMS text, returns SourceChart plus adapter-owned lane/sample/audio mappings and BGM events, and creates existing builtin Instant/Hold rules. Platform acquisition, sample decoding, sound devices and judging remain outside parsing. The file-loading example bounds file reads and compiles actual parsed content; the parser performs no asset IO. Legacy Shift-JIS conversion belongs before this text boundary; the application shared decoder has an explicit UTF-8-first/strict-Shift-JIS fallback policy and explicit mode API.
 
-Supported syntax is case-insensitive: base BPM (default 130), WAVxx base36 IDs/paths, direct hexadecimal BPM channel03, extended base36 BPMxx/channel08, STOPxx/channel09, decimal measure-length channel02, layered BGM01, visible player channels11..19/21..29, paired LNTYPE1 channels51..59/61..69, and LNOBJ endpoints on visible channels. Channel16/26 are scratch lanes; other channels keep their numeric lane identity rather than assuming a fixed key layout. LNTYPE1 holds pair successive nonzero markers per lane, including across measures; only the head sample is sounded, and the tail token is retained as metadata. Dangling/overlapping/malformed holds are rejected. LNTYPE2, mines, invisible notes, unsupported timing/scroll/warp extensions, and unrecognized commands/channels fail with line diagnostics. Listed descriptive headers are preserved, while BMP/BGA directives/channels are explicitly reported as ignored visual features.
+Supported syntax is case-insensitive: base BPM (default 130), WAVxx base36 IDs/paths, direct hexadecimal BPM channel03, extended base36 BPMxx/channel08, STOPxx/channel09, decimal measure-length channel02, layered BGM01, visible player channels11..19/21..29, paired LNTYPE1 channels51..59/61..69, and LNOBJ endpoints on visible channels. Channel16/26 are scratch lanes; other channels keep their numeric lane identity rather than assuming a fixed key layout. LNTYPE1 holds pair successive nonzero markers per lane, including across measures; only the head sample is sounded, and the tail token is retained as metadata. Dangling/overlapping/malformed holds are rejected. LNTYPE2, mines, invisible notes, unsupported timing/scroll/warp extensions, and unrecognized commands/channels fail with line diagnostics. Listed descriptive headers are preserved. BMPxx resource definitions and Base04/Poor06/Layer07 selections are retained and compiled separately; unsupported BGA crop directives remain explicit visual warnings.
 
 Measure duration is exactly four quarter beats times its rational length. Tokens divide that measure into equal rational positions; global quarter-beat positions use checked i128 arithmetic. The minimum integer beat-grid resolution is the LCM of reduced rational denominators, with an explicit caller cap and checked conversion to core u32/i64 ticks. Decimal values never pass through floats. STOP units are 1/48 of one quarter beat, independent of measure length; duration uses the tempo active at that beat, after a same-beat BPM change. STOP durations quantize to integer nanoseconds once. Notes/BGM at a STOP use its pre-STOP timestamp, matching the core chart compiler.
 
@@ -35,3 +35,31 @@ Case-insensitive SWITCH/SETSWITCH select positive u32 values using the same sour
 SKIP takes no operand and targets the nearest enclosing SWITCH, requiring a prior CASE/DEF. An active SKIP inside nested IF/RANDOM disables the enclosing SWITCH payload while all remaining nested controls are still structurally validated. Ancestor activation is respected, so ENDIF/ENDRANDOM or an inner ELSE cannot restore a skipped outer branch. CASE/DEF/ENDSW require the current top scope to be SWITCH; closing commands do not cross unclosed scopes. ENDSW is mandatory even for inactive switches and at EOF; only RANDOM scopes retain implicit EOF endings. All scopes share the 128 depth bound. Original physical caps and diagnostics apply to discarded payload; selected object/timing/sample rules remain unchanged. SWITCH choices do not replace the separate RANDOM choice used by IF.
 
 The [format memo author's SWITCH extension documentation](https://saxxonpike.github.io/bms-command-memo/index.html#SWITCH) describes fallthrough/SKIP/default behavior and differing historical implementations. The bounded, structured policy above is BeatKernel's explicit dialect: permissive DEF-before-CASE and ignored structural mistakes are unsupported. Authored parser and real preparation/replay/PCM fixtures are compiled for later execution, not represented as native or format-conformance acceptance.
+
+## Independent visual resources and timing
+
+ImageId is a separate base36 BMP namespace, including BMP00 initial poor
+resource. Definitions retain exact opaque nonempty paths; there is no parser
+asset IO. BgaChannel Base/Poor/Layer correspond to04/06/07. Zero row tokens
+are rests and do not clear previous selections. Undefined nonzero BMP
+references remain admitted selections for application blank-resource handling;
+missing WAV/BPM/STOP definitions retain their strict errors. Definitions and
+per-channel duplicate positions obey the existing explicit duplicate policy
+and source-seeded branch selection. Equal-time different channels remain
+independent and use visual-only acquisition ordinals.
+
+The independent bga_ticks_per_beat grid encompasses gameplay denominators
+under the same configured resolution cap. Visual subdivisions never alter
+SourceChart gameplay resolution or nonvisual acquisition ordinals. BGA uses
+checked core BPM/STOP marker rescaling and pre-STOP scheduling through
+compile_bga and CompiledBms.bga; visual-only markers are never judge objects.
+Source/raw-token limits include visual events. Existing note metadata includes
+original source lines, so moving gameplay lines still changes replay identity
+as before; this work does not remove that behavior.
+
+The application owns explicit bounded raster preparation and original-song
+Base/Layer composition; the adapter does not interpret native clocks or upload
+images. BMP00/Poor selections do not imply continuous poor display. Video,
+crop/opacity and miss-triggered poor-overlay policies remain outside supported
+visual semantics. Authored parser/timing/seed/limit fixtures are source-compiled
+for later execution, not format conformance or native GPU acceptance.

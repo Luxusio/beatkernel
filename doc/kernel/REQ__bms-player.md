@@ -1124,9 +1124,9 @@ Prepare channel indexes before play and query each last selection at or before
 the exact original-song timestamp. Pause, backwards seek and fresh practice
 restart use the same state projection as live/replay, without accumulated
 relative elapsed time or per-frame file IO. Store typed references, not GPU
-resources in chart state. Static raster decoding/loading, upload/rendering,
-video/crop/opacity extensions and miss-triggered poor-overlay policy remain
-pending; this foundation alone does not display backgrounds. Meaningful
+resources in chart state. Static raster decoding/loading and native Base/Layer upload/rendering are
+defined below. Video/crop/opacity extensions and miss-triggered poor-overlay
+policy remain pending; timeline projection alone does not display backgrounds. Meaningful
 fixtures must be authored for later execution; source checks are compile only.
 
 Original BMP00/04/06 semantics: [author's BMS format](https://bm98.yaneu.com/bm98/bmsformat.html). Channel07 extension context:
@@ -1137,8 +1137,9 @@ Original BMP00/04/06 semantics: [author's BMS format](https://bm98.yaneu.com/bm9
 Support BMP/PNG/JPEG raster signatures with bounded configurable decoding into
 straight RGBA8 before playback; preserve alpha and literal image orientation,
 without resizing. Use the maintained image codec with only these format
-features enabled. Videos, other formats, legacy black color-key transparency,
-GPU upload/display and streamed texture-cache policy remain pending.
+features enabled. Videos, other formats and legacy black color-key transparency
+remain pending. Native Base/Layer upload/display uses bounded ownership below;
+prefetch/streaming improvements remain pending.
 
 An explicit portable ImageAssets preparation API opens only visual references
 and defined BMP00, outside audio/input/frame callbacks. Undefined references,
@@ -1158,3 +1159,34 @@ encoded/output/retained storage, not a hard total-process peak: decoder buffers
 and RGBA conversion can coexist. Author codec and real filesystem/prepared
 chart fixtures for later execution; source compilation alone does not establish
 codec correctness or native rendering acceptance.
+
+## Native BGA ownership and composition
+
+Attached native live/local/replay owners prepare referenced static images
+before report loops and atomically publish one immutable CPU bank with the
+exact chart/roster. Terminal audio-only invocations keep no-image-IO behavior.
+Snapshots share the bank across all members and retain it through results;
+fresh sessions start without prior assets. Validate registration before IO.
+
+The UI owner creates/removes GPU textures for the current visible Base/Layer
+selections (up to four member views/eight unique images). Share canonical
+pixel aliases, release unselected textures before admitting replacements,
+reuse unchanged selections and bound failed-upload retry to wanted-set changes.
+Changing bank identity, navigation/session replacement and renderer destruction
+release or reset matching ownership; suspend/resume never reuses stale GPU IDs.
+Undefined/missing/failed base selections are black; unavailable layers draw
+nothing. Retain per-visible-view unavailable counts for a user-facing caption.
+
+Compose centered aspect-fit base then layer in a black playfield background,
+darkened below notes for readability; keep alpha, clipped field bounds, local
+member time, note/pressed/feedback/judgement painter order and original timing.
+Existing playfield wrappers retain plain lane geometry. Poor selection remains
+a selection until miss activation policy exists; do not display it continuously.
+Videos, additional raster formats and legacy black color-key policy remain
+pending. GPU upload on selection changes may stall the UI; there is no measured
+frame latency or native correctness claim until deferred execution.
+
+Author fake resource-owner/cache and real Scene/native publisher fixtures for
+alias sharing, bounds, admission failure, selection/bank/page change, cleanup,
+renderer reset, original-time pause/seek and sparse local IDs. Source compilation
+is not native GPU/device acceptance.
