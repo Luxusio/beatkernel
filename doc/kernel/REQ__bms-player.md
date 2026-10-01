@@ -4,8 +4,8 @@ The native Goal is to develop a BMS player. Keep all application features in
 the existing `beatkernel-bms-runtime` crate, with internal modules, and retain
 the core/platform/BMS adapter boundaries. Graphical presentation must use
 actual native gameplay, not autoplay or a separate simulation passed off as play.
-This app is the first game composition of the Rust cross-platform rhythm-game
-engine. Keep generic geometry/rendering components distinct from BMS display
+BeatKernel is intended as a Rust cross-platform rhythm-game engine, built from
+the low-latency runtime kernel. This app is its first game composition. Keep generic geometry/rendering components distinct from BMS display
 layouts and rules; developing them inside this app is not proof of a completed
 general engine UI API. Promote proven reusable abstractions after concrete use.
 
@@ -105,8 +105,8 @@ Bound drafts to 128 fields, 4096 UTF-8 bytes per value and 64 KiB total value
 bytes. Keep values intact as flag/value pairs rather than parsing shell text.
 Cursor movement and deletion honor UTF-8 scalar boundaries; reject controls and
 newlines. Current glyph fallback still applies to non-ASCII text. Clipboard,
-IME composition, multilingual shaping and enumerated device selectors remain
-future work. Native profile persistence is described below. Editing never acquires devices or
+IME composition, multilingual shaping and enumerated keyboard device selectors
+remain future work. Native audio output metadata selection is described below. Native profile persistence is described below. Editing never acquires devices or
 changes native input/audio owners.
 The next primitives are validated RGBA8 texture resources and clipped sprite
 quads. Solid, glyph and custom texture quads preserve painter order through
@@ -141,6 +141,22 @@ registry patch or disabling DX12. Upgrade after native/WASM source checks show
 the newer dependency graph is compatible.
 
 ## Controls and rendering behavior
+
+Audio Devices in Settings queries the configured backend on the settings
+operation worker, then shows exact identities and native metadata. Selecting
+a row updates only the device field in the draft; Apply remains separate.
+Disabled/absent WASAPI endpoints cannot be chosen, and ASIO discovery requires
+the explicit registry view. Refresh repeats discovery; Back leaves values
+unchanged. Neither default-role metadata nor the first row becomes an automatic
+device choice. Availability and format/buffer support remain native preparation
+checks. ALSA entries are output/duplex PCM hints, including configured plugins,
+not a proof of playable formats. CoreAudio metadata describes current settings.
+The portable catalog admits at most 1024 rows, 4096 UTF-8 bytes per ID/name/detail
+and 4 MiB in total; capacity errors reject the catalog instead of silently
+showing a partial list. IDs remain exact; only display controls are flattened.
+Existing Windows/macOS discovery may allocate the native list before app-level
+admission. Device queries do not open playback streams or instantiate ASIO
+drivers. They are never executed on input/audio callbacks or during a game.
 
 Native settings profiles are explicit user-selected files. `--profile PATH`
 loads a host-tagged versioned UTF-8 profile before opening the window; explicit
@@ -194,8 +210,8 @@ The user's verification deferral remains in force: fixture authoring and source
 compilation may proceed; actual GUI rendering/focus/close/restart/input/audio,
 replay/network execution and independent reviews/QA remain required later.
 This presentation increment does not by itself prove the full player complete.
-Graphical native settings now have source integration; enumerated device
-selectors, persistence of GPU/UI presentation settings and expanded
+Graphical native settings and audio output metadata selectors now have source
+integration; enumerated keyboard selectors, persistence of GPU/UI presentation settings and expanded
 transport/practice controls remain player work. Native profiles have source
 integration with file-I/O and interruption acceptance still pending. Existing
 casual multiplayer has independent local starts and unauthenticated progress;
@@ -212,7 +228,7 @@ warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warni
 
 - Settings validation checks syntax and cross-option constraints, not resource
   availability — actual device/file checks remain in native preparation.
-- Settings currently require typed device IDs and HID usage bindings; clipboard
+- Keyboard device IDs and HID usage bindings still require typed values; clipboard
   and IME composition remain absent — extend these while retaining
   bounded drafts and next-session-only application.
 - Profile operations drain on close rather than being forcibly interrupted —

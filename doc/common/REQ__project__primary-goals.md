@@ -16,7 +16,7 @@ Windows' [stream-management contract](https://learn.microsoft.com/en-us/windows/
 
 ## BMS application scope
 
-The user describes the product as a Rust cross-platform rhythm-game engine.
+The user reaffirmed that BeatKernel is a Rust cross-platform rhythm-game engine.
 BeatKernel's shared timing/input/judging/audio/replay primitives are the engine
 foundation; the BMS application is its first game composition. Build reusable
 components bottom-up, then combine them into higher-level features. Keep chart
@@ -294,3 +294,10 @@ flags require reopening before further Mixer delivery.
 The executable verification configuration is [the Harness manifest](../harness/manifest.yaml). It runs formatting, strict Clippy, workspace tests in debug and release, transport, binding, chart, input-inspector and judge help/fixture examples, and public API documentation. Timestamped judge stdin also receives task-specific CLI QA. CI declares Linux, Windows and macOS checks using Rust 1.98.1; local verification alone does not establish execution on all CI hosts or physical hardware.
 
 Contributors need a working Rust 1.98.1 or newer toolchain with rustfmt, Clippy and a host linker. The [toolchain guide](../build/GUIDE__rust-toolchain.md) records the pinned compiler policy. Task-local isolated toolchain paths are environment-specific and are not a project installation contract.
+
+Native settings now include a source-integrated audio output metadata picker.
+Discovery and profile file operations share one serialized worker outside the
+UI/game/audio owners. Explicit selection sets only the next-session draft ID;
+actual device preparation remains authoritative. Keyboard enumeration and
+executed discovery/UI acceptance remain pending. See the
+[player contract](../kernel/REQ__bms-player.md).

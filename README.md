@@ -105,10 +105,13 @@ See the [competition contract](doc/kernel/REQ__bms-competition.md) for limits.
 F2 or Settings opens a bounded draft editor for native devices, buffers, timing,
 bindings and competition options. Apply validates through the existing native
 parser and updates the next session; Back discards. Missing device/binding
-configuration can be entered there before starting. Device enumeration,
-clipboard and IME composition remain pending. `--profile PATH` loads saved
+configuration can be entered there before starting. Audio Devices queries native
+output metadata on the settings worker; select an entry and Use Device to copy
+its exact ID into the draft. Apply remains separate. ASIO discovery requires an
+explicit registry view. Keyboard device selection, clipboard and IME composition
+remain pending. `--profile PATH` loads saved
 native options; explicit native arguments replace matching profile entries.
-Settings Load/Save use an editable path and a separate file worker. Save stores
+Settings Load/Save use an editable path and the same serialized settings worker. Save stores
 the draft; Apply remains separate. Profiles retain the OS identity and exclude
 chart selection and GPU/UI settings. Actual file-I/O acceptance remains pending.
 See the [player contract](doc/kernel/REQ__bms-player.md) for lifecycle and scope.
