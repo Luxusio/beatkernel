@@ -599,18 +599,30 @@ impl DisplayDraft {
 
 struct PracticeDraft {
     editor: LineEditor,
+    end_editor: LineEditor,
+    end_focused: bool,
     error: Option<String>,
     view: PracticeView,
 }
 impl PracticeDraft {
     fn edit(&mut self, key: Option<KeyCode>, value: Option<&str>) {
-        self.error = edit_line(&mut self.editor, key, value).err();
+        let editor = if self.end_focused {
+            &mut self.end_editor
+        } else {
+            &mut self.editor
+        };
+        self.error = edit_line(editor, key, value).err();
+    }
+    fn clear_end(&mut self) {
+        self.end_editor = LineEditor::new("", 64).expect("empty bounded practice end");
+        self.error = None;
     }
     fn reset(&mut self) {
         match LineEditor::new("0:00", 64) {
             Ok(editor) => {
                 self.editor = editor;
-                self.error = None;
+                self.clear_end();
+                self.end_focused = false;
             }
             Err(error) => self.error = Some(error),
         }
@@ -1874,8 +1886,16 @@ impl Desktop {
             let start = PracticeStart::from_settings(
                 &self.settings.as_ref().ok_or("settings unavailable")?.values,
             )?;
+            let end = PracticeStart::section_end(
+                &self.settings.as_ref().ok_or("settings unavailable")?.values,
+            )?;
             let practice = PracticeDraft {
                 editor: LineEditor::new(&start.formatted(), 64)?,
+                end_editor: LineEditor::new(
+                    &end.map_or_else(String::new, PracticeStart::formatted),
+                    64,
+                )?,
+                end_focused: false,
                 error: None,
                 view: PracticeView::new(
                     next.active_id().ok_or("practice instance unavailable")?,
@@ -1901,13 +1921,18 @@ impl Desktop {
             let next = self.prepare_route(ScreenRoute::Settings)?;
             let practice = self.practice.as_ref().ok_or("practice unavailable")?;
             let start = PracticeStart::parse(practice.editor.value())?;
+            let end = if practice.end_editor.value().is_empty() {
+                None
+            } else {
+                Some(PracticeStart::parse(practice.end_editor.value())?)
+            };
             let settings = self.settings.as_ref().ok_or("settings unavailable")?;
             let mut values = settings.values.clone();
-            start.apply_to(&mut values)?;
+            start.apply_section(end, &mut values)?;
             let editor = if values
                 .fields()
                 .get(settings.selected)
-                .is_some_and(|field| field.flag == "--start-ns")
+                .is_some_and(|field| matches!(field.flag, "--start-ns" | "--end-ns"))
             {
                 LineEditor::new(&values.fields()[settings.selected].value, 4096)?
             } else {
@@ -1936,6 +1961,11 @@ impl Desktop {
         match key {
             KeyCode::Escape if !repeat => self.back(),
             KeyCode::Enter if !repeat => self.finish_practice(),
+            KeyCode::Tab if !repeat => {
+                if let Some(practice) = &mut self.practice {
+                    practice.end_focused = !practice.end_focused;
+                }
+            }
             KeyCode::ArrowLeft
             | KeyCode::ArrowRight
             | KeyCode::Home
@@ -2133,7 +2163,17 @@ impl Desktop {
         }
         if self.navigator.route() == ScreenRoute::Practice {
             match id.0 {
+                70 | 75 => {
+                    if let Some(practice) = &mut self.practice {
+                        practice.end_focused = id.0 == 75;
+                    }
+                }
                 71 => self.finish_practice(),
+                76 => {
+                    if let Some(practice) = &mut self.practice {
+                        practice.clear_end();
+                    }
+                }
                 72 => self.back(),
                 73 => {
                     if let Some(practice) = &mut self.practice {
@@ -3094,7 +3134,7 @@ impl Desktop {
             .active_id()
             .ok_or("practice instance unavailable")?;
         let hovered = self.hit();
-        let armed = [ControlId(71), ControlId(72), ControlId(73)]
+        let armed = [ControlId(71), ControlId(72), ControlId(73), ControlId(76)]
             .into_iter()
             .find(|&id| self.gesture.is_armed(id));
         let practice = self.practice.as_ref().ok_or("practice data unavailable")?;
@@ -3103,6 +3143,8 @@ impl Desktop {
         }
         practice.view.update(PracticeFrame {
             editor: practice.editor.clone(),
+            end_editor: practice.end_editor.clone(),
+            end_focused: practice.end_focused,
             error: practice.error.clone(),
             hovered,
             armed,
@@ -4313,6 +4355,113 @@ mod tests {
             previous
         );
         assert!(!app.options.native.iter().any(|flag| flag == "--start-ns"));
+    }
+
+    #[test]
+    fn practice_section_done_updates_selected_end_atomically_and_back_discards() {
+        let mut app = lifecycle_fixture();
+        app.open_settings();
+        let parent = app.navigator.active_id();
+        let settings = app.settings.as_mut().unwrap();
+        let end_index = settings
+            .values
+            .fields()
+            .iter()
+            .position(|field| field.flag == "--end-ns")
+            .unwrap();
+        settings.select(end_index).unwrap();
+        let before = settings.values.native_args();
+        app.open_practice();
+        let child = app.navigator.active_id();
+        let draft = app.practice.as_mut().unwrap();
+        draft.editor = LineEditor::new("168:00:00.000000001", 64).unwrap();
+        draft.end_editor = LineEditor::new("168:00:00.000000002", 64).unwrap();
+        app.finish_practice();
+        assert_eq!(app.navigator.active_id(), parent);
+        assert!(app.practice.is_none());
+        let settings = app.settings.as_ref().unwrap();
+        assert_eq!(settings.editor.value(), "604800000000002");
+        assert_eq!(
+            PracticeStart::from_settings(&settings.values)
+                .unwrap()
+                .nanoseconds(),
+            604800000000001
+        );
+        assert_eq!(
+            PracticeStart::section_end(&settings.values)
+                .unwrap()
+                .unwrap()
+                .nanoseconds(),
+            604800000000002
+        );
+        assert!(!app.options.native.iter().any(|arg| arg == "--end-ns"));
+        let saved = settings.values.native_args();
+        app.open_practice();
+        assert_ne!(app.navigator.active_id(), child);
+        assert_eq!(
+            app.practice.as_ref().unwrap().end_editor.value(),
+            "168:00:00.000000002"
+        );
+        app.practice.as_mut().unwrap().end_editor =
+            LineEditor::new("168:00:00.000000001", 64).unwrap();
+        let instance = app.navigator.active_id();
+        app.finish_practice();
+        assert_eq!(app.navigator.active_id(), instance);
+        assert!(app.practice.as_ref().unwrap().error.is_some());
+        assert_eq!(app.settings.as_ref().unwrap().values.native_args(), saved);
+        app.back();
+        assert_eq!(app.navigator.active_id(), parent);
+        assert_eq!(app.settings.as_ref().unwrap().values.native_args(), saved);
+        assert_ne!(saved, before);
+    }
+    #[test]
+    fn practice_field_focus_and_end_clear_change_only_targeted_draft() {
+        let mut app = lifecycle_fixture();
+        app.open_settings();
+        app.open_practice();
+        app.draw().unwrap();
+        for id in [70, 75, 71, 72, 73, 76] {
+            assert!(app.hits.iter().any(|(hit, _)| hit.0 == id));
+        }
+        app.practice.as_mut().unwrap().editor = LineEditor::new("20:00:00", 64).unwrap();
+        app.practice_key(KeyCode::Tab, false);
+        assert!(app.practice.as_ref().unwrap().end_focused);
+        app.practice.as_mut().unwrap().edit(None, Some("20:00:01"));
+        assert_eq!(app.practice.as_ref().unwrap().editor.value(), "20:00:00");
+        assert_eq!(
+            app.practice.as_ref().unwrap().end_editor.value(),
+            "20:00:01"
+        );
+        app.practice_key(KeyCode::Tab, true);
+        assert!(app.practice.as_ref().unwrap().end_focused);
+        app.activate(ControlId(70));
+        assert!(!app.practice.as_ref().unwrap().end_focused);
+        app.activate(ControlId(75));
+        assert!(app.practice.as_ref().unwrap().end_focused);
+        app.activate(ControlId(76));
+        assert_eq!(app.practice.as_ref().unwrap().end_editor.value(), "");
+        assert_eq!(app.practice.as_ref().unwrap().editor.value(), "20:00:00");
+        app.finish_practice();
+        let values = &app.settings.as_ref().unwrap().values;
+        assert_eq!(
+            PracticeStart::from_settings(values).unwrap().nanoseconds(),
+            72000000000000
+        );
+        assert_eq!(PracticeStart::section_end(values).unwrap(), None);
+        app.open_practice();
+        app.practice.as_mut().unwrap().end_editor = LineEditor::new("21:00:00", 64).unwrap();
+        app.activate(ControlId(73));
+        let draft = app.practice.as_ref().unwrap();
+        assert_eq!(draft.editor.value(), "0:00");
+        assert_eq!(draft.end_editor.value(), "");
+        assert!(!draft.end_focused);
+        app.finish_practice();
+        let values = &app.settings.as_ref().unwrap().values;
+        assert_eq!(
+            PracticeStart::from_settings(values).unwrap().nanoseconds(),
+            0
+        );
+        assert_eq!(PracticeStart::section_end(values).unwrap(), None);
     }
 
     #[test]
