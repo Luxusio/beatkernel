@@ -1,5 +1,17 @@
 # Local player roster and input ownership
 
+Windows groups use repeated stable `--local-player ID:INTERFACE_PATH` assignments
+and the same graphical roster as Linux. Each exact keyboard resolves to a fresh
+Raw Input DeviceId/handle before output starts; aliases or detached assignments
+fail rather than substitute a device. A single game-owner message pump acquires
+all keyboards using original QPC receipt metadata and routes each to its own
+actual Runtime. One transport/output/BGM is shared. A bounded merger freezes
+deadline advancement while messages remain queued; `--advance-lag-ns` (0..1s,
+default 2ms) controls its common frontier. Selected removal and chronology errors
+stop the whole group, preserving completed prefixes through cleanup and replay
+save. Raw Input receipt timestamps do not establish physical key actuation time.
+Native execution acceptance remains deferred; macOS group acquisition is pending.
+
 Each stable local member owns its competition presentation: at most eight
 recorded ghost prefixes and one peer-reported prefix, with connection lifecycle
 retained through cleanup. Group reports update the matching PlayerId only.
@@ -29,8 +41,9 @@ assuming two panes. Removing a member/session route needs held-key cleanup.
 
 Portable roster/admission, solo automatic preparation and shared Runtime
 composition now have source integration. Linux terminal composition adds multiple
-simultaneous evdev sources with graphical roster assignment. Windows/macOS
-multi-input acquisition remains unimplemented; source integration does not prove native
+simultaneous evdev sources with graphical roster assignment. Windows composes
+simultaneous Raw Input sources; macOS multi-input remains unimplemented.
+Source integration does not prove native
 multiplayer acceptance.
 Actual discovery, filtering and multi-player acceptance remain deferred.
 
@@ -88,7 +101,7 @@ group failure. Only after all judges and shared output drain finish is the
 cohort complete. Save separate .p<ID>.bkr recordings after native cleanup.
 
 This integration starts with Linux terminal play and its graphical publication.
-Graphical roster assignment has Linux source integration. Windows/macOS native
+Graphical roster assignment has Linux and Windows source integration. macOS native
 multi-input integration remains required work. Combined local-network sessions currently fail explicitly
 before resource acquisition rather than claim partial support.
 Native execution and file/recording acceptance remain deferred.
@@ -122,7 +135,7 @@ continues for every member. Notes and text stay within each panel and retain
 original song-time projection. Prepared-chart and report publication occur on
 the game owner, never audio callbacks or UI event timestamps. Linux local mode
 attaches this presentation; Settings Players assigns devices or imports CLI/profile
-identities. Windows/macOS multi-input remain required later work.
+identities. Windows uses the same presentation; macOS multi-input remains required work.
 Native UI/GPU/execution acceptance is still user-deferred.
 
 ## Graphical roster assignment

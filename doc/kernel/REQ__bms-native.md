@@ -1,5 +1,26 @@
 # Native Windows BMS sample composition
 
+## Local Windows groups
+
+Repeated `--local-player ID:INTERFACE_PATH` selects 2..64 distinct keyboards and
+stable positive u32 player IDs. Split the first colon so interface paths retain
+their content; reject duplicate IDs/paths, missing/ambiguous attachments and any
+mixed `--keyboard-path` solo override. Paths resolve against the current native
+keyboard records before output starts, also checking DeviceId/handle aliases.
+The existing shared/exclusive WASAPI and optional ASIO owners retain their
+calibration, buffer/period policies and cleanup; each player owns an independent
+actual core Runtime/judge/capture/completion, with shared BGM and audio transport.
+
+One bounded Raw Input pump feeds original receipt-clock events into InputMerger.
+Queued-message backlog suppresses deadline advancement. The common frontier
+uses an explicit `--advance-lag-ns` margin (default 2ms, range 0..1s); events at
+or behind a committed frontier fail explicitly. Selected removal stops the group.
+Completed reports survive partial failure and are published/captured before
+cleanup. Audio joins and registration closes before all per-player replay save
+attempts, using stable `.p<ID>.bkr` suffixes and the existing no-overwrite policy.
+Group plus network mode fails before resources; saved ghosts remain per-player.
+Source integration does not prove executed Windows/ASIO/device acceptance.
+
 `windows_bms` is a separate binary in `beatkernel-bms-runtime`; the unified
 application exposes the same native composition through `play` and `player`.
 This native sample loads an actual supported BMS chart
