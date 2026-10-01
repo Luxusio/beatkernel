@@ -14,6 +14,40 @@ BeatKernel is a low-latency, cross-platform Rust runtime for rhythm games. Proje
 
 Windows' [stream-management contract](https://learn.microsoft.com/en-us/windows/win32/coreaudio/stream-management) distinguishes WASAPI shared and exclusive modes. Steinberg [publishes the ASIO SDK under GPLv3 or a separate proprietary agreement](https://github.com/audiosdk/asio/blob/main/LICENSE.txt). On 2026-10-01 the user selected its GPLv3 path: preserve project-authored MIT source and distribute ASIO-combined builds with GPLv3 notices and Corresponding Source. The [distribution contract](../platform/REQ__asio-distribution.md) replaces the earlier unresolved-license prerequisite.
 
+## BMS application scope
+
+On 2026-10-01 the user selected a single BMS application crate containing all
+application features: UI, configuration, loading, play sessions, replay,
+device selection, multiplayer and record competition. Organize these features
+as internal modules instead of adding application, session, UI or networking
+crates solely for organization. Keep the existing core, native-platform and
+BMS-adapter dependency boundaries. One primary application entry point should
+expose the modes; existing diagnostic/sample binaries may remain development
+tools. Multiple execution threads do not require multiple crates.
+
+The existing application source is `samples/bms-runtime`. Moving it to
+`apps/bms-runtime` is a proposed layout, not an implemented migration.
+This decision does not establish a completed UI or separated input/game thread.
+
+The application must provide three competition modes:
+
+- Live multiplayer with other players.
+- Competition against the user's own saved past performance.
+- Competition against another player's saved performance.
+
+For saved-performance competition, the proposed default is a replay opponent
+on the same chart using the shared core judging/replay pipeline. Comparable
+results must identify compatible chart content, judging rules and gameplay
+modifiers; mismatches must be rejected or explicitly presented as incomparable.
+Remote progress must not become a substitute timestamp for local input judging.
+Live multiplayer requires a separate network session layer within the app;
+server topology, result authority, authentication, ranking policy, anti-cheat
+and synchronization tolerances remain unresolved design choices.
+
+These competition modes are future application requirements, not implemented
+capabilities. They do not replace outstanding kernel acceptance or lift the
+user's verification deferral.
+
 ## Implementation continuation policy
 
 On 2026-10-01 the user instructed and reconfirmed that a blocked development item must not stop
