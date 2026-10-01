@@ -2,19 +2,19 @@
 //! Socket work never runs on the gameplay or audio thread. Each peer starts locally.
 use beatkernel::{
     replay::{
-        codec::{encode_replay, ReplayCodecLimits, ReplayFile},
         ReplayHeader,
+        codec::{ReplayCodecLimits, ReplayFile, encode_replay},
     },
-    time::ClockDomainId,
+    time::{ClockDomainId, Timestamp},
 };
 use std::{
     fmt,
     io::{self, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
+        Arc,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
-        Arc,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -38,6 +38,45 @@ pub fn competition_identity(
     file.runtime_version = runtime_version.into();
     let identity = encode_replay(&file, limits)
         .map_err(|error| MultiplayerError::Protocol(error.to_string()))?;
+    validate_identity(&identity)?;
+    Ok(identity)
+}
+
+/// Exact finite-section agreement around the unchanged normalized setup identity.
+/// `None` preserves legacy bytes. Endpoints remain outside captured replay headers.
+pub fn competition_identity_for_section(
+    header: &ReplayHeader,
+    runtime_version: &str,
+    limits: ReplayCodecLimits,
+    end: Option<Timestamp>,
+) -> Result<Vec<u8>, MultiplayerError> {
+    let Some(end) = end else {
+        return competition_identity(header, runtime_version, limits);
+    };
+    // Bound caller-assembled metadata through the canonical codec before the
+    // profile decoder allocates its window vector.
+    let legacy = competition_identity(header, runtime_version, limits)?;
+    let (_, start, _) = crate::replay_playback::decode_chart_setup(&header.options)
+        .map_err(|error| MultiplayerError::Protocol(error.to_string()))?;
+    if start.as_nanos() < 0 || end.as_nanos() < 0 || end <= start {
+        return Err(MultiplayerError::Protocol(
+            "section endpoint must be nonnegative and after start".into(),
+        ));
+    }
+    let prefix = b"bms-competition-section/v1:";
+    let length = prefix
+        .len()
+        .checked_add(8)
+        .and_then(|n| n.checked_add(legacy.len()))
+        .filter(|n| *n <= MAX_IDENTITY)
+        .ok_or_else(|| MultiplayerError::Protocol("section identity exceeds limit".into()))?;
+    let mut identity = Vec::new();
+    identity
+        .try_reserve_exact(length)
+        .map_err(|_| MultiplayerError::Protocol("section identity allocation failed".into()))?;
+    identity.extend_from_slice(prefix);
+    identity.extend_from_slice(&end.as_nanos().to_le_bytes());
+    identity.extend_from_slice(&legacy);
     validate_identity(&identity)?;
     Ok(identity)
 }
@@ -565,6 +604,196 @@ fn queue_error<T>(error: TrySendError<T>) -> MultiplayerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn section_header(start: i64, seed: u64) -> ReplayHeader {
+        let mut options = if seed != 0 {
+            b"bms-judge-profile/v3:".to_vec()
+        } else if start != 0 {
+            b"bms-judge-profile/v2:".to_vec()
+        } else {
+            b"bms-judge-profile/v1:".to_vec()
+        };
+        if seed != 0 {
+            options.extend_from_slice(&seed.to_le_bytes());
+        }
+        if seed != 0 || start != 0 {
+            options.extend_from_slice(&start.to_le_bytes());
+        }
+        options.extend_from_slice(&(-9_i64).to_le_bytes());
+        options.extend_from_slice(&1_u64.to_le_bytes());
+        options.extend_from_slice(&1_u32.to_le_bytes());
+        options.extend_from_slice(&10_i64.to_le_bytes());
+        options.extend_from_slice(&20_i64.to_le_bytes());
+        ReplayHeader {
+            version: beatkernel::replay::REPLAY_VERSION,
+            chart_identity: vec![1],
+            rules_identity: vec![2],
+            options,
+            seed: 0,
+            normalized_clock: ClockDomainId(17),
+        }
+    }
+    fn section_limits() -> ReplayCodecLimits {
+        ReplayCodecLimits::new(
+            131072,
+            1,
+            131000,
+            beatkernel::input::CodecLimits::new(64, 0).unwrap(),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn literal_section_envelope_preserves_none_and_only_normalizes_clock() {
+        let mut header = section_header(13, u64::MAX);
+        let limits = section_limits();
+        let legacy = competition_identity(&header, "runtime", limits).unwrap();
+        assert_eq!(
+            competition_identity_for_section(&header, "runtime", limits, None).unwrap(),
+            legacy
+        );
+        let end = Timestamp::from_nanos(i64::MAX);
+        let mut expected = b"bms-competition-section/v1:".to_vec();
+        expected.extend_from_slice(&i64::MAX.to_le_bytes());
+        expected.extend_from_slice(&legacy);
+        let actual =
+            competition_identity_for_section(&header, "runtime", limits, Some(end)).unwrap();
+        assert_eq!(actual, expected);
+        assert_ne!(actual, legacy);
+        header.normalized_clock = ClockDomainId(99);
+        assert_eq!(
+            competition_identity_for_section(&header, "runtime", limits, Some(end)).unwrap(),
+            actual
+        );
+        assert_ne!(
+            competition_identity_for_section(
+                &header,
+                "runtime",
+                limits,
+                Some(Timestamp::from_nanos(i64::MAX - 1))
+            )
+            .unwrap(),
+            actual
+        );
+        assert_ne!(
+            competition_identity_for_section(&header, "other-runtime", limits, Some(end)).unwrap(),
+            actual
+        );
+        for mut changed in [
+            section_header(14, u64::MAX),
+            section_header(13, 3),
+            section_header(13, 0),
+        ] {
+            assert_ne!(
+                competition_identity_for_section(&changed, "runtime", limits, Some(end)).unwrap(),
+                actual
+            );
+            changed.rules_identity.push(3);
+            assert_ne!(
+                competition_identity_for_section(&changed, "runtime", limits, Some(end)).unwrap(),
+                actual
+            );
+        }
+        let mut changed = header.clone();
+        changed.rules_identity.push(3);
+        assert_ne!(
+            competition_identity_for_section(&changed, "runtime", limits, Some(end)).unwrap(),
+            actual
+        );
+        let prefix = b"bms-judge-profile/v3:".len();
+        let mut changed = header.clone();
+        changed.options[prefix + 16..prefix + 24].copy_from_slice(&(-8_i64).to_le_bytes());
+        assert_ne!(
+            competition_identity_for_section(&changed, "runtime", limits, Some(end)).unwrap(),
+            actual
+        );
+        let mut changed = header;
+        changed.seed = 1;
+        assert_ne!(
+            competition_identity_for_section(&changed, "runtime", limits, Some(end)).unwrap(),
+            actual
+        );
+    }
+    #[test]
+    fn finite_metadata_and_endpoint_errors_are_explicit() {
+        let header = section_header(13, 3);
+        let limits = section_limits();
+        for end in [-1, 0, 12, 13] {
+            assert!(
+                competition_identity_for_section(
+                    &header,
+                    "runtime",
+                    limits,
+                    Some(Timestamp::from_nanos(end))
+                )
+                .is_err()
+            );
+        }
+        let mut malformed = vec![section_header(-1, 3), section_header(-1, 0)];
+        let mut zero_seed = header.clone();
+        let prefix = b"bms-judge-profile/v3:".len();
+        zero_seed.options[prefix..prefix + 8].fill(0);
+        malformed.push(zero_seed);
+        let mut short = header.clone();
+        short.options.truncate(prefix + 15);
+        malformed.push(short);
+        let mut trailing = header.clone();
+        trailing.options.push(0);
+        malformed.push(trailing);
+        let mut count = header.clone();
+        count.options[prefix + 24..prefix + 32].copy_from_slice(&u64::MAX.to_le_bytes());
+        malformed.push(count);
+        let mut unknown = header.clone();
+        unknown.options = b"unknown".to_vec();
+        malformed.push(unknown);
+        for bad in malformed {
+            assert!(
+                competition_identity_for_section(
+                    &bad,
+                    "runtime",
+                    limits,
+                    Some(Timestamp::from_nanos(14))
+                )
+                .is_err()
+            );
+        }
+        let tight = ReplayCodecLimits::new(
+            1024,
+            1,
+            1,
+            beatkernel::input::CodecLimits::new(64, 0).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            competition_identity_for_section(
+                &header,
+                "runtime",
+                tight,
+                Some(Timestamp::from_nanos(14))
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn whole_section_identity_obeys_exact_max_after_wrapping() {
+        let mut header = section_header(0, 0);
+        let limits = section_limits();
+        let overhead = b"bms-competition-section/v1:".len() + 8;
+        let base = competition_identity(&header, "runtime", limits)
+            .unwrap()
+            .len();
+        header
+            .rules_identity
+            .resize(1 + MAX_IDENTITY - overhead - base, 2);
+        let end = Some(Timestamp::from_nanos(1));
+        assert_eq!(
+            competition_identity_for_section(&header, "runtime", limits, end)
+                .unwrap()
+                .len(),
+            MAX_IDENTITY
+        );
+        header.rules_identity.push(2);
+        assert!(competition_identity(&header, "runtime", limits).is_ok());
+        assert!(competition_identity_for_section(&header, "runtime", limits, end).is_err());
+    }
     fn progress() -> Progress {
         Progress {
             song_ns: -2,

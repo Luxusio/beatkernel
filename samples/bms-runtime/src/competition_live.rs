@@ -3,7 +3,8 @@ use crate::{
     competition::{Competition, OpponentKind},
     local_players::PlayerId,
     multiplayer::{
-        Multiplayer, MultiplayerEvent, MultiplayerOptions, Progress, competition_identity,
+        Multiplayer, MultiplayerEvent, MultiplayerOptions, Progress,
+        competition_identity_for_section,
     },
     player::{self, CompetitionSnapshot, GhostSnapshot, NetworkSnapshot, NetworkStatus},
     replay_capture::LiveReplayCapture,
@@ -262,6 +263,47 @@ impl LiveCompetition {
         start: Timestamp,
         chart_seed: u64,
     ) -> Result<Option<Self>> {
+        Self::prepare_member_section(
+            player, options, source, judge, domain, start, chart_seed, None,
+        )
+    }
+
+    /// Prepare solo competition with an optional original-song endpoint.
+    /// Invalid finite geometry rejects before feature selection, files or sockets.
+    pub fn prepare_section_at_with_chart_seed(
+        options: &CompetitionOptions,
+        source: &BmsChart,
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        start: Timestamp,
+        chart_seed: u64,
+        end: Option<Timestamp>,
+    ) -> Result<Option<Self>> {
+        Self::prepare_member_section(
+            PlayerId(1),
+            options,
+            source,
+            judge,
+            domain,
+            start,
+            chart_seed,
+            end,
+        )
+    }
+
+    fn prepare_member_section(
+        player: PlayerId,
+        options: &CompetitionOptions,
+        source: &BmsChart,
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        start: Timestamp,
+        chart_seed: u64,
+        end: Option<Timestamp>,
+    ) -> Result<Option<Self>> {
+        if end.is_some_and(|end| start.as_nanos() < 0 || end.as_nanos() < 0 || end <= start) {
+            return Err("competition section endpoint must be nonnegative and after start".into());
+        }
         if player.0 == 0 {
             return Err("competition player ID must be nonzero".into());
         }
@@ -272,9 +314,15 @@ impl LiveCompetition {
         let capture =
             LiveReplayCapture::new_at_with_chart_seed(judge, domain, limits, start, chart_seed)?;
         let header = capture.header().clone();
+        let network_end = if options.network.is_some() { end } else { None };
+        let identity = competition_identity_for_section(
+            &header,
+            env!("CARGO_PKG_VERSION"),
+            limits,
+            network_end,
+        )?;
         let mut competition = Competition::new(header.clone(), 8)?;
         options.load_opponents(source, &mut competition, limits)?;
-        let identity = competition_identity(&header, env!("CARGO_PKG_VERSION"), limits)?;
         let settings = MultiplayerOptions {
             setup_timeout: options.setup_timeout,
             ..MultiplayerOptions::default()
@@ -485,6 +533,109 @@ fn display_basename(label: &str) -> String {
 #[cfg(test)]
 mod fixtures {
     use super::*;
+    #[test]
+    fn invalid_finite_geometry_precedes_noop_and_opponent_socket_acquisition() {
+        use beatkernel::judge::{JudgeGrade, JudgeProfile, JudgeWindow};
+        let source = parse_seeded(
+            "#BPM 120\n#WAV01 head.wav\n#00011:01",
+            ParseOptions::default(),
+            3,
+        )
+        .unwrap();
+        let judge = JudgeEngine::new(
+            source.compile().unwrap().chart,
+            source.rules(),
+            JudgeProfile::new(
+                vec![JudgeWindow {
+                    grade: JudgeGrade(1),
+                    early: beatkernel::time::Duration::ZERO,
+                    late: beatkernel::time::Duration::ZERO,
+                }],
+                beatkernel::time::Duration::ZERO,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let inactive = CompetitionOptions::default();
+        let selected = CompetitionOptions {
+            ghosts: vec![(
+                OpponentKind::Own,
+                PathBuf::from("must-not-open-invalid-section.bkr"),
+            )],
+            network: Some(NetworkRole::Host("127.0.0.1:12345".parse().unwrap())),
+            ..CompetitionOptions::default()
+        };
+        for options in [&inactive, &selected] {
+            for (start, end) in [(-1, 1), (0, -1), (0, 0), (1, 1), (2, 1)] {
+                let error = LiveCompetition::prepare_section_at_with_chart_seed(
+                    options,
+                    &source,
+                    &judge,
+                    ClockDomainId(17),
+                    Timestamp::from_nanos(start),
+                    3,
+                    Some(Timestamp::from_nanos(end)),
+                )
+                .err()
+                .unwrap();
+                assert_eq!(
+                    error.to_string(),
+                    "competition section endpoint must be nonnegative and after start"
+                );
+            }
+        }
+        assert!(
+            LiveCompetition::prepare_section_at_with_chart_seed(
+                &inactive,
+                &source,
+                &judge,
+                ClockDomainId(17),
+                Timestamp::ZERO,
+                3,
+                Some(Timestamp::from_nanos(1))
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            LiveCompetition::prepare_section_at_with_chart_seed(
+                &inactive,
+                &source,
+                &judge,
+                ClockDomainId(17),
+                Timestamp::from_nanos(i64::MAX - 1),
+                u64::MAX,
+                Some(Timestamp::MAX)
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            LiveCompetition::prepare_at_with_chart_seed(
+                &inactive,
+                &source,
+                &judge,
+                ClockDomainId(17),
+                Timestamp::ZERO,
+                3
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            LiveCompetition::prepare_section_at_with_chart_seed(
+                &inactive,
+                &source,
+                &judge,
+                ClockDomainId(17),
+                Timestamp::ZERO,
+                3,
+                None
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
     #[test]
     fn display_labels_remove_directories_controls_and_bound_unicode() {
         assert_eq!(display_basename("/private/user/own.bkr"), "own.bkr");
