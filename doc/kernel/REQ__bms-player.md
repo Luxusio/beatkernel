@@ -577,29 +577,30 @@ It enters idle Wait only after a presented frame (or a zero-size suspended
 surface), so a recovered surface cannot wait indefinitely for unrelated input.
 
 
-## Graphical practice-start draft
+## Graphical practice-section draft
 
-Settings exposes a dedicated Practice child (button or F6). Its retained input
-accepts nonnegative decimal seconds, M:SS or H:MM:SS with 1..9 fractional digits;
-empty means zero. Colon seconds must be below 60, and minutes must be below 60
-in the three-part form. Two-part minutes and hours can span long songs. Input
-is bounded to 64 bytes and checked against nonnegative i64 nanoseconds with
-integer arithmetic. Invalid, fractional-overprecision or overflowing input is
-rejected without rounding or changing the parent draft.
+Settings exposes a dedicated Practice child (button or F6). Independent retained
+start/end inputs accept nonnegative decimal seconds, M:SS or H:MM:SS with 1..9
+fractional digits. Empty start means zero; empty end means through song end.
+A configured end must be strictly later than start. Colon seconds stay below60,
+minutes below60 in three-part form; hours/two-part minutes can span long songs.
+Each input is bounded to64bytes and nonnegativei64 nanoseconds without rounding.
+Tab/click chooses the active field; text/cursor edits target only that editor.
+Full Song resets startzero/emptyend, Through End clears onlyend. Back/Escape
+discards child edits. Done/Enter validates and atomically changes both parent
+settingsfields, synchronizing the selected start/end raweditor. Invalid range,
+precision/overflow or finalbytecapacity preserves parentdraft and childscope.
+Old endpoint bytes are released within a candidate transaction before checking
+new values, so replacing at the byte ceiling is judged by final configuration.
+Apply/profileSave stayseparate; no native acquisition/clock/chartread in bindings.
+Native parsers still own supported modes and applied configuration validation.
 
-Reset changes the child editor to zero. Back/Escape discards child edits;
-Done/Enter updates only the Settings draft's --start-ns field and refreshes its
-visible editor if selected. Settings Apply and profile Save stay separate.
-Future live sessions use that applied start; F5 keeps its pinned session start.
-Native section judge/audio/record identity are the existing original-song-time
-paths. No device acquisition, chart reading or wall clock runs in view bindings.
-
-The panel owns one retained reactive node tree per Navigator instance, with
-editor/status/control dependencies and scope disposal at child exit. Idle
-rendering uses the same event-driven composition and transient-surface retry
-policy as Selection. Loops, live scrubbing, pause/resume and GUI/acoustic
-acceptance remain unfinished and user-deferred.
-
+The view owns one retained tree per Navigator instance. Each endpoint/cursor
+update repaints only its own node; focus updates its two affected fieldnodes,
+error/button dependencies remainindependent, unchangedframes remainclean.
+Scope disposal drops all child effects; transient surface restoration retains
+geometry/hitorder. Native loops/pause use the existing owner contracts. Actual
+GUI/native/acoustic execution and live scrubbing remain deferred or unfinished.
 
 ## Retained Settings presentation
 
@@ -914,3 +915,6 @@ Windows WASAPI shared/exclusive and macOS CoreAudio solo or local 2..64 commands
 
 ### Native finite UI practice intent
 Enabling a marked practice loop preflights a fresh pinned invocation with exact --start-ns/--end-ns, then cancels and joins the previous owner. Each native session ends only at its immutable PCM/logical endpoint and native/drained frontier. Automatic repeat requires the old worker joined, successful noncancelled Finished publication and its exact completed endpoint. Observed UI song time never authorizes an audio stop/repeat; diagnostic seconds and failures cannot repeat. Disabling repetition leaves the current immutable section fence until it finishes; F5 returns to the pinned original. Fresh repeated owners preserve replay filename ordinals and one preroll. Restart may leave a device reopening gap; no gapless claim. Prepare fixtures for later execution; native GUI/acoustic acceptance remains deferred.
+
+### Precise practice section editor
+F6 Practice edits retained start and optional end fields independently, with Tab/click focus and exact seconds/M:SS/H:MM:SS up to nine decimal places. Empty end plays through song end; a configured end must be strictly later than start. Done atomically updates both original-song nanosecond fields in the parent settings draft, preserving unrelated options. Invalid range/capacity preserves that draft and child error state. Apply remains separate; Back discards. Full Song sets start zero and clears end; Through End clears only end. Views repaint only changed dependencies and dispose with screen scope. Native mode validation remains authoritative on Apply/start; ASIO/network finite configurations are unsupported. Prepare focused regression fixtures for later execution; GUI/device execution remains deferred.

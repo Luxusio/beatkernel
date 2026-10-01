@@ -127,9 +127,12 @@ or open Records for a hidden chart. Search survives Settings Back and Play retur
 F5 or Retry starts the same chart again after the previous native session has
 finished cleanup. The accepted chart/device/timing/roster options stay pinned;
 recorded retries use distinct .retry<N>.bkr stems and create-new saves.
-Settings Practice (button or F6) accepts exact seconds, M:SS or H:MM:SS with
-up to nine fractional digits; Done updates the draft and Settings Apply selects
-the next original-song practice start. The raw PRACTICE START (NS) field remains
+Settings Practice (button or F6) edits exact start and optional end as seconds,
+M:SS or H:MM:SS with up to nine fractional digits. Tab/click selects the field;
+empty end means through song end, and a configured end must follow start.
+Done updates both fields atomically in the draft; Settings Apply selects the
+next original-song section. Back discards, Full Song clears both endpoints,
+and Through End clears only the end. Raw PRACTICE START/END (NS) fields remain
 available in Settings and profiles;
 F5 retries the selected start. Earlier note heads/crossing holds are excluded, and
 overlapping automatic BGM resumes from original PCM frames. Section recordings
