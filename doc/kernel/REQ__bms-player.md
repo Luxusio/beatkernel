@@ -769,6 +769,18 @@ pause/discipline, source validation and independent player identities remain.
 Logical end reports do not acknowledge native presentation or complete remaining
 hold/notes. Native owner/config/UI/frontier/cleanup integration still remains;
 the observed loop retains its current ceiling until that connection is made.
+The native-end observer consumes a retained physical render endpoint and actual
+associated output/host clock pairs. It validates the expected playback endpoint,
+monotonic grids and clocks, retains evidence across unavailable telemetry and
+emits a boundary once only after native presentation crosses that physical frame.
+Malformed/regressing/overflowing observations are error-atomic. Host boundary
+interpolation has Unknown physical accuracy and never proves acoustic completion.
+An actual clock observation at/below the boundary is required as a lower bracket;
+starting observation after an already-presented endpoint cannot invent that
+missing relation. Once the physical marker is known, the observer retains the
+latest actual pair strictly below it for checked interpolation.
+This observer does not itself mutate Transport, drain inputs or restart owners;
+native lifecycle integration remains required.
 
 ## Catalog search and filtered selection
 

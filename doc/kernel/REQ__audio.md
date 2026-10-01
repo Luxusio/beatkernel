@@ -130,6 +130,13 @@ Runtime's separate immutable original-song end caps input admission and judging
 without changing the physical or playback grids. Its song_end_reached report is
 logical evidence only; actual native presentation must still cross the audio
 boundary before an owner acknowledges completion or disposes the session.
+RenderReport also retains playback_end_physical_frame, the actual physical frame
+where a valid nonempty render first reaches the configured immutable endpoint.
+Unlimited/manual-only pauses report None. Zero end records frame zero on the
+first nonempty render; empty/invalid buffers do not adopt a marker. Once reached,
+the marker survives silent callbacks and resume requests, so latest-only native
+telemetry cannot lose the boundary or substitute a later silent block. Native
+scalar publication preserves presence separately from its full u64 value.
 Known ceiling: the fence is an audio component. Native BMS owners still need
 explicit endpoint intent, Transport/input/judging/capture admission and cleanup
 integration before graphical loops can claim an exact native endpoint. Playback
