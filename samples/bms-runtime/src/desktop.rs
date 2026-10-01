@@ -656,11 +656,18 @@ fn scoped_metadata(
 }
 
 fn release_panel<T>(panel: &mut Option<PanelScope<T>>, navigator: &ScreenNavigator) {
+    synchronize_panel(panel, navigator);
     if panel
         .as_ref()
         .is_some_and(|panel| !navigator.retains(panel.id()))
     {
         *panel = None;
+    }
+}
+
+fn synchronize_panel<T>(panel: &mut Option<PanelScope<T>>, navigator: &ScreenNavigator) {
+    if let Some(panel) = panel {
+        panel.synchronize(navigator);
     }
 }
 
@@ -762,6 +769,15 @@ impl Desktop {
     }
     fn is_suspended(&self) -> bool {
         self.navigator.phase() == ScreenPhase::Suspended
+    }
+    /// Panels observe the Navigator's lifecycle without owning another stack.
+    fn synchronize_panel_lifecycles(&mut self) {
+        synchronize_panel(&mut self.picker, &self.navigator);
+        synchronize_panel(&mut self.records, &self.navigator);
+        synchronize_panel(&mut self.display, &self.navigator);
+        synchronize_panel(&mut self.practice, &self.navigator);
+        synchronize_panel(&mut self.local_setup, &self.navigator);
+        synchronize_panel(&mut self.settings, &self.navigator);
     }
     fn ui_ready(&self) -> bool {
         self.active
@@ -890,7 +906,7 @@ impl Desktop {
             _ => None,
         }
         .ok_or("metadata panel unavailable")?;
-        if !self.navigator.accepts(scope.0) {
+        if !scope.1.is_active() || !self.navigator.accepts(scope.0) {
             return Err("metadata panel is not active".into());
         }
         Ok(scope)
@@ -1355,7 +1371,7 @@ impl Desktop {
             .expect("profile worker")
             .join()
             .unwrap_or_else(|_| Err("profile worker panicked".into()));
-        if operation.permit.is_cancelled() || !self.navigator.accepts(operation.owner) {
+        if !operation.permit.is_active() || !self.navigator.accepts(operation.owner) {
             return;
         }
         // Completion must wake event-driven menus before polling switches to Wait.
@@ -3150,6 +3166,7 @@ impl ApplicationHandler for Desktop {
             return;
         }
         self.navigator.resume();
+        self.synchronize_panel_lifecycles();
         if self.window.is_none() {
             match event_loop.create_window(
                 Window::default_attributes()
@@ -3202,8 +3219,11 @@ impl ApplicationHandler for Desktop {
     }
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
         self.navigator.suspend();
+        self.synchronize_panel_lifecycles();
         self.active = false;
         self.pointer = None;
+        self.gesture.cancel();
+        self.invalidate_hits();
         self.cancel();
         self.renderer = None;
         self.instance = None;
@@ -4094,9 +4114,16 @@ mod tests {
             .insert("kept-profile")
             .unwrap();
         let settings_permit = app.settings.as_ref().unwrap().task_permit();
+        assert!(settings_permit.is_active());
         app.open_display();
         let display_id = app.display.as_ref().unwrap().id();
         let display_permit = app.display.as_ref().unwrap().task_permit();
+        assert_eq!(
+            settings_permit.phase(),
+            beatkernel_bms_runtime::panel_scope::PanelPhase::Retained
+        );
+        assert!(!settings_permit.is_cancelled());
+        assert!(display_permit.is_active());
         app.key(KeyCode::Tab, false);
         assert_eq!(app.display.as_ref().unwrap().selected, 1);
         assert_eq!(app.settings.as_ref().unwrap().selected, 0);
@@ -4109,6 +4136,7 @@ mod tests {
         assert!(app.display.is_none());
         assert!(display_permit.is_cancelled());
         assert!(!settings_permit.is_cancelled());
+        assert!(settings_permit.is_active());
         assert_eq!(app.settings.as_ref().unwrap().id(), settings_id);
         assert_eq!(
             app.settings.as_ref().unwrap().profile.value(),
@@ -4128,6 +4156,42 @@ mod tests {
         assert!(child_permit.is_cancelled() && settings_permit.is_cancelled());
         assert!(app.settings.is_none() && app.local_setup.is_none());
         assert_eq!(app.navigator.route(), ScreenRoute::Closing);
+    }
+
+    #[test]
+    fn panel_suspend_defers_admission_without_disposing_retained_parent_or_child() {
+        use beatkernel_bms_runtime::panel_scope::PanelPhase;
+        let mut app = lifecycle_fixture();
+        app.open_settings();
+        let parent = app.settings.as_ref().unwrap().task_permit();
+        app.open_local();
+        let child_id = app.local_setup.as_ref().unwrap().id();
+        let child = app.local_setup.as_ref().unwrap().task_permit();
+        assert_eq!(parent.phase(), PanelPhase::Retained);
+        assert!(child.is_active());
+        assert_eq!(app.metadata_scope().unwrap().0, child_id);
+
+        app.navigator.suspend();
+        app.synchronize_panel_lifecycles();
+        assert_eq!(parent.phase(), PanelPhase::Suspended);
+        assert_eq!(child.phase(), PanelPhase::Suspended);
+        assert!(!parent.is_cancelled() && !child.is_cancelled());
+        assert!(app.metadata_scope().is_err());
+        app.back();
+        assert_eq!(app.navigator.active_id(), Some(child_id));
+
+        app.navigator.resume();
+        app.synchronize_panel_lifecycles();
+        assert_eq!(parent.phase(), PanelPhase::Retained);
+        assert!(child.is_active());
+        assert_eq!(app.metadata_scope().unwrap().0, child_id);
+        app.back();
+        assert!(child.is_cancelled());
+        assert!(parent.is_active());
+        app.request_close();
+        assert!(parent.is_cancelled());
+        app.synchronize_panel_lifecycles();
+        assert!(parent.is_cancelled() && child.is_cancelled());
     }
 
     #[test]
