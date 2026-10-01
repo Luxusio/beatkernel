@@ -5,11 +5,37 @@ pub const MAX_FIELDS: usize = 128;
 pub const MAX_VALUE_BYTES: usize = 4096;
 pub const MAX_TOTAL_BYTES: usize = 64 * 1024;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsHost {
     Windows,
     Linux,
     Macos,
+}
+
+/// Explicit override flags replace the entire corresponding profile group.
+/// Values remain individual tokens; chart selection is not persisted here.
+pub fn overlay_native_args(
+    base: &[String],
+    overrides: &[String],
+    host: SettingsHost,
+) -> Result<Vec<String>, String> {
+    if base.len() % 2 != 0 || overrides.len() % 2 != 0 {
+        return Err("settings overrides require flag/value pairs".into());
+    }
+    // Validate each source before merging, including unknown and duplicate flags.
+    NativeSettings::from_args(base, host)?;
+    NativeSettings::from_args(overrides, host)?;
+    let replaced: BTreeSet<_> = overrides
+        .chunks_exact(2)
+        .map(|pair| pair[0].as_str())
+        .collect();
+    let merged: Vec<_> = base
+        .chunks_exact(2)
+        .filter(|pair| !replaced.contains(pair[0].as_str()))
+        .chain(overrides.chunks_exact(2))
+        .flat_map(|pair| pair.iter().cloned())
+        .collect();
+    Ok(NativeSettings::from_args(&merged, host)?.native_args())
 }
 
 #[derive(Clone, Debug)]
@@ -356,6 +382,35 @@ mod tests {
     use super::*;
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).into()).collect()
+    }
+    #[test]
+    fn cli_overrides_replace_whole_repeat_groups_and_can_clear_optional_values() {
+        let base = args(&[
+            "--bind",
+            "11:04",
+            "--bind",
+            "12:05",
+            "--alsa",
+            "hw:0",
+            "--seconds",
+            "10",
+        ]);
+        let overrides = args(&[
+            "--bind",
+            "11:06",
+            "--alsa",
+            "device with spaces",
+            "--seconds",
+            "",
+        ]);
+        assert_eq!(
+            overlay_native_args(&base, &overrides, SettingsHost::Linux).unwrap(),
+            args(&["--bind", "11:06", "--alsa", "device with spaces"])
+        );
+        assert!(
+            overlay_native_args(&base, &args(&["--unsupported", "x"]), SettingsHost::Linux)
+                .is_err()
+        );
     }
     #[test]
     fn exact_values_and_repeat_order_survive_without_chart_or_defaults() {

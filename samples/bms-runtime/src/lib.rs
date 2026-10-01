@@ -35,6 +35,8 @@ pub mod replay_render;
 pub mod scene;
 /// Bounded native option drafts for off-thread application configuration.
 pub mod settings;
+/// Versioned native settings profiles and bounded off-thread file storage.
+pub mod settings_profile;
 /// Validated portable raw texture resources.
 #[cfg(feature = "graphics")]
 pub mod texture;
