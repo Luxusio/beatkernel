@@ -13,7 +13,7 @@ use std::{
     io::{self, Read},
     os::unix::{
         ffi::OsStrExt,
-        fs::{FileTypeExt, OpenOptionsExt},
+        fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
 };
@@ -367,6 +367,17 @@ impl EvdevDevice {
     /// Native metadata for this opened device; runtime ID remains fixed.
     pub const fn descriptor(&self) -> &DeviceDescriptor {
         &self.descriptor
+    }
+    /// Character-device number of the opened handle, for same-node alias rejection.
+    /// Queries the owned descriptor rather than re-resolving its path.
+    pub fn native_device_number(&self) -> Result<u64, LinuxError> {
+        let metadata = self.file.metadata()?;
+        if !metadata.file_type().is_char_device() {
+            return Err(LinuxError::InvalidConfiguration(
+                "evdev handle is not a character device",
+            ));
+        }
+        Ok(metadata.rdev())
     }
     /// Explicit path selected at open.
     pub fn path(&self) -> &Path {

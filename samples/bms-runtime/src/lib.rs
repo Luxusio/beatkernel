@@ -16,6 +16,8 @@ pub mod font;
 /// Reusable asynchronous native/Web GPU presentation, separate from game I/O.
 #[cfg(feature = "graphics")]
 pub mod graphics;
+/// Bounded native input merging on one common host clock.
+pub mod local_input;
 /// Collection-based local player identity and unique native input assignment.
 pub mod local_players;
 /// Shared-transport/output execution over independent actual core runtimes.
