@@ -27,6 +27,266 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+/// ALSA output/duplex PCM name hint, not a format or availability certificate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlsaDevice {
+    /// Exact ALSA NAME, preserved for explicit caller selection.
+    pub name: String,
+    /// Unmodified optional UTF-8 description; display code may flatten newlines.
+    pub description: Option<String>,
+}
+
+/// Queries ALSA output/duplex PCM hints without opening a PCM stream.
+///
+/// `max_devices` must be 1..=4096 and bounds **all** scanned hints, including
+/// input-only hints and duplicates. `max_text_bytes` must be 1..=16384 and
+/// bounds each returned native text field, excluding its NUL terminator. A cap
+/// violation rejects the whole result instead of returning a truncated list.
+/// Exact duplicate NAME values retain the first output/duplex description in
+/// native order. No default endpoint is selected and no format is certified.
+///
+/// Rust traversal and owned metadata are bounded; ALSA constructs its entire
+/// native hint list, and allocates extracted strings, before these bounds can
+/// be checked. This off-thread query cannot bound that native allocation/work.
+///
+/// ABI and ownership follow ALSA's [Name Hint Interface](https://www.alsa-project.org/alsa-doc/alsa-lib/group___hint.html).
+pub fn alsa_output_devices(
+    max_devices: usize,
+    max_text_bytes: usize,
+) -> Result<Vec<AlsaDevice>, LinuxError> {
+    let mut rows = DiscoveryRows::new(max_devices, max_text_bytes)?;
+    let api = DiscoveryApi::load()?;
+    let mut list = ptr::null_mut();
+    // SAFETY: -1 selects all cards; static pcm is NUL-terminated. The output
+    // pointer is writable. On error ALSA frees its internal partial list; on
+    // success the returned NULL-terminated list becomes HintList's sole owner.
+    check("snd_device_name_hint", unsafe {
+        (api.hint)(-1, c"pcm".as_ptr(), &mut list)
+    })?;
+    let list = HintList {
+        pointer: list,
+        api: &api,
+    };
+    if list.pointer.is_null() {
+        return Err(LinuxError::MalformedInput("ALSA returned a NULL hint list"));
+    }
+    // Read at most max_devices entries plus the required terminating pointer.
+    // A non-null pointer in that extra position reports overflow, never a
+    // silently partial list. No hint text is inspected in the extra position.
+    for index in 0..=max_devices {
+        // SAFETY: ALSA guarantees a NULL-terminated pointer array. We stop at
+        // its first NULL, so pointer reads remain within that native allocation.
+        let hint = unsafe { *list.pointer.add(index) };
+        if hint.is_null() {
+            return Ok(rows.devices);
+        }
+        if index == max_devices {
+            return Err(LinuxError::InvalidConfiguration(
+                "ALSA discovery hint count exceeds limit",
+            ));
+        }
+        // SAFETY: hint belongs to the still-owned list; IDs are static C strings.
+        // Each returned malloc allocation immediately gains a HintText owner.
+        let ioid = HintText(unsafe { (api.get)(hint, c"IOID".as_ptr()) });
+        let ioid_bytes = ioid.bytes(max_text_bytes)?;
+        if hint_is_input(ioid_bytes, max_text_bytes)? {
+            rows.admit(None, None, ioid_bytes)?;
+            continue;
+        }
+        // SAFETY: same live hint/IDs; allocations are freed on every later error.
+        let name = HintText(unsafe { (api.get)(hint, c"NAME".as_ptr()) });
+        // SAFETY: same live hint/IDs; DESC is optional according to ALSA.
+        let description = HintText(unsafe { (api.get)(hint, c"DESC".as_ptr()) });
+        rows.admit(
+            name.bytes(max_text_bytes)?,
+            description.bytes(max_text_bytes)?,
+            ioid_bytes,
+        )?;
+    }
+    unreachable!("bounded hint traversal returns at terminator or limit")
+}
+
+struct DiscoveryRows {
+    max_devices: usize,
+    max_text_bytes: usize,
+    scanned: usize,
+    devices: Vec<AlsaDevice>,
+}
+impl DiscoveryRows {
+    fn new(max_devices: usize, max_text_bytes: usize) -> Result<Self, LinuxError> {
+        if !(1..=4096).contains(&max_devices) || !(1..=16384).contains(&max_text_bytes) {
+            return Err(LinuxError::InvalidConfiguration(
+                "ALSA discovery limits must be 1..4096 hints and 1..16384 bytes per text",
+            ));
+        }
+        let mut devices = Vec::new();
+        devices
+            .try_reserve_exact(max_devices)
+            .map_err(|_| discovery_allocation_error())?;
+        Ok(Self {
+            max_devices,
+            max_text_bytes,
+            scanned: 0,
+            devices,
+        })
+    }
+    fn admit(
+        &mut self,
+        name: Option<&[u8]>,
+        description: Option<&[u8]>,
+        ioid: Option<&[u8]>,
+    ) -> Result<(), LinuxError> {
+        if self.scanned == self.max_devices {
+            return Err(LinuxError::InvalidConfiguration(
+                "ALSA discovery hint count exceeds limit",
+            ));
+        }
+        self.scanned += 1;
+        if hint_is_input(ioid, self.max_text_bytes)? {
+            return Ok(());
+        }
+        let name = hint_utf8(
+            name.ok_or(LinuxError::MalformedInput("ALSA output hint has no NAME"))?,
+            self.max_text_bytes,
+        )?;
+        if name.is_empty() || name.chars().any(char::is_control) {
+            return Err(LinuxError::MalformedInput(
+                "ALSA hint NAME is empty or contains controls",
+            ));
+        }
+        let description = description
+            .map(|bytes| hint_utf8(bytes, self.max_text_bytes))
+            .transpose()?;
+        if self.devices.iter().any(|device| device.name == name) {
+            return Ok(());
+        }
+        self.devices.push(AlsaDevice {
+            name: owned_hint_text(name)?,
+            description: description.map(owned_hint_text).transpose()?,
+        });
+        Ok(())
+    }
+}
+
+fn hint_utf8(bytes: &[u8], max_text_bytes: usize) -> Result<&str, LinuxError> {
+    if bytes.len() > max_text_bytes {
+        return Err(LinuxError::MalformedInput(
+            "ALSA hint text exceeds selected byte limit",
+        ));
+    }
+    std::str::from_utf8(bytes)
+        .map_err(|_| LinuxError::MalformedInput("ALSA hint text is not UTF-8"))
+}
+fn hint_is_input(ioid: Option<&[u8]>, max_text_bytes: usize) -> Result<bool, LinuxError> {
+    match ioid
+        .map(|bytes| hint_utf8(bytes, max_text_bytes))
+        .transpose()?
+    {
+        Some("Input") => Ok(true),
+        Some("Output") | None => Ok(false),
+        Some(_) => Err(LinuxError::MalformedInput("unknown ALSA hint IOID")),
+    }
+}
+fn owned_hint_text(value: &str) -> Result<String, LinuxError> {
+    let mut owned = String::new();
+    owned
+        .try_reserve_exact(value.len())
+        .map_err(|_| discovery_allocation_error())?;
+    owned.push_str(value);
+    Ok(owned)
+}
+fn discovery_allocation_error() -> LinuxError {
+    LinuxError::Io(std::io::Error::from(std::io::ErrorKind::OutOfMemory))
+}
+
+// Kept separate from PCM Api: native stream opening needs no discovery symbols.
+struct DiscoveryApi {
+    hint: unsafe extern "C" fn(c_int, *const c_char, *mut *mut Handle) -> c_int,
+    get: unsafe extern "C" fn(*const c_void, *const c_char) -> *mut c_char,
+    free_hint: unsafe extern "C" fn(*mut Handle) -> c_int,
+    _library: Library,
+}
+impl DiscoveryApi {
+    fn load() -> Result<Self, LinuxError> {
+        let library = Library::open()?;
+        // SAFETY: these published ALSA control.h signatures match each symbol.
+        // POSIX dlsym returns callable addresses; Library lives until all owners
+        // invoking the functions have been dropped.
+        let hint = unsafe {
+            std::mem::transmute::<
+                Handle,
+                unsafe extern "C" fn(c_int, *const c_char, *mut *mut Handle) -> c_int,
+            >(library.symbol(c"snd_device_name_hint")?)
+        };
+        // SAFETY: exact control.h signature and the same retained library lifetime.
+        let get = unsafe {
+            std::mem::transmute::<
+                Handle,
+                unsafe extern "C" fn(*const c_void, *const c_char) -> *mut c_char,
+            >(library.symbol(c"snd_device_name_get_hint")?)
+        };
+        // SAFETY: exact control.h signature and the same retained library lifetime.
+        let free_hint = unsafe {
+            std::mem::transmute::<Handle, unsafe extern "C" fn(*mut Handle) -> c_int>(
+                library.symbol(c"snd_device_name_free_hint")?,
+            )
+        };
+        Ok(Self {
+            hint,
+            get,
+            free_hint,
+            _library: library,
+        })
+    }
+}
+struct HintList<'a> {
+    pointer: *mut Handle,
+    api: &'a DiscoveryApi,
+}
+impl Drop for HintList<'_> {
+    fn drop(&mut self) {
+        // SAFETY: matching successful ALSA list allocation, freed once while its
+        // library is retained; all HintText owners have already left their scope.
+        unsafe {
+            (self.api.free_hint)(self.pointer);
+        }
+    }
+}
+unsafe extern "C" {
+    fn free(pointer: *mut c_void);
+}
+struct HintText(*mut c_char);
+impl HintText {
+    fn bytes(&self, max_text_bytes: usize) -> Result<Option<&[u8]>, LinuxError> {
+        if self.0.is_null() {
+            return Ok(None);
+        }
+        for length in 0..=max_text_bytes {
+            // SAFETY: ALSA returns an allocated NUL-terminated string. Stop at
+            // the first NUL, or reject once more than the selected bytes exist.
+            if unsafe { *self.0.add(length) } == 0 {
+                // SAFETY: the preceding scan established length initialized
+                // bytes before NUL; this slice cannot outlive its HintText owner.
+                return Ok(Some(unsafe {
+                    std::slice::from_raw_parts(self.0.cast(), length)
+                }));
+            }
+        }
+        Err(LinuxError::MalformedInput(
+            "ALSA hint text exceeds selected byte limit",
+        ))
+    }
+}
+impl Drop for HintText {
+    fn drop(&mut self) {
+        // SAFETY: get_hint returns malloc-owned storage or NULL; libc free is
+        // its documented matching deallocator, invoked once for this owner.
+        unsafe {
+            free(self.0.cast());
+        }
+    }
+}
+
 /// Explicit ALSA PCM request; rates/format never substitute silently.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AlsaRequest {
@@ -876,6 +1136,86 @@ fn validate_sizes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_filters_input_and_preserves_first_exact_output_name() {
+        let mut rows = DiscoveryRows::new(4, 32).unwrap();
+        rows.admit(None, None, Some(b"Input")).unwrap();
+        rows.admit(
+            Some(b"hw:CARD=Exact,DEV=1"),
+            Some(b"Stereo\nOutput"),
+            Some(b"Output"),
+        )
+        .unwrap();
+        rows.admit(Some(b"default"), None, None).unwrap();
+        rows.admit(Some(b"hw:CARD=Exact,DEV=1"), Some(b"duplicate"), None)
+            .unwrap();
+        assert_eq!(
+            rows.devices,
+            vec![
+                AlsaDevice {
+                    name: "hw:CARD=Exact,DEV=1".into(),
+                    description: Some("Stereo\nOutput".into())
+                },
+                AlsaDevice {
+                    name: "default".into(),
+                    description: None
+                },
+            ]
+        );
+        assert_eq!(rows.scanned, 4);
+    }
+
+    #[test]
+    fn discovery_rejects_caps_without_truncation_and_counts_input_hints() {
+        for (devices, bytes) in [(0, 1), (4097, 1), (1, 0), (1, 16385)] {
+            assert!(matches!(
+                DiscoveryRows::new(devices, bytes),
+                Err(LinuxError::InvalidConfiguration(_))
+            ));
+        }
+        let mut rows = DiscoveryRows::new(1, 6).unwrap();
+        rows.admit(None, None, Some(b"Input")).unwrap();
+        assert!(matches!(
+            rows.admit(Some(b"hw:0"), None, None),
+            Err(LinuxError::InvalidConfiguration(_))
+        ));
+        assert!(rows.devices.is_empty());
+        let mut rows = DiscoveryRows::new(2, 6).unwrap();
+        rows.admit(Some(b"abcdef"), Some(b"123456"), None).unwrap();
+        assert!(rows.admit(Some(b"abcdefg"), None, None).is_err());
+        assert_eq!(rows.devices.len(), 1);
+        assert_eq!(rows.devices[0].name, "abcdef");
+    }
+
+    #[test]
+    fn discovery_rejects_malformed_native_text_and_unknown_direction() {
+        for name in [&b""[..], &b"a\nb"[..], &b"a\0b"[..], &b"\xff"[..]] {
+            let mut rows = DiscoveryRows::new(1, 32).unwrap();
+            assert!(matches!(
+                rows.admit(Some(name), None, None),
+                Err(LinuxError::MalformedInput(_))
+            ));
+        }
+        let mut rows = DiscoveryRows::new(1, 32).unwrap();
+        assert!(rows.admit(Some(b"name"), Some(b"\xff"), None).is_err());
+        let mut rows = DiscoveryRows::new(1, 32).unwrap();
+        assert!(rows.admit(Some(b"name"), None, Some(b"Unknown")).is_err());
+        let mut rows = DiscoveryRows::new(1, 32).unwrap();
+        assert!(rows.admit(None, None, None).is_err());
+    }
+
+    #[test]
+    fn native_hint_text_scan_honors_byte_boundary_and_empty_or_absent_values() {
+        // Borrowed fixtures bypass Drop because these are not malloc allocations.
+        let empty = std::mem::ManuallyDrop::new(HintText(c"".as_ptr().cast_mut()));
+        assert_eq!(empty.bytes(1).unwrap(), Some(&b""[..]));
+        let text = std::mem::ManuallyDrop::new(HintText(c"four".as_ptr().cast_mut()));
+        assert_eq!(text.bytes(4).unwrap(), Some(&b"four"[..]));
+        assert!(text.bytes(3).is_err());
+        let absent = HintText(ptr::null_mut());
+        assert_eq!(absent.bytes(1).unwrap(), None);
+    }
 
     fn request() -> AlsaRequest {
         AlsaRequest {
