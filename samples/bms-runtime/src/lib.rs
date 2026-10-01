@@ -33,6 +33,8 @@ pub mod replay_render;
 /// Bounded platform-independent geometry for GPU presentation.
 #[cfg(feature = "graphics")]
 pub mod scene;
+/// Bounded native option drafts for off-thread application configuration.
+pub mod settings;
 /// Validated portable raw texture resources.
 #[cfg(feature = "graphics")]
 pub mod texture;
