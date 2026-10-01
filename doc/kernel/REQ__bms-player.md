@@ -561,8 +561,9 @@ GPU playfield uniforms.
 
 This introduces only the MIT standalone Floem reactive engine, not its released
 wgpu22/forked-winit host. The existing wgpu27/winit0.30 host and native resource
-owners remain. Settings now has the retained binding below. Display uses the retained child below. Records, Players and Devices still use
-the previous drawing path. A changed node currently causes full composed rectangle
+owners remain. Settings, Display and Records use the retained bindings below.
+Players and Devices still use the previous drawing path. A changed node
+currently causes full composed rectangle
 buffer upload, not a partial GPU update; concatenation and fill cost remain
 proportional to visible geometry. GUI execution, dependency disposal behavior
 and performance measurements remain user-deferred; source compilation alone
@@ -621,8 +622,9 @@ Metadata completion queues redraw before returning to event-driven idle Wait,
 including errors and Save completion. Clearing hit regions invalidates retained
 composition even if every signal compares equal. Button hover uses the shared
 layout so it remains valid after hit-cache invalidation. The obsolete immediate
-Settings renderer is removed; Display now has the retained child below; Records, Players and Devices retain
-the previous path. Actual GUI, performance and dependency-disposal execution
+Settings renderer is removed; Display and Records use retained children.
+Players and Devices retain the previous path. Actual GUI, performance and
+dependency-disposal execution
 remain user-deferred; source compilation is not acceptance evidence.
 
 
@@ -647,7 +649,7 @@ performance; execution remains user-deferred.
 
 ## Shared retained UI component base
 
-All four migrated views (Selection, Practice, Settings and Display) use the same
+All five migrated views (Selection, Practice, Settings, Display and Records) use the same
 RetainedNodes geometry storage/binding/composition implementation. Individual
 views retain their signal dependencies, data model and explicit scope disposal;
 sharing packets does not introduce shared navigation state or native owners.
@@ -655,6 +657,25 @@ Initial geometry errors are checked before a view is returned. Composition
 errors preserve dirty state and stop partial presentation. Existing selectivity,
 retained instance, pending-hit and Back/disposal behavior remain required.
 
-This removes the earlier per-view packet helper duplication. Records, Players
-and Devices still require reactive migration. There is no full widget host,
+This removes the earlier per-view packet helper duplication. Players and
+Devices still require reactive migration. There is no full widget host,
 custom signal engine or batching scheduler, and no measured performance claim.
+
+## Retained Records UI
+
+The Records screen retains geometry nodes per screen instance. Directory edits,
+selection and paging update the affected visible rows and controls; preview,
+opponent count, errors and messages update their own nodes. Equal frames do not
+repaint nodes. Scan/Preview/Watch/Add still use the existing current-selection
+validation and metadata worker boundaries. Pending metadata disables directory,
+row, paging and action hits. Replay Watch preserves native replay ownership.
+An editable settings draft may contain more than eight saved opponent paths;
+Records still displays the count and permits Clear All/Back. Existing Add and
+native launch validation own the eight-opponent limit; view construction must
+not prevent the user from correcting that draft.
+
+Known ceiling: only ten catalog rows are drawn; catalog comparison and visible
+row projection still run on UI events. Changed packets are concatenated and
+the complete rectangle buffer is uploaded. Players and Devices reactive
+migration, live practice controls, browser adapters and full acceptance remain
+unfinished. Compilation alone does not prove GUI, native or timing behavior.

@@ -190,7 +190,7 @@ Wait, including load/save failures with no user input. Clearing cached hit regio
 forces restoration even when no signal changed. Child Back restores the retained
 Settings scope and scene; branch exit disposes subscriptions.
 
-Display now uses the retained child below. Records, Players and Devices remain
+Display and Records use the retained panels below. Players and Devices remain
 on the previous rendering path; full widget-host migration and actual GUI/performance acceptance
 remain unfinished and user-deferred.
 
@@ -214,11 +214,21 @@ migrations and GUI/performance acceptance remain unfinished and user-deferred.
 
 ## Shared retained node composition
 
-Selection, Practice, Settings and Display use one RetainedNodes implementation
-for packet construction, dependency binding, dirty state and ordered composition.
+Selection, Practice, Settings, Display and Records use one RetainedNodes
+implementation for packet construction, dependency binding, dirty state and ordered composition.
 Views still own their Floem scope, signal graph and Navigator instance identity;
 only the containing view disposes its scope. The shared primitive never owns
 navigation, native sessions, clocks or a batching scheduler. It checks initial
 packet errors before a view is published; later composition errors remain
 explicit and cannot clear dirty status. Scope disposal and retained Back behavior
 must preserve the existing dependency and geometry/hit order contracts.
+
+## Retained Records panel
+
+The Records view retains a main-thread Floem scope per Navigator instance and
+uses the shared retained node primitive. Directory editor, ten visible rows,
+preview, controls and status have separate dependencies. Returning Back or
+starting Watch releases the Records scope; metadata workers still belong to
+the coordinator and carry its existing cancellation permits. Pending operations
+disable every hit region. Accepted completion requests redraw before idle Wait.
+No filesystem scan, preview reconstruction or native playback runs in view effects.
