@@ -67,6 +67,8 @@ pub struct Renderer {
     note_pipeline: wgpu::RenderPipeline,
     note_layers: Vec<NoteLayer>,
     instances: wgpu::Buffer,
+    uploaded_geometry: Option<(Arc<()>, u64)>,
+    redraw_pending: bool,
     viewport: wgpu::Buffer,
     texture_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -356,6 +358,8 @@ impl Renderer {
             note_pipeline,
             note_layers,
             instances,
+            uploaded_geometry: None,
+            redraw_pending: true,
             viewport,
             texture_layout,
             sampler,
@@ -508,6 +512,7 @@ impl Renderer {
         self.check_failure()?;
         if width == 0 || height == 0 {
             self.suspended = true;
+            self.redraw_pending = false;
             return Ok(());
         }
         let limit = self.device.limits().max_texture_dimension_2d;
@@ -522,7 +527,14 @@ impl Renderer {
             self.surface.configure(&self.device, &self.config);
         }
         self.suspended = false;
+        self.redraw_pending = true;
         self.check_failure()
+    }
+
+    /// A transient acquisition failure still needs a later draw. Event-driven
+    /// hosts must retry at their normal cadence until a frame is presented.
+    pub fn needs_redraw(&self) -> bool {
+        self.redraw_pending
     }
 
     pub fn needs_surface_recreation(&self) -> bool {
@@ -561,6 +573,7 @@ impl Renderer {
                 ));
             }
         }
+        self.redraw_pending = !self.suspended;
         if self.suspended || self.recreate_surface {
             return Ok(());
         }
@@ -585,9 +598,17 @@ impl Renderer {
             bytemuck::cast_slice(&[dimensions[0], dimensions[1], 0.0, 0.0]),
         );
         let rectangles = scene.rectangles();
-        if !rectangles.is_empty() {
-            self.queue
-                .write_buffer(&self.instances, 0, bytemuck::cast_slice(rectangles));
+        let (identity, epoch) = scene.geometry_stamp();
+        if !self
+            .uploaded_geometry
+            .as_ref()
+            .is_some_and(|(old, old_epoch)| Arc::ptr_eq(old, identity) && *old_epoch == epoch)
+        {
+            if !rectangles.is_empty() {
+                self.queue
+                    .write_buffer(&self.instances, 0, bytemuck::cast_slice(rectangles));
+            }
+            self.uploaded_geometry = Some((Arc::clone(identity), epoch));
         }
         for (field, layer) in scene.playfields().iter().zip(&mut self.note_layers) {
             if !layer
@@ -665,6 +686,7 @@ impl Renderer {
         }
         self.queue.submit([encoder.finish()]);
         frame.present();
+        self.redraw_pending = false;
         if suboptimal {
             self.surface.configure(&self.device, &self.config);
         }
