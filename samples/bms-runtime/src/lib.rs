@@ -526,6 +526,11 @@ pub mod image_key;
 /// Original-song-time activation policy for retained Poor image selections.
 pub mod poor_background;
 
+/// Shared native QUIC ownership and portable explicit credential configuration.
+pub mod multiplayer_quic;
+#[cfg(test)]
+mod multiplayer_quic_fixtures;
+
 /// Portable ownership of the actual Mixer on an absolute callback frame grid.
 pub mod worklet_audio;
 #[cfg(test)]
