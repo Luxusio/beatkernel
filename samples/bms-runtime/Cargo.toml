@@ -15,6 +15,7 @@ default = ["desktop"]
 desktop = ["graphics", "dep:winit", "dep:pollster", "dep:arboard"]
 graphics = ["dep:wgpu", "dep:bytemuck", "dep:floem_reactive", "dep:ab_glyph"]
 browser = ["graphics", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
+browser-audio = ["dep:wasm-bindgen", "dep:js-sys"]
 asio-sdk = ["beatkernel-platform/asio-sdk"]
 
 [dependencies]

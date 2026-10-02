@@ -14,6 +14,9 @@ pub mod bga;
 pub mod bgm;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser;
+/// Numeric bindings for the separate AudioWorklet WASM owner.
+#[cfg(all(target_arch = "wasm32", feature = "browser-audio"))]
+pub mod browser_audio;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 mod browser_canvas;
 /// Strict bounded application chart decoding before the UTF-8 parser.
@@ -522,6 +525,11 @@ pub mod image_key;
 
 /// Original-song-time activation policy for retained Poor image selections.
 pub mod poor_background;
+
+/// Portable ownership of the actual Mixer on an absolute callback frame grid.
+pub mod worklet_audio;
+#[cfg(test)]
+mod worklet_audio_fixtures;
 
 /// Prepared original-song per-role BGA opacity queries.
 pub mod bga_opacity;
