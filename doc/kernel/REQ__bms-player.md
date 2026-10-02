@@ -1219,3 +1219,14 @@ Prepare #BGA/#@BGA fragments into default256x256 transparent canvases before pla
 
 ### Explicit BGA canvas dimensions
 Honor selected CANVASSIZE for both ordinary static resources and crop canvases. Validate header, positive extent<=configured decode dimensions/hard16384 and checkedRGBA byte size<=per-image/64MiB limit before filesystem or canvas allocation. Header syntax permits1..9999 but preparation budgets still govern. Without header preserve original raw extents and legacy256crop. With header, top-left pad transparent black or crop to plane; never stretch source pixels. Exact-size raw images share originalArc; aliases/normalizeddefinitions share changedcanvas variants. Aggregate budget counts retainedsource plus changedcanvases and keyedLayers. Existing native atomic publication/cache/aspect-fit rendering uses producedcanvas aspect ratio; no frame pixel work or shader change. Parser/pixel/extreme/bounds/alias/nativepublication/cacheScene/actualRuntime STOP-replay fixtures authored for later execution; native pixels/performance and videos/ExtChr remain pending.
+## Chart WAV gain preparation
+
+All shared audio preparation paths apply checked VOLWAV percentage to both
+keysound bindings (including LN heads) and scheduled BGM commands before
+playback. Default unity; zero retains scheduling while muting. Keep decoded
+PCM, frame counts, voice IDs, schedules, judgment and replay setup unchanged.
+Resolve gain before WAV asset IO and reuse the same preparation in live,
+offline, custom-decoder and replay-aware loaders. Device clipping and historical
+player conformance require later execution; static header gain does not imply
+dynamic97/98 support. Author fixtures for actual shared Runtime/Mixer PCM and
+replay-aware preparation, compiling them without execution under the user deferral.

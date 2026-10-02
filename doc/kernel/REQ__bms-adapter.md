@@ -95,3 +95,13 @@ Accept selected #BGAxx source x1 y1 x2 y2 dx dy and #@BGAxx source sx sy w h dx 
 
 ## Explicit canvas-size header
 Selected CANVASSIZE accepts two positive1..4-digit ASCII decimals. Last valid header wins regardless of DuplicatePolicy; malformed active values warn and ignore without erasing a prior valid value. Preserve canonical metadata; a checked accessor rejects fabricated invalid data. Absent header returnsNone, leaving legacy raw-image rendering and256crop behavior. Explicit header sets original-image top-left transparent-black padding/cropping and BGA/#@BGA canvas dimensions. Seeded active selection and line bounds remain. Gameplay/timing/audio/replay identity unchanged for unmoved game lines. This follows the Sonorous proposal via author translation; video/ExtChr/full native conformity remain unfinished.
+## Static WAV volume
+
+Selected VOLWAV accepts the existing nonnegative plain decimal grammar with
+18-digit precision and optional leading plus. Absent means100%; zero mutes,
+200% doubles gain. Preserve raw metadata, duplicate rules and seeded branch
+selection. A checked wav_gain accessor converts percentage once to finite f32
+and rejects malformed fabricated metadata. No additional percentage ceiling;
+the existing decimal precision bounds admission. Gameplay timing and replay
+setup identity remain unchanged for unchanged gameplay lines. Dynamic channels
+97/98 remain unsupported. Fixtures are authored for later execution.
