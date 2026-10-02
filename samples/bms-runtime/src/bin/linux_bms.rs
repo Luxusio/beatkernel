@@ -405,7 +405,7 @@ impl Drop for DeliverySession {
 }
 
 #[cfg(target_os = "linux")]
-use beatkernel_bms_runtime::native_cohort_setup::save_capture;
+use beatkernel_bms_runtime::native_finish::{finish_solo, save_capture};
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -1025,23 +1025,15 @@ mod native {
         }
         // Final input counters were read above; close evdev before file I/O.
         drop(input);
-        if let Some(competition) = competition.as_mut() {
-            competition.finish();
-        }
-        let save = save_capture(
+        finish_solo(
+            outcome,
+            stop.map_err(Into::into),
+            Ok(()),
+            competition.as_mut(),
             capture,
             options.record_replay.as_deref(),
-            outcome.is_err() || stop.is_err(),
-        );
-        if let Err(error) = &save {
-            eprintln!(
-                "replay save error after cleanup (valid captured prefix retained until save): {error}"
-            );
-        }
-        outcome?;
-        stop?;
-        save?;
-        Ok(())
+            save_capture,
+        )
     }
 }
 
