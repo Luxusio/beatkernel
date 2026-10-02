@@ -21,6 +21,8 @@ pub mod browser_audio;
 mod browser_canvas;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_game;
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
+pub mod browser_replay;
 /// Strict bounded application chart decoding before the UTF-8 parser.
 pub mod chart_text;
 /// Saved-record opponents and actual judgment summaries.
@@ -150,6 +152,10 @@ mod source_preparation_fixtures;
 pub mod step_gameplay;
 #[cfg(test)]
 mod step_gameplay_fixtures;
+/// Nonblocking recorded-operation presentation and bounded remote audio batches.
+pub mod step_replay;
+#[cfg(test)]
+mod step_replay_fixtures;
 /// Validated portable raw texture resources.
 pub mod texture;
 /// Atomic Design-style presentation compositions, independent of native I/O.

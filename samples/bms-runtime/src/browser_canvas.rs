@@ -83,6 +83,23 @@ impl BrowserCanvas {
         )
     }
 
+    pub(crate) fn present_replay(
+        &mut self,
+        replay: &crate::browser_replay::BrowserReplay,
+        lookahead: i64,
+    ) -> Result<(), String> {
+        self.present(
+            &replay.chart,
+            &replay.images,
+            replay.replay.song_time(),
+            lookahead,
+            &replay.recent,
+            replay.replay.pressed_lanes(),
+            Some(&replay.progress),
+            Some(replay.replay.score()),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn present(
         &mut self,

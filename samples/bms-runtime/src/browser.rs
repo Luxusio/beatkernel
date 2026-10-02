@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use beatkernel::{
     audio::{AudioFormat, PcmLimits},
+    replay::codec::{ReplayFile, decode_replay},
     time::Timestamp,
 };
 use wasm_bindgen::prelude::*;
@@ -120,6 +121,52 @@ impl BrowserLibrary {
             chart,
             images,
             chart_seed: seed,
+            replay: None,
+        })
+    }
+
+    /// Decode the canonical bounded recording and prepare its actual seeded
+    /// chart section. This resource is consumed by BrowserReplay, not live play.
+    pub fn prepare_replay_chart(
+        &self,
+        path: &str,
+        bytes: Vec<u8>,
+        sample_rate: u32,
+        channels: u16,
+        max_pcm_asset_bytes: u32,
+        max_pcm_total_bytes: u32,
+        max_samples: u32,
+    ) -> Result<BrowserPrepared, JsValue> {
+        let limits = crate::competition_live::replay_limits().map_err(js_error)?;
+        let file = decode_replay(&bytes, limits).map_err(js_error)?;
+        let (_, _, seed) =
+            crate::replay_playback::decode_chart_setup(&file.header.options).map_err(js_error)?;
+        let original = self.prepare_chart(
+            path,
+            sample_rate,
+            channels,
+            seed,
+            max_pcm_asset_bytes,
+            max_pcm_total_bytes,
+            max_samples,
+        )?;
+        let pcm_limits = PcmLimits::new(
+            max_pcm_asset_bytes as usize,
+            max_pcm_total_bytes as usize,
+            max_samples as usize,
+        )
+        .map_err(js_error)?;
+        let prepared =
+            crate::section_start::prepare_replay(original.prepared, &file, limits, pcm_limits)
+                .map_err(js_error)?;
+        let chart = PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart)
+            .map_err(js_error)?;
+        Ok(BrowserPrepared {
+            prepared,
+            chart,
+            images: original.images,
+            chart_seed: seed,
+            replay: Some(file),
         })
     }
 }
@@ -131,6 +178,7 @@ pub struct BrowserPrepared {
     pub(crate) chart: PlayerChart,
     pub(crate) images: Arc<ImageAssets>,
     pub(crate) chart_seed: u64,
+    pub(crate) replay: Option<ReplayFile>,
 }
 
 #[wasm_bindgen]
@@ -218,6 +266,15 @@ impl BrowserView {
     pub fn draw_game(&mut self, game: &crate::browser_game::BrowserGame) -> Result<(), JsValue> {
         self.canvas
             .present_game(game, LOOKAHEAD_NS)
+            .map_err(js_error)
+    }
+
+    pub fn draw_replay(
+        &mut self,
+        replay: &crate::browser_replay::BrowserReplay,
+    ) -> Result<(), JsValue> {
+        self.canvas
+            .present_replay(replay, LOOKAHEAD_NS)
             .map_err(js_error)
     }
 

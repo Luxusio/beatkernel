@@ -153,6 +153,11 @@ impl ReplayCompletion {
             drain: OutputDrain::new(domain, rate),
         }
     }
+    /// New or retained outbound commands invalidate the earlier drain barrier.
+    pub fn reset_drain(&mut self) {
+        self.drain.after_frame = None;
+        self.drain.idle_end = None;
+    }
     pub fn observe(
         &mut self,
         records_finished: bool,

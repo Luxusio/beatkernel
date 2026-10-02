@@ -661,7 +661,14 @@ impl StepGameplay {
         presented: Option<ClockPoint>,
     ) -> Result<Option<ClockPoint>, StepGameplayError> {
         self.ensure_usable()?;
-        match self.check_completion_evidence(rendered, presented) {
+        match validate_output_evidence(
+            self.output_origin,
+            self.sample_rate,
+            self.last_render,
+            self.last_presented,
+            rendered,
+            presented,
+        ) {
             Ok(normalized) => Ok(normalized),
             Err(error) => {
                 self.failed = true;
@@ -672,109 +679,6 @@ impl StepGameplay {
                 })
             }
         }
-    }
-
-    fn check_completion_evidence(
-        &self,
-        rendered: Option<RenderReport>,
-        presented: Option<ClockPoint>,
-    ) -> Result<Option<ClockPoint>, CompletionError> {
-        let normalized = presented
-            .map(|point| {
-                if point.domain != self.output_origin.domain {
-                    return Err(CompletionError(
-                        "completion presentation clock domain differs",
-                    ));
-                }
-                let ns = point
-                    .timestamp
-                    .as_nanos()
-                    .checked_sub(self.output_origin.timestamp.as_nanos())
-                    .ok_or(CompletionError(
-                        "completion presentation origin subtraction overflow",
-                    ))?;
-                let timestamp = Timestamp::from_nanos(ns);
-                if ns < 0 || self.last_presented.is_some_and(|last| timestamp < last) {
-                    return Err(CompletionError(
-                        "completion presentation precedes its output frontier",
-                    ));
-                }
-                Ok(ClockPoint {
-                    domain: point.domain,
-                    timestamp,
-                })
-            })
-            .transpose()?;
-        let Some(report) = rendered else {
-            return Ok(normalized);
-        };
-        if report.paused
-            || report.playback_end_physical_frame.is_some()
-            || report.producer_disconnected
-        {
-            return Err(CompletionError(
-                "completion requires connected unlimited unpaused output",
-            ));
-        }
-        if report.frames > AudioLimits::MAX_RENDER_FRAMES
-            || report.active_voices > AudioLimits::MAX_VOICES
-            || report.pending_commands > AudioLimits::MAX_COMMANDS
-            || report.start_frame != report.playback_start_frame
-            || report.frames != report.playback_frames
-        {
-            return Err(CompletionError(
-                "completion render capacity or playback grid differs",
-            ));
-        }
-        let frames = u64::try_from(report.frames)
-            .map_err(|_| CompletionError("completion render extent overflow"))?;
-        let end = report
-            .start_frame
-            .checked_add(frames)
-            .ok_or(CompletionError("completion render cursor overflow"))?;
-        let end_ns = (i128::from(end) * 1_000_000_000 + i128::from(self.sample_rate) - 1)
-            / i128::from(self.sample_rate);
-        let duration = Duration::from_nanos(
-            i64::try_from(end_ns)
-                .map_err(|_| CompletionError("completion render duration overflow"))?,
-        );
-        self.output_origin
-            .timestamp
-            .checked_add(duration)
-            .ok_or(CompletionError("completion render clock overflow"))?;
-        let counters = report.counters;
-        if counters.rendered_frames != end
-            || counters.commands_applied > counters.commands_consumed
-            || counters.late_commands > counters.commands_consumed
-            || counter_values(counters)[4..]
-                .iter()
-                .any(|&value| value != 0)
-        {
-            return Err(CompletionError(
-                "completion mixer counters contain failure or invalid evidence",
-            ));
-        }
-        if let Some(previous) = self.last_render {
-            if report.start_frame == previous.start_frame {
-                if report != previous {
-                    return Err(CompletionError(
-                        "completion render block changed after observation",
-                    ));
-                }
-            } else if report.start_frame < previous.counters.rendered_frames {
-                return Err(CompletionError(
-                    "completion render chronology regressed or overlapped",
-                ));
-            }
-            if counter_values(counters)
-                .into_iter()
-                .zip(counter_values(previous.counters))
-                .any(|(current, previous)| current < previous)
-            {
-                return Err(CompletionError("completion mixer counters regressed"));
-            }
-        }
-        Ok(normalized)
     }
 
     /// Drain one bounded batch while retaining its original scalar commands
@@ -841,28 +745,10 @@ impl StepGameplay {
     ) -> Result<(), StepGameplayError> {
         self.ensure_usable()?;
         let batch = self.pending.take();
-        let valid = batch.as_ref().is_some_and(|batch| {
-            sequence == batch.sequence
-                && admitted <= batch.commands.len()
-                && (!success || admitted == batch.commands.len())
-        });
-        if !valid {
+        acknowledge_batch(batch, sequence, admitted, success).map_err(|error| {
             self.failed = true;
-            return Err(StepGameplayError::InvalidAcknowledgement {
-                sequence,
-                admitted,
-                success,
-                batch,
-            });
-        }
-        if !success {
-            self.failed = true;
-            return Err(StepGameplayError::AudioRejected {
-                batch: batch.expect("validated exact batch"),
-                admitted,
-            });
-        }
-        Ok(())
+            error
+        })
     }
 
     /// Fence without inventing completion, a replay operation or a remote ACK.
@@ -884,6 +770,140 @@ impl StepGameplay {
     pub fn failed(&self) -> bool {
         self.failed
     }
+}
+
+/// Validate and consume exactly one original batch; owners apply their own fence.
+pub(crate) fn acknowledge_batch(
+    batch: Option<StepAudioBatch>,
+    sequence: u64,
+    admitted: usize,
+    success: bool,
+) -> Result<(), StepGameplayError> {
+    let valid = batch.as_ref().is_some_and(|batch| {
+        sequence == batch.sequence
+            && admitted <= batch.commands.len()
+            && (!success || admitted == batch.commands.len())
+    });
+    if !valid {
+        return Err(StepGameplayError::InvalidAcknowledgement {
+            sequence,
+            admitted,
+            success,
+            batch,
+        });
+    }
+    if !success {
+        return Err(StepGameplayError::AudioRejected {
+            batch: batch.expect("validated exact batch"),
+            admitted,
+        });
+    }
+    Ok(())
+}
+
+/// Shared validation for normal unlimited live/replay output; no state is adopted.
+pub(crate) fn validate_output_evidence(
+    output_origin: ClockPoint,
+    sample_rate: u32,
+    last_render: Option<RenderReport>,
+    last_presented: Option<Timestamp>,
+    rendered: Option<RenderReport>,
+    presented: Option<ClockPoint>,
+) -> Result<Option<ClockPoint>, CompletionError> {
+    let normalized = presented
+        .map(|point| {
+            if point.domain != output_origin.domain {
+                return Err(CompletionError(
+                    "completion presentation clock domain differs",
+                ));
+            }
+            let ns = point
+                .timestamp
+                .as_nanos()
+                .checked_sub(output_origin.timestamp.as_nanos())
+                .ok_or(CompletionError(
+                    "completion presentation origin subtraction overflow",
+                ))?;
+            let timestamp = Timestamp::from_nanos(ns);
+            if ns < 0 || last_presented.is_some_and(|last| timestamp < last) {
+                return Err(CompletionError(
+                    "completion presentation precedes its output frontier",
+                ));
+            }
+            Ok(ClockPoint {
+                domain: point.domain,
+                timestamp,
+            })
+        })
+        .transpose()?;
+    let Some(report) = rendered else {
+        return Ok(normalized);
+    };
+    if report.paused || report.playback_end_physical_frame.is_some() || report.producer_disconnected
+    {
+        return Err(CompletionError(
+            "completion requires connected unlimited unpaused output",
+        ));
+    }
+    if report.frames > AudioLimits::MAX_RENDER_FRAMES
+        || report.active_voices > AudioLimits::MAX_VOICES
+        || report.pending_commands > AudioLimits::MAX_COMMANDS
+        || report.start_frame != report.playback_start_frame
+        || report.frames != report.playback_frames
+    {
+        return Err(CompletionError(
+            "completion render capacity or playback grid differs",
+        ));
+    }
+    let frames = u64::try_from(report.frames)
+        .map_err(|_| CompletionError("completion render extent overflow"))?;
+    let end = report
+        .start_frame
+        .checked_add(frames)
+        .ok_or(CompletionError("completion render cursor overflow"))?;
+    let end_ns =
+        (i128::from(end) * 1_000_000_000 + i128::from(sample_rate) - 1) / i128::from(sample_rate);
+    let duration = Duration::from_nanos(
+        i64::try_from(end_ns)
+            .map_err(|_| CompletionError("completion render duration overflow"))?,
+    );
+    output_origin
+        .timestamp
+        .checked_add(duration)
+        .ok_or(CompletionError("completion render clock overflow"))?;
+    let counters = report.counters;
+    if counters.rendered_frames != end
+        || counters.commands_applied > counters.commands_consumed
+        || counters.late_commands > counters.commands_consumed
+        || counter_values(counters)[4..]
+            .iter()
+            .any(|&value| value != 0)
+    {
+        return Err(CompletionError(
+            "completion mixer counters contain failure or invalid evidence",
+        ));
+    }
+    if let Some(previous) = last_render {
+        if report.start_frame == previous.start_frame {
+            if report != previous {
+                return Err(CompletionError(
+                    "completion render block changed after observation",
+                ));
+            }
+        } else if report.start_frame < previous.counters.rendered_frames {
+            return Err(CompletionError(
+                "completion render chronology regressed or overlapped",
+            ));
+        }
+        if counter_values(counters)
+            .into_iter()
+            .zip(counter_values(previous.counters))
+            .any(|(current, previous)| current < previous)
+        {
+            return Err(CompletionError("completion mixer counters regressed"));
+        }
+    }
+    Ok(normalized)
 }
 
 fn counter_values(counters: AudioCounters) -> [u64; 11] {

@@ -9,7 +9,7 @@ use crate::{
     image_assets::ImageAssets,
     note_progress::NoteProgress,
     player_chart::PlayerChart,
-    step_gameplay::{StepGameplay, StepGameplayConfig, StepGameplayError},
+    step_gameplay::{StepAudioBatch, StepGameplay, StepGameplayConfig, StepGameplayError},
     worklet_audio::decode_output,
 };
 use beatkernel::{
@@ -29,7 +29,7 @@ use beatkernel_platform::audio::presentation::discipline::DisciplineConfig;
 use wasm_bindgen::prelude::*;
 
 const HOST: ClockDomainId = ClockDomainId(0x57494e);
-const OUTPUT: ClockDomainId = ClockDomainId(0x57415544);
+pub(crate) const OUTPUT: ClockDomainId = ClockDomainId(0x57415544);
 struct Explicit;
 impl ClockMapper for Explicit {
     fn map(&self, from: ClockPoint, to: ClockDomainId) -> Option<Timestamp> {
@@ -66,6 +66,17 @@ pub struct BrowserSample {
     rate: u32,
     channels: u16,
     pcm: Option<Vec<f32>>,
+}
+impl BrowserSample {
+    pub(crate) fn from_pcm(id: SampleId, sample: PcmSample) -> Self {
+        let format = sample.format();
+        Self {
+            id: id.0,
+            rate: format.sample_rate(),
+            channels: format.channels(),
+            pcm: Some(sample.into_samples()),
+        }
+    }
 }
 #[wasm_bindgen]
 impl BrowserSample {
@@ -114,6 +125,9 @@ impl BrowserGame {
         offset_ns: i64,
         key_pairs: Vec<u32>,
     ) -> Result<Self, JsValue> {
+        if prepared.replay.is_some() {
+            return Err(error("replay resources require the replay owner"));
+        }
         if key_pairs.len() > 36 || key_pairs.len() % 2 != 0 || host_origin_ns < 0 {
             return Err(error("invalid browser binding count or host origin"));
         }
@@ -207,15 +221,9 @@ impl BrowserGame {
         self.game.activate(point(HOST, host_ns)).map_err(error)
     }
     pub fn next_sample(&mut self) -> Option<BrowserSample> {
-        self.samples.pop_front().map(|(id, sample)| {
-            let format = sample.format();
-            BrowserSample {
-                id: id.0,
-                rate: format.sample_rate(),
-                channels: format.channels(),
-                pcm: Some(sample.into_samples()),
-            }
-        })
+        self.samples
+            .pop_front()
+            .map(|(id, sample)| BrowserSample::from_pcm(id, sample))
     }
     pub fn input(
         &mut self,
@@ -244,8 +252,7 @@ impl BrowserGame {
             .game
             .process_input(input, &Explicit, point(OUTPUT, audio_ns));
         self.accept_report(result)?;
-        if let Some(index) = self.chart.lanes.iter().position(|&value| value == lane) {
-            let mask = 1u32 << index;
+        if let Some(mask) = crate::pressed_keys::lane_bit(GameControlId(u32::from(lane))) {
             if down {
                 self.pressed |= mask;
             } else {
@@ -338,38 +345,7 @@ impl BrowserGame {
         let Some(batch) = self.game.take_commands(max as usize).map_err(error)? else {
             return Ok(JsValue::NULL);
         };
-        let result = (|| {
-            let commands = js_sys::Array::new();
-            for command in batch.commands {
-                let object = js_sys::Object::new();
-                let at = command.at().as_nanos();
-                let (kind, voice, sample, gain, value, denominator) = match command {
-                    AudioCommand::Play {
-                        voice,
-                        sample,
-                        gain,
-                        ..
-                    } => (0, voice.0, sample.0, gain, 0, 0),
-                    AudioCommand::Stop { voice, .. } => (1, voice.0, 0, 0.0, 0, 0),
-                    AudioCommand::SetRate { rate, .. } => {
-                        (2, 0, 0, 0.0, rate.numerator(), rate.denominator())
-                    }
-                    AudioCommand::Seek { song_time, .. } => (3, 0, 0, 0.0, song_time.as_nanos(), 0),
-                };
-                field(&object, "kind", JsValue::from_f64(f64::from(kind)))?;
-                field(&object, "voice", unsigned(voice))?;
-                field(&object, "sample", unsigned(sample))?;
-                field(&object, "at", signed(at))?;
-                field(&object, "gain", JsValue::from_f64(f64::from(gain)))?;
-                field(&object, "value", signed(value))?;
-                field(&object, "denominator", unsigned(denominator))?;
-                commands.push(&object);
-            }
-            let result = js_sys::Object::new();
-            field(&result, "sequence", unsigned(batch.sequence))?;
-            field(&result, "commands", commands.into())?;
-            Ok(result.into())
-        })();
+        let result = encode_batch(batch);
         if result.is_err() {
             self.game.fail();
         }
@@ -444,4 +420,40 @@ impl BrowserGame {
             self.recent.push(*event);
         }
     }
+}
+
+/// Single scalar command ABI used by both live and replay owners.
+pub(crate) fn encode_batch(batch: StepAudioBatch) -> Result<JsValue, JsValue> {
+    (|| {
+        let commands = js_sys::Array::new();
+        for command in batch.commands {
+            let object = js_sys::Object::new();
+            let at = command.at().as_nanos();
+            let (kind, voice, sample, gain, value, denominator) = match command {
+                AudioCommand::Play {
+                    voice,
+                    sample,
+                    gain,
+                    ..
+                } => (0, voice.0, sample.0, gain, 0, 0),
+                AudioCommand::Stop { voice, .. } => (1, voice.0, 0, 0.0, 0, 0),
+                AudioCommand::SetRate { rate, .. } => {
+                    (2, 0, 0, 0.0, rate.numerator(), rate.denominator())
+                }
+                AudioCommand::Seek { song_time, .. } => (3, 0, 0, 0.0, song_time.as_nanos(), 0),
+            };
+            field(&object, "kind", JsValue::from_f64(f64::from(kind)))?;
+            field(&object, "voice", unsigned(voice))?;
+            field(&object, "sample", unsigned(sample))?;
+            field(&object, "at", signed(at))?;
+            field(&object, "gain", JsValue::from_f64(f64::from(gain)))?;
+            field(&object, "value", signed(value))?;
+            field(&object, "denominator", unsigned(denominator))?;
+            commands.push(&object);
+        }
+        let result = js_sys::Object::new();
+        field(&result, "sequence", unsigned(batch.sequence))?;
+        field(&result, "commands", commands.into())?;
+        Ok(result.into())
+    })()
 }
