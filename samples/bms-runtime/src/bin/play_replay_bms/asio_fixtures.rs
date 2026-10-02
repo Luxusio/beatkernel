@@ -359,3 +359,545 @@ fn recorded_asio_natural_completion_requires_explicit_bounded_clock_assessments(
         }
     }
 }
+
+mod playback_control {
+    use super::*;
+    use beatkernel::audio::{
+        AudioCommand, CommandProducer, PcmSample, SampleBank, SampleId, VoiceId,
+    };
+    use beatkernel_bms_runtime::native_start::interval::StartInterval;
+
+    fn point(domain: ClockDomainId, ns: i64) -> ClockPoint {
+        ClockPoint {
+            domain,
+            timestamp: Timestamp::from_nanos(ns),
+        }
+    }
+    fn fixture() -> (CommandProducer, Mixer, ReplayPause) {
+        let format = AudioFormat::new(1000, 1).unwrap();
+        let limits = AudioLimits::new(8, 2, 8, 32, 8).unwrap();
+        let pcm = PcmLimits::new(128, 512, 1).unwrap();
+        let mut bank = SampleBank::new(format, pcm).unwrap();
+        bank.insert(
+            SampleId(1),
+            PcmSample::new(
+                format,
+                (1..=64).map(|value| value as f32 / 256.0).collect(),
+                pcm,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let (mut producer, consumer) = command_queue(8).unwrap();
+        producer
+            .try_push(AudioCommand::Play {
+                voice: VoiceId(1),
+                sample: SampleId(1),
+                at: Timestamp::ZERO,
+                gain: 1.0,
+            })
+            .unwrap();
+        let mixer = Mixer::new(
+            MixerConfig::new(format, OUTPUT, Timestamp::ZERO, limits),
+            bank,
+            consumer,
+        )
+        .unwrap();
+        let pause = ReplayPause::new(
+            point(OUTPUT, 0),
+            HOST,
+            1000,
+            Timestamp::from_nanos(50_000_000),
+            Duration::from_nanos(3_000_000),
+        )
+        .unwrap();
+        (producer, mixer, pause)
+    }
+    fn observed(render: RenderReport, before: i64, after: i64) -> PauseIntervalObservation {
+        PauseIntervalObservation {
+            output_origin: point(OUTPUT, 0),
+            sample_rate: 1000,
+            render,
+            clock: StartInterval::new(
+                point(OUTPUT, render.start_frame as i64 * 1_000_000),
+                point(HOST, before),
+                point(HOST, after),
+            )
+            .unwrap(),
+        }
+    }
+    fn interval(
+        observation: Option<PauseIntervalObservation>,
+        now: i64,
+    ) -> Option<PauseObservation> {
+        Some(PauseObservation::Interval {
+            observation,
+            now: point(HOST, now),
+        })
+    }
+    fn step(
+        pause: &mut ReplayPause,
+        available: &mut bool,
+        evidence: Option<PauseObservation>,
+        rendered: Option<RenderReport>,
+        desired: bool,
+        producer: &mut CommandProducer,
+        requests: &mut Vec<bool>,
+    ) -> Result<ReplayPauseUpdate> {
+        update_replay_pause(pause, available, evidence, rendered, desired, |paused| {
+            requests.push(paused);
+            producer.request_pause(paused);
+        })
+    }
+    struct FakeOutput {
+        pair: Option<ClockPair>,
+        source: Option<ClockPoint>,
+        report: Option<RenderReport>,
+        source_reads: usize,
+        pair_reads: usize,
+    }
+    impl NativeOutput for FakeOutput {
+        fn start(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn stop(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn poll(&mut self) -> Result<Option<RenderReport>> {
+            Ok(self.report)
+        }
+        fn presented(&mut self) -> Result<Option<ClockPoint>> {
+            self.source_reads += 1;
+            Ok(self.source)
+        }
+        fn presentation_pair(&mut self) -> Result<Option<ClockPair>> {
+            self.pair_reads += 1;
+            Ok(self.pair)
+        }
+        fn last_render(&mut self) -> Option<RenderReport> {
+            self.report
+        }
+        fn final_check(&mut self) -> Result<()> {
+            Ok(())
+        }
+        fn print_native(&mut self) {}
+    }
+
+    #[test]
+    fn absent_relations_and_source_only_presentation_cannot_enable_or_request_pause() {
+        let (mut producer, mut mixer, mut pause) = fixture();
+        let report = mixer.render(&mut [0.0; 4]).unwrap();
+        let mut available = false;
+        let mut requests = Vec::new();
+        for evidence in [None, interval(None, 120)] {
+            let update = step(
+                &mut pause,
+                &mut available,
+                evidence,
+                Some(report),
+                true,
+                &mut producer,
+                &mut requests,
+            )
+            .unwrap();
+            assert!(!update.became_available);
+            assert_eq!(update.requested, None);
+            assert!(update.boundary.is_none());
+            assert!(!available);
+            assert_eq!(pause.phase(), PausePhase::Running);
+        }
+        let mut output = FakeOutput {
+            pair: None,
+            source: Some(point(OUTPUT, 4_000_000)),
+            report: Some(report),
+            source_reads: 0,
+            pair_reads: 0,
+        };
+        let frame = output.presentation().unwrap();
+        assert_eq!(frame.presented, Some(point(OUTPUT, 4_000_000)));
+        assert!(frame.pause.is_none());
+        assert_eq!((output.pair_reads, output.source_reads), (1, 1));
+        step(
+            &mut pause,
+            &mut available,
+            frame.pause,
+            output.poll().unwrap(),
+            true,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap();
+        assert!(!available && requests.is_empty());
+        assert_eq!(
+            pause.presentation_song(frame.presented.unwrap()).unwrap(),
+            Some(Timestamp::from_nanos(51_000_000))
+        );
+        let mut sound = [99.0; 2];
+        assert!(!mixer.render(&mut sound).unwrap().paused);
+        assert_eq!(sound, [5.0 / 256.0, 6.0 / 256.0]);
+    }
+
+    #[test]
+    fn common_interval_step_routes_requests_once_and_acks_without_new_native_evidence() {
+        let (mut producer, mut mixer, mut pause) = fixture();
+        let first = observed(mixer.render(&mut [0.0; 4]).unwrap(), 100, 120);
+        let mut available = false;
+        let mut requests = Vec::new();
+        let update = step(
+            &mut pause,
+            &mut available,
+            interval(Some(first), 120),
+            Some(first.render),
+            true,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap();
+        assert!(update.became_available && available);
+        assert_eq!(update.requested, Some(true));
+        assert!(update.boundary.is_none());
+        assert_eq!(pause.phase(), PausePhase::Pausing);
+        let repeated = step(
+            &mut pause,
+            &mut available,
+            interval(Some(first), 120),
+            Some(first.render),
+            true,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap();
+        assert!(!repeated.became_available);
+        assert_eq!(repeated.requested, None);
+        assert_eq!(requests, [true]);
+        let mut silence = [99.0; 3];
+        let frozen = observed(mixer.render(&mut silence).unwrap(), 200, 240);
+        assert_eq!(silence, [0.0; 3]);
+        let later_poll = observed(mixer.render(&mut [99.0; 2]).unwrap(), 300, 340);
+        assert_ne!(frozen.render.start_frame, later_poll.render.start_frame);
+        let waiting = step(
+            &mut pause,
+            &mut available,
+            interval(Some(frozen), 239),
+            Some(later_poll.render),
+            true,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap();
+        assert!(waiting.boundary.is_none());
+        assert_eq!(pause.last_render_report(), Some(frozen.render));
+        assert_eq!(
+            pause.presentation_song(point(OUTPUT, 7_000_000)).unwrap(),
+            None
+        );
+        let paused = step(
+            &mut pause,
+            &mut available,
+            interval(None, 240),
+            Some(later_poll.render),
+            true,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap()
+        .boundary
+        .unwrap();
+        assert!(paused.paused);
+        assert_eq!(paused.song, Timestamp::from_nanos(51_000_000));
+        assert_eq!(paused.interval.unwrap().earliest(), point(HOST, 200));
+        assert_eq!(paused.interval.unwrap().latest(), point(HOST, 240));
+        assert_eq!(pause.phase(), PausePhase::Paused);
+        assert_eq!(requests, [true]);
+
+        let resume = step(
+            &mut pause,
+            &mut available,
+            interval(Some(later_poll), 340),
+            Some(later_poll.render),
+            false,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap();
+        assert_eq!(resume.requested, Some(false));
+        assert!(resume.boundary.is_none());
+        assert_eq!(pause.phase(), PausePhase::Resuming);
+        let mut sound = [99.0; 2];
+        let resumed = observed(mixer.render(&mut sound).unwrap(), 400, 440);
+        assert_eq!(sound, [5.0 / 256.0, 6.0 / 256.0]);
+        assert_eq!(
+            (
+                resumed.render.start_frame,
+                resumed.render.playback_start_frame
+            ),
+            (9, 4)
+        );
+        // A newer independently polled report must not become interval evidence.
+        let absent = step(
+            &mut pause,
+            &mut available,
+            interval(None, 400),
+            Some(resumed.render),
+            false,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap();
+        assert!(absent.boundary.is_none());
+        assert_eq!(pause.phase(), PausePhase::Resuming);
+        let waiting = step(
+            &mut pause,
+            &mut available,
+            interval(Some(resumed), 439),
+            Some(resumed.render),
+            false,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap();
+        assert!(waiting.boundary.is_none());
+        let running = step(
+            &mut pause,
+            &mut available,
+            interval(None, 440),
+            None,
+            false,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap()
+        .boundary
+        .unwrap();
+        assert!(!running.paused);
+        assert_eq!(running.song, paused.song);
+        assert_eq!(running.interval.unwrap().latest(), point(HOST, 440));
+        assert_eq!(pause.phase(), PausePhase::Running);
+        assert_eq!(requests, [true, false]);
+        assert_eq!(
+            pause.presentation_song(point(OUTPUT, 8_999_999)).unwrap(),
+            None
+        );
+        assert_eq!(
+            pause.presentation_song(point(OUTPUT, 9_000_000)).unwrap(),
+            Some(paused.song)
+        );
+    }
+
+    #[test]
+    fn invalid_control_evidence_never_requests_audio_or_loses_a_pending_acknowledgement() {
+        let (mut producer, mut mixer, mut pause) = fixture();
+        let first = observed(mixer.render(&mut [0.0; 4]).unwrap(), 100, 120);
+        let mut available = false;
+        let mut requests = Vec::new();
+        let bad_rate = PauseIntervalObservation {
+            sample_rate: 0,
+            ..first
+        };
+        for evidence in [
+            Some(PauseObservation::Interval {
+                observation: Some(first),
+                now: point(ClockDomainId(9), 120),
+            }),
+            interval(Some(bad_rate), 120),
+        ] {
+            assert!(
+                step(
+                    &mut pause,
+                    &mut available,
+                    evidence,
+                    Some(first.render),
+                    true,
+                    &mut producer,
+                    &mut requests
+                )
+                .is_err()
+            );
+            assert!(!available && requests.is_empty());
+            assert_eq!(pause.phase(), PausePhase::Running);
+            assert_eq!(pause.last_render_report(), None);
+        }
+        step(
+            &mut pause,
+            &mut available,
+            interval(Some(first), 120),
+            Some(first.render),
+            true,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap();
+        let frozen = observed(mixer.render(&mut [0.0; 2]).unwrap(), 200, 240);
+        let wrong_now = Some(PauseObservation::Interval {
+            observation: Some(frozen),
+            now: point(ClockDomainId(9), 1000),
+        });
+        assert!(
+            step(
+                &mut pause,
+                &mut available,
+                wrong_now,
+                Some(frozen.render),
+                true,
+                &mut producer,
+                &mut requests
+            )
+            .is_err()
+        );
+        assert_eq!(pause.phase(), PausePhase::Pausing);
+        assert_eq!(pause.last_render_report(), Some(first.render));
+        assert_eq!(requests, [true]);
+        step(
+            &mut pause,
+            &mut available,
+            interval(Some(frozen), 239),
+            Some(frozen.render),
+            true,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap();
+        assert!(
+            step(
+                &mut pause,
+                &mut available,
+                interval(None, 238),
+                None,
+                true,
+                &mut producer,
+                &mut requests
+            )
+            .is_err()
+        );
+        assert_eq!(pause.phase(), PausePhase::Pausing);
+        let boundary = step(
+            &mut pause,
+            &mut available,
+            interval(None, 240),
+            None,
+            true,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap()
+        .boundary
+        .unwrap();
+        assert_eq!(boundary.song, Timestamp::from_nanos(51_000_000));
+        assert_eq!(boundary.interval.unwrap().latest(), point(HOST, 240));
+        assert_eq!(requests, [true]);
+    }
+
+    #[test]
+    fn point_output_default_keeps_existing_pause_flow_and_uses_the_same_resume_floor() {
+        let (mut producer, mut mixer, mut pause) = fixture();
+        let first = mixer.render(&mut [0.0; 4]).unwrap();
+        let mut output = FakeOutput {
+            pair: Some(ClockPair {
+                source: point(OUTPUT, 0),
+                target: point(HOST, 100),
+            }),
+            source: Some(point(OUTPUT, 99_000_000)),
+            report: Some(first),
+            source_reads: 0,
+            pair_reads: 0,
+        };
+        let mut available = false;
+        let mut requests = Vec::new();
+        let frame = output.presentation().unwrap();
+        assert_eq!(frame.presented, Some(point(OUTPUT, 0)));
+        assert_eq!(output.source_reads, 0);
+        let requested = step(
+            &mut pause,
+            &mut available,
+            frame.pause,
+            output.poll().unwrap(),
+            true,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap();
+        assert!(requested.became_available);
+        assert_eq!(requested.requested, Some(true));
+        let frozen = mixer.render(&mut [0.0; 3]).unwrap();
+        output.report = Some(frozen);
+        output.pair = Some(ClockPair {
+            source: point(OUTPUT, 3_000_000),
+            target: point(HOST, 300),
+        });
+        let frame = output.presentation().unwrap();
+        assert!(
+            step(
+                &mut pause,
+                &mut available,
+                frame.pause,
+                output.poll().unwrap(),
+                true,
+                &mut producer,
+                &mut requests
+            )
+            .unwrap()
+            .boundary
+            .is_none()
+        );
+        output.pair = Some(ClockPair {
+            source: point(OUTPUT, 4_000_000),
+            target: point(HOST, 400),
+        });
+        let frame = output.presentation().unwrap();
+        let paused = step(
+            &mut pause,
+            &mut available,
+            frame.pause,
+            output.poll().unwrap(),
+            true,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap()
+        .boundary
+        .unwrap();
+        assert!(paused.paused && paused.interval.is_none());
+        assert_eq!(paused.song, Timestamp::from_nanos(51_000_000));
+        let resumed = step(
+            &mut pause,
+            &mut available,
+            frame.pause,
+            output.poll().unwrap(),
+            false,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap();
+        assert_eq!(resumed.requested, Some(false));
+        output.report = Some(mixer.render(&mut [0.0; 2]).unwrap());
+        output.pair = Some(ClockPair {
+            source: point(OUTPUT, 7_000_000),
+            target: point(HOST, 700),
+        });
+        let frame = output.presentation().unwrap();
+        let running = step(
+            &mut pause,
+            &mut available,
+            frame.pause,
+            output.poll().unwrap(),
+            false,
+            &mut producer,
+            &mut requests,
+        )
+        .unwrap()
+        .boundary
+        .unwrap();
+        assert!(!running.paused && running.interval.is_none());
+        assert_eq!(running.song, paused.song);
+        assert_eq!(requests, [true, false]);
+        assert_eq!(output.source_reads, 0);
+        assert_eq!(
+            pause.presentation_song(point(OUTPUT, 6_999_999)).unwrap(),
+            None
+        );
+        assert_eq!(
+            pause.presentation_song(frame.presented.unwrap()).unwrap(),
+            Some(paused.song)
+        );
+    }
+}

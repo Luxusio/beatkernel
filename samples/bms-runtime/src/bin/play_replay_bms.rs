@@ -10,7 +10,8 @@ use beatkernel_bms_runtime::{
     bgm::{BgmConfig, BgmFeeder},
     completion::ReplayCompletion,
     load_prepared_for_replay,
-    playback_pause::PausePhase,
+    native_start::HostStartWindow,
+    playback_pause::{PauseIntervalObservation, PausePhase},
     player,
     replay_audio::{completed_render_cursor, plan_audio},
     replay_pause::ReplayPause,
@@ -440,6 +441,98 @@ fn parse(args: &[String], host: Backend) -> Result<Options> {
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+enum PauseObservation {
+    Point(ClockPair),
+    #[cfg_attr(
+        not(any(all(target_os = "windows", feature = "asio-sdk"), test)),
+        allow(dead_code)
+    )]
+    Interval {
+        observation: Option<PauseIntervalObservation>,
+        now: ClockPoint,
+    },
+}
+#[derive(Clone, Copy, Debug)]
+struct NativePresentation {
+    presented: Option<ClockPoint>,
+    pause: Option<PauseObservation>,
+}
+#[derive(Clone, Copy, Debug)]
+struct ReplayControlBoundary {
+    paused: bool,
+    song: Timestamp,
+    interval: Option<HostStartWindow>,
+}
+#[derive(Default)]
+struct ReplayPauseUpdate {
+    became_available: bool,
+    requested: Option<bool>,
+    boundary: Option<ReplayControlBoundary>,
+}
+/// Shared replay control step. Native owners supply evidence; only the sole
+/// command producer changes the mixer. Recorded operations remain with ReplayVisual.
+fn update_replay_pause(
+    pause: &mut ReplayPause,
+    available: &mut bool,
+    evidence: Option<PauseObservation>,
+    rendered: Option<RenderReport>,
+    desired: bool,
+    mut request_audio: impl FnMut(bool),
+) -> Result<ReplayPauseUpdate> {
+    let Some(evidence) = evidence else {
+        return Ok(ReplayPauseUpdate::default());
+    };
+    let has_observation = match evidence {
+        PauseObservation::Point(_) => true,
+        PauseObservation::Interval { observation, .. } => observation.is_some(),
+    };
+    if !*available && !has_observation {
+        return Ok(ReplayPauseUpdate::default());
+    }
+    let mut update = ReplayPauseUpdate {
+        became_available: !*available,
+        ..ReplayPauseUpdate::default()
+    };
+    // Keep requests private until clock/report validation and checked song
+    // projection succeed. This owner-side clone contains only bounded scalars.
+    let mut candidate = pause.clone();
+    let accepted = match evidence {
+        PauseObservation::Point(pair) => candidate.request(desired, pair)?,
+        PauseObservation::Interval { observation, .. } => match observation {
+            Some(observation) => candidate.request_interval(desired, observation)?,
+            None => false,
+        },
+    };
+    if accepted {
+        update.requested = Some(candidate.phase() == PausePhase::Pausing);
+    }
+    update.boundary = match evidence {
+        PauseObservation::Point(pair) => {
+            candidate
+                .observe(rendered, pair)?
+                .map(|boundary| ReplayControlBoundary {
+                    paused: boundary.paused,
+                    song: boundary.song,
+                    interval: None,
+                })
+        }
+        PauseObservation::Interval { observation, now } => candidate
+            .observe_interval(observation, now)?
+            .map(|boundary| ReplayControlBoundary {
+                paused: boundary.paused,
+                song: boundary.song,
+                interval: Some(boundary.host),
+            }),
+    };
+    *pause = candidate;
+    *available = true;
+    if let Some(paused) = update.requested {
+        request_audio(paused);
+    }
+    Ok(update)
+}
+
 trait NativeOutput {
     fn start(&mut self) -> Result<()>;
     fn stop(&mut self) -> Result<()>;
@@ -451,6 +544,17 @@ trait NativeOutput {
     /// A source-only point cannot establish a pause boundary relation.
     fn presentation_pair(&mut self) -> Result<Option<ClockPair>> {
         Ok(None)
+    }
+    fn presentation(&mut self) -> Result<NativePresentation> {
+        let pair = self.presentation_pair()?;
+        let presented = match pair {
+            Some(pair) => Some(pair.source),
+            None => self.presented()?,
+        };
+        Ok(NativePresentation {
+            presented,
+            pause: pair.map(PauseObservation::Point),
+        })
     }
     fn last_render(&mut self) -> Option<RenderReport>;
     fn final_check(&mut self) -> Result<()>;
@@ -954,41 +1058,46 @@ fn run(options: Options) -> Result<()> {
             let rendered = stream.poll()?;
             let cursor = rendered.as_ref().map(playback_render_cursor).transpose()?;
             player::retry_pause_publication();
-            let pair = stream.presentation_pair()?;
-            let presented = if let Some(pair) = pair {
-                Some(pair.source)
-            } else {
-                stream.presented()?
-            };
-            if let Some(pair) = pair {
-                if !pause_available {
-                    pause_available = true;
-                    player::publish_pause(player::PauseState::Running);
+            let presentation = stream.presentation()?;
+            let presented = presentation.presented;
+            let update = update_replay_pause(
+                &mut pause,
+                &mut pause_available,
+                presentation.pause,
+                rendered,
+                player::pause_requested(),
+                |paused| producer.request_pause(paused),
+            )?;
+            if update.became_available {
+                player::publish_pause(player::PauseState::Running);
+            }
+            if let Some(paused) = update.requested {
+                player::publish_pause(if paused {
+                    player::PauseState::Pausing
+                } else {
+                    player::PauseState::Resuming
+                });
+            }
+            if let Some(boundary) = update.boundary {
+                if let Some(window) = boundary.interval {
+                    println!(
+                        "replay pause={} host interval={window:?}; latest is acknowledgement deadline, acoustic accuracy unmeasured",
+                        boundary.paused
+                    );
                 }
-                if pause.request(player::pause_requested(), pair)? {
-                    let desired = pause.phase() == PausePhase::Pausing;
-                    producer.request_pause(desired);
-                    player::publish_pause(if desired {
-                        player::PauseState::Pausing
-                    } else {
-                        player::PauseState::Resuming
-                    });
+                if boundary.paused {
+                    let events = visual.advance_to(boundary.song)?;
+                    player::publish_replay_prefix_with_pressed(
+                        boundary.song,
+                        &events,
+                        visual.pressed_lanes(),
+                    )?;
                 }
-                if let Some(boundary) = pause.observe(rendered, pair)? {
-                    if boundary.paused {
-                        let events = visual.advance_to(boundary.song)?;
-                        player::publish_replay_prefix_with_pressed(
-                            boundary.song,
-                            &events,
-                            visual.pressed_lanes(),
-                        )?;
-                    }
-                    player::publish_pause(if boundary.paused {
-                        player::PauseState::Paused
-                    } else {
-                        player::PauseState::Running
-                    });
-                }
+                player::publish_pause(if boundary.paused {
+                    player::PauseState::Paused
+                } else {
+                    player::PauseState::Running
+                });
             }
             if !matches!(
                 pause.phase(),
@@ -1066,7 +1175,7 @@ fn main() -> Result<()> {
 pub(crate) fn run_args(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
         println!(
-            "play_replay_bms --chart PATH --replay PATH --device ID --rate HZ --channels N [--seconds N --channel-policy exact|mono-stereo --backend wasapi|asio|alsa|coreaudio --asio-view native|32|64 --output-channels 0,1 --buffer-frames N --period-frames N --mode shared|exclusive --shared-policy engine-period|legacy --preroll-ns N --lookahead-ns N --command-capacity N --voices N --max-records N --max-bytes N]\nASIO requires Windows + asio-sdk, explicit braced CLSID/view/output channels and --asio-system-clock multimedia plus --asio-timer-error-ns, --asio-drift-error-ns, --asio-latency-error-ns assessments; optional --asio-anchor-age-ns defaults1000000000. Rejects mode/shared-policy/period; buffer defaults driver preferred.\nHost backend: WASAPI on Windows, ALSA on Linux, CoreAudio on macOS. No input acquisition. Exact float32 output rate/channels; no endpoint/mode fallback. Channel policy defaults exact; mono-stereo explicitly duplicates mono assets into stereo.\nLinux requires explicit buffer/period; macOS requires numeric AudioDeviceID and buffer, rejects period. Mode/shared-policy are Windows only, default shared engine-period; explicit shared-policy rejects exclusive. Windows buffer/period default to device settings, and unsupported requested combinations reject.\nDefaults: preroll 3000000000ns, lookahead 3000000000ns, commands 65536, voices 4096, records 1000000, replay bytes 67108864. Nonnegative i64 preroll, positive i64 lookahead, positive checked finite seconds and capacities.\nOmit seconds to finish the actual recorded prefix and drain admitted PCM through native presentation. Seconds is an optional wall cutoff after Start including preroll and can truncate the prefix/tail. Presentation missing/degraded stays unavailable; cancellation remains available. ASIO queues actual rendered-block presentation observations until fresh QPC reaches their assessed upper host interval, then advances visual/natural drain. Prepared frames/raw sample position do not establish audible progress. ASIO pause remains unsupported, physical accuracy unmeasured. Finite horizons/credit can fail on stalls/dense cues; final admission/core/native diagnostics remain separate. Source implementation is not native sound or physical timing evidence."
+            "play_replay_bms --chart PATH --replay PATH --device ID --rate HZ --channels N [--seconds N --channel-policy exact|mono-stereo --backend wasapi|asio|alsa|coreaudio --asio-view native|32|64 --output-channels 0,1 --buffer-frames N --period-frames N --mode shared|exclusive --shared-policy engine-period|legacy --preroll-ns N --lookahead-ns N --command-capacity N --voices N --max-records N --max-bytes N]\nASIO requires Windows + asio-sdk, explicit braced CLSID/view/output channels and --asio-system-clock multimedia plus --asio-timer-error-ns, --asio-drift-error-ns, --asio-latency-error-ns assessments; optional --asio-anchor-age-ns defaults1000000000. Rejects mode/shared-policy/period; buffer defaults driver preferred.\nHost backend: WASAPI on Windows, ALSA on Linux, CoreAudio on macOS. No input acquisition. Exact float32 output rate/channels; no endpoint/mode fallback. Channel policy defaults exact; mono-stereo explicitly duplicates mono assets into stereo.\nLinux requires explicit buffer/period; macOS requires numeric AudioDeviceID and buffer, rejects period. Mode/shared-policy are Windows only, default shared engine-period; explicit shared-policy rejects exclusive. Windows buffer/period default to device settings, and unsupported requested combinations reject.\nDefaults: preroll 3000000000ns, lookahead 3000000000ns, commands 65536, voices 4096, records 1000000, replay bytes 67108864. Nonnegative i64 preroll, positive i64 lookahead, positive checked finite seconds and capacities.\nOmit seconds to finish the actual recorded prefix and drain admitted PCM through native presentation. Seconds is an optional wall cutoff after Start including preroll and can truncate the prefix/tail. Presentation missing/degraded stays unavailable; cancellation remains available. ASIO queues actual rendered-block presentation observations until fresh QPC reaches their assessed upper host interval, then advances visual/natural drain. Prepared frames/raw sample position do not establish audible progress. ASIO replay pause uses original assessed intervals and exact frozen playback frames; physical accuracy unmeasured. Finite horizons/credit can fail on stalls/dense cues; final admission/core/native diagnostics remain separate. Source implementation is not native sound or physical timing evidence."
         );
         return Ok(());
     }
@@ -1614,6 +1723,9 @@ mod asio_native {
             })
         }
         fn presented(&mut self) -> Result<Option<ClockPoint>> {
+            Ok(self.presentation()?.presented)
+        }
+        fn presentation(&mut self) -> Result<NativePresentation> {
             self.window.pump()?;
             self.snapshot(false)?;
             let now = self.clock.sample()?.normalized;
@@ -1650,9 +1762,22 @@ mod asio_native {
             };
             // Queued real block observations mature against fresh QPC; neither
             // the latest prepared block nor wall-time extrapolation is audible progress.
-            Ok(self
-                .presentation
-                .observe(observation, self.clock.sample()?.normalized)?)
+            let now = self.clock.sample()?.normalized;
+            let presented = self.presentation.observe(observation, now)?;
+            let observation = observation.map(|value| PauseIntervalObservation {
+                output_origin: value.output_origin,
+                sample_rate: value.sample_rate,
+                render: value.render,
+                clock: beatkernel_bms_runtime::native_start::StartInterval {
+                    output: value.output,
+                    before: value.host.before,
+                    after: value.host.after,
+                },
+            });
+            Ok(NativePresentation {
+                presented,
+                pause: Some(PauseObservation::Interval { observation, now }),
+            })
         }
         fn last_render(&mut self) -> Option<RenderReport> {
             if let Ok(snapshot) = self.stream.snapshot() {
