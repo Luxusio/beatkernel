@@ -212,8 +212,11 @@ output metadata on the settings worker; select an entry and Use Device to copy
 its exact ID into the draft. Apply remains separate. ASIO discovery requires an
 explicit registry view. Keyboard metadata discovery is source-integrated for
 automatic preparation and Linux per-player assignment. Search, native settings
-and profile fields support IME previews with composition ranges; clipboard and
-general committed-text selection remain pending. `--profile PATH` loads saved
+and profile fields support IME previews with composition ranges. All existing
+text fields support Shift+Left/Right/Home/End selection and Ctrl+A (Command+A on
+macOS). Typing or deleting replaces/removes the selection; IME cancellation
+preserves it. Clipboard and mouse/word/grapheme selection remain pending.
+`--profile PATH` loads saved
 native and display options; explicit arguments replace matching profile entries.
 Settings Load/Save use an editable path and the same serialized settings worker. Save stores
 the draft; Apply remains separate. Profiles retain the OS identity and exclude

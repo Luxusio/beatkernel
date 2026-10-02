@@ -284,6 +284,36 @@ may further limit actual frame rate. Surface resize scales the fixed logical
 outdated surfaces reconfigure, timeout/occlusion skip a frame, fatal GPU errors
 request cancellation and wait for game cleanup before exit.
 
+## Shared text selection
+
+All existing desktop LineEditor fields support Shift+Left/Right/Home/End and
+select-all: Ctrl+A on Windows/Linux and Command+A on macOS. Select-all matches
+the logical A character, consumes its text event, and excludes additional
+Shift/Alt/command modifiers. Selection navigation uses Shift alone. Commands
+apply only to the focused editable field while UI is ready; active IME
+composition retains keyboard ownership. Search, native settings values/profile,
+display options, practice start/end and record-directory drafts share this model.
+
+Selections use ordered UTF-8 byte boundaries and scalar movement. Reversing
+direction retains the starting anchor until collapse. Ordinary Left/Right
+collapse selection to its start/end without another step. Insertion replaces
+selection once; Backspace/Delete remove it once. Validate control characters and
+the replacement's final byte count before any mutation, preserving the entire
+editor on failure. IME preview replaces the base selection in a clone; cancel
+preserves the base and commit replaces it once. Empty preedit clears composition
+without deleting the selected base text. Native cursor visibility stays intact.
+
+The borrowed visible projection clips selected ranges to scalar columns and the
+existing focused text-field renderer highlights them. Equality changes repaint
+the relevant retained field; identical updates stay idle. Each retained editor
+keeps its selection across focus changes until that draft is reset/replaced;
+unfocused fields hide it. Held modifiers reset when UI becomes unavailable,
+including focus loss, occlusion, suspend, pending work and closing. Ordinary
+field changes retain held modifiers. Clipboard, mouse/word/grapheme selection and
+IME in additional dialogs remain separate work. Regression fixtures cover model,
+scene geometry, retained invalidation and actual desktop event routing; execution
+and native keyboard/IME acceptance remain deferred.
+
 ## Acceptance and scope
 
 The user's verification deferral remains in force: fixture authoring and source
@@ -316,8 +346,8 @@ warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warni
 - Settings validation checks syntax and cross-option constraints, not resource
   availability — actual device/file checks remain in native preparation.
 - HID usage bindings still require typed values. Search, native settings and
-  profile fields support IME composition ranges; clipboard and general
-  committed-text selection remain pending. Retain bounded drafts and
+  profile fields support IME composition ranges and committed text selection;
+  clipboard remains pending. Retain bounded drafts and
   next-session-only application when extending editing.
 - Profile operations drain on close rather than being forcibly interrupted —
   assess filesystem stall behavior during deferred native acceptance.
