@@ -112,6 +112,9 @@ async function workerHarness(options = {}) {
       this.calls = [];
       this.frees = 0;
       this.stops = 0;
+      this.disposals = [];
+      this.replayTakes = 0;
+      this.replayBytes = null;
       this.samples = [
         { id: 19n, rate: 44100, pcm: new Float32Array([0.25, -0.25, 0.5, -0.5]) },
         { id: 18446744073709551615n, rate: 96000, pcm: new Float32Array([1, -1]) },
@@ -135,6 +138,21 @@ async function workerHarness(options = {}) {
     get combo() { this.live(); return this.score.combo; }
     get failed() { this.live(); return false; }
     sample_count() { this.live(); return this.samples.length; }
+    configure_capture(...limits) {
+      this.live();
+      this.calls.push(["capture", ...limits]);
+      if (options.captureError) throw new Error(options.captureError);
+    }
+    take_replay() {
+      this.live();
+      assert.equal(this.stops, 1, "capture export requires a stopped owner");
+      assert.equal(++this.replayTakes, 1);
+      this.disposals.push("take");
+      if (options.replayError) throw new Error(options.replayError);
+      // Opaque binding output: actual codec/parity is covered by the Rust fixtures.
+      this.replayBytes = options.replayBytes ? options.replayBytes() : Uint8Array.from([66, 75, 82, 255, 0, 1]);
+      return this.replayBytes;
+    }
     next_sample() { this.live(); this.calls.push(["sample"]); return this.samples[this.sampleIndex++] ?? null; }
     activate(host) { this.live(); this.calls.push(["activate", host]); }
     input(...args) {
@@ -158,11 +176,13 @@ async function workerHarness(options = {}) {
     stop() {
       this.live();
       assert.equal(++this.stops, 1);
+      this.disposals.push("stop");
       if (options.stopError) throw new Error(options.stopError);
     }
     free() {
       assert.equal(this.stops, 1);
       assert.equal(++this.frees, 1);
+      this.disposals.push("free");
       if (options.freeError) throw new Error(options.freeError);
     }
   }
@@ -227,7 +247,7 @@ async function catalogWorker(options = {}) {
 
 async function started(options = {}) {
   const h = await catalogWorker(options);
-  await h.send(startRequest());
+  await h.send(startRequest(options.recordReplay === undefined ? {} : { recordReplay: options.recordReplay }));
   assert.equal(h.of("play-reply").at(-1).result.kind, "prepared");
   h.rpcId = 1;
   h.rpc = async (kind, fields = {}) => {
@@ -594,4 +614,123 @@ test("paired observations are preflighted together and preserve order before a c
   assert.equal(fault.of("play-render-done").length, 0);
   assert.match(fault.of("play-error")[0].message, /phase bound/);
   assertReleased(fault);
+});
+
+test("recording is opt-in before preparation and transfers one stopped-owner prefix without copying its identity", async () => {
+  for (const recordReplay of [undefined, false, true]) {
+    const h = await active({ recordReplay });
+    const game = h.games[0];
+    assert.deepEqual(game.calls.filter(row => row[0] === "capture"),
+      recordReplay ? [["capture", 64 * 1024 * 1024, 1000000]] : []);
+    assert.equal(game.prepared.path, "song/chart.bms");
+    assert.equal(h.libraries[0].preparations[1].args[2], 18446744073709551615n);
+    await h.send({ kind: "play-stop", playId: 7 });
+    const receipt = h.of("play-stopped")[0];
+    assert.equal(receipt.replayComplete, false);
+    assert.equal(receipt.replayError, null);
+    assert.equal(game.replayTakes, recordReplay ? 1 : 0);
+    assert.deepEqual(game.disposals, recordReplay ? ["stop", "take", "free"] : ["stop", "free"]);
+    const transfer = h.transfers[h.messages.indexOf(receipt)];
+    if (recordReplay) {
+      assert.deepEqual(Array.from(receipt.replay), [66, 75, 82, 255, 0, 1]);
+      assert.equal(receipt.replay.byteOffset, 0);
+      assert.equal(receipt.replay.byteLength, receipt.replay.buffer.byteLength);
+      assert.equal(transfer.length, 1);
+      assert.equal(transfer[0], game.replayBytes.buffer);
+      assert.equal(game.replayBytes.buffer.byteLength, 0, "owned bytes leave the Worker exactly once");
+    } else {
+      assert.equal(receipt.replay, null);
+      assert.equal(transfer.length, 0);
+    }
+    await h.send({ kind: "play-stop", playId: 7 });
+    assert.equal(h.of("play-stopped").length, 1);
+    assertReleased(h);
+  }
+  for (const recordReplay of [null, 1, "true"]) {
+    const h = await catalogWorker();
+    await h.send(startRequest({ recordReplay }));
+    assert.equal(h.libraries[0].preparations.length, 1, "invalid choice never prepares gameplay");
+    assert.equal(h.games.length, 0);
+    assert.match(h.of("play-error")[0].message, /recording choice/);
+    assert.equal(h.of("play-error")[0].replay, null);
+  }
+});
+
+test("complete capture requires current actual completion, while stale proof and operation failures retain only prefixes", async () => {
+  const natural = await active({ recordReplay: true, observeOutput: () => true });
+  await natural.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(),
+    presentedNs: 123n, presentedHostNs: ORIGIN });
+  await natural.send({ kind: "play-stop", playId: 7, completed: true });
+  assert.equal(natural.of("play-stopped")[0].replayComplete, true);
+  assert.equal(natural.of("play-stopped")[0].replayError, null);
+  assertReleased(natural);
+
+  for (const invalidation of ["no-proof", "input", "batch", "malformed-choice"]) {
+    const h = await active({ recordReplay: true, observeOutput: () => true });
+    if (invalidation !== "no-proof") {
+      await h.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(),
+        presentedNs: 1n, presentedHostNs: ORIGIN });
+    }
+    if (invalidation === "batch") h.games[0].batches.push(batch(10n));
+    if (invalidation === "input" || invalidation === "batch") {
+      await h.send(step({ events: invalidation === "input"
+        ? [{ hostNs: ORIGIN, key: 2, down: true, sequence: 1n }] : [] }));
+    }
+    await h.send({ kind: "play-stop", playId: 7, completed: invalidation === "malformed-choice" ? 1 : true });
+    assert.equal(h.of("play-stopped").length, 0);
+    const receipt = h.of("play-error")[0];
+    assert.equal(receipt.replayComplete, false);
+    assert.equal(receipt.released, true);
+    assert.ok(receipt.replay instanceof Uint8Array);
+    assertReleased(h);
+  }
+  const partial = await active({ recordReplay: true, input(game) {
+    game.score.hits = 18n;
+    throw new Error("committed input capture failed");
+  } });
+  await partial.send(step({ events: [{ hostNs: ORIGIN, key: 2, down: true, sequence: 1n }] }));
+  const receipt = partial.of("play-error")[0];
+  assert.match(receipt.message, /committed input capture failed/);
+  assert.equal(receipt.replayComplete, false);
+  assert.equal(receipt.replayError, null);
+  assertReleased(partial, { ...SCORE, hits: 18n });
+});
+
+test("serialization and transferable-layout failures stay separate from stop/free ownership failures", async () => {
+  for (const options of [
+    { replayError: "actual codec byte limit" },
+    { replayBytes: () => null },
+    { replayBytes: () => new Uint8Array(0) },
+    { replayBytes: () => new Uint8Array([1, 2, 3]).subarray(1) },
+    { replayBytes: () => new Uint8Array(64 * 1024 * 1024 + 1) },
+  ]) {
+    const h = await active({ ...options, recordReplay: true });
+    await h.send({ kind: "play-stop", playId: 7 });
+    const receipt = h.of("play-stopped")[0];
+    assert.equal(receipt.replay, null);
+    assert.equal(receipt.replayComplete, false);
+    assert.match(receipt.replayError, options.replayError ? /actual codec byte limit/ : /transferable layout/);
+    assert.equal(h.of("play-error").length, 0, "export failure does not invent a cleanup leak");
+    assert.equal(h.transfers[h.messages.indexOf(receipt)].length, 0);
+    assert.deepEqual(h.games[0].disposals, ["stop", "take", "free"]);
+    assertReleased(h);
+  }
+  for (const fault of ["stopError", "freeError"]) {
+    const h = await active({ recordReplay: true, [fault]: "actual owner cleanup failure" });
+    await h.send({ kind: "play-stop", playId: 7 });
+    const receipt = h.of("play-error")[0];
+    assert.equal(receipt.released, false);
+    assert.equal(receipt.replayComplete, false);
+    assert.equal(receipt.replayError, null);
+    assert.equal(h.games[0].replayTakes, fault === "stopError" ? 0 : 1);
+    assert.equal(receipt.replay === null, fault === "stopError");
+    assertReleased(h);
+  }
+  const setup = await catalogWorker({ captureError: "actual capture setup limit" });
+  await setup.send(startRequest({ recordReplay: true }));
+  assert.match(setup.of("play-error")[0].message, /actual capture setup limit/);
+  assert.equal(setup.of("play-error")[0].replayComplete, false);
+  assert.equal(setup.of("play-error")[0].replayError, null);
+  assert.equal(setup.games[0].replayTakes, 0, "a refused capture was never admitted for export");
+  assertReleased(setup);
 });

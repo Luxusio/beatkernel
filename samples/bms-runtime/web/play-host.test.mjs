@@ -2,7 +2,7 @@
 // Actual main.js and numeric helpers; controlled DOM/Worker/AudioHost endpoints.
 // No browser, audio device, generated binding or WASM instance is used.
 import assert from "node:assert/strict";
-import { File } from "node:buffer";
+import { Blob, File } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
@@ -31,6 +31,9 @@ async function harness(faults = {}) {
   const unexpected = [];
   const timers = new Map();
   const opens = [];
+  const urls = [];
+  const revoked = [];
+  const downloads = [];
   let now = 1000;
   let nextTimer = 0;
   let gesture = false;
@@ -61,6 +64,7 @@ async function harness(faults = {}) {
       this.textContent = "";
       this.dataset = {};
       this.disabled = false;
+      this.checked = false;
       this.hidden = false;
       this.children = [];
       this.files = [];
@@ -74,6 +78,16 @@ async function harness(faults = {}) {
         this.value = this.children[0]?.value ?? "";
       }
     }
+    appendChild(child) { this.append(child); child.parent = this; return child; }
+    click() {
+      if (this.tagName === "a") downloads.push({ href: this.href, filename: this.download, link: this });
+      else this.emit("click");
+    }
+    remove() {
+      if (this.parent) this.parent.children = this.parent.children.filter(child => child !== this);
+      this.parent = null;
+      this.removed = true;
+    }
     replaceChildren(...children) { this.children = []; this.value = ""; this.append(...children); }
     replaceWith(fresh) { elements.set(this.id, fresh); }
     setAttribute(name, value) { this[name] = value; }
@@ -85,7 +99,7 @@ async function harness(faults = {}) {
     constructor(text, value) { super("option"); this.textContent = text; this.value = value; }
   }
   for (const id of ["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek",
-    "title", "details", "status", "viewport", "play", "stop", "keys", "canvas", "prepare-form", "seek-form"]) {
+    "title", "details", "status", "viewport", "play", "stop", "record", "export", "keys", "canvas", "prepare-form", "seek-form"]) {
     elements.set(id, new Element(id === "chart" ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
@@ -93,6 +107,7 @@ async function harness(faults = {}) {
   elements.get("seed").value = "7";
 
   const document = new Events();
+  document.body = new Element("body");
   document.hidden = false;
   document.getElementById = id => elements.get(id);
   document.createElement = tag => new Element(tag);
@@ -129,7 +144,7 @@ async function harness(faults = {}) {
   Object.assign(window, { isSecureContext: true, devicePixelRatio: 1, Worker,
     OffscreenCanvas: class {}, ResizeObserver, matchMedia: () => new Events() });
 
-  const audio = {
+  function createAudio() { return {
     sampleRate: 48000,
     samples: [], commandsSeen: [], arms: [], polls: 0, finishes: 0, outputReads: 0,
     stopCalls: 0, stopStarts: 0, stopping: null,
@@ -178,18 +193,32 @@ async function harness(faults = {}) {
       }
       return this.stopping;
     },
-  };
+  }; }
+  let audio = createAudio();
+  let audioOpened = false;
   class AudioHost {
     static open(options) {
+      if (audioOpened) audio = createAudio();
+      audioOpened = true;
       opens.push({ options, gesture });
       traces.push(["open", gesture]);
       return faults.openGate?.promise ?? Promise.resolve(audio);
     }
   }
   const moduleToken = {};
+  class ControlledURL extends URL {
+    static createObjectURL(blob) {
+      if (faults.downloadError) throw new Error(faults.downloadError);
+      assert.ok(blob instanceof Blob);
+      const url = `blob:deferred-fixture/${urls.length + 1}`;
+      urls.push({ url, blob });
+      return url;
+    }
+    static revokeObjectURL(url) { revoked.push(url); }
+  }
   const context = createContext({
     document, window, Worker, ResizeObserver, Option,
-    AbortController, AbortSignal, URL, TextEncoder, File, Uint8Array, Uint32Array, Float32Array,
+    AbortController, AbortSignal, URL: ControlledURL, Blob, TextEncoder, File, Uint8Array, Uint32Array, Float32Array,
     ArrayBuffer, structuredClone, performance: { now: () => now },
     WebAssembly: { compile: async binary => {
       assert.deepEqual(Array.from(binary), [0, 97, 115, 109, 1, 0, 0, 0]);
@@ -315,7 +344,7 @@ async function harness(faults = {}) {
     now = until;
     await flush();
   }
-  return { get, workers, audio, opens, traces, faults, timers, moduleToken, window, document,
+  return { get, workers, get audio() { return audio; }, opens, traces, faults, timers, moduleToken, window, document, urls, revoked, downloads,
     click, receive, reply, preview, begin, prepared, launch, advance,
     setNow(value) { assert.ok(value >= now); now = value; },
     async close() {
@@ -326,6 +355,169 @@ async function harness(faults = {}) {
     },
   };
 }
+
+test("recording locks its session choice and exposes prefix downloads only after both cleanup joins", async () => {
+  for (const audioFirst of [true, false]) {
+    const stopGate = deferred();
+    const h = await harness({ stopGate });
+    assert.equal(h.get("record").checked, false);
+    assert.equal(h.get("export").disabled, true);
+    await h.preview();
+    h.get("record").checked = true;
+    const session = await h.launch();
+    assert.equal(session.start.recordReplay, true);
+    assert.equal(h.get("record").disabled, true);
+    assert.equal(h.get("export").disabled, true);
+    h.click("export");
+    assert.equal(h.urls.length, 0);
+    h.get("record").checked = false; // A later DOM value cannot change the session's choice.
+    h.click("stop");
+    await flush();
+    assert.equal(h.workers[0].last("play-stop").completed, false);
+    const bytes = Uint8Array.from([66, 75, 82, 0, 255]);
+    const receipt = finalScore(session.id, { replay: bytes, replayComplete: false, replayError: null });
+    if (audioFirst) { stopGate.resolve(); await flush(); }
+    else await h.receive(receipt);
+    assert.equal(h.get("export").disabled, true, "one cleanup receipt cannot expose owned capture bytes");
+    if (audioFirst) await h.receive(receipt);
+    else { stopGate.resolve(); await flush(); }
+    assert.equal(h.get("record").disabled, false);
+    assert.equal(h.get("export").disabled, false);
+    assert.match(h.get("export").textContent, /prefix/);
+    assert.equal(h.urls.length, 0, "receiving a capture does not create a URL or start a download");
+    h.click("export");
+    assert.equal(h.urls.length, 1);
+    assert.equal(h.urls[0].blob.type, "application/octet-stream");
+    assert.deepEqual(new Uint8Array(await h.urls[0].blob.arrayBuffer()), bytes);
+    assert.equal(h.downloads[0].filename, `beatkernel-${session.id}-prefix.bkr`);
+    assert.equal(h.downloads[0].href, h.urls[0].url);
+    assert.equal(h.downloads[0].link.removed, true);
+    assert.equal(h.document.body.children.length, 0);
+    h.click("export");
+    assert.deepEqual(h.revoked, [h.urls[0].url]);
+    await h.advance(59999);
+    assert.equal(h.revoked.length, 1);
+    await h.advance(1);
+    assert.deepEqual(h.revoked, [h.urls[0].url, h.urls[1].url]);
+    assert.equal(h.get("export").disabled, false, "URL expiry does not discard the bounded recorded result");
+    h.click("export");
+    await h.close();
+    assert.deepEqual(h.revoked, h.urls.map(entry => entry.url));
+  }
+});
+
+test("only natural completion labels a joined replay complete and real cleanup failures downgrade it", async () => {
+  for (const cleanup of ["clean", "audio", "worker"]) {
+    const stopGate = deferred();
+    const h = await harness({ stopGate, outputEvidence: { contextTime: 1.3, performanceTime: 1300 } });
+    await h.preview();
+    h.get("record").checked = true;
+    const session = await h.launch();
+    const worker = h.workers[0];
+    h.setNow(1300);
+    await h.advance(8);
+    await h.receive({ kind: "play-render-done", playId: session.id,
+      renderId: worker.last("play-render").renderId, completed: true });
+    await h.receive({ kind: "play-step-done", playId: session.id,
+      tickId: worker.last("play-step").tickId, songNs: 50000000n,
+      hits: 3n, misses: 1n, combo: 2n, preOriginInputs: 0 });
+    assert.equal(worker.last("play-stop").completed, true);
+    const receipt = finalScore(session.id, { replay: Uint8Array.from([1, 2, 3]),
+      replayComplete: cleanup !== "worker", replayError: null,
+      ...(cleanup === "worker" ? { kind: "play-error", released: false, message: "game free failed" } : {}) });
+    await h.receive(receipt);
+    assert.equal(h.get("export").disabled, true);
+    if (cleanup === "audio") stopGate.reject(new Error("actual context close failed"));
+    else stopGate.resolve();
+    await flush();
+    assert.equal(h.get("export").disabled, false);
+    assert.match(h.get("export").textContent, cleanup === "clean" ? /complete/ : /prefix/);
+    if (cleanup === "clean") assert.match(h.get("status").textContent, /Song completed/);
+    else {
+      assert.equal(h.get("status").dataset.error, "true");
+      assert.match(h.get("status").textContent, /cleanup failed/);
+      assert.equal(worker.terminations, 1);
+      assert.equal(h.get("play").disabled, true, "download remains possible while graphics ownership requires reload");
+    }
+    assert.equal(h.urls.length, 0);
+    h.click("export");
+    assert.match(h.downloads[0].filename, cleanup === "clean" ? /-complete\.bkr$/ : /-prefix\.bkr$/);
+    await h.close();
+  }
+});
+
+test("missing, unowned and malformed export evidence cannot become a downloadable complete record", async () => {
+  const bytes = () => Uint8Array.from([1, 2, 3]);
+  for (const [record, fields] of [
+    [true, {}],
+    [true, { replay: null, replayComplete: true, replayError: null }],
+    [true, { replay: bytes(), replayComplete: true, replayError: null }],
+    [true, { replay: bytes().subarray(1), replayComplete: false, replayError: null }],
+    [true, { replay: new Uint8Array(0), replayComplete: false, replayError: null }],
+    [false, { replay: bytes(), replayComplete: false, replayError: null }],
+    [true, { replay: null, replayComplete: false, replayError: "actual codec refused the byte limit" }],
+  ]) {
+    const h = await harness();
+    await h.preview();
+    h.get("record").checked = record;
+    const session = await h.launch();
+    h.click("stop");
+    await flush();
+    await h.receive(finalScore(session.id, fields));
+    assert.equal(h.get("export").disabled, true);
+    assert.equal(h.get("status").dataset.error, "true");
+    assert.match(h.get("status").textContent, /Replay export failed/);
+    assert.equal(h.workers[0].terminations, 0, "serialization evidence alone does not imply a resource leak");
+    assert.equal(h.get("play").disabled, false);
+    h.click("export");
+    assert.equal(h.urls.length, 0);
+    await h.close();
+  }
+});
+
+test("one retained replay survives a failed export and its URLs are replaced only by a newer valid result", async () => {
+  const h = await harness();
+  await h.preview();
+  h.get("record").checked = true;
+  const first = await h.launch();
+  h.click("stop");
+  await flush();
+  await h.receive(finalScore(first.id, { replay: Uint8Array.from([7, 8]), replayComplete: false, replayError: null }));
+  h.click("export");
+  assert.equal(h.urls.length, 1);
+  h.faults.downloadError = "browser denied URL allocation";
+  h.click("export");
+  assert.deepEqual(h.revoked, [h.urls[0].url]);
+  assert.match(h.get("status").textContent, /browser denied URL allocation/);
+  assert.equal(h.get("export").disabled, false);
+  delete h.faults.downloadError;
+  h.click("export");
+  assert.equal(h.urls.length, 2);
+
+  const failed = await h.launch();
+  assert.equal(h.get("export").disabled, true);
+  h.click("stop");
+  await flush();
+  await h.receive(finalScore(failed.id, { replay: null, replayComplete: false, replayError: "capture export failed" }));
+  assert.equal(h.get("export").disabled, false);
+  assert.deepEqual(h.revoked, [h.urls[0].url], "a missing newer capture retains the older result and URL");
+  h.click("export");
+  assert.equal(h.downloads.at(-1).filename, `beatkernel-${first.id}-prefix.bkr`);
+  assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), Uint8Array.from([7, 8]));
+
+  const replacement = await h.launch();
+  h.click("stop");
+  await flush();
+  await h.receive(finalScore(replacement.id, { replay: Uint8Array.from([9, 10]), replayComplete: false, replayError: null }));
+  assert.deepEqual(h.revoked, h.urls.map(entry => entry.url));
+  const count = h.urls.length;
+  h.click("export");
+  assert.equal(h.urls.length, count + 1);
+  assert.equal(h.downloads.at(-1).filename, `beatkernel-${replacement.id}-prefix.bkr`);
+  assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), Uint8Array.from([9, 10]));
+  await h.close();
+  assert.deepEqual(h.revoked, h.urls.map(entry => entry.url));
+});
 
 test("user gesture opens real host boundary before awaits, then transfers source PCM and arms after setup", async () => {
   const h = await harness();
@@ -339,6 +531,7 @@ test("user gesture opens real host boundary before awaits, then transfers source
   const start = worker.last("play-start");
   assert.equal(start.rate, 48000, "preparation follows actual AudioContext rate");
   assert.equal(start.seed, "7");
+  assert.equal(start.recordReplay, false, "recording remains disabled unless explicitly selected");
   assert.ok(start.keyPairs instanceof Uint32Array);
   const commands = await h.prepared(start, 1);
   assert.equal(h.audio.samples[0].rate, 44100, "original source rate survives transfer");
