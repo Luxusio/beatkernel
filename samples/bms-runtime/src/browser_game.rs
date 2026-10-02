@@ -1,8 +1,4 @@
 //! Worker-owned gameplay bindings; audio lives in a separate Worklet instance.
-#[cfg(test)]
-#[path = "browser_output_fixtures.rs"]
-mod output_fixtures;
-
 use std::{
     collections::{BTreeSet, VecDeque},
     sync::Arc,
@@ -14,9 +10,10 @@ use crate::{
     note_progress::NoteProgress,
     player_chart::PlayerChart,
     step_gameplay::{StepGameplay, StepGameplayConfig, StepGameplayError},
+    worklet_audio::decode_output,
 };
 use beatkernel::{
-    audio::{AudioCommand, AudioCounters, PcmSample, RenderReport, SampleId},
+    audio::{AudioCommand, PcmSample, SampleId},
     input::{
         Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector, EventMeta,
         GameControlId, PhysicalControlId, PhysicalInputEvent,
@@ -364,103 +361,6 @@ impl BrowserGame {
     }
 }
 
-struct OutputEvidence {
-    report: Option<RenderReport>,
-    start: u64,
-    context: Option<u64>,
-}
-
-/// Decode the actual BrowserAudio::report_word ABI without Number conversion.
-/// These capacities are the browser player's explicit Worklet configuration;
-/// the first active suffix and later variable nonempty buffer lengths are valid.
-fn decode_output(words: &[u32]) -> Result<OutputEvidence, &'static str> {
-    if words.len() != 56 {
-        return Err("browser output report requires exactly 56 words");
-    }
-    let mut values = [0u64; 28];
-    for (value, pair) in values.iter_mut().zip(words.chunks_exact(2)) {
-        *value = u64::from(pair[0]) | (u64::from(pair[1]) << 32);
-    }
-    if [0, 5, 6, 11, 23, 25, 27]
-        .into_iter()
-        .any(|index| values[index] > 1)
-    {
-        return Err("browser output report contains an invalid boolean flag");
-    }
-    if values[27] != 0 || values[25] != 1 {
-        return Err("browser output is terminal or has no armed start");
-    }
-    if values[23] == 0 && values[24] != 0 {
-        return Err("browser output absent context cursor is nonzero");
-    }
-    let start = values[26];
-    let context = (values[23] == 1).then_some(values[24]);
-    if values[0] == 0 {
-        if values[1..23].iter().any(|&value| value != 0)
-            || context.is_some_and(|cursor| cursor > start)
-        {
-            return Err("browser unavailable output report contains render evidence");
-        }
-        return Ok(OutputEvidence {
-            report: None,
-            start,
-            context,
-        });
-    }
-    if !(1..=4096).contains(&values[2]) || values[8] > 4096 || values[9] > 4096 {
-        return Err("browser output report exceeds configured render or mixer capacity");
-    }
-    if values[1] != values[3]
-        || values[2] != values[4]
-        || values[5] != 0
-        || values[6] != 0
-        || values[7] != 0
-        || values[11] != 0
-    {
-        return Err(
-            "browser output requires connected unlimited unpaused playback on its original grid",
-        );
-    }
-    let end = values[1]
-        .checked_add(values[2])
-        .ok_or("browser output render cursor overflow")?;
-    let absolute_end = start
-        .checked_add(end)
-        .ok_or("browser output context cursor overflow")?;
-    if context != Some(absolute_end) {
-        return Err("browser output context cursor differs from its relative mixer grid");
-    }
-    let report = RenderReport {
-        start_frame: values[1],
-        frames: values[2] as usize,
-        playback_start_frame: values[3],
-        playback_frames: values[4] as usize,
-        paused: false,
-        playback_end_physical_frame: None,
-        active_voices: values[8] as usize,
-        pending_commands: values[9] as usize,
-        song_position: Timestamp::from_nanos(values[10] as i64),
-        producer_disconnected: false,
-        counters: AudioCounters {
-            rendered_frames: values[12],
-            commands_consumed: values[13],
-            commands_applied: values[14],
-            late_commands: values[15],
-            pending_full: values[16],
-            voice_full: values[17],
-            unknown_samples: values[18],
-            unknown_stops: values[19],
-            invalid_gains: values[20],
-            invalid_rates: values[21],
-            invalid_times: values[22],
-        },
-    };
-    Ok(OutputEvidence {
-        report: Some(report),
-        start,
-        context,
-    })
-}
 impl BrowserGame {
     fn accept_report(
         &mut self,
