@@ -182,8 +182,9 @@ underline; an explicitly collapsed range still displays a caret. An endpoint-onl
 range change repaints its retained field without rebuilding unrelated rows or
 controls. Commit, cancellation and field/lifecycle changes clear decorations;
 preview metadata never changes committed text or search results. Rejected edits
-preserve text, cursor and metadata. Current glyph fallback and OS candidate
-positioning remain; multilingual shaping and clipboard are future work. Prepared regression
+preserve text, cursor and metadata. Supplied-font field rendering is specified
+below; bitmap rendering remains when no font is supplied or admission fails.
+OS candidate positioning, multilingual shaping and clipboard are future work. Prepared regression
 fixtures await later execution and do not certify native IME behavior.
 Native audio output metadata selection is described below. Native profile persistence is described below. Editing never acquires devices or
 changes native input/audio owners.
@@ -364,9 +365,9 @@ warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warni
 - At most 2048 visible notes per displayed playfield and a finite UI rectangle
   batch are rendered per frame (65,536 UI rectangles). Note overlap and geometry
   capacity overflow report an error — revise admission for denser layouts.
-- In-scene text currently uses ASCII glyphs; Unicode title/artist survive in
-  native window titles — add a font atlas when multilingual in-scene text is
-  implemented.
+- Supplied fonts render catalog titles/artists and editable fields; remaining
+  labels and noneditable metadata use bitmap glyphs. Shaping, grapheme editing
+  and fallback fonts remain pending; native visual acceptance is deferred.
 - Full-song completion now has source integration; native presentation and
   full-queue admission behavior remain unexecuted — verify these boundaries,
   final keysound/BGM tails and long-chart cancellation during deferred native
@@ -756,14 +757,32 @@ Desktop `--title-font PATH` selects a caller-provided font for catalog titles an
 Preparation reads at most 32 MiB, caches the first 1024 scalars of each title and artist
 in a fixed 14-pixel, 1024-square atlas with 4096 cached-character capacity, and
 fails explicitly before window/native startup on invalid or excessive data.
-The immutable font cache is uploaded once per renderer; retained title rows
-use actual advances, baseline offsets and normalized sprite UVs without raster
-work on redraw. Full renderer recovery creates a new texture identity and
-rebuilds the Selection view; surface-only recovery retains the resource.
-The option stays outside native invocation/replay/profile arguments. Controls,
-search fields and other screens keep their existing bitmap font for now.
-Font fallback/shaping, broader widget integration and actual native visual
-acceptance remain unfinished; source fixtures are prepared for later execution.
+The font also renders Search, Settings value/profile and visible value rows,
+Display fields, Practice start/end and the Records directory. The option stays
+outside native invocation/replay/profile arguments; labels, buttons and other
+noneditable metadata retain bitmap text. The supplied font must contain the
+desired characters; glyph-zero output does not establish fallback support.
+
+At UI input/navigation/profile boundaries, extend the cache transactionally for
+current field text and uncommitted IME previews. Each string is bounded to 4096
+UTF-8 bytes, a batch to 64 KiB, and the atlas to 4096 cached characters. Cache hits
+reuse the same immutable Arc. A miss prepares a private candidate with stable
+existing UVs and publishes only after the entire batch succeeds. Update the
+same renderer texture at the same extent, preserving resource count, byte budget
+and retained title packets. Admission failure keeps draft text and the previous
+atlas intact, displays an error and uses bitmap fields until successful admission.
+No rasterization, font parsing or pixel copying occurs in retained paint effects
+or audio/gameplay callbacks. A cache miss can allocate and upload on the UI owner.
+
+Font fields use actual glyph advances for visible UTF-8 windows, caret, committed
+selection and IME decorations; clip pixels to the field. Preserve native missing
+cursor visibility, fit the composition when possible and keep the caret within
+the 1024-scalar draw window even for long or zero-advance input. Font-generation
+changes invalidate input nodes; cached identical updates leave retained nodes
+idle. Full renderer recovery uploads the latest CPU atlas, creates a new texture
+identity and rebinds fields/rebuilds Selection; surface-only recovery retains it.
+Font fallback, shaping, grapheme editing and native visual acceptance remain
+unfinished. Source fixtures cover these boundaries for later execution.
 
 Portable font preparation accepts caller-provided TrueType/OpenType bytes and
 a fixed pixel scale, preparing glyphs into a bounded RGBA atlas for the existing

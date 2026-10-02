@@ -133,8 +133,8 @@ fields underline the composition and highlight the IME's selected range, clipped
 to the visible text window. An absent IME cursor range hides the caret;
 an explicitly collapsed range keeps it visible. Range-only changes update the retained field.
 Previews stay separate from saved drafts; committing, switching fields or leaving
-the active screen clears the decorations. Existing bitmap glyph fallback still
-applies; multilingual shaping and clipboard integration remain pending.
+the active screen clears the decorations. Fields use the supplied font when
+available, otherwise bitmap glyphs; multilingual shaping and clipboard remain pending.
 Selection rows show artist metadata below the title when available.
 In Records, Remove Own and Remove Other remove one selected record occurrence
 from the competition draft without deleting its file. Selected own/other counts
@@ -143,11 +143,16 @@ repaired by removing records, while Add is disabled at eight opponents.
 Titles and artists clip to separate line bands within the row, including
 cropped glyph textures at the edges. Long text stays inside the row padding;
 overhanging glyphs may be cut rather than wrapped or shortened with an ellipsis.
-Use `player --library DIR --title-font PATH` to draw catalog titles and artists with a
-caller-provided TrueType/OpenType font. Both use a fixed 14-pixel prepared
-atlas, uploaded once per renderer and rebuilt with its texture binding on
-renderer recovery. Invalid or excessive font data fails before window startup.
-Other controls retain the bitmap font; shaping and fallback remain pending.
+Use `player --library DIR --title-font PATH` to draw catalog titles, artists and
+editable fields with a caller-provided TrueType/OpenType font. Search, settings,
+display options, practice times and the record directory use its actual glyph
+advances for text, cursor and selection. New input/IME characters extend the
+bounded 14-pixel atlas at UI state changes and update the same GPU texture;
+cached input does not rerasterize or rebuild the catalog. Renderer recovery
+uploads the latest atlas. Invalid initial font data fails before window startup;
+later cache-limit errors preserve the text, show an error and use bitmap fields.
+The supplied font must contain the desired glyphs. Other labels and controls
+retain bitmap text; shaping and fallback fonts remain pending.
 F5 or Retry starts the same chart again after the previous native session has
 finished cleanup. The accepted chart/device/timing/roster options stay pinned;
 recorded retries use distinct .retry<N>.bkr stems and create-new saves.
