@@ -90,3 +90,56 @@ Fixtures may be authored and compiled; execution, browser/native acceptance and
 formal review remain deferred under the user's verification sequencing.
 Deferred Node fixtures cover the actual host metadata/time helpers and Worker
 generation/cancellation path with mocked WASM ownership, without requiring a GPU.
+
+## AudioWorklet component and remaining host integration
+
+The optional `browser-audio` build in the same application crate exposes the
+actual kernel Mixer for an AudioWorklet. Its generated `audio-pkg/` artifact is
+separate from the graphics Worker package. An ordinary Worklet WASM instance
+owns its own SampleBank, unique queue producer/consumer, Mixer and fixed output
+storage. A pointer from the gameplay Worker's WASM instance is never treated as
+shared storage. Prepared PCM is transferred and copied during setup, preserving
+sample identity, source rate and explicit channel layout. Rendering performs no
+decoding or application allocation. Setup/destruction remain outside `process`.
+
+The Worklet uses the actual AudioContext sample rate. Its one-shot start target
+is an absolute context frame, acknowledged separately from a posted request.
+Prestart silence and a partial first block are exact on that grid. Mixer frame
+zero starts at the selected absolute frame; subsequent context blocks must be
+contiguous. Invalid/duplicate/late start, discontinuity, overflow, mismatched
+channels or oversized blocks produce explicit failure. Actual callback lengths
+are used; 128 frames is not a permanent assumption. A fixed interleaved WASM
+view is copied into the browser's supplied planar outputs. Unexpected memory
+growth after activation is a terminal error rather than reuse of a detached view.
+
+Numeric command batches preserve IDs, timestamps and order, with bounded count,
+session generation, sequence and admitted-prefix acknowledgement. Local Runtime
+admission, Worklet queue admission and Mixer execution are distinct evidence.
+An admission failure fences the session; committed game operations are never
+retried. BGM's existing rolling feeder stays with the gameplay owner. Polling
+the Worklet returns actual render/queue counters outside the per-block callback.
+Those reports do not establish output presentation or acoustic latency.
+
+Pinned generated bindings may require UTF-8 TextEncoder/TextDecoder in a Worklet.
+A compatibility bootstrap runs before those bindings and installs only missing
+implementations of the non-streaming UTF-8 operations they use. It preserves
+typed buffer offsets, scalar replacement, BOM/fatal behavior and encodeInto
+counts; unsupported encodings/streaming fail explicitly. It is not a general
+encoding polyfill. The steady numeric render path does not encode strings.
+
+The processor starts silent, admits resources, finishes allocation, arms once
+and acknowledges stop before its owner is discarded. Failure publishes one
+terminal diagnostic and silences output; it never silently restarts. A context
+owns one active processor for this generated module. JavaScript/GC/MessagePort
+and browser device buffering have no hard realtime guarantee. Native WASAPI or
+ASIO controls are not browser capabilities.
+
+This component alone does not enable the player UI's audio or gameplay. Required
+follow-on work is the bounded sample/command host bridge, nonblocking shared
+SoloRuntime session/input watermarks, actual getOutputTimestamp presentation
+mapping, result/capture/replay integration and end-user start/stop controls.
+The current preview remains labeled accordingly. Browser input timestamps use
+the originating Window performance domain; Worker and Window origins are not
+implicitly equal. Physical keyboards cannot be distinguished by DOM key events.
+The full player Goal remains open, with generated bindings, processor execution,
+audio/device behavior and formal acceptance still deferred.

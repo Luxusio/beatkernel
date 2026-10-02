@@ -110,3 +110,41 @@ acceptance. Host, Windows GNU, macOS, headless, WASM graphics and WASM browser
 source configurations compiled with Rust 1.98.1. Tests, binding
 generation, browser/Worker/GPU execution, audio/timing acceptance and formal
 review/QA remain deferred; the full player task stays open.
+
+## AudioWorklet component
+
+The separate `browser-audio` feature exports the existing Rust Mixer through a
+numeric ABI for `audio-worklet.js`. It belongs to the same application crate
+and excludes graphics. The component does not yet connect the preview controls
+to gameplay, keyboard input, capture, replay or network play.
+
+When execution is scheduled, build and generate this artifact separately from
+the graphics bindings above. Each Cargo build replaces the common output WASM,
+so generate each feature's bindings immediately after its own build:
+
+```sh
+cargo build -p beatkernel-bms-runtime --lib --target wasm32-unknown-unknown --no-default-features --features browser-audio --release --locked
+wasm-bindgen --target web --out-dir samples/bms-runtime/web/audio-pkg target/wasm32-unknown-unknown/release/beatkernel_bms_runtime.wasm
+```
+
+`audio-pkg/` is ignored generated output. These commands have not been executed.
+The eventual host must compile its WASM outside the callback, provide the
+compiled module to the processor, and activate AudioContext from a user gesture.
+The processor's preparation and control protocol is documented in its source.
+It imports the UTF-8 compatibility bootstrap before generated bindings, because
+encoding constructors may be absent in an AudioWorklet global.
+
+The Worklet owns its own PCM bank, queue and Mixer in a separate WASM memory.
+Setup allocates bounded storage and a fixed interleaved output view. Source
+sample rates are retained. The one-shot start uses absolute AudioContext frames;
+the first suffix after that boundary is relative Mixer frame zero. Actual block
+lengths are used. Gaps, regressions and unexpected memory growth terminate the
+owner instead of inventing render progress. Control acknowledgements distinguish
+queue admission from actual rendered commands. Polling returns genuine Mixer
+reports outside the callback; those reports are not output-presentation or
+acoustic timing evidence.
+
+The host bridge and shared nonblocking gameplay owner still need implementation.
+Browser device buffering, JavaScript/GC and MessagePort do not provide a hard
+realtime guarantee or native WASAPI/ASIO controls. Generated bindings, Worklet
+execution, browser output and behavioral tests remain deferred.
