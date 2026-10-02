@@ -521,8 +521,8 @@ output-latency errors. A bounded queue retains future blocks until fresh QPC
 reaches each observation's upper host interval, then advances the shared replay
 visual/completion cursor using its actual output frame. No raw native sample
 counter or prepared-frame count substitutes for audible presentation. Natural
-recorded-prefix completion is admitted without diagnostic seconds; ASIO pause
-remains unavailable. GUI Watch forwards the pinned clock assessments. Graphical
+recorded-prefix completion is admitted without diagnostic seconds; ASIO replay
+pause uses the interval policy below. GUI Watch forwards the pinned clock assessments. Graphical
 finite retries likewise defer ASIO capability to the actual native parser rather
 than retaining an obsolete backend veto. Driver/MSVC and physical acceptance
 remain unverified; portable composition fixtures are prepared for later use.
@@ -884,7 +884,7 @@ raw native sample position never establish audible completion. The upper host
 point is a conservative admission frontier under the supplied estimates, not
 an exact physical endpoint timestamp; physical accuracy remains unknown.
 Invalid or regressing ASIO endpoint observations fail without changing retained
-evidence. ASIO pause remains unsupported; finite solo network sessions use
+evidence. Offline ASIO pause uses the exact live interval policy below; finite solo network sessions use
 the section identity policy below. SDK-free launch rejection and conditional ASIO build
 licensing remain unchanged. Driver/MSVC execution and physical acceptance are
 deferred; portable composition fixtures are prepared for later execution.
@@ -1003,15 +1003,14 @@ is not locale collation, full case folding, accent removal or fuzzy ranking.
 ## Presentation-derived live pause
 
 F9 or the Pause/Resume button requests live pause when the native owner announces
-support. Linux ALSA, Windows WASAPI shared/exclusive and macOS CoreAudio
+support. Linux ALSA, Windows WASAPI shared/exclusive, SDK-enabled ASIO and macOS CoreAudio
 solo/local 2..64 without network competition implement the same acknowledged
 boundary and key reconciliation flow; saved-record ghosts remain supported.
 Replay Watch uses the same native/mixer boundary coordinator to stop recorded
 operation progress and sound together, preserving the playback cursor and
 recorded start. It acquires no keyboard or network and does not mutate recordings.
 Capability is announced only from an actual native output/host relation.
-ASIO recorded playback uses the interval policy below; live ASIO pause remains
-unsupported until its input and logical freeze policy is established. Backend
+ASIO recorded and live playback use the interval policies below. Backend
 selection cannot invent a presentation relation.
 Cross-platform native acceptance remains open.
 Local cohorts use one native pause coordinator, one shared Transport and
@@ -1032,8 +1031,8 @@ pause must not bypass the merger's chronology or late-input policy.
 Windows WASAPI and macOS CoreAudio local owners adopt this same shared
 boundary, lag and per-member policy. Windows continues QPC receipt acquisition
 and native owner messages during pending acknowledgements; macOS preserves
-normalized native HID timestamps and attachment/loss checks. ASIO remains
-unsupported for pause until presentation evidence establishes a usable relation.
+normalized native HID timestamps and attachment/loss checks. ASIO uses its
+original interval evidence with the exact logical freeze and input policy below.
 While paused, ordered input is removed through the lag frontier into key levels,
 without advancing the committed judge frontier past the shared pause boundary.
 
@@ -1044,24 +1043,26 @@ owner retries acknowledgement publication after transient UI-slot contention,
 so an idle paused session cannot strand the UI in Pausing. Successful delivery
 clears that retry without continuously cloning unchanged paused snapshots. The
 owner recovers the first pause/resume output frame from coalesced render reports
-and waits for the actual native output frontier to cross it. Host boundary time
-is interpolated from request and crossing output/host observations; its physical
-mapping error remains Unknown. UI wall time never substitutes for this relation.
+and waits for the actual native output frontier to cross it. Point-based host
+boundary time is interpolated from request and crossing observations; interval
+backends retain their complete assessed windows and explicit software cutoffs.
+Physical mapping accuracy remains unmeasured. UI wall time never substitutes
+for a native relation.
 
 While waiting for a boundary all owners fence judging and correction updates.
-Linux and macOS hold gameplay input collection. Windows continues its native
-message pump and Raw Input acquisition, parking at most 65536 events in receipt
-order before judge admission; timestamps remain actual QPC receipts rather than
-historical hardware key times. Close and device-change messages still run.
-After pause acknowledgement the owner appends a shared Transport
-pause, drains pre-boundary input, and commits one judge advance at the boundary
+Native adapters continue acquisition into bounded pending input while judge
+admission waits. Windows continues its message pump and Raw Input acquisition;
+its timestamps remain actual QPC receipts rather than historical hardware key
+times. Close and device-change messages still run. After pause acknowledgement
+the owner stages a shared Transport pause and exact playback-frame song anchor,
+drains pre-boundary input, and commits one judge advance at the boundary
 before announcing Paused. During pause it drains native input into bounded key
 levels without generating scoring input or repeated frozen capture operations.
 After resume acknowledgement it resumes Transport, reconstructs presentation
 discipline using the cumulative paused-frame gap, and drains the paused prefix
-before admitting post-boundary original input. macOS solo parks at most 4096
-post-resume HID events until the collector is actually empty, preserving their
-original timestamps and admitting reconciliation releases first. Local cohorts
+before admitting post-boundary original input. Solo owners retain bounded
+post-resume originals until acquisition reports no backlog, preserving their
+timestamps and admitting reconciliation releases first. Local cohorts
 on all three platforms use the existing bounded 65536-entry shared InputMerger
 for original events during pause and resume; release reconciliation runs outside
 that native-event merger through the actual member Runtime. Hitting a
@@ -1089,7 +1090,7 @@ Known ceiling: boundary interpolation has no acoustic accuracy guarantee.
 Missing/regressing/unrepresentable clock relations, native device failure and
 raw queue SYN_DROPPED/resync terminate and drain the session with its valid
 recorded prefix. Waiting for output presentation can grow a raw-input backlog;
-input loss is never silently repaired. ASIO/network pause policy,
+input loss is never silently repaired. Network pause policy,
 gapless loops/browser/full widget host and full native/GUI/replay acceptance remain
 unfinished. Source compilation and authored fixtures are not execution proof.
 
@@ -1596,10 +1597,10 @@ The transport's nominal anchor is distinct from this retained uncertainty. Coars
 host plateaus are permitted when bounds remain consistent. Point-based backends
 keep their existing projection. Configure pause/end frame grids before arming;
 seed ASIO end and discipline using the original interval observation. Initial
-network gating does not enable manual ASIO pause. Committed ASIO gameplay uses
+network gating does not enable manual network pause. All ASIO gameplay uses
 the common logical render-grid scheduler, so held startup silence never shifts
-keysound commands by the physical start-frame offset. Ungated ASIO retains its
-existing software-frontier scheduling.
+keysound commands by the physical start-frame offset, and manual pause silence
+does not shift logical keysound scheduling.
 
 Use actual applied ASIO buffer metadata from prepared stream evidence, never a
 second requested-size estimate. Reject stale, incompatible, inconsistent or
@@ -1693,10 +1694,56 @@ Interval diagnostics retain both endpoints rather than claiming the upper
 acknowledgement deadline is an exact acoustic timestamp. No live input, new
 recorded operations, capture format or networking is introduced into Watch.
 
-Live/local ASIO pause remains separate work: input inside an uncertainty window
-needs an explicit classification policy and exact logical freeze before enabling
-that capability. A point-based Transport cutoff alone is insufficient evidence.
+Live/local ASIO uses the conservative input policy and exact logical freeze in
+the next section. A point-based Transport cutoff alone is insufficient evidence.
 Network pause remains unsupported. SDK integration is Windows+asio-sdk+MSVC;
 ordinary GNU checks do not compile that branch. Pure actual-Mixer, interval,
 replay and native-loop fixtures are authored and compiled only. Tests, driver,
 GUI, device, physical timing, formal review and QA execution remain deferred.
+
+## Exact live pause with interval evidence
+
+Solo and local cohorts consume the same typed native pause observation and
+shared pause coordinator. Point backends retain their existing host cutoff.
+ASIO supplies the original coherent render report, output origin, sample rate
+and complete assessed host interval; correction midpoints cannot replace it.
+An unavailable observation retains pending evidence, and fresh host time may
+acknowledge an already established window. Capability publication follows actual
+admitted evidence. Requests and checked boundary-song projection are staged
+before issuing the sole producer's mixer command.
+
+For interval evidence the software input policy is conservative: pause uses
+the window's earliest endpoint as its input cutoff, while resume uses its latest
+endpoint. Inputs strictly before the pause cutoff follow their original runtime
+path. Later inputs update paused key levels without judging. On resume, earlier
+inputs remain paused levels; reconciliation releases precede equal-time and
+later original inputs. These are explicit software cutoffs, not claims about
+the exact acoustic boundary. Full windows and original input provenance remain
+available. New paused presses remain suppressed until release.
+
+The frozen song position is the original song origin plus the once-rounded
+logical playback-frame duration. A staged Transport pause and seek establishes
+that exact position while preserving historical mapping before the cutoff.
+Resume retains it and rebuilds presentation discipline using the cumulative
+manual pause gap. Every local member shares this transport and pause boundary;
+input ownership, merger order, lag and per-member captures remain unchanged.
+
+Already committed judge history cannot rewind. If any member has progressed
+beyond the exact frozen song, a queued pre-cutoff input maps beyond it, or the
+selected cutoff conflicts with committed Transport chronology, terminate through
+the existing cleanup path while retaining committed reports and captures.
+Never silently move judge history backward to hide a timing conflict. Interval
+observations alone cannot repair such a conflict; native acceptance must assess
+these rejection cases as well as successful pause/resume.
+
+The shared Windows adapter retains original ASIO evidence for resume seeding,
+including when the old correction discipline awaited host progress. It seeds
+the new discipline from that evidence without requiring equality with an older
+midpoint pair. WASAPI retains its actual snapshot and equality checks. Offline
+solo/local ASIO uses logical playback scheduling so silent pause frames do not
+move keysound scheduling. Startup displacement and finite-marker precedence
+remain intact. Network pause remains separate work.
+
+Implementation and compiled fixtures do not establish runtime acceptance.
+SDK/MSVC compilation, driver output, physical timing, tests and formal review/QA
+remain deferred under the standing user instruction.

@@ -161,9 +161,12 @@ Interval diagnostics retain both endpoints rather than claiming the upper
 acknowledgement deadline is an exact acoustic timestamp. No live input, new
 recorded operations, capture format or networking is introduced into Watch.
 
-Live/local ASIO pause remains separate work: input inside an uncertainty window
-needs an explicit classification policy and exact logical freeze before enabling
-that capability. A point-based Transport cutoff alone is insufficient evidence.
+Offline solo/local ASIO pause uses the shared
+[exact live pause policy](REQ__bms-player.md#exact-live-pause-with-interval-evidence):
+earliest-bound pause input classification, latest-bound resume classification,
+exact playback-frame song freeze and explicit rejection of conflicting committed
+history. Those live input rules belong to the common gameplay owners; recorded
+Watch continues to use the replay policy above without physical keyboard input.
 Network pause remains unsupported. SDK integration is Windows+asio-sdk+MSVC;
 ordinary GNU checks do not compile that branch. Pure actual-Mixer, interval,
 replay and native-loop fixtures are authored and compiled only. Tests, driver,

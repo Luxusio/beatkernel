@@ -172,15 +172,21 @@ creating a fresh session. The mark survives retries of this session, including
 Results. F5 keeps the original pinned start. Replay Watch cannot override its
 recorded start. Snapshot delivery is coalesced, so marks use the latest observed
 position, not the physical key event timestamp. Linux ALSA, Windows WASAPI
-shared/exclusive and macOS CoreAudio support solo/local 2..64 F9/Pause without
-network competition, using native-frontier acknowledgement, shared Transport
-fencing and paused-key reconciliation. Replay Watch supports the same F9 control
-when an actual output/host clock pair or assessed ASIO presentation interval is
-available. The shared pause owner freezes recorded progress at the exact logical
-playback frame and waits for native presentation acknowledgement. Live/local ASIO
-and network pause, live scrubbing and gapless repetition remain work; native/GUI execution is
-still unverified. In live nonnetwork play, F7 marks a loop start, F10 marks a later
-end and F11 enables a fresh native finite session with exact start/end options.
+shared/exclusive, SDK-enabled ASIO and macOS CoreAudio implement solo/local 2..64
+F9/Pause without network competition, using native-frontier acknowledgement,
+shared Transport fencing and paused-key reconciliation. Replay Watch supports the
+same F9 control when an actual output/host clock pair or assessed ASIO presentation
+interval is available. The shared pause owner freezes recorded progress at the exact logical
+playback frame and waits for native presentation acknowledgement. Live ASIO uses
+the common interval policy: judging stops at the earliest pause bound and
+restarts at the latest resume bound. Input acquisition continues to track paused
+key levels, and source-owned held-key releases reconcile before resumed input.
+Live song freeze uses the exact logical playback frame on every backend. A
+conflicting committed/queued judge prefix or transport chronology fails explicitly
+instead of rewinding history. Network pause, live scrubbing and gapless repetition
+remain work; native/GUI execution is still unverified. In live nonnetwork play,
+F7 marks a loop start, F10 marks a later end and F11 enables a fresh native finite
+session with exact start/end options.
 Enabling first preflights, cancels, drains and joins the current owner. Audio
 stops at its immutable exclusive PCM frame end and judging caps at the logical
 end. Repetition waits for the actual native presented/drained endpoint, successful
@@ -196,15 +202,16 @@ and every member must reach the same logical end. SDK-enabled Windows ASIO
 solo/local owners also accept finite prefixes, using actual rendered block and
 assessed latency intervals. Completion waits for the upper host frontier of a
 block starting at or after the endpoint and drained input; prepared frames alone
-do not finish a session. Physical accuracy remains unknown and live/local ASIO
-pause is still unsupported. Network endpoint support remains unfinished. Portable regression fixtures are prepared for
-later execution, while native hardware/GUI/acoustic checks remain unverified.
+do not finish a session. Physical accuracy remains unknown. Live/local ASIO
+pause uses the shared exact-frame/input policy; finite solo network sessions
+retain their shared section identity and exclude manual pause. Portable regression
+fixtures are prepared for later execution, while native hardware/GUI/acoustic
+checks remain unverified.
 Windows WASAPI shared/exclusive and macOS CoreAudio solo and local 2..64 owners also accept
 `--end-ns`, using their actual PCM grid and native output/host clock relation.
 The endpoint freezes audio, caps judging, and finishes an incomplete prefix only
 after output presentation, input collection drain and pending resume reconciliation.
-Finite ASIO and network sessions are rejected
-before session resources are opened. Omitting the end retains full-song completion.
+Omitting the end retains full-song completion.
 A first clock observation already beyond the endpoint fails explicitly because
 no actual lower bracket exists. Native device execution remains unverified.
 Settings Records browses an explicit directory and previews a selected recording
@@ -711,8 +718,9 @@ physical output points, and resume excludes older points until they reach the
 resumed physical boundary, preventing queued silence from rewinding the visuals.
 The supplied timing bounds remain assessments; physical accuracy and
 SDK/MSVC/driver execution remain unverified. Standard Windows GNU source checks
-exclude the SDK/MSVC wrapper. Live/local ASIO pause still requires separate input
-boundary handling.
+exclude the SDK/MSVC wrapper. Live/local ASIO uses the shared conservative input
+cutoffs and exact logical freeze described in
+[the live pause requirements](doc/kernel/REQ__bms-player.md#exact-live-pause-with-interval-evidence).
 
 The graphical app's Settings → Records → Preview → Watch uses the same playfield
 and native recorded audio. W watches when the record list has focus; F5 retries
