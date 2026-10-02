@@ -4,6 +4,8 @@ mod auto_native;
 #[cfg(feature = "desktop")]
 mod desktop;
 #[cfg(feature = "desktop")]
+mod desktop_clipboard;
+#[cfg(feature = "desktop")]
 mod devices_native;
 #[allow(dead_code)]
 #[path = "bin/linux_bms.rs"]

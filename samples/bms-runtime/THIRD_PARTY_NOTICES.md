@@ -74,3 +74,48 @@ The miniz_oxide packages also retain their upstream umbrella LICENSE files
 beside the selected MIT text, including provenance for the original miniz
 implementation. This list covers new packages introduced by this phase, not
 a complete inventory of all transitive packages in every platform binary.
+
+## Native text clipboard
+
+The optional desktop dependency arboard 3.6.1 has default features disabled;
+only native text clipboard and Wayland data-control support are enabled. Core,
+BMS adapter, headless player and browser graphics do not depend on this adapter.
+The lockfile adds the following packages without upgrading existing packages.
+
+| Dependency | Selected license | Retained text |
+| --- | --- | --- |
+| arboard 3.6.1 | MIT | [license](third-party/arboard-3.6.1-LICENSE-MIT.txt) |
+| clipboard-win 5.4.1 | BSL-1.0 | [license](third-party/clipboard-win-5.4.1-LICENSE-BSL.txt) |
+| error-code 3.4.0 | BSL-1.0 | [license](third-party/error-code-3.4.0-LICENSE-BSL.txt) |
+| fixedbitset 0.5.7 | MIT | [license](third-party/fixedbitset-0.5.7-LICENSE-MIT.txt) |
+| nom 8.0.0 | MIT | [license](third-party/nom-8.0.0-LICENSE-MIT.txt) |
+| os_pipe 1.2.3 | MIT | [license](third-party/os_pipe-1.2.3-LICENSE-MIT.txt) |
+| petgraph 0.8.3 | MIT | [license](third-party/petgraph-0.8.3-LICENSE-MIT.txt) |
+| tree_magic_mini 3.2.2 | MIT | [license](third-party/tree_magic_mini-3.2.2-LICENSE-MIT.txt), [database licensing explanation](third-party/tree_magic_mini-3.2.2-README.md) |
+| wl-clipboard-rs 0.9.4 | MIT | [license](third-party/wl-clipboard-rs-0.9.4-LICENSE-MIT.txt) |
+| objc2 0.6.4 | MIT | [upstream licensing declaration](third-party/objc2-0.6.4-dispatch2-0.3.1-LICENSING.md) |
+| dispatch2 0.3.1 | MIT | [upstream licensing declaration](third-party/objc2-0.6.4-dispatch2-0.3.1-LICENSING.md) |
+| objc2-app-kit 0.3.2 | MIT | [upstream licensing declaration](third-party/objc2-frameworks-0.3.2-LICENSING.md) |
+| objc2-core-foundation 0.3.2 | MIT | [upstream licensing declaration](third-party/objc2-frameworks-0.3.2-LICENSING.md) |
+| objc2-core-graphics 0.3.2 | MIT | [upstream licensing declaration](third-party/objc2-frameworks-0.3.2-LICENSING.md) |
+| objc2-foundation 0.3.2 | MIT | [upstream licensing declaration](third-party/objc2-frameworks-0.3.2-LICENSING.md) |
+| objc2-io-surface 0.3.2 | MIT | [upstream licensing declaration](third-party/objc2-frameworks-0.3.2-LICENSING.md) |
+
+Package-provided texts above are copied verbatim. clipboard-win omits its text
+from the published archive; the retained BSL text comes from its published VCS
+revision [3b27cf2](https://github.com/DoumanAsh/clipboard-win/blob/3b27cf2bfd1adcfa6e0264eb51c1025ddaf0f342/LICENSE).
+The objc2/dispatch2 declarations come from published VCS revision
+[8852b424](https://github.com/madsmtm/objc2/blob/8852b424193ca41602281b3d7540d7c8ed51e49a/LICENSE.md);
+the framework declarations come from
+[7b1abfd7](https://github.com/madsmtm/objc2/blob/7b1abfd750a2cacaea71d6a56ecfb83cb7de560b/LICENSE.md).
+Those upstream revisions provide a license declaration and Apple SDK provenance
+note, but omit a package-specific full MIT grant and copyright text. Preserve
+the exact upstream statements; this inventory does not invent that attribution
+or establish complete release-packaging license compliance.
+
+tree_magic_mini's optional `with-gpl-data` feature and `tree_magic_db` package
+are absent from this dependency resolution. No GPL MIME database is embedded or
+redistributed here; any separately supplied system MIME data retains its own
+terms. arboard's text write selects an explicit text MIME type. Petgraph artwork
+is not distributed by this application. Project-authored code remains MIT and
+the separate optional ASIO SDK distribution policy is unchanged.
