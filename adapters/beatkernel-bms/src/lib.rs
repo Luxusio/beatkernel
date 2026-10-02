@@ -133,6 +133,29 @@ pub struct ImageId(
     /// Original numeric base36 image index.
     pub u16,
 );
+/// Prepared 256×256 canvas definition using half-open source corners.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BgaCrop {
+    /// Original BMP identity; crop definitions are not recursively resolved.
+    pub source: ImageId,
+    /// Signed source corners `[x1, y1, x2, y2]`.
+    pub source_rect: [i32; 4],
+    /// Signed placement `[dx, dy]` on the transparent canvas.
+    pub destination: [i32; 2],
+}
+impl BgaCrop {
+    /// Checks the base36 source range and strictly positive source extents.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.source.0 > 1295 {
+            return Err("BGA source identity exceeds two base36 digits".into());
+        }
+        let [x1, y1, x2, y2] = self.source_rect.map(i64::from);
+        if x2 - x1 <= 0 || y2 - y1 <= 0 {
+            return Err("BGA source rectangle must have positive extents".into());
+        }
+        Ok(())
+    }
+}
 /// Static Poor-image activation mode; gameplay and timing are unchanged.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PoorBgaMode {
@@ -232,6 +255,8 @@ pub struct BmsChart {
     pub samples: BTreeMap<u16, String>,
     /// Exact opaque BMP paths, including optional initial Poor resource 00.
     pub images: BTreeMap<ImageId, String>,
+    /// Crop canvases by destination identity, separate from BMP definitions.
+    pub bga_crops: BTreeMap<ImageId, BgaCrop>,
     /// Visual selections, kept outside the gameplay and audio grids.
     pub bga: Vec<BgaEvent>,
     /// Independent per-role opacity markers on the shared visual grid.
@@ -843,5 +868,108 @@ mod poor_mode_fixtures {
             oversized.compile_bga_opacity().unwrap_err().kind,
             BmsErrorKind::Limit("visual source items")
         ));
+    }
+}
+
+#[cfg(test)]
+mod crop_fixtures {
+    use super::*;
+    #[test]
+    fn base36_sugar_namespace_and_original_source_definitions() {
+        let chart = parse("#BMP00 初期.bmp\n#BMP01 first.bmp\n#BMP02 second.bmp\n#BGA01 2 -1 -2 3 4 5 6\n#@bga02 1 -1 -2 4 6 5 6\n#BGA00 0 0 0 1 1 0 0", ParseOptions::default()).unwrap();
+        assert_eq!(
+            chart.bga_crops[&ImageId(1)].source_rect,
+            chart.bga_crops[&ImageId(2)].source_rect
+        );
+        assert_eq!(
+            chart.bga_crops[&ImageId(1)].destination,
+            chart.bga_crops[&ImageId(2)].destination
+        );
+        assert_eq!(chart.bga_crops[&ImageId(1)].source_rect, [-1, -2, 3, 4]);
+        assert_eq!(chart.bga_crops[&ImageId(0)].source, ImageId(0));
+        assert_eq!(chart.images[&ImageId(1)], "first.bmp");
+        assert_eq!(chart.bga_crops[&ImageId(2)].source, ImageId(1));
+        assert_eq!(
+            parse("#BGAzz Z 0 0 1 1 0 0", ParseOptions::default())
+                .unwrap()
+                .bga_crops[&ImageId(1295)]
+                .source,
+            ImageId(35)
+        );
+    }
+    #[test]
+    fn strict_fields_coordinates_ids_and_duplicate_family() {
+        for line in [
+            "#BGA01",
+            "#BGA01 001 0 0 1 1 0 0",
+            "#BGA01 +A 0 0 1 1 0 0",
+            "#BGA01 あ 0 0 1 1 0 0",
+            "#BGA01 1 0 0 0 1 0 0",
+            "#BGA01 1 0 0 1 1 0 0 extra",
+            "#BGA01 1 0 0 1.5 1 0 0",
+            "#BGA01 1 2147483648 0 1 1 0 0",
+            "#@BGA01 1 2147483647 0 1 1 0 0",
+            "#@BGA01 1 0 0 -1 1 0 0",
+            "#BGA!1 1 0 0 1 1 0 0",
+        ] {
+            assert!(parse(line, ParseOptions::default()).is_err(), "{line}");
+        }
+        let duplicate = "#BGA01 1 0 0 1 1 0 0\n#@BGA01 2 0 0 2 2 3 4";
+        assert_eq!(
+            parse(duplicate, ParseOptions::default()).unwrap_err().line,
+            2
+        );
+        let options = ParseOptions {
+            duplicates: DuplicatePolicy::LastWins,
+            ..ParseOptions::default()
+        };
+        assert_eq!(
+            parse(duplicate, options).unwrap().bga_crops[&ImageId(1)].source_rect,
+            [0, 0, 2, 2]
+        );
+        assert_eq!(
+            parse("#BGALEGACY opaque", ParseOptions::default())
+                .unwrap()
+                .warnings
+                .len(),
+            1
+        );
+        assert!(
+            BgaCrop {
+                source: ImageId(1296),
+                source_rect: [0, 0, 1, 1],
+                destination: [0, 0]
+            }
+            .validate()
+            .is_err()
+        );
+    }
+    #[test]
+    fn selected_headers_and_no_gameplay_or_scheduled_changes() {
+        let base = "#BPM 120\n#WAV01 note.wav\n#00011:01\n#00001:01\n#00004:0100\n";
+        let original = parse(base, ParseOptions::default()).unwrap();
+        let with_crops = parse(
+            &format!("{base}#BGA01 1 0 0 1 1 0 0\n#@BGA02 1 0 0 1 1 0 0"),
+            ParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(original.source, with_crops.source);
+        assert_eq!(original.notes, with_crops.notes);
+        assert_eq!(original.compile().unwrap(), with_crops.compile().unwrap());
+        let conditional =
+            "#RANDOM 2\n#IF 1\n#BGA01 malformed\n#ELSE\n#@BGA01 1 0 0 1 1 0 0\n#ENDIF\n#ENDRANDOM";
+        assert_eq!(
+            parse_seeded(conditional, ParseOptions::default(), 0)
+                .unwrap()
+                .bga_crops
+                .len(),
+            1
+        );
+        assert!(parse_seeded(conditional, ParseOptions::default(), 3).is_err());
+        let options = ParseOptions {
+            max_lines: 1,
+            ..ParseOptions::default()
+        };
+        assert!(parse("#BGA01 1 0 0 1 1 0 0\n#BGA02 1 0 0 1 1 0 0", options).is_err());
     }
 }

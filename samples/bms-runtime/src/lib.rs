@@ -40,6 +40,8 @@ pub mod font_text;
 pub mod graphics;
 /// Contained immutable visual assets prepared outside playback callbacks.
 pub mod image_assets;
+/// Fixed transparent crop canvases prepared from original image resources.
+pub mod image_crop;
 /// Bounded raster decoding during preparation, independent of GPU ownership.
 pub mod image_decode;
 /// Fixed-capacity lane feedback from actual local judge results and song time.

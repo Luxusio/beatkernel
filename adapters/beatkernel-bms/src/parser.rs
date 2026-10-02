@@ -57,6 +57,63 @@ fn code(token: &str, radix: u32, line: usize) -> Result<u16, BmsError> {
     u16::from_str_radix(token, radix)
         .map_err(|_| fail(line, BmsErrorKind::Syntax("invalid index digit")))
 }
+fn crop(value: &str, sugar: bool, line: usize) -> Result<BgaCrop, BmsError> {
+    let mut fields = value.split_whitespace();
+    let source = fields.next().unwrap_or("");
+    if !(1..=2).contains(&source.len()) || !source.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err(fail(
+            line,
+            BmsErrorKind::Syntax("BGA source requires one or two base36 digits"),
+        ));
+    }
+    let source = ImageId(
+        u16::from_str_radix(source, 36)
+            .map_err(|_| fail(line, BmsErrorKind::Syntax("invalid BGA source")))?,
+    );
+    let mut coordinates = [0i32; 6];
+    for coordinate in &mut coordinates {
+        *coordinate = fields
+            .next()
+            .ok_or_else(|| fail(line, BmsErrorKind::Syntax("BGA requires seven fields")))?
+            .parse()
+            .map_err(|_| {
+                fail(
+                    line,
+                    BmsErrorKind::Syntax("BGA coordinate must fit signed i32"),
+                )
+            })?;
+    }
+    if fields.next().is_some() {
+        return Err(fail(
+            line,
+            BmsErrorKind::Syntax("BGA requires seven fields"),
+        ));
+    }
+    let [x, y, mut right, mut bottom, dx, dy] = coordinates;
+    if sugar {
+        if right <= 0 || bottom <= 0 {
+            return Err(fail(
+                line,
+                BmsErrorKind::Syntax("BGA width and height must be positive"),
+            ));
+        }
+        right = x
+            .checked_add(right)
+            .ok_or_else(|| fail(line, BmsErrorKind::Overflow))?;
+        bottom = y
+            .checked_add(bottom)
+            .ok_or_else(|| fail(line, BmsErrorKind::Overflow))?;
+    }
+    let crop = BgaCrop {
+        source,
+        source_rect: [x, y, right, bottom],
+        destination: [dx, dy],
+    };
+    crop.validate()
+        .map_err(|_| fail(line, BmsErrorKind::Syntax("invalid BGA source rectangle")))?;
+    Ok(crop)
+}
 fn define<K: Ord, V>(
     map: &mut BTreeMap<K, V>,
     key: K,
@@ -136,6 +193,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
     let mut base_defined = false;
     let mut samples = BTreeMap::new();
     let mut images = BTreeMap::new();
+    let mut bga_crops = BTreeMap::new();
     let mut tempos = BTreeMap::new();
     let mut stops = BTreeMap::new();
     let mut lengths = BTreeMap::<usize, (Ratio, usize)>::new();
@@ -387,7 +445,20 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 "BMP definition",
                 options.duplicates,
             )?;
-        } else if command.starts_with("BGA") {
+        } else if (command.len() == 5 && command.starts_with("BGA"))
+            || (command.len() == 6 && command.starts_with("@BGA"))
+        {
+            let sugar = command.starts_with('@');
+            let id = ImageId(code(&command[if sugar { 4 } else { 3 }..], 36, line)?);
+            define(
+                &mut bga_crops,
+                id,
+                crop(value, sugar, line)?,
+                line,
+                "BGA definition",
+                options.duplicates,
+            )?;
+        } else if command.starts_with("BGA") || command.starts_with("@BGA") {
             warnings.push(BmsWarning {
                 line,
                 message: format!("visual directive #{command} is not rendered by this adapter"),
@@ -821,6 +892,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
         source,
         samples,
         images,
+        bga_crops,
         bga,
         bga_opacity,
         bga_ticks_per_beat: visual_resolution,
