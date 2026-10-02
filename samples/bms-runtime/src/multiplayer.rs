@@ -1,5 +1,6 @@
 //! Casual two-player progress transport. Remote scores are unauthenticated display data.
 //! Socket work never runs on the gameplay or audio thread. Each peer starts locally.
+use crate::multiplayer_clock::{ClockFilter, ClockSample, OffsetEstimate};
 use beatkernel::{
     replay::{
         ReplayHeader,
@@ -21,7 +22,8 @@ use std::{
 };
 
 const MAGIC: &[u8; 4] = b"BKMP";
-const VERSION: u16 = 3;
+const VERSION: u16 = 4;
+const CLOCK_PROBES: u64 = 8;
 const MAX_IDENTITY: usize = 65_536;
 const MAX_BODY: usize = MAX_IDENTITY + 7;
 const TICK: Duration = Duration::from_millis(5);
@@ -93,7 +95,7 @@ pub struct Progress {
 
 #[derive(Clone, Debug)]
 pub struct MultiplayerOptions {
-    /// Includes accept/connect and exact identity exchange; 1 ms through 120 seconds.
+    /// Includes connect, identity, readiness and clock probes; 1 ms through 120 seconds.
     pub setup_timeout: Duration,
     /// Each application queue has this capacity, 1 through 1,024 messages.
     pub queue_capacity: usize,
@@ -139,6 +141,8 @@ pub enum MultiplayerEvent {
     Connected,
     /// Compatible peers both completely sent and received preparation readiness.
     Ready,
+    /// Minimum-delay software offset interval after eight validated probes.
+    ClockEstimated(OffsetEstimate),
     Progress(Progress),
     /// Peer terminal self-reported prefix, including aborted sessions.
     FinalProgress(Progress),
@@ -157,6 +161,8 @@ pub struct Multiplayer {
     stop_flag: Arc<AtomicBool>,
     ready_requested: Arc<AtomicBool>,
     ready: bool,
+    clock_epoch: Instant,
+    clock_estimate: Option<OffsetEstimate>,
     worker: Option<JoinHandle<()>>,
     local: Option<Progress>,
     remote: Option<Progress>,
@@ -201,6 +207,7 @@ impl Multiplayer {
         let ready_requested = Arc::new(AtomicBool::new(false));
         let worker_ready = ready_requested.clone();
         let finish_timeout = options.io_stall_timeout;
+        let clock_epoch = Instant::now();
         let worker = thread::Builder::new()
             .name("bms-multiplayer".into())
             .spawn(move || {
@@ -210,6 +217,7 @@ impl Multiplayer {
                     options,
                     &worker_stop,
                     &worker_ready,
+                    clock_epoch,
                     out_rx,
                     in_tx,
                 );
@@ -223,6 +231,8 @@ impl Multiplayer {
             stop_flag,
             ready_requested,
             ready: false,
+            clock_epoch,
+            clock_estimate: None,
             worker: Some(worker),
             local: None,
             remote: None,
@@ -251,6 +261,13 @@ impl Multiplayer {
     /// True after bilateral readiness is polled and until closure.
     pub fn is_ready(&self) -> bool {
         self.ready && !self.closed
+    }
+    /// Session monotonic epoch shared with this owner's socket worker.
+    pub fn clock_now_ns(&self) -> Result<i64, MultiplayerError> {
+        elapsed_ns(self.clock_epoch)
+    }
+    pub fn clock_estimate(&self) -> Option<OffsetEstimate> {
+        self.clock_estimate
     }
     /// Gameplay-side admission only; performs no socket I/O and never waits for capacity.
     pub fn try_publish(&mut self, progress: Progress) -> Result<(), MultiplayerError> {
@@ -375,6 +392,7 @@ impl Multiplayer {
         match event {
             MultiplayerEvent::Connected => self.connected = true,
             MultiplayerEvent::Ready => self.ready = true,
+            MultiplayerEvent::ClockEstimated(estimate) => self.clock_estimate = Some(*estimate),
             MultiplayerEvent::Progress(progress) => self.remote = Some(*progress),
             MultiplayerEvent::FinalProgress(progress) => {
                 self.remote = Some(*progress);
@@ -569,6 +587,111 @@ fn parse_progress(
     };
     validate_progress(previous, progress)?;
     Ok(progress)
+}
+
+fn elapsed_ns(epoch: Instant) -> Result<i64, MultiplayerError> {
+    i64::try_from(epoch.elapsed().as_nanos())
+        .map_err(|_| MultiplayerError::Protocol("session clock extent exceeded".into()))
+}
+
+/// Finite symmetric software probes; only the worker reads the actual clock.
+#[derive(Default)]
+struct ClockProbes {
+    completed: u64,
+    pending_ping: Option<(u64, i64)>,
+    peer_sequence: u64,
+    peer_send: Option<i64>,
+    pending_pong: Option<(u64, i64, i64)>,
+    last_receive: i64,
+    filter: ClockFilter,
+    emitted: bool,
+}
+impl ClockProbes {
+    fn next_ping(&mut self, now: i64) -> Result<Option<Vec<u8>>, MultiplayerError> {
+        if self.pending_ping.is_some() || self.completed == CLOCK_PROBES {
+            return Ok(None);
+        }
+        if now < self.last_receive {
+            return Err(MultiplayerError::Protocol("probe clock regressed".into()));
+        }
+        let mut payload = Vec::with_capacity(16);
+        payload.extend_from_slice(&self.completed.to_le_bytes());
+        payload.extend_from_slice(&now.to_le_bytes());
+        self.pending_ping = Some((self.completed, now));
+        Ok(Some(frame(6, &payload)))
+    }
+    fn receive_ping(&mut self, payload: &[u8], now: i64) -> Result<(), MultiplayerError> {
+        if payload.len() != 16 {
+            return Err(MultiplayerError::Protocol("invalid clock ping size".into()));
+        }
+        let sequence = u64::from_le_bytes(payload[..8].try_into().unwrap());
+        let sent = i64::from_le_bytes(payload[8..].try_into().unwrap());
+        if sequence != self.peer_sequence
+            || sequence >= CLOCK_PROBES
+            || sent < 0
+            || now < 0
+            || self.peer_send.is_some_and(|previous| sent < previous)
+            || self.pending_pong.is_some()
+        {
+            return Err(MultiplayerError::Protocol(
+                "invalid clock ping sequence/time".into(),
+            ));
+        }
+        self.pending_pong = Some((sequence, sent, now));
+        self.peer_sequence += 1;
+        self.peer_send = Some(sent);
+        Ok(())
+    }
+    fn next_pong(&mut self, now: i64) -> Result<Option<Vec<u8>>, MultiplayerError> {
+        let Some((sequence, echo, received)) = self.pending_pong else {
+            return Ok(None);
+        };
+        if now < received {
+            return Err(MultiplayerError::Protocol(
+                "clock pong send precedes receipt".into(),
+            ));
+        }
+        let mut payload = Vec::with_capacity(32);
+        payload.extend_from_slice(&sequence.to_le_bytes());
+        for timestamp in [echo, received, now] {
+            payload.extend_from_slice(&timestamp.to_le_bytes());
+        }
+        self.pending_pong = None;
+        Ok(Some(frame(7, &payload)))
+    }
+    fn receive_pong(&mut self, payload: &[u8], now: i64) -> Result<(), MultiplayerError> {
+        if payload.len() != 32 {
+            return Err(MultiplayerError::Protocol("invalid clock pong size".into()));
+        }
+        let word =
+            |offset: usize| i64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
+        let sequence = u64::from_le_bytes(payload[..8].try_into().unwrap());
+        let Some((expected, sent)) = self.pending_ping else {
+            return Err(MultiplayerError::Protocol("unsolicited clock pong".into()));
+        };
+        if sequence != expected || word(8) != sent {
+            return Err(MultiplayerError::Protocol(
+                "clock pong sequence/echo mismatch".into(),
+            ));
+        }
+        let sample = ClockSample::new(sent, word(16), word(24), now)
+            .map_err(|error| MultiplayerError::Protocol(error.to_string()))?;
+        self.filter
+            .observe(sample)
+            .map_err(|error| MultiplayerError::Protocol(error.to_string()))?;
+        self.completed += 1;
+        self.last_receive = now;
+        self.pending_ping = None;
+        Ok(())
+    }
+    fn estimate_event(&mut self) -> Option<MultiplayerEvent> {
+        if self.completed != CLOCK_PROBES || self.emitted {
+            return None;
+        }
+        let estimate = self.filter.estimate()?;
+        self.emitted = true;
+        Some(MultiplayerEvent::ClockEstimated(estimate))
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -779,6 +902,7 @@ fn run(
     options: MultiplayerOptions,
     stop: &AtomicBool,
     ready_requested: &AtomicBool,
+    clock_epoch: Instant,
     outgoing: Receiver<Outgoing>,
     incoming: SyncSender<MultiplayerEvent>,
 ) -> Result<(), MultiplayerError> {
@@ -823,12 +947,15 @@ fn run(
     let mut last_read = Instant::now();
     let mut connected = false;
     let mut protocol = Protocol::default();
+    let mut clocks = ClockProbes::default();
     let mut tx_tag = 1u8;
     loop {
         if stop.load(Ordering::Acquire) {
             return Ok(());
         }
-        if (!connected || !protocol.ready()) && Instant::now() >= deadline {
+        if (!connected || !protocol.ready() || clocks.completed < CLOCK_PROBES)
+            && Instant::now() >= deadline
+        {
             return Err(MultiplayerError::SetupTimeout);
         }
         if connected
@@ -891,6 +1018,18 @@ fn run(
                 incoming
                     .try_send(MultiplayerEvent::Connected)
                     .map_err(queue_error)?;
+            } else if tag == 6 || tag == 7 {
+                if !protocol.ready() {
+                    return Err(MultiplayerError::Protocol(
+                        "clock probe before readiness".into(),
+                    ));
+                }
+                let now = elapsed_ns(clock_epoch)?;
+                if tag == 6 {
+                    clocks.receive_ping(&payload, now)?;
+                } else {
+                    clocks.receive_pong(&payload, now)?;
+                }
             } else {
                 if let Some(event) = protocol.receive(tag, &payload)? {
                     incoming.try_send(event).map_err(queue_error)?;
@@ -906,6 +1045,23 @@ fn run(
             } else if let Some(ack) = protocol.next_ack() {
                 tx = ack;
                 tx_tag = 4;
+                written = 0;
+                last_write = Instant::now();
+            } else if protocol.ready() && clocks.pending_pong.is_some() {
+                tx = clocks.next_pong(elapsed_ns(clock_epoch)?)?.ok_or_else(|| {
+                    MultiplayerError::Protocol("missing pending clock pong".into())
+                })?;
+                tx_tag = 7;
+                written = 0;
+                last_write = Instant::now();
+            } else if protocol.ready()
+                && clocks.pending_ping.is_none()
+                && clocks.completed < CLOCK_PROBES
+            {
+                tx = clocks
+                    .next_ping(elapsed_ns(clock_epoch)?)?
+                    .ok_or_else(|| MultiplayerError::Protocol("missing next clock ping".into()))?;
+                tx_tag = 6;
                 written = 0;
                 last_write = Instant::now();
             } else {
@@ -927,6 +1083,9 @@ fn run(
         if let Some(event) = protocol.acknowledgement() {
             incoming.try_send(event).map_err(queue_error)?;
         }
+        if let Some(event) = clocks.estimate_event() {
+            incoming.try_send(event).map_err(queue_error)?;
+        }
         thread::park_timeout(TICK);
     }
 }
@@ -934,6 +1093,126 @@ fn queue_error<T>(error: TrySendError<T>) -> MultiplayerError {
     match error {
         TrySendError::Full(_) => MultiplayerError::QueueFull,
         TrySendError::Disconnected(_) => MultiplayerError::Closed,
+    }
+}
+
+#[cfg(test)]
+mod clock_probe_fixtures {
+    use super::*;
+
+    fn decode(wire: &[u8], expected_tag: u8) -> Vec<u8> {
+        let mut decoder = Frames::new();
+        for (index, byte) in wire.iter().enumerate() {
+            decoder.bytes.push(*byte);
+            let parsed = decoder.take().unwrap();
+            if index + 1 == wire.len() {
+                let (tag, payload) = parsed.unwrap();
+                assert_eq!(tag, expected_tag);
+                return payload;
+            }
+            assert!(parsed.is_none());
+        }
+        panic!("missing frame")
+    }
+
+    #[test]
+    fn eight_fragmented_exchanges_select_minimum_delay_and_emit_once() {
+        let mut local = ClockProbes::default();
+        let mut peer = ClockProbes::default();
+        for sequence in 0..8 {
+            let sent = 1_000 + sequence * 1_000;
+            let (forward, reverse) = if sequence == 3 { (3, 7) } else { (20, 30) };
+            let received = sent + forward + 100;
+            let replied = received + 5;
+            let arrived = sent + forward + 5 + reverse;
+            let ping = local.next_ping(sent).unwrap().unwrap();
+            assert!(local.next_ping(sent).unwrap().is_none());
+            peer.receive_ping(&decode(&ping, 6), received).unwrap();
+            let pong = peer.next_pong(replied).unwrap().unwrap();
+            assert!(peer.next_pong(replied).unwrap().is_none());
+            local.receive_pong(&decode(&pong, 7), arrived).unwrap();
+            if sequence < 7 {
+                assert!(local.estimate_event().is_none());
+            }
+        }
+        let Some(MultiplayerEvent::ClockEstimated(estimate)) = local.estimate_event() else {
+            panic!("missing estimate")
+        };
+        assert_eq!(
+            (
+                estimate.lower_ns(),
+                estimate.upper_ns(),
+                estimate.round_trip_ns()
+            ),
+            (93, 103, 10)
+        );
+        assert_eq!(estimate.observed_local_ns(), 4_015);
+        let deadline = estimate
+            .remote_deadline_to_local(10_100, 8_100, 5_000)
+            .unwrap();
+        assert_eq!(
+            (deadline.earliest_ns(), deadline.latest_ns()),
+            (9_997, 10_007)
+        );
+        assert!(
+            estimate
+                .remote_deadline_to_local(10_100, 9_016, 5_000)
+                .is_err()
+        );
+        assert!(local.estimate_event().is_none());
+        assert!(local.next_ping(9_000).unwrap().is_none());
+        assert!(
+            peer.receive_ping(&decode(&frame(6, &[0; 16]), 6), 9_000)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn malformed_unsolicited_and_mismatched_pongs_do_not_consume_pending_probe() {
+        let mut local = ClockProbes::default();
+        let mut peer = ClockProbes::default();
+        assert!(local.receive_pong(&[0; 32], 100).is_err());
+        let ping = decode(&local.next_ping(100).unwrap().unwrap(), 6);
+        assert!(peer.receive_ping(&ping[..15], 160).is_err());
+        peer.receive_ping(&ping, 160).unwrap();
+        assert!(peer.receive_ping(&ping, 160).is_err());
+        assert!(peer.next_pong(159).is_err());
+        let pong = decode(&peer.next_pong(180).unwrap().unwrap(), 7);
+        for offset in [0, 8] {
+            let mut wrong = pong.clone();
+            wrong[offset] ^= 1;
+            assert!(local.receive_pong(&wrong, 140).is_err());
+            assert_eq!(local.pending_ping, Some((0, 100)));
+            assert_eq!(local.completed, 0);
+            assert!(local.filter.estimate().is_none());
+        }
+        assert!(local.receive_pong(&pong[..31], 140).is_err());
+        assert!(local.receive_pong(&pong, 110).is_err()); // processing exceeds local span
+        local.receive_pong(&pong, 140).unwrap();
+        assert_eq!(local.completed, 1);
+        assert!(local.receive_pong(&pong, 140).is_err());
+        assert!(local.next_ping(139).is_err());
+        assert!(local.next_ping(140).unwrap().is_some());
+    }
+
+    #[test]
+    fn simultaneous_outstanding_probes_keep_independent_epoch_signs() {
+        let mut left = ClockProbes::default();
+        let mut right = ClockProbes::default();
+        let left_ping = decode(&left.next_ping(100).unwrap().unwrap(), 6);
+        let right_ping = decode(&right.next_ping(150).unwrap().unwrap(), 6);
+        right.receive_ping(&left_ping, 160).unwrap();
+        left.receive_ping(&right_ping, 110).unwrap();
+        let left_pong = decode(&left.next_pong(120).unwrap().unwrap(), 7);
+        let right_pong = decode(&right.next_pong(170).unwrap().unwrap(), 7);
+        left.receive_pong(&right_pong, 130).unwrap();
+        right.receive_pong(&left_pong, 180).unwrap();
+        let positive = left.filter.estimate().unwrap();
+        let negative = right.filter.estimate().unwrap();
+        assert_eq!((positive.lower_ns(), positive.upper_ns()), (40, 60));
+        assert_eq!((negative.lower_ns(), negative.upper_ns()), (-60, -40));
+        assert_eq!(left.pending_ping, None);
+        assert_eq!(right.pending_ping, None);
     }
 }
 
@@ -1307,7 +1586,7 @@ mod final_prefix_fixtures {
         state.next_ready(true).unwrap();
         state.written(5);
         assert_eq!(state.readiness(), Some(MultiplayerEvent::Ready));
-        for version in [1u16, 2] {
+        for version in [1u16, 2, 3] {
             let mut frames = Frames::new();
             frames.bytes = frame(5, &[]);
             frames.bytes[8..10].copy_from_slice(&version.to_le_bytes());
@@ -1331,8 +1610,23 @@ mod final_prefix_fixtures {
         incoming.try_send(MultiplayerEvent::Ready).unwrap();
         assert_eq!(owner.poll(), vec![MultiplayerEvent::Ready]);
         assert!(owner.is_ready());
+        let mut filter = ClockFilter::new();
+        filter
+            .observe(ClockSample::new(100, 160, 180, 140).unwrap())
+            .unwrap();
+        let estimate = filter.estimate().unwrap();
+        incoming
+            .try_send(MultiplayerEvent::ClockEstimated(estimate))
+            .unwrap();
+        assert_eq!(
+            owner.poll(),
+            vec![MultiplayerEvent::ClockEstimated(estimate)]
+        );
+        assert_eq!(owner.clock_estimate(), Some(estimate));
+        assert!(owner.clock_now_ns().unwrap() >= 0);
         owner.request_stop();
         assert!(!owner.is_ready());
+        assert_eq!(owner.clock_estimate(), Some(estimate));
         assert_eq!(owner.try_ready(), Err(MultiplayerError::Closed));
         assert_eq!(
             owner.try_publish(progress(2)),
@@ -1453,7 +1747,7 @@ mod final_prefix_fixtures {
         assert!(state.local_ack_received);
     }
     #[test]
-    fn version_three_wire_and_coalesced_complete_frames() {
+    fn version_four_wire_and_coalesced_complete_frames() {
         let mut wire = progress_frame(0, progress(1));
         wire.extend_from_slice(&prefix_frame(3, 1, progress(2)));
         let mut frames = Frames::new();
@@ -1500,6 +1794,8 @@ mod final_prefix_fixtures {
                 stop_flag: Arc::new(AtomicBool::new(false)),
                 ready_requested: Arc::new(AtomicBool::new(true)),
                 ready: true,
+                clock_epoch: Instant::now(),
+                clock_estimate: None,
                 worker: None,
                 local: None,
                 remote: None,

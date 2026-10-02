@@ -409,6 +409,7 @@ impl LiveCompetition {
                     }
                     MultiplayerEvent::Ready => self.network_status = Some(NetworkStatus::Connected),
                     MultiplayerEvent::Progress(_)
+                    | MultiplayerEvent::ClockEstimated(_)
                     | MultiplayerEvent::FinalProgress(_)
                     | MultiplayerEvent::FinalAcknowledged => {}
                     MultiplayerEvent::Disconnected(error) => {
@@ -497,7 +498,7 @@ impl LiveCompetition {
                 if Instant::now() >= deadline {
                     return Err(crate::multiplayer::MultiplayerError::SetupTimeout.into());
                 }
-                if network.is_ready() {
+                if network.is_ready() && network.clock_estimate().is_some() {
                     return Ok(true);
                 }
                 std::thread::sleep(
