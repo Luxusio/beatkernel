@@ -134,7 +134,7 @@ to the visible text window. An absent IME cursor range hides the caret;
 an explicitly collapsed range keeps it visible. Range-only changes update the retained field.
 Previews stay separate from saved drafts; committing, switching fields or leaving
 the active screen clears the decorations. Fields use the supplied font when
-available, otherwise bitmap glyphs; multilingual shaping and clipboard remain pending.
+available, otherwise bitmap glyphs; multilingual shaping remains pending.
 Selection rows show artist metadata below the title when available.
 In Records, Remove Own and Remove Other remove one selected record occurrence
 from the competition draft without deleting its file. Selected own/other counts
@@ -220,7 +220,17 @@ automatic preparation and Linux per-player assignment. Search, native settings
 and profile fields support IME previews with composition ranges. All existing
 text fields support Shift+Left/Right/Home/End selection and Ctrl+A (Command+A on
 macOS). Typing or deleting replaces/removes the selection; IME cancellation
-preserves it. Clipboard and mouse/word/grapheme selection remain pending.
+preserves it. Ctrl+C/X/V (Command+C/X/V on macOS) copies/cuts the selection or
+pastes plain text into the focused field. Copy/cut with no selection does nothing.
+Clipboard access runs on a persistent worker; cut deletes only after a successful
+write. Changing the field, screen, focus, composition or editor while waiting
+discards the pending edit. Paste preserves spaces and enforces the field's byte
+and control-character limits; multiline text is rejected. Mouse/word/grapheme
+selection remains pending. Native clipboard calls have no hard timeout and may
+delay closing; real desktop acceptance is deferred. Linux availability depends
+on supported Wayland data-control or X11/XWayland, and clipboard persistence after
+exit depends on the desktop's clipboard manager. See the
+[clipboard behavior and limits](doc/changes/CHANGE__clipboard-fields.md).
 `--profile PATH` loads saved
 native and display options; explicit arguments replace matching profile entries.
 Settings Load/Save use an editable path and the same serialized settings worker. Save stores

@@ -184,7 +184,7 @@ controls. Commit, cancellation and field/lifecycle changes clear decorations;
 preview metadata never changes committed text or search results. Rejected edits
 preserve text, cursor and metadata. Supplied-font field rendering is specified
 below; bitmap rendering remains when no font is supplied or admission fails.
-OS candidate positioning, multilingual shaping and clipboard are future work. Prepared regression
+OS candidate positioning and multilingual shaping are future work. Prepared regression
 fixtures await later execution and do not certify native IME behavior.
 Native audio output metadata selection is described below. Native profile persistence is described below. Editing never acquires devices or
 changes native input/audio owners.
@@ -310,7 +310,7 @@ the relevant retained field; identical updates stay idle. Each retained editor
 keeps its selection across focus changes until that draft is reset/replaced;
 unfocused fields hide it. Held modifiers reset when UI becomes unavailable,
 including focus loss, occlusion, suspend, pending work and closing. Ordinary
-field changes retain held modifiers. Clipboard, mouse/word/grapheme selection and
+field changes retain held modifiers. Mouse/word/grapheme selection and
 IME in additional dialogs remain separate work. Regression fixtures cover model,
 scene geometry, retained invalidation and actual desktop event routing; execution
 and native keyboard/IME acceptance remain deferred.
@@ -348,7 +348,7 @@ warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warni
   availability — actual device/file checks remain in native preparation.
 - HID usage bindings still require typed values. Search, native settings and
   profile fields support IME composition ranges and committed text selection;
-  clipboard remains pending. Retain bounded drafts and
+  clipboard uses the shared asynchronous adapter. Retain bounded drafts and
   next-session-only application when extending editing.
 - Profile operations drain on close rather than being forcibly interrupted —
   assess filesystem stall behavior during deferred native acceptance.
@@ -1620,3 +1620,40 @@ must not replace native resource-retention or cleanup semantics. Local cohorts
 retain their existing all-members policy and share the same capture publisher.
 Author failure-priority and actual-capture forwarding fixtures using in-memory
 publication callbacks; compilation does not establish file/device acceptance.
+
+## Shared asynchronous text clipboard
+
+All seven existing editable targets use the same clipboard transaction: search,
+native setting value, profile path, display value, practice start/end and record
+directory. Exact Ctrl+C/X/V on Windows/Linux or Command+C/X/V on macOS matches
+logical characters; additional modifiers are excluded. Consume shortcut text
+before ordinary insertion. Repeats do not submit again; IME composition owns its
+keyboard. Copy/cut with no selection do nothing and do not initialize a backend.
+Copy/cut preserve the selected UTF-8 bytes exactly. Paste replaces selection
+without trimming or normalizing and uses existing byte/control validation.
+
+Native access belongs to one lazy, persistent worker using desktop-only arboard
+3.6.1 text support (no image feature), with one outstanding operation. The UI,
+audio and game owners never call the native clipboard. Validate a cut candidate
+against its model before writing; delete only after successful write and current
+model validation. Settings editor and cloned NativeSettings publish together.
+Backend, payload or validation errors preserve the draft and appear in the
+existing error region.
+
+A pending edit belongs to the exact screen instance, field and editor snapshot.
+Screen/field changes, loss of readiness/focus, IME composition and any editor
+change cancel its publication. Recheck on completion; a cancelled operation still
+drains before another starts. An already submitted copy/cut write cannot be
+recalled. Completion polling occurs only while work is pending; navigation and
+suspend retain the clipboard owner. Closing drains and joins it before exit.
+
+Reads are rejected above 4096 UTF-8 bytes after the native backend allocates its
+String, then enforce the target's smaller limit. This is not an allocation bound
+on arbitrary external clipboard data. Native operations lack a hard timeout and
+can delay shutdown; no bounded native-latency guarantee is made. Linux requires
+persistent clipboard ownership; survival after app exit depends on the desktop's
+clipboard manager. Wayland uses arboard's supported data-control protocols with
+its X11/XWayland path where available; unsupported desktops report errors.
+Browser clipboard adapters remain separate work. Fake-backend/editor/desktop
+fixtures are authored and compiled only; real clipboard/IME/close acceptance,
+tests, review and QA remain deferred.
