@@ -1,7 +1,7 @@
 //! Contained off-thread asset lookup; no file content or codec access.
 use std::{
     fs, io,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
 };
 
 /// Exact preserves literal lookup. Variants are considered only when that
@@ -13,24 +13,41 @@ pub enum AssetPathPolicy {
     AudioVariants,
 }
 
-fn relative_name(name: &str) -> io::Result<PathBuf> {
+pub(crate) fn relative_name(name: &str) -> io::Result<PathBuf> {
     let portable = name.replace('\\', "/");
     if portable.is_empty()
+        || portable.starts_with('/')
         || portable.contains('\0')
         || portable.as_bytes().get(1) == Some(&b':')
-        || Path::new(&portable)
-            .components()
-            .any(|part| !matches!(part, Component::Normal(_) | Component::CurDir))
+        || portable.split('/').any(|part| part == "..")
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "empty, absolute, parent or drive-qualified asset path rejected",
         ));
     }
+    let normalized = portable
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+    if normalized.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "asset path has no file component",
+        ));
+    }
+    if normalized.as_bytes().get(1) == Some(&b':') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "drive-qualified asset path rejected after dot normalization",
+        ));
+    }
+    // Keep native dot/trailing-separator semantics; memory keys normalize them separately.
     Ok(PathBuf::from(portable))
 }
 
-fn variants(relative: &Path) -> Vec<PathBuf> {
+pub(crate) fn variants(relative: &Path) -> Vec<PathBuf> {
     let families = match relative
         .extension()
         .and_then(|extension| extension.to_str())

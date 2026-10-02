@@ -4,6 +4,10 @@
 pub mod asio_replay;
 /// Contained exact or compatible asset filename lookup during preparation.
 pub mod asset_paths;
+/// Bounded selected-file and native asset acquisition.
+pub mod asset_source;
+#[cfg(test)]
+mod asset_source_fixtures;
 /// Prepared original-song image selections shared by live and replay presentation.
 pub mod bga;
 /// Rolling BGM admission on an explicitly configured output frame grid.
@@ -131,6 +135,8 @@ pub mod session_launch;
 pub mod settings;
 /// Versioned native settings profiles and bounded off-thread file storage.
 pub mod settings_profile;
+#[cfg(test)]
+mod source_preparation_fixtures;
 /// Validated portable raw texture resources.
 pub mod texture;
 /// Atomic Design-style presentation compositions, independent of native I/O.
@@ -151,8 +157,6 @@ use beatkernel_bms::{BmsChart, CompiledBms, ParseOptions, parse_seeded};
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
-    fs::File,
-    io::Read,
     path::Path,
 };
 
@@ -340,10 +344,37 @@ fn prepare_seeded(
 ) -> Result<PreparedBms, Box<dyn Error>> {
     let chart_path = std::fs::canonicalize(path)?;
     let root = chart_path.parent().ok_or("chart has no parent")?;
-    let options = ParseOptions::default();
-    let encoded_chart = bounded_read(&chart_path, options.max_bytes)?;
-    let text = chart_text::decode_chart_text(
+    let encoded_chart = bounded_read(&chart_path, ParseOptions::default().max_bytes)?;
+    let source = asset_source::FileAssetSource::new(root)?;
+    prepare_from_source(
         &encoded_chart,
+        &source,
+        format,
+        pcm_limits,
+        channels,
+        decoder,
+        paths,
+        seed,
+        replay,
+    )
+}
+
+/// Prepares the same chart and assets from bounded bytes and a scoped resource source.
+/// Replay setup is validated before any resource acquisition.
+pub fn prepare_from_source(
+    chart_bytes: &[u8],
+    assets: &dyn asset_source::AssetSource,
+    format: AudioFormat,
+    pcm_limits: PcmLimits,
+    channels: ChannelPolicy,
+    decoder: &dyn AssetDecoder,
+    paths: asset_paths::AssetPathPolicy,
+    seed: u64,
+    replay: Option<(&ReplayFile, ReplayCodecLimits)>,
+) -> Result<PreparedBms, Box<dyn Error>> {
+    let options = ParseOptions::default();
+    let text = chart_text::decode_chart_text(
+        chart_bytes,
         chart_text::ChartTextEncoding::Auto,
         options.max_bytes,
     )?;
@@ -368,8 +399,11 @@ fn prepare_seeded(
             .samples
             .get(&u16::try_from(sample.0)?)
             .ok_or("referenced sample has no WAV definition")?;
-        let asset_path = asset_paths::resolve_asset(root, name, paths)?;
-        let encoded = bounded_read(&asset_path, 64 * 1024 * 1024)?;
+        let asset_path = assets.resolve(name, paths)?;
+        let encoded = assets.read(&asset_path, 64 * 1024 * 1024)?;
+        if encoded.len() > 64 * 1024 * 1024 {
+            return Err("encoded file exceeds preparation limit".into());
+        }
         let pcm = decoder.decode(&asset_path, &encoded, pcm_limits)?;
         let pcm = prepare_channels(pcm, format, pcm_limits, channels)?;
         bank.insert(sample, pcm)?;
@@ -431,25 +465,7 @@ fn prepare_seeded(
 }
 
 fn bounded_read(path: &Path, limit: usize) -> Result<Vec<u8>, Box<dyn Error>> {
-    let mut file = File::open(path)?;
-    let mut bytes = Vec::new();
-    let mut block = [0u8; 8192];
-    loop {
-        let count = file.read(&mut block)?;
-        if count == 0 {
-            break;
-        }
-        let length = bytes
-            .len()
-            .checked_add(count)
-            .ok_or("encoded length overflow")?;
-        if length > limit {
-            return Err("encoded file exceeds preparation limit".into());
-        }
-        bytes.try_reserve(count)?;
-        bytes.extend_from_slice(&block[..count]);
-    }
-    Ok(bytes)
+    Ok(asset_source::read_bounded(path, limit)?)
 }
 
 fn prepare_channels(

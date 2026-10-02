@@ -1,6 +1,7 @@
 //! Contained static visual resources, prepared explicitly before playback.
 use crate::{
-    asset_paths::{AssetPathPolicy, resolve_asset},
+    asset_paths::AssetPathPolicy,
+    asset_source::{AssetSource, FileAssetSource},
     image_crop::crop_canvas_sized,
     image_decode::{ImageDecodeError, ImageDecodeLimits, decode},
     image_key::{black_to_transparent, needs_key},
@@ -9,8 +10,7 @@ use crate::{
 use beatkernel_bms::{BgaChannel, BgaCrop, BmsChart, ImageId};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::File,
-    io::{self, Read},
+    io,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -83,32 +83,6 @@ enum Cached {
     Loaded(Arc<RgbaImage>),
     Unavailable(ImageUnavailable),
 }
-enum ReadError {
-    Io(io::Error),
-    Limit(String),
-}
-fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, ReadError> {
-    let mut file = File::open(path).map_err(ReadError::Io)?;
-    if file.metadata().map_err(ReadError::Io)?.len() > limit as u64 {
-        return Err(ReadError::Limit("encoded image file exceeds limit".into()));
-    }
-    let mut bytes = Vec::new();
-    let mut block = [0u8; 8192];
-    loop {
-        let count = file.read(&mut block).map_err(ReadError::Io)?;
-        if count == 0 {
-            break;
-        }
-        if bytes.len().checked_add(count).is_none_or(|len| len > limit) {
-            return Err(ReadError::Limit("encoded image file exceeds limit".into()));
-        }
-        bytes
-            .try_reserve(count)
-            .map_err(|e| ReadError::Limit(e.to_string()))?;
-        bytes.extend_from_slice(&block[..count]);
-    }
-    Ok(bytes)
-}
 
 impl ImageAssets {
     /// Loads referenced images, crop dependencies and initial BMP00/BGA00.
@@ -116,6 +90,17 @@ impl ImageAssets {
     /// reject the entire preparation. Filesystem stability is assumed, as for audio.
     pub fn prepare(
         root: &Path,
+        chart: &BmsChart,
+        limits: ImageAssetLimits,
+    ) -> Result<Self, String> {
+        limits.validate()?;
+        let source = FileAssetSource::new(root).map_err(|e| e.to_string())?;
+        Self::prepare_from_source(&source, chart, limits)
+    }
+
+    /// Prepares identical decoded/cropped/keyed resources from a scoped source.
+    pub fn prepare_from_source(
+        source: &dyn AssetSource,
         chart: &BmsChart,
         limits: ImageAssetLimits,
     ) -> Result<Self, String> {
@@ -170,13 +155,6 @@ impl ImageAssets {
         {
             return Err("image reference capacity exceeded".into());
         }
-        let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
-        if !std::fs::metadata(&root)
-            .map_err(|e| e.to_string())?
-            .is_dir()
-        {
-            return Err("image root must be a directory".into());
-        }
         let mut bank = Self::default();
         let mut cache = BTreeMap::<PathBuf, Cached>::new();
         for id in sources {
@@ -184,7 +162,7 @@ impl ImageAssets {
                 bank.unavailable.insert(id, ImageUnavailable::Undefined);
                 continue;
             };
-            let path = match resolve_asset(&root, name, AssetPathPolicy::Exact) {
+            let path = match source.resolve(name, AssetPathPolicy::Exact) {
                 Ok(path) => path,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     bank.unavailable.insert(id, ImageUnavailable::Missing);
@@ -195,17 +173,17 @@ impl ImageAssets {
             let resource = if let Some(resource) = cache.get(&path) {
                 resource.clone()
             } else {
-                let encoded = match read_bounded(&path, limits.decode.max_encoded_bytes) {
+                let encoded = match source.read(&path, limits.decode.max_encoded_bytes) {
                     Ok(encoded) => encoded,
-                    Err(ReadError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
                         bank.unavailable.insert(id, ImageUnavailable::Missing);
                         continue;
                     }
-                    Err(ReadError::Io(e)) => {
-                        return Err(format!("image read {}: {e}", path.display()));
-                    }
-                    Err(ReadError::Limit(e)) => return Err(e),
+                    Err(e) => return Err(format!("image read {}: {e}", path.display())),
                 };
+                if encoded.len() > limits.decode.max_encoded_bytes {
+                    return Err("encoded image file exceeds limit".into());
+                }
                 let resource = match decode(&encoded, limits.decode) {
                     Ok(image) => {
                         let total = bank
