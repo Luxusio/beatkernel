@@ -388,6 +388,7 @@ impl Output {
             }
         }
     }
+    #[cfg(feature = "asio-sdk")]
     pub(super) fn observe(
         &mut self,
         discipline: &mut PresentationDiscipline,

@@ -467,6 +467,7 @@ fn validate_finite_modes(
 }
 
 #[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 fn finite_session_done(
     end_ns: Option<i64>,
     presented: Option<ClockPoint>,
@@ -523,7 +524,7 @@ mod native {
             PhysicalInputEvent,
         },
         judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
-        time::{ClockDomainId, ClockMapper, ClockMappingQuality, Duration},
+        time::{ClockDomainId, Duration},
         transport::{Rate, Transport},
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
@@ -549,15 +550,7 @@ mod native {
     pub(super) const HOST: ClockDomainId = ClockDomainId(1);
     pub(super) const OUTPUT: ClockDomainId = ClockDomainId(2);
     const DEVICE: DeviceId = DeviceId(1);
-    pub(super) struct ExplicitDomains;
-    impl ClockMapper for ExplicitDomains {
-        fn map(&self, _: ClockPoint, _: ClockDomainId) -> Option<Timestamp> {
-            None
-        }
-        fn quality(&self) -> ClockMappingQuality {
-            ClockMappingQuality::Unknown
-        }
-    }
+
     pub(super) fn output_origin() -> ClockPoint {
         ClockPoint {
             domain: OUTPUT,

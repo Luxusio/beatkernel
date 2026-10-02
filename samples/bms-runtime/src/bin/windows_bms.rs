@@ -692,6 +692,7 @@ fn validate_finite_modes(
 }
 
 #[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 fn finite_session_done(
     end_ns: Option<i64>,
     presented: Option<beatkernel::time::ClockPoint>,
@@ -740,7 +741,7 @@ mod native {
         audio::{Mixer, MixerConfig, PcmLimits, command_queue, command_queue_with_start_gate},
         input::{Binding, BindingMap, DeviceSelector, GameControlId, PhysicalControlId},
         judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
-        time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Timestamp},
+        time::{ClockDomainId, ClockMappingQuality, ClockPoint, Timestamp},
         transport::Rate,
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
@@ -781,15 +782,7 @@ mod native {
     };
     pub(super) const HOST: ClockDomainId = ClockDomainId(1);
     pub(super) const OUTPUT: ClockDomainId = ClockDomainId(2);
-    pub(super) struct ExplicitDomains;
-    impl ClockMapper for ExplicitDomains {
-        fn map(&self, _: ClockPoint, _: ClockDomainId) -> Option<Timestamp> {
-            None
-        }
-        fn quality(&self) -> ClockMappingQuality {
-            ClockMappingQuality::Unknown
-        }
-    }
+
     pub(super) struct Window {
         pub(super) hwnd: HWND,
         instance: HINSTANCE,
@@ -1066,14 +1059,15 @@ mod native {
         MAX_START_INPUT_EVENTS, NativeStartConfig, NativeStartDevice, NativeStartObservation,
         NativeStartResult, start_committed,
     };
-    struct GameplayDevice<'a> {
-        stream: &'a mut super::live_output::Output,
-        input: &'a mut WindowsInput,
-        acquisition: &'a AcquisitionWindow,
-        clock: &'a QpcClock,
-        selected: Option<(u64, usize)>,
-        retained: &'a mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
-        last_snapshot: Option<beatkernel_platform::audio::AudioStreamSnapshot>,
+    pub(super) struct GameplayDevice<'a> {
+        pub(super) stream: &'a mut super::live_output::Output,
+        pub(super) input: &'a mut WindowsInput,
+        pub(super) acquisition: &'a AcquisitionWindow,
+        pub(super) clock: &'a QpcClock,
+        pub(super) selected: &'a [(beatkernel::input::DeviceId, usize)],
+        pub(super) retained:
+            &'a mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
+        pub(super) last_snapshot: Option<beatkernel_platform::audio::AudioStreamSnapshot>,
     }
     impl NativeGameplayDevice for GameplayDevice<'_> {
         fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
@@ -1203,7 +1197,8 @@ mod native {
             &mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
         >,
     ) -> Result<bool> {
-        let batch = read_messages(input, acquisition, selected, 256, |event| {
+        let selected = selected.map(|(id, handle)| (beatkernel::input::DeviceId(id), handle));
+        let batch = read_messages(input, acquisition, selected.as_slice(), 256, |event| {
             if let Some(events) = retained.as_deref_mut() {
                 if events.len() >= MAX_START_INPUT_EVENTS {
                     return Err("startup Raw Input buffer exhausted; restart required".into());
@@ -1219,7 +1214,7 @@ mod native {
     fn read_messages(
         input: &mut WindowsInput,
         acquisition: &AcquisitionWindow,
-        selected: Option<(u64, usize)>,
+        selected: &[(beatkernel::input::DeviceId, usize)],
         limit: usize,
         mut admit: impl FnMut(beatkernel::input::PhysicalInputEvent) -> Result<()>,
     ) -> Result<InputBatch> {
@@ -1259,7 +1254,9 @@ mod native {
                     }
                 }
                 for event in acquired?.input.events {
-                    if selected.is_some_and(|(id, _)| event.meta().source.0 != id) {
+                    if !selected.is_empty()
+                        && !selected.iter().any(|(id, _)| event.meta().source == *id)
+                    {
                         continue;
                     }
                     admit(event)?;
@@ -1272,7 +1269,10 @@ mod native {
                         input.attach_device(message.lParam as usize)?;
                     }
                     GIDC_REMOVAL => {
-                        if selected.is_some_and(|(_, handle)| handle == message.lParam as usize) {
+                        if selected
+                            .iter()
+                            .any(|(_, handle)| *handle == message.lParam as usize)
+                        {
                             return Err("selected keyboard detached during acquisition".into());
                         }
                         input.remove_device(message.lParam as usize);
@@ -1655,12 +1655,14 @@ mod native {
                 runtime.set_song_end(Timestamp::from_nanos(end))?;
             }
             let pump = {
+                let gameplay_selection =
+                    selected.map(|(id, handle)| (beatkernel::input::DeviceId(id), handle));
                 let mut device = GameplayDevice {
                     stream: &mut stream,
                     input: &mut input,
                     acquisition: &acquisition,
                     clock: &clock,
-                    selected,
+                    selected: gameplay_selection.as_slice(),
                     retained: &mut startup_inputs,
                     last_snapshot: None,
                 };

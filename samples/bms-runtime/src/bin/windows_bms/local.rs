@@ -1,5 +1,5 @@
 //! Actual Windows local cohort: one Raw Input pump and one shared native output.
-use super::native::{AcquisitionWindow, ExplicitDomains, HOST, OUTPUT};
+use super::native::{AcquisitionWindow, HOST, OUTPUT};
 use super::*;
 use beatkernel::{
     audio::{AudioCommand, Mixer, MixerConfig, PcmLimits, command_queue},
@@ -17,51 +17,24 @@ use beatkernel_bms_runtime::{
     load_prepared_with_seed,
     local_input::InputMerger,
     local_players::{MAX_LOCAL_PLAYERS, PlayerId},
-    local_runtime::{InputResult, MemberConfig, PlayerReport, RuntimeGroup, VoiceAllocator},
-    playback_pause::{NativePause, PauseKeyboard, PausePhase},
-    player::{self, PauseState},
+    local_runtime::{MemberConfig, RuntimeGroup, VoiceAllocator},
+    playback_pause::NativePause,
     replay_capture::LiveReplayCapture,
 };
+use beatkernel_bms_runtime::{
+    native_cohort::{NativeCohortSession, PlayerState, replay_path, run_cohort},
+    native_gameplay::NativeGameplayConfig,
+};
+#[cfg(test)]
+use beatkernel_bms_runtime::{
+    native_cohort::{finite_cohort_done, lag_reaches},
+    playback_pause::{PauseKeyboard, PausePhase},
+};
 use beatkernel_platform::{
-    audio::presentation::discipline::{DisciplineConfig, DisciplineUpdate, PresentationDiscipline},
+    audio::presentation::discipline::{DisciplineConfig, PresentationDiscipline},
     raw_input::RawDeviceKind,
     windows::{clock::QpcClock, input::WindowsInput},
 };
-use std::{
-    path::Path,
-    ptr,
-    time::{Duration as WallDuration, Instant},
-};
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DefWindowProcW, DispatchMessageW, GIDC_ARRIVAL, GIDC_REMOVAL, MSG, PM_NOREMOVE, PM_REMOVE,
-    PeekMessageW, TranslateMessage, WM_CLOSE, WM_INPUT, WM_INPUT_DEVICE_CHANGE, WM_QUIT,
-};
-
-struct PlayerState {
-    player: PlayerId,
-    capture: Option<LiveReplayCapture>,
-    competition: Option<LiveCompetition>,
-    completion: Option<SongCompletion>,
-    score: ScoreSummary,
-    last_song: Timestamp,
-}
-
-/// A candidate watermark is insufficient: every member requires the same
-/// actually committed acquisition frontier and acknowledged native endpoint.
-fn finite_cohort_done(
-    end: Option<i64>,
-    presented: Option<ClockPoint>,
-    committed: Option<ClockPoint>,
-    states: &[PlayerState],
-    backlog: bool,
-    resuming: bool,
-) -> bool {
-    committed.is_some_and(|frontier| {
-        states.iter().all(|state| {
-            finite_session_done(end, presented, frontier, state.last_song, backlog, resuming)
-        })
-    })
-}
 
 fn admit_mode(count: usize, network: bool) -> Result<()> {
     if !(2..=MAX_LOCAL_PLAYERS).contains(&count) {
@@ -94,177 +67,6 @@ fn resolve_keyboards(
         selected.push((DeviceId(id), handle));
     }
     Ok(selected)
-}
-
-/// Uses the base stem, preserves its directory/OS encoding, and adds a player
-/// suffix. Actual save still uses the parent's create-new/no-overwrite boundary.
-fn replay_path(base: &Path, player: PlayerId) -> Result<PathBuf> {
-    if player.0 == 0 {
-        return Err("invalid local replay player identity".into());
-    }
-    let mut stem = base
-        .file_stem()
-        .filter(|stem| !stem.is_empty())
-        .ok_or("local replay base requires a filename")?
-        .to_os_string();
-    stem.push(format!(".p{}.bkr", player.0));
-    Ok(base.with_file_name(stem))
-}
-
-/// Preserve every actual completed report, including reports from a partial
-/// group error, before propagating a capture/competition error to cleanup.
-fn observe_reports(reports: &[PlayerReport], states: &mut [PlayerState]) -> Result<()> {
-    let mut failures = Vec::new();
-    for tagged in reports {
-        let Some(state) = states
-            .iter_mut()
-            .find(|state| state.player == tagged.player)
-        else {
-            failures.push(format!("report for unknown player {:?}", tagged.player));
-            continue;
-        };
-        state.last_song = tagged.report.song_time;
-        if let Some(capture) = state.capture.as_mut() {
-            if let Err(error) = capture.record_report(&tagged.report) {
-                failures.push(format!("player{} capture: {error}", state.player.0));
-            }
-        }
-        if !tagged.report.judge_events.is_empty() {
-            if let Err(error) = state.score.observe(&tagged.report.judge_events) {
-                failures.push(format!("player{} score: {error}", state.player.0));
-            }
-        }
-        if let Some(competition) = state.competition.as_mut() {
-            if let Err(error) = competition.observe(&tagged.report) {
-                failures.push(format!("player{} competition: {error}", state.player.0));
-            }
-        }
-        for event in &tagged.report.judge_events {
-            println!("player{} judge={event:?}", tagged.player.0);
-        }
-        if tagged.report.judge_error.is_some() || !tagged.report.audio_failures.is_empty() {
-            eprintln!(
-                "player{} committed partial report judge={:?}, audio={:?}",
-                tagged.player.0, tagged.report.judge_error, tagged.report.audio_failures
-            );
-        }
-    }
-    if let Err(error) = beatkernel_bms_runtime::player::publish_local_reports(reports) {
-        failures.push(format!("local presentation: {error}"));
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("; ").into())
-    }
-}
-
-fn playback_schedule(
-    pause: Option<&NativePause>,
-    stream: &mut super::live_output::Output,
-    rate: u32,
-) -> Result<ClockPoint> {
-    let Some(pause) = pause else {
-        return stream.schedule(rate);
-    };
-    Ok(pause.scheduling_point(
-        stream
-            .render_report()?
-            .or_else(|| pause.last_render_report())
-            .ok_or("local mixer playback boundary unavailable")?,
-    )?)
-}
-
-fn process_event(
-    event: beatkernel::input::PhysicalInputEvent,
-    group: &mut RuntimeGroup,
-    pause: Option<&NativePause>,
-    stream: &mut super::live_output::Output,
-    rate: u32,
-    states: &mut [PlayerState],
-) -> Result<()> {
-    match group.process_input(
-        event,
-        &ExplicitDomains,
-        playback_schedule(pause, stream, rate)?,
-    ) {
-        Ok(InputResult::Processed(reports)) => observe_reports(&reports, states),
-        Ok(InputResult::Ignored { device }) => {
-            Err(format!("merged source {device:?} has no local runtime owner").into())
-        }
-        Err(failure) => {
-            if let Err(error) = observe_reports(&failure.completed_reports, states) {
-                eprintln!("partial group report observation: {error}");
-            }
-            Err(failure.into())
-        }
-    }
-}
-fn advance_group(
-    at: ClockPoint,
-    group: &mut RuntimeGroup,
-    pause: Option<&NativePause>,
-    stream: &mut super::live_output::Output,
-    rate: u32,
-    states: &mut [PlayerState],
-) -> Result<()> {
-    match group.advance_to(
-        at,
-        &ExplicitDomains,
-        playback_schedule(pause, stream, rate)?,
-    ) {
-        Ok(reports) => observe_reports(&reports, states),
-        Err(failure) => {
-            if let Err(error) = observe_reports(&failure.completed_reports, states) {
-                eprintln!("partial group deadline observation: {error}");
-            }
-            Err(failure.into())
-        }
-    }
-}
-fn reconcile_resume(
-    keyboard: &mut PauseKeyboard,
-    at: ClockPoint,
-    group: &mut RuntimeGroup,
-    pause: Option<&NativePause>,
-    stream: &mut super::live_output::Output,
-    rate: u32,
-    states: &mut [PlayerState],
-) -> Result<()> {
-    for event in keyboard.resume(at)? {
-        process_event(event, group, pause, stream, rate, states)?;
-    }
-    Ok(())
-}
-fn update_discipline(
-    discipline: &mut PresentationDiscipline,
-    now: ClockPoint,
-    group: &mut RuntimeGroup,
-) -> Result<()> {
-    if let DisciplineUpdate::Applied {
-        base_rate_ppm,
-        correction_ppm,
-        applied_rate_ppm,
-        phase_error_ns,
-        limited,
-    } = discipline.update(now, group.transport_mut())?
-    {
-        println!(
-            "shared discipline measured={base_rate_ppm:+}ppm correction={correction_ppm:+}ppm applied={applied_rate_ppm:+}ppm phase={phase_error_ns}ns limited={limited}"
-        );
-    }
-    Ok(())
-}
-/// An actual pause commit may precede the configured lag watermark. Wait for
-/// that first safe frontier; subsequent merger queries still detect regression.
-fn lag_reaches(now: ClockPoint, boundary: ClockPoint, lag: i64) -> Result<bool> {
-    if now.domain != boundary.domain || !(0..=1_000_000_000).contains(&lag) {
-        return Err("local pause lag has invalid domain or extent".into());
-    }
-    let frontier = i128::from(now.timestamp.as_nanos())
-        .checked_sub(i128::from(lag))
-        .ok_or("local pause lag arithmetic overflow")?;
-    Ok(frontier >= i128::from(boundary.timestamp.as_nanos()))
 }
 
 pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> Result<()> {
@@ -542,393 +344,50 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         if let Some(end) = options.end_ns {
             group.set_song_end(Timestamp::from_nanos(end))?;
         }
-        let mut end_boundary = if let Some(end) = &mut native_end {
-            let initial_rendered = stream.render_report()?;
-            stream.observe_end(end, &discipline, initial_rendered)?
-        } else {
-            None
-        };
-        let mut end_rendered = false;
-        let mut committed_frontier = None;
         let mut merger = InputMerger::new(
             HOST,
             host_origin,
             selected.iter().map(|(device, _)| *device).collect(),
             65536,
         )?;
-        let deadline = options
-            .seconds
-            .map(|seconds| Instant::now() + WallDuration::from_secs(seconds));
-        let mut last_progress = None;
-        let mut keyboard = PauseKeyboard::new();
-        let mut paused_boundary: Option<ClockPoint> = None;
-        let mut resume_boundary: Option<ClockPoint> = None;
-        let mut pause_committed = false;
-        let mut pause_lag_reached = false;
-        if pause_supported {
-            player::publish_pause(PauseState::Running);
-        }
-        let pump = (|| -> Result<()> {
-            'pump: while deadline.is_none_or(|deadline| Instant::now() < deadline)
-                && !beatkernel_bms_runtime::player::cancelled()
-            {
-                let _admission = stream.observe(&mut discipline)?;
-                player::retry_pause_publication();
-                let rendered = stream.render_report()?;
-                if let Some(end) = &mut native_end {
-                    end_rendered |=
-                        rendered.is_some_and(|report| report.playback_end_physical_frame.is_some());
-                    if let Some(boundary) = stream.observe_end(end, &discipline, rendered)? {
-                        end_boundary = Some(boundary);
-                    }
-                }
-                if pause_supported {
-                    let reference = discipline
-                        .latest_pair()
-                        .ok_or("local pause requires native clock relation")?;
-                    if !end_rendered
-                        && (pause.phase() == PausePhase::Running || pause_committed)
-                        && resume_boundary.is_none()
-                        && pause.request(player::pause_requested(), reference)?
-                    {
-                        let desired = pause.phase() == PausePhase::Pausing;
-                        group.request_audio_pause(desired);
-                        player::publish_pause(if desired {
-                            PauseState::Pausing
-                        } else {
-                            PauseState::Resuming
-                        });
-                    }
-                    if let Some(boundary) = pause.observe(rendered, reference)? {
-                        if boundary.paused {
-                            if !end_rendered {
-                                group.transport_mut().pause(boundary.host.timestamp)?;
-                                paused_boundary = Some(boundary.host);
-                                pause_committed = false;
-                                pause_lag_reached = false;
-                            }
-                        } else {
-                            group.transport_mut().resume(boundary.host.timestamp)?;
-                            resume_boundary = Some(boundary.host);
-                            paused_boundary = None;
-                            pause_committed = false;
-                            discipline = PresentationDiscipline::new(
-                                DisciplineConfig::default(),
-                                output_origin,
-                                HOST,
-                                pause.song_origin_after_pause(song_origin)?,
-                            )?;
-                            discipline.observe_clock_pair(reference)?;
-                        }
-                    }
-                }
-                feed_rendered(&mut bgm, stream.render_report()?, |command| {
-                    group.enqueue_audio(command)
-                })?;
-                // Drain a bounded common pump before releasing input or miss deadlines.
-                // SAFETY: MSG is initialized POD storage on its owning window thread.
-                let mut message: MSG = unsafe { std::mem::zeroed() };
-                for _ in 0..256 {
-                    if deadline.is_some_and(|deadline| Instant::now() >= deadline)
-                        || beatkernel_bms_runtime::player::cancelled()
-                    {
-                        break 'pump;
-                    }
-                    // SAFETY: writable message storage, common owning-thread queue.
-                    if unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) } == 0
-                    {
-                        break;
-                    }
-                    if message.message == WM_QUIT || message.message == WM_CLOSE {
-                        break 'pump;
-                    }
-                    if message.hwnd == acquisition.hwnd() && message.message == WM_INPUT {
-                        let acquired =
-                            input.read_raw_input(message.lParam as usize, Some(message.time));
-                        if message.wParam & 0xff == 0 {
-                            // SAFETY: clean this actual foreground Raw Input message once,
-                            // including when decode failed. Never dispatch it again below.
-                            unsafe {
-                                DefWindowProcW(
-                                    message.hwnd,
-                                    message.message,
-                                    message.wParam,
-                                    message.lParam,
-                                );
-                            }
-                        }
-                        for event in acquired?.input.events {
-                            if !selected
-                                .iter()
-                                .any(|(device, _)| *device == event.meta().source)
-                            {
-                                continue;
-                            }
-                            let host = ClockPoint {
-                                domain: event.meta().clock_domain,
-                                timestamp: event.meta().timestamp,
-                            };
-                            let received = clock.sample()?.normalized;
-                            discipline.validate_host(received)?;
-                            if host.domain != HOST || host.timestamp > received.timestamp {
-                                return Err(
-                                    "local Raw Input has invalid QPC domain/future timestamp"
-                                        .into(),
-                                );
-                            }
-                            if host.timestamp < host_origin.timestamp {
-                                before_origin = before_origin
-                                    .checked_add(1)
-                                    .ok_or("pre-origin counter overflow")?;
-                                continue;
-                            }
-                            discipline.validate_host(host)?;
-                            delivery.observe(host, received)?;
-                            merger.admit(event, received)?;
-                        }
-                        continue;
-                    }
-                    if message.hwnd == acquisition.hwnd()
-                        && message.message == WM_INPUT_DEVICE_CHANGE
-                    {
-                        match message.wParam as u32 {
-                            GIDC_ARRIVAL => {
-                                input.attach_device(message.lParam as usize)?;
-                            }
-                            GIDC_REMOVAL => {
-                                if selected
-                                    .iter()
-                                    .any(|(_, handle)| *handle == message.lParam as usize)
-                                {
-                                    return Err(
-                                        "assigned local keyboard detached; restart whole cohort"
-                                            .into(),
-                                    );
-                                }
-                                input.remove_device(message.lParam as usize);
-                            }
-                            _ => {}
-                        }
-                    }
-                    // SAFETY: an actual initialized native message on the owning thread.
-                    unsafe {
-                        TranslateMessage(&message);
-                        DispatchMessageW(&message);
-                    }
-                }
-                // SAFETY: inspect without removing; any queued input/owner message
-                // freezes the common frontier until a subsequent bounded pump drains it.
-                let backlog =
-                    unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_NOREMOVE) } != 0;
-                let now = clock.sample()?.normalized;
-                discipline.validate_host(now)?;
-                // A calibrated output-zero host anchor can still be in the
-                // future. Keep that anchor intact until its actual host origin.
-                if now.timestamp < host_origin.timestamp {
-                    std::thread::sleep(WallDuration::from_millis(1));
-                    continue;
-                }
-                // Keep native messages and QPC acquisition alive during pending
-                // presentation, while the existing merger parks actual receipts.
-                if pause_supported
-                    && (pause.last_render_report().is_none()
-                        || matches!(pause.phase(), PausePhase::Pausing | PausePhase::Resuming))
-                {
-                    std::thread::sleep(WallDuration::from_millis(1));
-                    continue;
-                }
-                if pause_supported && pause.phase() == PausePhase::Paused && !end_rendered {
-                    if !pause_committed && !backlog {
-                        let at = paused_boundary.ok_or("local paused boundary unavailable")?;
-                        while let Some(event) = merger.pop_ready(at)? {
-                            let host = ClockPoint {
-                                domain: event.meta().clock_domain,
-                                timestamp: event.meta().timestamp,
-                            };
-                            discipline.validate_host(host)?;
-                            if host.timestamp >= at.timestamp {
-                                keyboard.observe_paused(event)?;
-                            } else if keyboard.accept(&event)? {
-                                process_event(
-                                    event,
-                                    &mut group,
-                                    pause_supported.then_some(&pause),
-                                    &mut stream,
-                                    pcm.sample_rate(),
-                                    &mut states,
-                                )?;
-                            }
-                        }
-                        advance_group(
-                            at,
-                            &mut group,
-                            Some(&pause),
-                            &mut stream,
-                            pcm.sample_rate(),
-                            &mut states,
-                        )?;
-                        merger.commit(at)?;
-                        committed_frontier = Some(at);
-                        pause_committed = true;
-                        player::publish_pause(PauseState::Paused);
-                    }
-                    if pause_committed {
-                        if !pause_lag_reached {
-                            pause_lag_reached = lag_reaches(
-                                now,
-                                paused_boundary.ok_or("local paused boundary unavailable")?,
-                                options.advance_lag,
-                            )?;
-                        }
-                        if pause_lag_reached {
-                            if let Some(frontier) =
-                                merger.watermark(now, options.advance_lag, backlog)?
-                            {
-                                while let Some(event) = merger.pop_ready(frontier)? {
-                                    keyboard.observe_paused(event)?;
-                                }
-                            }
-                        }
-                    }
-                    std::thread::sleep(WallDuration::from_millis(1));
-                    continue;
-                }
-                if let Some(at) = resume_boundary {
-                    if !lag_reaches(now, at, options.advance_lag)? {
-                        std::thread::sleep(WallDuration::from_millis(1));
-                        continue;
-                    }
-                }
-                let frontier = merger.watermark(now, options.advance_lag, backlog)?;
-                if resume_boundary.is_some_and(|at| {
-                    frontier.is_none_or(|frontier| frontier.timestamp < at.timestamp)
-                }) {
-                    std::thread::sleep(WallDuration::from_millis(1));
-                    continue;
-                }
-                let was_resuming = resume_boundary.is_some();
-                if !was_resuming {
-                    update_discipline(&mut discipline, now, &mut group)?;
-                }
-                if let Some(frontier) = frontier {
-                    while let Some(event) = merger.pop_ready(frontier)? {
-                        let host = ClockPoint {
-                            domain: event.meta().clock_domain,
-                            timestamp: event.meta().timestamp,
-                        };
-                        discipline.validate_host(host)?;
-                        if let Some(at) = resume_boundary {
-                            if host.timestamp < at.timestamp {
-                                keyboard.observe_paused(event)?;
-                                continue;
-                            }
-                            reconcile_resume(
-                                &mut keyboard,
-                                at,
-                                &mut group,
-                                Some(&pause),
-                                &mut stream,
-                                pcm.sample_rate(),
-                                &mut states,
-                            )?;
-                            resume_boundary = None;
-                            player::publish_pause(PauseState::Running);
-                        }
-                        if end_boundary
-                            .is_some_and(|boundary| host.timestamp >= boundary.host.timestamp)
-                        {
-                            continue;
-                        }
-                        if !pause_supported || keyboard.accept(&event)? {
-                            process_event(
-                                event,
-                                &mut group,
-                                pause_supported.then_some(&pause),
-                                &mut stream,
-                                pcm.sample_rate(),
-                                &mut states,
-                            )?;
-                        }
-                    }
-                    if let Some(at) = resume_boundary.take() {
-                        reconcile_resume(
-                            &mut keyboard,
-                            at,
-                            &mut group,
-                            Some(&pause),
-                            &mut stream,
-                            pcm.sample_rate(),
-                            &mut states,
-                        )?;
-                        player::publish_pause(PauseState::Running);
-                    }
-                    if was_resuming {
-                        update_discipline(&mut discipline, now, &mut group)?;
-                    }
-                    advance_group(
-                        frontier,
-                        &mut group,
-                        pause_supported.then_some(&pause),
-                        &mut stream,
-                        pcm.sample_rate(),
-                        &mut states,
-                    )?;
-                    merger.commit(frontier)?;
-                    committed_frontier = Some(frontier);
-                    let second = states[0].last_song.as_nanos().div_euclid(1_000_000_000);
-                    if last_progress != Some(second) {
-                        println!(
-                            "shared logical song={}ns; pending merged input={}",
-                            states[0].last_song.as_nanos(),
-                            merger.pending()
-                        );
-                        for state in &states {
-                            println!("player{} score={:?}", state.player.0, state.score);
-                        }
-                        last_progress = Some(second);
-                    }
-                }
-                if finite_cohort_done(
-                    options.end_ns,
-                    end_boundary.map(|boundary| boundary.host),
-                    committed_frontier,
-                    &states,
-                    backlog,
-                    resume_boundary.is_some(),
-                ) {
-                    player::publish_section_end(Timestamp::from_nanos(
-                        options.end_ns.expect("finite endpoint admitted"),
-                    ));
-                    println!(
-                        "all Windows local finite prefixes complete: native endpoint presented and committed input frontier drained"
-                    );
-                    break;
-                }
-                let mut finished = options.end_ns.is_none();
-                for state in &mut states {
-                    if let Some(completion) = &mut state.completion {
-                        let judge = group
-                            .member_judge(state.player)
-                            .ok_or("local judge unavailable")?;
-                        finished &= completion.observe(
-                            judge,
-                            state.last_song,
-                            bgm.report(),
-                            stream.render_report()?,
-                            discipline.latest_pair().map(|pair| pair.source),
-                        )?;
-                    }
-                }
-                if finished {
-                    println!(
-                        "all Windows local players complete: terminal judging and shared output drain"
-                    );
-                    break;
-                }
-                std::thread::sleep(WallDuration::from_millis(1));
-            }
-            Ok(())
-        })();
+        let pump = {
+            let mut retained = std::collections::VecDeque::new();
+            let mut device = super::native::GameplayDevice {
+                stream: &mut stream,
+                input: &mut input,
+                acquisition: &acquisition,
+                clock: &clock,
+                selected: &selected,
+                retained: &mut retained,
+                last_snapshot: None,
+            };
+            run_cohort(
+                &mut device,
+                NativeCohortSession {
+                    group: &mut group,
+                    states: &mut states,
+                    merger: &mut merger,
+                    bgm: &mut bgm,
+                    discipline: &mut discipline,
+                    pause: &mut pause,
+                    end: &mut native_end,
+                    delivery: &mut delivery,
+                    pre_origin_inputs: &mut before_origin,
+                },
+                NativeGameplayConfig {
+                    origin: host_origin,
+                    stream_origin: output_origin,
+                    playback_origin: output_origin,
+                    song_origin,
+                    sample_rate: pcm.sample_rate(),
+                    end_song: options.end_ns.map(Timestamp::from_nanos),
+                    advance_lag: Duration::from_nanos(options.advance_lag),
+                    seconds: options.seconds,
+                    pause_supported,
+                    logical_schedule: options.backend == Backend::Wasapi,
+                },
+            )
+        };
         for state in &states {
             if let Some(telemetry) = group.member_telemetry(state.player) {
                 println!(
@@ -988,6 +447,8 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     }
 }
 
+#[cfg(test)]
+use std::path::Path;
 #[cfg(test)]
 mod fixtures {
     use super::*;

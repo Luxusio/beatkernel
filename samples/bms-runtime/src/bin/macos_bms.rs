@@ -516,6 +516,7 @@ fn finite_mode(options: &Options, network: bool) -> Result<()> {
     Ok(())
 }
 #[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn finite_session_done(
     end: Option<i64>,
     presented: Option<ClockPoint>,
@@ -532,6 +533,7 @@ fn finite_session_done(
         && !resuming
 }
 #[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn before_finite_end(input: ClockPoint, presented: Option<ClockPoint>) -> Result<bool> {
     if let Some(boundary) = presented {
         if input.domain != boundary.domain {
@@ -584,7 +586,7 @@ mod native {
         audio::{Mixer, MixerConfig, PcmLimits, command_queue, command_queue_with_start_gate},
         input::{Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId},
         judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
-        time::{ClockDomainId, ClockMapper, ClockMappingQuality, Duration},
+        time::{ClockDomainId, Duration},
         transport::{Rate, Transport},
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
@@ -610,15 +612,7 @@ mod native {
     pub(super) const M_NATIVE: ClockDomainId = ClockDomainId(1);
     pub(super) const HOST: ClockDomainId = ClockDomainId(2);
     pub(super) const OUTPUT: ClockDomainId = ClockDomainId(3);
-    pub(super) struct ExplicitDomains;
-    impl ClockMapper for ExplicitDomains {
-        fn map(&self, _: ClockPoint, _: ClockDomainId) -> Option<Timestamp> {
-            None
-        }
-        fn quality(&self) -> ClockMappingQuality {
-            ClockMappingQuality::Unknown
-        }
-    }
+
     pub(super) fn output_origin() -> ClockPoint {
         ClockPoint {
             domain: OUTPUT,
