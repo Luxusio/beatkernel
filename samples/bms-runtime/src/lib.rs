@@ -62,6 +62,8 @@ mod mp3_fixture;
 pub mod multiplayer;
 /// Checked software peer-clock offset intervals and deadline conversion.
 pub mod multiplayer_clock;
+/// Checked bilateral commitment to a future software start.
+pub mod multiplayer_start;
 /// Omitted solo option defaults, independent of native discovery.
 pub mod native_defaults;
 pub mod native_end;
