@@ -405,7 +405,9 @@ impl LiveCompetition {
                             "multiplayer peer connected; compatible setup, self-reported progress"
                         );
                     }
-                    MultiplayerEvent::Progress(_) => {}
+                    MultiplayerEvent::Progress(_)
+                    | MultiplayerEvent::FinalProgress(_)
+                    | MultiplayerEvent::FinalAcknowledged => {}
                     MultiplayerEvent::Disconnected(error) => {
                         eprintln!("multiplayer disconnected: {error}; local play continues");
                         disconnected = true;
@@ -468,9 +470,22 @@ impl LiveCompetition {
         Ok(())
     }
 
-    /// Print the exact last local prefix and join networking after native cleanup.
-    /// Remote state is the last received prefix, not an authoritative final result.
+    fn terminal_prefix(&self) -> Option<Progress> {
+        let song_ns = self.competition.song_time()?.as_nanos();
+        let score = self.competition.score();
+        Some(Progress {
+            song_ns,
+            hits: score.hits,
+            misses: score.misses,
+            combo: score.combo,
+            max_combo: score.max_combo,
+        })
+    }
+
+    /// Send the exact last observed prefix, wait boundedly for receipt and join.
+    /// Call only after native cleanup; a peer receipt is not a ranked final result.
     pub fn finish(&mut self) {
+        let terminal_prefix = self.terminal_prefix();
         println!(
             "competition final local prefix at {:?}: {:?}",
             self.competition.song_time(),
@@ -493,6 +508,21 @@ impl LiveCompetition {
                     eprintln!("multiplayer final disconnect: {error}");
                     self.network_failed = true;
                 }
+            }
+            if !self.network_failed && network.is_connected() {
+                if let Some(progress) = terminal_prefix {
+                    if let Err(error) = network.finish_delivery(progress) {
+                        eprintln!("multiplayer terminal prefix was not acknowledged: {error}");
+                        self.network_failed = true;
+                    } else {
+                        println!("multiplayer terminal prefix acknowledged by peer: {progress:?}");
+                    }
+                }
+            }
+            if let Some(remote) = network.remote_final_progress() {
+                println!(
+                    "competition peer terminal prefix={remote:?}; self-reported, not a final ranking"
+                );
             }
             if let Some(remote) = network.remote_progress() {
                 println!(
@@ -533,6 +563,99 @@ fn display_basename(label: &str) -> String {
 #[cfg(test)]
 mod fixtures {
     use super::*;
+    #[test]
+    fn terminal_prefix_uses_latest_actual_judgments_even_inside_publish_throttle() {
+        use beatkernel::{
+            audio::command_queue,
+            input::BindingMap,
+            judge::{JudgeGrade, JudgeProfile, JudgeWindow},
+            runtime::Runtime,
+            time::{ClockMapper, ClockMappingQuality, ClockPoint},
+            transport::{Rate, Transport},
+        };
+        struct Identity;
+        impl ClockMapper for Identity {
+            fn map(&self, from: ClockPoint, to: ClockDomainId) -> Option<Timestamp> {
+                (from.domain == to).then_some(from.timestamp)
+            }
+            fn quality(&self) -> ClockMappingQuality {
+                ClockMappingQuality::Exact
+            }
+        }
+        let source = parse_seeded(
+            "#BPM 60\n#WAV01 key.wav\n#00011:01",
+            ParseOptions::default(),
+            0,
+        )
+        .unwrap();
+        let judge = JudgeEngine::new(
+            source.compile().unwrap().chart,
+            source.rules(),
+            JudgeProfile::new(
+                vec![JudgeWindow {
+                    grade: JudgeGrade(1),
+                    early: beatkernel::time::Duration::ZERO,
+                    late: beatkernel::time::Duration::ZERO,
+                }],
+                beatkernel::time::Duration::ZERO,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let header = LiveReplayCapture::new(&judge, ClockDomainId(17), replay_limits().unwrap())
+            .unwrap()
+            .into_file()
+            .header;
+        let mut owner = LiveCompetition {
+            player: PlayerId(1),
+            competition: Competition::new(header, 0).unwrap(),
+            network: None,
+            last_publish: Some(0),
+            last_display: None,
+            network_failed: false,
+            network_status: None,
+            last_presentation: None,
+        };
+        assert_eq!(owner.terminal_prefix(), None); // No invented prefix before an actual report.
+        let (producer, _consumer) = command_queue(1).unwrap();
+        let mut runtime = Runtime::new(
+            ClockDomainId(17),
+            ClockDomainId(17),
+            Transport::new(Timestamp::ZERO, Timestamp::ZERO, Rate::NORMAL),
+            BindingMap::from_bindings([]).unwrap(),
+            judge,
+            producer,
+            vec![],
+            0,
+        )
+        .unwrap();
+        let point = ClockPoint {
+            domain: ClockDomainId(17),
+            timestamp: Timestamp::from_nanos(1),
+        };
+        let report = runtime.advance_to(point, &Identity, point).unwrap();
+        assert_eq!(report.judge_events.len(), 1);
+        owner
+            .competition
+            .observe(&report.judge_events, report.song_time)
+            .unwrap();
+        assert_eq!(
+            owner.terminal_prefix(),
+            Some(Progress {
+                song_ns: 1,
+                hits: 0,
+                misses: 1,
+                combo: 0,
+                max_combo: 0
+            })
+        );
+        assert_eq!(owner.last_publish, Some(0));
+        owner.competition.observe(&[], Timestamp::MAX).unwrap();
+        assert_eq!(owner.terminal_prefix().unwrap().song_ns, i64::MAX);
+        assert_eq!(owner.terminal_prefix().unwrap().misses, 1);
+        owner.competition.reset();
+        assert_eq!(owner.terminal_prefix(), None);
+    }
     #[test]
     fn invalid_finite_geometry_precedes_noop_and_opponent_socket_acquisition() {
         use beatkernel::judge::{JudgeGrade, JudgeProfile, JudgeWindow};
