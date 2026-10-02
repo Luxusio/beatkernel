@@ -475,3 +475,6 @@ pub mod bga_render;
 
 /// Immutable exact-black transparency for chart-declared BGA Layer resources.
 pub mod image_key;
+
+/// Original-song-time activation policy for retained Poor image selections.
+pub mod poor_background;

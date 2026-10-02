@@ -3,6 +3,7 @@ use crate::player_chart::PlayerChart;
 use beatkernel::{
     chart::MAX_SOURCE_ITEMS,
     judge::{JudgeEvent, JudgeOutcome, JudgeStage},
+    time::Timestamp,
 };
 use std::sync::Arc;
 
@@ -25,6 +26,7 @@ pub enum NoteState {
 pub struct NoteProgress {
     chart: Arc<PlayerChart>,
     pages: Arc<Vec<Arc<Page>>>,
+    last_miss: Option<Timestamp>,
 }
 impl NoteProgress {
     /// Prepares bounded zero pages for this exact chart allocation.
@@ -47,6 +49,7 @@ impl NoteProgress {
         Ok(Self {
             chart,
             pages: Arc::new(pages),
+            last_miss: None,
         })
     }
     /// Applies accepted events immediately, independently of calibrated event time.
@@ -80,7 +83,15 @@ impl NoteProgress {
             if next == NoteState::Completed {
                 page.completed += 1;
             }
+            if matches!(event.outcome, JudgeOutcome::Miss { .. }) {
+                self.last_miss = Some(self.last_miss.map_or(event.at, |old| old.max(event.at)));
+            }
         }
+    }
+    /// Latest effective timestamp of a new accepted, known-stage miss transition.
+    /// Hits never clear it; duplicate/completed objects cannot refresh it.
+    pub const fn last_miss(&self) -> Option<Timestamp> {
+        self.last_miss
     }
     /// Returns state by prepared note index, or None outside that chart.
     pub fn state(&self, index: usize) -> Option<NoteState> {
@@ -294,5 +305,97 @@ mod fixtures {
         assert_eq!(wide.pages[2].completed, 17);
         assert!(wide.all_completed(0, 4096));
         assert!(!wide.all_completed(0, 8209));
+    }
+    #[test]
+    fn last_miss_tracks_only_new_matching_transitions_with_max_effective_time() {
+        let chart = chart();
+        let hold = chart
+            .notes
+            .iter()
+            .position(|note| note.end.is_some())
+            .unwrap();
+        let instant = chart
+            .notes
+            .iter()
+            .position(|note| note.end.is_none())
+            .unwrap();
+        let mut progress = NoteProgress::new(chart.clone()).unwrap();
+        let pristine = progress.clone();
+        assert_eq!(progress.last_miss(), None);
+        let at = |object, stage, miss, nanos| {
+            let mut e = event(object, stage, miss);
+            e.at = Timestamp::from_nanos(nanos);
+            e
+        };
+        progress.apply(&[
+            at(chart.notes[hold].object, JudgeStage::Instant, true, 900),
+            at(chart.notes[instant].object, JudgeStage::HoldTail, true, 900),
+            at(chart.notes[hold].object, JudgeStage::Custom(1), true, 900),
+            at(ObjectId(u64::MAX), JudgeStage::Instant, true, 900),
+        ]);
+        assert_eq!(progress.last_miss(), None);
+        assert!(Arc::ptr_eq(&progress.pages, &pristine.pages));
+        progress.apply(&[at(chart.notes[hold].object, JudgeStage::HoldHead, false, 1)]);
+        assert_eq!(progress.last_miss(), None);
+        progress.apply(&[at(
+            chart.notes[hold].object,
+            JudgeStage::HoldTail,
+            true,
+            200,
+        )]);
+        let snapshot = progress.clone();
+        progress.apply(&[at(
+            chart.notes[instant].object,
+            JudgeStage::Instant,
+            true,
+            100,
+        )]);
+        assert_eq!(progress.last_miss(), Some(Timestamp::from_nanos(200)));
+        assert_eq!(pristine.last_miss(), None);
+        let completed = progress.clone();
+        progress.apply(&[
+            at(chart.notes[instant].object, JudgeStage::Instant, true, 999),
+            at(chart.notes[hold].object, JudgeStage::HoldTail, true, 999),
+            at(
+                chart.notes[instant].object,
+                JudgeStage::Instant,
+                false,
+                1000,
+            ),
+        ]);
+        assert_eq!(progress.last_miss(), Some(Timestamp::from_nanos(200)));
+        assert!(Arc::ptr_eq(&progress.pages, &completed.pages));
+        assert_eq!(snapshot.state(instant), Some(NoteState::Pending));
+        let mut head_miss = NoteProgress::new(chart.clone()).unwrap();
+        head_miss.apply(&[at(chart.notes[hold].object, JudgeStage::HoldHead, true, -5)]);
+        assert_eq!(head_miss.last_miss(), Some(Timestamp::from_nanos(-5)));
+        assert_eq!(head_miss.state(hold), Some(NoteState::Completed));
+    }
+    #[test]
+    fn miss_timestamp_retains_full_dense_prefix_and_hits_do_not_clear_it() {
+        let text = format!("#BPM 60\n#WAV01 head.wav\n#00011:{}", "01".repeat(140));
+        let source = beatkernel_bms::parse(&text, beatkernel_bms::ParseOptions::default()).unwrap();
+        let chart = Arc::new(
+            PlayerChart::from_compiled(&source, &source.compile().unwrap().chart).unwrap(),
+        );
+        let mut progress = NoteProgress::new(chart.clone()).unwrap();
+        let events: Vec<_> = chart.notes[..139]
+            .iter()
+            .enumerate()
+            .map(|(index, note)| {
+                let mut e = event(note.object, JudgeStage::Instant, true);
+                e.at = Timestamp::from_nanos(138 - index as i64);
+                e
+            })
+            .collect();
+        progress.apply(&events);
+        assert_eq!(progress.last_miss(), Some(Timestamp::from_nanos(138)));
+        assert!(progress.all_completed(0, 139));
+        let snapshot = progress.clone();
+        progress.apply(&[event(chart.notes[139].object, JudgeStage::Instant, false)]);
+        assert_eq!(progress.last_miss(), snapshot.last_miss());
+        assert_eq!(snapshot.state(139), Some(NoteState::Pending));
+        let fresh = NoteProgress::new(chart).unwrap();
+        assert_eq!(fresh.last_miss(), None);
     }
 }
