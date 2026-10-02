@@ -2097,6 +2097,94 @@ fn actual_timeout_capture_replay_and_native_publication_share_poor_interval() {
             .base,
         Some(ImageId(1))
     );
+    // Display-only headers appended after gameplay retain the captured identity.
+    for mode in [0, 1, 2] {
+        let variant = beatkernel_bms::parse(
+            &format!("{text}\n#POORBGA {mode}"),
+            beatkernel_bms::ParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(variant.source, source.source);
+        let (publisher, viewer) = player::channel();
+        let mode_live = player::with_publisher(publisher, || {
+            player::publish_native_chart(
+                &path,
+                &variant,
+                &compiled.chart,
+                &[local_players::PlayerId(1)],
+            )
+            .map_err(|e| e.to_string())?;
+            let mut selections = Vec::new();
+            for (i, report) in reports.iter().enumerate() {
+                player::publish_report(report).map_err(|e| e.to_string())?;
+                player::publish_pause(if i % 2 == 0 {
+                    player::PauseState::Running
+                } else {
+                    player::PauseState::Paused
+                });
+                let shown = viewer.take_latest().unwrap();
+                selections.push(policy.select(
+                    shown.chart.as_ref().unwrap(),
+                    shown.song_time.unwrap(),
+                    shown.note_progress.as_ref(),
+                )?);
+            }
+            Ok(selections)
+        })
+        .unwrap();
+        let normal = fresh_chart.bga_state(live[1].song_time.unwrap());
+        match mode {
+            0 => {
+                assert_eq!(mode_live[1].state.base, Some(ImageId(0)));
+                assert!(mode_live[1].poor_overlay.is_none());
+            }
+            1 => {
+                assert_eq!(mode_live[1].state, normal);
+                assert_eq!(mode_live[1].poor_overlay, Some(ImageId(0)));
+                assert_eq!(mode_live[2].poor_overlay, Some(ImageId(2)));
+            }
+            2 => {
+                assert_eq!(mode_live[1].state, normal);
+                assert!(mode_live[1].poor_overlay.is_none());
+            }
+            _ => unreachable!(),
+        }
+        assert!(mode_live[0].poor_overlay.is_none() && mode_live[3].poor_overlay.is_none());
+        let mut visual = replay_visual::ReplayVisual::new(&variant, &file, cap).unwrap();
+        let (publisher, viewer) = player::channel();
+        player::with_publisher(publisher, || {
+            player::publish_native_chart(
+                &path,
+                &variant,
+                &compiled.chart,
+                &[local_players::PlayerId(1)],
+            )
+            .map_err(|e| e.to_string())?;
+            for (i, report) in reports.iter().enumerate() {
+                let events = visual
+                    .advance_to(report.song_time)
+                    .map_err(|e| e.to_string())?;
+                player::publish_replay_prefix(report.song_time, &events)
+                    .map_err(|e| e.to_string())?;
+                player::publish_pause(if i % 2 == 0 {
+                    player::PauseState::Running
+                } else {
+                    player::PauseState::Paused
+                });
+                let shown = viewer.take_latest().unwrap();
+                assert_eq!(
+                    policy.select(
+                        shown.chart.as_ref().unwrap(),
+                        shown.song_time.unwrap(),
+                        shown.note_progress.as_ref()
+                    )?,
+                    mode_live[i]
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+    }
 }
 
 #[test]

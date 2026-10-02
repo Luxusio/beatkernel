@@ -2,6 +2,8 @@
 #[cfg(test)]
 #[path = "font_fixture.rs"]
 mod font_fixture;
+#[cfg(test)]
+use beatkernel_bms_runtime::bga::BgaState;
 use beatkernel_bms_runtime::ui::{
     atoms::{rect, text},
     catalog_search::CatalogSearch,
@@ -17,7 +19,6 @@ use beatkernel_bms_runtime::ui::{
     text_input::LineEditor,
 };
 use beatkernel_bms_runtime::{
-    bga::BgaState,
     bga_render::{BgaFrame, BgaTextureCache},
     competition::OpponentKind,
     device_catalog::{DeviceCatalog, DeviceRequest},
@@ -3772,9 +3773,9 @@ impl Desktop {
         let Some(snapshot) = &game.snapshot else {
             return self.bga_cache.sync(None, &[], renderer);
         };
-        let (states, count) = background_states(snapshot, game.local_page)?;
+        let (states, count) = background_presentations(snapshot, game.local_page)?;
         self.bga_cache
-            .sync(snapshot.images.as_ref(), &states[..count], renderer)
+            .sync_presentations(snapshot.images.as_ref(), &states[..count], renderer)
     }
 }
 impl ApplicationHandler for Desktop {
@@ -4271,14 +4272,29 @@ fn local_page(count: usize, current: usize, forward: bool) -> usize {
     }
 }
 
+#[cfg(test)]
 fn background_states(
     snapshot: &player::PlayerSnapshot,
     page: usize,
 ) -> Result<([BgaState; 4], usize), String> {
+    let (presentations, count) = background_presentations(snapshot, page)?;
+    Ok((presentations.map(|presentation| presentation.state), count))
+}
+
+fn background_presentations(
+    snapshot: &player::PlayerSnapshot,
+    page: usize,
+) -> Result<
+    (
+        [beatkernel_bms_runtime::poor_background::BgaPresentation; 4],
+        usize,
+    ),
+    String,
+> {
     if snapshot.players.len() > 64 {
         return Err("local background roster exceeds capacity".into());
     }
-    let mut states = [BgaState::default(); 4];
+    let mut states = [beatkernel_bms_runtime::poor_background::BgaPresentation::default(); 4];
     let count = if snapshot.players.len() >= 2 {
         let first = page
             .checked_mul(4)
@@ -4289,14 +4305,14 @@ fn background_states(
             if let (Some(chart), Some(now)) = (&member.chart, member.song_time) {
                 states[slot] =
                     beatkernel_bms_runtime::poor_background::PoorBackgroundPolicy::default()
-                        .project(chart, now, member.note_progress.as_ref())?;
+                        .select(chart, now, member.note_progress.as_ref())?;
             }
         }
         members.len()
     } else {
         if let (Some(chart), Some(now)) = (&snapshot.chart, snapshot.song_time) {
             states[0] = beatkernel_bms_runtime::poor_background::PoorBackgroundPolicy::default()
-                .project(chart, now, snapshot.note_progress.as_ref())?;
+                .select(chart, now, snapshot.note_progress.as_ref())?;
         }
         1
     };
@@ -4474,6 +4490,56 @@ mod tests {
         draw_game_with_background(&mut scene, &game, 1_000_000_000, &frames).unwrap();
     }
 
+    #[test]
+    fn native_background_presentations_preserve_all_three_poor_modes_per_member() {
+        use beatkernel::{
+            judge::{JudgeEvent, JudgeOutcome, JudgeStage, MissReason},
+            time::Timestamp,
+        };
+        use beatkernel_bms::ImageId;
+        let members: Vec<_> = [0,1,2].into_iter().map(|mode| {
+            let source = beatkernel_bms::parse(&format!("#BPM 120\n#WAV01 tap.wav\n#00011:01\n#BMP00 poor.bmp\n#00004:01\n#00007:02\n#POORBGA {mode}"), beatkernel_bms::ParseOptions::default()).unwrap();
+            let chart = Arc::new(player_chart::PlayerChart::from_compiled(&source, &source.compile().unwrap().chart).unwrap());
+            let mut progress = beatkernel_bms_runtime::note_progress::NoteProgress::new(chart.clone()).unwrap();
+            progress.apply(&[JudgeEvent { object: chart.notes[0].object, stage: JudgeStage::Instant, outcome: JudgeOutcome::Miss { reason: MissReason::HeadTimeout }, at: Timestamp::ZERO, input: None }]);
+            player::LocalPlayerSnapshot { player: PlayerId(mode + 1), chart: Some(chart), song_time: Some(Timestamp::ZERO), score: Default::default(), last_judge: None, recent_results: vec![], pressed_lanes: 0, note_progress: Some(progress), competition: None }
+        }).collect();
+        let mut snapshot = player::PlayerSnapshot {
+            players: members,
+            ..Default::default()
+        };
+        let (shown, count) = background_presentations(&snapshot, 0).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(shown[0].state.base, Some(ImageId(0)));
+        assert!(shown[0].state.layer.is_none() && shown[0].poor_overlay.is_none());
+        assert_eq!(shown[1].state.base, Some(ImageId(1)));
+        assert_eq!(shown[1].state.layer, Some(ImageId(2)));
+        assert_eq!(shown[1].poor_overlay, Some(ImageId(0)));
+        assert_eq!(shown[2].state.base, Some(ImageId(1)));
+        assert_eq!(shown[2].state.layer, Some(ImageId(2)));
+        assert!(shown[2].poor_overlay.is_none());
+        snapshot.pause = player::PauseState::Paused;
+        assert_eq!(background_presentations(&snapshot, 0).unwrap().0, shown);
+        let overlay = snapshot.players[1].clone();
+        for member in &mut snapshot.players {
+            member.song_time = Some(Timestamp::from_nanos(500_000_000));
+        }
+        assert!(
+            background_presentations(&snapshot, 0)
+                .unwrap()
+                .0
+                .iter()
+                .all(|p| p.poor_overlay.is_none())
+        );
+        snapshot.players.clear();
+        snapshot.chart = overlay.chart;
+        snapshot.song_time = overlay.song_time;
+        snapshot.note_progress = overlay.note_progress;
+        assert_eq!(
+            background_presentations(&snapshot, 0).unwrap().0[0],
+            shown[1]
+        );
+    }
     #[test]
     fn poor_background_uses_each_members_prefix_and_solo_alias_without_wall_time() {
         use beatkernel::{

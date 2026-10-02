@@ -1176,7 +1176,16 @@ mod tests {
                 width: 2,
                 height: 1,
             }),
-            layer: None,
+            layer: Some(BgaSprite {
+                texture: TextureId::allocate().unwrap(),
+                width: 1,
+                height: 2,
+            }),
+            poor_overlay: Some(BgaSprite {
+                texture: TextureId::allocate().unwrap(),
+                width: 1,
+                height: 1,
+            }),
             unavailable: 0,
         });
         let mut scene = Scene::new(960, 720);
@@ -1202,6 +1211,17 @@ mod tests {
             .position(|batch| batch.playfield.is_some())
             .unwrap();
         assert!(image < notes);
+        let layer = scene
+            .batches()
+            .iter()
+            .position(|batch| batch.texture == frames[0].layer.unwrap().texture)
+            .unwrap();
+        let poor = scene
+            .batches()
+            .iter()
+            .position(|batch| batch.texture == frames[0].poor_overlay.unwrap().texture)
+            .unwrap();
+        assert!(image < layer && layer < poor && poor < notes);
         let image_rectangle = &scene.rectangles()[scene.batches()[image].first as usize];
         assert!(image_rectangle.bounds[1] >= TOP as f32);
         assert!(image_rectangle.bounds[1] + image_rectangle.bounds[3] <= LINE as f32);
@@ -1235,6 +1255,16 @@ mod tests {
                     .count(),
                 1
             );
+            for sprite in [frame.layer, frame.poor_overlay].into_iter().flatten() {
+                assert_eq!(
+                    scene
+                        .batches()
+                        .iter()
+                        .filter(|batch| batch.texture == sprite.texture)
+                        .count(),
+                    1
+                );
+            }
         }
         let mut invalid = frames;
         invalid[3].base.as_mut().unwrap().width = 0;
