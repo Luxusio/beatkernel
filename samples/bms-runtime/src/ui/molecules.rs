@@ -2,7 +2,11 @@
 use super::atoms::{rect, text};
 use super::interaction::Bounds;
 use super::text_input::{LineEditor, VisibleLine};
-use crate::scene::Scene;
+use crate::{
+    font_text::FontText,
+    scene::{ClipRect, Scene},
+    texture::TextureId,
+};
 use std::ops::RangeInclusive;
 
 /// A clipped line field; editing and focus belong to the menu owner.
@@ -12,6 +16,100 @@ pub fn text_field(scene: &mut Scene, editor: &LineEditor, bounds: Bounds, focuse
     }
     let cells = usize::try_from((bounds.width - 16) / 12).unwrap_or(usize::MAX);
     paint_line(scene, editor.visible_line(cells), bounds, focused);
+}
+
+/// Font preparation belongs to the caller; this paints immutable cached geometry.
+pub fn text_field_with_font(
+    scene: &mut Scene,
+    editor: &LineEditor,
+    bounds: Bounds,
+    focused: bool,
+    font: Option<&FontText>,
+) {
+    let Some(font) = font else {
+        return text_field(scene, editor, bounds, focused);
+    };
+    if bounds.width < 18 || bounds.height < 30 {
+        return;
+    }
+    let result = (|| {
+        let width = u32::try_from(bounds.width - 18).map_err(|_| "font field width exceeds u32")?;
+        let line = font.field_line(editor, width)?;
+        let x = bounds.x.checked_add(8).ok_or("font field x overflow")?;
+        let y = bounds.y.checked_add(8).ok_or("font field y overflow")?;
+        let clip = ClipRect::new([x, y, bounds.width - 16, 18])?;
+        rect(
+            scene,
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            if focused { 0x354e6c } else { 0x263d59 },
+        );
+        if let Some((start, end)) = line.selection.filter(|_| focused) {
+            scene.sprite_clipped(
+                TextureId::WHITE,
+                [x + start, y, end - start, 16],
+                [0.0, 0.0, 1.0, 1.0],
+                0x42688a,
+                clip,
+            )?;
+        }
+        font.draw_clipped(scene, x, y, line.value, 0xf0f4ff, clip)?;
+        if let Some((start, end)) = line.composition.filter(|_| focused) {
+            scene.sprite_clipped(
+                TextureId::WHITE,
+                [x + start, y + 16, end - start, 2],
+                [0.0, 0.0, 1.0, 1.0],
+                0x74e5c5,
+                clip,
+            )?;
+        }
+        if focused && line.caret_visible {
+            scene.sprite_clipped(
+                TextureId::WHITE,
+                [x + line.caret_x, y, 2, 16],
+                [0.0, 0.0, 1.0, 1.0],
+                0x74e5c5,
+                clip,
+            )?;
+        }
+        Ok::<_, String>(())
+    })();
+    if let Err(error) = result {
+        scene.reject(error);
+    }
+}
+
+pub fn text_field_value_with_font(
+    scene: &mut Scene,
+    value: &str,
+    bounds: Bounds,
+    font: Option<&FontText>,
+) {
+    let Some(font) = font else {
+        return text_field_value(scene, value, bounds);
+    };
+    if bounds.width < 18 || bounds.height < 30 {
+        return;
+    }
+    let result = (|| {
+        let x = bounds.x.checked_add(8).ok_or("font field x overflow")?;
+        let y = bounds.y.checked_add(8).ok_or("font field y overflow")?;
+        let clip = ClipRect::new([x, y, bounds.width - 16, 18])?;
+        rect(
+            scene,
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            0x263d59,
+        );
+        font.draw_clipped(scene, x, y, value, 0xf0f4ff, clip)
+    })();
+    if let Err(error) = result {
+        scene.reject(error);
+    }
 }
 
 /// An unfocused field borrows its value without constructing an editor per frame.
@@ -188,6 +286,59 @@ pub fn note(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn prepared_font_fields_align_unicode_selection_caret_and_ime_underline() {
+        use crate::font_atlas::FontAtlas;
+        use std::sync::Arc;
+        let atlas = Arc::new(
+            FontAtlas::new(crate::font_fixture::font_bytes(), 14.0, 128, 128, 16).unwrap(),
+        );
+        let atlas = FontAtlas::extend_texts(&atlas, &["A가"]).unwrap();
+        let texture = TextureId::allocate().unwrap();
+        let font = FontText::new(atlas, texture).unwrap();
+        let bounds = Bounds {
+            x: 10,
+            y: 10,
+            width: 50,
+            height: 32,
+        };
+        let mut editor = LineEditor::new("A가", 32).unwrap();
+        editor.select_all();
+        let mut scene = Scene::new(100, 100);
+        text_field_with_font(&mut scene, &editor, bounds, true, Some(&font));
+        scene.status().unwrap();
+        assert_eq!(scene.rectangles().len(), 5);
+        assert_eq!(scene.rectangles()[1].bounds, [18.0, 18.0, 17.0, 16.0]);
+        assert_eq!(scene.rectangles()[4].bounds, [35.0, 18.0, 2.0, 16.0]);
+        assert_eq!(
+            scene
+                .batches()
+                .iter()
+                .filter(|b| b.texture == texture)
+                .map(|b| b.count)
+                .sum::<u32>(),
+            2
+        );
+        let preview = editor.preedit("가", Some((0, 3))).unwrap();
+        scene.clear();
+        text_field_with_font(&mut scene, &preview, bounds, true, Some(&font));
+        assert_eq!(scene.rectangles()[1].bounds, [18.0, 18.0, 8.0, 16.0]);
+        assert_eq!(scene.rectangles()[3].bounds, [18.0, 34.0, 8.0, 2.0]);
+        assert_eq!(scene.rectangles()[4].bounds, [18.0, 18.0, 2.0, 16.0]);
+        scene.clear();
+        text_field_with_font(&mut scene, &preview, bounds, false, Some(&font));
+        assert_eq!(scene.rectangles().len(), 2);
+        scene.clear();
+        text_field_with_font(
+            &mut scene,
+            &LineEditor::new("別", 32).unwrap(),
+            bounds,
+            true,
+            Some(&font),
+        );
+        assert!(scene.status().is_err());
+        assert!(scene.rectangles().is_empty());
+    }
     #[test]
     fn committed_selection_clips_without_composition_and_hides_when_unfocused() {
         let mut editor = LineEditor::new("a별éz", 32).unwrap();

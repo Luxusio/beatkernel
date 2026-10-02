@@ -2,11 +2,12 @@
 use super::{
     atoms::{rect, text},
     interaction::{Bounds, ControlId},
-    molecules::{button, text_field, text_field_value},
+    molecules::{button, text_field_value_with_font, text_field_with_font},
     retained::RetainedNodes,
     text_input::LineEditor,
 };
 use crate::{
+    font_text::FontText,
     scene::Scene,
     screen_lifecycle::ScreenInstanceId,
     settings::{MAX_FIELDS, SettingsField},
@@ -150,6 +151,7 @@ pub struct SettingsView {
     editor: RwSignal<LineEditor>,
     profile: RwSignal<LineEditor>,
     profile_focused: RwSignal<bool>,
+    input_font: RwSignal<Option<FontText>>,
     message: RwSignal<Option<String>>,
     error: RwSignal<Option<String>>,
     pending: RwSignal<bool>,
@@ -177,6 +179,7 @@ impl SettingsView {
             editor: scope.create_rw_signal(empty.clone()),
             profile: scope.create_rw_signal(empty),
             profile_focused: scope.create_rw_signal(false),
+            input_font: scope.create_rw_signal(None),
             message: scope.create_rw_signal(None),
             error: scope.create_rw_signal(None),
             pending: scope.create_rw_signal(false),
@@ -218,47 +221,63 @@ impl SettingsView {
             let editor = view.editor;
             let focused = view.profile_focused;
             let pending = view.pending;
+            let input_font = view.input_font;
             let memo = scope.create_memo(move |_| {
                 let selected = selected.get();
                 let index = selected / 10 * 10 + slot;
-                fields
-                    .get(index)
-                    .and_then(|signal| signal.get())
-                    .map(|field| {
-                        let (editor, focused) = if index == selected {
-                            (Some(editor.get()), !focused.get())
-                        } else {
-                            (None, false)
+                (
+                    fields
+                        .get(index)
+                        .and_then(|signal| signal.get())
+                        .map(|field| {
+                            let (editor, focused) = if index == selected {
+                                (Some(editor.get()), !focused.get())
+                            } else {
+                                (None, false)
+                            };
+                            Row {
+                                index,
+                                field,
+                                editor,
+                                focused,
+                                pending: pending.get(),
+                            }
+                        }),
+                    input_font.get(),
+                )
+            });
+            view.nodes
+                .bind(scope, memo, move |(row, font), scene, hits| {
+                    if let Some(row) = row {
+                        let y = 120 + slot as i64 * 39;
+                        text(scene, 24, (y + 10) as usize, row.field.label, 1, 0xf0f4ff);
+                        let bounds = Bounds {
+                            x: 280,
+                            y,
+                            width: 650,
+                            height: 32,
                         };
-                        Row {
-                            index,
-                            field,
-                            editor,
-                            focused,
-                            pending: pending.get(),
+                        if let Some(editor) = row.editor {
+                            text_field_with_font(
+                                scene,
+                                &editor,
+                                bounds,
+                                row.focused,
+                                font.as_ref(),
+                            );
+                        } else {
+                            text_field_value_with_font(
+                                scene,
+                                &row.field.value,
+                                bounds,
+                                font.as_ref(),
+                            );
                         }
-                    })
-            });
-            view.nodes.bind(scope, memo, move |row, scene, hits| {
-                if let Some(row) = row {
-                    let y = 120 + slot as i64 * 39;
-                    text(scene, 24, (y + 10) as usize, row.field.label, 1, 0xf0f4ff);
-                    let bounds = Bounds {
-                        x: 280,
-                        y,
-                        width: 650,
-                        height: 32,
-                    };
-                    if let Some(editor) = row.editor {
-                        text_field(scene, &editor, bounds, row.focused);
-                    } else {
-                        text_field_value(scene, &row.field.value, bounds);
+                        if !row.pending {
+                            hits.push((ControlId(1000 + row.index as u64), bounds));
+                        }
                     }
-                    if !row.pending {
-                        hits.push((ControlId(1000 + row.index as u64), bounds));
-                    }
-                }
-            });
+                });
         }
         let selected = view.selected;
         let fields = Rc::clone(&view.fields);
@@ -275,9 +294,19 @@ impl SettingsView {
         let profile = view.profile;
         let focused = view.profile_focused;
         let pending = view.pending;
-        let memo = scope.create_memo(move |_| (profile.get(), focused.get(), pending.get()));
-        view.nodes
-            .bind(scope, memo, |(profile, focused, pending), scene, hits| {
+        let input_font = view.input_font;
+        let memo = scope.create_memo(move |_| {
+            (
+                profile.get(),
+                focused.get(),
+                pending.get(),
+                input_font.get(),
+            )
+        });
+        view.nodes.bind(
+            scope,
+            memo,
+            |(profile, focused, pending, font), scene, hits| {
                 let bounds = Bounds {
                     x: 160,
                     y: 558,
@@ -285,11 +314,12 @@ impl SettingsView {
                     height: 34,
                 };
                 text(scene, 24, 570, "PROFILE PATH", 1, 0xf0f4ff);
-                text_field(scene, &profile, bounds, focused);
+                text_field_with_font(scene, &profile, bounds, focused, font.as_ref());
                 if !pending {
                     hits.push((ControlId(15), bounds));
                 }
-            });
+            },
+        );
         for (id, bounds, label) in BUTTONS.iter().skip(5).copied() {
             view.button_node(id, bounds, label);
         }
@@ -322,6 +352,11 @@ impl SettingsView {
     }
     pub const fn id(&self) -> ScreenInstanceId {
         self.id
+    }
+    pub fn set_input_font(&self, font: Option<FontText>) {
+        if self.input_font.get_untracked() != font {
+            self.input_font.set(font);
+        }
     }
     /// Preflight shape validation precedes every signal write. Borrowed equality
     /// avoids cloning entire field vectors or unchanged editor/status values.
@@ -447,6 +482,49 @@ mod fixtures {
     }
     fn paints(view: &SettingsView) -> Vec<usize> {
         view.nodes.paints()
+    }
+    #[test]
+    fn prepared_font_generation_updates_value_nodes_and_profile_without_other_controls() {
+        use crate::{font_atlas::FontAtlas, texture::TextureId};
+        use std::sync::Arc;
+        let view = SettingsView::new(ScreenInstanceId(9), 960, 720).unwrap();
+        let fields = fields(30);
+        let editor = LineEditor::new("가", 4096).unwrap();
+        let profile = LineEditor::new("A", 4096).unwrap();
+        let values: Vec<_> = fields[..10]
+            .iter()
+            .map(|field| field.value.as_str())
+            .chain([editor.value(), profile.value()])
+            .collect();
+        let base = Arc::new(
+            FontAtlas::new(crate::font_fixture::font_bytes(), 14.0, 128, 128, 64).unwrap(),
+        );
+        let atlas = FontAtlas::extend_texts(&base, &values).unwrap();
+        let texture = TextureId::allocate().unwrap();
+        let font = FontText::new(Arc::clone(&atlas), texture).unwrap();
+        view.update(frame(&fields, &editor, &profile)).unwrap();
+        view.set_input_font(Some(font));
+        let mut scene = Scene::new(960, 720);
+        let mut hits = Vec::new();
+        view.compose(&mut scene, &mut hits).unwrap();
+        let before = paints(&view);
+        let atlas = FontAtlas::extend_texts(&atlas, &["別"]).unwrap();
+        let font = FontText::new(atlas, texture).unwrap();
+        view.set_input_font(Some(font.clone()));
+        let after = paints(&view);
+        assert_eq!(
+            before.iter().zip(&after).filter(|(a, b)| a != b).count(),
+            11
+        );
+        assert_eq!(&before[..7], &after[..7]);
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert!(scene.batches().iter().any(|batch| batch.texture == texture));
+        view.set_input_font(Some(font));
+        assert_eq!(paints(&view), after);
+        assert!(!view.dirty());
+        view.set_input_font(None);
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert!(!scene.batches().iter().any(|batch| batch.texture == texture));
     }
     #[test]
     fn committed_selection_changes_only_the_focused_setting_or_profile_node() {

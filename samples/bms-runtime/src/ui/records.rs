@@ -2,11 +2,12 @@
 use super::{
     atoms::{rect, text},
     interaction::{Bounds, ControlId},
-    molecules::{button, text_field, text_field_value},
+    molecules::{button, text_field_value, text_field_with_font},
     retained::RetainedNodes,
     text_input::LineEditor,
 };
 use crate::{
+    font_text::FontText,
     record_catalog::{RecordCatalog, RecordPreview},
     scene::Scene,
     screen_lifecycle::ScreenInstanceId,
@@ -261,6 +262,7 @@ pub struct RecordsView {
     scope: Scope,
     directory: RwSignal<LineEditor>,
     directory_focused: RwSignal<bool>,
+    input_font: RwSignal<Option<FontText>>,
     rows: [RwSignal<Option<Row>>; 10],
     summary: RwSignal<Option<(usize, bool)>>,
     preview: RwSignal<Option<Preview>>,
@@ -284,6 +286,7 @@ impl RecordsView {
             scope,
             directory: scope.create_rw_signal(directory),
             directory_focused: scope.create_rw_signal(true),
+            input_font: scope.create_rw_signal(None),
             rows: std::array::from_fn(|_| scope.create_rw_signal(None)),
             summary: scope.create_rw_signal(None),
             preview: scope.create_rw_signal(None),
@@ -305,15 +308,32 @@ impl RecordsView {
         let directory = view.directory;
         let focused = view.directory_focused;
         let pending = view.pending;
-        let memo = scope.create_memo(move |_| (directory.get(), focused.get(), pending.get()));
-        view.nodes
-            .bind(scope, memo, |(directory, focused, pending), scene, hits| {
+        let input_font = view.input_font;
+        let memo = scope.create_memo(move |_| {
+            (
+                directory.get(),
+                focused.get(),
+                pending.get(),
+                input_font.get(),
+            )
+        });
+        view.nodes.bind(
+            scope,
+            memo,
+            |(directory, focused, pending, font), scene, hits| {
                 text(scene, 24, 120, "DIRECTORY", 1, 0xf0f4ff);
-                text_field(scene, &directory, DIRECTORY, focused && !pending);
+                text_field_with_font(
+                    scene,
+                    &directory,
+                    DIRECTORY,
+                    focused && !pending,
+                    font.as_ref(),
+                );
                 if !pending {
                     hits.push((ControlId(58), DIRECTORY));
                 }
-            });
+            },
+        );
         view.nodes.static_node(|scene, _| {
             text(
                 scene,
@@ -507,6 +527,11 @@ impl RecordsView {
     }
     pub const fn id(&self) -> ScreenInstanceId {
         self.id
+    }
+    pub fn set_input_font(&self, font: Option<FontText>) {
+        if self.input_font.get_untracked() != font {
+            self.input_font.set(font);
+        }
     }
     pub fn update(&self, frame: RecordsFrame<'_>) -> Result<(), String> {
         validate_frame(&frame)?;

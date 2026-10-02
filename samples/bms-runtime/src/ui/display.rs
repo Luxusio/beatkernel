@@ -2,10 +2,11 @@
 use super::{
     atoms::{rect, text},
     interaction::{Bounds, ControlId},
-    molecules::{button, text_field},
+    molecules::{button, text_field_with_font},
     retained::RetainedNodes,
     text_input::LineEditor,
 };
+use crate::font_text::FontText;
 use crate::scene::Scene;
 use crate::screen_lifecycle::ScreenInstanceId;
 use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
@@ -46,6 +47,7 @@ pub struct DisplayView {
     scope: Scope,
     editors: [RwSignal<LineEditor>; 4],
     selected: RwSignal<usize>,
+    input_font: RwSignal<Option<FontText>>,
     error: RwSignal<Option<String>>,
     pending: RwSignal<bool>,
     hovered: RwSignal<Option<ControlId>>,
@@ -67,6 +69,7 @@ impl DisplayView {
             scope,
             editors: editors.map(|editor| scope.create_rw_signal(editor)),
             selected: scope.create_rw_signal(0),
+            input_font: scope.create_rw_signal(None),
             error: scope.create_rw_signal(None),
             pending: scope.create_rw_signal(false),
             hovered: scope.create_rw_signal(None),
@@ -93,12 +96,14 @@ impl DisplayView {
             let editor = view.editors[index];
             let selected = view.selected;
             let pending = view.pending;
+            let input_font = view.input_font;
             let focus = scope.create_memo(move |_| selected.get() == index);
-            let memo = scope.create_memo(move |_| (editor.get(), focus.get(), pending.get()));
+            let memo = scope
+                .create_memo(move |_| (editor.get(), focus.get(), pending.get(), input_font.get()));
             view.nodes.bind(
                 scope,
                 memo,
-                move |(editor, focused, pending), scene, hits| {
+                move |(editor, focused, pending, font), scene, hits| {
                     let y = 130 + index as i64 * 75;
                     text(scene, 24, (y + 10) as usize, label, 1, 0xf0f4ff);
                     let bounds = Bounds {
@@ -107,7 +112,13 @@ impl DisplayView {
                         width: 650,
                         height: 34,
                     };
-                    text_field(scene, &editor, bounds, focused && !pending);
+                    text_field_with_font(
+                        scene,
+                        &editor,
+                        bounds,
+                        focused && !pending,
+                        font.as_ref(),
+                    );
                     if !pending {
                         hits.push((ControlId(40000 + index as u64), bounds));
                     }
@@ -159,6 +170,11 @@ impl DisplayView {
     }
     pub const fn id(&self) -> ScreenInstanceId {
         self.id
+    }
+    pub fn set_input_font(&self, font: Option<FontText>) {
+        if self.input_font.get_untracked() != font {
+            self.input_font.set(font);
+        }
     }
     /// Invalid selection rejects before any signal write. Borrowed equality
     /// avoids cloning unchanged draft values during pointer or status updates.

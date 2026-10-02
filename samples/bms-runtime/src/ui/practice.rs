@@ -2,11 +2,13 @@
 use super::{
     atoms::{rect, text},
     interaction::{Bounds, ControlId},
-    molecules::{button, text_field},
+    molecules::{button, text_field_with_font},
     retained::RetainedNodes,
     text_input::LineEditor,
 };
-use crate::{practice::PracticeStart, scene::Scene, screen_lifecycle::ScreenInstanceId};
+use crate::{
+    font_text::FontText, practice::PracticeStart, scene::Scene, screen_lifecycle::ScreenInstanceId,
+};
 use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +29,7 @@ pub struct PracticeView {
     editor: RwSignal<LineEditor>,
     end_editor: RwSignal<LineEditor>,
     end_focused: RwSignal<bool>,
+    input_font: RwSignal<Option<FontText>>,
     error: RwSignal<Option<String>>,
     hovered: RwSignal<Option<ControlId>>,
     armed: RwSignal<Option<ControlId>>,
@@ -47,6 +50,7 @@ impl PracticeView {
             editor: scope.create_rw_signal(editor),
             end_editor: scope.create_rw_signal(end_editor),
             end_focused: scope.create_rw_signal(false),
+            input_font: scope.create_rw_signal(None),
             error: scope.create_rw_signal(None),
             hovered: scope.create_rw_signal(None),
             armed: scope.create_rw_signal(None),
@@ -108,16 +112,17 @@ impl PracticeView {
         });
         let editor = view.editor;
         let end_focused = view.end_focused;
-        let memo = scope.create_memo(move |_| (editor.get(), end_focused.get()));
+        let input_font = view.input_font;
+        let memo = scope.create_memo(move |_| (editor.get(), end_focused.get(), input_font.get()));
         view.nodes
-            .bind(scope, memo, |(editor, end_focused), scene, hits| {
+            .bind(scope, memo, |(editor, end_focused, font), scene, hits| {
                 let bounds = Bounds {
                     x: 24,
                     y: 150,
                     width: 906,
                     height: 40,
                 };
-                text_field(scene, &editor, bounds, !end_focused);
+                text_field_with_font(scene, &editor, bounds, !end_focused, font.as_ref());
                 hits.push((ControlId(70), bounds));
                 let preview = PracticeStart::parse(editor.value())
                     .map(|start| format!("EXACT START: {} NS", start.nanoseconds()))
@@ -125,16 +130,16 @@ impl PracticeView {
                 text(scene, 24, 230, &preview, 2, 0xd8b36b);
             });
         let editor = view.end_editor;
-        let memo = scope.create_memo(move |_| (editor.get(), end_focused.get()));
+        let memo = scope.create_memo(move |_| (editor.get(), end_focused.get(), input_font.get()));
         view.nodes
-            .bind(scope, memo, |(editor, end_focused), scene, hits| {
+            .bind(scope, memo, |(editor, end_focused, font), scene, hits| {
                 let bounds = Bounds {
                     x: 24,
                     y: 280,
                     width: 906,
                     height: 40,
                 };
-                text_field(scene, &editor, bounds, end_focused);
+                text_field_with_font(scene, &editor, bounds, end_focused, font.as_ref());
                 hits.push((ControlId(75), bounds));
                 let preview = if editor.value().is_empty() {
                     "THROUGH SONG END".into()
@@ -174,6 +179,11 @@ impl PracticeView {
     }
     pub const fn id(&self) -> ScreenInstanceId {
         self.id
+    }
+    pub fn set_input_font(&self, font: Option<FontText>) {
+        if self.input_font.get_untracked() != font {
+            self.input_font.set(font);
+        }
     }
     pub fn update(&self, frame: PracticeFrame) {
         if self.editor.get_untracked() != frame.editor {

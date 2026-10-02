@@ -526,6 +526,8 @@ pub(super) fn run(
         modifiers: ModifiersState::empty(),
         title_font,
         font_text: None,
+        input_font: None,
+        input_font_error: None,
         selection_diagnostics,
         selection_view: None,
         painted_reactive: None,
@@ -962,6 +964,8 @@ struct Desktop {
     modifiers: ModifiersState,
     title_font: Option<Arc<FontAtlas>>,
     font_text: Option<FontText>,
+    input_font: Option<FontText>,
+    input_font_error: Option<String>,
     selection_diagnostics: Arc<[String]>,
     selection_view: Option<SelectionView>,
     painted_reactive: Option<ScreenInstanceId>,
@@ -989,9 +993,101 @@ impl Desktop {
     }
     fn invalidate_hits(&mut self) {
         self.sync_ime();
+        self.sync_input_font();
         self.hits.clear();
         // A retained scene must restore hit regions even if its signals are equal.
         self.painted_reactive = None;
+    }
+    /// Prepare changed field glyphs at UI state boundaries, never in retained paint.
+    fn sync_input_font(&mut self) {
+        self.input_font_error = None;
+        if let Err(error) = self.prepare_input_font() {
+            self.input_font = None;
+            self.input_font_error = Some(format!("FIELD FONT: {error} - USING BITMAP"));
+        }
+    }
+    fn prepare_input_font(&mut self) -> Result<(), String> {
+        let Some(current) = &self.title_font else {
+            self.input_font = None;
+            return Ok(());
+        };
+        let mut values = [""; 11];
+        let count = match self.navigator.route() {
+            ScreenRoute::Selection => {
+                values[0] = self
+                    .ime_editor(ImeField::Search, &self.search_editor)
+                    .value();
+                1
+            }
+            ScreenRoute::Settings => {
+                if let Some(draft) = &self.settings {
+                    let first = draft.selected / SETTINGS_ROWS * SETTINGS_ROWS;
+                    for (slot, (index, field)) in draft
+                        .values
+                        .fields()
+                        .iter()
+                        .enumerate()
+                        .skip(first)
+                        .take(SETTINGS_ROWS)
+                        .enumerate()
+                    {
+                        values[slot] = if index == draft.selected {
+                            self.ime_editor(ImeField::Setting(index), &draft.editor)
+                                .value()
+                        } else {
+                            field.value.as_str()
+                        };
+                    }
+                    values[10] = self.ime_editor(ImeField::Profile, &draft.profile).value();
+                }
+                11
+            }
+            ScreenRoute::Display => {
+                if let Some(draft) = &self.display {
+                    for (slot, editor) in draft.editors.iter().enumerate() {
+                        values[slot] = editor.value();
+                    }
+                }
+                4
+            }
+            ScreenRoute::Practice => {
+                if let Some(draft) = &self.practice {
+                    values[0] = draft.editor.value();
+                    values[1] = draft.end_editor.value();
+                }
+                2
+            }
+            ScreenRoute::Records => {
+                if let Some(draft) = &self.records {
+                    values[0] = draft.directory.value();
+                }
+                1
+            }
+            _ => return Ok(()),
+        };
+        let next = FontAtlas::extend_texts(current, &values[..count])?;
+        let changed = !Arc::ptr_eq(current, &next);
+        if !changed && self.renderer.is_some() && self.font_text.is_some() {
+            self.input_font = self.font_text.clone();
+            return Ok(());
+        }
+        let binding = if let Some(renderer) = &mut self.renderer {
+            let texture = if let Some(font) = &self.font_text {
+                if changed {
+                    renderer.update_texture(font.texture_id(), next.image())?;
+                }
+                font.texture_id()
+            } else {
+                renderer.upload_texture(next.image())?
+            };
+            Some(FontText::new(Arc::clone(&next), texture)?)
+        } else {
+            None
+        };
+        self.title_font = Some(next);
+        self.font_text = binding.clone();
+        self.input_font = binding;
+        Ok(())
     }
     fn closing(&self) -> bool {
         self.navigator.phase() == ScreenPhase::Exiting
@@ -3090,6 +3186,7 @@ impl Desktop {
                 }
             }
         }
+        self.sync_input_font();
     }
     fn key(&mut self, key: KeyCode, repeat: bool) {
         self.sync_ime();
@@ -3352,7 +3449,10 @@ impl Desktop {
             armed: [ControlId(1), ControlId(5), ControlId(4)]
                 .into_iter()
                 .find(|&id| self.gesture.is_armed(id)),
-            error: self.failure.clone(),
+            error: self
+                .input_font_error
+                .clone()
+                .or_else(|| self.failure.clone()),
             backend_pending: self.active_backend != self.options.backend,
         };
         let view = self
@@ -3363,6 +3463,7 @@ impl Desktop {
         let editor = self.ime_editor(ImeField::Search, &self.search_editor);
         view.set_search(editor, self.search_focused)?;
         view.update(frame);
+        view.set_input_font(self.input_font.clone());
         if view.dirty() || self.painted_reactive != Some(id) {
             view.compose(&mut self.scene, &mut self.hits)?;
             self.painted_reactive = Some(id);
@@ -3417,11 +3518,15 @@ impl Desktop {
             profile,
             profile_focused: settings.profile_focused,
             message: settings.message.as_deref(),
-            error: settings.error.as_deref(),
+            error: self
+                .input_font_error
+                .as_deref()
+                .or(settings.error.as_deref()),
             pending,
             hovered,
             armed,
         })?;
+        view.set_input_font(self.input_font.clone());
         if view.dirty() || self.painted_reactive != Some(id) {
             view.compose(&mut self.scene, &mut self.hits)?;
             self.painted_reactive = Some(id);
@@ -3470,11 +3575,15 @@ impl Desktop {
         view.update(DisplayFrame {
             editors: &display.editors,
             selected: display.selected,
-            error: display.error.as_deref(),
+            error: self
+                .input_font_error
+                .as_deref()
+                .or(display.error.as_deref()),
             pending,
             hovered,
             armed,
         })?;
+        view.set_input_font(self.input_font.clone());
         if view.dirty() || self.painted_reactive != Some(id) {
             view.compose(&mut self.scene, &mut self.hits)?;
             self.painted_reactive = Some(id);
@@ -3577,6 +3686,7 @@ impl Desktop {
             opponents,
             self.settings.as_ref().map(|draft| &draft.values),
         );
+        frame.error = self.input_font_error.as_deref().or(frame.error);
         frame.hovered = beatkernel_bms_runtime::ui::records::hit(&frame, self.point());
         frame.armed = (50..=61)
             .map(ControlId)
@@ -3586,6 +3696,7 @@ impl Desktop {
             .as_ref()
             .ok_or("records view unavailable")?;
         view.update(frame)?;
+        view.set_input_font(self.input_font.clone());
         if view.dirty() || self.painted_reactive != Some(id) {
             view.compose(&mut self.scene, &mut self.hits)?;
             self.painted_reactive = Some(id);
@@ -3609,10 +3720,14 @@ impl Desktop {
             editor: practice.editor.clone(),
             end_editor: practice.end_editor.clone(),
             end_focused: practice.end_focused,
-            error: practice.error.clone(),
+            error: self
+                .input_font_error
+                .clone()
+                .or_else(|| practice.error.clone()),
             hovered,
             armed,
         });
+        practice.view.set_input_font(self.input_font.clone());
         if practice.view.dirty() || self.painted_reactive != Some(id) {
             practice.view.compose(&mut self.scene, &mut self.hits)?;
             self.painted_reactive = Some(id);
@@ -3995,9 +4110,9 @@ impl ApplicationHandler for Desktop {
             })();
             match result {
                 Ok((instance, renderer, font_text)) => {
-                    self.bind_title_font(font_text);
                     self.instance = Some(instance);
                     self.renderer = Some(renderer);
+                    self.bind_title_font(font_text);
                 }
                 Err(error) => {
                     self.fail(error);
@@ -4024,6 +4139,8 @@ impl ApplicationHandler for Desktop {
         self.invalidate_hits();
         self.cancel();
         self.renderer = None;
+        self.font_text = None;
+        self.input_font = None;
         self.bga_cache = BgaTextureCache::default();
         self.instance = None;
     }
@@ -4143,6 +4260,9 @@ impl ApplicationHandler for Desktop {
             _ => {}
         }
         self.sync_ime();
+        if request_redraw {
+            self.sync_input_font();
+        }
         if request_redraw && !self.closing() && !self.is_suspended() && !self.occluded {
             if let Some(window) = &self.window {
                 window.request_redraw();
@@ -4893,6 +5013,76 @@ mod tests {
         assert_eq!(app.search_editor.value(), "FIX");
         assert_eq!(app.entries[0].path, PathBuf::from("fixture.bms"));
     }
+    #[test]
+    fn field_font_preparation_preserves_edits_and_old_atlas_when_capacity_is_exhausted() {
+        let mut app = lifecycle_fixture();
+        app.title_font = Some(Arc::new(
+            FontAtlas::new(font_fixture::font_bytes(), 14.0, 128, 128, 1).unwrap(),
+        ));
+        app.set_search_focus(true);
+        app.edit_search(None, Some("A"));
+        let before = Arc::clone(app.title_font.as_ref().unwrap());
+        assert!(before.get('A').is_some());
+        app.edit_search(None, Some("가"));
+        assert_eq!(app.search_editor.value(), "A가");
+        assert!(Arc::ptr_eq(&before, app.title_font.as_ref().unwrap()));
+        assert!(
+            app.input_font_error
+                .as_ref()
+                .unwrap()
+                .contains("USING BITMAP")
+        );
+        assert!(app.input_font.is_none());
+        app.draw_selection().unwrap();
+        select_all_input(&mut app);
+        app.modifiers_changed(ModifiersState::empty());
+        pressed_input(&mut app, KeyCode::KeyA, Some("A"));
+        assert_eq!(app.search_editor.value(), "A");
+        assert!(app.input_font_error.is_none());
+        assert!(Arc::ptr_eq(&before, app.title_font.as_ref().unwrap()));
+        assert!(app.renderer.is_none());
+    }
+    #[test]
+    fn actual_ime_and_draft_navigation_prepare_unicode_without_renderer_or_native_io() {
+        let mut app = lifecycle_fixture();
+        app.title_font = Some(Arc::new(
+            FontAtlas::new(font_fixture::font_bytes(), 14.0, 128, 128, 128).unwrap(),
+        ));
+        app.set_search_focus(true);
+        app.ime_event(Ime::Enabled);
+        app.ime_event(Ime::Preedit("가".into(), Some((0, 3))));
+        assert!(app.title_font.as_ref().unwrap().get('가').is_some());
+        assert_eq!(app.search_editor.value(), "");
+        let prepared = Arc::clone(app.title_font.as_ref().unwrap());
+        app.ime_event(Ime::Preedit("".into(), None));
+        assert!(Arc::ptr_eq(&prepared, app.title_font.as_ref().unwrap()));
+        app.open_settings();
+        app.settings.as_mut().unwrap().profile_focused = true;
+        pressed_input(&mut app, KeyCode::KeyX, Some("別.profile"));
+        for character in "別.profile".chars() {
+            assert!(app.title_font.as_ref().unwrap().get(character).is_some());
+        }
+        app.open_display();
+        pressed_input(&mut app, KeyCode::KeyX, Some("音"));
+        assert!(app.title_font.as_ref().unwrap().get('音').is_some());
+        app.back();
+        app.open_practice();
+        pressed_input(&mut app, KeyCode::KeyX, Some("語"));
+        assert!(app.title_font.as_ref().unwrap().get('語').is_some());
+        app.practice.as_mut().unwrap().end_focused = true;
+        pressed_input(&mut app, KeyCode::KeyX, Some("終"));
+        assert!(app.title_font.as_ref().unwrap().get('終').is_some());
+        app.back();
+        app.open_records();
+        pressed_input(&mut app, KeyCode::KeyX, Some("録"));
+        assert!(app.title_font.as_ref().unwrap().get('録').is_some());
+        assert!(app.input_font_error.is_none());
+        assert!(app.options.native.is_empty());
+        assert!(app.profile_io.is_none());
+        assert!(app.renderer.is_none());
+        assert!(app.window.is_none());
+        assert!(app.game.is_none());
+    }
     fn select_all_input(app: &mut Desktop) {
         app.modifiers_changed(if cfg!(target_os = "macos") {
             ModifiersState::SUPER
@@ -5180,6 +5370,8 @@ mod tests {
             modifiers: ModifiersState::empty(),
             title_font: None,
             font_text: None,
+            input_font: None,
+            input_font_error: None,
             selection_diagnostics: Arc::from([]),
             selection_view: None,
             painted_reactive: None,

@@ -2,7 +2,7 @@
 use super::{
     atoms::{rect, text, text_clipped},
     interaction::{Bounds, ControlId},
-    molecules::{button, text_field},
+    molecules::{button, text_field_with_font},
     retained::RetainedNodes,
     text_input::LineEditor,
 };
@@ -40,6 +40,7 @@ pub struct SelectionView {
     cursor: RwSignal<Option<usize>>,
     search: RwSignal<LineEditor>,
     search_focused: RwSignal<bool>,
+    input_font: RwSignal<Option<FontText>>,
     hovered: RwSignal<Option<ControlId>>,
     armed: RwSignal<Option<ControlId>>,
     error: RwSignal<Option<String>>,
@@ -85,6 +86,7 @@ impl SelectionView {
             cursor: scope.create_rw_signal((!items.is_empty()).then_some(0)),
             search: scope.create_rw_signal(LineEditor::new("", 256)?),
             search_focused: scope.create_rw_signal(false),
+            input_font: scope.create_rw_signal(None),
             hovered: scope.create_rw_signal(None),
             armed: scope.create_rw_signal(None),
             error: scope.create_rw_signal(None),
@@ -271,16 +273,17 @@ impl SelectionView {
         });
         let search = view.search;
         let focused = view.search_focused;
-        let memo = scope.create_memo(move |_| (search.get(), focused.get()));
+        let input_font = view.input_font;
+        let memo = scope.create_memo(move |_| (search.get(), focused.get(), input_font.get()));
         view.nodes
-            .bind(scope, memo, |(editor, focused), scene, hits| {
+            .bind(scope, memo, |(editor, focused, font), scene, hits| {
                 let bounds = Bounds {
                     x: 440,
                     y: 102,
                     width: 490,
                     height: 34,
                 };
-                text_field(scene, &editor, bounds, focused);
+                text_field_with_font(scene, &editor, bounds, focused, font.as_ref());
                 hits.push((ControlId(80), bounds));
             });
         let pending = view.backend_pending;
@@ -318,6 +321,11 @@ impl SelectionView {
     }
     pub const fn id(&self) -> ScreenInstanceId {
         self.id
+    }
+    pub fn set_input_font(&self, font: Option<FontText>) {
+        if self.input_font.get_untracked() != font {
+            self.input_font.set(font);
+        }
     }
     /// Equality suppresses unchanged writes. Independent field signals prevent
     /// status changes from subscribing or repainting catalog rows.
@@ -462,6 +470,59 @@ mod fixtures {
     }
     fn paints(view: &SelectionView) -> Vec<usize> {
         view.nodes.paints()
+    }
+    #[test]
+    fn input_font_generation_repaints_search_without_rebuilding_catalog_packets() {
+        use crate::{font_atlas::FontAtlas, texture::TextureId};
+        let atlas = Arc::new(
+            FontAtlas::new(crate::font_fixture::font_bytes(), 14.0, 128, 128, 16).unwrap(),
+        );
+        let atlas = FontAtlas::extend_texts(&atlas, &["A"]).unwrap();
+        let texture = TextureId::allocate().unwrap();
+        let old = FontText::new(Arc::clone(&atlas), texture).unwrap();
+        let items: Arc<[SelectionItem]> = vec![SelectionItem {
+            title: "A".into(),
+            artist: String::new(),
+        }]
+        .into();
+        let view = SelectionView::new_with_font(
+            ScreenInstanceId(7),
+            items,
+            Arc::from([]),
+            960,
+            720,
+            Some(old.clone()),
+        )
+        .unwrap();
+        view.set_search(&LineEditor::new("A", 256).unwrap(), true)
+            .unwrap();
+        view.set_input_font(Some(old));
+        let mut scene = Scene::new(960, 720);
+        let mut hits = Vec::new();
+        view.compose(&mut scene, &mut hits).unwrap();
+        let before = paints(&view);
+        let next = FontAtlas::extend_texts(&atlas, &["가"]).unwrap();
+        let font = FontText::new(next, texture).unwrap();
+        view.set_input_font(Some(font.clone()));
+        let after = paints(&view);
+        assert_eq!(before.iter().zip(&after).filter(|(a, b)| a != b).count(), 1);
+        assert_eq!(&before[4..19], &after[4..19]);
+        view.compose(&mut scene, &mut hits).unwrap();
+        view.set_input_font(Some(font));
+        assert_eq!(paints(&view), after);
+        assert!(!view.dirty());
+        view.set_search(&LineEditor::new("가", 256).unwrap(), true)
+            .unwrap();
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert_eq!(
+            scene
+                .batches()
+                .iter()
+                .filter(|b| b.texture == texture)
+                .map(|b| b.count)
+                .sum::<u32>(),
+            2
+        );
     }
     #[test]
     fn committed_selection_only_repaints_search_and_identical_selection_stays_idle() {
