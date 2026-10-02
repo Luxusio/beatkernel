@@ -1747,3 +1747,18 @@ remain intact. Network pause remains separate work.
 Implementation and compiled fixtures do not establish runtime acceptance.
 SDK/MSVC compilation, driver output, physical timing, tests and formal review/QA
 remain deferred under the standing user instruction.
+
+## Browser selected-file preview
+
+The optional `browser` feature now adds selected-file preparation and a dedicated
+Worker that presents the actual chart and static BGA on an OffscreenCanvas. It
+reuses the common chart/audio/image preparation, visible-note query, GPU cache
+and BGA composition inside this application crate. Explicit preview time does
+not establish browser audio playback or a gameplay clock.
+
+The [browser host contract](REQ__bms-browser.md) defines relative resource lookup,
+input budgets, worker ownership, replacement/lifecycle rules and remaining scope.
+Browser audio/presentation evidence, input clock mapping, actual judging,
+capture/replay and network adapters remain required work. Source compilation,
+generated bindings and browser execution have separate acceptance requirements;
+this phase does not close the player Goal.

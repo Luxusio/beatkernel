@@ -252,9 +252,14 @@ See the [player contract](doc/kernel/REQ__bms-player.md) for lifecycle and scope
 Source compilation does not establish executed GUI, multiplayer or playback.
 
 GPU geometry and async renderer initialization are exposed by the `graphics`
-feature, independently of desktop window ownership. This supports later WASM
-reuse; a browser player still needs canvas/startup/input/audio/files/network
-adapters. Check the reusable library with:
+feature, independently of desktop window ownership. The optional `browser`
+feature adds selected-file preparation and a dedicated Worker with a transferred
+OffscreenCanvas. It previews the actual compiled notes and static BGA at an
+explicit song position through the shared renderer. Browser audio, input clocks,
+judging, capture/replay and networking remain follow-on work. See the
+[browser build and usage instructions](samples/bms-runtime/web/README.md) and
+[browser contract](doc/kernel/REQ__bms-browser.md). Generated bindings and actual
+browser/GPU execution remain unverified. Check the reusable graphics library with:
 
 ```sh
 cargo check -p beatkernel-bms-runtime --lib --no-default-features --features graphics --target wasm32-unknown-unknown --locked
