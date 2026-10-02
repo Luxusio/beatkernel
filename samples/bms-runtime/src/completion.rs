@@ -107,6 +107,14 @@ impl SongCompletion {
         self.calibration_seconds
     }
 
+    /// Producer work invalidates an earlier idle barrier without undoing judging.
+    /// Hosts with a separately acknowledged output queue must call this whenever
+    /// new commands can still reach the mixer after the observed idle block.
+    pub fn reset_drain(&mut self) {
+        self.drain.after_frame = None;
+        self.drain.idle_end = None;
+    }
+
     /// Call after successful input/advance operations and BGM admission.
     /// The supplied presentation point must come from the native output domain.
     /// As in the three native compositions, the mixer must drain at least the

@@ -5,11 +5,15 @@ use crate::{
     PreparedBms,
     bgm::{BgmConfig, BgmFeedError, BgmFeedReport, BgmFeeder},
     competition::{CompetitionError, ScoreSummary},
+    completion::{CompletionError, SongCompletion},
     local_runtime::{GroupError, SoloRuntime},
     native_judge::NativeJudgeConfig,
 };
 use beatkernel::{
-    audio::{AudioCommand, AudioLimits, CommandConsumer, QueuePopError, SampleBank, command_queue},
+    audio::{
+        AudioCommand, AudioCounters, AudioLimits, CommandConsumer, QueuePopError, RenderReport,
+        SampleBank, command_queue,
+    },
     input::{BindingMap, PhysicalInputEvent},
     judge::JudgeEngine,
     runtime::{RuntimeProcessingClock, RuntimeReport},
@@ -68,6 +72,12 @@ pub enum StepGameplayError {
         error: BgmFeedError,
         report: BgmFeedReport,
     },
+    /// Original output evidence is retained; invalid evidence fences the owner.
+    Completion {
+        error: CompletionError,
+        rendered: Option<RenderReport>,
+        presented: Option<ClockPoint>,
+    },
     Queue {
         error: QueuePopError,
         commands: Vec<AudioCommand>,
@@ -117,6 +127,7 @@ impl fmt::Display for StepGameplayError {
                 "{error}; {} BGM admissions remain committed",
                 report.total_admitted
             ),
+            Self::Completion { error, .. } => write!(f, "step gameplay completion: {error}"),
             Self::Queue { error, commands } => write!(
                 f,
                 "audio queue {error:?} after {} consumed commands",
@@ -151,6 +162,11 @@ pub struct StepGameplay {
     runtime: SoloRuntime,
     consumer: CommandConsumer,
     bgm: BgmFeeder,
+    completion: SongCompletion,
+    output_origin: ClockPoint,
+    sample_rate: u32,
+    last_render: Option<RenderReport>,
+    last_presented: Option<Timestamp>,
     score: ScoreSummary,
     song: Timestamp,
     host_domain: ClockDomainId,
@@ -231,6 +247,15 @@ impl StepGameplay {
         }
         .profile()
         .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
+        let completion = SongCompletion::prepare(
+            &prepared,
+            config.late_ns,
+            config.offset_ns,
+            config.preroll.as_nanos(),
+            config.output_origin.domain,
+        )
+        .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
+        let sample_rate = prepared.bank.format().sample_rate();
         let rules = prepared.source.rules();
         let judge = JudgeEngine::new(prepared.compiled.chart, rules, profile)
             .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
@@ -272,6 +297,11 @@ impl StepGameplay {
             runtime,
             consumer,
             bgm,
+            completion,
+            output_origin: config.output_origin,
+            sample_rate,
+            last_render: None,
+            last_presented: None,
             score: ScoreSummary::default(),
             song,
             host_domain: config.host_origin.domain,
@@ -357,6 +387,9 @@ impl StepGameplay {
             }
         };
         self.song = report.song_time;
+        if !report.audio_commands.is_empty() {
+            self.completion.reset_drain();
+        }
         let score_error = self.score.observe(&report.judge_events).err();
         if score_error.is_some()
             || report.judge_error.is_some()
@@ -390,7 +423,12 @@ impl StepGameplay {
         match self.bgm.feed(rendered_frames, budget, |command| {
             runtime.enqueue_audio(command)
         }) {
-            Ok(report) => Ok(report),
+            Ok(report) => {
+                if report.admitted != 0 {
+                    self.completion.reset_drain();
+                }
+                Ok(report)
+            }
             Err(error) => {
                 self.failed = true;
                 let mut report = self.bgm.report();
@@ -398,6 +436,169 @@ impl StepGameplay {
                 Err(StepGameplayError::Bgm { error, report })
             }
         }
+    }
+
+    /// Observe actual normal-rate Mixer rendering and output presentation.
+    /// The caller's mixer must drain at least the entire command queue capacity
+    /// in each nonempty render. Buffer length itself may vary. Presentation is
+    /// on output_origin's domain; no host time or command ACK substitutes for it.
+    pub fn observe_completion(
+        &mut self,
+        rendered: Option<RenderReport>,
+        presented: Option<ClockPoint>,
+    ) -> Result<bool, StepGameplayError> {
+        let normalized = self.validate_completion_evidence(rendered, presented)?;
+        if let Some(report) = rendered.filter(|report| report.frames != 0) {
+            self.last_render = Some(report);
+        }
+        if let Some(point) = normalized {
+            self.last_presented = Some(point.timestamp);
+        }
+        if self.pending.is_some() || self.consumer.available_up_to(1) != 0 {
+            self.completion.reset_drain();
+            return Ok(false);
+        }
+        match self.completion.observe(
+            self.runtime.judge(),
+            self.song,
+            self.bgm.report(),
+            rendered,
+            normalized,
+        ) {
+            Ok(complete) => Ok(complete),
+            Err(error) => {
+                self.failed = true;
+                Err(StepGameplayError::Completion {
+                    error,
+                    rendered,
+                    presented,
+                })
+            }
+        }
+    }
+
+    /// Binding preflight before a report is allowed to advance BGM admission.
+    /// Successful validation does not adopt the observation or change readiness.
+    pub(crate) fn validate_completion_evidence(
+        &mut self,
+        rendered: Option<RenderReport>,
+        presented: Option<ClockPoint>,
+    ) -> Result<Option<ClockPoint>, StepGameplayError> {
+        self.ensure_usable()?;
+        match self.check_completion_evidence(rendered, presented) {
+            Ok(normalized) => Ok(normalized),
+            Err(error) => {
+                self.failed = true;
+                Err(StepGameplayError::Completion {
+                    error,
+                    rendered,
+                    presented,
+                })
+            }
+        }
+    }
+
+    fn check_completion_evidence(
+        &self,
+        rendered: Option<RenderReport>,
+        presented: Option<ClockPoint>,
+    ) -> Result<Option<ClockPoint>, CompletionError> {
+        let normalized = presented
+            .map(|point| {
+                if point.domain != self.output_origin.domain {
+                    return Err(CompletionError(
+                        "completion presentation clock domain differs",
+                    ));
+                }
+                let ns = point
+                    .timestamp
+                    .as_nanos()
+                    .checked_sub(self.output_origin.timestamp.as_nanos())
+                    .ok_or(CompletionError(
+                        "completion presentation origin subtraction overflow",
+                    ))?;
+                let timestamp = Timestamp::from_nanos(ns);
+                if ns < 0 || self.last_presented.is_some_and(|last| timestamp < last) {
+                    return Err(CompletionError(
+                        "completion presentation precedes its output frontier",
+                    ));
+                }
+                Ok(ClockPoint {
+                    domain: point.domain,
+                    timestamp,
+                })
+            })
+            .transpose()?;
+        let Some(report) = rendered else {
+            return Ok(normalized);
+        };
+        if report.paused
+            || report.playback_end_physical_frame.is_some()
+            || report.producer_disconnected
+        {
+            return Err(CompletionError(
+                "completion requires connected unlimited unpaused output",
+            ));
+        }
+        if report.frames > AudioLimits::MAX_RENDER_FRAMES
+            || report.active_voices > AudioLimits::MAX_VOICES
+            || report.pending_commands > AudioLimits::MAX_COMMANDS
+            || report.start_frame != report.playback_start_frame
+            || report.frames != report.playback_frames
+        {
+            return Err(CompletionError(
+                "completion render capacity or playback grid differs",
+            ));
+        }
+        let frames = u64::try_from(report.frames)
+            .map_err(|_| CompletionError("completion render extent overflow"))?;
+        let end = report
+            .start_frame
+            .checked_add(frames)
+            .ok_or(CompletionError("completion render cursor overflow"))?;
+        let end_ns = (i128::from(end) * 1_000_000_000 + i128::from(self.sample_rate) - 1)
+            / i128::from(self.sample_rate);
+        let duration = Duration::from_nanos(
+            i64::try_from(end_ns)
+                .map_err(|_| CompletionError("completion render duration overflow"))?,
+        );
+        self.output_origin
+            .timestamp
+            .checked_add(duration)
+            .ok_or(CompletionError("completion render clock overflow"))?;
+        let counters = report.counters;
+        if counters.rendered_frames != end
+            || counters.commands_applied > counters.commands_consumed
+            || counters.late_commands > counters.commands_consumed
+            || counter_values(counters)[4..]
+                .iter()
+                .any(|&value| value != 0)
+        {
+            return Err(CompletionError(
+                "completion mixer counters contain failure or invalid evidence",
+            ));
+        }
+        if let Some(previous) = self.last_render {
+            if report.start_frame == previous.start_frame {
+                if report != previous {
+                    return Err(CompletionError(
+                        "completion render block changed after observation",
+                    ));
+                }
+            } else if report.start_frame < previous.counters.rendered_frames {
+                return Err(CompletionError(
+                    "completion render chronology regressed or overlapped",
+                ));
+            }
+            if counter_values(counters)
+                .into_iter()
+                .zip(counter_values(previous.counters))
+                .any(|(current, previous)| current < previous)
+            {
+                return Err(CompletionError("completion mixer counters regressed"));
+            }
+        }
+        Ok(normalized)
     }
 
     /// Drain one bounded batch while retaining its original scalar commands
@@ -421,6 +622,7 @@ impl StepGameplay {
         if count == 0 {
             return Ok(None);
         }
+        self.completion.reset_drain();
         let Some(sequence) = self.sequence.checked_add(1) else {
             self.failed = true;
             return Err(StepGameplayError::SequenceOverflow);
@@ -506,4 +708,20 @@ impl StepGameplay {
     pub fn failed(&self) -> bool {
         self.failed
     }
+}
+
+fn counter_values(counters: AudioCounters) -> [u64; 11] {
+    [
+        counters.rendered_frames,
+        counters.commands_consumed,
+        counters.commands_applied,
+        counters.late_commands,
+        counters.pending_full,
+        counters.voice_full,
+        counters.unknown_samples,
+        counters.unknown_stops,
+        counters.invalid_gains,
+        counters.invalid_rates,
+        counters.invalid_times,
+    ]
 }
