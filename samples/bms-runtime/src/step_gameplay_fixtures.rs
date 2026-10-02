@@ -222,6 +222,10 @@ fn assert_fenced(game: &mut StepGameplay, chosen: StepGameplayConfig) {
         Err(StepGameplayError::Failed)
     ));
     assert!(matches!(
+        game.observe_completion(None, None),
+        Err(StepGameplayError::Failed)
+    ));
+    assert!(matches!(
         game.activate(chosen.host_origin),
         Err(StepGameplayError::Failed)
     ));
@@ -966,4 +970,217 @@ fn config_and_checked_bgm_extents_reject_before_a_usable_session_is_returned() {
         })
     ));
     assert_fenced(&mut game, chosen);
+}
+
+#[test]
+fn completion_waits_for_local_and_retained_commands_pcm_tail_and_exact_presented_end() {
+    let week = 604_800_000_000_000;
+    let chosen = StepGameplayConfig {
+        output_origin: point(22, week),
+        ..zero_preroll()
+    };
+    let mapper = clocks(chosen);
+    let (mut game, bank) =
+        StepGameplay::new(prepared("#00011:01\n"), chosen, bindings(false)).unwrap();
+    game.process_input(
+        input(chosen, 1, 4, 1, 0, ButtonState::Down),
+        &mapper,
+        chosen.output_origin,
+    )
+    .unwrap();
+    game.advance_to(host_at(chosen, 1), &mapper, chosen.output_origin)
+        .unwrap();
+    assert_eq!(game.score().hits, 1);
+    let (mut producer, mut mixer) = make_mixer(bank, chosen);
+    let first = mixer.render(&mut [0.0]).unwrap();
+    let before_end = Some(point(22, week + 999_999_999));
+    assert!(!game.observe_completion(Some(first), before_end).unwrap());
+    let before_admission = mixer.render(&mut [0.0]).unwrap();
+    assert!(
+        !game
+            .observe_completion(Some(before_admission), before_end)
+            .unwrap()
+    );
+    let batch = game.take_commands(8).unwrap().unwrap();
+    assert_eq!(batch.commands.len(), 1);
+    assert!(
+        !game
+            .observe_completion(Some(before_admission), before_end)
+            .unwrap()
+    );
+    producer.try_push(batch.commands[0]).unwrap();
+    game.acknowledge(batch.sequence, 1, true).unwrap();
+    // A pre-admission idle report cannot finish merely because its batch ACK arrived.
+    assert!(
+        !game
+            .observe_completion(Some(before_admission), before_end)
+            .unwrap()
+    );
+    let mut pcm = [0.0];
+    let head = mixer.render(&mut pcm).unwrap();
+    assert_eq!(pcm, [0.125]);
+    assert_eq!(head.active_voices, 1);
+    assert!(!game.observe_completion(Some(head), before_end).unwrap());
+    let tail = mixer.render(&mut pcm).unwrap();
+    assert_eq!(pcm, [-0.0625]);
+    assert_eq!(tail.active_voices, 0);
+    assert!(!game.observe_completion(Some(tail), None).unwrap());
+    assert!(!game.observe_completion(None, before_end).unwrap());
+    let later = mixer.render(&mut pcm).unwrap();
+    assert_eq!(pcm, [0.0]);
+    // First idle end is frame 4 = 1 s, independent of later buffered silence.
+    assert!(!game.observe_completion(Some(later), before_end).unwrap());
+    assert!(
+        game.observe_completion(Some(later), Some(point(22, week + 1_000_000_000)))
+            .unwrap()
+    );
+    assert_eq!(game.score().hits, 1);
+    assert!(!game.failed());
+}
+
+#[test]
+fn completion_uses_actual_miss_deadline_and_rolling_bgm_tail_not_the_last_note_time() {
+    let chosen = zero_preroll();
+    let mapper = clocks(chosen);
+    let (mut game, bank) =
+        StepGameplay::new(prepared("#00011:01\n#00101:02\n"), chosen, bindings(false)).unwrap();
+    let (mut producer, mut mixer) = make_mixer(bank, chosen);
+    game.advance_to(host_at(chosen, 0), &mapper, chosen.output_origin)
+        .unwrap();
+    assert_eq!(
+        game.score().misses,
+        0,
+        "the zero-width deadline is inclusive"
+    );
+    assert!(!game.observe_completion(None, Some(point(22, 0))).unwrap());
+    game.advance_to(host_at(chosen, 1), &mapper, chosen.output_origin)
+        .unwrap();
+    assert_eq!(game.score().misses, 1);
+    assert_eq!(game.bgm_report().remaining, 1);
+    for _ in 0..8 {
+        let report = mixer.render(&mut [0.0; 2]).unwrap();
+        game.feed_audio(mixer.frame_cursor(), 8).unwrap();
+        deliver(&mut game, &mut producer, 8);
+        assert!(
+            !game
+                .observe_completion(Some(report), Some(point(22, 0)))
+                .unwrap()
+        );
+    }
+    assert_eq!(mixer.frame_cursor(), 16);
+    assert_eq!(game.bgm_report().remaining, 0);
+    assert_eq!(game.bgm_report().outstanding, 1);
+    let mut pcm = [0.0];
+    let head = mixer.render(&mut pcm).unwrap();
+    assert_eq!(pcm, [0.0625]);
+    game.feed_audio(mixer.frame_cursor(), 8).unwrap();
+    assert_eq!(game.bgm_report().outstanding, 0);
+    assert!(
+        !game
+            .observe_completion(Some(head), Some(point(22, 0)))
+            .unwrap()
+    );
+    let tail = mixer.render(&mut pcm).unwrap();
+    assert_eq!(pcm, [0.03125]);
+    assert!(
+        !game
+            .observe_completion(Some(tail), Some(point(22, 4_499_999_999)))
+            .unwrap()
+    );
+    let silence = mixer.render(&mut pcm).unwrap();
+    assert_eq!(pcm, [0.0]);
+    assert!(
+        game.observe_completion(Some(silence), Some(point(22, 4_500_000_000)))
+            .unwrap()
+    );
+}
+
+#[test]
+fn malformed_completion_evidence_fences_with_original_report_and_score_retained() {
+    for case in 0..11 {
+        let chosen = config();
+        let (mut game, bank) = StepGameplay::new(prepared(""), chosen, bindings(false)).unwrap();
+        let (_producer, mut mixer) = make_mixer(bank, chosen);
+        let mut rendered = mixer.render(&mut [0.0]).unwrap();
+        let mut presented = point(22, 1_000_000_100);
+        match case {
+            0 => presented.domain = ClockDomainId(11),
+            1 => presented.timestamp = Timestamp::from_nanos(i64::MIN),
+            2 => rendered.paused = true,
+            3 => rendered.producer_disconnected = true,
+            4 => rendered.playback_end_physical_frame = Some(1),
+            5 => rendered.playback_frames = 0,
+            6 => rendered.counters.rendered_frames = 0,
+            7 => rendered.counters.unknown_samples = 1,
+            8 => {
+                rendered.start_frame = u64::MAX;
+                rendered.playback_start_frame = u64::MAX;
+            }
+            9 | 10 => {
+                assert!(
+                    !game
+                        .observe_completion(Some(rendered), Some(presented))
+                        .unwrap()
+                );
+                if case == 9 {
+                    presented.timestamp = Timestamp::from_nanos(1_000_000_099);
+                } else {
+                    rendered.song_position = Timestamp::from_nanos(1);
+                }
+            }
+            _ => unreachable!(),
+        }
+        let score = game.score().clone();
+        let song = game.song_time();
+        let hash = game.judge().stable_hash().unwrap();
+        match game
+            .observe_completion(Some(rendered), Some(presented))
+            .unwrap_err()
+        {
+            StepGameplayError::Completion {
+                rendered: actual_rendered,
+                presented: actual_presented,
+                ..
+            } => {
+                assert_eq!(actual_rendered, Some(rendered));
+                assert_eq!(actual_presented, Some(presented));
+            }
+            error => panic!("expected retained completion evidence: {error:?}"),
+        }
+        assert_eq!(game.score(), &score);
+        assert_eq!(game.song_time(), song);
+        assert_eq!(game.judge().stable_hash().unwrap(), hash);
+        assert_fenced(&mut game, chosen);
+    }
+}
+
+#[test]
+fn absent_and_repeated_output_cannot_complete_even_an_empty_or_multiweek_chart() {
+    let chosen = zero_preroll();
+    let (mut empty, bank) = StepGameplay::new(prepared(""), chosen, bindings(false)).unwrap();
+    let (_producer, mut mixer) = make_mixer(bank, chosen);
+    let presented = Some(point(22, 1_000_000_000));
+    assert!(!empty.observe_completion(None, presented).unwrap());
+    let zero = mixer.render(&mut []).unwrap();
+    assert!(!empty.observe_completion(Some(zero), presented).unwrap());
+    let first = mixer.render(&mut [0.0]).unwrap();
+    assert!(!empty.observe_completion(Some(first), presented).unwrap());
+    assert!(!empty.observe_completion(Some(first), presented).unwrap());
+    let idle = mixer.render(&mut [0.0]).unwrap();
+    assert!(!empty.observe_completion(Some(idle), None).unwrap());
+    assert!(!empty.observe_completion(None, presented).unwrap());
+    assert!(empty.observe_completion(Some(idle), presented).unwrap());
+
+    let long = prepared("#BPM 0.1\n#99911:01\n");
+    let deadline = long.compiled.chart.objects()[0].time.start.as_nanos();
+    assert!(deadline > 7 * 24 * 3600 * 1_000_000_000);
+    let (mut game, bank) = StepGameplay::new(long, chosen, bindings(false)).unwrap();
+    let (_producer, mut mixer) = make_mixer(bank, chosen);
+    let far = Some(point(22, deadline + 10_000_000_000));
+    let first = mixer.render(&mut [0.0]).unwrap();
+    let idle = mixer.render(&mut [0.0]).unwrap();
+    assert!(!game.observe_completion(Some(first), far).unwrap());
+    assert!(!game.observe_completion(Some(idle), far).unwrap());
+    assert_eq!((game.score().hits, game.score().misses), (0, 0));
+    assert!(!game.failed());
 }
