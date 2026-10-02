@@ -488,7 +488,7 @@ mod native {
             Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId,
             PhysicalInputEvent,
         },
-        judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
+        judge::JudgeEngine,
         time::{ClockDomainId, Duration},
         transport::{Rate, Transport},
     };
@@ -499,6 +499,7 @@ mod native {
     use beatkernel_bms_runtime::{
         ChannelPolicy,
         native_chart::{NativeChartConfig, prepare_chart},
+        native_judge::{NativeJudgeConfig, capture_limits, prepare_capture},
         playback_pause::NativePause,
         player::{self},
     };
@@ -755,17 +756,15 @@ mod native {
             bindings: &options.bindings,
         })?;
         println!("prepared practice section={section:?}");
-        let mut completion = if options.end_ns.is_none() {
-            Some(beatkernel_bms_runtime::completion::SongCompletion::prepare(
-                &prepared,
-                options.late,
-                options.offset,
-                options.preroll,
-                OUTPUT,
-            )?)
-        } else {
-            None
+        let judge_config = NativeJudgeConfig {
+            early: options.early,
+            late: options.late,
+            offset: options.offset,
+            preroll: options.preroll,
+            output: OUTPUT,
+            end: options.end_ns.map(Timestamp::from_nanos),
         };
+        let mut completion = judge_config.completion(&prepared)?;
         for warning in &prepared.source.warnings {
             eprintln!("BMS warning line{}: {}", warning.line, warning.message);
         }
@@ -787,14 +786,7 @@ mod native {
         let judge = JudgeEngine::new(
             prepared.compiled.chart,
             prepared.source.rules(),
-            JudgeProfile::new(
-                vec![JudgeWindow {
-                    grade: JudgeGrade(1),
-                    early: Duration::from_nanos(options.early),
-                    late: Duration::from_nanos(options.late),
-                }],
-                Duration::from_nanos(options.offset),
-            )?,
+            judge_config.profile()?,
         )?;
         let mut competition =
             beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_native_section_at_with_chart_seed(
@@ -869,23 +861,17 @@ mod native {
         let mut capture = None;
         let mut startup_inputs = VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
         let outcome = (|| -> Result<()> {
-            if options.record_replay.is_some() {
-                let limits = beatkernel::replay::codec::ReplayCodecLimits::new(
+            capture = prepare_capture(
+                &judge,
+                HOST,
+                Timestamp::from_nanos(options.start_ns),
+                options.chart_seed,
+                capture_limits(
+                    options.record_replay.is_some(),
                     options.replay_max_bytes,
                     options.replay_max_records,
-                    4096,
-                    beatkernel::input::CodecLimits::new(65536, 32768)?,
-                )?;
-                capture = Some(
-                    beatkernel_bms_runtime::replay_capture::LiveReplayCapture::new_at_with_chart_seed(
-                        &judge,
-                        HOST,
-                        limits,
-                        Timestamp::from_nanos(options.start_ns),
-                        options.chart_seed,
-                    )?,
-                );
-            }
+                )?,
+            )?;
             let (mut discipline, pair, host_origin, discipline_origin) = if network_start {
                 let competition = competition
                     .as_mut()

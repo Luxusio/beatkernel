@@ -3,23 +3,19 @@ use crate::{
     PreparedBms,
     competition::ScoreSummary,
     competition_live::{CompetitionOptions, LiveCompetition},
-    completion::SongCompletion,
     local_input::InputMerger,
     local_players::{MAX_LOCAL_PLAYERS, PlayerId},
     local_runtime::{MemberConfig, RuntimeGroup, VoiceAllocator},
     native_cohort::{PlayerState, replay_path},
     native_gameplay::NativeGameplayResult,
+    native_judge::{NativeJudgeConfig, capture_limits, prepare_capture},
     replay_capture::LiveReplayCapture,
 };
 use beatkernel::{
     audio::{AudioCommand, CommandProducer, VoiceId},
-    input::{
-        Binding, BindingMap, CodecLimits, DeviceId, DeviceSelector, GameControlId,
-        PhysicalControlId,
-    },
-    judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
-    replay::codec::ReplayCodecLimits,
-    time::{ClockDomainId, ClockPoint, Duration, Timestamp},
+    input::{Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId},
+    judge::JudgeEngine,
+    time::{ClockDomainId, ClockPoint, Timestamp},
     transport::Transport,
 };
 use std::{
@@ -96,24 +92,20 @@ pub fn prepare_cohort(
             );
         }
     }
-    let profile = JudgeProfile::new(
-        vec![JudgeWindow {
-            grade: JudgeGrade(1),
-            early: Duration::from_nanos(config.early),
-            late: Duration::from_nanos(config.late),
-        }],
-        Duration::from_nanos(config.offset),
-    )?;
-    let limits = if config.record_replay.is_some() {
-        Some(ReplayCodecLimits::new(
-            config.replay_max_bytes,
-            config.replay_max_records,
-            4096,
-            CodecLimits::new(65536, 32768)?,
-        )?)
-    } else {
-        None
+    let judge_config = NativeJudgeConfig {
+        early: config.early,
+        late: config.late,
+        offset: config.offset,
+        preroll: config.preroll,
+        output: config.output,
+        end: config.end,
     };
+    let profile = judge_config.profile()?;
+    let limits = capture_limits(
+        config.record_replay.is_some(),
+        config.replay_max_bytes,
+        config.replay_max_records,
+    )?;
     let mut reserved = Vec::new();
     reserved.try_reserve_exact(prepared.bgm_commands.len())?;
     for command in &prepared.bgm_commands {
@@ -159,28 +151,9 @@ pub fn prepare_cohort(
             .record_replay
             .map(|path| replay_path(path, player))
             .transpose()?;
-        let capture = limits
-            .map(|limits| {
-                LiveReplayCapture::new_at_with_chart_seed(
-                    &judge,
-                    config.host,
-                    limits,
-                    config.start,
-                    config.chart_seed,
-                )
-            })
-            .transpose()?;
-        let completion = if config.end.is_none() {
-            Some(SongCompletion::prepare(
-                prepared,
-                config.late,
-                config.offset,
-                config.preroll,
-                config.output,
-            )?)
-        } else {
-            None
-        };
+        let capture =
+            prepare_capture(&judge, config.host, config.start, config.chart_seed, limits)?;
+        let completion = judge_config.completion(prepared)?;
         states.push(PlayerState {
             player,
             capture,
@@ -356,8 +329,9 @@ mod fixtures {
     use super::*;
     use beatkernel::{
         audio::*,
-        input::{ButtonEvent, ButtonState, EventMeta, PhysicalInputEvent},
+        input::{ButtonEvent, ButtonState, CodecLimits, EventMeta, PhysicalInputEvent},
         judge::JudgeStage,
+        replay::codec::ReplayCodecLimits,
         runtime::SoundBinding,
         transport::Rate,
     };
