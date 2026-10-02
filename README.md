@@ -79,7 +79,8 @@ reuses bounded native presentation discipline. Optional shared recording exports
 canonical replay bytes after cleanup. Portable stepped replay and WASM
 preparation/render bindings reuse the existing replay audio and visual owners.
 Window/Worker replay launch uses the same audio host and recorded seed/section.
-Persistence and browser networking remain unfinished.
+Explicit saved-record browsing/storage feeds that replay path. Competition
+against browser records and browser networking remain unfinished.
 See the [browser host instructions](samples/bms-runtime/web/README.md).
 Browser source compilation does not establish playable browser behavior.
 
@@ -281,8 +282,9 @@ and score during the authored keyboard/audio gameplay path. Actual output/host
 pairs feed bounded continuous transport correction through the native shared
 observer. Optional canonical replay export uses the common capture owner.
 Portable stepped replay and WASM preparation/render bindings are source-integrated;
-browser replay launch now reuses the audio host, while persistent results and
-browser networking remain follow-on work. See the
+browser replay launch now reuses the audio host. Explicit saved-record storage
+and selection are source-integrated; browser competition and networking remain
+follow-on work. See the
 [browser build and usage instructions](samples/bms-runtime/web/README.md) and
 [browser contract](doc/kernel/REQ__bms-browser.md). Generated bindings and actual
 browser/GPU execution remain unverified. Check the reusable graphics library with:

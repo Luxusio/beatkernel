@@ -216,8 +216,8 @@ nominal start projection and browser estimates are not measured acoustic latency
 or an accuracy guarantee. Optional shared capture and replay download are
 source-integrated. Portable stepped replay and WASM preparation/render bindings
 reuse canonical recorded work and existing audio planning. Window/Worker replay
-launch reuses the same audio host. Persistent records and networking remain
-unfinished.
+launch reuses the same audio host. Explicit saved-record storage/browsing feeds
+the replay path; browser competition and networking remain unfinished.
 
 Natural completion uses the existing shared SongCompletion owner. Every original
 object must finish judging; BGM and outgoing/local command work must finish;
@@ -278,7 +278,8 @@ written or uploaded. Blob URLs are created only on a download click, revoked on
 replacement/page hiding and after at most 60 seconds. Stopped capture extraction
 is a single encoding attempt; serialization failure remains explicit and does
 not hide game cleanup failure. Local replay import/playback is source-integrated;
-browser persistence and network opponents remain follow-on work. Source checks and authored fixtures
+Explicit saved-record storage/browsing feeds that replay path; browser
+competition and network opponents remain follow-on work. Source checks and authored fixtures
 do not establish that a browser download or replay ran.
 
 ## Replay runtime components
@@ -323,3 +324,30 @@ prefixes. It does not assert the whole chart completed, relabel/rewrite the
 input recording or recapture it. Live Play and its optional recording/download
 remain independent. Host fixtures are authored with controlled endpoints and
 have not run; neither browser/audio playback nor generated bindings are verified.
+
+## Saved records
+
+After a recorded play and both cleanup joins, **Save last recording** explicitly
+stores its canonical bytes, original chart path, score and capture label in this
+browser. Saving is optional and never automatic. **Refresh saved records** lists
+metadata without loading replay payloads. **Use saved replay** selects that
+recording for the existing Play replay action and shows the matching chart path;
+it does not import song assets or start audio. Select/prepare the matching chart,
+then click Play replay. **Delete selected record** deletes only that saved item.
+
+The same-origin library allows 128 records, at most 64 MiB each and 256 MiB total
+encoded data. Count/aggregate checks and metadata/byte insertion share one
+transaction; deletion also updates both stores together. Success waits for
+transaction commit, and no old records are silently removed to make room.
+Quota/open/abort/corruption errors remain visible while the current capture,
+download and selected replay are retained. A successful save followed by a
+failed list refresh remains reported as a save with a refresh error.
+
+Only one library operation owns the controls. Hiding/leaving the page closes
+the storage owner and invalidates late replies. Version changes/timeouts fence
+the connection; a later explicit action can open a fresh owner. Browser-managed
+storage is best effort and may be removed by the browser/user, so explicit
+downloads remain useful. Stored complete/prefix labels are display metadata and
+do not authenticate a recording or prove it matches selected assets. Browser
+competition against saved records remains separate work. Storage/host fixtures
+are authored but unexecuted, and no IndexedDB/browser/audio behavior is verified.

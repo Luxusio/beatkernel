@@ -73,9 +73,10 @@ visible-note query, retained GPU note cache and BGA opacity rules are reused.
 
 The host now contains a playable start/stop source path through the common
 Runtime and separate AudioWorklet Mixer. The bounded native presentation
-observer is reused for continuous input-transport correction. Complete
-browser replay viewing, persistent result catalog and network transport remain
-follow-on work. Optional shared capture and canonical export are source-integrated. Source integration does not complete or validate the requested player.
+observer is reused for continuous input-transport correction. Optional shared
+capture/export, local replay viewing and explicit saved-record catalog are
+source-integrated. Browser competition and network transport remain follow-on
+work. Source integration does not complete or validate the requested player.
 
 ## Known ceiling
 
@@ -165,8 +166,8 @@ The player UI calls these components through prepared-sample transfer, a
 nonblocking shared SoloRuntime and bounded input/audio message ownership.
 Actual getOutputTimestamp pairs feed the existing native presentation
 discipline. Optional common capture exports canonical replay bytes. Local
-replay playback reuses the output host; persistent result integration remains
-unfinished. Browser input timestamps use
+replay playback reuses the output host, with explicit saved-record selection.
+Browser competition/networking remain unfinished. Browser input timestamps use
 the originating Window performance domain; Worker and Window origins are not
 implicitly equal. Physical keyboards cannot be distinguished by DOM key events.
 The full player Goal remains open, with generated bindings, processor execution,
@@ -250,8 +251,9 @@ Completion retains the gameplay owner until the Window's captured input prefix
 and outstanding steps/audio batch join, then uses the same bounded stop/disposal
 handshake. A manual stop, cancellation or failure does not become a natural
 finish. A browser without usable output timestamp evidence keeps manual Stop
-available and cannot claim natural completion. Replay playback, persistence
-and browser networking remain separate unfinished work; this acceptance contract is not evidence that the source was executed.
+available and cannot claim natural completion. Replay playback and explicit
+record storage use separate owners below. Browser competition/networking remain
+unfinished; this acceptance contract is not evidence that source was executed.
 
 A gameplay disposal error during completion or manual stop is retained as a
 cleanup failure. The Window terminates that Worker and requires reload before
@@ -303,8 +305,8 @@ before freeing the WASM game. Cancellation/failure yields a prefix; a complete
 label requires genuine natural-completion evidence and both game/audio cleanup
 joins. The Window shall retain at most one result and offer an explicit download
 only after joins. Export URLs shall be revoked on replacement/page hiding. No
-auto download, persisted browser library or browser replay playback is implied
-by this export slice; those remain separate unfinished work.
+auto download, saving or playback shall be triggered by export. Replay and
+explicit saved-record library actions are defined separately below.
 
 ## Nonblocking replay component
 
@@ -341,8 +343,9 @@ Play replay action using the selected matching chart/assets. Live Play shall
 remain independently available. Window and Worker shall validate nonempty
 recording metadata at or below 64 MiB before acquisition; the Worker shall read
 it once, reject changed size/invalid layout and invalidate cancelled preparation
-before constructing a WASM owner. No upload or persistent recording library is
-implied. The canonical file supplies branch seed and section, not live controls.
+before constructing a WASM owner. Playback shall not upload or automatically
+save its recording. Explicit library actions are defined separately below.
+The canonical file supplies branch seed and section, not live controls.
 
 Replay shall reuse the same AudioHost, command/sample transport, immutable
 armed start, genuine output presentation and joined cleanup as live play.
@@ -353,3 +356,34 @@ Natural termination shall say the recorded replay ended, including prefixes,
 and shall never assert full-chart completion. Stop, Escape, focus/page loss and
 failures shall release the actual replay/audio owners. Source integration and
 authored host fixtures do not imply browser/audio execution was verified.
+
+## Explicit local recording library
+
+The browser shall offer explicit Save last recording, Refresh saved records,
+Use saved replay and Delete selected record actions. No automatic save, upload,
+pruning or deletion shall occur. Saved bytes shall be the actual canonical
+capture extracted after both cleanup joins. Their stored chart path and readable
+score are display metadata; a complete label shall never authenticate a file or
+prove the selected chart/assets match. Loading shall select a replay for the
+existing user-gesture Play replay path without automatically starting audio.
+
+The same-origin IndexedDB boundary shall separate metadata from encoded bytes.
+Listing shall read bounded metadata only. Initial limits are 128 records, 64 MiB
+per recording and 256 MiB total encoded bytes. Save shall validate metadata and
+bytes before admission, then check aggregate limits and insert both stores in
+one transaction. Delete shall remove both stores atomically. Write success shall
+require the transaction's complete event; request success alone is insufficient.
+Quota, abort, corrupted data, blocked/failed opens and unavailable storage shall
+remain explicit errors without losing the current replay or live/download path.
+Browser-managed storage is best effort and may be removed by the browser/user.
+
+One library operation shall own the UI at a time. Closing/hiding the page shall
+invalidate late results, close its connection and abort pending transactions;
+late opens shall release their connection. Version changes and timed-out
+operations shall fence the storage owner. A new explicit action may open a
+fresh owner. Stale results shall never replace current selection or page state.
+
+Signed replay/preroll readout shall format one sign and the absolute exact
+nanosecond magnitude, including negative subsecond time and i64 minimum.
+Preview time admission shall remain nonnegative. Browser storage, binding,
+audio and authored fixture execution remain deferred until scheduled.

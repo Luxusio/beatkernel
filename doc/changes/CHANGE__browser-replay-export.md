@@ -25,8 +25,9 @@ file contents or acoustic behavior. Completeness is a UI/filename label; the
 existing replay format and noncryptographic setup identity remain unchanged.
 
 At most one last captured result is held. Blob URLs are created only on explicit
-download, revoked on replacement/page hiding and after 60 seconds. Persisted
-browser catalogs, replay import/playback and browser transport remain unfinished.
+download, revoked on replacement/page hiding and after 60 seconds.
+Local replay import/playback and explicit saved-record catalogs were subsequently
+source-integrated; browser competition/transport remain unfinished.
 
 Host workspace all-targets, headless application all-targets, WASM browser
 library and WASM browser-audio library checks exited zero after the relevant
