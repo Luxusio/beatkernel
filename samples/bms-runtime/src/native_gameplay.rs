@@ -3,6 +3,10 @@ use crate::{
     bgm::BgmFeeder,
     competition_live::LiveCompetition,
     completion::SongCompletion,
+    live_pause::{
+        LivePauseBoundary, LivePauseObservation, prepare_live_transport, update_live_pause,
+        validate_pre_pause_input,
+    },
     local_runtime::SoloRuntime,
     native_end::{EndBoundary, NativeEnd},
     playback_pause::{NativePause, PauseKeyboard, PausePhase},
@@ -49,6 +53,14 @@ pub struct InputBatch {
 
 pub trait NativeGameplayDevice {
     fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()>;
+    /// Native interval owners override this with original coherent evidence;
+    /// correction-only midpoint pairs cannot establish their pause boundary.
+    fn pause_observation(
+        &mut self,
+        reference: ClockPair,
+    ) -> NativeGameplayResult<LivePauseObservation> {
+        Ok(LivePauseObservation::Point(reference))
+    }
     fn render_report(&mut self) -> NativeGameplayResult<Option<RenderReport>>;
     fn host_now(&self) -> NativeGameplayResult<ClockPoint>;
     fn acquire(
@@ -237,14 +249,12 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
     let mut last_progress = None;
     let mut last_host = None;
     let mut keyboard = PauseKeyboard::new();
-    let mut paused_boundary: Option<ClockPoint> = None;
+    let mut paused_boundary: Option<LivePauseBoundary> = None;
     let mut resume_boundary: Option<ClockPoint> = None;
     let mut pause_committed = false;
     let mut end_boundary = None;
     let mut end_rendered = false;
-    if config.pause_supported {
-        player::publish_pause(PauseState::Running);
-    }
+    let mut pause_announced = false;
     while !player::cancelled() && deadline.is_none_or(|deadline| Instant::now() < deadline) {
         player::retry_pause_publication();
         device.observe(session.discipline)?;
@@ -260,39 +270,56 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
                 end_boundary = Some(boundary);
             }
         }
-        if config.pause_supported
-            && !end_rendered
-            && (session.pause.phase() == PausePhase::Running || pause_committed)
-            && resume_boundary.is_none()
-            && session
-                .pause
-                .request(player::pause_requested(), reference)?
-        {
-            let desired = session.pause.phase() == PausePhase::Pausing;
-            session.runtime.request_audio_pause(desired);
-            player::publish_pause(if desired {
-                PauseState::Pausing
-            } else {
-                PauseState::Resuming
-            });
-        }
         if config.logical_schedule || config.pause_supported {
-            if let Some(boundary) = session.pause.observe(rendered, reference)? {
+            let desired = (config.pause_supported
+                && !end_rendered
+                && (session.pause.phase() == PausePhase::Running || pause_committed)
+                && resume_boundary.is_none())
+            .then(player::pause_requested);
+            let update = update_live_pause(
+                session.pause,
+                device.pause_observation(reference)?,
+                rendered,
+                desired,
+                config.song_origin,
+                config.sample_rate,
+            )?;
+            if update.observed && config.pause_supported && !pause_announced {
+                pause_announced = true;
+                player::publish_pause(PauseState::Running);
+            }
+            if let Some(desired) = update.requested {
+                session.runtime.request_audio_pause(desired);
+                player::publish_pause(if desired {
+                    PauseState::Pausing
+                } else {
+                    PauseState::Resuming
+                });
+            }
+            if let Some(boundary) = update.boundary {
+                println!(
+                    "live pause={} host window={:?}, software cutoff={:?}, exact song={:?}; acoustic accuracy unmeasured",
+                    boundary.paused, boundary.window, boundary.at, boundary.song
+                );
                 if boundary.paused {
                     if !end_rendered {
-                        session
-                            .runtime
-                            .transport_mut()
-                            .pause(boundary.host.timestamp)?;
-                        paused_boundary = Some(boundary.host);
+                        let transport = prepare_live_transport(
+                            session.runtime.transport_mut(),
+                            boundary,
+                            last_song,
+                        )?;
+                        *session.runtime.transport_mut() = transport;
+                        paused_boundary = Some(boundary);
                         pause_committed = false;
                     }
                 } else {
-                    session
-                        .runtime
-                        .transport_mut()
-                        .resume(boundary.host.timestamp)?;
-                    resume_boundary = Some(boundary.host);
+                    let transport = prepare_live_transport(
+                        session.runtime.transport_mut(),
+                        boundary,
+                        last_song,
+                    )?;
+                    *session.runtime.transport_mut() = transport;
+                    resume_boundary = Some(boundary.at);
                     paused_boundary = None;
                     pause_committed = false;
                     let mut discipline = PresentationDiscipline::new_with_playback_origin(
@@ -384,7 +411,7 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
         }
         while let Some(event) = pending.pop_front() {
             let host = point(&event);
-            if paused_boundary.is_some_and(|at| host.timestamp >= at.timestamp) {
+            if paused_boundary.is_some_and(|boundary| host.timestamp >= boundary.at.timestamp) {
                 keyboard.observe_paused(event)?;
                 continue;
             }
@@ -392,6 +419,9 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
                 continue;
             }
             chronology(host, last_operation)?;
+            if let Some(boundary) = paused_boundary {
+                validate_pre_pause_input(session.runtime.transport_mut(), boundary, host)?;
+            }
             if config.pause_supported && !keyboard.accept(&event)? {
                 continue;
             }
@@ -399,7 +429,8 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
             last_operation = host;
         }
         if !batch.backlog {
-            if let Some(at) = paused_boundary.filter(|_| !pause_committed) {
+            if let Some(boundary) = paused_boundary.filter(|_| !pause_committed) {
+                let at = boundary.at;
                 if received.timestamp >= at.timestamp {
                     chronology(at, last_operation)?;
                     let audio_at = schedule(device, &session, config)?;
@@ -494,6 +525,7 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
 
 #[cfg(test)]
 mod fixtures {
+    include!("native_gameplay_interval_fixtures.rs");
     use super::*;
     use beatkernel::{
         audio::*,

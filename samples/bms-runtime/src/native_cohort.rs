@@ -4,6 +4,9 @@ use crate::{
     competition::ScoreSummary,
     competition_live::LiveCompetition,
     completion::SongCompletion,
+    live_pause::{
+        LivePauseBoundary, prepare_live_transport, update_live_pause, validate_pre_pause_input,
+    },
     local_input::InputMerger,
     local_players::PlayerId,
     local_runtime::{InputResult, PlayerReport, RuntimeGroup},
@@ -275,13 +278,11 @@ pub fn run_cohort<D: NativeGameplayDevice>(
     };
     let mut committed = None;
     let mut keyboard = PauseKeyboard::new();
-    let mut paused_boundary = None;
+    let mut paused_boundary: Option<LivePauseBoundary> = None;
     let mut resume_boundary = None;
     let mut pause_committed = false;
     let mut pause_lag_reached = false;
-    if config.pause_supported {
-        player::publish_pause(PauseState::Running);
-    }
+    let mut pause_announced = false;
     while !player::cancelled() && deadline.is_none_or(|deadline| Instant::now() < deadline) {
         player::retry_pause_publication();
         device.observe(session.discipline)?;
@@ -297,40 +298,68 @@ pub fn run_cohort<D: NativeGameplayDevice>(
                 end_boundary = Some(boundary);
             }
         }
-        if config.pause_supported
-            && !end_rendered
-            && (session.pause.phase() == PausePhase::Running || pause_committed)
-            && resume_boundary.is_none()
-            && session
-                .pause
-                .request(player::pause_requested(), reference)?
-        {
-            let desired = session.pause.phase() == PausePhase::Pausing;
-            session.group.request_audio_pause(desired);
-            player::publish_pause(if desired {
-                PauseState::Pausing
-            } else {
-                PauseState::Resuming
-            });
-        }
         if config.logical_schedule || config.pause_supported {
-            if let Some(boundary) = session.pause.observe(rendered, reference)? {
+            let desired = (config.pause_supported
+                && !end_rendered
+                && (session.pause.phase() == PausePhase::Running || pause_committed)
+                && resume_boundary.is_none())
+            .then(player::pause_requested);
+            let update = update_live_pause(
+                session.pause,
+                device.pause_observation(reference)?,
+                rendered,
+                desired,
+                config.song_origin,
+                config.sample_rate,
+            )?;
+            if update.observed && config.pause_supported && !pause_announced {
+                pause_announced = true;
+                player::publish_pause(PauseState::Running);
+            }
+            if let Some(desired) = update.requested {
+                session.group.request_audio_pause(desired);
+                player::publish_pause(if desired {
+                    PauseState::Pausing
+                } else {
+                    PauseState::Resuming
+                });
+            }
+            if let Some(boundary) = update.boundary {
+                println!(
+                    "local pause={} host window={:?}, software cutoff={:?}, exact song={:?}; acoustic accuracy unmeasured",
+                    boundary.paused, boundary.window, boundary.at, boundary.song
+                );
+                let last_song = session
+                    .states
+                    .iter()
+                    .map(|state| state.last_song)
+                    .max()
+                    .ok_or("cohort pause has no member prefix")?;
+                if !boundary.paused
+                    && session
+                        .states
+                        .iter()
+                        .any(|state| state.last_song != boundary.song)
+                {
+                    return Err("cohort resume requires every member at the frozen song".into());
+                }
                 if boundary.paused {
                     if !end_rendered {
-                        session
-                            .group
-                            .transport_mut()
-                            .pause(boundary.host.timestamp)?;
-                        paused_boundary = Some(boundary.host);
+                        let transport = prepare_live_transport(
+                            session.group.transport_mut(),
+                            boundary,
+                            last_song,
+                        )?;
+                        *session.group.transport_mut() = transport;
+                        paused_boundary = Some(boundary);
                         pause_committed = false;
                         pause_lag_reached = false;
                     }
                 } else {
-                    session
-                        .group
-                        .transport_mut()
-                        .resume(boundary.host.timestamp)?;
-                    resume_boundary = Some(boundary.host);
+                    let transport =
+                        prepare_live_transport(session.group.transport_mut(), boundary, last_song)?;
+                    *session.group.transport_mut() = transport;
+                    resume_boundary = Some(boundary.at);
                     paused_boundary = None;
                     pause_committed = false;
                     let mut discipline = PresentationDiscipline::new_with_playback_origin(
@@ -396,12 +425,18 @@ pub fn run_cohort<D: NativeGameplayDevice>(
             continue;
         }
         if session.pause.phase() == PausePhase::Paused && !end_rendered {
-            let at = paused_boundary.ok_or("cohort paused boundary unavailable")?;
-            if !pause_committed && now.timestamp >= at.timestamp {
+            let boundary = paused_boundary.ok_or("cohort paused boundary unavailable")?;
+            let at = boundary.at;
+            if !pause_committed && lag_reaches(now, at, lag)? {
                 while let Some(event) = session.merger.pop_ready(at)? {
                     if point(&event).timestamp >= at.timestamp {
                         keyboard.observe_paused(event)?;
                     } else if keyboard.accept(&event)? {
+                        validate_pre_pause_input(
+                            session.group.transport_mut(),
+                            boundary,
+                            point(&event),
+                        )?;
                         process(device, &mut session, config, event)?;
                     }
                 }
@@ -524,6 +559,7 @@ pub fn run_cohort<D: NativeGameplayDevice>(
 
 #[cfg(test)]
 mod fixtures {
+    include!("native_cohort_interval_fixtures.rs");
     use super::*;
     use crate::local_runtime::MemberConfig;
     use beatkernel::{
