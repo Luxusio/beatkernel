@@ -66,6 +66,8 @@ pub mod multiplayer_clock;
 pub mod multiplayer_start;
 /// Shared native local-cohort gameplay and per-player report ownership.
 pub mod native_cohort;
+/// Shared local member construction, activation and recording finalization.
+pub mod native_cohort_setup;
 /// Omitted solo option defaults, independent of native discovery.
 pub mod native_defaults;
 pub mod native_end;
