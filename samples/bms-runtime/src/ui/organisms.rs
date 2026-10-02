@@ -1186,6 +1186,11 @@ mod tests {
                 width: 1,
                 height: 1,
             }),
+            layer2: Some(BgaSprite {
+                texture: TextureId::allocate().unwrap(),
+                width: 3,
+                height: 2,
+            }),
             unavailable: 0,
         });
         let mut scene = Scene::new(960, 720);
@@ -1221,7 +1226,12 @@ mod tests {
             .iter()
             .position(|batch| batch.texture == frames[0].poor_overlay.unwrap().texture)
             .unwrap();
-        assert!(image < layer && layer < poor && poor < notes);
+        let layer2 = scene
+            .batches()
+            .iter()
+            .position(|batch| batch.texture == frames[0].layer2.unwrap().texture)
+            .unwrap();
+        assert!(image < layer && layer < layer2 && layer2 < poor && poor < notes);
         let image_rectangle = &scene.rectangles()[scene.batches()[image].first as usize];
         assert!(image_rectangle.bounds[1] >= TOP as f32);
         assert!(image_rectangle.bounds[1] + image_rectangle.bounds[3] <= LINE as f32);
@@ -1255,7 +1265,10 @@ mod tests {
                     .count(),
                 1
             );
-            for sprite in [frame.layer, frame.poor_overlay].into_iter().flatten() {
+            for sprite in [frame.layer, frame.layer2, frame.poor_overlay]
+                .into_iter()
+                .flatten()
+            {
                 assert_eq!(
                     scene
                         .batches()

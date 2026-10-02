@@ -73,6 +73,7 @@ impl PoorBackgroundPolicy {
                     PoorBgaMode::Replace => {
                         presentation.state.base = Some(poor);
                         presentation.state.layer = None;
+                        presentation.state.layer2 = None;
                     }
                     PoorBgaMode::Overlay => {
                         presentation.poor_overlay = Some(poor);
@@ -270,11 +271,12 @@ mod fixtures {
             ("2", PoorBgaMode::Off),
         ] {
             let chart = fixture_chart(&format!(
-                "#POORBGA {digit}\n#BMP00 initial.png\n#00004:01\n#00007:02\n#00006:03"
+                "#POORBGA {digit}\n#BMP00 initial.png\n#00004:01\n#00007:02\n#0000A:04\n#00006:03"
             ));
             assert_eq!(chart.poor_bga_mode, mode);
             let mut progress = NoteProgress::new(chart.clone()).unwrap();
             let normal = chart.bga_state(Timestamp::ZERO);
+            assert_eq!(normal.layer2, Some(ImageId(4)));
             assert_eq!(
                 policy
                     .select(&chart, Timestamp::ZERO, Some(&progress))
@@ -295,6 +297,7 @@ mod fixtures {
                 PoorBgaMode::Replace => {
                     assert_eq!(active.state.base, normal.poor);
                     assert_eq!(active.state.layer, None);
+                    assert_eq!(active.state.layer2, None);
                     assert_eq!(active.poor_overlay, None);
                 }
                 PoorBgaMode::Overlay => {

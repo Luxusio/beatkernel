@@ -29,28 +29,30 @@ pub struct BgaSprite {
     pub width: u32,
     pub height: u32,
 }
-/// Current visible Base/Layer and explicitly activated Poor overlay.
+/// Current visible Base/two Layers and explicitly activated Poor overlay.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BgaFrame {
     pub active: bool,
     pub base: Option<BgaSprite>,
     pub layer: Option<BgaSprite>,
+    pub layer2: Option<BgaSprite>,
     pub poor_overlay: Option<BgaSprite>,
     pub unavailable: usize,
 }
 impl BgaFrame {
     /// Preflights caller frames before any partial playfield geometry.
     pub fn validate(&self) -> Result<(), String> {
-        if self.unavailable > 3
+        if self.unavailable > 4
             || (!self.active
                 && (self.base.is_some()
                     || self.layer.is_some()
+                    || self.layer2.is_some()
                     || self.poor_overlay.is_some()
                     || self.unavailable != 0))
         {
             return Err("invalid BGA frame selection".into());
         }
-        for sprite in [self.base, self.layer, self.poor_overlay]
+        for sprite in [self.base, self.layer, self.layer2, self.poor_overlay]
             .into_iter()
             .flatten()
         {
@@ -70,7 +72,7 @@ struct Entry {
     image: Arc<RgbaImage>,
     sprite: Option<BgaSprite>,
 }
-/// At most twelve distinct active Base/Layer/Poor resources across four views.
+/// At most sixteen distinct active Base/two Layers/Poor resources across four views.
 /// Failed uploads are retained blank and retried only when the wanted union changes.
 #[derive(Default)]
 pub struct BgaTextureCache {
@@ -130,13 +132,14 @@ impl BgaTextureCache {
         let Some(bank) = bank else {
             return Ok([BgaFrame::default(); 4]);
         };
-        let mut wanted: [Option<&Arc<RgbaImage>>; 12] = [None; 12];
+        let mut wanted: [Option<&Arc<RgbaImage>>; 16] = [None; 16];
         let mut count = 0;
         for presentation in states {
             let state = presentation.state;
             for image in [
                 state.base.and_then(|id| bank.get(id)),
                 state.layer.and_then(|id| bank.get_layer(id)),
+                state.layer2.and_then(|id| bank.get_layer(id)),
                 presentation.poor_overlay.and_then(|id| bank.get(id)),
             ]
             .into_iter()
@@ -198,6 +201,7 @@ impl BgaTextureCache {
             let state = presentation.state;
             frame.active = state.base.is_some()
                 || state.layer.is_some()
+                || state.layer2.is_some()
                 || presentation.poor_overlay.is_some();
             for (id, image, destination) in [
                 (
@@ -209,6 +213,11 @@ impl BgaTextureCache {
                     state.layer,
                     state.layer.and_then(|id| bank.get_layer(id)),
                     &mut frame.layer,
+                ),
+                (
+                    state.layer2,
+                    state.layer2.and_then(|id| bank.get_layer(id)),
+                    &mut frame.layer2,
                 ),
                 (
                     presentation.poor_overlay,
@@ -241,7 +250,7 @@ fn upload(owner: &mut impl TextureOwner, image: &RgbaImage) -> Option<BgaSprite>
         height: image.height(),
     })
 }
-/// Paints black then Base, Layer and Poor inside the above-judgement field.
+/// Paints black then Base, Layer, Layer2 and Poor inside the above-judgement field.
 /// Sprites use centered integer aspect fit, straight alpha and dim tint.
 pub fn paint(scene: &mut Scene, frame: BgaFrame, bounds: Bounds) -> Result<(), String> {
     frame.validate()?;
@@ -260,7 +269,7 @@ pub fn paint(scene: &mut Scene, frame: BgaFrame, bounds: Bounds) -> Result<(), S
         return Ok(());
     }
     scene.rect(bounds.x, bounds.y, bounds.width, bounds.height, 0);
-    for sprite in [frame.base, frame.layer, frame.poor_overlay]
+    for sprite in [frame.base, frame.layer, frame.layer2, frame.poor_overlay]
         .into_iter()
         .flatten()
     {
@@ -379,6 +388,7 @@ mod fixtures {
         BgaState {
             base: Some(ImageId(base)),
             layer: layer.map(ImageId),
+            layer2: None,
             poor: Some(ImageId(0)),
         }
     }
@@ -515,11 +525,11 @@ mod fixtures {
         assert_eq!(owner.attempts, 3);
     }
     #[test]
-    fn four_overlay_views_bound_twelve_resources_and_release_expired_overlays() {
+    fn four_two_layer_views_bound_sixteen_resources_and_release_expired_overlays() {
         let mut prepared = bank();
         let template = std::fs::read(prepared.path.join("red.bmp")).unwrap();
         let mut source = String::new();
-        for id in 1..=12u16 {
+        for id in 1..=16u16 {
             let code = if id < 10 {
                 format!("0{id}")
             } else {
@@ -531,46 +541,49 @@ mod fixtures {
             std::fs::write(prepared.path.join(&name), bytes).unwrap();
             source.push_str(&format!("#BMP{code} {name}\n"));
         }
-        source.push_str("#00004:01020304\n#00007:05060708\n#00006:090A0B0C");
+        source.push_str("#00004:01020304\n#00007:05060708\n#0000A:090A0B0C\n#00006:0D0E0F0G");
         let chart = beatkernel_bms::parse(&source, ParseOptions::default()).unwrap();
         prepared.bank = Arc::new(
             ImageAssets::prepare(&prepared.path, &chart, ImageAssetLimits::default()).unwrap(),
         );
         let selections: [BgaPresentation; 4] = std::array::from_fn(|i| BgaPresentation {
-            state: state(i as u16 + 1, Some(i as u16 + 5)),
-            poor_overlay: Some(ImageId(i as u16 + 9)),
+            state: BgaState {
+                layer2: Some(ImageId(i as u16 + 9)),
+                ..state(i as u16 + 1, Some(i as u16 + 5))
+            },
+            poor_overlay: Some(ImageId(i as u16 + 13)),
         });
         let normal = selections.map(|p| p.state);
         let mut owner = Owner {
-            capacity: 12,
+            capacity: 16,
             ..Owner::default()
         };
         let mut cache = BgaTextureCache::default();
         cache
             .sync(Some(&prepared.bank), &normal, &mut owner)
             .unwrap();
-        assert_eq!(owner.live.len(), 8); // Legacy selections never infer Poor activation.
+        assert_eq!(owner.live.len(), 12); // Legacy selections never infer Poor activation.
         let frames = cache
             .sync_presentations(Some(&prepared.bank), &selections, &mut owner)
             .unwrap();
-        assert_eq!((owner.live.len(), owner.attempts), (12, 12));
+        assert_eq!((owner.live.len(), owner.attempts), (16, 16));
         assert!(
             frames
                 .iter()
-                .all(|f| f.poor_overlay.is_some() && f.unavailable == 0)
+                .all(|f| f.layer2.is_some() && f.poor_overlay.is_some() && f.unavailable == 0)
         );
         cache
             .sync_presentations(Some(&prepared.bank), &selections, &mut owner)
             .unwrap();
-        assert_eq!(owner.attempts, 12);
+        assert_eq!(owner.attempts, 16);
         cache
             .sync(Some(&prepared.bank), &normal, &mut owner)
             .unwrap();
-        assert_eq!(owner.live.len(), 8);
+        assert_eq!(owner.live.len(), 12);
         cache.clear(&mut owner).unwrap();
         assert!(owner.live.is_empty());
         let mut owner = Owner {
-            capacity: 11,
+            capacity: 15,
             ..Owner::default()
         };
         let frames = cache
@@ -580,7 +593,7 @@ mod fixtures {
         cache
             .sync_presentations(Some(&prepared.bank), &selections, &mut owner)
             .unwrap();
-        assert_eq!((owner.live.len(), owner.attempts), (11, 12));
+        assert_eq!((owner.live.len(), owner.attempts), (15, 16));
         let before = owner.actions.len();
         assert!(
             cache
@@ -643,6 +656,7 @@ mod fixtures {
             }),
             unavailable: 0,
             poor_overlay: None,
+            layer2: None,
         };
         let mut scene = Scene::new(300, 300);
         paint(

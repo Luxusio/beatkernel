@@ -1733,13 +1733,19 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
     }
     let text = "#BPM 120\n#WAV01 tap.wav\n#00111:01\n#STOP01 48\n#00109:01\n\
          #BMP00 poor.png\n#BMP01 first.png\n#BMP02 second.png\n#BMP03 third.png\n\
-         #BMP04 layer.png\n#00004:01\n#00104:0203\n#00107:04\n#00106:ZZ\n";
+         #BMP04 layer.png\n#BMP05 second-layer.png\n#00004:01\n#00104:0203\n#00107:04\n#00106:ZZ\n#0010A:05\n";
     let source = beatkernel_bms::parse(text, beatkernel_bms::ParseOptions::default()).unwrap();
     let image_dir = Directory::new();
     let chart_path = image_dir.write("chart.bms", text.as_bytes());
-    for (index, name) in ["first.png", "second.png", "third.png", "layer.png"]
-        .into_iter()
-        .enumerate()
+    for (index, name) in [
+        "first.png",
+        "second.png",
+        "third.png",
+        "layer.png",
+        "second-layer.png",
+    ]
+    .into_iter()
+    .enumerate()
     {
         image_dir.write(name, &raster_bmp_pixel([index as u8 + 1, 0, 0]));
     }
@@ -1748,6 +1754,7 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
     let expected = bga::BgaState {
         base: Some(ImageId(2)),
         layer: Some(ImageId(4)),
+        layer2: Some(ImageId(5)),
         poor: Some(ImageId(1295)),
     };
     assert_eq!(
@@ -1852,6 +1859,17 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
             let now = shown.song_time.unwrap();
             let live_state = shown.chart.as_ref().unwrap().bga_state(now);
             let base = live_state.base.unwrap();
+            assert_eq!(live_state.layer2, Some(ImageId(5)));
+            assert_eq!(
+                shown
+                    .images
+                    .as_ref()
+                    .unwrap()
+                    .get_layer(ImageId(5))
+                    .unwrap()
+                    .pixels(),
+                &[5, 0, 0, 255]
+            );
             assert_eq!(
                 shown.images.as_ref().unwrap().get(base).unwrap().pixels(),
                 &[base.0 as u8, 0, 0, 255]
@@ -1937,13 +1955,14 @@ fn actual_timeout_capture_replay_and_native_publication_share_poor_interval() {
         }
     }
     let dir = Directory::new();
-    let text = "#BPM 60\n#WAV01 tap.wav\n#00011:01\n#BMP00 poor.bmp\n#BMP01 base.bmp\n#BMP02 changed.bmp\n#BMP03 layer.bmp\n#00004:01\n#00007:03\n#00006:00020000000000000000000000000000";
+    let text = "#BPM 60\n#WAV01 tap.wav\n#00011:01\n#BMP00 poor.bmp\n#BMP01 base.bmp\n#BMP02 changed.bmp\n#BMP03 layer.bmp\n#BMP04 second-layer.bmp\n#00004:01\n#00007:03\n#0000A:04\n#00006:00020000000000000000000000000000";
     let path = dir.write("chart.bms", text.as_bytes());
     for (name, color) in [
         ("poor.bmp", [0, 0, 0]),
         ("base.bmp", [10, 20, 30]),
         ("changed.bmp", [30, 20, 10]),
         ("layer.bmp", [0, 0, 30]),
+        ("second-layer.bmp", [40, 10, 0]),
     ] {
         dir.write(name, &raster_bmp_pixel(color));
     }
@@ -2042,6 +2061,7 @@ fn actual_timeout_capture_replay_and_native_publication_share_poor_interval() {
     assert_eq!(selected(&live[0]).base, Some(ImageId(1)));
     assert_eq!(selected(&live[1]).base, Some(ImageId(0)));
     assert!(selected(&live[1]).layer.is_none());
+    assert!(selected(&live[1]).layer2.is_none());
     assert_eq!(
         live[1]
             .images
@@ -2054,8 +2074,10 @@ fn actual_timeout_capture_replay_and_native_publication_share_poor_interval() {
     );
     assert_eq!(selected(&live[2]).base, Some(ImageId(2)));
     assert!(selected(&live[2]).layer.is_none());
+    assert!(selected(&live[2]).layer2.is_none());
     assert_eq!(selected(&live[3]).base, Some(ImageId(1)));
     assert_eq!(selected(&live[3]).layer, Some(ImageId(3)));
+    assert_eq!(selected(&live[3]).layer2, Some(ImageId(4)));
     let mut visual = replay_visual::ReplayVisual::new(&source, &file, cap).unwrap();
     let (publisher, viewer) = player::channel();
     player::with_publisher(publisher, || {
@@ -2136,16 +2158,19 @@ fn actual_timeout_capture_replay_and_native_publication_share_poor_interval() {
         match mode {
             0 => {
                 assert_eq!(mode_live[1].state.base, Some(ImageId(0)));
+                assert!(mode_live[1].state.layer2.is_none());
                 assert!(mode_live[1].poor_overlay.is_none());
             }
             1 => {
                 assert_eq!(mode_live[1].state, normal);
                 assert_eq!(mode_live[1].poor_overlay, Some(ImageId(0)));
+                assert_eq!(mode_live[1].state.layer2, Some(ImageId(4)));
                 assert_eq!(mode_live[2].poor_overlay, Some(ImageId(2)));
             }
             2 => {
                 assert_eq!(mode_live[1].state, normal);
                 assert!(mode_live[1].poor_overlay.is_none());
+                assert_eq!(mode_live[1].state.layer2, Some(ImageId(4)));
             }
             _ => unreachable!(),
         }
@@ -2284,7 +2309,7 @@ fn native_layer_preparation_preserves_raw_aliases_and_admits_variant_bytes_atomi
     let dir = Directory::new();
     dir.write("tap.wav", &wav(1, &[100, -100]));
     dir.write("black.bmp", &raster_bmp_pixel([0, 0, 0]));
-    let path = dir.write("chart.bms", b"#BPM 120\n#WAV01 tap.wav\n#00011:01\n#BMP01 black.bmp\n#BMP02 ./black.bmp\n#BMP03 black.bmp\n#00004:010203\n#00007:0102\n");
+    let path = dir.write("chart.bms", b"#BPM 120\n#WAV01 tap.wav\n#00011:01\n#BMP01 black.bmp\n#BMP02 ./black.bmp\n#BMP03 black.bmp\n#BMP04 ./black.bmp\n#00004:01020304\n#00007:0102\n#0000A:04\n");
     let prepared = load_prepared(
         &path,
         AudioFormat::new(24_000, 2).unwrap(),
@@ -2318,6 +2343,10 @@ fn native_layer_preparation_preserves_raw_aliases_and_admits_variant_bytes_atomi
     assert_eq!(bank.get(ImageId(1)).unwrap().pixels(), &[0, 0, 0, 255]);
     assert_eq!(bank.get_layer(ImageId(1)).unwrap().pixels(), &[0, 0, 0, 0]);
     assert!(bank.get_layer(ImageId(3)).is_none());
+    assert!(Arc::ptr_eq(
+        bank.get_layer(ImageId(1)).unwrap(),
+        bank.get_layer(ImageId(4)).unwrap()
+    ));
     assert!(
         ImageAssets::prepare(
             &dir.0,

@@ -4498,7 +4498,7 @@ mod tests {
         };
         use beatkernel_bms::ImageId;
         let members: Vec<_> = [0,1,2].into_iter().map(|mode| {
-            let source = beatkernel_bms::parse(&format!("#BPM 120\n#WAV01 tap.wav\n#00011:01\n#BMP00 poor.bmp\n#00004:01\n#00007:02\n#POORBGA {mode}"), beatkernel_bms::ParseOptions::default()).unwrap();
+            let source = beatkernel_bms::parse(&format!("#BPM 120\n#WAV01 tap.wav\n#00011:01\n#BMP00 poor.bmp\n#00004:01\n#00007:02\n#0000A:04\n#POORBGA {mode}"), beatkernel_bms::ParseOptions::default()).unwrap();
             let chart = Arc::new(player_chart::PlayerChart::from_compiled(&source, &source.compile().unwrap().chart).unwrap());
             let mut progress = beatkernel_bms_runtime::note_progress::NoteProgress::new(chart.clone()).unwrap();
             progress.apply(&[JudgeEvent { object: chart.notes[0].object, stage: JudgeStage::Instant, outcome: JudgeOutcome::Miss { reason: MissReason::HeadTimeout }, at: Timestamp::ZERO, input: None }]);
@@ -4512,11 +4512,14 @@ mod tests {
         assert_eq!(count, 3);
         assert_eq!(shown[0].state.base, Some(ImageId(0)));
         assert!(shown[0].state.layer.is_none() && shown[0].poor_overlay.is_none());
+        assert!(shown[0].state.layer2.is_none());
         assert_eq!(shown[1].state.base, Some(ImageId(1)));
         assert_eq!(shown[1].state.layer, Some(ImageId(2)));
+        assert_eq!(shown[1].state.layer2, Some(ImageId(4)));
         assert_eq!(shown[1].poor_overlay, Some(ImageId(0)));
         assert_eq!(shown[2].state.base, Some(ImageId(1)));
         assert_eq!(shown[2].state.layer, Some(ImageId(2)));
+        assert_eq!(shown[2].state.layer2, Some(ImageId(4)));
         assert!(shown[2].poor_overlay.is_none());
         snapshot.pause = player::PauseState::Paused;
         assert_eq!(background_presentations(&snapshot, 0).unwrap().0, shown);
