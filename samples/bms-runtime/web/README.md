@@ -8,7 +8,11 @@ prepared PCM to an AudioWorklet and feeds originating Window keyboard timestamps
 into the same SoloRuntime used by native gameplay. The natural-completion source
 path joins terminal judging, Mixer drain and reported output timestamps.
 Optional capture/download and local canonical replay playback are source-wired
-to this host. Browser multiplayer remains unfinished.
+to this host. Browser multiplayer remains unfinished. The shared Rust
+`multiplayer_protocol` module provides bounded BKMP v6 framing and the same
+progress, readiness, clock-probe and final-acknowledgement state used by native
+QUIC. A browser WebTransport session and compatible HTTP/3 endpoint still need
+integration; this module alone does not provide a browser connection.
 
 The DOM owns file selection, controls and layout. A dedicated module Worker owns
 the imported bytes, preparation and wgpu rendering on a transferred

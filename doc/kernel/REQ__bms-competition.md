@@ -73,6 +73,34 @@ The native source now replaces TCP with this shared QUIC adapter. TLS/trust
 fixtures and eventual native/browser transport execution remain required; the
 standing execution and formal QA deferral is unchanged.
 
+## Shared multiplayer protocol components
+
+Native QUIC and browser WebTransport shall share one application framing,
+progress validation, bilateral readiness, clock probe and final-ACK state
+implementation inside the BMS application crate. Shared components shall perform
+no socket, platform clock, thread, transport-runtime or audio operations. Each
+adapter supplies its actual clock evidence and complete-write observations.
+Existing native public progress/error/event types shall refer to the same
+common types. Valid native BKMP version 6 bytes and state transitions shall
+remain compatible; extraction shall not bump the version or duplicate logic.
+
+The shared decoder shall preserve partial headers/bodies and consume only the
+exact admitted prefix of a transport chunk. A held full frame shall consume
+zero more bytes until taken. Length shall be checked before body admission;
+malformed lengths or excess internal extent shall reject explicitly, without
+unchecked subtraction. The checked encoder shall reject payloads above 65,536
+bytes before allocation. Framing compatibility shall retain signed song time
+and exact unsigned counters, magic/version checks and reliable ordered delivery.
+
+Readiness shall require remote receipt and actual complete local frame write.
+Progress shall retain sequence, cumulative counts, combo and final-prefix
+validation. A final acknowledgement shall require its exact fully written
+final and any parsed peer ACK fully written; admission alone is insufficient.
+Clock probes and software start messages shall retain the existing shared
+checked time/order rules. Common source components do not establish a usable
+WebTransport session or compatible HTTP/3 server endpoint; those remain
+separate unfinished integration and deferred execution work.
+
 The native adapter uses explicit host certificate/key (`--mp-cert`, `--mp-key`)
 or joining trust anchor/server name (`--mp-ca`, `--mp-server-name`). Certificate
 and key reads admit bounded regular files up to 1 MiB each; malformed or

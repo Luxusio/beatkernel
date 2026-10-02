@@ -105,6 +105,9 @@ Certificate/key files accept PEM or DER with a 1 MiB per-file limit. Server name
 and trust anchor are validated; there is no implicit certificate bypass.
 The common networking worker uses one reliable QUIC stream for the existing
 bounded setup/start/progress/final protocol on all native platforms. Browser
+and native adapters can now share the transport-independent BKMP v6 framing,
+progress validation, readiness, clock probes and final-acknowledgement state.
+The QUIC reader uses that bounded decoder; its public native types remain stable.
 WebTransport requires its own compatible HTTP/3 server integration and remains
 unfinished. QUIC socket/TLS execution is still deferred.
 Use an explicit reachable IP for another machine. Network loss leaves local
