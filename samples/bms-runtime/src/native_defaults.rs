@@ -188,6 +188,181 @@ pub fn replay_args(
     result.extend(["--replay".into(), replay]);
     Ok(result)
 }
+/// Application preparation owns policy; adapters return actual native metadata.
+pub type NativePreparationResult<T> = Result<T, Box<dyn std::error::Error>>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreparationMode {
+    Play,
+    Replay,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NativeOutputFormat {
+    pub rate: f64,
+    pub channels: u32,
+    pub buffer_frames: Option<u32>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeKeyboardCandidate {
+    pub id: String,
+    pub selectable: bool,
+    pub order: u64,
+}
+pub trait NativePreparationDevice {
+    fn default_output(&mut self) -> NativePreparationResult<String>;
+    fn output_format(&mut self, device: &str) -> NativePreparationResult<NativeOutputFormat>;
+    fn keyboards(&mut self) -> NativePreparationResult<Vec<NativeKeyboardCandidate>>;
+    fn asio_format(&mut self, projected: &[String]) -> NativePreparationResult<NativeOutputFormat>;
+}
+fn metadata_id(id: &str) -> NativePreparationResult<()> {
+    if id.is_empty()
+        || id.len() > crate::device_catalog::MAX_DEVICE_TEXT_BYTES
+        || id
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
+        return Err("native metadata has an invalid bounded identity".into());
+    }
+    Ok(())
+}
+fn native_format(
+    format: NativeOutputFormat,
+    host: SettingsHost,
+) -> NativePreparationResult<(u32, u16, Option<u32>)> {
+    if !format.rate.is_finite()
+        || format.rate <= 0.0
+        || format.rate.fract() != 0.0
+        || format.rate > f64::from(u32::MAX)
+        || format.channels == 0
+        || format.buffer_frames == Some(0)
+    {
+        return Err("native output metadata has invalid rate/channels/buffer".into());
+    }
+    let channels = if host == SettingsHost::Macos {
+        format.channels.min(2)
+    } else {
+        format.channels
+    };
+    let channels = u16::try_from(channels)?;
+    beatkernel::audio::AudioFormat::new(format.rate as u32, channels)?;
+    Ok((format.rate as u32, channels, format.buffer_frames))
+}
+/// Resolve omitted application values only, after strict original-argument validation.
+/// No parser-only device/keyboard identity is ever used for native execution.
+pub fn prepare<D: NativePreparationDevice>(
+    args: &[String],
+    host: SettingsHost,
+    mode: PreparationMode,
+    device: &mut D,
+    validate: impl FnOnce(&[String]) -> NativePreparationResult<()>,
+) -> NativePreparationResult<Vec<String>> {
+    validate(args)?;
+    // Keep schema/size rejection ahead of native calls even for a permissive
+    // supplied validator. Existing projection remains the schema authority.
+    let mut defaults = NativeDefaults {
+        device: String::new(),
+        keyboard: String::new(),
+        rate: 48_000,
+        channels: 2,
+        buffer_frames: 1024,
+    };
+    let mut validation_defaults = NativeDefaults::for_validation();
+    if host == SettingsHost::Macos {
+        validation_defaults.device = "1".into();
+    }
+    match mode {
+        PreparationMode::Play => {
+            complete(args, host, &validation_defaults)?;
+        }
+        PreparationMode::Replay => {
+            replay_args(args, host, &validation_defaults)?;
+        }
+    }
+    let get = |flag: &str| {
+        args.chunks_exact(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].as_str())
+    };
+    let asio = host == SettingsHost::Windows && get("--backend") == Some("asio");
+    if asio && get("--device").is_none() {
+        return Err("ASIO requires an explicit driver configuration".into());
+    }
+    if host != SettingsHost::Linux {
+        if let Some(id) = get("--device") {
+            defaults.device = id.to_owned();
+        } else {
+            defaults.device = device.default_output()?;
+            metadata_id(&defaults.device)?;
+        }
+    }
+    let need_format = match host {
+        SettingsHost::Linux => false,
+        SettingsHost::Windows => {
+            mode == PreparationMode::Replay
+                && !asio
+                && (get("--rate").is_none() || get("--channels").is_none())
+        }
+        SettingsHost::Macos => {
+            get("--rate").is_none()
+                || get("--channels").is_none()
+                || get("--buffer-frames").is_none()
+        }
+    };
+    if need_format {
+        let format = device.output_format(&defaults.device)?;
+        let (rate, channels, buffer) = native_format(format, host)?;
+        defaults.rate = rate;
+        defaults.channels = channels;
+        if host == SettingsHost::Macos && get("--buffer-frames").is_none() {
+            defaults.buffer_frames = buffer.ok_or("native output buffer metadata missing")?;
+        }
+    }
+    if asio && mode == PreparationMode::Replay && get("--rate").is_none() {
+        let projected = replay_args(args, host, &defaults)?;
+        let format = device.asio_format(&projected)?;
+        let (rate, _, _) = native_format(format, host)?;
+        defaults.rate = rate;
+    }
+    let need_keyboard = mode == PreparationMode::Play
+        && get("--local-player").is_none()
+        && match host {
+            SettingsHost::Linux => get("--evdev").is_none() && get("--local-input").is_none(),
+            SettingsHost::Macos => get("--keyboard-registry").is_none(),
+            SettingsHost::Windows => false,
+        };
+    if need_keyboard {
+        let candidates = device.keyboards()?;
+        if candidates.len() > crate::device_catalog::MAX_DEVICES {
+            return Err("native keyboard metadata exceeds device count".into());
+        }
+        let mut bytes = 0usize;
+        let mut selected: Option<&NativeKeyboardCandidate> = None;
+        for candidate in &candidates {
+            metadata_id(&candidate.id)?;
+            bytes = bytes
+                .checked_add(candidate.id.len())
+                .ok_or("native keyboard metadata byte overflow")?;
+            if bytes > crate::device_catalog::MAX_CATALOG_BYTES {
+                return Err("native keyboard metadata exceeds byte budget".into());
+            }
+            if candidate.selectable
+                && selected.is_none_or(|previous| candidate.order < previous.order)
+            {
+                selected = Some(candidate);
+            }
+        }
+        defaults.keyboard = selected
+            .ok_or("no selectable native keyboard available")?
+            .id
+            .clone();
+    }
+    // Unused missing identities remain empty: complete never inserts them for
+    // explicit inputs/assigned players, replay never inserts input options.
+    Ok(match mode {
+        PreparationMode::Play => complete(args, host, &defaults)?,
+        PreparationMode::Replay => replay_args(args, host, &defaults)?,
+    })
+}
+
 #[cfg(test)]
 mod fixtures {
     use super::*;
@@ -514,5 +689,418 @@ mod chart_seed_projection_fixtures {
                     .any(|pair| pair == ["--replay", "record.bkr"])
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod preparation_fixtures {
+    use super::*;
+    #[derive(Default)]
+    struct Device {
+        calls: Vec<String>,
+        projected: Vec<String>,
+        bad: Option<NativeOutputFormat>,
+        bad_id: bool,
+        keyboard_count: usize,
+        failure: bool,
+    }
+    impl NativePreparationDevice for Device {
+        fn default_output(&mut self) -> NativePreparationResult<String> {
+            self.calls.push("default".into());
+            if self.failure {
+                return Err("default unavailable".into());
+            }
+            Ok(if self.bad_id {
+                "bad\nID".into()
+            } else {
+                "7".into()
+            })
+        }
+        fn output_format(&mut self, id: &str) -> NativePreparationResult<NativeOutputFormat> {
+            self.calls.push(format!("format:{id}"));
+            if self.failure {
+                return Err("format unavailable".into());
+            }
+            Ok(self.bad.unwrap_or(NativeOutputFormat {
+                rate: 44_100.0,
+                channels: 8,
+                buffer_frames: Some(512),
+            }))
+        }
+        fn keyboards(&mut self) -> NativePreparationResult<Vec<NativeKeyboardCandidate>> {
+            self.calls.push("keyboard".into());
+            if self.keyboard_count > 0 {
+                return Ok((0..self.keyboard_count)
+                    .map(|order| NativeKeyboardCandidate {
+                        id: "1".into(),
+                        selectable: true,
+                        order: order as u64,
+                    })
+                    .collect());
+            }
+            Ok(vec![
+                NativeKeyboardCandidate {
+                    id: "disabled".into(),
+                    selectable: false,
+                    order: 0,
+                },
+                NativeKeyboardCandidate {
+                    id: "9".into(),
+                    selectable: true,
+                    order: 9,
+                },
+                NativeKeyboardCandidate {
+                    id: "3".into(),
+                    selectable: true,
+                    order: 3,
+                },
+            ])
+        }
+        fn asio_format(&mut self, args: &[String]) -> NativePreparationResult<NativeOutputFormat> {
+            self.calls.push("asio".into());
+            self.projected = args.to_vec();
+            Ok(NativeOutputFormat {
+                rate: 96_000.0,
+                channels: 2,
+                buffer_frames: None,
+            })
+        }
+    }
+    fn args(replay: bool) -> Vec<String> {
+        let mut args = vec!["--chart".into(), "song.bms".into()];
+        if replay {
+            args.extend(["--replay".into(), "past.bkr".into()]);
+        }
+        args
+    }
+    fn validated(
+        args: &[String],
+        host: SettingsHost,
+        mode: PreparationMode,
+    ) -> NativePreparationResult<()> {
+        let mut defaults = NativeDefaults::for_validation();
+        if host == SettingsHost::Macos {
+            defaults.device = "1".into();
+        }
+        match mode {
+            PreparationMode::Play => {
+                complete(args, host, &defaults)?;
+            }
+            PreparationMode::Replay => {
+                replay_args(args, host, &defaults)?;
+            }
+        }
+        Ok(())
+    }
+    fn run(
+        args: &[String],
+        host: SettingsHost,
+        mode: PreparationMode,
+        device: &mut Device,
+    ) -> NativePreparationResult<Vec<String>> {
+        prepare(args, host, mode, device, |args| validated(args, host, mode))
+    }
+    #[test]
+    fn shared_preparation_uses_minimum_actual_host_mode_queries() {
+        for (host, mode, expected) in [
+            (
+                SettingsHost::Windows,
+                PreparationMode::Play,
+                vec!["default"],
+            ),
+            (
+                SettingsHost::Windows,
+                PreparationMode::Replay,
+                vec!["default", "format:7"],
+            ),
+            (SettingsHost::Linux, PreparationMode::Play, vec!["keyboard"]),
+            (SettingsHost::Linux, PreparationMode::Replay, vec![]),
+            (
+                SettingsHost::Macos,
+                PreparationMode::Play,
+                vec!["default", "format:7", "keyboard"],
+            ),
+            (
+                SettingsHost::Macos,
+                PreparationMode::Replay,
+                vec!["default", "format:7"],
+            ),
+        ] {
+            let original = args(mode == PreparationMode::Replay);
+            let mut device = Device::default();
+            let output = run(&original, host, mode, &mut device).unwrap();
+            assert_eq!(device.calls, expected);
+            assert_eq!(original, args(mode == PreparationMode::Replay));
+            if host == SettingsHost::Macos {
+                assert!(
+                    output
+                        .chunks_exact(2)
+                        .any(|pair| pair == ["--channels", "2"])
+                );
+                assert!(
+                    output
+                        .chunks_exact(2)
+                        .any(|pair| pair == ["--buffer-frames", "512"])
+                );
+            }
+            if mode == PreparationMode::Replay {
+                assert!(!output.iter().any(|arg| matches!(
+                    arg.as_str(),
+                    "--evdev" | "--keyboard-path" | "--keyboard-registry"
+                )));
+            }
+            if host == SettingsHost::Linux && mode == PreparationMode::Play {
+                assert!(output.chunks_exact(2).any(|pair| pair == ["--evdev", "3"]));
+            }
+        }
+    }
+    #[test]
+    fn explicit_options_and_group_assignments_never_trigger_unnecessary_queries() {
+        for host in [
+            SettingsHost::Windows,
+            SettingsHost::Linux,
+            SettingsHost::Macos,
+        ] {
+            let mut values = args(false);
+            if host == SettingsHost::Windows {
+                values.extend(["--buffer", "frames:64"].map(String::from));
+            } else {
+                values.extend(
+                    [
+                        "--rate",
+                        "32000",
+                        "--channels",
+                        "1",
+                        "--buffer-frames",
+                        "64",
+                    ]
+                    .map(String::from),
+                );
+            }
+            values.extend(match host {
+                SettingsHost::Windows => vec!["--device".into(), "explicit".into()],
+                SettingsHost::Linux => vec![
+                    "--alsa".into(),
+                    "explicit".into(),
+                    "--evdev".into(),
+                    "/explicit".into(),
+                ],
+                SettingsHost::Macos => vec![
+                    "--device".into(),
+                    "99".into(),
+                    "--keyboard-registry".into(),
+                    "88".into(),
+                ],
+            });
+            let mut device = Device::default();
+            let output = run(&values, host, PreparationMode::Play, &mut device).unwrap();
+            assert!(device.calls.is_empty());
+            assert_eq!(&output[..values.len()], &values);
+        }
+        for count in [2, 3, 4] {
+            for host in [SettingsHost::Linux, SettingsHost::Macos] {
+                let mut values = args(false);
+                for id in 1..=count {
+                    let input = if host == SettingsHost::Linux {
+                        format!("{id}:/dev/input/event{id}")
+                    } else {
+                        format!("{id}:{}", 100 + id)
+                    };
+                    values.extend(["--local-player".into(), input]);
+                }
+                let mut device = Device::default();
+                run(&values, host, PreparationMode::Play, &mut device).unwrap();
+                assert!(!device.calls.iter().any(|call| call == "keyboard"));
+            }
+        }
+    }
+    #[test]
+    fn original_validator_and_schema_failure_precede_all_native_calls() {
+        let values = args(false);
+        let mut device = Device::default();
+        let original = values.clone();
+        assert!(
+            prepare(
+                &values,
+                SettingsHost::Macos,
+                PreparationMode::Play,
+                &mut device,
+                |received| {
+                    assert_eq!(received, original);
+                    Err("strict syntax rejected".into())
+                }
+            )
+            .is_err()
+        );
+        assert!(device.calls.is_empty());
+        let invalid = ["--unknown".into(), "bad".into()];
+        assert!(
+            prepare(
+                &invalid,
+                SettingsHost::Windows,
+                PreparationMode::Play,
+                &mut device,
+                |_| Ok(())
+            )
+            .is_err()
+        );
+        assert!(device.calls.is_empty());
+        let mut asio = args(false);
+        asio.extend(["--backend".into(), "asio".into()]);
+        assert!(
+            run(
+                &asio,
+                SettingsHost::Windows,
+                PreparationMode::Play,
+                &mut device
+            )
+            .is_err()
+        );
+        assert!(device.calls.is_empty());
+    }
+    #[test]
+    fn metadata_errors_never_become_parser_placeholder_execution() {
+        for format in [
+            NativeOutputFormat {
+                rate: f64::NAN,
+                channels: 2,
+                buffer_frames: Some(512),
+            },
+            NativeOutputFormat {
+                rate: 44100.5,
+                channels: 2,
+                buffer_frames: Some(512),
+            },
+            NativeOutputFormat {
+                rate: 0.0,
+                channels: 2,
+                buffer_frames: Some(512),
+            },
+            NativeOutputFormat {
+                rate: f64::from(u32::MAX) + 1.0,
+                channels: 2,
+                buffer_frames: Some(512),
+            },
+            NativeOutputFormat {
+                rate: 48000.0,
+                channels: 0,
+                buffer_frames: Some(512),
+            },
+            NativeOutputFormat {
+                rate: 48000.0,
+                channels: 2,
+                buffer_frames: Some(0),
+            },
+            NativeOutputFormat {
+                rate: 48000.0,
+                channels: 2,
+                buffer_frames: None,
+            },
+        ] {
+            let mut device = Device {
+                bad: Some(format),
+                ..Default::default()
+            };
+            assert!(
+                run(
+                    &args(false),
+                    SettingsHost::Macos,
+                    PreparationMode::Play,
+                    &mut device
+                )
+                .is_err()
+            );
+            assert!(!device.calls.iter().any(|call| call == "keyboard"));
+        }
+        for (bad_id, failure) in [(true, false), (false, true)] {
+            let mut device = Device {
+                bad_id,
+                failure,
+                ..Default::default()
+            };
+            assert!(
+                run(
+                    &args(false),
+                    SettingsHost::Windows,
+                    PreparationMode::Play,
+                    &mut device
+                )
+                .is_err()
+            );
+            assert_eq!(device.calls, vec!["default"]);
+        }
+        let mut device = Device {
+            keyboard_count: crate::device_catalog::MAX_DEVICES + 1,
+            ..Default::default()
+        };
+        assert!(
+            run(
+                &args(false),
+                SettingsHost::Linux,
+                PreparationMode::Play,
+                &mut device
+            )
+            .is_err()
+        );
+        assert!(metadata_id("").is_err());
+        assert!(
+            metadata_id(&"x".repeat(crate::device_catalog::MAX_DEVICE_TEXT_BYTES + 1)).is_err()
+        );
+    }
+    #[test]
+    fn asio_replay_query_uses_real_projection_routing_buffer_and_clock_assessments() {
+        let mut values = args(true);
+        values.extend(
+            [
+                "--backend",
+                "asio",
+                "--device",
+                "{12345678-9ABC-DEF0-1234-56789ABCDEF0}",
+                "--output-channels",
+                "3,7",
+                "--buffer",
+                "frames:64",
+                "--asio-system-clock",
+                "multimedia",
+                "--asio-timer-error-ns",
+                "100",
+            ]
+            .map(String::from),
+        );
+        let mut device = Device::default();
+        let output = run(
+            &values,
+            SettingsHost::Windows,
+            PreparationMode::Replay,
+            &mut device,
+        )
+        .unwrap();
+        assert_eq!(device.calls, vec!["asio"]);
+        for pair in [
+            ["--channels", "2"],
+            ["--output-channels", "3,7"],
+            ["--buffer-frames", "64"],
+            ["--asio-system-clock", "multimedia"],
+            ["--asio-timer-error-ns", "100"],
+        ] {
+            assert!(device.projected.chunks_exact(2).any(|p| p == pair));
+        }
+        assert!(output.chunks_exact(2).any(|p| p == ["--rate", "96000"]));
+        assert!(!device.projected.iter().any(|arg| arg == "--bind"));
+        let live: Vec<String> = values
+            .chunks_exact(2)
+            .filter(|pair| pair[0] != "--replay")
+            .flatten()
+            .cloned()
+            .collect();
+        let mut device = Device::default();
+        run(
+            &live,
+            SettingsHost::Windows,
+            PreparationMode::Play,
+            &mut device,
+        )
+        .unwrap();
+        assert!(device.calls.is_empty());
     }
 }
