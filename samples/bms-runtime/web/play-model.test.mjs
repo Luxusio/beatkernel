@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  millisecondsToNanos, secondsToNanos, frameNanos, startProjection, presentationPoint, reportWord, renderedCursor,
+  millisecondsToNanos, secondsToNanos, frameNanos, startProjection, presentationPoint, presentationPair, reportWord, renderedCursor,
   KEY_BINDINGS, bindingsFor,
 } from "./play-model.mjs";
 
@@ -173,4 +173,24 @@ test("malformed presentation data and unrepresentable grids are errors even befo
     [0n, 48000, 1, Infinity], [I64_MAX, 1, 1, 1000]]) {
     assert.throws(() => presentationPoint({ contextTime: 0, performanceTime: 0 }, start, rate, now, age));
   }
+});
+
+test("presentation pairs preserve original fractional Window time separately from output and receipt time", () => {
+  const evidence = { contextTime: 1.5, performanceTime: 2050.125 };
+  const expected = { outputNs: 500000000n, hostNs: 2050125000n };
+  assert.deepEqual(presentationPair(evidence, 48000n, 48000, 2200), expected);
+  assert.deepEqual(presentationPair(evidence, 48000n, 48000, 3050.125), expected,
+    "neither coordinate advances with the observation's receipt time");
+  assert.equal(presentationPoint(evidence, 48000n, 48000, 2200), expected.outputNs);
+  assert.deepEqual(presentationPair({ contextTime: 1, performanceTime: 9007199254.75 },
+    1n, 44100, 9007199255), { outputNs: 999977324n, hostNs: 9007199254750000n });
+  assert.deepEqual(presentationPair({ contextTime: 604800.125, performanceTime: 604800000.125 },
+    604800n * 48000n, 48000, 604800001), { outputNs: 125000000n, hostNs: 604800000125000n });
+  for (const timestamp of [{ contextTime: 0, performanceTime: 2050 },
+    { contextTime: 1.5, performanceTime: 0 }, { contextTime: 0.5, performanceTime: 2050 },
+    { contextTime: 1.5, performanceTime: 999 }, { contextTime: 1.5, performanceTime: 2201 }]) {
+    assert.equal(presentationPair(timestamp, 48000n, 48000, 2200), null);
+  }
+  assert.throws(() => presentationPair({ contextTime: 1, performanceTime: 9223372036855 },
+    0n, 48000, 9223372036855), "original host time must fit signed nanoseconds");
 });

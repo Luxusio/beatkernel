@@ -24,6 +24,9 @@ use beatkernel::{
         AffineClockMapper, ClockDomainId, ClockInterval, ClockPair, ClockPoint, Duration, Timestamp,
     },
 };
+use beatkernel_platform::audio::presentation::discipline::{
+    DisciplineConfig, DisciplineError, DisciplineUpdate, ObservationAdmission,
+};
 
 fn point(domain: u32, nanos: i64) -> ClockPoint {
     ClockPoint {
@@ -1183,4 +1186,345 @@ fn absent_and_repeated_output_cannot_complete_even_an_empty_or_multiweek_chart()
     assert!(!game.observe_completion(Some(idle), far).unwrap());
     assert_eq!((game.score().hits, game.score().misses), (0, 0));
     assert!(!game.failed());
+}
+
+fn clock_policy() -> DisciplineConfig {
+    DisciplineConfig {
+        capacity: 4,
+        retention_interval: Duration::from_nanos(1_000_000_000),
+        max_observation_age: Duration::from_nanos(1_000_000_000),
+        ..DisciplineConfig::default()
+    }
+}
+
+fn observed(chosen: StepGameplayConfig, output_ns: i64, host_ns: i64) -> ClockPair {
+    ClockPair {
+        source: point(22, chosen.output_origin.timestamp.as_nanos() + output_ns),
+        target: point(11, chosen.host_origin.timestamp.as_nanos() + host_ns),
+    }
+}
+
+#[test]
+fn output_discipline_preserves_watermark_continuity_historical_phase_and_real_judging() {
+    let chosen = StepGameplayConfig {
+        early_ns: 1_000_000,
+        late_ns: 1_000_000,
+        ..zero_preroll()
+    };
+    let mapper = clocks(chosen);
+    let (mut game, _) =
+        StepGameplay::new(prepared("#00011:01\n#00112:01\n"), chosen, bindings(false)).unwrap();
+    game.configure_output_clock(clock_policy()).unwrap();
+    game.activate(chosen.host_origin).unwrap();
+    let physical = input(chosen, 1, 4, 1, 0, ButtonState::Down);
+    let first = game
+        .process_input(physical.clone(), &mapper, chosen.output_origin)
+        .unwrap();
+    assert_eq!(first.song_time, Timestamp::ZERO);
+    assert_eq!(game.score().hits, 1);
+    game.observe_output_clock(observed(chosen, 1_000_100_000, 1_000_000_000))
+        .unwrap();
+    game.advance_to(
+        host_at(chosen, 1_000_000_000),
+        &mapper,
+        chosen.output_origin,
+    )
+    .unwrap();
+    assert_eq!(
+        game.update_output_clock(host_at(chosen, 1_000_000_000))
+            .unwrap(),
+        Some(DisciplineUpdate::Warmup { span_ns: 0 })
+    );
+    game.observe_output_clock(observed(chosen, 2_000_200_000, 2_000_000_000))
+        .unwrap();
+    let at = host_at(chosen, 2_000_000_000);
+    let boundary = game.advance_to(at, &mapper, chosen.output_origin).unwrap();
+    let expected = DisciplineUpdate::Applied {
+        base_rate_ppm: 100,
+        correction_ppm: 20,
+        applied_rate_ppm: 120,
+        phase_error_ns: 200_000,
+        limited: false,
+    };
+    assert_eq!(game.update_output_clock(at).unwrap(), Some(expected));
+    assert_eq!(game.song_time(), boundary.song_time);
+    assert_eq!(
+        game.advance_to(at, &mapper, chosen.output_origin)
+            .unwrap()
+            .song_time,
+        Timestamp::from_nanos(2_000_000_000)
+    );
+    let later = host_at(chosen, 3_000_000_000);
+    assert_eq!(
+        game.advance_to(later, &mapper, chosen.output_origin)
+            .unwrap()
+            .song_time,
+        Timestamp::from_nanos(3_000_120_000)
+    );
+    // The latest observation still points at host 2 s. Its phase must use the
+    // preserved historical segment, even after correcting the future at 2 s.
+    assert_eq!(game.update_output_clock(later).unwrap(), Some(expected));
+    let second = game
+        .process_input(
+            input(chosen, 1, 5, 2, 4_000_000_000, ButtonState::Down),
+            &mapper,
+            output_at(chosen, 4_000_000_000),
+        )
+        .unwrap();
+    assert_eq!(second.song_time, Timestamp::from_nanos(4_000_240_000));
+    assert_eq!(second.audio_at, point(22, 4_100_000_000));
+    assert!(matches!(second.judge_events[0].outcome,
+        JudgeOutcome::Hit { delta, .. } if delta == Duration::from_nanos(240_000)));
+    assert_eq!(game.score().hits, 2);
+    assert_eq!(first.input, Some(physical));
+    assert_eq!(first.song_time, Timestamp::ZERO);
+    assert!(!game.failed());
+}
+
+#[test]
+fn missing_and_stale_observations_skip_correction_and_duplicates_do_not_refresh_age() {
+    let chosen = zero_preroll();
+    let mapper = clocks(chosen);
+    let (mut game, _) = StepGameplay::new(prepared(""), chosen, bindings(false)).unwrap();
+    game.configure_output_clock(clock_policy()).unwrap();
+    game.activate(chosen.host_origin).unwrap();
+    game.advance_to(chosen.host_origin, &mapper, chosen.output_origin)
+        .unwrap();
+    assert_eq!(game.update_output_clock(chosen.host_origin).unwrap(), None);
+    for second in 1..=2 {
+        assert_eq!(
+            game.observe_output_clock(observed(
+                chosen,
+                second * 1_000_000_000,
+                second * 1_000_000_000
+            ))
+            .unwrap(),
+            ObservationAdmission::Retained
+        );
+        let at = host_at(chosen, second * 1_000_000_000);
+        game.advance_to(at, &mapper, chosen.output_origin).unwrap();
+        assert!(game.update_output_clock(at).unwrap().is_some());
+    }
+    assert_eq!(
+        game.observe_output_clock(observed(chosen, 2_000_000_000, 2_000_000_000))
+            .unwrap(),
+        ObservationAdmission::Unchanged
+    );
+    assert_eq!(
+        game.observe_output_clock(observed(chosen, 2_000_000_000, 2_999_000_000))
+            .unwrap(),
+        ObservationAdmission::Unchanged
+    );
+    let stale = host_at(chosen, 3_000_000_001);
+    game.advance_to(stale, &mapper, chosen.output_origin)
+        .unwrap();
+    assert_eq!(game.update_output_clock(stale).unwrap(), None);
+    assert_eq!(game.song_time(), Timestamp::from_nanos(3_000_000_001));
+    // More observations than the retained ring capacity preserve normal motion.
+    for second in 4..=9 {
+        assert_eq!(
+            game.observe_output_clock(observed(
+                chosen,
+                second * 1_000_000_000,
+                second * 1_000_000_000
+            ))
+            .unwrap(),
+            ObservationAdmission::Retained
+        );
+        let at = host_at(chosen, second * 1_000_000_000);
+        game.advance_to(at, &mapper, chosen.output_origin).unwrap();
+        assert!(matches!(
+            game.update_output_clock(at).unwrap(),
+            Some(DisciplineUpdate::Applied {
+                applied_rate_ppm: 0,
+                phase_error_ns: 0,
+                ..
+            })
+        ));
+    }
+    assert!(!game.failed());
+}
+
+#[test]
+fn clock_faults_fence_committed_score_without_retiming_or_replaying_commands() {
+    for case in 0..9 {
+        let chosen = zero_preroll();
+        let mapper = clocks(chosen);
+        let (mut game, _) =
+            StepGameplay::new(prepared("#00011:01\n"), chosen, bindings(false)).unwrap();
+        game.configure_output_clock(clock_policy()).unwrap();
+        game.activate(chosen.host_origin).unwrap();
+        game.process_input(
+            input(chosen, 1, 4, 1, 0, ButtonState::Down),
+            &mapper,
+            chosen.output_origin,
+        )
+        .unwrap();
+        game.observe_output_clock(observed(chosen, if case == 5 { 300_000_000 } else { 0 }, 0))
+            .unwrap();
+        let at = host_at(chosen, 1_000_000_000);
+        game.advance_to(at, &mapper, chosen.output_origin).unwrap();
+        if case == 8 {
+            game.process_input(
+                input(chosen, 1, 99, 2, 1_000_000_000, ButtonState::Down),
+                &mapper,
+                chosen.output_origin,
+            )
+            .unwrap();
+        }
+        let score = game.score().clone();
+        let song = game.song_time();
+        let hash = game.judge().stable_hash().unwrap();
+        let (error, expected) = match case {
+            0 => {
+                let mut pair = observed(chosen, 1_000_000_000, 1_000_000_000);
+                pair.source.domain = ClockDomainId(33);
+                (
+                    game.observe_output_clock(pair).unwrap_err(),
+                    DisciplineError::DomainMismatch,
+                )
+            }
+            1 => (
+                game.observe_output_clock(observed(chosen, -1, 1))
+                    .unwrap_err(),
+                DisciplineError::NonIncreasing,
+            ),
+            2 => (
+                game.observe_output_clock(observed(chosen, 1, -1))
+                    .unwrap_err(),
+                DisciplineError::NonIncreasing,
+            ),
+            3 => (
+                game.observe_output_clock(observed(chosen, 1, 0))
+                    .unwrap_err(),
+                DisciplineError::NonIncreasing,
+            ),
+            4 | 5 => {
+                game.observe_output_clock(observed(
+                    chosen,
+                    if case == 4 {
+                        1_010_000_000
+                    } else {
+                        1_300_000_000
+                    },
+                    1_000_000_000,
+                ))
+                .unwrap();
+                (
+                    game.update_output_clock(at).unwrap_err(),
+                    if case == 4 {
+                        DisciplineError::BaseRateOutOfBounds
+                    } else {
+                        DisciplineError::PhaseErrorTooLarge
+                    },
+                )
+            }
+            6 => (
+                game.update_output_clock(point(33, at.timestamp.as_nanos()))
+                    .unwrap_err(),
+                DisciplineError::DomainMismatch,
+            ),
+            7 => (
+                game.update_output_clock(host_at(chosen, 999_999_999))
+                    .unwrap_err(),
+                DisciplineError::NonIncreasing,
+            ),
+            _ => (
+                game.update_output_clock(at).unwrap_err(),
+                DisciplineError::NonIncreasing,
+            ),
+        };
+        assert!(matches!(error, StepGameplayError::Clock(actual) if actual == expected));
+        assert_eq!(game.score(), &score);
+        assert_eq!(game.song_time(), song);
+        assert_eq!(game.judge().stable_hash().unwrap(), hash);
+        assert_eq!(game.score().hits, 1);
+        assert_fenced(&mut game, chosen);
+    }
+}
+
+#[test]
+fn clock_configuration_is_atomic_setup_and_actual_host_may_precede_nominal_activation() {
+    let chosen = zero_preroll();
+    let (mut game, _) = StepGameplay::new(prepared(""), chosen, bindings(false)).unwrap();
+    assert!(matches!(
+        game.configure_output_clock(DisciplineConfig {
+            capacity: 1,
+            ..clock_policy()
+        }),
+        Err(StepGameplayError::Clock(DisciplineError::InvalidConfig))
+    ));
+    assert!(!game.failed());
+    game.configure_output_clock(clock_policy()).unwrap();
+    assert!(matches!(
+        game.configure_output_clock(clock_policy()),
+        Err(StepGameplayError::InvalidConfiguration(_))
+    ));
+    let activated = StepGameplayConfig {
+        host_origin: point(11, 15_000_000_000),
+        ..chosen
+    };
+    game.activate(activated.host_origin).unwrap();
+    assert_eq!(
+        game.observe_output_clock(observed(activated, 0, -1_000_000))
+            .unwrap(),
+        ObservationAdmission::Retained
+    );
+    game.advance_to(
+        activated.host_origin,
+        &clocks(activated),
+        chosen.output_origin,
+    )
+    .unwrap();
+    assert_eq!(
+        game.update_output_clock(activated.host_origin).unwrap(),
+        Some(DisciplineUpdate::Warmup { span_ns: 0 })
+    );
+    game.observe_output_clock(observed(activated, 1_000_000_000, 999_000_000))
+        .unwrap();
+    let at = host_at(activated, 1_000_000_000);
+    game.advance_to(at, &clocks(activated), chosen.output_origin)
+        .unwrap();
+    assert!(matches!(
+        game.update_output_clock(at).unwrap(),
+        Some(DisciplineUpdate::Applied {
+            base_rate_ppm: 0,
+            phase_error_ns: 1_000_000,
+            applied_rate_ppm: 100,
+            ..
+        })
+    ));
+    assert_eq!(game.song_time(), Timestamp::from_nanos(1_000_000_000));
+
+    let (mut nominal, _) = StepGameplay::new(prepared(""), chosen, bindings(false)).unwrap();
+    nominal
+        .advance_to(chosen.host_origin, &clocks(chosen), chosen.output_origin)
+        .unwrap();
+    assert!(matches!(
+        nominal.configure_output_clock(clock_policy()),
+        Err(StepGameplayError::InvalidConfiguration(_))
+    ));
+    assert_eq!(
+        nominal.update_output_clock(chosen.host_origin).unwrap(),
+        None
+    );
+    assert!(!nominal.failed());
+    for observe in [false, true] {
+        let (mut premature, _) = StepGameplay::new(prepared(""), chosen, bindings(false)).unwrap();
+        premature.configure_output_clock(clock_policy()).unwrap();
+        let failure = if observe {
+            premature
+                .observe_output_clock(observed(chosen, 0, 0))
+                .unwrap_err()
+        } else {
+            premature
+                .update_output_clock(chosen.host_origin)
+                .unwrap_err()
+        };
+        assert!(matches!(
+            failure,
+            StepGameplayError::Clock(DisciplineError::InvalidConfig)
+        ));
+        assert_fenced(&mut premature, chosen);
+    }
 }

@@ -148,6 +148,11 @@ async function workerHarness(options = {}) {
       this.calls.push(["output", words.slice(), presentedNs]);
       return options.observeOutput?.(this, words, presentedNs) ?? false;
     }
+    observe_presentation(outputNs, hostNs) {
+      this.live();
+      this.calls.push(["presentation", outputNs, hostNs]);
+      options.observePresentation?.(this, outputNs, hostNs);
+    }
     commands(max) { this.live(); this.calls.push(["commands", max]); return this.batches.shift() ?? null; }
     acknowledge(...args) { this.live(); this.calls.push(["ack", ...args]); options.ack?.(this, args); }
     stop() {
@@ -317,11 +322,12 @@ test("Window input provenance, pre-origin count and actual rendered cursor survi
   assert.deepEqual(h.of("play-commands")[0].batch, batch(11n));
   const pulls = game.calls.filter(value => value[0] === "commands").length;
   const unavailable = renderReport({ available: false });
-  await h.send({ kind: "play-render", playId: 7, renderId: 1, report: unavailable, presentedNs: null });
+  await h.send({ kind: "play-render", playId: 7, renderId: 1, report: unavailable, presentedNs: null, presentedHostNs: null });
   assert.deepEqual(game.calls.find(value => value[0] === "output"), ["output", unavailable.words, null]);
   assert.deepEqual(h.of("play-render-done")[0], { kind: "play-render-done", playId: 7, renderId: 1, completed: false });
   const actual = renderReport();
-  await h.send({ kind: "play-render", playId: 7, renderId: 2, report: actual, presentedNs: 9007199254742999n });
+  await h.send({ kind: "play-render", playId: 7, renderId: 2, report: actual,
+    presentedNs: 9007199254742999n, presentedHostNs: ORIGIN });
   assert.deepEqual(game.calls.filter(value => value[0] === "output")[1], ["output", actual.words, 9007199254742999n]);
   await h.send(step({ tickId: 2, watermark: ORIGIN + 20n }));
   assert.equal(game.calls.filter(value => value[0] === "commands").length, pulls);
@@ -477,8 +483,8 @@ test("RPC, tick and report fences prevent repeated consumption and reject faulty
     assertReleased(h);
   }
   const render = await active();
-  await render.send({ kind: "play-render", playId: 7, renderId: 2, report: renderReport(), presentedNs: null });
-  await render.send({ kind: "play-render", playId: 7, renderId: 2, report: renderReport(), presentedNs: null });
+  await render.send({ kind: "play-render", playId: 7, renderId: 2, report: renderReport(), presentedNs: null, presentedHostNs: null });
+  await render.send({ kind: "play-render", playId: 7, renderId: 2, report: renderReport(), presentedNs: null, presentedHostNs: null });
   assert.equal(render.games[0].calls.filter(value => value[0] === "output").length, 1);
   assert.equal(render.of("play-render-done").length, 1);
   assertReleased(render);
@@ -488,7 +494,7 @@ test("RPC, tick and report fences prevent repeated consumption and reject faulty
   terminal.words[54] = 1;
   for (const faulty of [renderReport({ start: START + 1n }), unknownSample, terminal]) {
     const h = await active();
-    await h.send({ kind: "play-render", playId: 7, renderId: 1, report: faulty, presentedNs: null });
+    await h.send({ kind: "play-render", playId: 7, renderId: 1, report: faulty, presentedNs: null, presentedHostNs: null });
     assert.equal(h.games[0].calls.filter(value => value[0] === "output").length, 0);
     assert.equal(h.of("play-render-done").length, 0);
     assertReleased(h);
@@ -502,7 +508,8 @@ test("RPC, tick and report fences prevent repeated consumption and reject faulty
 test("actual completion result is correlated without disposing gameplay before its explicit stop", async () => {
   const h = await active({ observeOutput() { return true; } });
   const report = renderReport();
-  await h.send({ kind: "play-render", playId: 7, renderId: 1, report, presentedNs: 9223372036854775807n });
+  await h.send({ kind: "play-render", playId: 7, renderId: 1, report,
+    presentedNs: 9223372036854775807n, presentedHostNs: ORIGIN });
   assert.deepEqual(h.of("play-render-done")[0], { kind: "play-render-done", playId: 7, renderId: 1, completed: true });
   assert.equal(h.games[0].frees, 0);
   assert.equal(h.of("play-stopped").length, 0);
@@ -513,7 +520,7 @@ test("actual completion result is correlated without disposing gameplay before i
   assertReleased(h);
   for (const fault of ["stopError", "freeError"]) {
     const broken = await active({ [fault]: "actual gameplay disposal failed", observeOutput() { return true; } });
-    await broken.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs: 1n });
+    await broken.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs: 1n, presentedHostNs: ORIGIN });
     assert.equal(broken.of("play-render-done")[0].completed, true);
     await broken.send({ kind: "play-stop", playId: 7 });
     assert.equal(broken.of("play-stopped").length, 0);
@@ -526,20 +533,20 @@ test("actual completion result is correlated without disposing gameplay before i
 test("malformed presentation and contradictory or failed completion cannot publish a successful receipt", async () => {
   for (const presentedNs of [undefined, -1n, 9223372036854775808n, 1, "1"]) {
     const h = await active();
-    await h.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs });
+    await h.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs, presentedHostNs: ORIGIN });
     assert.equal(h.games[0].calls.filter(value => value[0] === "output").length, 0);
     assert.equal(h.of("play-render-done").length, 0);
     assertReleased(h);
   }
   for (const result of ["true", 1]) {
     const h = await active({ observeOutput() { return result; } });
-    await h.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs: 1n });
+    await h.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs: 1n, presentedHostNs: ORIGIN });
     assert.equal(h.of("play-render-done").length, 0);
     assertReleased(h);
   }
   const outstanding = await active({ batches: [batch(81n)], observeOutput() { return true; } });
   await outstanding.send(step());
-  await outstanding.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs: 1n });
+  await outstanding.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs: 1n, presentedHostNs: ORIGIN });
   assert.equal(outstanding.of("play-render-done").length, 0);
   assertReleased(outstanding);
 
@@ -548,9 +555,43 @@ test("malformed presentation and contradictory or failed completion cannot publi
     game.score = { ...retained };
     throw new Error("actual completion rejected the output domain");
   } });
-  await failed.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs: 1n });
+  await failed.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs: 1n, presentedHostNs: ORIGIN });
   assert.equal(failed.of("play-render-done").length, 0);
   assert.match(failed.of("play-error")[0].message, /output domain/);
   assert.equal(failed.of("play-error")[0].released, true);
+  assert.equal(failed.games[0].calls.filter(value => value[0] === "presentation").length, 0);
   assertReleased(failed, retained);
+});
+
+test("paired observations are preflighted together and preserve order before a correlated receipt", async () => {
+  const h = await active();
+  await h.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport({ available: false }),
+    presentedNs: null, presentedHostNs: null });
+  assert.equal(h.games[0].calls.filter(value => value[0] === "presentation").length, 0);
+  const actual = renderReport();
+  await h.send({ kind: "play-render", playId: 7, renderId: 2, report: actual,
+    presentedNs: 0n, presentedHostNs: ORIGIN - 1n });
+  assert.deepEqual(h.games[0].calls.filter(value => ["output", "presentation"].includes(value[0])).slice(-2), [
+    ["output", actual.words, 0n], ["presentation", 0n, ORIGIN - 1n],
+  ]);
+  assert.equal(h.of("play-render-done").at(-1).renderId, 2);
+  await h.send({ kind: "play-stop", playId: 7 });
+  assertReleased(h);
+  for (const [presentedNs, presentedHostNs] of [[null, 1n], [1n, null], [null, undefined],
+    [1n, -1n], [1n, 9223372036854775808n], [1n, 1], [1n, "1"]]) {
+    const invalid = await active();
+    await invalid.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(),
+      presentedNs, presentedHostNs });
+    assert.equal(invalid.games[0].calls.filter(value => ["output", "presentation"].includes(value[0])).length, 0);
+    assert.equal(invalid.of("play-render-done").length, 0);
+    assertReleased(invalid);
+  }
+  const fault = await active({ observePresentation() { throw new Error("actual clock phase bound exceeded"); } });
+  await fault.send({ kind: "play-render", playId: 7, renderId: 1, report: actual,
+    presentedNs: 1n, presentedHostNs: ORIGIN });
+  assert.deepEqual(fault.games[0].calls.filter(value => ["output", "presentation"].includes(value[0])).map(value => value[0]),
+    ["output", "presentation"]);
+  assert.equal(fault.of("play-render-done").length, 0);
+  assert.match(fault.of("play-error")[0].message, /phase bound/);
+  assertReleased(fault);
 });

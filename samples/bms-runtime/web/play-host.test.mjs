@@ -682,6 +682,7 @@ test("output observations follow poll, retain actual time without extrapolation 
   await flush();
   const first = worker.last("play-render");
   assert.equal(first.presentedNs, 50000000n, "8 ms of host delay does not advance output evidence");
+  assert.equal(first.presentedHostNs, 1300000000n);
   const pollIndex = h.traces.findIndex(row => row[0] === "poll");
   const outputIndex = h.traces.findIndex(row => row[0] === "output-timestamp");
   assert.ok(outputIndex > pollIndex);
@@ -690,6 +691,7 @@ test("output observations follow poll, retain actual time without extrapolation 
   await h.advance(8);
   const regressed = worker.last("play-render");
   assert.equal(regressed.presentedNs, null);
+  assert.equal(regressed.presentedHostNs, null);
   await h.receive({ kind: "play-render-done", playId: session.id, renderId: regressed.renderId, completed: false });
   h.faults.outputEvidence = { contextTime: 1.3, performanceTime: 1316 };
   await h.advance(8);
@@ -708,6 +710,7 @@ test("unavailable output keeps completion pending while malformed evidence and r
     if (code === "unsupported" || code === "unavailable") {
       const report = worker.last("play-render");
       assert.equal(report.presentedNs, null);
+      assert.equal(report.presentedHostNs, null);
       await h.receive({ kind: "play-render-done", playId: session.id, renderId: report.renderId, completed: false });
       await h.receive({ kind: "play-step-done", playId: session.id,
         tickId: worker.last("play-step").tickId, songNs: 604800000000000n,
@@ -741,4 +744,41 @@ test("unavailable output keeps completion pending while malformed evidence and r
     assert.match(h.get("status").textContent, /completion evidence was malformed/);
     await h.close();
   }
+});
+
+test("Window retains only progressing clock pairs and defers coarse or regressing coordinates", async () => {
+  const h = await harness({ outputEvidence: { contextTime: 1.5, performanceTime: 1500 } });
+  await h.preview();
+  const session = await h.launch();
+  const worker = h.workers[0];
+  h.setNow(1500);
+  await h.advance(8);
+  const initial = worker.last("play-render");
+  assert.equal(initial.presentedNs, 250000000n);
+  assert.equal(initial.presentedHostNs, 1500000000n);
+  let previous = initial;
+  for (const [contextTime, performanceTime, outputNs, hostNs] of [
+    // The repeated output forwards its actual host coordinate without retaining
+    // it as new progress. A subsequent host below 1504 ms must remain admissible.
+    [1.5, 1504, 250000000n, 1504000000n],
+    [1.5009765625, 1500, null, null],
+    [1.5009765625, 1502.125, 250976562n, 1502125000n],
+    [1.5, 1510, null, null],
+    [1.501953125, 1501, null, null],
+    [1.501953125, 1502.125, null, null],
+    [1.501953125, 1510, 251953125n, 1510000000n],
+  ]) {
+    await h.receive({ kind: "play-render-done", playId: session.id,
+      renderId: previous.renderId, completed: false });
+    h.faults.outputEvidence = { contextTime, performanceTime };
+    await h.advance(8);
+    const next = worker.last("play-render");
+    assert.ok(next.renderId > previous.renderId);
+    assert.equal(next.presentedNs, outputNs);
+    assert.equal(next.presentedHostNs, hostNs);
+    previous = next;
+  }
+  assert.equal(worker.messages("play-stop").length, 0);
+  assert.equal(h.audio.stopStarts, 0);
+  await h.close();
 });
