@@ -300,6 +300,21 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 options.duplicates,
             )?;
             lnobj = Some(marker);
+        } else if command == "POORBGA" {
+            PoorBgaMode::parse(value).map_err(|_| {
+                fail(
+                    line,
+                    BmsErrorKind::Syntax("POORBGA requires exactly 0, 1 or 2"),
+                )
+            })?;
+            define(
+                &mut metadata,
+                command,
+                value.to_owned(),
+                line,
+                "POORBGA",
+                options.duplicates,
+            )?;
         } else if command == "LNTYPE" {
             if value != "1" && value != "01" {
                 return Err(fail(

@@ -40,6 +40,8 @@ pub struct PlayerChart {
     pub notes: Vec<PlayerNote>,
     /// Latest gameplay endpoint, in song nanoseconds.
     pub duration_ns: i64,
+    /// Validated presentation-only POORBGA mode cached during chart preparation.
+    pub poor_bga_mode: beatkernel_bms::PoorBgaMode,
     // A range-maximum tree prunes ended holds without scanning the old prefix.
     endpoint_tree: Vec<i64>,
     tree_leaves: usize,
@@ -75,6 +77,7 @@ impl PlayerChart {
         source: &BmsChart,
         chart: &CompiledChart,
     ) -> Result<Self, PlayerChartError> {
+        let poor_bga_mode = source.poor_bga_mode().map_err(PlayerChartError)?;
         let mut by_id = BTreeMap::new();
         for note in &source.notes {
             if by_id.insert(note.object, note.lane.channel()).is_some() {
@@ -133,6 +136,7 @@ impl PlayerChart {
             lanes,
             notes,
             duration_ns,
+            poor_bga_mode,
             endpoint_tree,
             tree_leaves,
             object_index,
@@ -547,12 +551,34 @@ mod tests {
             artist: String::new(),
             lanes: vec![0x11],
             duration_ns: 0,
+            poor_bga_mode: beatkernel_bms::PoorBgaMode::default(),
             notes,
             endpoint_tree,
             tree_leaves,
             object_index,
             bga: crate::bga::BgaTimeline::default(),
         }
+    }
+
+    #[test]
+    fn poor_bga_mode_is_checked_once_and_invalid_fabricated_metadata_rejects_preparation() {
+        let mut source = beatkernel_bms::parse(
+            "#BPM 60\n#WAV01 head.wav\n#00011:01",
+            beatkernel_bms::ParseOptions::default(),
+        )
+        .unwrap();
+        let compiled = source.compile().unwrap().chart;
+        for (value, expected) in [
+            ("0", beatkernel_bms::PoorBgaMode::Replace),
+            ("1", beatkernel_bms::PoorBgaMode::Overlay),
+            ("2", beatkernel_bms::PoorBgaMode::Off),
+        ] {
+            source.metadata.insert("POORBGA".into(), value.into());
+            let prepared = PlayerChart::from_compiled(&source, &compiled).unwrap();
+            assert_eq!(prepared.poor_bga_mode, expected);
+        }
+        source.metadata.insert("POORBGA".into(), " 1".into());
+        assert!(PlayerChart::from_compiled(&source, &compiled).is_err());
     }
 
     #[test]

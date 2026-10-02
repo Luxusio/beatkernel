@@ -133,6 +133,28 @@ pub struct ImageId(
     /// Original numeric base36 image index.
     pub u16,
 );
+/// Static Poor-image activation mode; gameplay and timing are unchanged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PoorBgaMode {
+    /// Header 0 (also absent): replace normal Base/Layer with raw Poor.
+    #[default]
+    Replace,
+    /// Header 1: retain normal Base/Layer and overlay raw Poor last.
+    Overlay,
+    /// Header 2: disable miss-driven Poor activation.
+    Off,
+}
+impl PoorBgaMode {
+    /// Parses an exact single POORBGA digit; no signs or guessed values.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "0" => Ok(Self::Replace),
+            "1" => Ok(Self::Overlay),
+            "2" => Ok(Self::Off),
+            _ => Err("POORBGA requires exactly 0, 1 or 2".into()),
+        }
+    }
+}
 /// Independently selected BMS image layers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum BgaChannel {
@@ -210,6 +232,14 @@ pub struct CompiledBms {
     pub bga: Vec<ScheduledBga>,
 }
 impl BmsChart {
+    /// Reads the preserved POORBGA header, rejecting fabricated invalid metadata.
+    pub fn poor_bga_mode(&self) -> Result<PoorBgaMode, String> {
+        self.metadata
+            .get("POORBGA")
+            .map_or(Ok(PoorBgaMode::default()), |value| {
+                PoorBgaMode::parse(value)
+            })
+    }
     /// Compiles gameplay, BGM and visual selections with checked core timing.
     pub fn compile(&self) -> Result<CompiledBms, BmsError> {
         let chart = self
@@ -389,3 +419,75 @@ impl std::fmt::Display for BmsError {
     }
 }
 impl std::error::Error for BmsError {}
+
+#[cfg(test)]
+mod poor_mode_fixtures {
+    use super::*;
+    #[test]
+    fn strict_header_defaults_duplicates_conditionals_and_gameplay_identity() {
+        let source = "#BPM 60\n#WAV01 head.wav\n#00011:01\n";
+        let default = parse(source, ParseOptions::default()).unwrap();
+        assert_eq!(default.poor_bga_mode().unwrap(), PoorBgaMode::Replace);
+        for (value, mode) in [
+            ("0", PoorBgaMode::Replace),
+            ("1", PoorBgaMode::Overlay),
+            ("2", PoorBgaMode::Off),
+        ] {
+            let parsed = parse(
+                &format!("{source}#pOoRbGa {value}"),
+                ParseOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(parsed.metadata["POORBGA"], value);
+            assert_eq!(parsed.poor_bga_mode().unwrap(), mode);
+            assert_eq!(parsed.source, default.source);
+            assert_eq!(
+                parsed.compile().unwrap().chart,
+                default.compile().unwrap().chart
+            );
+        }
+        for value in ["", "00", "01", "3", "+1", "-1", "1 2", "1.0", "１"] {
+            assert!(parse(&format!("#POORBGA {value}"), ParseOptions::default()).is_err());
+        }
+        let repeated = "#POORBGA 0\n#poorbga 1";
+        assert_eq!(
+            parse(repeated, ParseOptions::default()).unwrap_err().line,
+            2
+        );
+        let last = parse(
+            repeated,
+            ParseOptions {
+                duplicates: DuplicatePolicy::LastWins,
+                ..ParseOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(last.poor_bga_mode().unwrap(), PoorBgaMode::Overlay);
+        let conditional = "#RANDOM 2\n#IF 1\n#POORBGA 2\n#ELSE\n#POORBGA 1\n#ENDIF";
+        assert_eq!(
+            parse_seeded(conditional, ParseOptions::default(), 3)
+                .unwrap()
+                .poor_bga_mode()
+                .unwrap(),
+            PoorBgaMode::Off
+        );
+        assert_eq!(
+            parse_seeded(conditional, ParseOptions::default(), 0)
+                .unwrap()
+                .poor_bga_mode()
+                .unwrap(),
+            PoorBgaMode::Overlay
+        );
+        let inactive = "#SETRANDOM 1\n#IF 2\n#POORBGA malformed\n#ENDIF";
+        assert_eq!(
+            parse(inactive, ParseOptions::default())
+                .unwrap()
+                .poor_bga_mode()
+                .unwrap(),
+            PoorBgaMode::Replace
+        );
+        let mut fabricated = default;
+        fabricated.metadata.insert("POORBGA".into(), "01".into());
+        assert!(fabricated.poor_bga_mode().is_err());
+    }
+}
