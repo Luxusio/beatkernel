@@ -133,7 +133,7 @@ pub struct ImageId(
     /// Original numeric base36 image index.
     pub u16,
 );
-/// Prepared 256×256 canvas definition using half-open source corners.
+/// Crop definition using half-open corners on the application-selected canvas.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BgaCrop {
     /// Original BMP identity; crop definitions are not recursively resolved.
@@ -286,7 +286,37 @@ pub struct CompiledBms {
     /// Independently scheduled per-role opacity markers.
     pub bga_opacity: Vec<ScheduledBgaOpacity>,
 }
+pub(crate) fn parse_canvas_size(value: &str) -> Option<[u32; 2]> {
+    let mut fields = value.split_whitespace();
+    let mut size = [0; 2];
+    for extent in &mut size {
+        let field = fields.next()?;
+        if !(1..=4).contains(&field.len()) || !field.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        *extent = field.parse().ok()?;
+        if *extent == 0 {
+            return None;
+        }
+    }
+    if fields.next().is_some() {
+        return None;
+    }
+    Some(size)
+}
 impl BmsChart {
+    /// Reads explicit CANVASSIZE, rejecting malformed fabricated metadata.
+    /// Absent metadata preserves the resource's legacy canvas policy.
+    pub fn canvas_size(&self) -> Result<Option<[u32; 2]>, BmsError> {
+        self.metadata
+            .get("CANVASSIZE")
+            .map(|value| {
+                parse_canvas_size(value).ok_or_else(|| {
+                    BmsError::new(0, BmsErrorKind::Syntax("invalid CANVASSIZE metadata"))
+                })
+            })
+            .transpose()
+    }
     /// Reads the preserved POORBGA header, rejecting fabricated invalid metadata.
     pub fn poor_bga_mode(&self) -> Result<PoorBgaMode, String> {
         self.metadata
@@ -971,5 +1001,77 @@ mod crop_fixtures {
             ..ParseOptions::default()
         };
         assert!(parse("#BGA01 1 0 0 1 1 0 0\n#BGA02 1 0 0 1 1 0 0", options).is_err());
+    }
+}
+
+#[cfg(test)]
+mod canvas_fixtures {
+    use super::*;
+    #[test]
+    fn last_valid_wins_and_invalid_never_erases_metadata() {
+        for duplicates in [DuplicatePolicy::Reject, DuplicatePolicy::LastWins] {
+            let options = ParseOptions {
+                duplicates,
+                ..ParseOptions::default()
+            };
+            let chart = parse(
+                "#CANVASSIZE 0001 0002\n#CANVASSIZE 0 2\n#canvassize 31 17\n#CANVASSIZE +4 5",
+                options,
+            )
+            .unwrap();
+            assert_eq!(chart.canvas_size().unwrap(), Some([31, 17]));
+            assert_eq!(chart.metadata["CANVASSIZE"], "31 17");
+            assert_eq!(
+                chart
+                    .warnings
+                    .iter()
+                    .map(|warning| warning.line)
+                    .collect::<Vec<_>>(),
+                vec![2, 4]
+            );
+        }
+        assert_eq!(
+            parse("", ParseOptions::default())
+                .unwrap()
+                .canvas_size()
+                .unwrap(),
+            None
+        );
+    }
+    #[test]
+    fn strict_fields_and_fabricated_metadata() {
+        for invalid in [
+            "", "1", "1 2 3", "0 1", "0000 1", "10000 1", "1 -2", "+1 2", "1.5 2", "１ 2", "1 ٢",
+            "1e2 3",
+        ] {
+            let chart = parse(&format!("#CANVASSIZE {invalid}"), ParseOptions::default()).unwrap();
+            assert_eq!(chart.canvas_size().unwrap(), None);
+            assert_eq!(chart.warnings.len(), 1);
+            let mut fabricated = chart;
+            fabricated
+                .metadata
+                .insert("CANVASSIZE".into(), invalid.into());
+            assert!(fabricated.canvas_size().is_err(), "{invalid}");
+        }
+        assert_eq!(parse_canvas_size("9999 0001"), Some([9999, 1]));
+    }
+    #[test]
+    fn conditional_selection_and_unchanged_game_identity() {
+        let text = "#RANDOM 2\n#IF 1\n#CANVASSIZE 3 4\n#ELSE\n#CANVASSIZE malformed\n#CANVASSIZE 5 6\n#ENDIF";
+        let seed_zero = parse_seeded(text, ParseOptions::default(), 0).unwrap();
+        assert_eq!(seed_zero.canvas_size().unwrap(), Some([5, 6]));
+        assert_eq!(seed_zero.warnings.len(), 1);
+        let seed_three = parse_seeded(text, ParseOptions::default(), 3).unwrap();
+        assert_eq!(seed_three.canvas_size().unwrap(), Some([3, 4]));
+        assert!(seed_three.warnings.is_empty());
+        let gameplay = "#BPM 120\n#WAV01 note.wav\n#00011:01\n#00001:01\n#00004:0100\n";
+        let baseline = parse(gameplay, ParseOptions::default()).unwrap();
+        let sized = parse(
+            &format!("{gameplay}#CANVASSIZE 19 23"),
+            ParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(baseline.source, sized.source);
+        assert_eq!(baseline.compile().unwrap(), sized.compile().unwrap());
     }
 }

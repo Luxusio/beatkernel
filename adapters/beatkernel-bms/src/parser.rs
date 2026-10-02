@@ -364,6 +364,12 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 options.duplicates,
             )?;
             lnobj = Some(marker);
+        } else if command == "CANVASSIZE" {
+            if let Some([width, height]) = parse_canvas_size(value) {
+                metadata.insert(command, format!("{width} {height}"));
+            } else {
+                warnings.push(BmsWarning { line, message: "invalid CANVASSIZE ignored; requires two positive one-to-four digit ASCII decimals".into() });
+            }
         } else if command == "POORBGA" {
             PoorBgaMode::parse(value).map_err(|_| {
                 fail(
