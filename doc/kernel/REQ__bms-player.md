@@ -1235,7 +1235,7 @@ replay-aware preparation, compiling them without execution under the user deferr
 After native audio/input cleanup, a connected solo network owner admits its
 exact latest cumulative prefix and waits at most the configured I/O stall
 timeout for a matching terminal acknowledgement. Periodic50ms throttling must
-not omit that prefix. Wire version4 retains separate progress, terminal progress and
+not omit that prefix. Wire version5 retains separate progress, terminal progress and
 acknowledgement with ordered sequences and checked cumulative counts. Reject
 duplicate/unsolicited/wrong acknowledgements, repeated terminal frames and
 progress after terminal. Preserve complete-frame writes when prioritizing the
@@ -1260,18 +1260,39 @@ deadline, explicit cancellation and bounded per-pass256 native input/message
 draining. No judgment or replay input is admitted during waiting. Preserve
 native input loss/removal/decode failures and foreground Raw Input cleanup.
 Errors/timeouts cancel the network owner and run existing native cleanup;
-offline and ghost-only modes keep their existing startup. Wireversion4 updates
+offline and ghost-only modes keep their existing startup. Wireversion5 updates
 the earlier terminal-prefix version2 contract while preserving final/ack data
-semantics. This is a preparation barrier; common-clock scheduled starts and
-measured synchronization still require implementation and later execution.
+semantics. The committed software start below extends this preparation barrier;
+native output-zero targeting and measured synchronization remain future work.
 ## Clock estimate before network audio start
 
 The shared native readiness gate also waits for eight validated session clock
 exchanges and a retained conservative offset estimate. All three existing
 native wait callbacks continue input draining/cancellation inside cleanup-owned
 startup, before audio starts; no extra main UI/audio callback wait is added.
-The existing multiplayer setup deadline bounds this phase. Wireversion4 extends
+The existing multiplayer setup deadline bounds this phase. Wireversion5 extends
 version3 readiness and terminal frames with finite clock probes. Local score,
 replay identity and song timestamps remain independent of probe data. Estimates
-are software observations, not a common audio-start commitment or measured
-physical synchronization. Native/socket/formal acceptance remains deferred.
+are software observations. The following committed software start extends
+this gate; measured physical synchronization remains unproven. Native/socket/formal acceptance remains deferred.
+
+## Committed software start
+
+Wireversion5 extends software clock sampling with bilateral clock-ready, host
+proposal, exact join acceptance and host commit. Configurable checked nanosecond
+policy bounds proposal lead, minimum remaining lead, estimate age and uncertainty.
+Reject duplicates, wrong roles/order/echo, stale estimates and close deadlines.
+Host publishes a local schedule after the entire commit is written; join after
+receiving the commit. Native startup waiting services existing bounded input and
+cancellation until the committed local target, rejecting materially late release.
+This schedules a software audio-start call; hardware output-zero, differing
+preroll/device latency and disconnected-peer atomicity remain unproven.
+Fixtures are authored and compiled only; execution/formal acceptance deferred.
+
+Software start defaults:2000ms proposal lead,100ms minimum remaining lead,
+5000ms maximum estimate age,100ms maximum interval width and25ms maximum gate
+release lateness. Shared native application extraction supports
+`--mp-start-lead-ms`, `--mp-start-min-lead-ms`, `--mp-clock-max-age-ms`,
+`--mp-clock-max-uncertainty-ms` and `--mp-start-max-lateness-ms`. Require host or
+join; reject duplicate flags, checked conversion overflow and invalid policies.
+An insufficient overall setup timeout fails rather than bypassing agreement.

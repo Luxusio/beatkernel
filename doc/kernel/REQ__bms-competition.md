@@ -90,7 +90,7 @@ prefix and waits until the configured I/O stall deadline for its exact peer
 acknowledgement before joining the networking worker. Queue pressure is retryable
 within that deadline; disconnect, cancellation, protocol errors and timeout
 remain explicit failures. This bypasses periodic publication throttling without
-introducing a gameplay/audio wait. The wire protocol is version4; versions1/2/3 peers
+introducing a gameplay/audio wait. The wire protocol is version5; versions1/2/3/4 peers
 are incompatible. Retain received peer-terminal progress separately from ordinary
 progress. A receipt confirms acceptance of a self-reported terminal prefix,
 including aborted sessions; it does not establish completed play or a ranking.
@@ -125,10 +125,10 @@ linking, real socket exchange, device playback or ASIO SDK/C++ acceptance.
 
 Selected network playback waits for both compatible peers to declare native
 preparation before starting audio. Assets, immutable PCM schedule, device and
-input acquisition complete before one-shot readiness admission. Version4 retains
+input acquisition complete before one-shot readiness admission. Version5 retains
 an empty ready frame; readiness requires full local frame write and remote
 ready receipt. Reject duplicate/nonempty ready frames and progress/terminal
-frames before bilateral readiness. Versions1/2/3 are incompatible. The existing
+frames before bilateral readiness. Versions1/2/3/4 are incompatible. The existing
 setup timeout bounds startup waiting; unavailable peers abort before output
 start rather than silently playing alone.
 
@@ -145,7 +145,7 @@ authored/compiled only; native/socket
 execution and formal acceptance remain deferred.
 ## Session monotonic clock sampling
 
-Wireversion4 adds fixed ping/pong frames after compatible bilateral readiness.
+Wireversion5 retains fixed ping/pong frames after compatible bilateral readiness.
 Each peer completes eight sequential four-timestamp exchanges on its socket
 worker, with one outstanding ping and one pending pong. Validate exact sequence,
 echo, frame length, nonnegative elapsed session times and local/remote chronology.
@@ -154,12 +154,33 @@ Choose minimum corrected RTT, with newest equal-delay sample; reject impossible
 negative corrected RTT rather than hide it. Emit one retained ClockEstimated
 result; native readiness waiting now requires that estimate before audio start.
 Existing setup/stall deadlines and cancellation apply. Version3 readiness/frame
-semantics continue inside incompatible wireversion4 (old1/2/3 reject).
+semantics continue inside incompatible wireversion5 (old1/2/3/4 reject).
 
 Timing points are software encoding/parsing observations and include scheduling
 and buffering. No system/wall-clock adjustment or hardware timestamp is implied.
 Checked deadline conversion retains the interval, bounds observation age, rejects
 backward/future observations, overflow and an already-due possible deadline.
 The model assumes constant offset during sampling; it does not prove drift or
-physical synchronization. Common-start commitment, preroll agreement and native
-audio clock scheduling remain to implement. Fixtures are authored/compiled only.
+physical synchronization. The software-start commitment below extends this
+barrier; preroll agreement and native output-zero targeting remain to implement. Fixtures are authored/compiled only.
+
+## Committed software start
+
+Wireversion5 extends software clock sampling with bilateral clock-ready, host
+proposal, exact join acceptance and host commit. Configurable checked nanosecond
+policy bounds proposal lead, minimum remaining lead, estimate age and uncertainty.
+Reject duplicates, wrong roles/order/echo, stale estimates and close deadlines.
+Host publishes a local schedule after the entire commit is written; join after
+receiving the commit. Native startup waiting services existing bounded input and
+cancellation until the committed local target, rejecting materially late release.
+This schedules a software audio-start call; hardware output-zero, differing
+preroll/device latency and disconnected-peer atomicity remain unproven.
+Fixtures are authored and compiled only; execution/formal acceptance deferred.
+
+Software start defaults:2000ms proposal lead,100ms minimum remaining lead,
+5000ms maximum estimate age,100ms maximum interval width and25ms maximum gate
+release lateness. Shared native application extraction supports
+`--mp-start-lead-ms`, `--mp-start-min-lead-ms`, `--mp-clock-max-age-ms`,
+`--mp-clock-max-uncertainty-ms` and `--mp-start-max-lateness-ms`. Require host or
+join; reject duplicate flags, checked conversion overflow and invalid policies.
+An insufficient overall setup timeout fails rather than bypassing agreement.
