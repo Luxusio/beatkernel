@@ -23,7 +23,7 @@ pub struct BgaTimeline {
     initial_poor: Option<ImageId>,
 }
 
-fn channel_index(channel: BgaChannel) -> usize {
+pub(crate) fn channel_index(channel: BgaChannel) -> usize {
     match channel {
         BgaChannel::Base => 0,
         BgaChannel::Layer => 1,

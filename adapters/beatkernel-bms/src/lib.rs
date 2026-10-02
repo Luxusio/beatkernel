@@ -191,6 +191,30 @@ pub struct ScheduledBga {
     /// Visual-only source acquisition ordinal.
     pub ordinal: u64,
 }
+/// Per-role alpha marker on the independent visual quarter-beat grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BgaOpacityEvent {
+    /// Source position in BmsChart::bga_ticks_per_beat units.
+    pub beat: Beat,
+    /// Base/Layer/Layer2/Poor role selected by channels0B..0E.
+    pub channel: BgaChannel,
+    /// Exact nonzero hexadecimal byte, normalized only during drawing.
+    pub alpha: u8,
+    /// Shared visual-only acquisition order, including image selections.
+    pub ordinal: u64,
+}
+/// Per-role opacity scheduled with checked core pre-STOP timing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScheduledBgaOpacity {
+    /// Original absolute song timestamp.
+    pub at: Timestamp,
+    /// Independent visual role.
+    pub channel: BgaChannel,
+    /// Original raw alpha byte.
+    pub alpha: u8,
+    /// Shared visual source ordinal for simultaneous ordering.
+    pub ordinal: u64,
+}
 /// Explicitly ignored descriptive/visual feature, never silent timing fallback.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BmsWarning {
@@ -210,6 +234,8 @@ pub struct BmsChart {
     pub images: BTreeMap<ImageId, String>,
     /// Visual selections, kept outside the gameplay and audio grids.
     pub bga: Vec<BgaEvent>,
+    /// Independent per-role opacity markers on the shared visual grid.
+    pub bga_opacity: Vec<BgaOpacityEvent>,
     /// Independent visual tick grid encompassing the gameplay resolution.
     pub bga_ticks_per_beat: u32,
     /// Lane/keysound mapping by chart-local object identity.
@@ -232,6 +258,8 @@ pub struct CompiledBms {
     pub bgm: Vec<ScheduledBgm>,
     /// Separately compiled visual image selections, never judged objects.
     pub bga: Vec<ScheduledBga>,
+    /// Independently scheduled per-role opacity markers.
+    pub bga_opacity: Vec<ScheduledBgaOpacity>,
 }
 impl BmsChart {
     /// Reads the preserved POORBGA header, rejecting fabricated invalid metadata.
@@ -283,38 +311,13 @@ impl BmsChart {
             chart,
             bgm,
             bga: self.compile_bga()?,
+            bga_opacity: self.compile_bga_opacity()?,
         })
     }
     /// Compiles the visual grid separately, preserving gameplay/BGM rounding.
     /// Tempo/STOP beats are checked-rescaled; simultaneous events use pre-STOP time.
     pub fn compile_bga(&self) -> Result<Vec<ScheduledBga>, BmsError> {
-        let original = self.source.ticks_per_beat;
-        if original == 0 || self.bga_ticks_per_beat == 0 || self.bga_ticks_per_beat % original != 0
-        {
-            return Err(BmsError::new(0, BmsErrorKind::Resolution));
-        }
-        let factor = i64::from(self.bga_ticks_per_beat / original);
-        let rescale = |beat: Beat| -> Result<Beat, BmsError> {
-            let tick = beat
-                .ticks()
-                .checked_mul(factor)
-                .ok_or_else(|| BmsError::new(0, BmsErrorKind::Overflow))?;
-            Beat::new(tick).map_err(|error| BmsError::new(0, BmsErrorKind::Compile(error)))
-        };
-        let mut timing = SourceChart::new(self.bga_ticks_per_beat, self.source.initial_bpm)
-            .map_err(|error| BmsError::new(0, BmsErrorKind::Compile(error)))?;
-        for marker in &self.source.bpm_changes {
-            timing.bpm_changes.push(BpmChange {
-                beat: rescale(marker.beat)?,
-                bpm: marker.bpm,
-            });
-        }
-        for marker in &self.source.stops {
-            timing.stops.push(Stop {
-                beat: rescale(marker.beat)?,
-                duration: marker.duration,
-            });
-        }
+        let mut timing = self.visual_timing()?;
         timing.objects.extend(
             self.bga
                 .iter()
@@ -344,6 +347,76 @@ impl BmsChart {
         }
         scheduled.sort_by_key(|event| (event.at, event.ordinal));
         Ok(scheduled)
+    }
+    /// Schedules alpha markers separately without changing gameplay or image events.
+    pub fn compile_bga_opacity(&self) -> Result<Vec<ScheduledBgaOpacity>, BmsError> {
+        let mut timing = self.visual_timing()?;
+        timing
+            .objects
+            .extend(
+                self.bga_opacity
+                    .iter()
+                    .enumerate()
+                    .map(|(index, event)| SourceObject {
+                        id: ObjectId(index as u64),
+                        start: event.beat,
+                        end: None,
+                        interaction: InteractionId(0),
+                        visual: VisualId(0),
+                        audio: None,
+                        metadata: ObjectMetadata::default(),
+                    }),
+            );
+        let compiled = timing
+            .compile()
+            .map_err(|error| BmsError::new(0, BmsErrorKind::Compile(error)))?;
+        let mut scheduled = Vec::with_capacity(self.bga_opacity.len());
+        for object in compiled.objects() {
+            let event = self.bga_opacity[object.id.0 as usize];
+            scheduled.push(ScheduledBgaOpacity {
+                at: object.time.start,
+                channel: event.channel,
+                alpha: event.alpha,
+                ordinal: event.ordinal,
+            });
+        }
+        scheduled.sort_by_key(|event| (event.at, event.ordinal));
+        Ok(scheduled)
+    }
+    fn visual_timing(&self) -> Result<SourceChart, BmsError> {
+        self.bga
+            .len()
+            .checked_add(self.bga_opacity.len())
+            .filter(|count| *count <= MAX_SOURCE_ITEMS)
+            .ok_or_else(|| BmsError::new(0, BmsErrorKind::Limit("visual source items")))?;
+        let original = self.source.ticks_per_beat;
+        if original == 0 || self.bga_ticks_per_beat == 0 || self.bga_ticks_per_beat % original != 0
+        {
+            return Err(BmsError::new(0, BmsErrorKind::Resolution));
+        }
+        let factor = i64::from(self.bga_ticks_per_beat / original);
+        let rescale = |beat: Beat| -> Result<Beat, BmsError> {
+            let tick = beat
+                .ticks()
+                .checked_mul(factor)
+                .ok_or_else(|| BmsError::new(0, BmsErrorKind::Overflow))?;
+            Beat::new(tick).map_err(|error| BmsError::new(0, BmsErrorKind::Compile(error)))
+        };
+        let mut timing = SourceChart::new(self.bga_ticks_per_beat, self.source.initial_bpm)
+            .map_err(|error| BmsError::new(0, BmsErrorKind::Compile(error)))?;
+        for marker in &self.source.bpm_changes {
+            timing.bpm_changes.push(BpmChange {
+                beat: rescale(marker.beat)?,
+                bpm: marker.bpm,
+            });
+        }
+        for marker in &self.source.stops {
+            timing.stops.push(Stop {
+                beat: rescale(marker.beat)?,
+                duration: marker.duration,
+            });
+        }
+        Ok(timing)
     }
     /// Creates lane-specific registrations using existing builtin evaluators.
     /// Timing windows/offsets stay caller-controlled; RANK is not guessed.
@@ -594,5 +667,181 @@ mod poor_mode_fixtures {
             .bga
             .is_empty()
         );
+    }
+    #[test]
+    fn opacity_hex_bytes_zero_rests_namespaces_duplicates_and_shared_visual_ordinals() {
+        let chart = parse(
+            "#BPM 60\n#00004:01\n#0000B:01\n#0000C:ff\n#0000D:80\n#0000E:7F\n#0000B:00",
+            ParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(chart.bga.len(), 1);
+        assert_eq!(chart.bga_opacity.len(), 4);
+        assert_eq!(
+            chart
+                .bga_opacity
+                .iter()
+                .map(|event| (event.channel, event.alpha, event.ordinal))
+                .collect::<Vec<_>>(),
+            vec![
+                (BgaChannel::Base, 1, 1),
+                (BgaChannel::Layer, 255, 2),
+                (BgaChannel::Layer2, 128, 3),
+                (BgaChannel::Poor, 127, 4)
+            ]
+        );
+        assert!(chart.source.objects.is_empty());
+        assert!(chart.images.is_empty());
+        let compiled = chart.compile().unwrap();
+        assert_eq!(compiled.bga_opacity.len(), 4);
+        assert!(
+            compiled
+                .bga_opacity
+                .iter()
+                .all(|event| event.at.as_nanos() == 0)
+        );
+        for value in ["GG", "G1", "ZZ", "0", ""] {
+            assert!(parse(&format!("#0000B:{value}"), ParseOptions::default()).is_err());
+        }
+        let duplicate = "#0000C:01\n#0000c:FF";
+        assert_eq!(
+            parse(duplicate, ParseOptions::default()).unwrap_err().line,
+            2
+        );
+        let last = parse(
+            duplicate,
+            ParseOptions {
+                duplicates: DuplicatePolicy::LastWins,
+                ..ParseOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(last.bga_opacity[0].alpha, 255);
+        assert_eq!(last.bga_opacity[0].ordinal, 1);
+        assert!(
+            parse(
+                "#00004:01\n#0000B:01",
+                ParseOptions {
+                    max_objects: 1,
+                    ..ParseOptions::default()
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            parse(
+                "#0000B:00",
+                ParseOptions {
+                    max_objects: 1,
+                    ..ParseOptions::default()
+                }
+            )
+            .unwrap()
+            .bga_opacity
+            .is_empty()
+        );
+    }
+    #[test]
+    fn opacity_subdivision_and_checked_bpm_stop_preserve_gameplay_and_images() {
+        let prefix =
+            "#BPM 120\n#STOP01 48\n#WAV01 head.wav\n#00011:0101\n#00009:0001\n#00004:0101\n";
+        let plain = parse(
+            &format!("{prefix}; ignored physical line\n#00001:0101"),
+            ParseOptions::default(),
+        )
+        .unwrap();
+        let alpha = parse(
+            &format!("{prefix}#0000D:00010000000000\n#00001:0101"),
+            ParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(plain.source, alpha.source);
+        assert_eq!(plain.notes, alpha.notes);
+        assert_eq!(plain.bgm, alpha.bgm);
+        assert_eq!(
+            plain
+                .bga
+                .iter()
+                .map(|event| (event.channel, event.image, event.ordinal))
+                .collect::<Vec<_>>(),
+            alpha
+                .bga
+                .iter()
+                .map(|event| (event.channel, event.image, event.ordinal))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(alpha.source.ticks_per_beat, 1);
+        assert_eq!(alpha.bga_ticks_per_beat, 7);
+        assert_eq!(
+            plain.compile().unwrap().chart,
+            alpha.compile().unwrap().chart
+        );
+        assert_eq!(plain.compile().unwrap().bgm, alpha.compile().unwrap().bgm);
+        assert_eq!(plain.compile_bga().unwrap(), alpha.compile_bga().unwrap());
+        assert_eq!(
+            alpha.compile_bga_opacity().unwrap()[0].at.as_nanos(),
+            285_714_285
+        );
+        let stops = parse(
+            "#BPM 120\n#BPM01 240\n#STOP01 48\n#00008:00010000\n#00009:00010000\n#0000B:00017F00",
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .compile_bga_opacity()
+        .unwrap();
+        assert_eq!(
+            stops
+                .iter()
+                .map(|event| event.at.as_nanos())
+                .collect::<Vec<_>>(),
+            vec![500_000_000, 1_000_000_000]
+        );
+        assert!(
+            parse(
+                "#0000B:00010000000000",
+                ParseOptions {
+                    max_resolution: 6,
+                    ..ParseOptions::default()
+                }
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn seeded_opacity_and_combined_fabricated_visual_capacity_are_checked() {
+        let text = "#RANDOM 2\n#IF 1\n#0000B:01\n#ELSE\n#0000B:FF\n#ENDIF";
+        assert_eq!(
+            parse_seeded(text, ParseOptions::default(), 3)
+                .unwrap()
+                .bga_opacity[0]
+                .alpha,
+            1
+        );
+        assert_eq!(
+            parse_seeded(text, ParseOptions::default(), 0)
+                .unwrap()
+                .bga_opacity[0]
+                .alpha,
+            255
+        );
+        assert!(
+            parse(
+                "#SETRANDOM 1\n#IF 2\n#0000E:GG\n#ENDIF",
+                ParseOptions::default()
+            )
+            .unwrap()
+            .bga_opacity
+            .is_empty()
+        );
+        let mut oversized = parse("#00004:01\n#0000B:01", ParseOptions::default()).unwrap();
+        oversized.bga.resize(MAX_SOURCE_ITEMS, oversized.bga[0]);
+        assert!(matches!(
+            oversized.compile_bga().unwrap_err().kind,
+            BmsErrorKind::Limit("visual source items")
+        ));
+        assert!(matches!(
+            oversized.compile_bga_opacity().unwrap_err().kind,
+            BmsErrorKind::Limit("visual source items")
+        ));
     }
 }

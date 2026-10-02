@@ -47,6 +47,7 @@ pub struct PlayerChart {
     tree_leaves: usize,
     object_index: Vec<(ObjectId, usize)>,
     bga: crate::bga::BgaTimeline,
+    opacity: crate::bga_opacity::BgaOpacityTimeline,
 }
 
 /// A chart/catalog preparation failure with a user-visible explanation.
@@ -141,12 +142,19 @@ impl PlayerChart {
             tree_leaves,
             object_index,
             bga: crate::bga::BgaTimeline::from_chart(source).map_err(PlayerChartError)?,
+            opacity: crate::bga_opacity::BgaOpacityTimeline::from_chart(source)
+                .map_err(PlayerChartError)?,
         })
     }
 
     /// Image selections at the original song time, shared by every session mode.
     pub fn bga_state(&self, now: Timestamp) -> crate::bga::BgaState {
         self.bga.state_at(now)
+    }
+
+    /// Per-channel opacity at the exact original song time, independent of images.
+    pub fn bga_opacity(&self, now: Timestamp) -> crate::bga_opacity::BgaOpacity {
+        self.opacity.state_at(now)
     }
 
     /// Looks up a prepared object identity without scanning notes. A changed
@@ -557,6 +565,7 @@ mod tests {
             tree_leaves,
             object_index,
             bga: crate::bga::BgaTimeline::default(),
+            opacity: crate::bga_opacity::BgaOpacityTimeline::default(),
         }
     }
 

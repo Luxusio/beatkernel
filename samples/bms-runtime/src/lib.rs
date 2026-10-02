@@ -478,3 +478,6 @@ pub mod image_key;
 
 /// Original-song-time activation policy for retained Poor image selections.
 pub mod poor_background;
+
+/// Prepared original-song per-role BGA opacity queries.
+pub mod bga_opacity;

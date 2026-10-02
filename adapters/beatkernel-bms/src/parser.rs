@@ -195,7 +195,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 )?;
                 continue;
             }
-            if !matches!(channel, 1 | 3 | 4 | 6 | 7 | 8 | 9 | 0x0a)
+            if !matches!(channel, 1 | 3 | 4 | 6 | 7 | 8 | 9 | 0x0a | 0x0b..=0x0e)
                 && !visible(channel)
                 && !long(channel)
             {
@@ -210,7 +210,11 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                     BmsErrorKind::Syntax("channel data requires nonempty pairs"),
                 ));
             }
-            let radix = if channel == 3 { 16 } else { 36 };
+            let radix = if channel == 3 || matches!(channel, 0x0b..=0x0e) {
+                16
+            } else {
+                36
+            };
             let mut tokens = Vec::with_capacity(data.len() / 2);
             for token in data.as_bytes().chunks_exact(2) {
                 let token = std::str::from_utf8(token).expect("ASCII checked");
@@ -229,7 +233,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 tokens,
                 line,
             };
-            if matches!(channel, 4 | 6 | 7 | 0x0a) {
+            if matches!(channel, 4 | 6 | 7 | 0x0a | 0x0b..=0x0e) {
                 visual_rows.push(row);
             } else {
                 rows.push(row);
@@ -478,8 +482,35 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
     let visual_resolution =
         u32::try_from(visual_resolution).map_err(|_| fail(0, BmsErrorKind::Resolution))?;
     let mut visual_merged = BTreeMap::new();
+    let mut opacity_merged = BTreeMap::new();
     for event in visual_events {
         let tick = arithmetic(event.line, event.beat.ticks(visual_resolution))?;
+        if matches!(event.channel, 0x0b..=0x0e) {
+            let channel = match event.channel {
+                0x0b => BgaChannel::Base,
+                0x0c => BgaChannel::Layer,
+                0x0d => BgaChannel::Layer2,
+                0x0e => BgaChannel::Poor,
+                _ => unreachable!("opacity row channel"),
+            };
+            let marker = BgaOpacityEvent {
+                beat: Beat::new(tick)
+                    .map_err(|error| fail(event.line, BmsErrorKind::Compile(error)))?,
+                channel,
+                alpha: u8::try_from(event.value)
+                    .map_err(|_| fail(event.line, BmsErrorKind::Overflow))?,
+                ordinal: event.ordinal,
+            };
+            define(
+                &mut opacity_merged,
+                (tick, channel),
+                marker,
+                event.line,
+                "BGA opacity position",
+                options.duplicates,
+            )?;
+            continue;
+        }
         let channel = match event.channel {
             4 => BgaChannel::Base,
             6 => BgaChannel::Poor,
@@ -505,6 +536,8 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
     }
     let mut bga: Vec<_> = visual_merged.into_values().collect();
     bga.sort_by_key(|event| (event.beat, event.ordinal));
+    let mut bga_opacity: Vec<_> = opacity_merged.into_values().collect();
+    bga_opacity.sort_by_key(|event| (event.beat, event.ordinal));
     let resolution = u32::try_from(resolution).map_err(|_| fail(0, BmsErrorKind::Resolution))?;
     let mut measures = Vec::with_capacity(max_measure + 1);
     for measure in 0..=max_measure {
@@ -708,6 +741,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
         .and_then(|count| count.checked_add(stop_events.len()))
         .and_then(|count| count.checked_add(bgm.len()))
         .and_then(|count| count.checked_add(bga.len()))
+        .and_then(|count| count.checked_add(bga_opacity.len()))
         .filter(|count| *count <= options.max_objects && *count <= MAX_SOURCE_ITEMS)
         .ok_or_else(|| fail(0, BmsErrorKind::Limit("source items")))?;
     let mut source = SourceChart::new(resolution, base)
@@ -788,6 +822,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
         samples,
         images,
         bga,
+        bga_opacity,
         bga_ticks_per_beat: visual_resolution,
         notes: mapped,
         bgm,
