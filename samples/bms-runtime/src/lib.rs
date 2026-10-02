@@ -82,6 +82,8 @@ pub mod multiplayer_clock;
 pub mod multiplayer_protocol;
 #[cfg(test)]
 mod multiplayer_protocol_fixtures;
+#[cfg(test)]
+mod multiplayer_session_fixtures;
 /// Checked bilateral commitment to a future software start.
 pub mod multiplayer_start;
 /// Common queue, rolling BGM and mixer construction/replenishment.

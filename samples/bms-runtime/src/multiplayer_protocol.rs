@@ -1,8 +1,10 @@
 //! Shared BKMP v6 framing and progress state, independent of transport and clocks.
 //! Peer progress is self-reported display data, not authenticated scoring.
 use crate::multiplayer_clock::{ClockFilter, ClockSample, OffsetEstimate};
-use crate::multiplayer_start::{StartMessage, StartSchedule};
-use std::fmt;
+use crate::multiplayer_start::{
+    StartAgreement, StartMessage, StartPolicy, StartRole, StartSchedule,
+};
+use std::{collections::VecDeque, fmt};
 
 pub(crate) const MAGIC: &[u8; 4] = b"BKMP";
 pub(crate) const VERSION: u16 = 6;
@@ -446,6 +448,349 @@ impl Protocol {
         } else {
             None
         }
+    }
+}
+
+/// Exact frame admitted for one complete local stream write. The adapter owns
+/// these bytes until completion; partial writes never acknowledge `id`.
+#[derive(Debug, PartialEq, Eq)]
+pub struct OutboundFrame {
+    pub id: u64,
+    pub bytes: Vec<u8>,
+}
+
+/// Control traffic precedes application dequeue, without a second progress queue.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WriteStep {
+    Frame(OutboundFrame),
+    ApplicationSlot,
+    Waiting,
+}
+
+#[derive(Clone, Copy)]
+struct InFlight {
+    id: u64,
+    tag: u8,
+    start: Option<StartMessage>,
+}
+
+/// Transport-independent session orchestration. All times are supplied by the
+/// caller on one nonnegative, monotonic session clock. No acoustic timing is
+/// inferred from probes or complete local writes.
+///
+/// There is one in-flight frame and at most eight pending events. Drain events
+/// after each operation, especially after `written` and before reading EOF.
+/// Errors fence every mutating operation with the original failure; already
+/// queued events remain available through `poll_event`.
+pub struct Session {
+    identity: Vec<u8>,
+    identity_sent: bool,
+    connected: bool,
+    ready_requested: bool,
+    protocol: Protocol,
+    clocks: ClockProbes,
+    start: StartAgreement,
+    last_now: Option<i64>,
+    last_frame_id: u64,
+    in_flight: Option<InFlight>,
+    application_slot: bool,
+    events: VecDeque<MultiplayerEvent>,
+    failure: Option<MultiplayerError>,
+}
+
+impl Session {
+    pub fn new(
+        identity: Vec<u8>,
+        role: StartRole,
+        policy: StartPolicy,
+        preroll_ns: i64,
+    ) -> Result<Self, MultiplayerError> {
+        if identity.is_empty() || identity.len() > MAX_IDENTITY {
+            return Err(MultiplayerError::InvalidOptions);
+        }
+        let start = StartAgreement::new_at(role, policy, preroll_ns)
+            .map_err(|error| MultiplayerError::Protocol(error.to_string()))?;
+        Ok(Self {
+            identity,
+            identity_sent: false,
+            connected: false,
+            ready_requested: false,
+            protocol: Protocol::default(),
+            clocks: ClockProbes::default(),
+            start,
+            last_now: None,
+            last_frame_id: 0,
+            in_flight: None,
+            application_slot: false,
+            events: VecDeque::with_capacity(8),
+            failure: None,
+        })
+    }
+
+    fn operate<T>(
+        &mut self,
+        operation: impl FnOnce(&mut Self) -> Result<T, MultiplayerError>,
+    ) -> Result<T, MultiplayerError> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        let result = operation(self);
+        if let Err(error) = &result {
+            self.failure = Some(error.clone());
+            self.application_slot = false;
+        }
+        result
+    }
+
+    fn observe_now(&mut self, now: i64) -> Result<(), MultiplayerError> {
+        if now < 0 || self.last_now.is_some_and(|previous| now < previous) {
+            return Err(MultiplayerError::Protocol(
+                "session clock is negative or regressed".into(),
+            ));
+        }
+        self.last_now = Some(now);
+        Ok(())
+    }
+
+    fn event(&mut self, event: MultiplayerEvent) -> Result<(), MultiplayerError> {
+        if self.events.len() == 8 {
+            return Err(MultiplayerError::QueueFull);
+        }
+        self.events.push_back(event);
+        Ok(())
+    }
+
+    fn collect_events(&mut self) -> Result<(), MultiplayerError> {
+        if let Some(event) = self.protocol.readiness() {
+            self.event(event)?;
+        }
+        if let Some(event) = self.protocol.acknowledgement() {
+            self.event(event)?;
+        }
+        if let Some(event) = self.clocks.estimate_event() {
+            if let MultiplayerEvent::ClockEstimated(estimate) = &event {
+                self.start
+                    .prepare(*estimate)
+                    .map_err(|error| MultiplayerError::Protocol(error.to_string()))?;
+            }
+            self.event(event)?;
+        }
+        if let Some(schedule) = self.start.take_schedule() {
+            self.event(MultiplayerEvent::StartScheduled(schedule))?;
+        }
+        Ok(())
+    }
+
+    fn admit(
+        &mut self,
+        bytes: Vec<u8>,
+        start: Option<StartMessage>,
+    ) -> Result<OutboundFrame, MultiplayerError> {
+        let id = self.last_frame_id.checked_add(1).ok_or_else(|| {
+            MultiplayerError::Protocol("outbound frame identity exhausted".into())
+        })?;
+        self.last_frame_id = id;
+        self.in_flight = Some(InFlight {
+            id,
+            tag: bytes[10],
+            start,
+        });
+        self.application_slot = false;
+        Ok(OutboundFrame { id, bytes })
+    }
+
+    /// One-shot local preparation request; it may precede peer identity receipt.
+    pub fn request_ready(&mut self) -> Result<(), MultiplayerError> {
+        self.operate(|session| {
+            if session.ready_requested {
+                return Err(MultiplayerError::Protocol(
+                    "local readiness already requested".into(),
+                ));
+            }
+            session.ready_requested = true;
+            session.application_slot = false;
+            Ok(())
+        })
+    }
+
+    /// Accept one complete decoded frame. Transport framing and deadlines remain
+    /// the caller's responsibility; every phase/order check lives here.
+    pub fn receive(&mut self, tag: u8, payload: &[u8], now: i64) -> Result<(), MultiplayerError> {
+        self.operate(|session| {
+            session.observe_now(now)?;
+            session.application_slot = false;
+            if payload.len() > MAX_IDENTITY {
+                return Err(MultiplayerError::Protocol(
+                    "frame payload exceeds limit".into(),
+                ));
+            }
+            if !session.connected {
+                if tag != 1 {
+                    return Err(MultiplayerError::Protocol("expected setup".into()));
+                }
+                if payload != session.identity.as_slice() {
+                    return Err(MultiplayerError::IncompatibleSetup);
+                }
+                session.connected = true;
+                session.event(MultiplayerEvent::Connected)?;
+            } else if tag == 6 || tag == 7 {
+                if !session.protocol.ready() {
+                    return Err(MultiplayerError::Protocol(
+                        "clock probe before readiness".into(),
+                    ));
+                }
+                if tag == 6 {
+                    session.clocks.receive_ping(payload, now)?;
+                } else {
+                    session.clocks.receive_pong(payload, now)?;
+                }
+            } else if (8..=11).contains(&tag) {
+                if !session.protocol.ready() {
+                    return Err(MultiplayerError::Protocol(
+                        "start before preparation readiness".into(),
+                    ));
+                }
+                session
+                    .start
+                    .receive(parse_start_frame(tag, payload)?, now)
+                    .map_err(|error| MultiplayerError::Protocol(error.to_string()))?;
+            } else {
+                if matches!(tag, 2 | 3) && !session.start.committed() {
+                    return Err(MultiplayerError::Protocol(
+                        "progress before committed start".into(),
+                    ));
+                }
+                if let Some(event) = session.protocol.receive(tag, payload)? {
+                    session.event(event)?;
+                }
+            }
+            session.collect_events()
+        })
+    }
+
+    /// Admit one control frame or offer one application dequeue. While a frame
+    /// remains in flight, this returns Waiting without producing another copy.
+    pub fn poll_write(&mut self, now: i64) -> Result<WriteStep, MultiplayerError> {
+        self.operate(|session| {
+            session.observe_now(now)?;
+            session.application_slot = false;
+            if session.in_flight.is_some() {
+                return Ok(WriteStep::Waiting);
+            }
+            if !session.identity_sent {
+                let bytes = frame(1, &session.identity);
+                let admitted = session.admit(bytes, None)?;
+                session.identity_sent = true;
+                return Ok(WriteStep::Frame(admitted));
+            }
+            if !session.connected {
+                return Ok(WriteStep::Waiting);
+            }
+            let (bytes, start) =
+                if let Some(bytes) = session.protocol.next_ready(session.ready_requested) {
+                    (bytes, None)
+                } else if let Some(bytes) = session.protocol.next_ack() {
+                    (bytes, None)
+                } else if session.protocol.ready() && session.clocks.pending_pong.is_some() {
+                    let bytes = session.clocks.next_pong(now)?.ok_or_else(|| {
+                        MultiplayerError::Protocol("missing pending clock pong".into())
+                    })?;
+                    (bytes, None)
+                } else if session.protocol.ready()
+                    && session.clocks.pending_ping.is_none()
+                    && session.clocks.completed < CLOCK_PROBES
+                {
+                    let bytes = session.clocks.next_ping(now)?.ok_or_else(|| {
+                        MultiplayerError::Protocol("missing next clock ping".into())
+                    })?;
+                    (bytes, None)
+                } else if let Some(message) = session
+                    .start
+                    .next(now)
+                    .map_err(|error| MultiplayerError::Protocol(error.to_string()))?
+                {
+                    (start_frame(message), Some(message))
+                } else {
+                    if session.start.committed() && session.protocol.local_final.is_none() {
+                        session.application_slot = true;
+                        return Ok(WriteStep::ApplicationSlot);
+                    }
+                    return Ok(WriteStep::Waiting);
+                };
+            Ok(WriteStep::Frame(session.admit(bytes, start)?))
+        })
+    }
+
+    /// Consumes a fresh ApplicationSlot. Receive, readiness, or write-completion
+    /// operations invalidate that grant; poll again before dequeuing progress.
+    pub fn send_progress(
+        &mut self,
+        progress: Progress,
+        final_prefix: bool,
+        now: i64,
+    ) -> Result<OutboundFrame, MultiplayerError> {
+        self.operate(|session| {
+            session.observe_now(now)?;
+            if !session.application_slot
+                || session.in_flight.is_some()
+                || !session.start.committed()
+            {
+                return Err(MultiplayerError::Protocol(
+                    "application write slot required".into(),
+                ));
+            }
+            session.application_slot = false;
+            let bytes = session.protocol.outgoing(Outgoing {
+                progress,
+                final_prefix,
+            })?;
+            session.admit(bytes, None)
+        })
+    }
+
+    /// Credits exactly the in-flight frame once. This is a complete local write,
+    /// never a claim of peer receipt or final application acknowledgement.
+    pub fn written(&mut self, frame_id: u64, now: i64) -> Result<(), MultiplayerError> {
+        self.operate(|session| {
+            session.observe_now(now)?;
+            session.application_slot = false;
+            let pending = session
+                .in_flight
+                .filter(|frame| frame.id == frame_id)
+                .ok_or_else(|| {
+                    MultiplayerError::Protocol("stale or unexpected complete write".into())
+                })?;
+            session.protocol.written(pending.tag);
+            if let Some(message) = pending.start {
+                session
+                    .start
+                    .written(message, now)
+                    .map_err(|error| MultiplayerError::Protocol(error.to_string()))?;
+            }
+            session.in_flight = None;
+            session.collect_events()
+        })
+    }
+
+    pub fn poll_event(&mut self) -> Option<MultiplayerEvent> {
+        self.events.pop_front()
+    }
+
+    /// True after the peer supplied exactly the expected identity.
+    pub fn setup_complete(&self) -> bool {
+        self.connected
+    }
+
+    /// Used by adapter setup deadlines; identity alone is insufficient.
+    pub fn preparation_pending(&self) -> bool {
+        !self.connected
+            || !self.protocol.ready()
+            || self.clocks.completed < CLOCK_PROBES
+            || !self.start.committed()
+    }
+
+    pub fn start_committed(&self) -> bool {
+        self.start.committed()
     }
 }
 

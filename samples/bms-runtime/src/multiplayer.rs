@@ -4,16 +4,18 @@ use crate::multiplayer_clock::OffsetEstimate;
 #[cfg(test)]
 use crate::multiplayer_clock::{ClockFilter, ClockSample};
 use crate::multiplayer_protocol::{
-    CLOCK_PROBES, ClockProbes, FrameDecoder as Frames, MAX_IDENTITY, Outgoing, Protocol, frame,
-    parse_start_frame, start_frame, validate_progress,
+    FrameDecoder as Frames, MAX_IDENTITY, Outgoing, Session, WriteStep, validate_progress,
 };
 pub use crate::multiplayer_protocol::{MultiplayerError, MultiplayerEvent, Progress};
 #[cfg(test)]
-use crate::multiplayer_protocol::{VERSION, parse_progress, prefix_frame, progress_frame};
+use crate::multiplayer_protocol::{
+    ClockProbes, Protocol, VERSION, frame, parse_progress, parse_start_frame, prefix_frame,
+    progress_frame, start_frame,
+};
 use crate::multiplayer_quic::{QuicCredentials, QuicEndpoint as Endpoint};
 #[cfg(test)]
 use crate::multiplayer_start::StartMessage;
-use crate::multiplayer_start::{StartAgreement, StartPolicy, StartSchedule};
+use crate::multiplayer_start::{StartPolicy, StartSchedule};
 use beatkernel::{
     replay::{
         ReplayHeader,
@@ -22,7 +24,6 @@ use beatkernel::{
     time::{ClockDomainId, Timestamp},
 };
 use std::{
-    fmt,
     io::{self, Read, Write},
     net::SocketAddr,
     sync::{
@@ -498,8 +499,14 @@ fn elapsed_ns(epoch: Instant) -> Result<i64, MultiplayerError> {
         .map_err(|_| MultiplayerError::Protocol("session clock extent exceeded".into()))
 }
 
-fn start_error(error: impl fmt::Display) -> MultiplayerError {
-    MultiplayerError::Protocol(error.to_string())
+fn forward_session_events(
+    session: &mut Session,
+    incoming: &SyncSender<MultiplayerEvent>,
+) -> Result<(), MultiplayerError> {
+    while let Some(event) = session.poll_event() {
+        incoming.try_send(event).map_err(queue_error)?;
+    }
+    Ok(())
 }
 
 fn run(
@@ -512,10 +519,12 @@ fn run(
     outgoing: Receiver<Outgoing>,
     incoming: SyncSender<MultiplayerEvent>,
 ) -> Result<(), MultiplayerError> {
-    let role = endpoint.role();
-    let mut start = StartAgreement::new_at(role, options.start_policy, options.preroll_ns)
-        .map_err(start_error)?;
-    let mut start_in_flight = None;
+    let mut session = Session::new(
+        identity,
+        endpoint.role(),
+        options.start_policy,
+        options.preroll_ns,
+    )?;
     let deadline = Instant::now() + options.setup_timeout;
     let mut stream = match endpoint.connect(stop, deadline) {
         Ok(stream) => stream,
@@ -526,60 +535,50 @@ fn run(
         Err(error) => return Err(error.into()),
     };
     let result = (|| {
-        let mut tx = frame(1, &identity);
+        let mut tx = match session.poll_write(elapsed_ns(clock_epoch)?)? {
+            WriteStep::Frame(frame) => Some(frame),
+            _ => {
+                return Err(MultiplayerError::Protocol(
+                    "missing initial setup frame".into(),
+                ));
+            }
+        };
         let mut written = 0;
         let mut rx = Frames::new();
         let mut buffer = [0; 4096];
         let mut last_write = Instant::now();
         let mut last_read = Instant::now();
-        let mut connected = false;
-        let mut protocol = Protocol::default();
-        let mut clocks = ClockProbes::default();
-        let mut tx_tag = 1u8;
+        let mut readiness_requested = false;
         loop {
             if stop.load(Ordering::Acquire) {
                 return Ok(());
             }
-            if (!connected
-                || !protocol.ready()
-                || clocks.completed < CLOCK_PROBES
-                || !start.committed())
-                && Instant::now() >= deadline
-            {
+            if session.preparation_pending() && Instant::now() >= deadline {
                 return Err(MultiplayerError::SetupTimeout);
             }
-            if connected
-                && ((written < tx.len() && last_write.elapsed() >= options.io_stall_timeout)
+            if session.setup_complete()
+                && ((tx.is_some() && last_write.elapsed() >= options.io_stall_timeout)
                     || (!rx.bytes.is_empty() && last_read.elapsed() >= options.io_stall_timeout))
             {
                 return Err(MultiplayerError::IoStalled);
             }
-            if written < tx.len() {
-                match stream.write(&tx[written..]) {
+            if !readiness_requested && ready_requested.load(Ordering::Acquire) {
+                session.request_ready()?;
+                readiness_requested = true;
+            }
+            if let Some(frame) = &tx {
+                match stream.write(&frame.bytes[written..]) {
                     Ok(0) => return Err(MultiplayerError::Closed),
                     Ok(count) => {
                         written += count;
                         last_write = Instant::now();
-                        if written == tx.len() {
-                            protocol.written(tx_tag);
-                            if let Some(message) = start_in_flight.take() {
-                                start
-                                    .written(message, elapsed_ns(clock_epoch)?)
-                                    .map_err(start_error)?;
-                            }
-                            if let Some(schedule) = start.take_schedule() {
-                                incoming
-                                    .try_send(MultiplayerEvent::StartScheduled(schedule))
-                                    .map_err(queue_error)?;
-                            }
-                            if let Some(event) = protocol.readiness() {
-                                incoming.try_send(event).map_err(queue_error)?;
-                            }
-                            // Peer may close immediately after receiving this ack.
-                            // Publish confirmed delivery before the following read sees EOF.
-                            if let Some(event) = protocol.acknowledgement() {
-                                incoming.try_send(event).map_err(queue_error)?;
-                            }
+                        if written == frame.bytes.len() {
+                            session.written(frame.id, elapsed_ns(clock_epoch)?)?;
+                            tx = None;
+                            written = 0;
+                            // Publish complete-write effects before a following
+                            // read can see peer EOF, including the final ACK.
+                            forward_session_events(&mut session, &incoming)?;
                         }
                     }
                     Err(error)
@@ -612,115 +611,30 @@ fn run(
                 }
             }
             if let Some((tag, payload)) = rx.take()? {
-                if !connected {
-                    if tag != 1 {
-                        return Err(MultiplayerError::Protocol("expected setup".into()));
-                    }
-                    if payload != identity {
-                        return Err(MultiplayerError::IncompatibleSetup);
-                    }
-                    connected = true;
-                    incoming
-                        .try_send(MultiplayerEvent::Connected)
-                        .map_err(queue_error)?;
-                } else if tag == 6 || tag == 7 {
-                    if !protocol.ready() {
-                        return Err(MultiplayerError::Protocol(
-                            "clock probe before readiness".into(),
-                        ));
-                    }
-                    let now = elapsed_ns(clock_epoch)?;
-                    if tag == 6 {
-                        clocks.receive_ping(&payload, now)?;
-                    } else {
-                        clocks.receive_pong(&payload, now)?;
-                    }
-                } else if (8..=11).contains(&tag) {
-                    if !protocol.ready() {
-                        return Err(MultiplayerError::Protocol(
-                            "start before native readiness".into(),
-                        ));
-                    }
-                    start
-                        .receive(parse_start_frame(tag, &payload)?, elapsed_ns(clock_epoch)?)
-                        .map_err(start_error)?;
-                } else {
-                    if matches!(tag, 2 | 3) && !start.committed() {
-                        return Err(MultiplayerError::Protocol(
-                            "progress before committed start".into(),
-                        ));
-                    }
-                    if let Some(event) = protocol.receive(tag, &payload)? {
-                        incoming.try_send(event).map_err(queue_error)?;
-                    }
-                }
+                session.receive(tag, &payload, elapsed_ns(clock_epoch)?)?;
+                forward_session_events(&mut session, &incoming)?;
             }
-            if connected && written == tx.len() {
-                if let Some(ready) = protocol.next_ready(ready_requested.load(Ordering::Acquire)) {
-                    tx = ready;
-                    tx_tag = 5;
-                    written = 0;
-                    last_write = Instant::now();
-                } else if let Some(ack) = protocol.next_ack() {
-                    tx = ack;
-                    tx_tag = 4;
-                    written = 0;
-                    last_write = Instant::now();
-                } else if protocol.ready() && clocks.pending_pong.is_some() {
-                    tx = clocks.next_pong(elapsed_ns(clock_epoch)?)?.ok_or_else(|| {
-                        MultiplayerError::Protocol("missing pending clock pong".into())
-                    })?;
-                    tx_tag = 7;
-                    written = 0;
-                    last_write = Instant::now();
-                } else if protocol.ready()
-                    && clocks.pending_ping.is_none()
-                    && clocks.completed < CLOCK_PROBES
-                {
-                    tx = clocks.next_ping(elapsed_ns(clock_epoch)?)?.ok_or_else(|| {
-                        MultiplayerError::Protocol("missing next clock ping".into())
-                    })?;
-                    tx_tag = 6;
-                    written = 0;
-                    last_write = Instant::now();
-                } else if let Some(message) =
-                    start.next(elapsed_ns(clock_epoch)?).map_err(start_error)?
-                {
-                    tx = start_frame(message);
-                    tx_tag = tx[10];
-                    start_in_flight = Some(message);
-                    written = 0;
-                    last_write = Instant::now();
-                } else {
-                    match outgoing.try_recv() {
-                        Ok(message) => {
-                            tx_tag = if message.final_prefix { 3 } else { 2 };
-                            tx = protocol.outgoing(message)?;
-                            written = 0;
-                            last_write = Instant::now();
-                        }
-                        Err(TryRecvError::Empty) => {}
+            if tx.is_none() {
+                let next = match session.poll_write(elapsed_ns(clock_epoch)?)? {
+                    WriteStep::Frame(frame) => Some(frame),
+                    WriteStep::ApplicationSlot => match outgoing.try_recv() {
+                        Ok(message) => Some(session.send_progress(
+                            message.progress,
+                            message.final_prefix,
+                            elapsed_ns(clock_epoch)?,
+                        )?),
+                        Err(TryRecvError::Empty) => None,
                         Err(TryRecvError::Disconnected) => return Ok(()),
-                    }
+                    },
+                    WriteStep::Waiting => None,
+                };
+                if let Some(frame) = next {
+                    tx = Some(frame);
+                    written = 0;
+                    last_write = Instant::now();
                 }
             }
-            if let Some(event) = protocol.readiness() {
-                incoming.try_send(event).map_err(queue_error)?;
-            }
-            if let Some(event) = protocol.acknowledgement() {
-                incoming.try_send(event).map_err(queue_error)?;
-            }
-            if let Some(event) = clocks.estimate_event() {
-                if let MultiplayerEvent::ClockEstimated(estimate) = &event {
-                    start.prepare(*estimate).map_err(start_error)?;
-                }
-                incoming.try_send(event).map_err(queue_error)?;
-            }
-            if let Some(schedule) = start.take_schedule() {
-                incoming
-                    .try_send(MultiplayerEvent::StartScheduled(schedule))
-                    .map_err(queue_error)?;
-            }
+            forward_session_events(&mut session, &incoming)?;
             stream.idle(TICK);
         }
     })();
