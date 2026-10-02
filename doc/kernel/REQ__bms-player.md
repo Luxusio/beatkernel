@@ -1497,3 +1497,23 @@ image loading. Native device ownership, exact roster identities and cleanup rema
 unchanged. Author real-component regression fixtures for request forwarding,
 section/binding boundaries, PCM tails and error propagation; execution and physical
 acceptance remain deferred.
+
+## Shared native judging and capture configuration
+
+Native solo and local sessions share application policy for the grade-one judge
+profile, optional full-song completion, recording limits and pristine replay
+capture. Keep exact early/late windows and signed input offset. Full-song
+completion uses the actual chart and PCM; finite sessions skip that preparation
+and retain their existing endpoint validation. Disabled recording does not
+validate ignored capture values. Enabled recording retains caller byte/record
+budgets, a 4096-byte header budget and input codec bounds of 65536/32768.
+
+The same core JudgeEngine continues to own judging. Preserve capture clock domain,
+original-song section start, chart seed and existing replay bytes. Solos prepare
+completion before chart publication, profile/judge after publication/cancellation,
+and capture inside the cleanup-protected outcome after native devices open.
+Local cohorts prepare their profile once and clone it for independent judges;
+member capture/completion still precede opponent loading. Device selectors,
+sound voices, recording paths and native cleanup remain with their existing
+owners. Author actual judge/runtime/capture/replay and completion-boundary fixtures;
+compilation does not establish runtime or physical acceptance.
