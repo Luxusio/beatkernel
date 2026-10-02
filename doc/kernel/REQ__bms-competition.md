@@ -46,6 +46,29 @@ preventing continuation after a partially admitted exchange. These are software
 timing and receipt contracts; physical synchronization and an actual browser
 HTTP/3 WebTransport endpoint remain separate implementation and acceptance work.
 
+## Browser multiplayer transport boundary
+
+The browser binding delegates to the same Session and FrameDecoder, with exact
+i64/u64 values exposed as JavaScript BigInt. The caller must supply the actual
+canonical setup identity; transport creation alone does not derive chart/rules
+compatibility. Incoming chunks are sliced to the decoder's needed prefix before
+crossing the WASM boundary, preserving bounded copying and unconsumed suffixes.
+Decoder failures also fence the binding's session operations.
+
+The WebTransport adapter opens one reliable bidirectional stream over an HTTPS
+HTTP/3 session. It retains only a bounded received chunk, exposes bounded read
+prefixes, and keeps one reader operation and one writer operation in flight.
+Outbound bytes are snapshotted before awaiting the write. Only resolved complete
+local writes may be reported to the shared session; they do not imply a final
+peer application ACK. Finite setup and I/O deadlines, abort and remote closure
+fence late results, with idempotent cancellation and cleanup. No automatic
+fallback, certificate bypass, UI-driven connection or protocol implementation
+belongs in this transport component.
+
+Callable binding and transport source remain separate from gameplay-derived
+setup, browser competition UI and the compatible HTTP/3 service. Those require
+further integration and deferred browser/network acceptance.
+
 ## Saved-record opponents
 
 The user can select their own saved replay or another player's saved replay.

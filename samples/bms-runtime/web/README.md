@@ -13,14 +13,42 @@ to this host. Browser multiplayer remains unfinished. The shared Rust
 progress, readiness, clock-probe and final-acknowledgement state used by native
 QUIC. Its common session owner composes setup matching and software start
 agreement, with bounded events and exact complete-write receipt IDs. Native
-QUIC already delegates those transitions to the common owner. A browser
-WebTransport adapter, WASM session bindings and compatible HTTP/3 endpoint still need
-integration; this module alone does not provide a browser connection.
+QUIC already delegates those transitions to the common owner. Callable
+`BrowserMultiplayer` WASM bindings and `multiplayer-transport.mjs` provide the
+session and WebTransport stream boundaries. Their connection to gameplay-derived
+setup, the existing host controls and a compatible HTTP/3 service remains
+unfinished; Play does not open a multiplayer connection.
 
 The DOM owns file selection, controls and layout. A dedicated module Worker owns
 the imported bytes, preparation and wgpu rendering on a transferred
 OffscreenCanvas. The host uses plain JavaScript without React or external
 scripts. Existing retained note instances and BGA texture caching are reused.
+
+## Multiplayer component boundary
+
+`BrowserMultiplayer` owns the shared Rust session. Its constructor takes exact
+canonical setup bytes, a host/join role and actual preroll. `with_policy` exposes
+the software start bounds. `WebTransportChannel.open` in
+`multiplayer-transport.mjs` owns the browser stream. These components are not yet
+called by the existing Play flow.
+
+An integrating owner requests readiness after preparation, reads at most
+`needed_bytes()` using `readPrefix`, then passes that bounded prefix to
+`receive_bytes` with explicit elapsed nanoseconds. Drain `poll_event` after each
+operation. `next_write` returns kind 0 for waiting, 1 for a frame or 2 for an
+application slot. Frame bytes may be taken once; only after `channel.write`
+resolves may `written(frame_id, now_ns)` credit their complete local write.
+An application slot permits `send_progress` from the actual game counters.
+Free each write object after consuming it, and close/free the session during
+cleanup. Times, frame IDs and counters use BigInt. The returned start event is a software
+schedule; the caller still owns audio startup and deadline admission.
+
+The channel allows one read and one write together, with finite deadlines.
+Read prefixes and writes are limited to 65,547 bytes; received chunks and their
+retained backing buffers to 1 MiB. Empty chunks are skipped at most 16 times.
+Cancellation and remote closure fence late completions. No peer application ACK
+is inferred from a local write. A compatible HTTPS HTTP/3 service and actual
+gameplay/UI integration are still required.
 
 ## Build and serve
 

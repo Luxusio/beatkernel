@@ -22,6 +22,7 @@ reads use the same bounded admission surface. The contract is documented in
 
 Known ceiling: shared source and compile-only evidence do not establish actual
 QUIC socket behavior, WebTransport sessions, HTTP/3 endpoint compatibility or
-acoustic synchronization. The browser transport/server and full competition
-integration remain unfinished. Authored fixture assertions, browser/network/
+acoustic synchronization. Subsequent [browser transport source](CHANGE__browser-multiplayer-transport.md)
+provides callable bindings and stream adapters, while the compatible server and
+full competition integration remain unfinished. Authored fixture assertions, browser/network/
 hardware execution and formal review/QA remain deferred; the Goal stays active.

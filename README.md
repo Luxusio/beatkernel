@@ -112,6 +112,9 @@ One shared session owner also handles setup matching, control-message priority,
 software start agreement and exact complete-write receipt IDs. Native QUIC
 delegates these transitions to it; connection and timeout ownership stay in the
 transport adapter.
+Callable browser WASM session bindings and a bounded WebTransport stream adapter
+are also provided as source components. Browser gameplay/UI wiring and the
+compatible HTTP/3 service remain unfinished.
 WebTransport requires its own compatible HTTP/3 server integration and remains
 unfinished. QUIC socket/TLS execution is still deferred.
 Use an explicit reachable IP for another machine. Network loss leaves local
