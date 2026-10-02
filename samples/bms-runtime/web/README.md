@@ -7,7 +7,8 @@ static BGA at an explicit song position. The Play source path also transfers
 prepared PCM to an AudioWorklet and feeds originating Window keyboard timestamps
 into the same SoloRuntime used by native gameplay. The natural-completion source
 path joins terminal judging, Mixer drain and reported output timestamps.
-Capture/replay and multiplayer are not yet wired to this host.
+Optional capture/download and local canonical replay playback are source-wired
+to this host. Browser multiplayer remains unfinished.
 
 The DOM owns file selection, controls and layout. A dedicated module Worker owns
 the imported bytes, preparation and wgpu rendering on a transferred
@@ -120,7 +121,8 @@ review/QA remain deferred; the full player task stays open.
 The separate `browser-audio` feature exports the existing Rust Mixer through a
 numeric ABI for `audio-worklet.js`. It belongs to the same application crate
 and excludes graphics. The Play controls connect the component to common gameplay and keyboard input.
-Capture, replay and network play remain separate work.
+Optional capture/download and replay use the same host; browser network play
+remains separate work.
 
 When execution is scheduled, build and generate this artifact separately from
 the graphics bindings above. Each Cargo build replaces the common output WASM,
@@ -212,8 +214,10 @@ input transport rate continuously after a complete accepted input watermark;
 original event timestamps and historical judgments remain unchanged. The
 nominal start projection and browser estimates are not measured acoustic latency
 or an accuracy guarantee. Optional shared capture and replay download are
-source-integrated; browser replay playback, persistent records and networking
-remain unfinished.
+source-integrated. Portable stepped replay and WASM preparation/render bindings
+reuse canonical recorded work and existing audio planning. Window/Worker replay
+launch reuses the same audio host. Persistent records and networking remain
+unfinished.
 
 Natural completion uses the existing shared SongCompletion owner. Every original
 object must finish judging; BGM and outgoing/local command work must finish;
@@ -273,6 +277,49 @@ Only one result is retained. Downloads are explicit; no file is automatically
 written or uploaded. Blob URLs are created only on a download click, revoked on
 replacement/page hiding and after at most 60 seconds. Stopped capture extraction
 is a single encoding attempt; serialization failure remains explicit and does
-not hide game cleanup failure. Browser persistence, replay import/viewing and
-network opponents remain follow-on work. Source checks and authored fixtures
+not hide game cleanup failure. Local replay import/playback is source-integrated;
+browser persistence and network opponents remain follow-on work. Source checks and authored fixtures
 do not establish that a browser download or replay ran.
+
+## Replay runtime components
+
+The same application crate now exposes `StepReplay`, a nonblocking owner using
+the existing `ReplayVisual`, replay audio planner, rolling feeder and
+`ReplayCompletion`. It holds one bounded original command batch until ACK and
+shares output-report and admission validation with `StepGameplay`. Actual
+presentation advances recorded operations; command credit comes from actual
+Mixer reports. Missing presentation does not advance judgments. A prefix ends
+at its recorded operations and never synthesizes chart completion or later BGM.
+
+`BrowserLibrary.prepare_replay_chart` decodes a bounded canonical recording,
+uses its recorded branch seed and selects its original section. `BrowserReplay`
+consumes that prepared resource once, exposes the same sample/command ABI and
+accepts actual output reports. `BrowserView.draw_replay` uses the common canvas
+with actual score, note progress and canonical eighteen-lane pressed state.
+The Window/Worker host now uses these components for local recorded playback.
+Source checks establish compilation only; fixtures and browser/audio execution
+remain deferred.
+
+## Play a local replay
+
+Select the matching song folder and prepare its chart, then choose one `.bkr`
+file under **Local replay** and click **Play replay**. The file must be nonempty
+and no larger than 64 MiB. Selection retains metadata; the Worker checks it
+again before reading once and rejects a changed-size or cancelled read before
+WASM construction. The canonical recording supplies its branch seed and section;
+the live seed control does not override it. Selected files stay on the device.
+
+Replay prepares samples at the browser's actual output rate and uses the same
+AudioHost/Worklet, sample transfer, original command batches, exact armed start,
+ACKs and joined cleanup as live play. Keyboard events do not judge replay;
+Escape, Stop, losing focus or hiding/leaving the page stop it. The display shows
+recorded score and pressed lanes from genuine output observations, without
+Window timers or animation synthesizing song progress. Unsupported/unavailable
+output presentation leaves recorded progression and natural completion pending;
+Stop stays available.
+
+Natural termination says **Recorded replay ended**, including interrupted
+prefixes. It does not assert the whole chart completed, relabel/rewrite the
+input recording or recapture it. Live Play and its optional recording/download
+remain independent. Host fixtures are authored with controlled endpoints and
+have not run; neither browser/audio playback nor generated bindings are verified.

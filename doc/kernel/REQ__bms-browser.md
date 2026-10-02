@@ -164,8 +164,9 @@ waiting does not prove that the browser released its internal audio resources.
 The player UI calls these components through prepared-sample transfer, a
 nonblocking shared SoloRuntime and bounded input/audio message ownership.
 Actual getOutputTimestamp pairs feed the existing native presentation
-discipline. Optional common capture exports canonical replay bytes; browser
-replay playback and persistent result integration remain unfinished. Browser input timestamps use
+discipline. Optional common capture exports canonical replay bytes. Local
+replay playback reuses the output host; persistent result integration remains
+unfinished. Browser input timestamps use
 the originating Window performance domain; Worker and Window origins are not
 implicitly equal. Physical keyboards cannot be distinguished by DOM key events.
 The full player Goal remains open, with generated bindings, processor execution,
@@ -304,3 +305,51 @@ joins. The Window shall retain at most one result and offer an explicit download
 only after joins. Export URLs shall be revoked on replacement/page hiding. No
 auto download, persisted browser library or browser replay playback is implied
 by this export slice; those remain separate unfinished work.
+
+## Nonblocking replay component
+
+Audible browser replay shall reuse canonical decoding, recorded seed/section
+selection, ReplayVisual, the existing replay audio planner, rolling feeder and
+ReplayCompletion. A nonblocking application owner shall retain at most one
+bounded immutable command batch until actual remote ACK. Live and replay shall
+share output-evidence and ACK validation, not duplicate clock/judge algorithms.
+
+Actual output presentation alone shall advance recorded visual operations and
+score. Rendering credit shall come from genuine checked Mixer reports. A log
+prefix shall remain a prefix: no synthetic final advance, new judgment, BGM after
+its recorded end or chart-complete claim. Original equal-time ordinal order,
+negative preroll and recorded section/branch provenance shall remain intact.
+Completion shall require recorded-operation exhaustion and subsequent actual
+PCM drain/presentation, independently of command admission. A failed owner shall
+retain readable score/state and refuse further consuming operations.
+
+Browser replay preparation shall own the decoded bounded recording together
+with its actual selected assets. Live BrowserGame shall reject that replay
+resource; replay shall consume it once through its dedicated owner. The common
+canvas/renderer shall draw replay score, note progress and actual pressed lanes
+with the same primitives as live play. Building these components does not imply
+that Window/Worker replay launch, browser execution or physical audio is verified.
+
+Live and replay pressed state shall use the common canonical eighteen-lane BMS
+mask, including sparse charts and player-two lanes. A displayed lane's position
+in the chart shall not change its control bit or highlight a different lane.
+
+## Audible replay host
+
+The browser shall offer explicit selection of one local recording and a separate
+Play replay action using the selected matching chart/assets. Live Play shall
+remain independently available. Window and Worker shall validate nonempty
+recording metadata at or below 64 MiB before acquisition; the Worker shall read
+it once, reject changed size/invalid layout and invalidate cancelled preparation
+before constructing a WASM owner. No upload or persistent recording library is
+implied. The canonical file supplies branch seed and section, not live controls.
+
+Replay shall reuse the same AudioHost, command/sample transport, immutable
+armed start, genuine output presentation and joined cleanup as live play.
+Audio resume shall remain within the initiating user gesture. Replay shall
+reject live input steps and accept no synthetic host-clock advancement or live
+capture. Readable recorded score shall update from output observations.
+Natural termination shall say the recorded replay ended, including prefixes,
+and shall never assert full-chart completion. Stop, Escape, focus/page loss and
+failures shall release the actual replay/audio owners. Source integration and
+authored host fixtures do not imply browser/audio execution was verified.
