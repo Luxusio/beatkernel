@@ -46,6 +46,7 @@ pub mod image_crop;
 pub mod image_decode;
 /// Fixed-capacity lane feedback from actual local judge results and song time.
 pub mod judge_feedback;
+pub mod live_pause;
 /// Bounded native input merging on one common host clock.
 pub mod local_input;
 /// Collection-based local player identity and unique native input assignment.
