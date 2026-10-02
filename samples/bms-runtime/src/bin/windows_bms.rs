@@ -18,6 +18,39 @@ enum Backend {
     Wasapi,
     Asio,
 }
+#[cfg(any(all(target_os = "windows", feature = "asio-sdk"), test))]
+fn asio_pause_observation(
+    observation: Option<beatkernel_platform::audio::asio::AsioPresentationObservation>,
+    now: beatkernel::time::ClockPoint,
+) -> beatkernel_bms_runtime::live_pause::LivePauseObservation {
+    use beatkernel_bms_runtime::{
+        live_pause::LivePauseObservation, native_start::StartInterval,
+        playback_pause::PauseIntervalObservation,
+    };
+    LivePauseObservation::Interval {
+        observation: observation.map(|value| PauseIntervalObservation {
+            output_origin: value.output_origin,
+            sample_rate: value.sample_rate,
+            render: value.render,
+            clock: StartInterval {
+                output: value.output,
+                before: value.host.before,
+                after: value.host.after,
+            },
+        }),
+        now,
+    }
+}
+#[cfg(any(all(target_os = "windows", feature = "asio-sdk"), test))]
+fn seed_asio_resume(
+    discipline: &mut beatkernel_platform::audio::presentation::discipline::PresentationDiscipline,
+    original: beatkernel_platform::audio::asio::AsioPresentationObservation,
+) -> Result<()> {
+    // Coarse host midpoints can leave the old discipline behind this genuine
+    // observation. The new discipline must retain its native source identity.
+    discipline.observe_asio(original)?;
+    Ok(())
+}
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[cfg(test)]
 fn park_pause_input(
@@ -1039,26 +1072,41 @@ mod native {
         pub(super) selected: &'a [(beatkernel::input::DeviceId, usize)],
         pub(super) retained:
             &'a mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
-        pub(super) last_snapshot: Option<beatkernel_platform::audio::AudioStreamSnapshot>,
+        pub(super) last_evidence: Option<super::live_output::StartupEvidence>,
+        #[cfg(feature = "asio-sdk")]
+        pub(super) current_asio:
+            Option<beatkernel_platform::audio::asio::AsioPresentationObservation>,
     }
     impl NativeGameplayDevice for GameplayDevice<'_> {
         fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
-            match self.stream {
-                super::live_output::Output::Wasapi(_) => {
-                    if let Some(NativeStartObservation {
-                        evidence: super::live_output::StartupEvidence::Wasapi(snapshot),
-                        ..
-                    }) = self.stream.startup_observation(discipline)?
-                    {
-                        self.last_snapshot = Some(snapshot);
-                    }
-                }
+            #[cfg(feature = "asio-sdk")]
+            {
+                self.current_asio = None;
+            }
+            if let Some(observation) = self.stream.startup_observation(discipline)? {
                 #[cfg(feature = "asio-sdk")]
-                super::live_output::Output::Asio(_) => {
-                    self.stream.observe(discipline)?;
+                if let super::live_output::StartupEvidence::Asio(value) = observation.evidence {
+                    self.current_asio = Some(value);
                 }
+                self.last_evidence = Some(observation.evidence);
             }
             Ok(())
+        }
+        fn pause_observation(
+            &mut self,
+            reference: beatkernel::time::ClockPair,
+        ) -> NativeGameplayResult<beatkernel_bms_runtime::live_pause::LivePauseObservation>
+        {
+            match self.stream {
+                super::live_output::Output::Wasapi(_) => {
+                    Ok(beatkernel_bms_runtime::live_pause::LivePauseObservation::Point(reference))
+                }
+                #[cfg(feature = "asio-sdk")]
+                super::live_output::Output::Asio(_) => Ok(super::asio_pause_observation(
+                    self.current_asio,
+                    self.clock.sample()?.normalized,
+                )),
+            }
         }
         fn render_report(
             &mut self,
@@ -1107,12 +1155,20 @@ mod native {
             discipline: &mut PresentationDiscipline,
             reference: beatkernel::time::ClockPair,
         ) -> NativeGameplayResult<()> {
-            let snapshot = self
-                .last_snapshot
-                .ok_or("original WASAPI resume snapshot unavailable")?;
-            discipline.observe(snapshot)?;
-            if discipline.latest_pair() != Some(reference) {
-                return Err("WASAPI resume snapshot differs from accepted reference".into());
+            match self
+                .last_evidence
+                .ok_or("original native resume evidence unavailable")?
+            {
+                super::live_output::StartupEvidence::Wasapi(snapshot) => {
+                    discipline.observe(snapshot)?;
+                    if discipline.latest_pair() != Some(reference) {
+                        return Err("WASAPI resume snapshot differs from accepted reference".into());
+                    }
+                }
+                #[cfg(feature = "asio-sdk")]
+                super::live_output::StartupEvidence::Asio(original) => {
+                    super::seed_asio_resume(discipline, original)?;
+                }
             }
             Ok(())
         }
@@ -1278,8 +1334,7 @@ mod native {
         if !options.local_players.is_empty() {
             return super::local_native::run(options, competition_options);
         }
-        let pause_supported =
-            options.backend == Backend::Wasapi && competition_options.network.is_none();
+        let pause_supported = competition_options.network.is_none();
         let clock = QpcClock::new(HOST)?;
         // Declared before device owners so every exit reports after their cleanup.
         let mut delivery = DeliverySession(beatkernel::telemetry::InputDeliveryTelemetry::new(
@@ -1593,7 +1648,9 @@ mod native {
                     clock: &clock,
                     selected: gameplay_selection.as_slice(),
                     retained: &mut startup_inputs,
-                    last_snapshot: None,
+                    last_evidence: None,
+                    #[cfg(feature = "asio-sdk")]
+                    current_asio: None,
                 };
                 run_gameplay(
                     &mut device,
@@ -1622,7 +1679,7 @@ mod native {
                         advance_lag: beatkernel::time::Duration::from_nanos(options.advance_lag),
                         seconds: options.seconds,
                         pause_supported,
-                        logical_schedule: options.backend == Backend::Wasapi || network_start,
+                        logical_schedule: true,
                     },
                 )
             };

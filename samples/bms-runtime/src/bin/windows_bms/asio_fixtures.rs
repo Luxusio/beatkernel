@@ -1,4 +1,4 @@
-//! Portable parser fixtures; no Windows, driver, clock, asset or replay IO.
+//! Portable parser and native-evidence fixtures; no driver, clock, asset or replay IO.
 use super::parse;
 
 const CLSID: &str = "{12345678-9abc-def0-1234-56789abcdef0}";
@@ -440,4 +440,172 @@ fn asio_actual_upper_interval_gates_windows_completion_after_render_and_message_
         false,
         false
     ));
+}
+
+#[test]
+fn actual_asio_pause_conversion_preserves_the_original_interval_report_and_fresh_host() {
+    use beatkernel::{
+        audio::{
+            AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, SampleBank, command_queue,
+        },
+        time::{ClockDomainId, ClockPoint, Timestamp},
+    };
+    use beatkernel_bms_runtime::live_pause::LivePauseObservation;
+    use beatkernel_platform::audio::asio::{AsioPresentationObservation, MultimediaHostInterval};
+    let point = |domain, ns| ClockPoint {
+        domain: ClockDomainId(domain),
+        timestamp: Timestamp::from_nanos(ns),
+    };
+    let format = AudioFormat::new(1000, 1).unwrap();
+    let bank = SampleBank::new(format, PcmLimits::new(1024, 1024, 1).unwrap()).unwrap();
+    let (mut producer, consumer) = command_queue(8).unwrap();
+    let mut mixer = Mixer::new(
+        MixerConfig::new(
+            format,
+            ClockDomainId(2),
+            Timestamp::ZERO,
+            AudioLimits::new(8, 1, 8, 16, 8).unwrap(),
+        ),
+        bank,
+        consumer,
+    )
+    .unwrap();
+    mixer.render(&mut [0.0; 2]).unwrap();
+    producer.request_pause(true);
+    let mut silence = [1.0; 2];
+    let render = mixer.render(&mut silence).unwrap();
+    assert_eq!(silence, [0.0; 2]);
+    assert_eq!(
+        (
+            render.start_frame,
+            render.playback_start_frame,
+            render.playback_frames
+        ),
+        (2, 2, 0)
+    );
+    let original = AsioPresentationObservation::from_render(
+        render,
+        1000,
+        MultimediaHostInterval {
+            before: point(1, 5_000_000),
+            after: point(1, 6_000_000),
+        },
+        3,
+        200,
+        point(2, 0),
+    )
+    .unwrap();
+    let LivePauseObservation::Interval {
+        observation: Some(observed),
+        now,
+    } = super::asio_pause_observation(Some(original), point(1, 10_000_000))
+    else {
+        panic!("ASIO must retain interval evidence");
+    };
+    assert_eq!(observed.output_origin, point(2, 0));
+    assert_eq!(observed.sample_rate, 1000);
+    assert_eq!(observed.render, render);
+    assert_eq!(observed.clock.output, point(2, 2_000_000));
+    assert_eq!(observed.clock.before, point(1, 7_999_800));
+    assert_eq!(observed.clock.after, point(1, 9_000_200));
+    assert_eq!(now, point(1, 10_000_000));
+    let LivePauseObservation::Interval { observation, now } =
+        super::asio_pause_observation(None, point(1, 11_000_000))
+    else {
+        panic!("missing ASIO telemetry must retain its evidence mode");
+    };
+    assert!(observation.is_none());
+    assert_eq!(now, point(1, 11_000_000));
+}
+
+#[test]
+fn native_asio_resume_reseeds_genuine_evidence_when_old_midpoint_has_not_progressed() {
+    use beatkernel::{
+        audio::{
+            AudioFormat, AudioLimits, Mixer, MixerConfig, PcmLimits, SampleBank, command_queue,
+        },
+        time::{ClockDomainId, ClockMappingQuality, ClockPair, ClockPoint, Timestamp},
+    };
+    use beatkernel_platform::audio::{
+        asio::{AsioPresentationObservation, MultimediaHostInterval},
+        presentation::discipline::{
+            DisciplineConfig, ObservationAdmission, PresentationDiscipline,
+        },
+    };
+    let point = |domain, ns| ClockPoint {
+        domain: ClockDomainId(domain),
+        timestamp: Timestamp::from_nanos(ns),
+    };
+    let format = AudioFormat::new(1000, 1).unwrap();
+    let bank = SampleBank::new(format, PcmLimits::new(1024, 1024, 1).unwrap()).unwrap();
+    let (_producer, consumer) = command_queue(8).unwrap();
+    let mut mixer = Mixer::new(
+        MixerConfig::new(
+            format,
+            ClockDomainId(2),
+            Timestamp::ZERO,
+            AudioLimits::new(8, 1, 8, 16, 8).unwrap(),
+        ),
+        bank,
+        consumer,
+    )
+    .unwrap();
+    let observation = |render| {
+        AsioPresentationObservation::from_render(
+            render,
+            1000,
+            MultimediaHostInterval {
+                before: point(1, 10_000_000),
+                after: point(1, 14_000_000),
+            },
+            0,
+            0,
+            point(2, 0),
+        )
+        .unwrap()
+    };
+    let first = observation(mixer.render(&mut [0.0; 2]).unwrap());
+    let latest = observation(mixer.render(&mut [0.0; 2]).unwrap());
+    let new_discipline = || {
+        PresentationDiscipline::new(
+            DisciplineConfig::default(),
+            point(2, 0),
+            ClockDomainId(1),
+            Timestamp::ZERO,
+        )
+        .unwrap()
+    };
+    let mut old = new_discipline();
+    assert_eq!(
+        old.observe_asio(first).unwrap(),
+        ObservationAdmission::Retained
+    );
+    let stale_reference = old.latest_pair().unwrap();
+    assert_eq!(
+        old.observe_asio(latest).unwrap(),
+        ObservationAdmission::AwaitingHostProgress
+    );
+    assert_eq!(old.latest_pair(), Some(stale_reference));
+
+    let mut resumed = new_discipline();
+    super::seed_asio_resume(&mut resumed, latest).unwrap();
+    assert_eq!(
+        resumed.latest_pair(),
+        Some(ClockPair {
+            source: point(2, 2_000_000),
+            target: point(1, 12_000_000)
+        })
+    );
+    assert_ne!(resumed.latest_pair(), Some(stale_reference));
+    assert_eq!(resumed.quality(), ClockMappingQuality::Unknown);
+    // Seeding retained ASIO source identity, rather than a fabricated supplied pair.
+    assert_eq!(
+        resumed.observe_asio(latest).unwrap(),
+        ObservationAdmission::Unchanged
+    );
+    let mut invalid = latest;
+    invalid.sample_rate = 999;
+    let before = resumed.latest_pair();
+    assert!(super::seed_asio_resume(&mut resumed, invalid).is_err());
+    assert_eq!(resumed.latest_pair(), before);
 }

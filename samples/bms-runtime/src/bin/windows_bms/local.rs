@@ -72,7 +72,6 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     )?;
     let count = options.local_players.len();
     let song_origin = options.song_origin()?;
-    let pause_supported = options.backend == Backend::Wasapi;
     if options.backend == Backend::Asio && !cfg!(feature = "asio-sdk") {
         return Err("ASIO requires feature asio-sdk and caller SDK; no driver loaded".into());
     }
@@ -256,7 +255,9 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 clock: &clock,
                 selected: &selected,
                 retained: &mut retained,
-                last_snapshot: None,
+                last_evidence: None,
+                #[cfg(feature = "asio-sdk")]
+                current_asio: None,
             };
             run_cohort(
                 &mut device,
@@ -280,8 +281,8 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                     end_song: options.end_ns.map(Timestamp::from_nanos),
                     advance_lag: Duration::from_nanos(options.advance_lag),
                     seconds: options.seconds,
-                    pause_supported,
-                    logical_schedule: options.backend == Backend::Wasapi,
+                    pause_supported: true, // Local admission already excludes network play.
+                    logical_schedule: true,
                 },
             )
         };
