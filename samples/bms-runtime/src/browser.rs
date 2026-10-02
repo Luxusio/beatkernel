@@ -126,9 +126,9 @@ impl BrowserLibrary {
 /// Owns resources once; moving into BrowserView does not clone PCM or indexes.
 #[wasm_bindgen]
 pub struct BrowserPrepared {
-    prepared: PreparedBms,
-    chart: PlayerChart,
-    images: Arc<ImageAssets>,
+    pub(crate) prepared: PreparedBms,
+    pub(crate) chart: PlayerChart,
+    pub(crate) images: Arc<ImageAssets>,
 }
 
 #[wasm_bindgen]
@@ -156,6 +156,10 @@ impl BrowserPrepared {
     #[wasm_bindgen(getter)]
     pub fn image_count(&self) -> usize {
         self.images.len()
+    }
+
+    pub fn lanes(&self) -> Vec<u8> {
+        self.chart.lanes.clone()
     }
 }
 
@@ -207,6 +211,12 @@ impl BrowserView {
                 .map_err(js_error)?;
         }
         Ok(())
+    }
+
+    pub fn draw_game(&mut self, game: &crate::browser_game::BrowserGame) -> Result<(), JsValue> {
+        self.canvas
+            .present_game(game, LOOKAHEAD_NS)
+            .map_err(js_error)
     }
 
     pub fn needs_redraw(&self) -> bool {

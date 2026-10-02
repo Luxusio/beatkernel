@@ -63,6 +63,38 @@ impl BrowserCanvas {
         song: Timestamp,
         lookahead: i64,
     ) -> Result<(), String> {
+        self.present(chart, images, song, lookahead, &[], 0, None, None)
+    }
+
+    pub(crate) fn present_game(
+        &mut self,
+        game: &crate::browser_game::BrowserGame,
+        lookahead: i64,
+    ) -> Result<(), String> {
+        self.present(
+            &game.chart,
+            &game.images,
+            game.game.song_time(),
+            lookahead,
+            &game.recent,
+            game.pressed,
+            Some(&game.progress),
+            Some(game.game.score()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn present(
+        &mut self,
+        chart: &PlayerChart,
+        images: &Arc<ImageAssets>,
+        song: Timestamp,
+        lookahead: i64,
+        recent: &[beatkernel::judge::JudgeEvent],
+        pressed: u32,
+        progress: Option<&crate::note_progress::NoteProgress>,
+        score: Option<&crate::competition::ScoreSummary>,
+    ) -> Result<(), String> {
         if lookahead <= 0 {
             return Err("playfield lookahead must be positive".into());
         }
@@ -73,7 +105,7 @@ impl BrowserCanvas {
                 .map_err(|error| format!("recreate browser canvas surface: {error}"))?;
             self.renderer.replace_surface(surface)?;
         }
-        let presentation = PoorBackgroundPolicy::default().select(chart, song, None)?;
+        let presentation = PoorBackgroundPolicy::default().select(chart, song, progress)?;
         // The common cache releases a previous asset bank and keeps current
         // image aliases, opacity and unavailable-image behavior intact.
         let frames = self.backgrounds.sync_presentations(
@@ -88,11 +120,14 @@ impl BrowserCanvas {
             chart,
             song,
             lookahead,
-            &[],
-            0,
-            None,
+            recent,
+            pressed,
+            progress,
             frames[0],
         )?;
+        if let Some(score) = score {
+            organisms::scoreboard(&mut self.scene, score, recent);
+        }
         self.renderer.render(&self.scene)
     }
 

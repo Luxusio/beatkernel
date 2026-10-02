@@ -91,6 +91,11 @@ impl PcmSample {
     pub fn samples(&self) -> &[f32] {
         &self.samples
     }
+
+    /// Transfers decoded storage during setup without copying the PCM buffer.
+    pub fn into_samples(self) -> Vec<f32> {
+        self.samples
+    }
 }
 
 /// Setup-time immutable asset ownership with deterministic sorted lookup.

@@ -1,0 +1,337 @@
+//! Worker-owned gameplay bindings; audio lives in a separate Worklet instance.
+use std::{
+    collections::{BTreeSet, VecDeque},
+    sync::Arc,
+};
+
+use crate::{
+    browser::BrowserPrepared,
+    image_assets::ImageAssets,
+    note_progress::NoteProgress,
+    player_chart::PlayerChart,
+    step_gameplay::{StepGameplay, StepGameplayConfig, StepGameplayError},
+};
+use beatkernel::{
+    audio::{AudioCommand, PcmSample, SampleId},
+    input::{
+        Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector, EventMeta,
+        GameControlId, PhysicalControlId, PhysicalInputEvent,
+    },
+    judge::JudgeEvent,
+    runtime::RuntimeReport,
+    time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
+};
+use wasm_bindgen::prelude::*;
+
+const HOST: ClockDomainId = ClockDomainId(0x57494e);
+const OUTPUT: ClockDomainId = ClockDomainId(0x57415544);
+struct Explicit;
+impl ClockMapper for Explicit {
+    fn map(&self, from: ClockPoint, to: ClockDomainId) -> Option<Timestamp> {
+        (from.domain == to).then_some(from.timestamp)
+    }
+    fn quality(&self) -> ClockMappingQuality {
+        ClockMappingQuality::Exact
+    }
+}
+fn point(domain: ClockDomainId, ns: i64) -> ClockPoint {
+    ClockPoint {
+        domain,
+        timestamp: Timestamp::from_nanos(ns),
+    }
+}
+fn error(value: impl std::fmt::Display) -> JsValue {
+    js_sys::Error::new(&value.to_string()).into()
+}
+fn field(object: &js_sys::Object, name: &str, value: JsValue) -> Result<(), JsValue> {
+    js_sys::Reflect::set(object, &JsValue::from_str(name), &value)?;
+    Ok(())
+}
+fn unsigned(value: u64) -> JsValue {
+    js_sys::BigInt::from(value).into()
+}
+fn signed(value: i64) -> JsValue {
+    js_sys::BigInt::from(value).into()
+}
+
+/// One setup asset; taking PCM transfers its original Rust allocation once.
+#[wasm_bindgen]
+pub struct BrowserSample {
+    id: u64,
+    rate: u32,
+    channels: u16,
+    pcm: Option<Vec<f32>>,
+}
+#[wasm_bindgen]
+impl BrowserSample {
+    #[wasm_bindgen(getter)]
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+    #[wasm_bindgen(getter)]
+    pub fn rate(&self) -> u32 {
+        self.rate
+    }
+    #[wasm_bindgen(getter)]
+    pub fn channels(&self) -> u16 {
+        self.channels
+    }
+    pub fn take_pcm(&mut self) -> Result<Vec<f32>, JsValue> {
+        self.pcm
+            .take()
+            .ok_or_else(|| error("sample PCM was already taken"))
+    }
+}
+
+#[wasm_bindgen]
+pub struct BrowserGame {
+    pub(crate) game: StepGameplay,
+    pub(crate) chart: Arc<PlayerChart>,
+    pub(crate) images: Arc<ImageAssets>,
+    pub(crate) progress: NoteProgress,
+    pub(crate) recent: Vec<JudgeEvent>,
+    pub(crate) pressed: u32,
+    keys: Vec<(u8, u16)>,
+    samples: VecDeque<(SampleId, PcmSample)>,
+}
+#[wasm_bindgen]
+impl BrowserGame {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        prepared: BrowserPrepared,
+        host_origin_ns: i64,
+        preroll_ns: i64,
+        early_ns: i64,
+        late_ns: i64,
+        offset_ns: i64,
+        key_pairs: Vec<u32>,
+    ) -> Result<Self, JsValue> {
+        if key_pairs.len() > 36 || key_pairs.len() % 2 != 0 || host_origin_ns < 0 {
+            return Err(error("invalid browser binding count or host origin"));
+        }
+        let mut lanes = BTreeSet::new();
+        let mut physical = BTreeSet::new();
+        let mut keys = Vec::new();
+        for pair in key_pairs.chunks_exact(2) {
+            let lane = u8::try_from(pair[0]).map_err(error)?;
+            let key = u16::try_from(pair[1]).map_err(error)?;
+            if !matches!(lane, 0x11..=0x19 | 0x21..=0x29)
+                || key == 0
+                || !lanes.insert(lane)
+                || !physical.insert(key)
+            {
+                return Err(error("browser lane/key bindings must be valid and unique"));
+            }
+            keys.push((lane, key));
+        }
+        if prepared
+            .chart
+            .lanes
+            .iter()
+            .any(|lane| !lanes.contains(lane))
+        {
+            return Err(error("a prepared lane has no browser key binding"));
+        }
+        let bindings = BindingMap::from_bindings(keys.iter().map(|&(lane, key)| Binding {
+            device: DeviceSelector::Any,
+            physical: PhysicalControlId::keyboard(key),
+            game_control: GameControlId(u32::from(lane)),
+        }))
+        .map_err(error)?;
+        let chart = Arc::new(prepared.chart);
+        let progress = NoteProgress::new(chart.clone()).map_err(error)?;
+        let config = StepGameplayConfig {
+            host_origin: point(HOST, host_origin_ns),
+            output_origin: point(OUTPUT, 0),
+            preroll: Duration::from_nanos(preroll_ns),
+            early_ns,
+            late_ns,
+            offset_ns,
+            command_capacity: 4096,
+            bgm_pending: 3072,
+            bgm_lookahead: Duration::from_nanos(500_000_000),
+            telemetry_capacity: 256,
+        };
+        let (game, bank) = StepGameplay::new(prepared.prepared, config, bindings).map_err(error)?;
+        Ok(Self {
+            game,
+            chart,
+            images: prepared.images,
+            progress,
+            recent: Vec::with_capacity(128),
+            pressed: 0,
+            keys,
+            samples: bank.into_samples().collect(),
+        })
+    }
+    pub fn sample_count(&self) -> usize {
+        self.samples.len()
+    }
+    pub fn activate(&mut self, host_ns: i64) -> Result<(), JsValue> {
+        self.game.activate(point(HOST, host_ns)).map_err(error)
+    }
+    pub fn next_sample(&mut self) -> Option<BrowserSample> {
+        self.samples.pop_front().map(|(id, sample)| {
+            let format = sample.format();
+            BrowserSample {
+                id: id.0,
+                rate: format.sample_rate(),
+                channels: format.channels(),
+                pcm: Some(sample.into_samples()),
+            }
+        })
+    }
+    pub fn input(
+        &mut self,
+        host_ns: i64,
+        key: u16,
+        down: bool,
+        sequence: u64,
+        audio_ns: i64,
+    ) -> Result<(), JsValue> {
+        let lane = self
+            .keys
+            .iter()
+            .find(|entry| entry.1 == key)
+            .map(|entry| entry.0)
+            .ok_or_else(|| error("browser input key is not bound"))?;
+        let input = PhysicalInputEvent::Button(ButtonEvent {
+            meta: EventMeta::new(DeviceId(1), point(HOST, host_ns), sequence),
+            control: PhysicalControlId::keyboard(key),
+            state: if down {
+                ButtonState::Down
+            } else {
+                ButtonState::Up
+            },
+        });
+        let result = self
+            .game
+            .process_input(input, &Explicit, point(OUTPUT, audio_ns));
+        self.accept_report(result)?;
+        if let Some(index) = self.chart.lanes.iter().position(|&value| value == lane) {
+            let mask = 1u32 << index;
+            if down {
+                self.pressed |= mask;
+            } else {
+                self.pressed &= !mask;
+            }
+        }
+        Ok(())
+    }
+    pub fn advance(&mut self, host_ns: i64, audio_ns: i64) -> Result<(), JsValue> {
+        let result = self
+            .game
+            .advance_to(point(HOST, host_ns), &Explicit, point(OUTPUT, audio_ns));
+        self.accept_report(result)
+    }
+    pub fn feed_audio(&mut self, rendered_frames: u64, budget: u32) -> Result<(), JsValue> {
+        self.game
+            .feed_audio(rendered_frames, budget as usize)
+            .map(|_| ())
+            .map_err(error)
+    }
+    pub fn commands(&mut self, max: u32) -> Result<JsValue, JsValue> {
+        let Some(batch) = self.game.take_commands(max as usize).map_err(error)? else {
+            return Ok(JsValue::NULL);
+        };
+        let result = (|| {
+            let commands = js_sys::Array::new();
+            for command in batch.commands {
+                let object = js_sys::Object::new();
+                let at = command.at().as_nanos();
+                let (kind, voice, sample, gain, value, denominator) = match command {
+                    AudioCommand::Play {
+                        voice,
+                        sample,
+                        gain,
+                        ..
+                    } => (0, voice.0, sample.0, gain, 0, 0),
+                    AudioCommand::Stop { voice, .. } => (1, voice.0, 0, 0.0, 0, 0),
+                    AudioCommand::SetRate { rate, .. } => {
+                        (2, 0, 0, 0.0, rate.numerator(), rate.denominator())
+                    }
+                    AudioCommand::Seek { song_time, .. } => (3, 0, 0, 0.0, song_time.as_nanos(), 0),
+                };
+                field(&object, "kind", JsValue::from_f64(f64::from(kind)))?;
+                field(&object, "voice", unsigned(voice))?;
+                field(&object, "sample", unsigned(sample))?;
+                field(&object, "at", signed(at))?;
+                field(&object, "gain", JsValue::from_f64(f64::from(gain)))?;
+                field(&object, "value", signed(value))?;
+                field(&object, "denominator", unsigned(denominator))?;
+                commands.push(&object);
+            }
+            let result = js_sys::Object::new();
+            field(&result, "sequence", unsigned(batch.sequence))?;
+            field(&result, "commands", commands.into())?;
+            Ok(result.into())
+        })();
+        if result.is_err() {
+            self.game.fail();
+        }
+        result
+    }
+    pub fn acknowledge(
+        &mut self,
+        sequence: u64,
+        admitted: u32,
+        success: bool,
+    ) -> Result<(), JsValue> {
+        self.game
+            .acknowledge(sequence, admitted as usize, success)
+            .map_err(error)
+    }
+    pub fn stop(&mut self) {
+        self.game.fail();
+        self.samples.clear();
+        self.pressed = 0;
+    }
+    #[wasm_bindgen(getter)]
+    pub fn song_ns(&self) -> i64 {
+        self.game.song_time().as_nanos()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn hits(&self) -> u64 {
+        self.game.score().hits
+    }
+    #[wasm_bindgen(getter)]
+    pub fn misses(&self) -> u64 {
+        self.game.score().misses
+    }
+    #[wasm_bindgen(getter)]
+    pub fn combo(&self) -> u64 {
+        self.game.score().combo
+    }
+    #[wasm_bindgen(getter)]
+    pub fn failed(&self) -> bool {
+        self.game.failed()
+    }
+}
+impl BrowserGame {
+    fn accept_report(
+        &mut self,
+        result: Result<RuntimeReport, StepGameplayError>,
+    ) -> Result<(), JsValue> {
+        match result {
+            Ok(report) => {
+                self.observe(&report);
+                Ok(())
+            }
+            Err(failure) => {
+                if let StepGameplayError::Report { report, .. } = &failure {
+                    self.observe(report);
+                }
+                Err(error(failure))
+            }
+        }
+    }
+    fn observe(&mut self, report: &RuntimeReport) {
+        self.progress.apply(&report.judge_events);
+        for event in &report.judge_events {
+            if self.recent.len() == 128 {
+                self.recent.remove(0);
+            }
+            self.recent.push(*event);
+        }
+    }
+}
