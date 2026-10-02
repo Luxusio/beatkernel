@@ -144,7 +144,40 @@ queue admission from actual rendered commands. Polling returns genuine Mixer
 reports outside the callback; those reports are not output-presentation or
 acoustic timing evidence.
 
-The host bridge and shared nonblocking gameplay owner still need implementation.
+`audio-host.mjs` adds the actual AudioContext/AudioWorkletNode owner. It is a
+component for subsequent player integration; the preview page does not yet call
+it. Prepare a `WebAssembly.Module` for the audio artifact before the user gesture,
+then call `AudioHost.open` from that gesture with explicit generation, channels,
+PCM limits and audio limits. Opening requests resume immediately and waits for
+the exact Worklet readiness response within one setup deadline. An optional
+AbortSignal cancels setup. Read-only `sampleRate` reports the actual context rate
+for subsequent chart preparation.
+
+Resource setup calls `sample({id, rate, channels, pcm})` sequentially, then
+`finish()`. Each PCM array must own its entire standalone backing buffer;
+posting consumes that buffer. `commands(batch)` preserves the Worklet's exact
+numeric command records; `arm(absoluteFrame)` selects the one-shot context start.
+The read-only `currentFrame` is a BigInt estimate derived from context time for
+choosing a future start target. The Worklet rejects requests that arrive too late;
+this estimate does not measure presentation or acoustic output. A context that
+stops running fences the owner rather than silently continuing its session.
+One ordinary operation may be pending. Calls that overlap reject locally, and
+the host does not create an unbounded control queue. Worklet rejection carries
+the exact admitted prefix in `AudioHostError`; game operations must never retry
+that batch. `poll()` returns genuine Worklet report words, and `stop()` shares
+one bounded cleanup operation that disconnects and closes the audio owner even
+if the stop acknowledgement fails.
+A close timeout reports failure and cannot establish browser resource release.
+
+The host regressions are authored for Node's VM runner with mocked WebAudio
+globals. They have not been executed and do not establish actual browser output:
+
+```sh
+node --experimental-vm-modules --test samples/bms-runtime/web/audio-host.test.mjs
+```
+
+Prepared-resource wiring and the shared nonblocking gameplay owner still need
+implementation.
 Browser device buffering, JavaScript/GC and MessagePort do not provide a hard
 realtime guarantee or native WASAPI/ASIO controls. Generated bindings, Worklet
 execution, browser output and behavioral tests remain deferred.

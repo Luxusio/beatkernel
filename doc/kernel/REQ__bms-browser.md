@@ -134,8 +134,34 @@ owns one active processor for this generated module. JavaScript/GC/MessagePort
 and browser device buffering have no hard realtime guarantee. Native WASAPI or
 ASIO controls are not browser capabilities.
 
-This component alone does not enable the player UI's audio or gameplay. Required
-follow-on work is the bounded sample/command host bridge, nonblocking shared
+The browser audio host owns one fresh AudioContext and Worklet node per session.
+Opening is called from a user gesture and requests context resume before any
+asynchronous module initialization. It uses the actual context rate and a
+precompiled audio WASM module. Setup cancellation uses an optional AbortSignal;
+a pre-aborted request creates no context. Resume, module loading and readiness
+share a finite setup deadline. Read-only metadata exposes the actual sample rate
+for later preparation without exposing mutable context ownership.
+The read-only current frame estimate floors context time multiplied by its
+sample rate, validates safe integer range and returns BigInt. It is a control
+estimate for choosing a future arm target; Worklet callback chronology remains
+authoritative, and the estimate is not output/acoustic evidence.
+Readiness, resource admission, one-shot arming,
+command-prefix acknowledgements, render reports and shutdown have distinct
+states; one ordinary control operation may be in flight, with no unbounded host
+queue. PCM transfer consumes a standalone full backing buffer during setup.
+Opening requires a running context before returning a usable owner. If a usable
+context becomes suspended, interrupted or closed, the host fences and cleans
+that owner rather than silently advancing a session against paused audio.
+Invalid local requests reject before posting. Partial command admission or
+transport/processor failure fences the owner and never retries committed input.
+Explicit idempotent stop cancels pending work, attempts bounded acknowledged
+Worklet cleanup and disconnects/closes the context even when acknowledgement
+fails. Neither ACKs nor context time establish acoustic presentation.
+A timed-out context-close promise is an explicit cleanup failure; bounded host
+waiting does not prove that the browser released its internal audio resources.
+
+These components alone do not enable the player UI's audio or gameplay. Required
+follow-on work is prepared-sample wiring, nonblocking shared
 SoloRuntime session/input watermarks, actual getOutputTimestamp presentation
 mapping, result/capture/replay integration and end-user start/stop controls.
 The current preview remains labeled accordingly. Browser input timestamps use
