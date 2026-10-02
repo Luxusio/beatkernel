@@ -34,6 +34,10 @@ function chooseRecording(h, files) {
   h.get("replay-file").files = files;
   h.get("replay-file").emit("change");
 }
+function savedRecord(fields = {}) {
+  return { id: 41, name: "saved-prefix.bkr", chartPath: "Songs/曲/chart.bms", complete: false,
+    hits: 18446744073709551615n, misses: 2n, combo: null, createdAt: 1234567890, byteLength: 4, ...fields };
+}
 
 async function harness(faults = {}) {
   const elements = new Map();
@@ -45,6 +49,9 @@ async function harness(faults = {}) {
   const urls = [];
   const revoked = [];
   const downloads = [];
+  const recordOpens = [];
+  const recordCalls = [];
+  const recordOwners = [];
   let now = 1000;
   let nextTimer = 0;
   let gesture = false;
@@ -111,8 +118,8 @@ async function harness(faults = {}) {
   }
   for (const id of ["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek",
     "title", "details", "status", "viewport", "play", "stop", "record", "export", "keys", "canvas", "prepare-form", "seek-form",
-    "replay-file", "replay-play", "replay-name"]) {
-    elements.set(id, new Element(id === "chart" ? "select" : id, id));
+    "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete"]) {
+    elements.set(id, new Element(id === "chart" || id === "records" ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
   elements.get("rate").value = "44100";
@@ -267,6 +274,48 @@ async function harness(faults = {}) {
   const audioModule = new SyntheticModule(["AudioHost"], function () {
     this.setExport("AudioHost", AudioHost);
   }, { context });
+  class RecordsStore {
+    constructor() { this.closed = false; this.closes = 0; recordOwners.push(this); }
+    static async open(options) {
+      recordOpens.push(options);
+      const store = new RecordsStore();
+      if (faults.recordsOpenGate) await faults.recordsOpenGate.promise;
+      if (faults.recordsOpenError) throw faults.recordsOpenError;
+      return store;
+    }
+    async list() {
+      assert.equal(this.closed, false);
+      recordCalls.push({ method: "list", store: this });
+      if (faults.recordsListGate) await faults.recordsListGate.promise;
+      if (faults.recordsListError) throw faults.recordsListError;
+      return structuredClone(faults.recordsList ?? []);
+    }
+    async save(value) {
+      assert.equal(this.closed, false);
+      recordCalls.push({ method: "save", value: structuredClone(value), store: this });
+      if (faults.recordsSaveGate) await faults.recordsSaveGate.promise;
+      if (faults.recordsSaveError) throw faults.recordsSaveError;
+      return savedRecord();
+    }
+    async load(id) {
+      assert.equal(this.closed, false);
+      recordCalls.push({ method: "load", id, store: this });
+      if (faults.recordsLoadGate) await faults.recordsLoadGate.promise;
+      if (faults.recordsLoadError) throw faults.recordsLoadError;
+      return structuredClone(faults.recordsLoaded ?? { metadata: savedRecord(), bytes: Uint8Array.from([1, 2, 3, 4]) });
+    }
+    async remove(id) {
+      assert.equal(this.closed, false);
+      recordCalls.push({ method: "remove", id, store: this });
+      if (faults.recordsRemoveGate) await faults.recordsRemoveGate.promise;
+      if (faults.recordsRemoveError) throw faults.recordsRemoveError;
+      return faults.recordsRemoved ?? true;
+    }
+    close() { if (!this.closed) { this.closed = true; this.closes++; } }
+  }
+  const recordsModule = new SyntheticModule(["RecordsStore"], function () {
+    this.setExport("RecordsStore", RecordsStore);
+  }, { context });
   const modules = new Map();
   for (const name of ["host_model.mjs", "play-model.mjs", "main.js"]) {
     const url = new URL(name, import.meta.url);
@@ -277,6 +326,7 @@ async function harness(faults = {}) {
   const main = modules.get("main.js");
   await main.link(specifier => {
     if (specifier === "./audio-host.mjs") return audioModule;
+    if (specifier === "./record-store.mjs") return recordsModule;
     const linked = modules.get(specifier.replace(/^\.\//, ""));
     assert.ok(linked, `unexpected import ${specifier}`);
     return linked;
@@ -362,6 +412,7 @@ async function harness(faults = {}) {
     await flush();
   }
   return { get, workers, get audio() { return audio; }, opens, traces, faults, timers, moduleToken, window, document, urls, revoked, downloads,
+    recordOpens, recordCalls, recordOwners,
     click, receive, reply, preview, begin, prepared, launch, advance,
     setNow(value) { assert.ok(value >= now); now = value; },
     async close() {
@@ -372,6 +423,174 @@ async function harness(faults = {}) {
     },
   };
 }
+
+test("the library opens only explicitly and saves joined capture bytes and actual score without autosave", async () => {
+  const stopGate = deferred();
+  const saveGate = deferred();
+  const h = await harness({ stopGate, recordsSaveGate: saveGate, recordsList: [savedRecord()] });
+  await h.preview();
+  assert.equal(h.recordOpens.length, 0);
+  assert.equal(h.recordCalls.length, 0);
+  const selected = selectedRecording();
+  chooseRecording(h, [selected.file]);
+  const label = h.get("replay-name").textContent;
+  h.get("record").checked = true;
+  const session = await h.launch();
+  assert.equal(h.get("records-save").disabled, true);
+  h.click("stop");
+  await flush();
+  const bytes = Uint8Array.from([7, 8, 9, 255]);
+  await h.receive(finalScore(session.id, { replay: bytes, replayComplete: false, replayError: null,
+    hits: 18446744073709551615n, misses: 0n, combo: 7n }));
+  assert.equal(h.get("records-save").disabled, true, "Worker receipt alone cannot release capture ownership");
+  stopGate.resolve();
+  await flush();
+  assert.equal(h.recordOpens.length, 0);
+  assert.equal(h.get("records-save").disabled, false);
+  h.click("records-save");
+  await flush();
+  assert.equal(h.recordOpens.length, 1);
+  const saved = h.recordCalls.find(call => call.method === "save").value;
+  assert.deepEqual(saved.bytes, bytes);
+  assert.equal(saved.name, `beatkernel-${session.id}-prefix.bkr`);
+  assert.equal(saved.chartPath, "chart.bms");
+  assert.equal(saved.complete, false);
+  assert.equal(saved.hits, 18446744073709551615n);
+  assert.equal(saved.misses, 0n);
+  assert.equal(saved.combo, 7n);
+  for (const id of ["play", "replay-play", "files", "seek", "export", "records-save", "records-refresh"]) {
+    assert.equal(h.get(id).disabled, true, `${id} conflicts with the pending library operation`);
+  }
+  h.click("records-save");
+  h.click("play");
+  assert.equal(h.recordCalls.filter(call => call.method === "save").length, 1);
+  assert.equal(h.opens.length, 1);
+  saveGate.resolve();
+  await flush();
+  assert.match(h.get("status").textContent, /Recording saved/);
+  assert.equal(h.recordCalls.filter(call => call.method === "list").length, 1);
+  assert.equal(h.get("export").disabled, false);
+  h.faults.recordsSaveError = Object.assign(new Error("actual IndexedDB quota exhausted"), { code: "quota" });
+  h.click("records-save");
+  await flush();
+  assert.match(h.get("status").textContent, /actual IndexedDB quota exhausted/);
+  assert.equal(h.get("replay-name").textContent, label);
+  assert.equal(h.get("export").disabled, false);
+  assert.equal(h.get("records-save").disabled, false);
+  delete h.faults.recordsSaveError;
+  h.faults.recordsListError = new Error("metadata refresh failed after commit");
+  h.click("records-save");
+  await flush();
+  assert.match(h.get("status").textContent, /Recording saved\..*metadata refresh failed after commit/);
+  assert.equal(h.recordOpens.length, 1, "ordinary quota/list failure does not silently open a replacement connection");
+  h.click("export");
+  assert.deepEqual(new Uint8Array(await h.urls[0].blob.arrayBuffer()), bytes);
+  assert.equal(selected.reads, 0);
+  await h.close();
+  assert.equal(h.recordOwners[0].closes, 1);
+});
+
+test("metadata listing does not load bytes and explicit use preserves the original replay gesture and delete scope", async () => {
+  const listGate = deferred();
+  const loadGate = deferred();
+  const row = savedRecord();
+  const bytes = Uint8Array.from([66, 75, 82, 255]);
+  const h = await harness({ recordsListGate: listGate, recordsLoadGate: loadGate,
+    recordsList: [row], recordsLoaded: { metadata: row, bytes } });
+  await h.preview();
+  h.click("records-refresh");
+  await flush();
+  assert.equal(h.recordCalls.filter(call => call.method === "list").length, 1);
+  assert.equal(h.recordCalls.filter(call => call.method === "load").length, 0);
+  assert.equal(h.get("play").disabled, true);
+  listGate.resolve();
+  await flush();
+  assert.equal(h.get("records").value, "41");
+  assert.match(h.get("records").children[0].textContent, /prefix.*18446744073709551615/);
+  assert.equal(h.opens.length, 0);
+  h.click("records-use");
+  await flush();
+  assert.equal(h.recordCalls.find(call => call.method === "load").id, 41);
+  assert.equal(h.get("replay-play").disabled, true);
+  loadGate.resolve();
+  await flush();
+  assert.match(h.get("replay-name").textContent, /saved-prefix\.bkr.*matching chart: Songs\/曲\/chart\.bms/);
+  assert.equal(h.get("chart").value, "chart.bms", "a metadata hint does not pretend the loaded assets match");
+  assert.equal(h.opens.length, 0, "selecting saved bytes cannot resume audio automatically");
+  const replay = await h.launch(0, "replay");
+  assert.equal(h.opens[0].gesture, true);
+  assert.equal(replay.start.replayFile.name, row.name);
+  assert.equal(replay.start.replayFile.size, bytes.length);
+  assert.deepEqual(new Uint8Array(await replay.start.replayFile.arrayBuffer()), bytes);
+  h.click("stop");
+  await flush();
+  await h.receive(finalScore(replay.id));
+  const label = h.get("replay-name").textContent;
+  h.faults.recordsList = [];
+  h.click("records-delete");
+  await flush();
+  assert.equal(h.recordCalls.find(call => call.method === "remove").id, 41);
+  assert.equal(h.get("records").value, "");
+  assert.match(h.get("status").textContent, /Selected record deleted/);
+  assert.equal(h.get("replay-name").textContent, label);
+  assert.equal(h.get("replay-play").disabled, false, "deleting storage does not revoke an already selected File");
+  assert.equal(h.recordCalls.filter(call => call.method === "save").length, 0);
+  assert.equal(h.opens.length, 1);
+  await h.close();
+});
+
+test("hidden-page and reopened-page cancellation cannot publish stale library results or retain late connections", async () => {
+  for (const transition of ["hidden", "pagehide"]) {
+    const loadGate = deferred();
+    const h = await harness({ recordsList: [savedRecord()], recordsLoadGate: loadGate });
+    await h.preview();
+    const selected = selectedRecording();
+    chooseRecording(h, [selected.file]);
+    const previous = h.get("replay-name").textContent;
+    h.click("records-refresh");
+    await flush();
+    h.click("records-use");
+    await flush();
+    const old = h.recordOwners[0];
+    if (transition === "hidden") { h.document.hidden = true; h.document.emit("visibilitychange"); }
+    else h.window.emit("pagehide");
+    await flush();
+    assert.equal(old.closed, true);
+    assert.equal(old.closes, 1);
+    if (transition === "pagehide") {
+      h.window.emit("pageshow", { persisted: true });
+      await h.preview();
+      chooseRecording(h, [selected.file]);
+    } else { h.document.hidden = false; h.document.emit("visibilitychange"); }
+    const currentLabel = h.get("replay-name").textContent;
+    if (transition === "hidden") assert.equal(currentLabel, previous);
+    loadGate.resolve();
+    await flush();
+    assert.equal(h.get("replay-name").textContent, currentLabel);
+    assert.equal(h.opens.length, 0);
+    delete h.faults.recordsLoadGate;
+    h.click("records-refresh");
+    await flush();
+    assert.equal(h.recordOpens.length, 2, "only a new explicit action replaces the closed owner");
+    assert.notEqual(h.recordOwners[1], old);
+    await h.close();
+  }
+  const gate = deferred();
+  const h = await harness({ recordsOpenGate: gate });
+  await h.preview();
+  h.click("records-refresh");
+  await flush();
+  const signal = h.recordOpens[0].signal;
+  h.window.emit("pagehide");
+  await flush();
+  assert.equal(signal.aborted, true);
+  gate.resolve();
+  await flush();
+  assert.equal(h.recordOwners[0].closed, true, "late open must be released before any catalog call");
+  assert.equal(h.recordCalls.length, 0);
+  assert.equal(h.opens.length, 0);
+  await h.close();
+});
 
 test("replay selection retains bounded File metadata, opens in the gesture and pumps audio without live keys", async () => {
   const stopGate = deferred();
