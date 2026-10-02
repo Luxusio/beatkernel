@@ -1,9 +1,10 @@
 import { snapshotFiles, nanoseconds, seconds } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
+import { RecordsStore } from "./record-store.mjs";
 import { KEY_BINDINGS, bindingsFor, millisecondsToNanos, frameNanos, startProjection, presentationPair } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
-const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name"].map(id => [id, byId(id)]));
+const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete"].map(id => [id, byId(id)]));
 let canvas = byId("canvas");
 let worker = null;
 let observer = null;
@@ -25,6 +26,8 @@ let lastReplay = null;
 let replayURL = null;
 let replayURLTimer = null;
 let selectedReplay = null;
+let recordsStore = null;
+let recordsOperation = null;
 
 function status(text, error = false) {
   ui.status.textContent = text;
@@ -32,19 +35,25 @@ function status(text, error = false) {
 }
 function controls() {
   const playing = activePlay !== null;
-  ui.folder.disabled = !initialized || preparing || playing || !("webkitdirectory" in ui.folder);
-  ui.files.disabled = !initialized || preparing || playing;
-  for (const field of [ui.chart, ui.rate, ui.seed, ui.prepare]) field.disabled = !initialized || !libraryId || importing || preparing || playing;
-  ui.position.disabled = ui.seek.disabled = !initialized || !hasPreview || importing || preparing || playing;
-  ui.play.disabled = !initialized || !hasPreview || importing || preparing || playing || !audioModule;
+  const busy = recordsOperation !== null;
+  ui.folder.disabled = !initialized || preparing || playing || busy || !("webkitdirectory" in ui.folder);
+  ui.files.disabled = !initialized || preparing || playing || busy;
+  for (const field of [ui.chart, ui.rate, ui.seed, ui.prepare]) field.disabled = !initialized || !libraryId || importing || preparing || playing || busy;
+  ui.position.disabled = ui.seek.disabled = !initialized || !hasPreview || importing || preparing || playing || busy;
+  ui.play.disabled = !initialized || !hasPreview || importing || preparing || playing || busy || !audioModule;
   ui.stop.disabled = !playing || activePlay.phase === "closing";
   ui.record.disabled = ui.play.disabled;
-  ui.export.disabled = playing || lastReplay === null;
-  ui["replay-file"].disabled = !initialized || importing || preparing || playing;
+  ui.export.disabled = playing || busy || lastReplay === null;
+  ui["replay-file"].disabled = !initialized || importing || preparing || playing || busy;
   ui["replay-play"].disabled = ui.play.disabled || selectedReplay === null;
+  const recordsDisabled = !initialized || importing || preparing || playing || busy;
+  ui.records.disabled = ui["records-refresh"].disabled = recordsDisabled;
+  ui["records-save"].disabled = recordsDisabled || lastReplay === null;
+  ui["records-use"].disabled = ui["records-delete"].disabled = recordsDisabled || !ui.records.value;
 }
 function stop() {
   revokeReplayURL();
+  closeRecords();
   if (activePlay?.phase !== "closing") void stopPlay("Playback stopped with the page.");
   ++owner;
   worker?.terminate();
@@ -80,7 +89,7 @@ function densityChanged() {
 }
 
 function prepare() {
-  if (!worker || !libraryId || importing || preparing || activePlay) return;
+  if (!worker || !libraryId || importing || preparing || activePlay || recordsOperation) return;
   try {
     const rate = Number(ui.rate.value);
     const seed = ui.seed.value;
@@ -155,6 +164,7 @@ function start() {
   selectedReplay = null;
   ui["replay-file"].value = "";
   ui["replay-name"].textContent = "Choose a recording and prepare its matching chart. Replay uses the recorded seed and section.";
+  ui.records.replaceChildren(new Option("Refresh to browse saved records", ""));
   ui.keys.textContent = "";
   ui.folder.value = ui.files.value = "";
   ui.chart.replaceChildren(new Option("Choose files first", ""));
@@ -191,7 +201,7 @@ function start() {
 }
 
 function choose(event) {
-  if (!initialized || preparing || !worker || activePlay) return;
+  if (!initialized || preparing || !worker || activePlay || recordsOperation) return;
   const files = event.target.files;
   if (!files?.length) return;
   if (files.length > 32768) return status("Select no more than 32,768 files.", true);
@@ -209,7 +219,7 @@ ui.files.addEventListener("change", choose);
 byId("prepare-form").addEventListener("submit", event => { event.preventDefault(); prepare(); });
 byId("seek-form").addEventListener("submit", event => {
   event.preventDefault();
-  if (!worker || !hasPreview || preparing || importing || activePlay) return;
+  if (!worker || !hasPreview || preparing || importing || activePlay || recordsOperation) return;
   try {
     const ns = nanoseconds(ui.position.value);
     seekId = ++serial;
@@ -222,7 +232,7 @@ window.addEventListener("resize", resize);
 ui.play.addEventListener("click", () => { void play("live"); });
 ui["replay-play"].addEventListener("click", () => { void play("replay"); });
 ui["replay-file"].addEventListener("change", event => {
-  if (!initialized || importing || preparing || activePlay) return;
+  if (!initialized || importing || preparing || activePlay || recordsOperation) return;
   try {
     const files = event.target.files;
     if (!files?.length) return;
@@ -238,8 +248,20 @@ ui["replay-file"].addEventListener("change", event => {
 });
 ui.stop.addEventListener("click", () => { void stopPlay("Playback stopped."); });
 ui.export.addEventListener("click", downloadReplay);
+ui.records.addEventListener("change", controls);
+for (const [id, action] of [["records-refresh", "refresh"], ["records-save", "save"], ["records-use", "use"], ["records-delete", "delete"]]) {
+  ui[id].addEventListener("click", () => { void recordAction(action); });
+}
 window.addEventListener("blur", () => { void stopPlay("Playback stopped after losing focus."); });
-document.addEventListener("visibilitychange", () => { if (document.hidden) void stopPlay("Playback stopped while the page is hidden."); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    void stopPlay("Playback stopped while the page is hidden.");
+    const pending = recordsOperation !== null;
+    closeRecords();
+    controls();
+    if (pending) status("Record library operation stopped while the page is hidden.");
+  }
+});
 window.addEventListener("keydown", event => key(event, true));
 window.addEventListener("keyup", event => key(event, false));
 
@@ -290,7 +312,7 @@ function playRpc(session, kind, fields = {}) {
 }
 
 async function play(mode = "live") {
-  if (!initialized || !hasPreview || !audioModule || importing || preparing || activePlay) return;
+  if (!initialized || !hasPreview || !audioModule || importing || preparing || activePlay || recordsOperation) return;
   if (mode === "replay" && selectedReplay === null) return;
   const session = { id: ++serial, owner, mode, phase: "preparing", controller: new AbortController(), audio: null, opening: null,
     rpc: null, timer: null, events: [], pressed: new Set(), bindings: [], sequence: 0n,
@@ -300,6 +322,7 @@ async function play(mode = "live") {
     completionReady: false, lastPresentation: null, cleanupError: null,
     recordReplay: mode === "live" && ui.record.checked === true, replay: null, replayError: null, naturalFinishRequested: false,
     replayFile: mode === "replay" ? selectedReplay : null,
+    chartPath: ui.chart.value,
     preview: { title: ui.title.textContent, details: ui.details.textContent, position: ui.position.value } };
   activePlay = session;
   controls();
@@ -607,7 +630,8 @@ function stopPlay(reason, failed = false, completed = false) {
         }
         if (session.replay !== null) {
           revokeReplayURL();
-          lastReplay = { bytes: session.replay.bytes, complete: session.replay.complete && !failed, id: session.id };
+          lastReplay = { bytes: session.replay.bytes, complete: session.replay.complete && !failed, id: session.id,
+            chartPath: session.chartPath, hits: score?.hits ?? null, misses: score?.misses ?? null, combo: score?.combo ?? null };
           ui.export.textContent = `Download last replay (${lastReplay.complete ? "complete" : "prefix"})`;
         }
         activePlay = null;
@@ -651,7 +675,7 @@ function revokeReplayURL() {
   replayURL = null;
 }
 function downloadReplay() {
-  if (activePlay !== null || lastReplay === null) return;
+  if (activePlay !== null || recordsOperation !== null || lastReplay === null) return;
   let link = null;
   try {
     revokeReplayURL();
@@ -666,5 +690,84 @@ function downloadReplay() {
     revokeReplayURL();
     status(`Replay download failed: ${String(error.message).slice(0, 4096)}`, true);
   } finally { link?.remove(); }
+}
+
+function closeRecords() {
+  recordsOperation?.controller.abort();
+  recordsOperation = null;
+  const previous = recordsStore;
+  recordsStore = null;
+  previous?.close();
+}
+function recordCurrent(operation) {
+  return recordsOperation === operation && operation.owner === owner && !operation.controller.signal.aborted;
+}
+async function openRecords(operation) {
+  if (recordsStore && !recordsStore.closed) return recordsStore;
+  const opened = await RecordsStore.open({ signal: operation.controller.signal });
+  if (!recordCurrent(operation)) {
+    opened.close();
+    throw new Error("Record library operation was cancelled.");
+  }
+  recordsStore = opened;
+  return opened;
+}
+function showRecords(entries) {
+  const previous = ui.records.value;
+  const options = document.createDocumentFragment();
+  for (const record of entries) {
+    options.append(new Option(`${record.name} · ${record.complete ? "complete capture" : "prefix"} · Hits ${record.hits ?? "unavailable"} · Misses ${record.misses ?? "unavailable"}`, String(record.id)));
+  }
+  ui.records.replaceChildren(options);
+  if (!entries.length) ui.records.append(new Option("No saved records", ""));
+  else if (entries.some(record => String(record.id) === previous)) ui.records.value = previous;
+}
+async function recordAction(action) {
+  if (!initialized || importing || preparing || activePlay || recordsOperation) return;
+  const captured = lastReplay;
+  if (action === "save" && captured === null) return;
+  const id = Number(ui.records.value);
+  if ((action === "use" || action === "delete") && (!Number.isSafeInteger(id) || id < 1)) return;
+  const operation = { owner, controller: new AbortController() };
+  recordsOperation = operation;
+  controls();
+  status(action === "save" ? "Saving the captured recording…" : "Opening saved records…");
+  let committed = "";
+  try {
+    const store = await openRecords(operation);
+    if (!recordCurrent(operation)) return;
+    if (action === "use") {
+      const loaded = await store.load(id);
+      if (!recordCurrent(operation)) return;
+      const file = new File([loaded.bytes], loaded.metadata.name, { type: "application/octet-stream" });
+      selectedReplay = file;
+      ui["replay-file"].value = "";
+      ui["replay-name"].textContent = `${file.name} · ${file.size} bytes · matching chart: ${loaded.metadata.chartPath}`;
+      status("Saved replay selected. Prepare its matching chart, then choose Play replay.");
+    } else {
+      if (action === "save") {
+        await store.save({ bytes: captured.bytes, name: `beatkernel-${captured.id}-${captured.complete ? "complete" : "prefix"}.bkr`,
+          chartPath: captured.chartPath, complete: captured.complete,
+          hits: captured.hits, misses: captured.misses, combo: captured.combo });
+        if (!recordCurrent(operation)) return;
+        committed = "Recording saved. ";
+      } else if (action === "delete") {
+        const removed = await store.remove(id);
+        if (!recordCurrent(operation)) return;
+        committed = removed ? "Selected record deleted. " : "Selected record was already absent. ";
+      }
+      const entries = await store.list();
+      if (!recordCurrent(operation)) return;
+      showRecords(entries);
+      status(`${committed}${entries.length} saved record(s).`);
+    }
+  } catch (error) {
+    if (recordCurrent(operation)) status(`${committed}Record library failed: ${String(error.message).slice(0, 4096)} Current replay and download remain available.`, true);
+  } finally {
+    if (recordsOperation === operation) {
+      recordsOperation = null;
+      controls();
+    }
+  }
 }
 start();

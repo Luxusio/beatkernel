@@ -41,6 +41,12 @@
       <div class="replay-controls"><label>Local replay <input id="replay-file" type="file" accept=".bkr" disabled></label>
         <button id="replay-play" type="button" disabled>Play replay</button></div>
       <p id="replay-name" class="hint">Choose a recording and prepare its matching chart. Replay uses the recorded seed and section.</p>
+      <div class="replay-controls"><label>Saved records <select id="records" disabled><option value="">Refresh to browse saved records</option></select></label>
+        <button id="records-refresh" type="button" disabled>Refresh saved records</button>
+        <button id="records-save" type="button" disabled>Save last recording</button>
+        <button id="records-use" type="button" disabled>Use saved replay</button>
+        <button id="records-delete" type="button" disabled>Delete selected record</button></div>
+      <p class="hint">Saving is explicit and stays in this browser. Loading a saved replay does not start audio. Keep downloads for records you want to preserve outside browser storage.</p>
       <p id="keys" class="hint" aria-label="Keyboard controls"></p>
       <p class="hint">Playback ends after the final sound when output timing is available. Escape, switching away from this page, or losing focus stops playback. Stop remains available.</p>
       <div id="viewport"><canvas id="canvas" width="960" height="720" aria-label="Chart lanes and background at the selected song time"></canvas></div>
