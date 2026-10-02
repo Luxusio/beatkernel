@@ -219,7 +219,7 @@ function failPlay(state, error, request = null) {
   if (identity(state.startRpcId) && state.startRpcId !== rpcId) {
     report("play-reply", { playId: state.id, rpcId: state.startRpcId, error: text });
   }
-  report("play-error", { playId: state.id, message: text, ...score });
+  report("play-error", { playId: state.id, message: text, released: cleanupError === null, ...score });
   scheduleDraw();
 }
 
@@ -231,7 +231,7 @@ function stopPlay(state) {
   if (state.startRpcId !== null) {
     report("play-reply", { playId: state.id, rpcId: state.startRpcId, error: "Gameplay setup was stopped." });
   }
-  if (error) report("play-error", { playId: state.id, message: message(error), ...score });
+  if (error) report("play-error", { playId: state.id, message: message(error), released: false, ...score });
   else report("play-stopped", { playId: state.id, ...score });
   scheduleDraw();
 }
@@ -419,10 +419,12 @@ function handlePlay(request) {
     } else if (request.kind === "play-step") stepPlay(state, request);
     else if (request.kind === "play-render") {
       if (!state.active || !identity(request.renderId) || request.renderId <= state.lastRender) throw new Error("Invalid rendered-report identity or state.");
-      const cursor = renderedCursor(request.report, state.startFrame);
-      if (cursor !== null) state.game.feed_audio(cursor, 256);
+      if (!(request.presentedNs === null || hostTime(request.presentedNs))) throw new Error("Invalid output presentation point.");
+      renderedCursor(request.report, state.startFrame);
+      const completed = state.game.observe_output(request.report.words, request.presentedNs);
+      if (typeof completed !== "boolean" || (completed && state.batch !== null)) throw new Error("Invalid completion with outstanding gameplay commands.");
       state.lastRender = request.renderId;
-      report("play-render-done", { playId: state.id, renderId: request.renderId });
+      report("play-render-done", { playId: state.id, renderId: request.renderId, completed });
       pumpCommands(state);
     } else throw new Error("Unknown gameplay request.");
   } catch (error) { failPlay(state, error, request); }

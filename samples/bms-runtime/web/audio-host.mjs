@@ -153,8 +153,14 @@ export class AudioHost {
       throw this.#error("unsupported", "presentation", "Audio output timestamps are unavailable.");
     }
     const timestamp = this.#context.getOutputTimestamp();
-    if (![timestamp?.contextTime, timestamp?.performanceTime].every(value => typeof value === "number" && Number.isFinite(value) && value > 0)) {
-      throw this.#error("state", "presentation", "Audio output timestamp evidence is not available yet.");
+    if (![timestamp?.contextTime, timestamp?.performanceTime].every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)) {
+      throw this.#error("state", "presentation", "Audio output timestamp evidence is malformed.");
+    }
+    if (timestamp.contextTime === 0 || timestamp.performanceTime === 0) {
+      throw this.#error("unavailable", "presentation", "Audio output timestamp evidence is not available yet.");
+    }
+    if (timestamp.contextTime > this.#context.currentTime) {
+      throw this.#error("state", "presentation", "Audio output position exceeds its context render clock.");
     }
     return { contextTime: timestamp.contextTime, performanceTime: timestamp.performanceTime };
   }

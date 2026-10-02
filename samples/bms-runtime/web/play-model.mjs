@@ -36,6 +36,21 @@ export function startProjection(clock, frame) {
   if (origin < 0n || origin > I64_MAX) throw new Error("Audio start projection exceeds Window time.");
   return origin;
 }
+// Actual reported presentation only; never extrapolate it to UI "now".
+export function presentationPoint(timestamp, start, rate, nowMs, maxAgeMs = 1000) {
+  if (!timestamp || ![timestamp.contextTime, timestamp.performanceTime, nowMs, maxAgeMs]
+    .every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)) {
+    throw new Error("Invalid audio presentation observation.");
+  }
+  // Validate the armed grid even when no output evidence is available yet.
+  frameNanos(start, rate);
+  if (timestamp.contextTime === 0 || timestamp.performanceTime === 0
+    || timestamp.performanceTime > nowMs || nowMs - timestamp.performanceTime > maxAgeMs) return null;
+  const contextNs = secondsToNanos(timestamp.contextTime);
+  const startNs = (start * 1000000000n + BigInt(rate) - 1n) / BigInt(rate);
+  const relative = contextNs - startNs;
+  return relative < 0n ? null : relative;
+}
 export function reportWord(words, index) {
   if (!(words instanceof Uint32Array) || words.length !== 56 || !Number.isInteger(index) || index < 0 || index >= 28) throw new Error("Invalid audio report words.");
   return BigInt(words[index * 2]) | BigInt(words[index * 2 + 1]) << 32n;

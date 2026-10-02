@@ -1,6 +1,6 @@
 import { snapshotFiles, nanoseconds, seconds } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
-import { KEY_BINDINGS, bindingsFor, millisecondsToNanos, frameNanos, startProjection } from "./play-model.mjs";
+import { KEY_BINDINGS, bindingsFor, millisecondsToNanos, frameNanos, startProjection, presentationPoint } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
 const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys"].map(id => [id, byId(id)]));
@@ -267,6 +267,7 @@ async function play() {
     tickId: 0, tickPending: null, audioBusy: false, batch: null, startFrame: null,
     origin: null, lastHost: 0n, lastStatus: 0, stopping: null, renderId: 0, renderPending: null,
     workerStarted: false, workerReleased: false, workerStop: null, finalScore: null,
+    completionReady: false, lastPresentation: null, cleanupError: null,
     preview: { title: ui.title.textContent, details: ui.details.textContent, position: ui.position.value } };
   activePlay = session;
   controls();
@@ -342,6 +343,7 @@ function key(event, down) {
     session.sequence++;
     if (session.sequence > 18446744073709551615n) throw new Error("Keyboard sequence exhausted.");
     session.events.push({ hostNs, key: binding[2], down, sequence: session.sequence });
+    session.completionReady = false;
     pumpInput(session);
   } catch (error) { void stopPlay(`Playback failed: ${error.message}`, true); }
 }
@@ -349,6 +351,25 @@ function key(event, down) {
 function audioSchedule(session) {
   const frame = session.audio.currentFrame + BigInt(Math.ceil(session.audio.sampleRate / 50));
   return frameNanos(frame > session.startFrame ? frame - session.startFrame : 0n, session.audio.sampleRate);
+}
+function presentedPoint(session) {
+  let timestamp;
+  try { timestamp = session.audio.outputTimestamp(); }
+  catch (error) {
+    if (error.code === "unsupported" || error.code === "unavailable") return null;
+    throw error;
+  }
+  const point = presentationPoint(timestamp, session.startFrame, session.audio.sampleRate, performance.now());
+  if (point === null || (session.lastPresentation !== null && point < session.lastPresentation)) return null;
+  session.lastPresentation = point;
+  return point;
+}
+function finishPlay(session) {
+  if (activePlay === session && session.phase === "playing" && session.completionReady
+    && session.events.length === 0 && session.tickPending === null && session.renderPending === null
+    && session.batch === null && !session.audioBusy) {
+    void stopPlay("Song completed.");
+  }
 }
 function pumpInput(session) {
   if (activePlay !== session || session.phase !== "playing" || session.tickPending !== null) return;
@@ -387,7 +408,7 @@ async function pumpAudio(session) {
         if (!Number.isSafeInteger(renderId)) throw new Error("Audio report identity exhausted.");
         const timer = setTimeout(() => { if (session.renderPending?.renderId === renderId) void stopPlay("Audio report Worker stopped responding.", true); }, 10000);
         session.renderPending = { renderId, timer };
-        worker.postMessage({ kind: "play-render", playId: session.id, renderId, report });
+        worker.postMessage({ kind: "play-render", playId: session.id, renderId, report, presentedNs: presentedPoint(session) });
       }
     }
   } catch (error) {
@@ -402,6 +423,7 @@ async function pumpAudio(session) {
   } finally {
     session.audioBusy = false;
     if (session.batch && session.phase === "playing") void pumpAudio(session);
+    finishPlay(session);
   }
 }
 
@@ -420,16 +442,23 @@ function receivePlay(data) {
     releasePlayWorker(session);
   } else if (data.kind === "play-error") {
     session.finalScore = data;
-    releasePlayWorker(session);
+    if (data.released === false) {
+      session.cleanupError = String(data.message).slice(0, 4096);
+      stop();
+    } else releasePlayWorker(session);
     void stopPlay(`Playback failed: ${data.message} · Hits ${data.hits}, misses ${data.misses}`, true);
   } else if (data.kind === "play-commands" && session.phase === "playing") {
     if (session.batch) { void stopPlay("More than one outgoing audio batch was published.", true); return; }
     session.batch = data.batch;
+    session.completionReady = false;
     void pumpAudio(session);
   } else if (data.kind === "play-render-done" && session.phase === "playing") {
     if (!session.renderPending || data.renderId !== session.renderPending.renderId) { void stopPlay("Audio report response was not correlated.", true); return; }
+    if (typeof data.completed !== "boolean") { void stopPlay("Song completion evidence was malformed.", true); return; }
     clearTimeout(session.renderPending.timer);
     session.renderPending = null;
+    session.completionReady = data.completed;
+    finishPlay(session);
   } else if (data.kind === "play-step-done" && session.phase === "playing") {
     const pending = session.tickPending;
     if (!pending || data.tickId !== pending.tickId) { void stopPlay("Gameplay step response was not correlated.", true); return; }
@@ -442,6 +471,7 @@ function receivePlay(data) {
       status(`Playing · Hits ${data.hits} · Misses ${data.misses} · Combo ${data.combo}`);
     }
     if (session.events.length) pumpInput(session);
+    finishPlay(session);
   }
 }
 
@@ -504,6 +534,10 @@ function stopPlay(reason, failed = false) {
     }
     finally {
       await workerStopped;
+      if (session.cleanupError !== null) {
+        failed = true;
+        reason = `Gameplay cleanup failed: ${session.cleanupError} Reload the page before playing again.`;
+      }
       if (activePlay === session) {
         if (session.owner === owner) {
           ui.title.textContent = session.preview.title;
