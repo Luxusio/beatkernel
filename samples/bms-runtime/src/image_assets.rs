@@ -201,7 +201,7 @@ impl ImageAssets {
         let layer_ids = chart
             .bga
             .iter()
-            .filter(|event| event.channel == BgaChannel::Layer)
+            .filter(|event| matches!(event.channel, BgaChannel::Layer | BgaChannel::Layer2))
             .map(|event| event.image)
             .collect();
         let (layers, decoded_bytes) = bank.keyed_layers(&layer_ids, limits.max_decoded_bytes)?;
@@ -245,7 +245,7 @@ impl ImageAssets {
         Ok((layers, total))
     }
 
-    /// Borrows only declared Layer pixels, with exact black made transparent.
+    /// Borrows only declared Layer/Layer2 pixels, with exact black made transparent.
     /// Non-Layer IDs and unavailable resources have no fallback to raw pixels.
     pub fn get_layer(&self, image: ImageId) -> Option<&Arc<RgbaImage>> {
         self.layers.get(&image)
@@ -351,7 +351,7 @@ mod layer_fixtures {
         let ids = chart
             .bga
             .iter()
-            .filter(|event| event.channel == BgaChannel::Layer)
+            .filter(|event| matches!(event.channel, BgaChannel::Layer | BgaChannel::Layer2))
             .map(|event| event.image)
             .collect();
         let (layers, total) = bank.keyed_layers(&ids, 4).unwrap();
@@ -362,5 +362,47 @@ mod layer_fixtures {
         assert!(bank.get_layer(ImageId(3)).is_none());
         assert!(Arc::ptr_eq(bank.get_layer(ImageId(2)).unwrap(), &original));
         assert_eq!(bank.decoded_bytes(), 4);
+    }
+    #[test]
+    fn layer_and_second_layer_canonical_alias_share_one_changed_variant_and_budget() {
+        let chart = beatkernel_bms::parse(
+            "#BMP01 same.png\n#BMP02 ./same.png\n#BMP03 same.png\n#00007:01\n#0000A:02\n#00006:03",
+            beatkernel_bms::ParseOptions::default(),
+        )
+        .unwrap();
+        let original = raw(vec![0, 0, 0, 255, 0, 0, 1, 64]);
+        let mut bank = ImageAssets::default();
+        for id in [1, 2, 3] {
+            bank.images.insert(ImageId(id), original.clone());
+        }
+        bank.decoded_bytes = 8;
+        bank.unique_images = 1;
+        let ids = chart
+            .bga
+            .iter()
+            .filter(|event| matches!(event.channel, BgaChannel::Layer | BgaChannel::Layer2))
+            .map(|event| event.image)
+            .collect();
+        assert!(bank.keyed_layers(&ids, 15).is_err());
+        assert!(bank.layers.is_empty());
+        assert_eq!(bank.decoded_bytes(), 8);
+        let (layers, total) = bank.keyed_layers(&ids, 16).unwrap();
+        bank.layers = layers;
+        bank.decoded_bytes = total;
+        assert_eq!(bank.decoded_bytes(), 16);
+        assert_eq!(bank.unique_images(), 1);
+        assert!(Arc::ptr_eq(
+            bank.get_layer(ImageId(1)).unwrap(),
+            bank.get_layer(ImageId(2)).unwrap()
+        ));
+        assert_eq!(
+            bank.get_layer(ImageId(2)).unwrap().pixels(),
+            &[0, 0, 0, 0, 0, 0, 1, 64]
+        );
+        assert!(bank.get_layer(ImageId(3)).is_none());
+        assert_eq!(
+            bank.get(ImageId(3)).unwrap().pixels(),
+            &[0, 0, 0, 255, 0, 0, 1, 64]
+        );
     }
 }

@@ -10,6 +10,8 @@ pub struct BgaState {
     pub base: Option<ImageId>,
     /// Layer channel07 selection.
     pub layer: Option<ImageId>,
+    /// Layer2 channel0A selection.
+    pub layer2: Option<ImageId>,
     /// Initial BMP00 or last channel06 selection.
     pub poor: Option<ImageId>,
 }
@@ -17,7 +19,7 @@ pub struct BgaState {
 /// Immutable per-channel indexes prepared before play; queries allocate nothing.
 #[derive(Clone, Debug, Default)]
 pub struct BgaTimeline {
-    channels: [Vec<ScheduledBga>; 3],
+    channels: [Vec<ScheduledBga>; 4],
     initial_poor: Option<ImageId>,
 }
 
@@ -26,6 +28,7 @@ fn channel_index(channel: BgaChannel) -> usize {
         BgaChannel::Base => 0,
         BgaChannel::Layer => 1,
         BgaChannel::Poor => 2,
+        BgaChannel::Layer2 => 3,
     }
 }
 
@@ -42,7 +45,7 @@ impl BgaTimeline {
     /// ordinal at equal timestamps. No partially prepared timeline is returned.
     pub fn new(events: Vec<ScheduledBga>, initial_poor: Option<ImageId>) -> Result<Self, String> {
         check_limit(events.len())?;
-        let mut counts = [0usize; 3];
+        let mut counts = [0usize; 4];
         let mut previous = None;
         for event in &events {
             let key = (event.at, event.ordinal);
@@ -52,7 +55,7 @@ impl BgaTimeline {
             counts[channel_index(event.channel)] += 1;
             previous = Some(key);
         }
-        let mut channels: [Vec<ScheduledBga>; 3] = std::array::from_fn(|_| Vec::new());
+        let mut channels: [Vec<ScheduledBga>; 4] = std::array::from_fn(|_| Vec::new());
         for (channel, count) in channels.iter_mut().zip(counts) {
             channel
                 .try_reserve_exact(count)
@@ -86,6 +89,7 @@ impl BgaTimeline {
         BgaState {
             base: last(0),
             layer: last(1),
+            layer2: last(3),
             poor: last(2).or(self.initial_poor),
         }
     }
@@ -138,6 +142,7 @@ mod tests {
         let at_ten = BgaState {
             base: Some(ImageId(4)),
             layer: Some(ImageId(2)),
+            layer2: None,
             poor: Some(ImageId(0)),
         };
         assert_eq!(timeline.state_at(Timestamp::from_nanos(10)), at_ten);
@@ -204,7 +209,8 @@ mod tests {
             BgaState {
                 base: Some(ImageId(1)),
                 poor: Some(ImageId(2)),
-                layer: Some(ImageId(3))
+                layer: Some(ImageId(3)),
+                layer2: None
             }
         );
         assert_eq!(
@@ -212,5 +218,57 @@ mod tests {
             Some(ImageId(1295))
         );
         assert!(!source.images.contains_key(&ImageId(1295)));
+    }
+    #[test]
+    fn fourth_channel_last_equal_time_selection_is_independent_and_seekable() {
+        let timeline = BgaTimeline::new(
+            vec![
+                event(0, 0, BgaChannel::Base, 1),
+                event(10, 1, BgaChannel::Layer, 2),
+                event(10, 2, BgaChannel::Layer2, 3),
+                event(10, 3, BgaChannel::Layer2, 4),
+                event(20, 4, BgaChannel::Poor, 5),
+                event(i64::MAX, 5, BgaChannel::Layer2, 1295),
+            ],
+            Some(ImageId(0)),
+        )
+        .unwrap();
+        let at = timeline.state_at(Timestamp::from_nanos(10));
+        assert_eq!(
+            at,
+            BgaState {
+                base: Some(ImageId(1)),
+                layer: Some(ImageId(2)),
+                layer2: Some(ImageId(4)),
+                poor: Some(ImageId(0))
+            }
+        );
+        assert_eq!(timeline.state_at(Timestamp::from_nanos(10)), at);
+        assert_eq!(timeline.state_at(Timestamp::from_nanos(9)).layer2, None);
+        assert_eq!(
+            timeline.state_at(Timestamp::from_nanos(i64::MAX)).layer2,
+            Some(ImageId(1295))
+        );
+        assert_eq!(timeline.state_at(Timestamp::from_nanos(10)), at);
+        assert_eq!(
+            timeline.state_at(Timestamp::from_nanos(i64::MIN)).layer2,
+            None
+        );
+        assert_eq!(timeline.len(), 6);
+        assert_eq!(timeline.channels.len(), 4);
+        let parsed = beatkernel_bms::parse(
+            "#BPM 120\n#0000a:0100\n#0010A:00ZZ",
+            beatkernel_bms::ParseOptions::default(),
+        )
+        .unwrap();
+        let parsed = BgaTimeline::from_chart(&parsed).unwrap();
+        assert_eq!(
+            parsed.state_at(Timestamp::from_nanos(2_999_999_999)).layer2,
+            Some(ImageId(1))
+        );
+        assert_eq!(
+            parsed.state_at(Timestamp::from_nanos(3_000_000_000)).layer2,
+            Some(ImageId(1295))
+        );
     }
 }

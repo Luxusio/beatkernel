@@ -195,7 +195,9 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 )?;
                 continue;
             }
-            if !matches!(channel, 1 | 3 | 4 | 6 | 7 | 8 | 9) && !visible(channel) && !long(channel)
+            if !matches!(channel, 1 | 3 | 4 | 6 | 7 | 8 | 9 | 0x0a)
+                && !visible(channel)
+                && !long(channel)
             {
                 return Err(fail(
                     line,
@@ -227,7 +229,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 tokens,
                 line,
             };
-            if matches!(channel, 4 | 6 | 7) {
+            if matches!(channel, 4 | 6 | 7 | 0x0a) {
                 visual_rows.push(row);
             } else {
                 rows.push(row);
@@ -482,6 +484,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
             4 => BgaChannel::Base,
             6 => BgaChannel::Poor,
             7 => BgaChannel::Layer,
+            0x0a => BgaChannel::Layer2,
             _ => unreachable!("visual row channel"),
         };
         let marker = BgaEvent {

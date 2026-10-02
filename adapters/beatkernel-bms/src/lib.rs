@@ -164,6 +164,8 @@ pub enum BgaChannel {
     Poor,
     /// Channel 07 overlay image.
     Layer,
+    /// Channel 0A second overlay image, composed above Layer.
+    Layer2,
 }
 /// Visual selection on its independent exact quarter-beat grid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -489,5 +491,108 @@ mod poor_mode_fixtures {
         let mut fabricated = default;
         fabricated.metadata.insert("POORBGA".into(), "01".into());
         assert!(fabricated.poor_bga_mode().is_err());
+    }
+    #[test]
+    fn second_layer_visual_grid_preserves_gameplay_and_checked_stop_timing() {
+        let prefix = "#BPM 120\n#STOP01 48\n#WAV01 head.wav\n#00011:0101\n#00009:0001\n";
+        let normal = parse(
+            &format!("{prefix}; unchanged physical line\n#00001:0101"),
+            ParseOptions::default(),
+        )
+        .unwrap();
+        let layer2 = parse(
+            &format!("{prefix}#0000a:00010000000000\n#00001:0101"),
+            ParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(layer2.source, normal.source);
+        assert_eq!(layer2.notes, normal.notes);
+        assert_eq!(layer2.bgm, normal.bgm);
+        assert_eq!(layer2.source.ticks_per_beat, 1);
+        assert_eq!(layer2.bga_ticks_per_beat, 7);
+        let compiled = layer2.compile().unwrap();
+        assert_eq!(compiled.chart, normal.compile().unwrap().chart);
+        assert_eq!(compiled.bgm, normal.compile().unwrap().bgm);
+        assert_eq!(compiled.bga[0].channel, BgaChannel::Layer2);
+        assert_eq!(compiled.bga[0].at.as_nanos(), 285_714_285);
+        let at_stop = parse(
+            "#BPM 120\n#STOP01 48\n#00009:0001\n#0000A:0001",
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .compile_bga()
+        .unwrap();
+        assert_eq!(at_stop[0].at.as_nanos(), 1_000_000_000);
+        let later = parse(
+            "#BPM 120\n#STOP01 48\n#00009:00010000\n#0000A:00000100",
+            ParseOptions::default(),
+        )
+        .unwrap()
+        .compile_bga()
+        .unwrap();
+        assert_eq!(later[0].at.as_nanos(), 1_500_000_000);
+        let cap = ParseOptions {
+            max_resolution: 6,
+            ..ParseOptions::default()
+        };
+        assert!(matches!(
+            parse("#0000A:00010000000000", cap).unwrap_err().kind,
+            BmsErrorKind::Resolution
+        ));
+    }
+    #[test]
+    fn layer2_zero_undefined_duplicates_seed_and_source_caps_match_other_visual_rows() {
+        let chart = parse("#00007:01\n#0000A:00ZZ", ParseOptions::default()).unwrap();
+        assert_eq!(chart.bga.len(), 2);
+        assert_eq!(chart.bga[1].image, ImageId(1295));
+        assert_eq!(chart.bga[1].channel, BgaChannel::Layer2);
+        assert!(parse("#0000A:01\n#0000a:02", ParseOptions::default()).is_err());
+        let last = parse(
+            "#0000A:01\n#0000a:02\n#0000A:00",
+            ParseOptions {
+                duplicates: DuplicatePolicy::LastWins,
+                ..ParseOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(last.bga.len(), 1);
+        assert_eq!(last.bga[0].image, ImageId(2));
+        assert!(
+            parse(
+                "#0000A:ZZZZ",
+                ParseOptions {
+                    max_objects: 1,
+                    ..ParseOptions::default()
+                }
+            )
+            .is_err()
+        );
+        let seeded = "#RANDOM 2\n#IF 1\n#0000A:01\n#ELSE\n#0000a:02\n#ENDIF";
+        assert_eq!(
+            parse_seeded(seeded, ParseOptions::default(), 3)
+                .unwrap()
+                .bga[0]
+                .image,
+            ImageId(1)
+        );
+        assert_eq!(
+            parse_seeded(seeded, ParseOptions::default(), 0)
+                .unwrap()
+                .bga[0]
+                .image,
+            ImageId(2)
+        );
+        assert!(
+            parse(
+                "#0000A:00",
+                ParseOptions {
+                    max_objects: 1,
+                    ..ParseOptions::default()
+                }
+            )
+            .unwrap()
+            .bga
+            .is_empty()
+        );
     }
 }
