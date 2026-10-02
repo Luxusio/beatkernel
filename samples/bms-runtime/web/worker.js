@@ -200,11 +200,21 @@ function statistics(state) {
 function disposeGame(state) {
   const game = state.game;
   state.game = null;
-  if (!game) return null;
-  let error = null;
-  try { game.stop(); } catch (cause) { error = cause; }
-  try { game.free(); } catch (cause) { error ??= cause; }
-  return error;
+  const result = { cleanupError: null, replay: null, replayError: null };
+  if (!game) return result;
+  let stopped = false;
+  try { game.stop(); stopped = true; } catch (cause) { result.cleanupError = cause; }
+  if (state.recordReplay && stopped) {
+    try {
+      const bytes = game.take_replay();
+      if (!(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer)
+        || bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength
+        || bytes.length === 0 || bytes.length > 64 * 1024 * 1024) throw new Error("Recorded replay has an invalid bounded transferable layout.");
+      result.replay = bytes;
+    } catch (cause) { result.replayError = message(cause); }
+  }
+  try { game.free(); } catch (cause) { result.cleanupError ??= cause; }
+  return result;
 }
 
 function failPlay(state, error, request = null) {
@@ -212,27 +222,33 @@ function failPlay(state, error, request = null) {
   const score = statistics(state);
   play = null; // Invalidates a still-awaiting preparation before releasing owners.
   stopRedraw();
-  const cleanupError = disposeGame(state);
+  const { cleanupError, replay, replayError } = disposeGame(state);
   const text = message(cleanupError ? `${message(error)}; cleanup: ${message(cleanupError)}` : error);
   const rpcId = request?.rpcId;
   if (identity(rpcId)) report("play-reply", { playId: state.id, rpcId, error: text });
   if (identity(state.startRpcId) && state.startRpcId !== rpcId) {
     report("play-reply", { playId: state.id, rpcId: state.startRpcId, error: text });
   }
-  report("play-error", { playId: state.id, message: text, released: cleanupError === null, ...score });
+  report("play-error", { playId: state.id, message: text, released: cleanupError === null,
+    replay, replayComplete: false, replayError, ...score }, replay ? [replay.buffer] : []);
   scheduleDraw();
 }
 
-function stopPlay(state) {
+function stopPlay(state, request) {
+  if (request.completed !== undefined && typeof request.completed !== "boolean") throw new Error("Invalid stopped-play completion choice.");
+  const completed = request.completed === true;
+  if (completed && (!state.completed || state.batch !== null)) throw new Error("Natural stop has no current completion evidence.");
   const score = statistics(state);
   play = null;
   stopRedraw();
-  const error = disposeGame(state);
+  const { cleanupError, replay, replayError } = disposeGame(state);
   if (state.startRpcId !== null) {
     report("play-reply", { playId: state.id, rpcId: state.startRpcId, error: "Gameplay setup was stopped." });
   }
-  if (error) report("play-error", { playId: state.id, message: message(error), released: false, ...score });
-  else report("play-stopped", { playId: state.id, ...score });
+  if (cleanupError) report("play-error", { playId: state.id, message: message(cleanupError), released: false,
+    replay, replayComplete: false, replayError, ...score }, replay ? [replay.buffer] : []);
+  else report("play-stopped", { playId: state.id, replay, replayComplete: completed && replay !== null,
+    replayError, ...score }, replay ? [replay.buffer] : []);
   scheduleDraw();
 }
 
@@ -260,6 +276,7 @@ async function preparePlay(state, request) {
       || typeof request.seed !== "string" || !/^\d{1,20}$/.test(request.seed) || BigInt(request.seed) > U64_MAX) {
       throw new Error("Invalid gameplay chart, sample rate or seed.");
     }
+    if (request.recordReplay !== undefined && typeof request.recordReplay !== "boolean") throw new Error("Invalid replay recording choice.");
     if (!(request.keyPairs instanceof Uint32Array) || request.keyPairs.length > 36 || request.keyPairs.length % 2 !== 0) {
       throw new Error("Invalid bounded gameplay key bindings.");
     }
@@ -280,6 +297,10 @@ async function preparePlay(state, request) {
     const moved = prepared;
     prepared = null; // A consuming Rust constructor also owns the argument on Err.
     state.game = new BrowserGame(moved, 0n, 100000000n, 50000000n, 50000000n, 0n, pairs);
+    if (request.recordReplay === true) {
+      state.game.configure_capture(64 * 1024 * 1024, 1000000);
+      state.recordReplay = true;
+    }
     state.keys = keys;
     reply(state, request, { kind: "prepared", samples: state.game.sample_count(), ...metadata });
     state.startRpcId = null;
@@ -325,6 +346,7 @@ function commandBatch(state) {
     }
   }
   state.batch = { sequence: batch.sequence, count: batch.commands.length };
+  state.completed = false;
   return batch;
 }
 
@@ -355,6 +377,7 @@ function stepPlay(state, request) {
   if (request.watermark !== null && host !== null && request.watermark < host) throw new Error("Gameplay watermark precedes its input prefix.");
   if (!Number.isSafeInteger(state.preOriginInputs + ignored)) throw new Error("Pre-origin input count overflow.");
   state.lastTick = request.tickId;
+  if (request.events.length !== 0) state.completed = false;
   for (const event of request.events) {
     if (event.hostNs < state.origin) state.preOriginInputs++;
     else state.game.input(event.hostNs, event.key, event.down, event.sequence, request.audioNs);
@@ -382,6 +405,7 @@ function handlePlay(request) {
       game: null, keys: null, active: false, origin: null, startFrame: null,
       batch: null, lastRpc: 0, lastTick: 0, lastRender: 0,
       lastHost: null, lastSequence: null, preOriginInputs: 0,
+      recordReplay: false, completed: false,
     };
     play = state; // Reserve before the ready await so stop cannot race a late owner.
     lastPlayId = state.id;
@@ -391,7 +415,7 @@ function handlePlay(request) {
   const state = play;
   if (!state || request.playId !== state.id) return;
   try {
-    if (request.kind === "play-stop") { stopPlay(state); return; }
+    if (request.kind === "play-stop") { stopPlay(state, request); return; }
     if (request.kind === "play-start") throw new Error("Gameplay setup is already owned by this identity.");
     const requiresRpc = ["play-sample", "play-commands", "play-activate"].includes(request.kind);
     if (request.rpcId !== undefined && !requiresRpc && request.kind !== "play-ack") throw new Error("Unexpected gameplay RPC identity.");
@@ -425,6 +449,7 @@ function handlePlay(request) {
       const completed = state.game.observe_output(request.report.words, request.presentedNs);
       if (typeof completed !== "boolean" || (completed && state.batch !== null)) throw new Error("Invalid completion with outstanding gameplay commands.");
       if (request.presentedNs !== null) state.game.observe_presentation(request.presentedNs, request.presentedHostNs);
+      state.completed = completed;
       state.lastRender = request.renderId;
       report("play-render-done", { playId: state.id, renderId: request.renderId, completed });
       pumpCommands(state);

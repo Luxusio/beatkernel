@@ -11,6 +11,8 @@ p { line-height: 1.6; }
 form, .files { display: flex; flex-wrap: wrap; gap: 16px; align-items: end; }
 label { display: flex; flex-direction: column; gap: 6px; font-size: .9rem; min-width: 0; }
 .chart { flex: 1 1 280px; }
+.replay-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
+.replay-controls label { flex-direction: row; align-items: center; }
 input, select, button { font: inherit; padding: 10px; border: 1px solid #63758c; border-radius: 5px; background: #111923; color: inherit; max-width: 100%; }
 input[type="file"] { width: 290px; }
 input[type="number"] { width: 140px; }

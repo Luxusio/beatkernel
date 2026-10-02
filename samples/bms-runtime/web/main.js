@@ -3,7 +3,7 @@ import { AudioHost } from "./audio-host.mjs";
 import { KEY_BINDINGS, bindingsFor, millisecondsToNanos, frameNanos, startProjection, presentationPair } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
-const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys"].map(id => [id, byId(id)]));
+const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export"].map(id => [id, byId(id)]));
 let canvas = byId("canvas");
 let worker = null;
 let observer = null;
@@ -21,6 +21,9 @@ let preparing = false;
 let hasPreview = false;
 let audioModule = null;
 let activePlay = null;
+let lastReplay = null;
+let replayURL = null;
+let replayURLTimer = null;
 
 function status(text, error = false) {
   ui.status.textContent = text;
@@ -34,8 +37,11 @@ function controls() {
   ui.position.disabled = ui.seek.disabled = !initialized || !hasPreview || importing || preparing || playing;
   ui.play.disabled = !initialized || !hasPreview || importing || preparing || playing || !audioModule;
   ui.stop.disabled = !playing || activePlay.phase === "closing";
+  ui.record.disabled = ui.play.disabled;
+  ui.export.disabled = playing || lastReplay === null;
 }
 function stop() {
+  revokeReplayURL();
   if (activePlay?.phase !== "closing") void stopPlay("Playback stopped with the page.");
   ++owner;
   worker?.terminate();
@@ -209,6 +215,7 @@ window.addEventListener("pageshow", event => { if (event.persisted) start(); });
 window.addEventListener("resize", resize);
 ui.play.addEventListener("click", play);
 ui.stop.addEventListener("click", () => { void stopPlay("Playback stopped."); });
+ui.export.addEventListener("click", downloadReplay);
 window.addEventListener("blur", () => { void stopPlay("Playback stopped after losing focus."); });
 document.addEventListener("visibilitychange", () => { if (document.hidden) void stopPlay("Playback stopped while the page is hidden."); });
 window.addEventListener("keydown", event => key(event, true));
@@ -268,6 +275,7 @@ async function play() {
     origin: null, lastHost: 0n, lastStatus: 0, stopping: null, renderId: 0, renderPending: null,
     workerStarted: false, workerReleased: false, workerStop: null, finalScore: null,
     completionReady: false, lastPresentation: null, cleanupError: null,
+    recordReplay: ui.record.checked === true, replay: null, replayError: null, naturalFinishRequested: false,
     preview: { title: ui.title.textContent, details: ui.details.textContent, position: ui.position.value } };
   activePlay = session;
   controls();
@@ -283,7 +291,8 @@ async function play() {
     if (activePlay !== session || session.phase === "closing") { await session.audio.stop(); return; }
     session.workerStarted = true;
     const prepared = await playRpc(session, "play-start", { libraryId, path: ui.chart.value,
-      rate: session.audio.sampleRate, seed: ui.seed.value, keyPairs: Uint32Array.from(KEY_BINDINGS.flatMap(row => [row[0], row[2]])) });
+      rate: session.audio.sampleRate, seed: ui.seed.value, recordReplay: session.recordReplay,
+      keyPairs: Uint32Array.from(KEY_BINDINGS.flatMap(row => [row[0], row[2]])) });
     ui.title.textContent = prepared.title || ui.chart.value;
     ui.details.textContent = `${prepared.artist || "Unknown artist"} · ${prepared.notes} notes · ${prepared.samples} sounds · ${session.audio.sampleRate} Hz output`;
     session.bindings = bindingsFor(prepared.lanes);
@@ -371,7 +380,7 @@ function finishPlay(session) {
   if (activePlay === session && session.phase === "playing" && session.completionReady
     && session.events.length === 0 && session.tickPending === null && session.renderPending === null
     && session.batch === null && !session.audioBusy) {
-    void stopPlay("Song completed.");
+    void stopPlay("Song completed.", false, true);
   }
 }
 function pumpInput(session) {
@@ -444,9 +453,12 @@ function receivePlay(data) {
     else request.resolve(data.result);
   } else if (data.kind === "play-stopped") {
     session.finalScore = data;
+    replayReceipt(session, data);
     releasePlayWorker(session);
+    if (session.phase !== "closing") void stopPlay("Gameplay stopped without the Window cleanup request.", true);
   } else if (data.kind === "play-error") {
     session.finalScore = data;
+    replayReceipt(session, data);
     if (data.released === false) {
       session.cleanupError = String(data.message).slice(0, 4096);
       stop();
@@ -489,10 +501,11 @@ function releasePlayWorker(session) {
   }
 }
 
-function stopPlay(reason, failed = false) {
+function stopPlay(reason, failed = false, completed = false) {
   const session = activePlay;
   if (!session) return Promise.resolve();
   if (session.stopping) return session.stopping;
+  session.naturalFinishRequested = completed;
   session.phase = "closing";
   session.controller.abort();
   clearInterval(session.timer);
@@ -519,7 +532,7 @@ function stopPlay(reason, failed = false) {
       }, 10000);
       session.workerStop = { timer, resolve };
     });
-    try { worker.postMessage({ kind: "play-stop", playId: session.id }); }
+    try { worker.postMessage({ kind: "play-stop", playId: session.id, completed }); }
     catch { stop(); failed = true; reason = "Gameplay Worker could not stop. Reload the page."; }
   }
   controls();
@@ -553,6 +566,15 @@ function stopPlay(reason, failed = false) {
         const score = session.finalScore;
         const result = score && typeof score.hits === "bigint" && typeof score.misses === "bigint"
           ? ` Hits ${score.hits} · Misses ${score.misses} · Combo ${score.combo ?? "unavailable"}.` : "";
+        if (session.replayError !== null) {
+          failed = true;
+          reason += ` Replay export failed: ${session.replayError}`;
+        }
+        if (session.replay !== null) {
+          revokeReplayURL();
+          lastReplay = { bytes: session.replay.bytes, complete: session.replay.complete && !failed, id: session.id };
+          ui.export.textContent = `Download last replay (${lastReplay.complete ? "complete" : "prefix"})`;
+        }
         activePlay = null;
         controls();
         if (session.owner === owner || failed) status(reason + result, failed);
@@ -560,5 +582,54 @@ function stopPlay(reason, failed = false) {
     }
   })();
   return session.stopping;
+}
+
+function replayReceipt(session, data) {
+  try {
+    // A non-recording older peer may omit export fields, but cannot publish bytes.
+    if (!session.recordReplay && data.replay === undefined && data.replayComplete === undefined
+      && data.replayError === undefined) return;
+    if (typeof data.replayComplete !== "boolean" || !(data.replayError === null
+      || (typeof data.replayError === "string" && data.replayError.length <= 4096))) throw new Error("Invalid replay export metadata.");
+    if (data.replay === null) {
+      if (data.replayComplete) throw new Error("Complete replay has no encoded data.");
+    } else {
+      const bytes = data.replay;
+      if (!session.recordReplay || !(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer)
+        || bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength
+        || bytes.length === 0 || bytes.length > 64 * 1024 * 1024
+        || (data.replayComplete && (data.kind !== "play-stopped" || !session.naturalFinishRequested))) {
+        throw new Error("Invalid replay export ownership or layout.");
+      }
+      session.replay = { bytes, complete: data.replayComplete };
+    }
+    if (data.replayError !== null) session.replayError = data.replayError;
+  } catch (error) {
+    session.replay = null;
+    session.replayError = String(error.message).slice(0, 4096);
+  }
+}
+function revokeReplayURL() {
+  clearTimeout(replayURLTimer);
+  replayURLTimer = null;
+  if (replayURL !== null) URL.revokeObjectURL(replayURL);
+  replayURL = null;
+}
+function downloadReplay() {
+  if (activePlay !== null || lastReplay === null) return;
+  let link = null;
+  try {
+    revokeReplayURL();
+    replayURL = URL.createObjectURL(new Blob([lastReplay.bytes], { type: "application/octet-stream" }));
+    link = document.createElement("a");
+    link.href = replayURL;
+    link.download = `beatkernel-${lastReplay.id}-${lastReplay.complete ? "complete" : "prefix"}.bkr`;
+    document.body.appendChild(link);
+    link.click();
+    replayURLTimer = setTimeout(revokeReplayURL, 60000);
+  } catch (error) {
+    revokeReplayURL();
+    status(`Replay download failed: ${String(error.message).slice(0, 4096)}`, true);
+  } finally { link?.remove(); }
 }
 start();
