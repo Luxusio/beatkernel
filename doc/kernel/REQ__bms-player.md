@@ -172,9 +172,18 @@ transactional editor. Switching fields/screens or losing active UI admission
 clears composition and native enable acknowledgement. Active composition
 suppresses ordinary keyboard text and shortcuts. The native event API carries
 no composition generation ID; ordered enable/disable and current-target guards
-are used without an absolute stale-event guarantee. Current glyph fallback,
-caret-only previews and OS candidate positioning remain; multilingual shaping,
-selection underlines and clipboard are future work. Prepared regression
+are used without an absolute stale-event guarantee. Focused search, settings and
+profile previews retain the complete composition and optional native selection
+as UTF-8 byte ranges. Underline the composition and highlight a nonempty selected
+range inside the visible scalar window; clip both to the text field. Keep the
+caret position in view and show the whole composition when it fits. A missing
+native preedit cursor range hides the caret while retaining the composition
+underline; an explicitly collapsed range still displays a caret. An endpoint-only
+range change repaints its retained field without rebuilding unrelated rows or
+controls. Commit, cancellation and field/lifecycle changes clear decorations;
+preview metadata never changes committed text or search results. Rejected edits
+preserve text, cursor and metadata. Current glyph fallback and OS candidate
+positioning remain; multilingual shaping and clipboard are future work. Prepared regression
 fixtures await later execution and do not certify native IME behavior.
 Native audio output metadata selection is described below. Native profile persistence is described below. Editing never acquires devices or
 changes native input/audio owners.
@@ -306,9 +315,10 @@ warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warni
 
 - Settings validation checks syntax and cross-option constraints, not resource
   availability — actual device/file checks remain in native preparation.
-- HID usage bindings still require typed values; clipboard
-  and IME composition remain absent — extend these while retaining
-  bounded drafts and next-session-only application.
+- HID usage bindings still require typed values. Search, native settings and
+  profile fields support IME composition ranges; clipboard and general
+  committed-text selection remain pending. Retain bounded drafts and
+  next-session-only application when extending editing.
 - Profile operations drain on close rather than being forcibly interrupted —
   assess filesystem stall behavior during deferred native acceptance.
 - New-profile publication requires hard-link support; concurrent replacement

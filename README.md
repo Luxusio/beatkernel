@@ -128,9 +128,13 @@ Selection supports PageUp/Down by fifteen rows and Home/End within search
 results. Wheel over a chart row moves through those results, with fractional
 trackpad movement accumulated and at most one page admitted per event.
 Focused search Home/End moves its text cursor.
-Native IME input supports search, settings values and profile paths. Composition
-previews stay separate from saved drafts; switching fields or leaving the active
-screen discards them. Existing bitmap glyph fallback still applies.
+Native IME input supports search, settings values and profile paths. Focused
+fields underline the composition and highlight the IME's selected range, clipped
+to the visible text window. An absent IME cursor range hides the caret;
+an explicitly collapsed range keeps it visible. Range-only changes update the retained field.
+Previews stay separate from saved drafts; committing, switching fields or leaving
+the active screen clears the decorations. Existing bitmap glyph fallback still
+applies; multilingual shaping and clipboard integration remain pending.
 Selection rows show artist metadata below the title when available.
 In Records, Remove Own and Remove Other remove one selected record occurrence
 from the competition draft without deleting its file. Selected own/other counts
@@ -207,8 +211,9 @@ configuration can be overridden there before starting; device selection is optio
 output metadata on the settings worker; select an entry and Use Device to copy
 its exact ID into the draft. Apply remains separate. ASIO discovery requires an
 explicit registry view. Keyboard metadata discovery is source-integrated for
-automatic preparation and Linux per-player assignment. Clipboard and IME
-composition remain pending. `--profile PATH` loads saved
+automatic preparation and Linux per-player assignment. Search, native settings
+and profile fields support IME previews with composition ranges; clipboard and
+general committed-text selection remain pending. `--profile PATH` loads saved
 native and display options; explicit arguments replace matching profile entries.
 Settings Load/Save use an editable path and the same serialized settings worker. Save stores
 the draft; Apply remains separate. Profiles retain the OS identity and exclude
