@@ -24,6 +24,7 @@ pub struct LineEditor {
     cursor: usize,
     max_bytes: usize,
     composition: Option<Composition>,
+    anchor: Option<usize>,
 }
 impl LineEditor {
     pub fn new(value: &str, max_bytes: usize) -> Result<Self, String> {
@@ -42,6 +43,7 @@ impl LineEditor {
             cursor: value.len(),
             max_bytes,
             composition: None,
+            anchor: None,
         })
     }
     pub fn value(&self) -> &str {
@@ -54,27 +56,41 @@ impl LineEditor {
     pub const fn composition(&self) -> Option<Composition> {
         self.composition
     }
-    /// Validation failure preserves content, cursor and composition metadata.
+    /// Positive, sorted UTF-8 byte range for ordinary committed-text selection.
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        self.anchor
+            .filter(|&anchor| anchor != self.cursor)
+            .map(|anchor| (anchor.min(self.cursor), anchor.max(self.cursor)))
+    }
+    pub fn select_all(&mut self) {
+        self.composition = None;
+        self.cursor = self.value.len();
+        self.anchor = (!self.value.is_empty()).then_some(0);
+    }
+    pub fn clear_selection(&mut self) {
+        self.anchor = None;
+        self.composition = None;
+    }
+    /// Validation failure preserves content, cursor, selection and composition.
     pub fn insert(&mut self, text: &str) -> Result<(), String> {
         if text.chars().any(invalid_character) {
             return Err("text input cannot contain control characters".into());
         }
-        if self
-            .value
-            .len()
+        let (begin, end) = self.selection().unwrap_or((self.cursor, self.cursor));
+        if (self.value.len() - (end - begin))
             .checked_add(text.len())
             .is_none_or(|len| len > self.max_bytes)
         {
             return Err("text input exceeds its byte limit".into());
         }
-        self.value.insert_str(self.cursor, text);
-        self.cursor += text.len();
+        self.value.replace_range(begin..end, text);
+        self.cursor = begin + text.len();
+        self.anchor = None;
         self.composition = None;
         Ok(())
     }
-    /// Creates visual composition text at the committed caret without changing
-    /// this editor. Cursor endpoints are UTF-8 byte offsets within `text`; the
-    /// first endpoint places the preview caret, without replacing a selection.
+    /// Clones a visual replacement of the committed selection, preserving this base.
+    /// Native cursor endpoints are UTF-8 byte offsets relative to the replacement.
     pub fn preedit(&self, text: &str, cursor: Option<(usize, usize)>) -> Result<Self, String> {
         if let Some((start, end)) = cursor {
             if start > end
@@ -88,47 +104,90 @@ impl LineEditor {
             }
         }
         let mut preview = self.clone();
+        preview.composition = None;
+        if text.is_empty() {
+            return Ok(preview); // Cancellation never deletes a committed selection.
+        }
+        let begin = self.selection().map_or(self.cursor, |range| range.0);
         preview.insert(text)?;
         if let Some((start, _)) = cursor {
-            preview.cursor = self.cursor + start;
+            preview.cursor = begin + start;
         }
-        if !text.is_empty() {
-            preview.composition = Some(Composition {
-                range: (self.cursor, self.cursor + text.len()),
-                selection: cursor.map(|(start, end)| (self.cursor + start, self.cursor + end)),
-            });
-        }
+        preview.composition = Some(Composition {
+            range: (begin, begin + text.len()),
+            selection: cursor.map(|(start, end)| (begin + start, begin + end)),
+        });
         Ok(preview)
     }
-    pub fn left(&mut self) {
+    fn move_to(&mut self, cursor: usize, extend: bool) {
+        let anchor = extend.then(|| self.anchor.unwrap_or(self.cursor));
+        self.cursor = cursor;
+        self.anchor = anchor.filter(|&anchor| anchor != cursor);
         self.composition = None;
-        self.cursor = self.value[..self.cursor]
-            .char_indices()
-            .next_back()
-            .map_or(0, |(at, _)| at);
+    }
+    pub fn move_left(&mut self, extend: bool) {
+        let cursor = if !extend && self.selection().is_some() {
+            self.selection().unwrap().0
+        } else {
+            self.value[..self.cursor]
+                .char_indices()
+                .next_back()
+                .map_or(0, |(at, _)| at)
+        };
+        self.move_to(cursor, extend);
+    }
+    pub fn move_right(&mut self, extend: bool) {
+        let cursor = if !extend && self.selection().is_some() {
+            self.selection().unwrap().1
+        } else {
+            self.value[self.cursor..]
+                .chars()
+                .next()
+                .map_or(self.cursor, |character| self.cursor + character.len_utf8())
+        };
+        self.move_to(cursor, extend);
+    }
+    pub fn move_home(&mut self, extend: bool) {
+        self.move_to(0, extend);
+    }
+    pub fn move_end(&mut self, extend: bool) {
+        self.move_to(self.value.len(), extend);
+    }
+    pub fn left(&mut self) {
+        self.move_left(false);
     }
     pub fn right(&mut self) {
-        self.composition = None;
-        if let Some(character) = self.value[self.cursor..].chars().next() {
-            self.cursor += character.len_utf8();
-        }
+        self.move_right(false);
     }
     pub fn home(&mut self) {
-        self.composition = None;
-        self.cursor = 0;
+        self.move_home(false);
     }
     pub fn end(&mut self) {
-        self.composition = None;
-        self.cursor = self.value.len();
+        self.move_end(false);
+    }
+    fn remove_selection(&mut self) -> bool {
+        let Some((begin, end)) = self.selection() else {
+            return false;
+        };
+        self.value.replace_range(begin..end, "");
+        self.cursor = begin;
+        self.anchor = None;
+        true
     }
     pub fn backspace(&mut self) {
         self.composition = None;
+        if self.remove_selection() {
+            return;
+        }
         let previous = self.cursor;
         self.left();
         self.value.replace_range(self.cursor..previous, "");
     }
     pub fn delete(&mut self) {
         self.composition = None;
+        if self.remove_selection() {
+            return;
+        }
         if let Some(character) = self.value[self.cursor..].chars().next() {
             self.value
                 .replace_range(self.cursor..self.cursor + character.len_utf8(), "");
@@ -189,7 +248,7 @@ impl LineEditor {
                 .and_then(|composition| clip(composition.range)),
             selection: self
                 .composition
-                .and_then(|composition| composition.selection)
+                .map_or_else(|| self.selection(), |composition| composition.selection)
                 .and_then(clip),
         }
     }
@@ -201,6 +260,165 @@ fn invalid_character(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn committed_selection_tracks_scalar_boundaries_reversal_and_plain_collapse() {
+        let mut line = LineEditor::new("a별b", 16).unwrap();
+        line.home();
+        line.move_right(true);
+        assert_eq!(line.selection(), Some((0, 1)));
+        line.move_right(true);
+        assert_eq!(line.selection(), Some((0, 4)));
+        line.move_left(true);
+        assert_eq!(line.selection(), Some((0, 1)));
+        line.move_left(true);
+        assert_eq!(line.selection(), None);
+        assert_eq!(line.anchor, None);
+        line.right();
+        line.move_right(true);
+        assert_eq!(line.selection(), Some((1, 4)));
+        line.move_left(true);
+        line.move_left(true);
+        assert_eq!(line.selection(), Some((0, 1)));
+        line.right();
+        assert_eq!(line.cursor(), 1);
+        assert!(line.selection().is_none());
+        line.move_end(true);
+        assert_eq!(line.selection(), Some((1, 5)));
+        line.left();
+        assert_eq!(line.cursor(), 1);
+        assert!(line.selection().is_none());
+        line.move_home(true);
+        assert_eq!(line.selection(), Some((0, 1)));
+        line.end();
+        assert_eq!(line.cursor(), 5);
+        assert!(line.selection().is_none());
+        line.select_all();
+        assert_eq!(line.selection(), Some((0, 5)));
+        line.clear_selection();
+        assert_eq!(line.cursor(), 5);
+        assert!(line.selection().is_none());
+        let mut empty = LineEditor::new("", 1).unwrap();
+        empty.select_all();
+        assert_eq!(empty.selection(), None);
+        empty.move_left(true);
+        empty.move_end(true);
+        assert_eq!(empty.anchor, None);
+    }
+    #[test]
+    fn full_capacity_replacement_and_both_deletions_are_atomic() {
+        let mut line = LineEditor::new("a별b", 5).unwrap();
+        line.home();
+        line.right();
+        line.move_right(true);
+        let original = line.clone();
+        for text in ["éé", "\n", "\u{2028}"] {
+            assert!(line.insert(text).is_err());
+            assert_eq!(line, original);
+        }
+        line.insert("音").unwrap();
+        assert_eq!(line.value(), "a音b");
+        assert_eq!(line.cursor(), 4);
+        assert!(line.selection().is_none());
+        for deletion in [LineEditor::delete, LineEditor::backspace] {
+            let mut selected = original.clone();
+            deletion(&mut selected);
+            assert_eq!((selected.value(), selected.cursor()), ("ab", 1));
+            assert_eq!(selected.selection(), None);
+        }
+        let mut all = original;
+        all.select_all();
+        all.insert("éé").unwrap();
+        assert_eq!(all.value(), "éé");
+        assert_eq!(all.cursor(), 4);
+        all.select_all();
+        all.insert("").unwrap();
+        assert_eq!(all.value(), "");
+    }
+    #[test]
+    fn committed_selection_is_clipped_without_becoming_composition() {
+        let mut line = LineEditor::new("a별cd音f", 32).unwrap();
+        line.home();
+        line.move_end(true);
+        assert_eq!(
+            line.visible_line(3),
+            VisibleLine {
+                value: "d音f",
+                caret: 3,
+                caret_visible: true,
+                composition: None,
+                selection: Some((0, 3))
+            }
+        );
+        assert_eq!(
+            line.visible_line(0),
+            VisibleLine {
+                value: "",
+                caret: 0,
+                caret_visible: true,
+                composition: None,
+                selection: None
+            }
+        );
+        let before = line.clone();
+        line.move_left(true);
+        assert_ne!(line, before);
+        assert_eq!(line.value(), before.value());
+        assert!(line.value().is_char_boundary(line.selection().unwrap().1));
+    }
+    #[test]
+    fn ime_preview_replaces_selected_base_once_and_empty_preview_cancels() {
+        let mut base = LineEditor::new("a別bc", 8).unwrap();
+        base.home();
+        base.right();
+        base.move_right(true);
+        let original = base.clone();
+        let preview = base.preedit("音é", Some((3, 5))).unwrap();
+        assert_eq!(preview.value(), "a音ébc");
+        assert_eq!(preview.cursor(), 4);
+        assert_eq!(preview.selection(), None);
+        assert_eq!(
+            preview.composition(),
+            Some(Composition {
+                range: (1, 6),
+                selection: Some((4, 6))
+            })
+        );
+        assert_eq!(preview.visible_line(8).selection, Some((2, 3)));
+        assert_eq!(base, original);
+        assert_eq!(base.preedit("", None).unwrap(), base);
+        assert_eq!(base.preedit("", Some((0, 0))).unwrap(), base);
+        assert!(base.preedit("音音", None).is_err());
+        assert_eq!(base, original);
+        assert!(base.preedit("音", Some((1, 3))).is_err());
+        assert_eq!(base, original);
+        assert!(
+            !base
+                .preedit("音é", None)
+                .unwrap()
+                .visible_line(8)
+                .caret_visible
+        );
+        base.insert("音é").unwrap();
+        assert_eq!(base.value(), preview.value());
+        assert_eq!(base.cursor(), 6);
+        assert!(base.selection().is_none());
+        assert!(base.composition().is_none());
+        let mut reversed = original;
+        reversed.move_left(true); // collapsed at selection's original anchor.
+        reversed.move_right(true);
+        reversed.move_left(true);
+        reversed.move_home(true);
+        assert_eq!(reversed.selection(), Some((0, 1)));
+        assert_eq!(
+            reversed
+                .preedit("音", None)
+                .unwrap()
+                .composition()
+                .unwrap()
+                .range,
+            (0, 3)
+        );
+    }
     #[test]
     fn native_missing_cursor_hides_preedit_caret_until_composition_is_cleared() {
         let base = LineEditor::new("ab", 16).unwrap();
