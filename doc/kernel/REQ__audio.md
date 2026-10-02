@@ -364,3 +364,21 @@ explicit driver remains required. Output routing, clock assessments and exact
 buffer requests survive projection. Metadata work belongs to the game owner,
 with no device discovery or waiting on UI/audio callbacks. Compilation does not
 establish native device availability or physical timing.
+
+## Shared local member preparation and finalization
+
+Local 2..64-player sessions share member preparation, runtime activation and
+recording finalization across operating systems. Preparation preserves admitted
+native device IDs and stable player IDs, validates bindings/rosters before ghost
+loading, and assigns disjoint keysound voices outside the shared BGM namespace.
+The same prepared chart, seed, section and rules initialize judges, captures,
+record opponents and completion metadata. Group and input merger use the same
+actual calibrated transport origin; no fabricated timestamp is substituted.
+
+Native owners stop/join output and close input before common finalization.
+Finalization finishes every record opponent and attempts every independent
+capture save, retaining session, cleanup and save failures. Destinations match
+player identity rather than a truncating positional zip. Recording publication
+remains create-new. Shared composition does not erase backend capabilities or
+claim native timing, file, socket or desktop acceptance. Fixtures are authored
+and compiled only while execution remains deferred.
