@@ -25,7 +25,7 @@ use std::{
 };
 
 const MAGIC: &[u8; 4] = b"BKMP";
-const VERSION: u16 = 5;
+const VERSION: u16 = 6;
 const CLOCK_PROBES: u64 = 8;
 const MAX_IDENTITY: usize = 65_536;
 const MAX_BODY: usize = MAX_IDENTITY + 7;
@@ -106,6 +106,8 @@ pub struct MultiplayerOptions {
     pub io_stall_timeout: Duration,
     /// Checked software-start lead, clock age and uncertainty bounds.
     pub start_policy: StartPolicy,
+    /// Local output-zero to section-start interval; independent of peer preroll.
+    pub preroll_ns: i64,
 }
 impl Default for MultiplayerOptions {
     fn default() -> Self {
@@ -114,6 +116,7 @@ impl Default for MultiplayerOptions {
             queue_capacity: 32,
             io_stall_timeout: Duration::from_secs(5),
             start_policy: StartPolicy::default(),
+            preroll_ns: 0,
         }
     }
 }
@@ -513,6 +516,9 @@ fn validate_identity(identity: &[u8]) -> Result<(), MultiplayerError> {
 }
 fn validate_options(identity: &[u8], options: &MultiplayerOptions) -> Result<(), MultiplayerError> {
     validate_identity(identity)?;
+    if options.preroll_ns < 0 {
+        return Err(MultiplayerError::InvalidOptions);
+    }
     options
         .start_policy
         .validate()
@@ -620,21 +626,19 @@ fn elapsed_ns(epoch: Instant) -> Result<i64, MultiplayerError> {
 
 fn start_frame(message: StartMessage) -> Vec<u8> {
     match message {
-        StartMessage::ClockReady => frame(8, &[]),
+        StartMessage::ClockReady(preroll) => frame(8, &preroll.to_le_bytes()),
         StartMessage::Propose(time) => frame(9, &time.to_le_bytes()),
         StartMessage::Accept(time) => frame(10, &time.to_le_bytes()),
         StartMessage::Commit(time) => frame(11, &time.to_le_bytes()),
     }
 }
 fn parse_start_frame(tag: u8, payload: &[u8]) -> Result<StartMessage, MultiplayerError> {
-    if tag == 8 && payload.is_empty() {
-        return Ok(StartMessage::ClockReady);
-    }
-    if !(9..=11).contains(&tag) || payload.len() != 8 {
+    if !(8..=11).contains(&tag) || payload.len() != 8 {
         return Err(MultiplayerError::Protocol("invalid start frame".into()));
     }
     let time = i64::from_le_bytes(payload.try_into().unwrap());
     Ok(match tag {
+        8 => StartMessage::ClockReady(time),
         9 => StartMessage::Propose(time),
         10 => StartMessage::Accept(time),
         _ => StartMessage::Commit(time),
@@ -960,7 +964,8 @@ fn run(
         Endpoint::Host(_) => StartRole::Host,
         Endpoint::Join(_) => StartRole::Join,
     };
-    let mut start = StartAgreement::new(role, options.start_policy).map_err(start_error)?;
+    let mut start = StartAgreement::new_at(role, options.start_policy, options.preroll_ns)
+        .map_err(start_error)?;
     let mut start_in_flight = None;
     let deadline = Instant::now() + options.setup_timeout;
     let mut stream = loop {
@@ -1317,7 +1322,7 @@ mod clock_probe_fixtures {
     #[test]
     fn start_wire_fragmentation_exact_lengths_and_echo_preservation() {
         for message in [
-            StartMessage::ClockReady,
+            StartMessage::ClockReady(123),
             StartMessage::Propose(i64::MAX),
             StartMessage::Accept(123),
             StartMessage::Commit(123),
@@ -1327,6 +1332,7 @@ mod clock_probe_fixtures {
             assert_eq!(parse_start_frame(wire[10], &payload).unwrap(), message);
         }
         assert!(parse_start_frame(8, &[0]).is_err());
+        assert!(parse_start_frame(8, &[]).is_err());
         for tag in 9..=11 {
             assert!(parse_start_frame(tag, &[]).is_err());
             assert!(parse_start_frame(tag, &[0; 7]).is_err());
@@ -1706,7 +1712,7 @@ mod final_prefix_fixtures {
         state.next_ready(true).unwrap();
         state.written(5);
         assert_eq!(state.readiness(), Some(MultiplayerEvent::Ready));
-        for version in [1u16, 2, 3, 4] {
+        for version in [1u16, 2, 3, 4, 5] {
             let mut frames = Frames::new();
             frames.bytes = frame(5, &[]);
             frames.bytes[8..10].copy_from_slice(&version.to_le_bytes());
@@ -1748,6 +1754,7 @@ mod final_prefix_fixtures {
         assert!(owner.try_finish(progress(2)).is_err());
         let schedule = StartSchedule {
             target_ns: 1_000,
+            song_target_ns: 1_000,
             uncertainty_ns: 20,
         };
         incoming
@@ -1882,7 +1889,7 @@ mod final_prefix_fixtures {
         assert!(state.local_ack_received);
     }
     #[test]
-    fn version_five_wire_and_coalesced_complete_frames() {
+    fn version_six_wire_and_coalesced_complete_frames() {
         let mut wire = progress_frame(0, progress(1));
         wire.extend_from_slice(&prefix_frame(3, 1, progress(2)));
         let mut frames = Frames::new();
@@ -1933,6 +1940,7 @@ mod final_prefix_fixtures {
                 clock_estimate: None,
                 start_schedule: Some(StartSchedule {
                     target_ns: 1_000,
+                    song_target_ns: 1_000,
                     uncertainty_ns: 0,
                 }),
                 start_policy: StartPolicy::default(),

@@ -52,7 +52,8 @@ impl StartPolicy {
 /// Exact message admitted for one complete frame write.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartMessage {
-    ClockReady,
+    /// Actual participant preroll in nonnegative nanoseconds.
+    ClockReady(i64),
     Propose(i64),
     Accept(i64),
     Commit(i64),
@@ -60,7 +61,10 @@ pub enum StartMessage {
 /// Committed target on this participant's elapsed clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StartSchedule {
+    /// Local software start target before its own preroll.
     pub target_ns: i64,
+    /// Nominal local song-start target after its own preroll.
+    pub song_target_ns: i64,
     pub uncertainty_ns: u64,
 }
 /// Atomic transition rejection.
@@ -70,6 +74,7 @@ pub enum StartError {
     AlreadyPrepared,
     NotPrepared,
     NegativeNow,
+    NegativePreroll,
     TimeRegression,
     UnexpectedMessage,
     WrongEcho,
@@ -106,6 +111,8 @@ pub struct StartAgreement {
     policy: StartPolicy,
     estimate: Option<OffsetEstimate>,
     peer_ready: bool,
+    preroll_ns: i64,
+    peer_preroll_ns: i64,
     local_ready: bool,
     in_flight: Option<StartMessage>,
     stage: Stage,
@@ -114,13 +121,27 @@ pub struct StartAgreement {
     last_now: Option<i64>,
 }
 impl StartAgreement {
+    /// Creates an agreement with zero preroll for compatibility.
     pub fn new(role: StartRole, policy: StartPolicy) -> Result<Self, StartError> {
+        Self::new_at(role, policy, 0)
+    }
+    /// Creates an agreement with the owner's actual native preroll.
+    pub fn new_at(
+        role: StartRole,
+        policy: StartPolicy,
+        preroll_ns: i64,
+    ) -> Result<Self, StartError> {
         policy.validate()?;
+        if preroll_ns < 0 {
+            return Err(StartError::NegativePreroll);
+        }
         Ok(Self {
             role,
             policy,
             estimate: None,
             peer_ready: false,
+            preroll_ns,
+            peer_preroll_ns: 0,
             local_ready: false,
             in_flight: None,
             stage: Stage::Waiting,
@@ -167,22 +188,36 @@ impl StartAgreement {
     }
     fn schedule_at(&self, deadline: i64, now: i64) -> Result<StartSchedule, StartError> {
         let estimate = self.estimate_at(now)?;
-        let (earliest, target) = match self.role {
-            StartRole::Host => (deadline, deadline),
+        let (song_earliest, song_latest, song_target) = match self.role {
+            StartRole::Host => (deadline, deadline, deadline),
             StartRole::Join => {
                 let window =
                     estimate.remote_deadline_to_local(deadline, now, self.policy.max_age_ns)?;
-                (window.earliest_ns(), window.midpoint_ns())
+                (
+                    window.earliest_ns(),
+                    window.latest_ns(),
+                    window.midpoint_ns(),
+                )
             }
         };
+        let earliest = song_earliest
+            .checked_sub(self.preroll_ns)
+            .ok_or(StartError::Overflow)?;
+        let latest = song_latest
+            .checked_sub(self.preroll_ns)
+            .ok_or(StartError::Overflow)?;
         if i128::from(earliest) - i128::from(now) < i128::from(self.policy.min_remaining_ns) {
             return Err(StartError::DeadlineTooClose);
         }
+        let target = i64::try_from((i128::from(earliest) + i128::from(latest)) / 2)
+            .map_err(|_| StartError::Overflow)?;
         Ok(StartSchedule {
             target_ns: target,
+            song_target_ns: song_target,
             uncertainty_ns: estimate.round_trip_ns(),
         })
     }
+
     /// Admits at most one frame; returns None while a prior frame remains in flight.
     pub fn next(&mut self, now: i64) -> Result<Option<StartMessage>, StartError> {
         let mut candidate = *self;
@@ -200,7 +235,7 @@ impl StartAgreement {
                 return Ok(None);
             }
             self.estimate_at(now)?;
-            self.in_flight = Some(StartMessage::ClockReady);
+            self.in_flight = Some(StartMessage::ClockReady(self.preroll_ns));
             return Ok(self.in_flight);
         }
         if !self.peer_ready {
@@ -209,9 +244,12 @@ impl StartAgreement {
         let message = match (self.role, self.stage) {
             (StartRole::Host, Stage::Waiting) => {
                 self.estimate_at(now)?;
-                let deadline = now
-                    .checked_add(self.policy.lead_ns as i64)
-                    .ok_or(StartError::Overflow)?;
+                let deadline = i64::try_from(
+                    i128::from(now)
+                        + i128::from(self.policy.lead_ns)
+                        + i128::from(self.preroll_ns.max(self.peer_preroll_ns)),
+                )
+                .map_err(|_| StartError::Overflow)?;
                 self.schedule_at(deadline, now)?;
                 self.proposal = Some(deadline);
                 self.stage = Stage::Proposing;
@@ -242,7 +280,7 @@ impl StartAgreement {
             return Err(StartError::UnexpectedMessage);
         }
         match message {
-            StartMessage::ClockReady => {
+            StartMessage::ClockReady(_) => {
                 candidate.estimate_at(now)?;
                 candidate.local_ready = true;
             }
@@ -267,11 +305,15 @@ impl StartAgreement {
     pub fn receive(&mut self, message: StartMessage, now: i64) -> Result<(), StartError> {
         let mut candidate = *self;
         candidate.observe_now(now)?;
-        if message == StartMessage::ClockReady {
+        if let StartMessage::ClockReady(preroll_ns) = message {
+            if preroll_ns < 0 {
+                return Err(StartError::NegativePreroll);
+            }
             if candidate.peer_ready {
                 return Err(StartError::UnexpectedMessage);
             }
             candidate.peer_ready = true;
+            candidate.peer_preroll_ns = preroll_ns;
         } else {
             if !candidate.local_ready || !candidate.peer_ready || candidate.in_flight.is_some() {
                 return Err(StartError::UnexpectedMessage);
@@ -340,21 +382,27 @@ mod fixtures {
     }
     fn ready(role: StartRole) -> StartAgreement {
         let mut agreement = prepared(role);
-        agreement.receive(StartMessage::ClockReady, 0).unwrap();
-        assert_eq!(agreement.next(0).unwrap(), Some(StartMessage::ClockReady));
-        agreement.written(StartMessage::ClockReady, 0).unwrap();
+        agreement.receive(StartMessage::ClockReady(0), 0).unwrap();
+        assert_eq!(
+            agreement.next(0).unwrap(),
+            Some(StartMessage::ClockReady(0))
+        );
+        agreement.written(StartMessage::ClockReady(0), 0).unwrap();
         agreement
     }
     #[test]
     fn unprepared_polling_waits_and_retains_early_peer_readiness() {
         let mut agreement = StartAgreement::new(StartRole::Host, policy()).unwrap();
         assert_eq!(agreement.next(0).unwrap(), None);
-        agreement.receive(StartMessage::ClockReady, 1).unwrap();
+        agreement.receive(StartMessage::ClockReady(0), 1).unwrap();
         assert_eq!(agreement.next(1).unwrap(), None);
         assert!(!agreement.committed());
         agreement.prepare(estimate([1, 1, 1, 1])).unwrap();
-        assert_eq!(agreement.next(1).unwrap(), Some(StartMessage::ClockReady));
-        agreement.written(StartMessage::ClockReady, 1).unwrap();
+        assert_eq!(
+            agreement.next(1).unwrap(),
+            Some(StartMessage::ClockReady(0))
+        );
+        agreement.written(StartMessage::ClockReady(0), 1).unwrap();
         assert_eq!(
             agreement.next(1).unwrap(),
             Some(StartMessage::Propose(1001))
@@ -370,16 +418,16 @@ mod fixtures {
             let mut host = StartAgreement::new(StartRole::Host, policy()).unwrap();
             let mut join = StartAgreement::new(StartRole::Join, policy()).unwrap();
             // Peer readiness is legal before the participant prepares its own estimate.
-            join.receive(StartMessage::ClockReady, 500 + offset)
+            join.receive(StartMessage::ClockReady(0), 500 + offset)
                 .unwrap();
             host.prepare(estimate(host_times)).unwrap();
             join.prepare(estimate(join_times)).unwrap();
             host.next(1000).unwrap();
-            host.written(StartMessage::ClockReady, 1000).unwrap();
+            host.written(StartMessage::ClockReady(0), 1000).unwrap();
             join.next(1000 + offset).unwrap();
-            join.written(StartMessage::ClockReady, 1000 + offset)
+            join.written(StartMessage::ClockReady(0), 1000 + offset)
                 .unwrap();
-            host.receive(StartMessage::ClockReady, 1000).unwrap();
+            host.receive(StartMessage::ClockReady(0), 1000).unwrap();
             let propose = host.next(1000).unwrap().unwrap();
             assert_eq!(propose, StartMessage::Propose(2000));
             assert_eq!(host.next(1001).unwrap(), None);
@@ -396,6 +444,7 @@ mod fixtures {
                 host.take_schedule(),
                 Some(StartSchedule {
                     target_ns: 2000,
+                    song_target_ns: 2000,
                     uncertainty_ns: width
                 })
             );
@@ -406,6 +455,7 @@ mod fixtures {
                 join.take_schedule(),
                 Some(StartSchedule {
                     target_ns: 2000 + offset,
+                    song_target_ns: 2000 + offset,
                     uncertainty_ns: width
                 })
             );
@@ -497,19 +547,19 @@ mod fixtures {
         agreement.next(10).unwrap();
         let before = agreement;
         assert_eq!(
-            agreement.written(StartMessage::ClockReady, 9),
+            agreement.written(StartMessage::ClockReady(0), 9),
             Err(StartError::TimeRegression)
         );
         assert_eq!(agreement, before);
         assert_eq!(
-            agreement.written(StartMessage::ClockReady, 10_001),
+            agreement.written(StartMessage::ClockReady(0), 10_001),
             Err(StartError::Estimate(ClockError::StaleEstimate))
         );
         assert_eq!(agreement, before);
-        agreement.written(StartMessage::ClockReady, 10).unwrap();
-        agreement.receive(StartMessage::ClockReady, 10).unwrap();
+        agreement.written(StartMessage::ClockReady(0), 10).unwrap();
+        agreement.receive(StartMessage::ClockReady(0), 10).unwrap();
         let before = agreement;
-        assert!(agreement.receive(StartMessage::ClockReady, 11).is_err());
+        assert!(agreement.receive(StartMessage::ClockReady(0), 11).is_err());
         assert_eq!(agreement, before);
         let mut uncertain = StartAgreement::new(
             StartRole::Join,
@@ -540,6 +590,111 @@ mod fixtures {
         join.receive(StartMessage::Propose(100), 0).unwrap(); // exact minimum allowed
     }
     #[test]
+    fn heterogeneous_prerolls_share_song_target_with_signed_clock_offsets() {
+        for (host_preroll, join_preroll) in [
+            (100, 400),
+            (400, 100),
+            (0, 0),
+            (0, 400),
+            (604_800_000_000_000, 72_000_000_000_000),
+        ] {
+            for offset in [50, -50] {
+                let mut host =
+                    StartAgreement::new_at(StartRole::Host, policy(), host_preroll).unwrap();
+                let mut join =
+                    StartAgreement::new_at(StartRole::Join, policy(), join_preroll).unwrap();
+                let positive = estimate([100, 160, 180, 140]);
+                let negative = estimate([100, 60, 80, 140]);
+                host.prepare(if offset > 0 { positive } else { negative })
+                    .unwrap();
+                join.prepare(if offset > 0 { negative } else { positive })
+                    .unwrap();
+                // Early peer readiness retains its actual preroll, not a placeholder.
+                join.receive(StartMessage::ClockReady(host_preroll), 500 + offset)
+                    .unwrap();
+                let host_ready = host.next(1000).unwrap().unwrap();
+                assert_eq!(host_ready, StartMessage::ClockReady(host_preroll));
+                host.written(host_ready, 1000).unwrap();
+                let join_ready = join.next(1000 + offset).unwrap().unwrap();
+                assert_eq!(join_ready, StartMessage::ClockReady(join_preroll));
+                join.written(join_ready, 1000 + offset).unwrap();
+                host.receive(join_ready, 1000).unwrap();
+                let proposal = host.next(1000).unwrap().unwrap();
+                let song_target = 2000 + host_preroll.max(join_preroll);
+                assert_eq!(proposal, StartMessage::Propose(song_target));
+                host.written(proposal, 1001).unwrap();
+                join.receive(proposal, 1001 + offset).unwrap();
+                let accept = join.next(1002 + offset).unwrap().unwrap();
+                join.written(accept, 1003 + offset).unwrap();
+                host.receive(accept, 1003).unwrap();
+                let commit = host.next(1004).unwrap().unwrap();
+                host.written(commit, 1005).unwrap();
+                join.receive(commit, 1005 + offset).unwrap();
+                let host_schedule = host.take_schedule().unwrap();
+                let join_schedule = join.take_schedule().unwrap();
+                assert_eq!(host_schedule.song_target_ns, song_target);
+                assert_eq!(join_schedule.song_target_ns, song_target + offset);
+                assert_eq!(
+                    host_schedule.target_ns + host_preroll,
+                    host_schedule.song_target_ns
+                );
+                assert_eq!(
+                    join_schedule.target_ns + join_preroll,
+                    join_schedule.song_target_ns
+                );
+                assert_eq!(
+                    join_schedule.song_target_ns - offset,
+                    host_schedule.song_target_ns
+                );
+                assert_eq!(host_schedule.uncertainty_ns, 20);
+                assert_eq!(join_schedule.uncertainty_ns, 20);
+            }
+        }
+    }
+    #[test]
+    fn preroll_validation_overflow_and_earliest_software_lead_are_atomic() {
+        assert_eq!(
+            StartAgreement::new_at(StartRole::Host, policy(), -1),
+            Err(StartError::NegativePreroll)
+        );
+        let mut host = prepared(StartRole::Host);
+        let before = host;
+        assert_eq!(
+            host.receive(StartMessage::ClockReady(-1), 1),
+            Err(StartError::NegativePreroll)
+        );
+        assert_eq!(host, before);
+        host.receive(StartMessage::ClockReady(i64::MAX), 1).unwrap();
+        host.next(1).unwrap();
+        host.written(StartMessage::ClockReady(0), 1).unwrap();
+        let before = host;
+        assert_eq!(host.next(1), Err(StartError::Overflow));
+        assert_eq!(host, before);
+        let mut large = StartAgreement::new_at(StartRole::Host, policy(), i64::MAX).unwrap();
+        large.prepare(estimate([0, 0, 0, 0])).unwrap();
+        large.receive(StartMessage::ClockReady(0), 0).unwrap();
+        large.next(0).unwrap();
+        large
+            .written(StartMessage::ClockReady(i64::MAX), 0)
+            .unwrap();
+        let before = large;
+        assert_eq!(large.next(0), Err(StartError::Overflow));
+        assert_eq!(large, before);
+        let mut join = StartAgreement::new_at(StartRole::Join, policy(), 400).unwrap();
+        join.prepare(estimate([100, 160, 180, 140])).unwrap();
+        join.receive(StartMessage::ClockReady(100), 600).unwrap();
+        join.next(600).unwrap();
+        join.written(StartMessage::ClockReady(400), 600).unwrap();
+        let before = join;
+        assert_eq!(
+            join.receive(StartMessage::Propose(1100), 600),
+            Err(StartError::DeadlineTooClose)
+        );
+        assert_eq!(join, before);
+        join.receive(StartMessage::Propose(1160), 600).unwrap(); // earliest software target700, exactly100 ahead
+        assert_eq!(join.next(600).unwrap(), Some(StartMessage::Accept(1160)));
+    }
+    #[test]
     fn long_elapsed_timelines_and_overflow_are_checked() {
         for now in [
             20 * 60 * 60 * 1_000_000_000i64,
@@ -548,9 +703,9 @@ mod fixtures {
         ] {
             let mut host = StartAgreement::new(StartRole::Host, policy()).unwrap();
             host.prepare(estimate([now, now, now, now])).unwrap();
-            host.receive(StartMessage::ClockReady, now).unwrap();
+            host.receive(StartMessage::ClockReady(0), now).unwrap();
             host.next(now).unwrap();
-            host.written(StartMessage::ClockReady, now).unwrap();
+            host.written(StartMessage::ClockReady(0), now).unwrap();
             assert_eq!(
                 host.next(now).unwrap(),
                 Some(StartMessage::Propose(now + 1000))
@@ -559,9 +714,9 @@ mod fixtures {
         let now = i64::MAX - 999;
         let mut host = StartAgreement::new(StartRole::Host, policy()).unwrap();
         host.prepare(estimate([now, now, now, now])).unwrap();
-        host.receive(StartMessage::ClockReady, now).unwrap();
+        host.receive(StartMessage::ClockReady(0), now).unwrap();
         host.next(now).unwrap();
-        host.written(StartMessage::ClockReady, now).unwrap();
+        host.written(StartMessage::ClockReady(0), now).unwrap();
         let before = host;
         assert_eq!(host.next(now), Err(StartError::Overflow));
         assert_eq!(host, before);
