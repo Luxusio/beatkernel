@@ -458,3 +458,188 @@ fn retained_paint_rejection_prevents_snapshot_until_scene_clear() {
     rejected.reject("uncached title".into());
     assert!(rejected.geometry_snapshot().is_err());
 }
+
+#[test]
+fn extended_cached_text_reuses_the_atlas_and_its_pixel_allocation() {
+    use std::sync::Arc;
+    let mut atlas = FontAtlas::new(font_bytes(), 32.0, 128, 128, 3).unwrap();
+    for character in ['A', '가', ' '] {
+        atlas.prepare(character).unwrap();
+    }
+    let atlas = Arc::new(atlas);
+    let pixels = atlas.image().pixels().as_ptr();
+    for values in [&[][..], &[""][..], &["A 가", "가AA", " "][..]] {
+        let cached = FontAtlas::extend_texts(&atlas, values).unwrap();
+        assert!(Arc::ptr_eq(&cached, &atlas));
+        assert_eq!(cached.image().pixels().as_ptr(), pixels);
+        assert_eq!(cached.len(), 3);
+    }
+}
+
+#[test]
+fn extended_unicode_keeps_old_uvs_and_deduplicates_real_and_missing_aliases() {
+    use std::sync::Arc;
+    let mut atlas = FontAtlas::new(font_bytes(), 32.0, 128, 128, 6).unwrap();
+    let latin = atlas.prepare('A').unwrap();
+    let atlas = Arc::new(atlas);
+    let before = atlas.image().pixels().to_vec();
+    let extended = FontAtlas::extend_texts(&atlas, &["가 ", "別", "未🙂"]).unwrap();
+    assert!(!Arc::ptr_eq(&extended, &atlas));
+    assert_eq!(extended.len(), 6);
+    assert_eq!(extended.image().width(), atlas.image().width());
+    assert_eq!(extended.image().height(), atlas.image().height());
+    assert_eq!(extended.ascent(), atlas.ascent());
+    assert_eq!(extended.get('A'), Some(latin));
+    assert_eq!(extended.get('가'), Some(latin));
+    let space = extended.get(' ').unwrap();
+    assert_eq!(space.uv, None);
+    assert_eq!(space.bounds, [0; 4]);
+    assert!(space.advance.is_finite() && space.advance >= 0.0);
+    let missing = extended.get('別').unwrap();
+    assert!(missing.missing && missing.uv.is_some());
+    assert_ne!(missing.uv, latin.uv);
+    assert_eq!(extended.get('未'), Some(missing));
+    assert_eq!(extended.get('🙂'), Some(missing));
+    assert_ne!(extended.image().pixels(), before);
+    for (old, new) in before.iter().zip(extended.image().pixels()) {
+        if *old != 0 {
+            assert_eq!(old, new);
+        }
+    }
+    assert_eq!(atlas.len(), 1);
+    assert_eq!(atlas.get('A'), Some(latin));
+    for character in ['가', ' ', '別', '未', '🙂'] {
+        assert_eq!(atlas.get(character), None);
+    }
+    assert_eq!(atlas.image().pixels(), before);
+    assert!(Arc::ptr_eq(
+        &FontAtlas::extend_texts(&extended, &["🙂未別 가A"]).unwrap(),
+        &extended
+    ));
+}
+
+#[test]
+fn failed_extension_discards_a_rasterized_candidate_and_preserves_future_placement() {
+    use std::sync::Arc;
+    // The first new glyph fits and needs real pixels; the second exceeds the
+    // character budget even though it could reuse the original A placement.
+    let mut atlas = FontAtlas::new(font_bytes(), 32.0, 128, 128, 2).unwrap();
+    let latin = atlas.prepare('A').unwrap();
+    let atlas = Arc::new(atlas);
+    let before = atlas.image().pixels().to_vec();
+    assert!(FontAtlas::extend_texts(&atlas, &["別", "가"]).is_err());
+    assert_eq!(atlas.len(), 1);
+    assert_eq!(atlas.get('A'), Some(latin));
+    assert_eq!(atlas.get('別'), None);
+    assert_eq!(atlas.get('가'), None);
+    assert_eq!(atlas.image().pixels(), before);
+    let retry = FontAtlas::extend_texts(&atlas, &["別"]).unwrap();
+    let mut expected = FontAtlas::new(font_bytes(), 32.0, 128, 128, 2).unwrap();
+    expected.prepare('A').unwrap();
+    let missing = expected.prepare('別').unwrap();
+    assert_eq!(retry.get('別'), Some(missing));
+    assert_eq!(retry.image().pixels(), expected.image().pixels());
+
+    // A separate failure exercises the atlas budget rather than the character
+    // limit. Only one triangle fits; the initial space consumes no pixels.
+    let width = latin.bounds[2] as u32 + 2;
+    let height = latin.bounds[3] as u32 + 2;
+    let mut tiny = FontAtlas::new(font_bytes(), 32.0, width, height, 8).unwrap();
+    let space = tiny.prepare(' ').unwrap();
+    let tiny = Arc::new(tiny);
+    let before = tiny.image().pixels().to_vec();
+    assert!(FontAtlas::extend_texts(&tiny, &["A", "別"]).is_err());
+    assert_eq!(tiny.len(), 1);
+    assert_eq!(tiny.get(' '), Some(space));
+    assert_eq!(tiny.get('A'), None);
+    assert_eq!(tiny.get('別'), None);
+    assert_eq!(tiny.image().pixels(), before);
+    let retry = FontAtlas::extend_texts(&tiny, &["別"]).unwrap();
+    let mut expected = FontAtlas::new(font_bytes(), 32.0, width, height, 8).unwrap();
+    expected.prepare(' ').unwrap();
+    let missing = expected.prepare('別').unwrap();
+    assert_eq!(retry.get('別'), Some(missing));
+    assert_eq!(retry.image().pixels(), expected.image().pixels());
+    assert_eq!(retry.len(), 2);
+}
+
+#[test]
+fn extension_enforces_exact_utf8_and_batch_byte_limits_even_for_cached_text() {
+    use std::sync::Arc;
+    let mut atlas = FontAtlas::new(font_bytes(), 32.0, 128, 128, 2).unwrap();
+    atlas.prepare('A').unwrap();
+    atlas.prepare('가').unwrap();
+    let atlas = Arc::new(atlas);
+    let exact = "가".repeat(1365) + "A";
+    assert_eq!(exact.len(), 4096);
+    let mut batch = vec![exact.as_str(); 16];
+    assert_eq!(batch.iter().map(|value| value.len()).sum::<usize>(), 65_536);
+    batch.push("");
+    assert!(Arc::ptr_eq(
+        &FontAtlas::extend_texts(&atlas, &batch).unwrap(),
+        &atlas
+    ));
+    batch.push("A");
+    assert!(FontAtlas::extend_texts(&atlas, &batch).is_err());
+    let oversized = exact + "A";
+    assert_eq!(oversized.len(), 4097);
+    assert!(FontAtlas::extend_texts(&atlas, &[&oversized]).is_err());
+    assert_eq!(atlas.len(), 2);
+    assert!(Arc::ptr_eq(
+        &FontAtlas::extend_texts(&atlas, &["가A"]).unwrap(),
+        &atlas
+    ));
+}
+
+#[test]
+fn extension_rejects_controls_without_publishing_valid_prefixes() {
+    use std::sync::Arc;
+    let mut atlas = FontAtlas::new(font_bytes(), 32.0, 128, 128, 16).unwrap();
+    let latin = atlas.prepare('A').unwrap();
+    let atlas = Arc::new(atlas);
+    let before = atlas.image().pixels().to_vec();
+    for control in ['\0', '\t', '\n', '\r', '\u{7f}', '\u{85}'] {
+        let invalid = format!("가{control}A");
+        assert!(FontAtlas::extend_texts(&atlas, &["別", &invalid]).is_err());
+        assert_eq!(atlas.len(), 1);
+        assert_eq!(atlas.get('A'), Some(latin));
+        assert_eq!(atlas.get('別'), None);
+        assert_eq!(atlas.get('가'), None);
+        assert_eq!(atlas.get(control), None);
+        assert_eq!(atlas.image().pixels(), before);
+    }
+}
+
+#[test]
+fn extension_counts_all_4096_characters_even_when_they_share_one_missing_glyph() {
+    use std::sync::Arc;
+    let atlas = Arc::new(FontAtlas::new(font_bytes(), 32.0, 128, 128, 4096).unwrap());
+    let values: Vec<String> = (0..4)
+        .map(|chunk| {
+            (0..1024)
+                .map(|index| char::from_u32(0x4e00 + chunk * 1024 + index).unwrap())
+                .collect()
+        })
+        .collect();
+    let borrowed: Vec<_> = values.iter().map(String::as_str).collect();
+    let full = FontAtlas::extend_texts(&atlas, &borrowed).unwrap();
+    assert_eq!(atlas.len(), 0);
+    assert!(atlas.image().pixels().iter().all(|byte| *byte == 0));
+    assert_eq!(full.len(), 4096);
+    let missing = full.get('\u{4e00}').unwrap();
+    assert!(missing.missing && missing.uv.is_some());
+    for character in values.iter().flat_map(|value| value.chars()) {
+        assert_eq!(full.get(character), Some(missing));
+    }
+    assert!(Arc::ptr_eq(
+        &FontAtlas::extend_texts(&full, &borrowed).unwrap(),
+        &full
+    ));
+    let before = full.image().pixels().to_vec();
+    for uncached in ["🙂", "A", " "] {
+        assert!(FontAtlas::extend_texts(&full, &[uncached]).is_err());
+        assert_eq!(full.len(), 4096);
+        assert_eq!(full.get(uncached.chars().next().unwrap()), None);
+        assert_eq!(full.image().pixels(), before);
+    }
+}

@@ -1,7 +1,7 @@
 //! Bounded fixed-scale font rasterization outside native and real-time owners.
 use crate::texture::RgbaImage;
 use ab_glyph::{Font, FontArc, ScaleFont};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 /// One cached character's actual font metrics and immutable atlas placement.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -79,6 +79,64 @@ impl FontAtlas {
             image: RgbaImage::new(width, height, rgba)?,
             shelf: Shelf::default(),
         })
+    }
+    /// Extend a private candidate atomically, preserving existing UVs and snapshots.
+    /// Cache-hit batches retain the same Arc and perform no rasterization/pixel copy.
+    /// Each text admits at most 4096 bytes, with 64 KiB across the complete batch.
+    pub fn extend_texts(current: &Arc<Self>, values: &[&str]) -> Result<Arc<Self>, String> {
+        let mut bytes = 0usize;
+        for value in values {
+            if value.len() > 4096 {
+                return Err("font field text exceeds 4096 bytes".into());
+            }
+            bytes = bytes
+                .checked_add(value.len())
+                .ok_or("font text batch byte count overflow")?;
+            if bytes > 64 * 1024 {
+                return Err("font text batch exceeds 64 KiB".into());
+            }
+        }
+        let mut missing = false;
+        for value in values {
+            for character in value.chars() {
+                if character.is_control() {
+                    return Err("control characters are not drawable font glyphs".into());
+                }
+                if let Some(glyph) = current.get(character) {
+                    if !glyph.advance.is_finite() || glyph.advance < 0.0 {
+                        return Err("font text advance must be finite and nonnegative".into());
+                    }
+                } else {
+                    missing = true;
+                }
+            }
+        }
+        if !missing {
+            return Ok(Arc::clone(current));
+        }
+        let mut pixels = Vec::new();
+        pixels
+            .try_reserve_exact(current.image.pixels().len())
+            .map_err(|_| "font atlas extension allocation failed")?;
+        pixels.extend_from_slice(current.image.pixels());
+        let mut candidate = Self {
+            font: current.font.clone(),
+            pixels: current.pixels,
+            max_glyphs: current.max_glyphs,
+            glyphs: current.glyphs.clone(),
+            placements: current.placements.clone(),
+            image: RgbaImage::new(current.image.width(), current.image.height(), pixels)?,
+            shelf: current.shelf,
+        };
+        for value in values {
+            for character in value.chars() {
+                let glyph = candidate.prepare(character)?;
+                if !glyph.advance.is_finite() || glyph.advance < 0.0 {
+                    return Err("font text advance must be finite and nonnegative".into());
+                }
+            }
+        }
+        Ok(Arc::new(candidate))
     }
     pub fn get(&self, character: char) -> Option<Glyph> {
         self.glyphs.get(&character).copied()
