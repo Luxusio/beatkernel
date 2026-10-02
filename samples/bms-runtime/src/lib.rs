@@ -66,6 +66,8 @@ pub mod multiplayer_clock;
 pub mod multiplayer_start;
 /// Common queue, rolling BGM and mixer construction/replenishment.
 pub mod native_audio;
+/// Shared native chart loading, section slicing and retained-lane coverage.
+pub mod native_chart;
 /// Shared native local-cohort gameplay and per-player report ownership.
 pub mod native_cohort;
 /// Shared local member construction, activation and recording finalization.
