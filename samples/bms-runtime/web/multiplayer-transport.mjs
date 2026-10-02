@@ -192,6 +192,12 @@ export class WebTransportChannel {
             throw new WebTransportChannelError("protocol", "read", "WebTransport chunk exceeds the 1 MiB retention limit or is malformed.");
           }
           if (chunk.byteLength === 0) {
+            // A detached view also reports zero length. Constructing an empty
+            // view validates attachment without copying its backing buffer.
+            try { new Uint8Array(chunk.buffer, chunk.byteOffset, 0); }
+            catch (cause) {
+              throw new WebTransportChannelError("protocol", "read", "WebTransport chunk backing buffer is detached.", cause);
+            }
             if (++empty >= 16) throw new WebTransportChannelError("protocol", "read", "Too many empty WebTransport chunks.");
             continue;
           }

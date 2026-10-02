@@ -22,6 +22,13 @@ The adapter resolves writes only after the stream writer accepts the complete
 snapshot. The caller then reports its matching frame ID to the shared session;
 that local observation does not establish the separate peer application ACK.
 
+A subsequent source inspection found that detached views were treated as empty
+chunks. The adapter now validates attachment before skipping a zero-length
+chunk, rejecting a detached buffer immediately. The existing independent
+negative fixture covers that branch but remains unexecuted. This uses the
+[ECMAScript typed-array construction rule](https://tc39.es/ecma262/multipage/indexed-collections.html#sec-initializetypedarrayfromarraybuffer)
+without copying the backing buffer.
+
 WebTransport requires an HTTPS HTTP/3 service and a bidirectional stream, as
 documented by [MDN WebTransport](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport)
 and [stream creation](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport/createBidirectionalStream).
