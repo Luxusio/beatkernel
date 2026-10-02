@@ -1170,7 +1170,7 @@ Snapshots share the bank across all members and retain it through results;
 fresh sessions start without prior assets. Validate registration before IO.
 
 The UI owner creates/removes GPU textures for the current visible Base/Layer
-and activated Poor selections (up to four member views/twelve unique images). Share canonical
+and activated Poor selections (up to four member views/sixteen unique images). Share canonical
 pixel aliases, release unselected textures before admitting replacements,
 reuse unchanged selections and bound failed-upload retry to wanted-set changes.
 Changing bank identity, navigation/session replacement and renderer destruction
@@ -1194,7 +1194,7 @@ is not native GPU/device acceptance.
 
 
 ### Static BGA exact-black Layer preparation
-BeatKernel uses an explicit RGBA8 policy: chart-declared channel 07 Layer images make exactly RGB (0,0,0) transparent before GPU filtering. Base and Poor retain source pixels. Preparation happens once on the game owner; unchanged images share the original Arc and canonical aliases share any changed variant. Changed unique variants count toward the existing aggregate decoded-byte admission limit; retaining a raw image and its changed variant costs both buffers. No threshold, EXBMP, per-frame pixel scan, or video behavior is implied. Pure pixel, alias, capacity, cache-role and native publication fixtures are authored for later execution; source compilation does not establish GPU visual correctness.
+BeatKernel uses an explicit RGBA8 policy: chart-declared channel 07 Layer and channel 0A Layer2 images make exactly RGB (0,0,0) transparent before GPU filtering. Base and Poor retain source pixels. Preparation happens once on the game owner; unchanged images share the original Arc and canonical aliases share any changed variant. Changed unique variants count toward the existing aggregate decoded-byte admission limit; retaining a raw image and its changed variant costs both buffers. No threshold, EXBMP, per-frame pixel scan, or video behavior is implied. Pure pixel, alias, capacity, cache-role and native publication fixtures are authored for later execution; source compilation does not establish GPU visual correctness.
 
 
 ### Poor background activation
@@ -1202,4 +1202,8 @@ PoorBackgroundPolicy defaults to a 500ms original-song interval after the latest
 
 
 ### POORBGA static display modes
-Recognize selected #POORBGA headers 0 (default Replace), 1 (Overlay), 2 (Off). Cache the checked mode in prepared PlayerChart. The full BgaPresentation selection API carries normal timeline state plus a separately activated poor_overlay. Replace retains the existing raw-Poor-as-Base behavior; Overlay keeps normal Base/Layer and paints raw Poor last beneath gameplay; Off preserves normal background despite misses. Existing project remains selection-only compatibility; overlay consumers use select. Raw Poor alpha is preserved, without Layer black key. The native UI consumes full selections for each member. Extend bounded active GPU union to12 CPU Arc identities across4views, reuse rawBase/Poor aliases and existing aggregate GPU slot/byte limits; no new shaders/per-frame allocations/decoding. Legacy cache sync has no implicit Poor activation. Author modes/parser/conditional/duplicates/12resource/cache/painter-order/actual runtime and replay publication fixtures for deferred execution.
+Recognize selected #POORBGA headers 0 (default Replace), 1 (Overlay), 2 (Off). Cache the checked mode in prepared PlayerChart. The full BgaPresentation selection API carries normal timeline state plus a separately activated poor_overlay. Replace retains the existing raw-Poor-as-Base behavior; Overlay keeps normal Base/Layer and paints raw Poor last beneath gameplay; Off preserves normal background despite misses. Existing project remains selection-only compatibility; overlay consumers use select. Raw Poor alpha is preserved, without Layer black key. The native UI consumes full selections for each member. Extend bounded active GPU union to16 CPU Arc identities across4views, reuse rawBase/Poor aliases and existing aggregate GPU slot/byte limits; no new shaders/per-frame allocations/decoding. Legacy cache sync has no implicit Poor activation. Author modes/parser/conditional/duplicates/16resource/cache/painter-order/actual runtime and replay publication fixtures for deferred execution.
+
+
+### Second BGA layer
+Support channel0A as an independent Layer2 selection on the original-song visual grid. Prepare its exact-black transparency with the same canonical shared variant as Layer1; raw Base/Poor remain untouched. Compose Base, Layer, Layer2, activated raw Poor beneath gameplay. Replace mode suppresses both layers, Overlay keeps both, Off keeps normal display. Cache at most16 distinct current CPU Arcs across4visible member views; existing GPU total limits still govern uploads. Query and cache steady state use no file/decoder/pixel work or new shader. Author independent timing/zero/undefined/duplicate/conditional/STOP/identity, variant-sharing/byte-cap, 16-resource/admission/failure/release, Scene order and actual Runtime/capture/replay/native publication/fresh practice fixtures for later execution. Opacity, crop and video remain pending.

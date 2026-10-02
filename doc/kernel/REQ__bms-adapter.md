@@ -40,7 +40,7 @@ The [format memo author's SWITCH extension documentation](https://saxxonpike.git
 
 ImageId is a separate base36 BMP namespace, including BMP00 initial poor
 resource. Definitions retain exact opaque nonempty paths; there is no parser
-asset IO. BgaChannel Base/Poor/Layer correspond to04/06/07. Zero row tokens
+asset IO. BgaChannel Base/Poor/Layer/Layer2 correspond to04/06/07/0A. Zero row tokens
 are rests and do not clear previous selections. Undefined nonzero BMP
 references remain admitted selections for application blank-resource handling;
 missing WAV/BPM/STOP definitions retain their strict errors. Definitions and
@@ -60,7 +60,7 @@ as before; this work does not remove that behavior.
 The application owns explicit bounded raster preparation and original-song
 Base/Layer composition; the adapter does not interpret native clocks or upload
 images. BMP00/Poor selections do not imply continuous poor display. Video,
-crop/opacity and additional layer channels remain outside supported
+crop/opacity and further layer channels remain outside supported
 visual semantics. Authored parser/timing/seed/limit fixtures are source-compiled
 for later execution, not format conformance or native GPU acceptance.
 
@@ -78,4 +78,8 @@ IO, judge object or replay operation is introduced by miss background display.
 
 
 ## POORBGA header
-Case-insensitive selected #POORBGA headers accept exact single digits 0, 1, or 2; absent means Replace. Preserve the header in metadata and use existing duplicate and seeded conditional rules. Typed modes Replace/Overlay/Off concern presentation only; malformed active values reject, inactive branches retain existing structural/bounded-source validation. A checked accessor rejects fabricated invalid metadata before PlayerChart preparation. Gameplay source objects, timing, keysounds, replay identity and grading remain unaffected when gameplay physical lines are unchanged. Overlay composes raw Poor above Base/Layer; it does not imply Layer2/opacity/video support or Poor black-key transformation.
+Case-insensitive selected #POORBGA headers accept exact single digits 0, 1, or 2; absent means Replace. Preserve the header in metadata and use existing duplicate and seeded conditional rules. Typed modes Replace/Overlay/Off concern presentation only; malformed active values reject, inactive branches retain existing structural/bounded-source validation. A checked accessor rejects fabricated invalid metadata before PlayerChart preparation. Gameplay source objects, timing, keysounds, replay identity and grading remain unaffected when gameplay physical lines are unchanged. Overlay composes raw Poor above Base/Layer; it does not imply opacity/video support or Poor black-key transformation.
+
+
+## Second visual layer
+Channel0A maps to BgaChannel::Layer2 and shares existing independent visual-only grid compilation, nonzero undefined-resource admission, zero rests, per-channel duplicate policy, conditional selection and source caps. Simultaneous channels remain independent. Visual denominators and BPM/STOP scheduling do not change SourceChart gameplay objects/timing/keysounds when physical gameplay lines stay fixed. The app owns exact-black prepared Layer2 pixels, original-song indexing and composition above Layer1 and below activated Poor; opacity/crop/video are separate unsupported extensions.
