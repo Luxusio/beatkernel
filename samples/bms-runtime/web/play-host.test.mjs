@@ -23,6 +23,17 @@ function finalScore(playId, overrides = {}) {
   return { kind: "play-stopped", playId, songNs: 2350000000n,
     hits: 3n, misses: 1n, combo: 2n, preOriginInputs: 0, ...overrides };
 }
+function selectedRecording(size = 6) {
+  const file = new File([Uint8Array.from([66, 75, 82, 0, 255, 1])], "recorded-prefix.bkr");
+  Object.defineProperty(file, "size", { value: size });
+  let reads = 0;
+  file.arrayBuffer = () => { reads++; throw new Error("Window must not acquire replay bytes"); };
+  return { file, get reads() { return reads; } };
+}
+function chooseRecording(h, files) {
+  h.get("replay-file").files = files;
+  h.get("replay-file").emit("change");
+}
 
 async function harness(faults = {}) {
   const elements = new Map();
@@ -99,7 +110,8 @@ async function harness(faults = {}) {
     constructor(text, value) { super("option"); this.textContent = text; this.value = value; }
   }
   for (const id of ["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek",
-    "title", "details", "status", "viewport", "play", "stop", "record", "export", "keys", "canvas", "prepare-form", "seek-form"]) {
+    "title", "details", "status", "viewport", "play", "stop", "record", "export", "keys", "canvas", "prepare-form", "seek-form",
+    "replay-file", "replay-play", "replay-name"]) {
     elements.set(id, new Element(id === "chart" ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
@@ -129,7 +141,11 @@ async function harness(faults = {}) {
       assert.equal(this.terminations, 0, "posting after Worker termination");
       // The fake canvas has no native transferable. Other data follows the real
       // structured-clone shape, including BigInt and typed event arrays.
-      this.posts.push({ value: structuredClone(value), transferCount: transfer.length });
+      const posted = structuredClone(value);
+      // Node versions may clone File as Blob. Preserve the selected immutable
+      // File endpoint here; this fake Worker never acquires its bytes.
+      if (value.replayFile instanceof File) posted.replayFile = value.replayFile;
+      this.posts.push({ value: posted, transferCount: transfer.length });
     }
     terminate() { this.terminations++; traces.push(["terminate"]); }
     messages(kind) { return this.posts.map(entry => entry.value).filter(value => value.kind === kind); }
@@ -300,15 +316,16 @@ async function harness(faults = {}) {
     assert.equal(get("play").disabled, false);
     return { title: get("title").textContent, details: get("details").textContent, position: get("position").value };
   }
-  async function begin() {
-    click("play");
+  async function begin(mode = "live") {
+    click(mode === "replay" ? "replay-play" : "play");
     await flush();
     return workers.at(-1).last("play-start");
   }
   async function prepared(start, sampleCount = 0) {
     const worker = workers.at(-1);
     await reply(start, { kind: "prepared", title: "Actual runtime", artist: "Runtime artist",
-      notes: 6, samples: sampleCount, lanes: [0x11] });
+      notes: 6, samples: sampleCount, lanes: [0x11],
+      ...(start.mode === "replay" ? { mode: "replay", recordedUntilNs: 2350000000n } : {}) });
     for (let index = 0; index < sampleCount; index++) {
       await reply(worker.last("play-sample"), { kind: "sample", id: BigInt(index + 1), rate: 44100,
         channels: 2, pcm: new Float32Array([0.25, -0.25, 0.5, -0.5]) });
@@ -316,9 +333,9 @@ async function harness(faults = {}) {
     await reply(worker.last("play-sample"), { kind: "samples-end" });
     return worker.last("play-commands");
   }
-  async function launch(sampleCount = 0) {
+  async function launch(sampleCount = 0, mode = "live") {
     const worker = workers.at(-1);
-    const start = await begin();
+    const start = await begin(mode);
     const commands = await prepared(start, sampleCount);
     await reply(commands, null);
     const activation = worker.last("play-activate");
@@ -355,6 +372,169 @@ async function harness(faults = {}) {
     },
   };
 }
+
+test("replay selection retains bounded File metadata, opens in the gesture and pumps audio without live keys", async () => {
+  const stopGate = deferred();
+  const h = await harness({ stopGate, outputEvidence: { contextTime: 1.3, performanceTime: 1300 } });
+  await h.preview();
+  const file = selectedRecording();
+  assert.equal(h.get("replay-play").disabled, true);
+  chooseRecording(h, [file.file]);
+  const label = h.get("replay-name").textContent;
+  assert.match(label, /recorded-prefix\.bkr.*6 bytes/);
+  assert.equal(h.get("replay-play").disabled, false);
+  const invalidFiles = [selectedRecording(0), selectedRecording(64 * 1024 * 1024 + 1), selectedRecording(1.5)];
+  for (const files of [...invalidFiles.map(value => [value.file]), [file.file, file.file],
+    [{ size: 6, name: "unbranded.bkr", arrayBuffer() { assert.fail("unbranded file read"); } }]]) {
+    chooseRecording(h, files);
+    assert.equal(h.get("replay-name").textContent, label);
+    assert.equal(h.get("replay-play").disabled, false, "invalid metadata leaves the prior admitted selection usable");
+    assert.equal(h.get("replay-file").value, "");
+  }
+  h.get("seed").value = "not a live seed";
+  h.get("record").checked = true;
+  h.click("replay-play");
+  assert.equal(h.opens.length, 1);
+  assert.equal(h.opens[0].gesture, true);
+  assert.equal(file.reads, 0);
+  await flush();
+  const worker = h.workers[0];
+  const start = worker.last("play-start");
+  assert.equal(start.mode, "replay");
+  assert.equal(start.replayFile, file.file);
+  assert.equal(start.rate, 48000);
+  for (const field of ["seed", "keyPairs", "recordReplay"]) assert.equal(Object.hasOwn(start, field), false);
+  assert.equal(h.get("replay-file").disabled, true);
+  assert.equal(h.get("play").disabled, true);
+  const commands = await h.prepared(start, 1);
+  await h.reply(commands, null);
+  const activation = worker.last("play-activate");
+  assert.equal(activation.startFrame, 60000n);
+  assert.deepEqual(h.audio.arms, [60000n]);
+  await h.reply(activation, null);
+  assert.equal(h.audio.samples[0].rate, 44100);
+  assert.match(h.get("keys").textContent, /Recorded input playback/);
+  h.setNow(1300);
+  const key = h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300 });
+  h.window.emit("keyup", { code: "KeyZ", repeat: false, timeStamp: 1300 });
+  assert.equal(key.defaultPrevented, false);
+  await h.advance(8);
+  assert.equal(worker.messages("play-step").length, 0);
+  const render = worker.last("play-render");
+  assert.equal(render.presentedNs, 50000000n);
+  await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
+    completed: false, songNs: 2350000000n, hits: 23n, misses: 4n, combo: 11n, preOriginInputs: 0 });
+  assert.match(h.get("status").textContent, /Replay.*Hits 23.*Misses 4.*Combo 11/);
+  assert.match(h.get("position").value, /^2\.35(?:0*)$/);
+  const escape = h.window.emit("keydown", { code: "Escape", repeat: false, timeStamp: 1308 });
+  assert.equal(escape.defaultPrevented, true);
+  await flush();
+  assert.equal(worker.last("play-stop").completed, false);
+  await h.receive(finalScore(start.playId, { replay: null, replayComplete: false, replayError: null }));
+  assert.equal(h.get("replay-play").disabled, true);
+  stopGate.resolve();
+  await flush();
+  assert.equal(h.get("replay-play").disabled, false);
+  assert.equal(h.get("export").disabled, true, "a played file does not become a newly captured export");
+  assert.equal(file.reads, 0);
+  assert.ok(invalidFiles.every(value => value.reads === 0));
+  await h.close();
+});
+
+test("recorded-prefix completion joins both owners and a fresh live session regains ordinary input routing", async () => {
+  const stopGate = deferred();
+  const h = await harness({ stopGate, outputEvidence: { contextTime: 1.3, performanceTime: 1300 } });
+  const saved = await h.preview();
+  const file = selectedRecording();
+  chooseRecording(h, [file.file]);
+  const replay = await h.launch(0, "replay");
+  const worker = h.workers[0];
+  const replayAudio = h.audio;
+  h.setNow(1300);
+  await h.advance(8);
+  const render = worker.last("play-render");
+  await h.receive({ kind: "play-render-done", playId: replay.id, renderId: render.renderId,
+    completed: true, songNs: 2350000000n, hits: 3n, misses: 1n, combo: 2n, preOriginInputs: 0 });
+  assert.equal(worker.last("play-stop").completed, true);
+  assert.equal(worker.messages("play-step").length, 0);
+  await h.receive(finalScore(replay.id, { replay: null, replayComplete: false, replayError: null }));
+  assert.equal(h.get("play").disabled, true);
+  stopGate.resolve();
+  await flush();
+  assert.match(h.get("status").textContent, /Recorded replay ended\..*Hits 3/);
+  assert.doesNotMatch(h.get("status").textContent, /Song completed/);
+  assert.equal(h.get("title").textContent, saved.title);
+  assert.equal(h.get("position").value, saved.position);
+  assert.equal(h.get("export").disabled, true);
+  const live = await h.launch();
+  assert.ok(live.id > replay.id);
+  assert.equal(live.start.mode, "live");
+  assert.equal(Object.hasOwn(live.start, "replayFile"), false);
+  assert.ok(live.start.keyPairs instanceof Uint32Array);
+  assert.notEqual(h.audio, replayAudio);
+  assert.equal(h.opens.length, 2);
+  assert.match(h.get("keys").textContent, /KeyZ/);
+  h.setNow(1600);
+  h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1600 });
+  assert.equal(worker.last("play-step").playId, live.id);
+  assert.equal(worker.last("play-step").events[0].down, true);
+  h.click("stop");
+  await flush();
+  await h.receive(finalScore(live.id));
+  assert.equal(file.reads, 0);
+  await h.close();
+});
+
+test("replay preparation cancellation, mode mismatch and rejected audio prefixes release the original session", async () => {
+  for (const mode of [undefined, "live"]) {
+    const h = await harness();
+    await h.preview();
+    chooseRecording(h, [selectedRecording().file]);
+    const start = await h.begin("replay");
+    await h.reply(start, { kind: "prepared", mode, title: "Wrong mode", notes: 1, samples: 1, lanes: [0x11] });
+    assert.equal(h.workers[0].messages("play-sample").length, 0);
+    assert.equal(h.audio.samples.length, 0);
+    assert.equal(h.audio.arms.length, 0);
+    await h.receive(finalScore(start.playId));
+    assert.match(h.get("status").textContent, /preparation mode changed/);
+    assert.equal(h.get("replay-play").disabled, false);
+    await h.close();
+  }
+  const cancelled = await harness();
+  await cancelled.preview();
+  const file = selectedRecording();
+  chooseRecording(cancelled, [file.file]);
+  const start = await cancelled.begin("replay");
+  cancelled.click("stop");
+  await flush();
+  await cancelled.reply(start, { kind: "prepared", mode: "replay", samples: 2, lanes: [] });
+  assert.equal(cancelled.workers[0].messages("play-sample").length, 0);
+  assert.equal(cancelled.get("play").disabled, true);
+  await cancelled.receive(finalScore(start.playId, { songNs: null, hits: null, misses: null, combo: null }));
+  assert.equal(cancelled.get("play").disabled, false);
+  assert.equal(file.reads, 0);
+  await cancelled.close();
+
+  const failure = Object.assign(new Error("actual replay output queue rejected prefix"), { admitted: 1 });
+  const rejected = await harness({ commandFailure: failure });
+  await rejected.preview();
+  chooseRecording(rejected, [selectedRecording().file]);
+  const replay = await rejected.launch(0, "replay");
+  const worker = rejected.workers[0];
+  await rejected.receive({ kind: "play-commands", playId: replay.id,
+    batch: { sequence: 91n, commands: [command(8n), command(9n)] } });
+  assert.equal(worker.last("play-ack").sequence, 91n);
+  assert.equal(worker.last("play-ack").admitted, 1);
+  assert.equal(worker.last("play-ack").success, false);
+  assert.equal(worker.messages("play-ack").length, 1);
+  assert.equal(rejected.audio.commandsSeen.length, 1);
+  await rejected.receive(finalScore(replay.id, { kind: "play-error", released: true,
+    message: "retained rejected replay commands", replay: null, replayComplete: false, replayError: null }));
+  assert.match(rejected.get("status").textContent, /actual replay output queue rejected prefix/);
+  assert.equal(rejected.get("export").disabled, true);
+  assert.equal(worker.messages("play-step").length, 0);
+  await rejected.close();
+});
 
 test("recording locks its session choice and exposes prefix downloads only after both cleanup joins", async () => {
   for (const audioFirst of [true, false]) {

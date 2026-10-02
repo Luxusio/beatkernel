@@ -52,13 +52,25 @@ async function workerHarness(options = {}) {
   const libraries = [];
   const views = [];
   const games = [];
+  const replays = [];
   const preparedOwners = [];
   const timers = new Map();
   let timerId = 0;
   let receive;
+  function makePrepared(path) {
+    const prepared = {
+      path, title: "Actual prepared metadata", artist: "Fixture", duration_ns: 604800000000000n,
+      note_count: 23, sample_count: 2, image_count: 1,
+      lanes: new Uint8Array(options.lanes ?? [0x11, 0x12]), moved: false, frees: 0,
+      free() { assert.equal(this.moved, false); assert.equal(++this.frees, 1); },
+    };
+    preparedOwners.push(prepared);
+    return prepared;
+  }
   class BrowserLibrary {
     files = [];
     preparations = [];
+    replayPreparations = [];
     frees = 0;
     constructor(...limits) { this.limits = limits; libraries.push(this); }
     add_file(path) { this.files.push(path); }
@@ -67,14 +79,15 @@ async function workerHarness(options = {}) {
       assert.equal(this.frees, 0);
       assert.ok(this.files.includes(path));
       this.preparations.push({ path, args });
-      const prepared = {
-        path, title: "Actual prepared metadata", artist: "Fixture", duration_ns: 604800000000000n,
-        note_count: 23, sample_count: 2, image_count: 1,
-        lanes: new Uint8Array(options.lanes ?? [0x11, 0x12]), moved: false, frees: 0,
-        free() { assert.equal(this.moved, false); assert.equal(++this.frees, 1); },
-      };
-      preparedOwners.push(prepared);
-      return prepared;
+      return makePrepared(path);
+    }
+    prepare_replay_chart(path, bytes, ...args) {
+      assert.equal(this.frees, 0);
+      assert.ok(this.files.includes(path));
+      assert.ok(bytes instanceof Uint8Array);
+      this.replayPreparations.push({ path, bytes: bytes.slice(), args });
+      if (options.prepareReplayError) throw new Error(options.prepareReplayError);
+      return makePrepared(path);
     }
     free() { assert.equal(++this.frees, 1); }
   }
@@ -90,6 +103,7 @@ async function workerHarness(options = {}) {
     positions = [];
     draws = 0;
     gameDraws = [];
+    replayDraws = [];
     resize(...extent) { this.extents.push(extent); }
     set_chart(prepared) {
       assert.equal(prepared.moved, false);
@@ -99,6 +113,7 @@ async function workerHarness(options = {}) {
     seek(ns) { this.positions.push(ns); }
     draw() { this.draws++; }
     draw_game(game) { assert.equal(game.frees, 0); this.gameDraws.push(game); }
+    draw_replay(replay) { assert.equal(replay.frees, 0); this.replayDraws.push(replay); }
     needs_redraw() { return false; }
   }
   class BrowserGame {
@@ -186,6 +201,20 @@ async function workerHarness(options = {}) {
       if (options.freeError) throw new Error(options.freeError);
     }
   }
+  class BrowserReplay extends BrowserGame {
+    constructor(prepared, ...args) {
+      super(prepared, ...args);
+      assert.equal(games.pop(), this);
+      replays.push(this);
+    }
+    get recorded_until_ns() { this.live(); return options.recordedUntil === undefined ? SCORE.song_ns : options.recordedUntil; }
+    activate() { assert.fail("replay must not activate a live transport"); }
+    input() { assert.fail("replay must not accept live input"); }
+    advance() { assert.fail("replay must not synthesize live advances"); }
+    observe_presentation() { assert.fail("replay must not discipline a live input clock"); }
+    configure_capture() { assert.fail("replay must not recapture a recording"); }
+    take_replay() { assert.fail("replay playback must not re-export its input bytes"); }
+  }
   const self = {
     isSecureContext: true, navigator: { gpu: {} },
     postMessage(value, transfer = []) {
@@ -200,11 +229,12 @@ async function workerHarness(options = {}) {
     setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); },
   });
-  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView", "BrowserGame"], function () {
+  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView", "BrowserGame", "BrowserReplay"], function () {
     this.setExport("default", async () => { if (options.initGate) await options.initGate.promise; });
     this.setExport("BrowserLibrary", BrowserLibrary);
     this.setExport("BrowserView", BrowserView);
     this.setExport("BrowserGame", BrowserGame);
+    this.setExport("BrowserReplay", BrowserReplay);
   }, { context });
   const helper = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
   const playHelper = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
@@ -217,7 +247,7 @@ async function workerHarness(options = {}) {
   });
   await worker.evaluate();
   return {
-    messages, transfers, libraries, preparedOwners, views, games, timers,
+    messages, transfers, libraries, preparedOwners, views, games, replays, timers,
     post(request) { receive({ data: request }); },
     async send(request) { receive({ data: request }); await flushJobs(); },
     async tick() {
@@ -234,6 +264,19 @@ function startRequest(fields = {}) {
     seed: "18446744073709551615", keyPairs: pairs(), ...fields };
 }
 
+function replayFile(acquire = null, size = 6) {
+  const bytes = Uint8Array.from([66, 75, 82, 0, 255, 1]);
+  const file = new FileType([bytes], "original-recording.bkr");
+  let reads = 0;
+  Object.defineProperty(file, "size", { value: size });
+  file.arrayBuffer = () => { reads++; return acquire ? acquire() : Promise.resolve(bytes.slice().buffer); };
+  return { file, bytes, get reads() { return reads; } };
+}
+function replayRequest(file, fields = {}) {
+  return { kind: "play-start", playId: 7, rpcId: 1, libraryId: 1,
+    path: "song/chart.bms", rate: 48000, mode: "replay", replayFile: file, ...fields };
+}
+
 async function catalogWorker(options = {}) {
   const h = await workerHarness(options);
   await h.send({ kind: "init", canvas: { transferred: true } });
@@ -247,7 +290,7 @@ async function catalogWorker(options = {}) {
 
 async function started(options = {}) {
   const h = await catalogWorker(options);
-  await h.send(startRequest(options.recordReplay === undefined ? {} : { recordReplay: options.recordReplay }));
+  await h.send(options.startRequest ?? startRequest(options.recordReplay === undefined ? {} : { recordReplay: options.recordReplay }));
   assert.equal(h.of("play-reply").at(-1).result.kind, "prepared");
   h.rpcId = 1;
   h.rpc = async (kind, fields = {}) => {
@@ -272,7 +315,7 @@ function step(fields = {}) {
 }
 
 function assertReleased(h, score = SCORE) {
-  const game = h.games[0];
+  const game = h.replays[0] ?? h.games[0];
   assert.equal(game.stops, 1);
   assert.equal(game.frees, 1);
   const last = h.of("play-error").at(-1) ?? h.of("play-stopped").at(-1);
@@ -733,4 +776,152 @@ test("serialization and transferable-layout failures stay separate from stop/fre
   assert.equal(setup.of("play-error")[0].replayError, null);
   assert.equal(setup.games[0].replayTakes, 0, "a refused capture was never admitted for export");
   assertReleased(setup);
+});
+
+test("replay reads once through canonical preparation and shares original PCM, ACK and output owners without live calls", async () => {
+  const file = replayFile();
+  const first = batch(101n);
+  const next = batch(102n);
+  const h = await started({ startRequest: replayRequest(file.file, { seed: "not a live seed", keyPairs: null }),
+    batches: [first, null, next], observeOutput(game, words, presented) {
+      if (presented !== null) game.score = { song_ns: 604800000000001n, hits: 23n, misses: 4n, combo: 11n };
+      return false;
+    } });
+  assert.equal(file.reads, 1);
+  assert.equal(h.games.length, 0);
+  const replay = h.replays[0];
+  const metadata = h.of("play-reply")[0].result;
+  assert.equal(metadata.mode, "replay");
+  assert.equal(metadata.recordedUntilNs, SCORE.song_ns);
+  assert.deepEqual(replay.args, [100000000n]);
+  assert.equal(h.libraries[0].preparations.length, 1, "only the accepted preview uses live-seed preparation");
+  const preparation = h.libraries[0].replayPreparations[0];
+  assert.deepEqual(preparation.bytes, file.bytes);
+  assert.deepEqual(preparation.args, [48000, 2, 64 * 1024 * 1024, 256 * 1024 * 1024, 1296]);
+  for (const rate of [44100, 96000]) {
+    const sample = (await h.rpc("play-sample")).result;
+    assert.equal(sample.rate, rate);
+    assert.ok(sample.pcm instanceof Float32Array);
+  }
+  assert.equal((await h.rpc("play-sample")).result.kind, "samples-end");
+  assert.deepEqual((await h.rpc("play-commands")).result, first);
+  await h.rpc("play-ack", { sequence: first.sequence, admitted: 2, success: true });
+  assert.equal((await h.rpc("play-commands")).result, null);
+  await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START });
+  await h.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport({ available: false }), presentedNs: null });
+  assert.deepEqual(h.of("play-commands")[0].batch, next);
+  const report = renderReport();
+  await h.send({ kind: "play-render", playId: 7, renderId: 2, report, presentedNs: 9007199254742999n,
+    presentedHostNs: "not used by replay" });
+  assert.deepEqual(replay.calls.filter(row => row[0] === "output").at(-1), ["output", report.words, 9007199254742999n]);
+  const progress = h.of("play-render-done").at(-1);
+  assert.equal(progress.songNs, 604800000000001n);
+  assert.equal(progress.hits, 23n);
+  assert.equal(progress.preOriginInputs, 0);
+  await h.tick();
+  assert.equal(h.views[0].replayDraws.at(-1), replay);
+  assert.equal(h.views[0].gameDraws.length, 0);
+  await h.send({ kind: "play-ack", playId: 7, sequence: next.sequence, admitted: 2, success: true });
+  await h.send({ kind: "play-stop", playId: 7 });
+  assertReleased(h, replay.score);
+  assert.deepEqual(replay.disposals, ["stop", "free"]);
+  const stopped = h.of("play-stopped")[0];
+  assert.equal(stopped.replay, null);
+  assert.equal(stopped.replayComplete, false);
+  assert.equal(stopped.replayError, null);
+  assert.equal(file.reads, 1);
+});
+
+test("replay metadata is bounded before acquisition and invalid or changed reads never reach WASM preparation", async () => {
+  for (const size of [0, -1, 1.5, 64 * 1024 * 1024 + 1, Number.MAX_SAFE_INTEGER + 1]) {
+    const file = replayFile(null, size);
+    const h = await catalogWorker();
+    await h.send(replayRequest(file.file));
+    assert.equal(file.reads, 0);
+    assert.equal(h.libraries[0].replayPreparations.length, 0);
+    assert.equal(h.replays.length, 0);
+    assert.equal(h.of("play-error").length, 1);
+  }
+  for (const fields of [{ replayFile: { size: 6, arrayBuffer() { assert.fail("unbranded file read"); } } },
+    { recordReplay: true }, { mode: "unknown" }]) {
+    const file = replayFile();
+    const h = await catalogWorker();
+    await h.send(replayRequest(file.file, fields));
+    assert.equal(file.reads, 0);
+    assert.equal(h.replays.length, 0);
+    assert.equal(h.of("play-error").length, 1);
+  }
+  for (const acquire of [() => Promise.resolve(new ArrayBuffer(5)),
+    () => Promise.resolve(new Uint8Array(6)), () => Promise.reject(new Error("actual file acquisition failed"))]) {
+    const file = replayFile(acquire);
+    const h = await catalogWorker();
+    await h.send(replayRequest(file.file));
+    assert.equal(file.reads, 1);
+    assert.equal(h.libraries[0].replayPreparations.length, 0);
+    assert.equal(h.replays.length, 0);
+    assert.equal(h.of("play-error")[0].released, true);
+  }
+  const file = replayFile();
+  const incompatible = await catalogWorker({ prepareReplayError: "canonical chart identity mismatch" });
+  await incompatible.send(replayRequest(file.file));
+  assert.equal(file.reads, 1);
+  assert.equal(incompatible.libraries[0].replayPreparations.length, 1);
+  assert.equal(incompatible.replays.length, 0);
+  assert.match(incompatible.of("play-error")[0].message, /canonical chart identity mismatch/);
+});
+
+test("a cancelled replay read cannot construct a late owner or replace a newer live session", async () => {
+  const gate = deferred();
+  const file = replayFile(() => gate.promise);
+  const h = await catalogWorker();
+  await h.send(replayRequest(file.file));
+  assert.equal(file.reads, 1);
+  assert.equal(h.replays.length, 0);
+  await h.send({ kind: "play-stop", playId: 7 });
+  assert.equal(h.of("play-stopped")[0].songNs, null);
+  assert.equal(h.of("play-stopped")[0].replay, null);
+  await h.send(startRequest({ playId: 8 }));
+  assert.equal(h.games.length, 1);
+  gate.resolve(file.bytes.slice().buffer);
+  await flushJobs();
+  assert.equal(h.replays.length, 0);
+  assert.equal(h.libraries[0].replayPreparations.length, 0);
+  assert.equal(h.games[0].frees, 0);
+  assert.equal(h.of("play-error").length, 0);
+  await h.send({ kind: "play-stop", playId: 8 });
+  assertReleased(h);
+  assert.equal(file.reads, 1);
+});
+
+test("replay rejects live steps and preserves output/ACK failures without inventing a completed capture", async () => {
+  const start = () => replayRequest(replayFile().file);
+  const natural = await active({ startRequest: start(), observeOutput: () => true, recordedUntil: null });
+  assert.equal(natural.of("play-reply")[0].result.recordedUntilNs, null);
+  await natural.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs: 1n });
+  assert.equal(natural.of("play-render-done")[0].completed, true);
+  await natural.send({ kind: "play-stop", playId: 7, completed: true });
+  assert.equal(natural.of("play-stopped")[0].replayComplete, false);
+  assertReleased(natural);
+  for (const request of [step(), { kind: "play-render", playId: 7, renderId: 1,
+    report: renderReport(), presentedNs: -1n }]) {
+    const h = await active({ startRequest: start() });
+    await h.send(request);
+    assert.equal(h.replays[0].calls.filter(row => ["input", "advance", "output"].includes(row[0])).length, 0);
+    assert.equal(h.of("play-error")[0].replay, null);
+    assertReleased(h);
+  }
+  const malformed = await active({ startRequest: start(), observeOutput: () => "true" });
+  await malformed.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs: 1n });
+  assert.equal(malformed.of("play-render-done").length, 0);
+  assertReleased(malformed);
+  const rejected = await active({ startRequest: start(), batches: [batch(83n)], ack() {
+    throw new Error("actual replay batch rejected after one command");
+  } });
+  await rejected.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs: null });
+  await rejected.send({ kind: "play-ack", playId: 7, sequence: 83n, admitted: 1, success: false });
+  assert.deepEqual(rejected.replays[0].calls.filter(row => row[0] === "ack"), [["ack", 83n, 1, false]]);
+  assert.equal(rejected.replays[0].calls.filter(row => row[0] === "commands").length, 1);
+  assert.match(rejected.of("play-error")[0].message, /after one command/);
+  assert.equal(rejected.of("play-error")[0].replay, null);
+  assertReleased(rejected);
 });
