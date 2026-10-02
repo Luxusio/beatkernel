@@ -21,7 +21,7 @@ use std::{
 };
 
 const MAGIC: &[u8; 4] = b"BKMP";
-const VERSION: u16 = 2;
+const VERSION: u16 = 3;
 const MAX_IDENTITY: usize = 65_536;
 const MAX_BODY: usize = MAX_IDENTITY + 7;
 const TICK: Duration = Duration::from_millis(5);
@@ -137,6 +137,8 @@ impl From<io::Error> for MultiplayerError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MultiplayerEvent {
     Connected,
+    /// Compatible peers both completely sent and received preparation readiness.
+    Ready,
     Progress(Progress),
     /// Peer terminal self-reported prefix, including aborted sessions.
     FinalProgress(Progress),
@@ -153,6 +155,8 @@ pub struct Multiplayer {
     incoming: Receiver<MultiplayerEvent>,
     terminal: Receiver<MultiplayerError>,
     stop_flag: Arc<AtomicBool>,
+    ready_requested: Arc<AtomicBool>,
+    ready: bool,
     worker: Option<JoinHandle<()>>,
     local: Option<Progress>,
     remote: Option<Progress>,
@@ -194,11 +198,21 @@ impl Multiplayer {
         let (terminal_tx, terminal) = mpsc::sync_channel(1);
         let stop_flag = Arc::new(AtomicBool::new(false));
         let worker_stop = stop_flag.clone();
+        let ready_requested = Arc::new(AtomicBool::new(false));
+        let worker_ready = ready_requested.clone();
         let finish_timeout = options.io_stall_timeout;
         let worker = thread::Builder::new()
             .name("bms-multiplayer".into())
             .spawn(move || {
-                let result = run(endpoint, identity, options, &worker_stop, out_rx, in_tx);
+                let result = run(
+                    endpoint,
+                    identity,
+                    options,
+                    &worker_stop,
+                    &worker_ready,
+                    out_rx,
+                    in_tx,
+                );
                 let reason = result.err().unwrap_or(MultiplayerError::Closed);
                 let _ = terminal_tx.try_send(reason);
             })?;
@@ -207,6 +221,8 @@ impl Multiplayer {
             incoming,
             terminal,
             stop_flag,
+            ready_requested,
+            ready: false,
             worker: Some(worker),
             local: None,
             remote: None,
@@ -218,10 +234,33 @@ impl Multiplayer {
             finish_timeout,
         })
     }
+    /// One-shot nonblocking preparation-ready request, independent of data capacity.
+    /// May precede setup exchange; only the worker sends after compatible setup.
+    pub fn try_ready(&mut self) -> Result<(), MultiplayerError> {
+        if self.closed || self.stop_flag.load(Ordering::Acquire) {
+            return Err(MultiplayerError::Closed);
+        }
+        self.ready_requested
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| MultiplayerError::Protocol("readiness already requested".into()))?;
+        if let Some(worker) = &self.worker {
+            worker.thread().unpark();
+        }
+        Ok(())
+    }
+    /// True after bilateral readiness is polled and until closure.
+    pub fn is_ready(&self) -> bool {
+        self.ready && !self.closed
+    }
     /// Gameplay-side admission only; performs no socket I/O and never waits for capacity.
     pub fn try_publish(&mut self, progress: Progress) -> Result<(), MultiplayerError> {
         if self.closed || self.stop_flag.load(Ordering::Acquire) {
             return Err(MultiplayerError::Closed);
+        }
+        if !self.is_ready() {
+            return Err(MultiplayerError::Protocol(
+                "bilateral readiness required".into(),
+            ));
         }
         if self.local_final {
             return Err(MultiplayerError::Protocol(
@@ -255,6 +294,11 @@ impl Multiplayer {
     pub fn try_finish(&mut self, progress: Progress) -> Result<(), MultiplayerError> {
         if self.closed || self.stop_flag.load(Ordering::Acquire) {
             return Err(MultiplayerError::Closed);
+        }
+        if !self.is_ready() {
+            return Err(MultiplayerError::Protocol(
+                "bilateral readiness required".into(),
+            ));
         }
         if self.local_final {
             return Err(MultiplayerError::Protocol(
@@ -330,6 +374,7 @@ impl Multiplayer {
     fn retain_event(&mut self, event: &MultiplayerEvent) {
         match event {
             MultiplayerEvent::Connected => self.connected = true,
+            MultiplayerEvent::Ready => self.ready = true,
             MultiplayerEvent::Progress(progress) => self.remote = Some(*progress),
             MultiplayerEvent::FinalProgress(progress) => {
                 self.remote = Some(*progress);
@@ -533,6 +578,10 @@ struct Outgoing {
 }
 #[derive(Default)]
 struct Protocol {
+    local_ready_sent: bool,
+    local_ready_written: bool,
+    remote_ready: bool,
+    ready_emitted: bool,
     tx_sequence: u64,
     rx_sequence: u64,
     local: Option<Progress>,
@@ -546,7 +595,30 @@ struct Protocol {
     acknowledgement_emitted: bool,
 }
 impl Protocol {
+    fn ready(&self) -> bool {
+        self.local_ready_written && self.remote_ready
+    }
+    fn next_ready(&mut self, requested: bool) -> Option<Vec<u8>> {
+        if !requested || self.local_ready_sent {
+            return None;
+        }
+        self.local_ready_sent = true;
+        Some(frame(5, &[]))
+    }
+    fn readiness(&mut self) -> Option<MultiplayerEvent> {
+        if self.ready() && !self.ready_emitted {
+            self.ready_emitted = true;
+            Some(MultiplayerEvent::Ready)
+        } else {
+            None
+        }
+    }
     fn outgoing(&mut self, message: Outgoing) -> Result<Vec<u8>, MultiplayerError> {
+        if !self.ready() {
+            return Err(MultiplayerError::Protocol(
+                "bilateral readiness required".into(),
+            ));
+        }
         if self.local_final.is_some() {
             return Err(MultiplayerError::Protocol(
                 "progress after local final".into(),
@@ -574,7 +646,21 @@ impl Protocol {
         tag: u8,
         payload: &[u8],
     ) -> Result<Option<MultiplayerEvent>, MultiplayerError> {
+        if tag != 5 && !self.ready() {
+            return Err(MultiplayerError::Protocol(
+                "data before bilateral readiness".into(),
+            ));
+        }
         match tag {
+            5 => {
+                if !payload.is_empty() || self.remote_ready {
+                    return Err(MultiplayerError::Protocol(
+                        "invalid or duplicate readiness".into(),
+                    ));
+                }
+                self.remote_ready = true;
+                Ok(None)
+            }
             2 | 3 => {
                 if self.remote_final {
                     return Err(MultiplayerError::Protocol(
@@ -626,6 +712,9 @@ impl Protocol {
         Some(frame(4, &sequence.to_le_bytes()))
     }
     fn written(&mut self, tag: u8) {
+        if tag == 5 {
+            self.local_ready_written = true;
+        }
         if tag == 3 {
             self.local_final_written = true;
         }
@@ -689,6 +778,7 @@ fn run(
     identity: Vec<u8>,
     options: MultiplayerOptions,
     stop: &AtomicBool,
+    ready_requested: &AtomicBool,
     outgoing: Receiver<Outgoing>,
     incoming: SyncSender<MultiplayerEvent>,
 ) -> Result<(), MultiplayerError> {
@@ -738,7 +828,7 @@ fn run(
         if stop.load(Ordering::Acquire) {
             return Ok(());
         }
-        if !connected && Instant::now() >= deadline {
+        if (!connected || !protocol.ready()) && Instant::now() >= deadline {
             return Err(MultiplayerError::SetupTimeout);
         }
         if connected
@@ -755,6 +845,9 @@ fn run(
                     last_write = Instant::now();
                     if written == tx.len() {
                         protocol.written(tx_tag);
+                        if let Some(event) = protocol.readiness() {
+                            incoming.try_send(event).map_err(queue_error)?;
+                        }
                         // Peer may close immediately after receiving this ack.
                         // Publish confirmed delivery before the following read sees EOF.
                         if let Some(event) = protocol.acknowledgement() {
@@ -805,7 +898,12 @@ fn run(
             }
         }
         if connected && written == tx.len() {
-            if let Some(ack) = protocol.next_ack() {
+            if let Some(ready) = protocol.next_ready(ready_requested.load(Ordering::Acquire)) {
+                tx = ready;
+                tx_tag = 5;
+                written = 0;
+                last_write = Instant::now();
+            } else if let Some(ack) = protocol.next_ack() {
                 tx = ack;
                 tx_tag = 4;
                 written = 0;
@@ -822,6 +920,9 @@ fn run(
                     Err(TryRecvError::Disconnected) => return Ok(()),
                 }
             }
+        }
+        if let Some(event) = protocol.readiness() {
+            incoming.try_send(event).map_err(queue_error)?;
         }
         if let Some(event) = protocol.acknowledgement() {
             incoming.try_send(event).map_err(queue_error)?;
@@ -1161,6 +1262,92 @@ mod tests {
 #[cfg(test)]
 mod final_prefix_fixtures {
     use super::*;
+    #[test]
+    fn readiness_requires_both_receipt_and_complete_local_frame() {
+        let mut left = Protocol::default();
+        let mut right = Protocol::default();
+        assert!(left.next_ready(false).is_none());
+        assert!(!left.ready());
+        let left_frame = left.next_ready(true).unwrap();
+        assert!(left.next_ready(true).is_none());
+        let (tag, payload) = decode(&left_frame);
+        assert_eq!(tag, 5);
+        assert!(payload.is_empty());
+        right.receive(tag, &payload).unwrap();
+        assert!(right.readiness().is_none());
+        let right_frame = right.next_ready(true).unwrap();
+        let (tag, payload) = decode(&right_frame);
+        left.receive(tag, &payload).unwrap();
+        assert!(left.readiness().is_none()); // a partial local write is not readiness
+        left.written(5);
+        assert_eq!(left.readiness(), Some(MultiplayerEvent::Ready));
+        assert!(left.readiness().is_none());
+        assert!(right.readiness().is_none());
+        right.written(5);
+        assert_eq!(right.readiness(), Some(MultiplayerEvent::Ready));
+        assert!(right.readiness().is_none());
+        assert!(left.outgoing(message(1, false)).is_ok());
+    }
+    #[test]
+    fn readiness_payload_duplicates_and_early_data_reject_atomically() {
+        let mut state = Protocol::default();
+        assert!(state.receive(5, &[0]).is_err());
+        assert!(!state.remote_ready);
+        for tag in [2, 3] {
+            let payload = decode(&prefix_frame(tag, 0, progress(1))).1;
+            assert!(state.receive(tag, &payload).is_err());
+            assert_eq!(state.rx_sequence, 0);
+            assert!(state.remote.is_none() && !state.remote_final && state.pending_ack.is_none());
+        }
+        assert!(state.outgoing(message(1, true)).is_err());
+        assert!(state.local_final.is_none() && state.tx_sequence == 0);
+        state.receive(5, &[]).unwrap();
+        assert!(state.receive(5, &[]).is_err());
+        assert!(!state.ready());
+        state.next_ready(true).unwrap();
+        state.written(5);
+        assert_eq!(state.readiness(), Some(MultiplayerEvent::Ready));
+        for version in [1u16, 2] {
+            let mut frames = Frames::new();
+            frames.bytes = frame(5, &[]);
+            frames.bytes[8..10].copy_from_slice(&version.to_le_bytes());
+            assert!(frames.take().is_err());
+        }
+    }
+    #[test]
+    fn owner_ready_request_is_separate_one_shot_and_cancel_fenced() {
+        let (mut owner, outgoing, incoming, _terminal) = owner();
+        owner.try_publish(progress(1)).unwrap(); // occupy the one data slot
+        owner.ready = false;
+        owner.ready_requested.store(false, Ordering::Release);
+        assert!(!owner.is_ready());
+        assert!(owner.try_publish(progress(2)).is_err());
+        assert!(owner.try_finish(progress(2)).is_err());
+        owner.try_ready().unwrap();
+        assert!(owner.ready_requested.load(Ordering::Acquire));
+        assert!(owner.try_ready().is_err());
+        assert!(!owner.is_ready());
+        assert_eq!(outgoing.try_recv().unwrap().progress, progress(1));
+        incoming.try_send(MultiplayerEvent::Ready).unwrap();
+        assert_eq!(owner.poll(), vec![MultiplayerEvent::Ready]);
+        assert!(owner.is_ready());
+        owner.request_stop();
+        assert!(!owner.is_ready());
+        assert_eq!(owner.try_ready(), Err(MultiplayerError::Closed));
+        assert_eq!(
+            owner.try_publish(progress(2)),
+            Err(MultiplayerError::Closed)
+        );
+    }
+    fn playing() -> Protocol {
+        Protocol {
+            local_ready_sent: true,
+            local_ready_written: true,
+            remote_ready: true,
+            ready_emitted: true,
+            ..Protocol::default()
+        }
+    }
     fn progress(song_ns: i64) -> Progress {
         Progress {
             song_ns,
@@ -1188,8 +1375,8 @@ mod final_prefix_fixtures {
     }
     #[test]
     fn fragmented_final_shares_sequence_and_retains_terminal_prefix() {
-        let mut sender = Protocol::default();
-        let mut peer = Protocol::default();
+        let mut sender = playing();
+        let mut peer = playing();
         let (tag, payload) = decode(&sender.outgoing(message(1, false)).unwrap());
         assert_eq!(
             peer.receive(tag, &payload).unwrap(),
@@ -1213,8 +1400,8 @@ mod final_prefix_fixtures {
     }
     #[test]
     fn simultaneous_finals_require_complete_peer_ack_write_before_notification() {
-        let mut left = Protocol::default();
-        let mut right = Protocol::default();
+        let mut left = playing();
+        let mut right = playing();
         let left_frame = left.outgoing(message(1, true)).unwrap();
         let right_frame = right.outgoing(message(1, true)).unwrap();
         left.written(3);
@@ -1246,7 +1433,7 @@ mod final_prefix_fixtures {
     }
     #[test]
     fn malformed_unsolicited_wrong_and_early_ack_preserve_state() {
-        let mut state = Protocol::default();
+        let mut state = playing();
         assert!(state.receive(4, &0u64.to_le_bytes()).is_err());
         state.outgoing(message(1, true)).unwrap();
         assert!(state.receive(4, &0u64.to_le_bytes()).is_err()); // not written yet
@@ -1266,11 +1453,11 @@ mod final_prefix_fixtures {
         assert!(state.local_ack_received);
     }
     #[test]
-    fn version_two_wire_and_coalesced_complete_frames() {
+    fn version_three_wire_and_coalesced_complete_frames() {
         let mut wire = progress_frame(0, progress(1));
         wire.extend_from_slice(&prefix_frame(3, 1, progress(2)));
         let mut frames = Frames::new();
-        let mut state = Protocol::default();
+        let mut state = playing();
         let mut cursor = 0;
         while cursor < wire.len() {
             let count = frames.needed().unwrap().min(wire.len() - cursor);
@@ -1291,7 +1478,7 @@ mod final_prefix_fixtures {
         assert!(frames.take().is_err());
         let mut exhausted = Protocol {
             tx_sequence: u64::MAX,
-            ..Protocol::default()
+            ..playing()
         };
         assert!(exhausted.outgoing(message(1, true)).is_err());
         assert!(exhausted.local_final.is_none() && exhausted.local.is_none());
@@ -1311,6 +1498,8 @@ mod final_prefix_fixtures {
                 incoming,
                 terminal,
                 stop_flag: Arc::new(AtomicBool::new(false)),
+                ready_requested: Arc::new(AtomicBool::new(true)),
+                ready: true,
                 worker: None,
                 local: None,
                 remote: None,
