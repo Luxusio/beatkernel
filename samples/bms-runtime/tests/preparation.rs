@@ -86,6 +86,143 @@ fn captured_setup_identity(prepared: &PreparedBms) -> beatkernel::replay::Replay
     .header
 }
 
+#[test]
+fn volwav_scales_key_and_bgm_once_through_shared_runtime_without_changing_pcm_or_replay_setup() {
+    use beatkernel::{judge::JudgeEngine, replay::codec::*, time::ClockDomainId};
+    let dir = Directory::new();
+    dir.write("key.wav", &wav(1, &[8192, -4096]));
+    dir.write("bgm.wav", &wav(1, &[4096, -2048]));
+    let format = AudioFormat::new(24_000, 1).unwrap();
+    let mut identity = None;
+    for (header, gain) in [
+        ("", 1.0f32),
+        ("100", 1.0),
+        ("0", 0.0),
+        ("50", 0.5),
+        ("200", 2.0),
+    ] {
+        // Keep the gameplay lines physically fixed so source-line identity is equal.
+        let path = dir.write(
+            "volume.bms",
+            format!(
+                "{}\n#BPM 60\n#WAV01 key.wav\n#WAV02 bgm.wav\n#00011:01\n#00001:02\n",
+                if header.is_empty() {
+                    String::new()
+                } else {
+                    format!("#VOLWAV {header}")
+                }
+            )
+            .as_bytes(),
+        );
+        let prepared = load_prepared(&path, format, limits(), ChannelPolicy::Exact).unwrap();
+        let setup = captured_setup_identity(&prepared);
+        assert_eq!(identity.get_or_insert_with(|| setup.clone()), &setup);
+        let profile = replay_playback::decode_profile(&setup.options).unwrap();
+        let judge = JudgeEngine::new(
+            prepared.compiled.chart.clone(),
+            prepared.source.rules(),
+            profile,
+        )
+        .unwrap();
+        let replay_limits = competition_live::replay_limits().unwrap();
+        let file = replay_capture::LiveReplayCapture::new(&judge, ClockDomainId(17), replay_limits)
+            .unwrap()
+            .into_file();
+        let file =
+            decode_replay(&encode_replay(&file, replay_limits).unwrap(), replay_limits).unwrap();
+        let restored = load_prepared_for_replay(
+            &path,
+            format,
+            limits(),
+            ChannelPolicy::Exact,
+            &file,
+            replay_limits,
+        )
+        .unwrap();
+        let custom = load_prepared_with_decoder(
+            &path,
+            format,
+            limits(),
+            ChannelPolicy::Exact,
+            &DefaultAssetDecoder,
+        )
+        .unwrap();
+        for chart in [prepared, restored, custom] {
+            assert_eq!(captured_setup_identity(&chart), setup);
+            assert_eq!(
+                chart.bank.get(SampleId(1)).unwrap().samples(),
+                &[0.25, -0.125]
+            );
+            assert_eq!(
+                chart.bank.get(SampleId(2)).unwrap().samples(),
+                &[0.125, -0.0625]
+            );
+            assert_eq!(chart.sounds[0].gain, gain);
+            assert_eq!(chart.sounds[0].stage, JudgeStage::Instant);
+            assert!(
+                matches!(chart.bgm_commands[0], AudioCommand::Play { gain: actual, .. } if actual == gain)
+            );
+            let mut output = Vec::new();
+            let report = offline::render_offline(
+                chart,
+                offline::OfflineOptions {
+                    frames: 3,
+                    block_frames: 1,
+                    command_capacity: 4,
+                    max_voices: 2,
+                },
+                &mut output,
+            )
+            .unwrap();
+            assert_eq!(report.hits, 1); // Even mute preserves ordinary judgment and scheduling.
+            let expected = if gain == 0.0 {
+                [0.0; 3]
+            } else {
+                [0.375 * gain, -0.1875 * gain, 0.0]
+            };
+            assert_eq!(
+                output,
+                expected
+                    .into_iter()
+                    .flat_map(f32::to_le_bytes)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[test]
+fn volwav_prepares_hold_heads_and_rejects_invalid_headers_before_asset_decoding() {
+    struct NeverDecode;
+    impl AssetDecoder for NeverDecode {
+        fn decode(&self, _: &Path, _: &[u8], _: PcmLimits) -> Result<PcmSample, Box<dyn Error>> {
+            panic!("invalid VOLWAV must fail before decoder invocation")
+        }
+    }
+    let dir = Directory::new();
+    dir.write("key.wav", &wav(1, &[8192]));
+    let format = AudioFormat::new(24_000, 1).unwrap();
+    let path = dir.write(
+        "hold.bms",
+        b"#VOLWAV 12.5\n#BPM 60\n#LNTYPE 1\n#WAV01 key.wav\n#00051:0101\n",
+    );
+    let prepared = load_prepared(&path, format, limits(), ChannelPolicy::Exact).unwrap();
+    assert_eq!(prepared.sounds.len(), 1);
+    assert_eq!(prepared.sounds[0].stage, JudgeStage::HoldHead);
+    assert_eq!(prepared.sounds[0].gain, 0.125);
+    assert_eq!(prepared.bank.get(SampleId(1)).unwrap().samples(), &[0.25]);
+    for value in ["-1", "NaN", "inf", "1e2", "100 200", "1000000000000000000"] {
+        let path = dir.write(
+            "invalid.bms",
+            format!("#VOLWAV {value}\n#BPM 60\n#WAV01 key.wav\n#00011:01\n").as_bytes(),
+        );
+        let error =
+            load_prepared_with_decoder(&path, format, limits(), ChannelPolicy::Exact, &NeverDecode)
+                .unwrap_err();
+        assert!(!error.to_string().contains("asset"), "{value}: {error}");
+    }
+}
+
 #[path = "../src/flac_fixture.rs"]
 mod flac_fixture;
 

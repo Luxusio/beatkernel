@@ -327,6 +327,7 @@ fn prepare_seeded(
         options.max_bytes,
     )?;
     let source = parse_seeded(&text, options, seed)?;
+    let wav_gain = source.wav_gain()?;
     if let Some((file, limits)) = replay {
         replay_playback::validate_setup(&source, file, limits)?;
     }
@@ -374,7 +375,7 @@ fn prepare_seeded(
             },
             sample: note.sample,
             voice: VoiceId(note.object.0),
-            gain: 1.0,
+            gain: wav_gain,
         });
     }
     let mut bgm_commands = Vec::new();
@@ -395,7 +396,7 @@ fn prepare_seeded(
                 voice: VoiceId(voice),
                 sample: event.sample,
                 at: event.at,
-                gain: 1.0,
+                gain: wav_gain,
             });
         }
     }
