@@ -741,6 +741,56 @@ test("opening failures and one shared setup deadline clean every partially creat
   assertClean(h);
 });
 
+test("failed or cancelled open preserves its original error and exposes failed close evidence", async () => {
+  for (const cancelled of [false, true]) {
+    const moduleGate = deferred();
+    const closeGate = deferred();
+    const controller = new AbortController();
+    const h = await harness({ moduleGate, closeGate });
+    const opening = observe(() => h.AudioHost.open(options({ signal: controller.signal })));
+    await flush();
+    const setupCause = new Error("original module acquisition failure");
+    if (cancelled) controller.abort();
+    else moduleGate.reject(setupCause);
+    await flush();
+    assert.equal(h.nodes.length, 0);
+    assert.equal(h.contexts[0].closes, 1);
+    assert.equal(opening.settled, false, "open must await its context cleanup outcome");
+
+    const closeCause = new Error("actual context close rejection");
+    if (cancelled) await h.expire();
+    else closeGate.reject(closeCause);
+    const error = failure(await opening.result, cancelled ? "aborted" : "transport");
+    assert.equal(error.operation, "open");
+    assert.equal(error.generation, 17);
+    assert.equal(error.status, null);
+    assert.equal(error.admitted, null);
+    if (cancelled) assert.match(error.message, /cancelled/i);
+    else {
+      assert.equal(error.cause, setupCause, "cleanup cannot replace the original module failure");
+      assert.match(error.message, /module loading failed/i);
+    }
+    const cleanup = error.cleanupError;
+    assert.ok(cleanup instanceof h.AudioHostError);
+    assert.notEqual(cleanup, error);
+    assert.equal(cleanup.code, cancelled ? "timeout" : "transport");
+    assert.equal(cleanup.operation, "close");
+    assert.equal(cleanup.generation, 17);
+    if (!cancelled) assert.equal(cleanup.cause, closeCause);
+    else assert.match(cleanup.message, /close timed out/i);
+    assertClean(h);
+
+    // Settling abandoned browser promises cannot erase recorded cleanup failure
+    // or construct a late processor after the rejected opening has returned.
+    moduleGate.resolve();
+    closeGate.resolve();
+    await flush();
+    assert.equal(error.cleanupError, cleanup);
+    assert.equal(h.nodes.length, 0);
+    assertClean(h);
+  }
+});
+
 test("ready must match actual context rate and channels before an owner becomes usable", async () => {
   for (const fields of [{ sampleRate: 44100 }, { channels: 1 }, { sampleRate: NaN }]) {
     const h = await harness();

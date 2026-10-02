@@ -231,7 +231,8 @@ export class AudioHost {
       const error = cause instanceof AudioHostError ? cause
         : host.#error("transport", "open", "Audio setup failed.", { cause });
       host.#fail(error);
-      await host.stop().catch(() => {});
+      try { await host.stop(); }
+      catch (cleanupError) { host.#failure.cleanupError = cleanupError; }
       throw host.#failure;
     }
   }

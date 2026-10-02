@@ -22,7 +22,9 @@ drift. Output-timestamp discipline remains unfinished.
 Stop, focus loss, hiding and teardown cancel pending work. Ordinary stop waits
 for audio cleanup and a correlated Worker release, reports available actual
 score and restores the accepted preview. Missing Worker stop receipts cause
-bounded termination and require a page reload. No-runtime cancellation reports
+bounded termination and require a page reload. Audio opening also preserves
+original setup failure plus stop/close cleanup evidence; unproven opening
+cleanup requires reload before another play. No-runtime cancellation reports
 null counters. Automatic completion, full capture/replay and browser multiplayer
 remain unfinished.
 

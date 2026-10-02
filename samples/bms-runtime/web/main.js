@@ -491,7 +491,10 @@ function stopPlay(reason, failed = false) {
   status(reason, failed);
   session.stopping = (async () => {
     try {
-      const audio = session.audio ?? await session.opening?.catch(() => null);
+      const audio = session.audio ?? await session.opening?.catch(error => {
+        if (error?.cleanupError) throw error.cleanupError;
+        return null;
+      });
       await audio?.stop();
     }
     catch (error) {

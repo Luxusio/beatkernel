@@ -378,8 +378,8 @@ test("stop waits for both audio cleanup and exact Worker receipt in either order
   }
 });
 
-test("cancelled pending open retains ownership through rejected cleanup or a late returned audio owner", async () => {
-  for (const lateOwner of [false, true]) {
+test("cancelled pending open retains ownership through settled or failed cleanup and a late returned audio owner", async () => {
+  for (const outcome of ["rejected", "late-owner", "cleanup-failure"]) {
     const openGate = deferred();
     const stopGate = deferred();
     const h = await harness({ openGate, stopGate });
@@ -390,15 +390,34 @@ test("cancelled pending open retains ownership through rejected cleanup or a lat
     assert.equal(h.opens[0].options.signal.aborted, true);
     assert.equal(h.get("play").disabled, true);
     assert.equal(h.workers[0].messages("play-start").length, 0);
-    if (lateOwner) {
+    let openingError;
+    if (outcome === "late-owner") {
       openGate.resolve(h.audio);
       await flush();
       assert.equal(h.audio.stopStarts, 1, "late owner shares its one cleanup promise");
       assert.equal(h.get("play").disabled, true);
       stopGate.resolve();
-    } else openGate.reject(new Error("opening cancellation cleanup settled"));
+    } else {
+      openingError = new Error("original opening failure");
+      if (outcome === "cleanup-failure") {
+        openingError.cleanupError = new Error("opening close remained unproven");
+      }
+      openGate.reject(openingError);
+    }
     await flush();
-    assert.equal(h.get("play").disabled, false);
+    if (outcome === "cleanup-failure") {
+      assert.equal(h.workers[0].terminations, 1);
+      assert.equal(h.get("play").disabled, true);
+      assert.equal(h.get("files").disabled, true);
+      assert.equal(h.get("status").dataset.error, "true");
+      assert.match(h.get("status").textContent, /Audio cleanup failed: opening close remained unproven/);
+      assert.match(h.get("status").textContent, /Reload the page/i);
+      assert.doesNotMatch(h.get("status").textContent, /original opening failure/);
+      assert.equal(openingError.message, "original opening failure");
+      assert.equal(openingError.cleanupError.message, "opening close remained unproven");
+      h.click("play");
+      assert.equal(h.opens.length, 1, "failed opening cleanup must fence another audio owner");
+    } else assert.equal(h.get("play").disabled, false);
     assert.equal(h.workers[0].messages("play-start").length, 0);
     assert.equal(h.workers[0].messages("play-stop").length, 0, "there was no Worker game to stop");
     await h.close();

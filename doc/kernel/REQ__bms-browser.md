@@ -220,3 +220,8 @@ a missing receipt or failed audio cleanup requires reloading before further play
 preview metadata and position are restored after ordinary stop. Full automatic
 song completion is not implemented; stopping is currently explicit. Source,
 fixtures and cargo check evidence are distinct from behavioral acceptance.
+
+Audio opening failures preserve the original setup error and attach cleanupError
+when bounded stop/close also fails. Cancellation waits for the opening promise
+and propagates this cleanup evidence before releasing the UI owner. Failed
+opening cleanup requires reload even when no usable AudioHost was returned.
