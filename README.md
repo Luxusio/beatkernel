@@ -69,11 +69,17 @@ have native source implementations; Linux/macOS native runtime evidence is pendi
 
 ## Unified BMS application
 
+Browser reuse currently provides bounded selected-file preparation and a Worker
+chart/BGA preview. A separate `browser-audio` component uses the common Rust
+Mixer in an AudioWorklet; its host gameplay/input bridge remains unfinished.
+See the [browser host instructions](samples/bms-runtime/web/README.md).
+Browser source compilation does not establish playable browser behavior.
+
 The existing `beatkernel-bms-runtime` crate now provides one primary executable
 with `player`, `play`, `replay`, `play-replay`, `render`, `render-replay` and `compete` modes.
 No extra app, UI or networking crate is added. `play --help` prints this host's
 native device/buffer options. Native play accepts saved opponents and optional
-two-player TCP progress exchange:
+two-player QUIC progress exchange:
 
 ```sh
 cargo run -p beatkernel-bms-runtime -- play --help
@@ -83,8 +89,15 @@ cargo run -p beatkernel-bms-runtime -- compete --chart song.bms --local-replay n
 
 Add `--ghost-self FILE` or `--ghost-other FILE` to native `play` options, up to
 eight opponents. Capture files using `--record-replay NEW_FILE`. Peers select
-`--mp-host 127.0.0.1:9000` and `--mp-join 127.0.0.1:9000` respectively, with the
-same chart and judging profile and their own explicit native device options.
+`--mp-host 127.0.0.1:9000 --mp-cert server.pem --mp-key server-key.pem` and
+`--mp-join 127.0.0.1:9000 --mp-ca trusted-ca.pem --mp-server-name localhost`
+respectively, with the same chart and judging profile and their own native options.
+Certificate/key files accept PEM or DER with a 1 MiB per-file limit. Server name
+and trust anchor are validated; there is no implicit certificate bypass.
+The common networking worker uses one reliable QUIC stream for the existing
+bounded setup/start/progress/final protocol on all native platforms. Browser
+WebTransport requires its own compatible HTTP/3 server integration and remains
+unfinished. QUIC socket/TLS execution is still deferred.
 Use an explicit reachable IP for another machine. Network loss leaves local
 play running; remote progress is self-reported and song starts are independent.
 The graphical `player` mode uses `winit` on the main thread and `wgpu` to draw

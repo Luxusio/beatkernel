@@ -36,8 +36,79 @@ weighting or claim of a universal BMS ranking formula.
 
 ## Live multiplayer
 
-The initial implementation supports two peers using an explicitly selected
-TCP host address or join address. A networking worker owns socket I/O; bounded
+### Required QUIC transport
+
+The user selected QUIC for multiplayer on 2026-10-02. Native multiplayer uses
+a common QUIC transport adapter shared by Windows, Linux and macOS. The earlier
+TCP connection owner has been replaced. Do not keep an implicit TCP fallback or
+copy protocol logic per OS.
+
+Transport changes retain the versioned bounded identity, readiness, clock
+probe, committed-start, progress and terminal-acknowledgement state machines.
+Reliable ordered streams carry compatibility/start/result controls. Any later
+datagram snapshot path needs its own explicit loss/reordering policy; replacing
+a stream must not silently weaken current validation or final delivery.
+Networking remains on its worker and never blocks input, judging or audio.
+QUIC encryption does not authenticate reported scores or make starts acoustically
+synchronized. Peer certificate/server identity trust must be explicit; disabling
+certificate verification is not a default connection mode.
+
+The user selected WebTransport for web multiplayer on 2026-10-02.
+Browser multiplayer requires WebTransport over HTTP/3 with a compatible server
+endpoint; browser APIs do not expose arbitrary native QUIC sockets. Share the
+application protocol across native and browser adapters, while implementing the
+actual WebTransport session/HTTP/3 boundary rather than assuming a raw native
+QUIC ALPN peer is already interoperable. This boundary follows the
+[W3C WebTransport design](https://github.com/w3c/webtransport/blob/main/explainer.md).
+Keep the app one crate with internal transport modules and keep authored source
+MIT. Native QUIC/runtime dependencies stay outside browser-only audio builds.
+The browser adapter checks API availability and required capabilities before
+connection and exposes an unsupported-browser state. Session controls and final
+results retain reliable ordered delivery; datagram progress is a later optional
+optimization with explicit loss/reordering handling. The WebTransport adapter
+and HTTP/3 session endpoint are planned, not implemented by the native QUIC
+source checkpoint.
+
+The native source now replaces TCP with this shared QUIC adapter. TLS/trust
+fixtures and eventual native/browser transport execution remain required; the
+standing execution and formal QA deferral is unchanged.
+
+The native adapter uses explicit host certificate/key (`--mp-cert`, `--mp-key`)
+or joining trust anchor/server name (`--mp-ca`, `--mp-server-name`). Certificate
+and key reads admit bounded regular files up to 1 MiB each; malformed or
+incompatible credentials reject startup. Duplicates, role-inappropriate fields
+and credentials without a host/join role reject configuration. Settings drafts
+may be incomplete, but actual transport creation requires all role credentials.
+There is no automatic certificate-verification bypass. TLS 1.3 and application
+ALPN `beatkernel-multiplayer/6` are required; early data is disabled.
+
+One bounded bidirectional stream carries the current framed protocol. Unsolicited
+unidirectional streams and datagrams are disabled. Setup uses one absolute
+deadline with cancellation checks; polling retains the same handshake future.
+Quiet long charts use finite idle timeout with keepalive rather than an
+unbounded dead connection. Driver polling stays on the existing network worker.
+Shutdown finishes and drains the send stream within a bounded timeout before
+closing the endpoint. A local write or transport receipt is not application
+consumption: the existing final-prefix peer acknowledgement remains authoritative,
+and no new bilateral-final requirement is silently imposed.
+
+Deferred native loopback fixtures exercise the real public Multiplayer owners
+through QUIC, including compatibility, bilateral readiness, committed start,
+exact progress/final acknowledgement, incompatible setup and certificate-name
+failure. These ignored tests require explicit test credential paths in
+`BEATKERNEL_TEST_QUIC_CERT`, `BEATKERNEL_TEST_QUIC_KEY`, `BEATKERNEL_TEST_QUIC_CA`
+and the matching `BEATKERNEL_TEST_QUIC_SERVER_NAME`. The supplied test certificate
+must be currently valid for that name and chain to the supplied trust anchor.
+It must not authorize the negative-test name
+`beatkernel-quic-name-mismatch.invalid`.
+Explicitly running without prerequisites fails rather than silently passing.
+No credentials are generated or socket tests executed during this source-only
+phase. Later command: `cargo test -p beatkernel-bms-runtime --test
+multiplayer_quic_loopback --locked -- --ignored`. Fixture compilation alone is
+not a successful TLS handshake or protocol-delivery observation.
+
+The current native implementation supports two peers using an explicitly selected
+QUIC host address or join address and the role's TLS credentials. A networking worker owns socket I/O; bounded
 queues connect it to the gameplay loop. Versioned finite frames, exact setup
 compatibility, sequence/progress validation and finite setup timeouts reject
 malformed or incompatible peers. Disconnection is explicit. Local judgments

@@ -6,6 +6,36 @@ notices and licenses. This does not introduce a GPL requirement for builds
 without the optional ASIO SDK. Transitive packages retain their own licenses;
 these direct notices are not a complete binary license inventory.
 
+## Native QUIC multiplayer
+
+Native targets use Quinn 0.11.12 with Tokio 1.53.1 and rustls/ring TLS, outside
+the dependency-free kernel and browser-only WASM builds. Authored source remains
+MIT. This introduces no GPL requirement and does not change the optional ASIO
+distribution split. Exact published notices for the newly resolved packages
+are retained under `third-party/` with versioned filenames.
+
+| Dependency | Selected license | Retained text |
+| --- | --- | --- |
+| quinn 0.11.12 | MIT | [license](third-party/quinn-0.11.12-LICENSE-MIT.txt) |
+| quinn-proto 0.11.19 | MIT | [license](third-party/quinn-proto-0.11.19-LICENSE-MIT.txt) |
+| quinn-udp 0.5.16 | MIT | [license](third-party/quinn-udp-0.5.16-LICENSE-MIT.txt) |
+| tokio 1.53.1 | MIT | [license](third-party/tokio-1.53.1-LICENSE.txt) |
+| rustls 0.23.45 | MIT | [license](third-party/rustls-0.23.45-LICENSE-MIT.txt) |
+| rustls-pki-types 1.15.1 | MIT | [license](third-party/rustls-pki-types-1.15.1-LICENSE-MIT.txt) |
+| rustls-webpki 0.103.15 | ISC | [license](third-party/rustls-webpki-0.103.15-LICENSE.txt) |
+| ring 0.17.14 | Apache-2.0 AND ISC | [umbrella](third-party/ring-0.17.14-LICENSE.txt), [BoringSSL](third-party/ring-0.17.14-LICENSE-BoringSSL.txt), [other bits](third-party/ring-0.17.14-LICENSE-other-bits.txt), [fiat](third-party/ring-0.17.14-fiat-LICENSE.txt) |
+| untrusted 0.9.0 | ISC | [license](third-party/untrusted-0.9.0-LICENSE.txt) |
+| mio 1.2.3 | MIT | [license](third-party/mio-1.2.3-LICENSE.txt) |
+| subtle 2.6.1 | BSD-3-Clause | [license](third-party/subtle-2.6.1-LICENSE.txt) |
+
+New chacha20 0.10.2, cpufeatures 0.3.1, getrandom 0.2.17, lru-slab 0.1.3,
+rand 0.10.3, rand_core 0.10.1, rand_pcg 0.10.2, rustc-hash 2.1.3, socket2 0.6.5
+and zeroize 1.9.0 use their MIT options; their exact `LICENSE-MIT` texts are
+retained with those versioned prefixes. This records the newly resolved native
+packages; binary redistributors must still inventory the actual linked graph.
+
+## Other application dependencies
+
 | Dependency | Selected license | Retained text |
 | --- | --- | --- |
 | wgpu 27.0.1 | MIT | [license](third-party/wgpu-27.0.1-LICENSE.txt) |
