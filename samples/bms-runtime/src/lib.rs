@@ -77,6 +77,8 @@ pub mod native_defaults;
 pub mod native_end;
 /// Shared native solo gameplay sequencing behind device operations.
 pub mod native_gameplay;
+/// Shared native profile, completion and optional capture configuration.
+pub mod native_judge;
 /// Checked nominal session/host/output projection for future native frame startup.
 pub mod native_start;
 /// Full-prefix prepared-object presentation state.
