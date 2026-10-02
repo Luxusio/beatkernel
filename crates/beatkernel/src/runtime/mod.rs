@@ -113,7 +113,60 @@ pub struct RuntimeReport {
     pub audio_failures: Vec<CommandPushError>,
 }
 
-/// Owns control-thread state; no callbacks or platform dependency.
+/// Software profiling only; never an input, song or output clock.
+///
+/// Hosts without a usable `std::time::Instant` must select `External` or
+/// `Disabled` before processing. External callbacks are trusted synchronous
+/// readers of monotonic nanoseconds and run on the control owner.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum RuntimeProcessingClock {
+    /// Uses the standard monotonic timer, preserving native profiling.
+    #[default]
+    Native,
+    /// Missing or regressing readings omit the duration observation.
+    External(fn() -> Option<u64>),
+    /// Acquires no processing timer; operation counters remain enabled.
+    Disabled,
+}
+
+enum ProcessingStarted {
+    Native(Instant),
+    External {
+        read: fn() -> Option<u64>,
+        start: Option<u64>,
+    },
+    Disabled,
+}
+
+impl RuntimeProcessingClock {
+    fn start(self) -> ProcessingStarted {
+        match self {
+            Self::Native => ProcessingStarted::Native(Instant::now()),
+            Self::External(read) => ProcessingStarted::External {
+                read,
+                start: read(),
+            },
+            Self::Disabled => ProcessingStarted::Disabled,
+        }
+    }
+}
+
+impl ProcessingStarted {
+    fn elapsed(self) -> Option<u64> {
+        match self {
+            Self::Native(start) => {
+                Some(u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX))
+            }
+            Self::External { read, start } => {
+                let end = read();
+                end?.checked_sub(start?)
+            }
+            Self::Disabled => None,
+        }
+    }
+}
+
+/// Owns control-thread state; no platform dependency.
 pub struct Runtime {
     host_domain: ClockDomainId,
     audio_domain: ClockDomainId,
@@ -127,6 +180,7 @@ pub struct Runtime {
     song_end: Option<Timestamp>,
     sequences: HashMap<DeviceId, u64>,
     telemetry: RuntimeTelemetry,
+    processing_clock: RuntimeProcessingClock,
 }
 
 impl Runtime {
@@ -158,6 +212,7 @@ impl Runtime {
             song_end: None,
             sequences: HashMap::new(),
             telemetry: RuntimeTelemetry::new(telemetry_capacity),
+            processing_clock: RuntimeProcessingClock::Native,
         })
     }
 
@@ -190,7 +245,7 @@ impl Runtime {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<RuntimeReport, RuntimeError> {
-        let started = Instant::now();
+        let started = self.processing_clock.start();
         let result = (|| {
             let incoming = ClockPoint {
                 domain: input.meta().clock_domain,
@@ -256,7 +311,7 @@ impl Runtime {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<RuntimeReport, RuntimeError> {
-        let started = Instant::now();
+        let started = self.processing_clock.start();
         let result = (|| {
             let (host, quality) = normalize(host, self.host_domain, mapper)?;
             let (mut report, mapped_song) = self.prepare(host, audio_at, mapper, quality)?;
@@ -369,9 +424,10 @@ impl Runtime {
         }
     }
 
-    fn observe(&mut self, started: Instant, rejected: bool) {
-        self.telemetry
-            .record_processing_ns(u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX));
+    fn observe(&mut self, started: ProcessingStarted, rejected: bool) {
+        if let Some(nanos) = started.elapsed() {
+            self.telemetry.record_processing_ns(nanos);
+        }
         if rejected {
             let counters = self.telemetry.counters_mut();
             counters.rejected = counters.rejected.saturating_add(1);
@@ -451,6 +507,11 @@ impl Runtime {
     /// Current software observations and caller-reported native counters.
     pub const fn telemetry(&self) -> &RuntimeTelemetry {
         &self.telemetry
+    }
+    /// Selects future software duration measurements without clearing telemetry
+    /// or changing gameplay, chronology, transport or queued audio commands.
+    pub fn set_processing_clock(&mut self, clock: RuntimeProcessingClock) {
+        self.processing_clock = clock;
     }
     /// Host reporting of actual loss and underruns.
     pub fn telemetry_mut(&mut self) -> &mut RuntimeTelemetry {

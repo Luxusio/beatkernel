@@ -69,6 +69,30 @@ wrap; unavailable measurements remain absent. Reporting may allocate, and there
 is no allocation-free judge/runtime claim. Hardware benchmarks and formal
 verification are deferred by the user's instruction on 2026-09-30.
 
+## Caller-selected processing clock
+
+`RuntimeProcessingClock` selects only software operation profiling: `Native`
+uses the existing `std::time::Instant`, `External(fn() -> Option<u64>)` reads
+caller-supplied monotonic nanoseconds, and `Disabled` acquires no processing
+clock. Native remains the default. Environments without a usable standard
+monotonic clock, including browser WASM, must explicitly select an external
+clock or disable duration measurement before input or deadline operations.
+The core remains dependency-free and contains no browser or OS clock adapter.
+
+An external start or end reading of `None`, or an end before its start, leaves
+that duration unrecorded. Unknown measurements are not recorded as zero. A valid
+zero duration is retained. Existing rejected-operation counters still update
+when duration measurement is unavailable or disabled. Changing the clock affects
+future observations and retains prior telemetry. RuntimeGroup and SoloRuntime
+forward the same selection to their actual member Runtime owners.
+
+All clock selections invoke identical binding, chronology, Transport, Judge,
+audio queue and replay behavior. The processing clock is never an input, song,
+presentation or audio-scheduling clock; its precision proves no acoustic timing.
+Caller clock functions are trusted synchronous callbacks, outside the audio
+callback. Regression and unavailable-duration fixtures are authored for later
+execution under the standing verification deferral.
+
 The portable runtime example composes an actual canonical keyboard fixture,
 binding, chart judge, scalar queue and Mixer and renders literal PCM. This is
 software composition evidence, not native Windows playback evidence.

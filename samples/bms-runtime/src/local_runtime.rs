@@ -4,7 +4,7 @@ use beatkernel::{
     audio::{AudioCommand, CommandProducer, CommandPushError, VoiceId, command_queue},
     input::{BindingMap, DeviceId, DeviceSelector, PhysicalInputEvent},
     judge::JudgeEngine,
-    runtime::{Runtime, RuntimeError, RuntimeReport, SoundBinding},
+    runtime::{Runtime, RuntimeError, RuntimeProcessingClock, RuntimeReport, SoundBinding},
     telemetry::RuntimeTelemetry,
     time::{ClockDomainId, ClockMapper, ClockPoint, Timestamp},
     transport::{Rate, Transport},
@@ -105,6 +105,14 @@ impl Drop for OwnerGuard<'_> {
 }
 
 impl RuntimeGroup {
+    /// Selects only software profiling for every actual member Runtime.
+    /// Browser hosts must configure this before processing any member.
+    pub fn set_processing_clock(&mut self, clock: RuntimeProcessingClock) {
+        for member in &mut self.members {
+            member.runtime.set_processing_clock(clock);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         host_domain: ClockDomainId,
@@ -352,6 +360,11 @@ impl RuntimeGroup {
 /// Production solo adapter uses exactly the same cohort execution path.
 pub struct SoloRuntime(RuntimeGroup);
 impl SoloRuntime {
+    /// Uses the same member profiling configuration as a local cohort.
+    pub fn set_processing_clock(&mut self, clock: RuntimeProcessingClock) {
+        self.0.set_processing_clock(clock);
+    }
+
     pub fn set_song_end(&mut self, end: Timestamp) -> Result<(), String> {
         self.0.set_song_end(end)
     }
