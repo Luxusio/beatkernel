@@ -59,8 +59,8 @@ as before; this work does not remove that behavior.
 
 The application owns explicit bounded raster preparation and original-song
 Base/Layer composition; the adapter does not interpret native clocks or upload
-images. BMP00/Poor selections do not imply continuous poor display. Video,
-crop/opacity and further layer channels remain outside supported
+images. BMP00/Poor selections do not imply continuous poor display.
+ARGB RGB/color-key, crop and video remain outside supported
 visual semantics. Authored parser/timing/seed/limit fixtures are source-compiled
 for later execution, not format conformance or native GPU acceptance.
 
@@ -78,8 +78,12 @@ IO, judge object or replay operation is introduced by miss background display.
 
 
 ## POORBGA header
-Case-insensitive selected #POORBGA headers accept exact single digits 0, 1, or 2; absent means Replace. Preserve the header in metadata and use existing duplicate and seeded conditional rules. Typed modes Replace/Overlay/Off concern presentation only; malformed active values reject, inactive branches retain existing structural/bounded-source validation. A checked accessor rejects fabricated invalid metadata before PlayerChart preparation. Gameplay source objects, timing, keysounds, replay identity and grading remain unaffected when gameplay physical lines are unchanged. Overlay composes raw Poor above Base/Layer; it does not imply opacity/video support or Poor black-key transformation.
+Case-insensitive selected #POORBGA headers accept exact single digits 0, 1, or 2; absent means Replace. Preserve the header in metadata and use existing duplicate and seeded conditional rules. Typed modes Replace/Overlay/Off concern presentation only; malformed active values reject, inactive branches retain existing structural/bounded-source validation. A checked accessor rejects fabricated invalid metadata before PlayerChart preparation. Gameplay source objects, timing, keysounds, replay identity and grading remain unaffected when gameplay physical lines are unchanged. Overlay composes raw Poor above Base/Layer; channel opacity is defined below; this does not imply video support or Poor black-key transformation.
 
 
 ## Second visual layer
-Channel0A maps to BgaChannel::Layer2 and shares existing independent visual-only grid compilation, nonzero undefined-resource admission, zero rests, per-channel duplicate policy, conditional selection and source caps. Simultaneous channels remain independent. Visual denominators and BPM/STOP scheduling do not change SourceChart gameplay objects/timing/keysounds when physical gameplay lines stay fixed. The app owns exact-black prepared Layer2 pixels, original-song indexing and composition above Layer1 and below activated Poor; opacity/crop/video are separate unsupported extensions.
+Channel0A maps to BgaChannel::Layer2 and shares existing independent visual-only grid compilation, nonzero undefined-resource admission, zero rests, per-channel duplicate policy, conditional selection and source caps. Simultaneous channels remain independent. Visual denominators and BPM/STOP scheduling do not change SourceChart gameplay objects/timing/keysounds when physical gameplay lines stay fixed. The app owns exact-black prepared Layer2 pixels, original-song indexing and composition above Layer1 and below activated Poor; channel opacity is defined below; ARGB RGB/color-key, crop and video remain unsupported.
+
+
+## Independent channel opacity
+Accept channels0B..0E with nonzero hexadecimal byte tokens mapped to Base/Layer/Layer2/Poor. 00 is a rest. Preserve explicit alpha bytes in a separate typed opacity namespace, never ImageId or judged objects. Use independent per-role opacity duplicate maps and shared visual grid/ordinals/source caps/seeded conditional selection. Default opaque255, direct byte normalization alpha/255 without guessed rounding or interpolation. Combined visual counts and checked BPM/STOP rescaling bound fabricated charts too. Images and opacity scheduled by separate typed vectors remain independent of gameplay SourceChart timing/keysounds/replay identity for unchanged physical gameplay lines. SharedARGB alpha compatibility, historical threshold behavior and native conformance are not claimed without execution; ARGB directives/RGB, crop and video remain unsupported.
