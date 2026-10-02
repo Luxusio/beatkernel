@@ -479,29 +479,7 @@ impl Drop for DeliverySession {
 }
 
 #[cfg(target_os = "macos")]
-fn save_capture(
-    capture: Option<beatkernel_bms_runtime::replay_capture::LiveReplayCapture>,
-    path: Option<&std::path::Path>,
-    failed_session: bool,
-) -> Result<()> {
-    let Some(capture) = capture else {
-        return Ok(());
-    };
-    let path = path.ok_or("enabled replay capture missing save path")?;
-    let records = capture.records().len();
-    let bytes = capture.encoded_bytes();
-    println!(
-        "replay capture: records={records}, encoded_bytes={bytes}, status={}, path={path:?}; accepted judge operations, physical output unverified",
-        if failed_session {
-            "valid prefix of failed session"
-        } else {
-            "complete recorded session"
-        }
-    );
-    let written = capture.save_new(path)?;
-    println!("replay create_new saved {written} bytes to {path:?}");
-    Ok(())
-}
+use beatkernel_bms_runtime::native_cohort_setup::save_capture;
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();

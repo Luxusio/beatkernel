@@ -1,29 +1,30 @@
 //! Actual macOS local cohort: one IOHID owner, one shared CoreAudio output.
 use super::native::{HOST, M_NATIVE, OUTPUT, observe, output_origin};
 use super::*;
+#[cfg(test)]
+use beatkernel::input::PhysicalControlId;
 use beatkernel::{
-    audio::{AudioCommand, CommandProducer, Mixer, MixerConfig, PcmLimits, command_queue},
-    input::{Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId},
-    judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
-    replay::codec::ReplayCodecLimits,
+    audio::{CommandProducer, Mixer, MixerConfig, PcmLimits, command_queue},
+    input::DeviceId,
     time::Duration,
     transport::{Rate, Transport},
 };
-use beatkernel_bms_runtime::{
-    ChannelPolicy,
-    competition::ScoreSummary,
-    competition_live::{CompetitionOptions, LiveCompetition},
-    completion::SongCompletion,
-    load_prepared_with_seed,
-    local_input::InputMerger,
-    local_players::{MAX_LOCAL_PLAYERS, PlayerId},
-    local_runtime::{MemberConfig, RuntimeGroup, VoiceAllocator},
-    native_end::NativeEnd,
-    playback_pause::NativePause,
-    replay_capture::LiveReplayCapture,
+use beatkernel_bms_runtime::native_cohort_setup::{
+    CohortPreparation, PreparedCohort, activate_cohort, admit_cohort as admit_mode, finish_cohort,
+    prepare_cohort,
 };
 use beatkernel_bms_runtime::{
-    native_cohort::{NativeCohortSession, PlayerState, replay_path, run_cohort},
+    ChannelPolicy, competition_live::CompetitionOptions, load_prepared_with_seed,
+    local_players::PlayerId, native_end::NativeEnd, playback_pause::NativePause,
+};
+#[cfg(test)]
+use beatkernel_bms_runtime::{
+    competition::ScoreSummary,
+    local_input::InputMerger,
+    native_cohort::{PlayerState, replay_path},
+};
+use beatkernel_bms_runtime::{
+    native_cohort::{NativeCohortSession, run_cohort},
     native_gameplay::{
         InputBatch, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult, retain_input,
     },
@@ -109,16 +110,6 @@ impl NativeGameplayDevice for CohortDevice<'_> {
     fn fallback_schedule(&mut self, _: u32) -> NativeGameplayResult<ClockPoint> {
         Err("CoreAudio local cohorts use logical mixer scheduling".into())
     }
-}
-
-fn admit_mode(count: usize, network: bool) -> Result<()> {
-    if !(2..=MAX_LOCAL_PLAYERS).contains(&count) {
-        return Err("macOS local play requires 2..64 exact registry assignments".into());
-    }
-    if network {
-        return Err("network competition currently supports one local participant only".into());
-    }
-    Ok(())
 }
 
 /// Missing attachments may arrive during bounded preparation; ambiguity,
@@ -306,104 +297,37 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             return Err(failures.join("; ").into());
         }
     };
-    let reserved: Vec<_> = prepared
-        .bgm_commands
+    let assignments: Vec<_> = options
+        .local_players
         .iter()
-        .map(|command| match command {
-            AudioCommand::Play { voice, .. } => Ok(*voice),
-            _ => Err("prepared BGM command is not Play"),
-        })
-        .collect::<std::result::Result<_, _>>()?;
-    let first_voice = reserved
-        .iter()
-        .map(|voice| voice.0)
-        .max()
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or("local voice namespace overflow")?;
-    let mut allocator = VoiceAllocator::new(first_voice);
-    let mut configs = Vec::with_capacity(count);
-    let mut states = Vec::with_capacity(count);
-    let mut save_paths = Vec::with_capacity(count);
-    for index in 0..count {
-        let player = options.local_players[index].0;
-        let device = selected[index];
-        let judge = JudgeEngine::new(
-            prepared.compiled.chart.clone(),
-            prepared.source.rules(),
-            JudgeProfile::new(
-                vec![JudgeWindow {
-                    grade: JudgeGrade(1),
-                    early: Duration::from_nanos(options.early),
-                    late: Duration::from_nanos(options.late),
-                }],
-                Duration::from_nanos(options.offset),
-            )?,
-        )?;
-        let bindings =
-            BindingMap::from_bindings(options.bindings.iter().map(|(&channel, &key)| Binding {
-                device: DeviceSelector::Exact(device),
-                physical: PhysicalControlId::keyboard(key),
-                game_control: GameControlId(u32::from(channel)),
-            }))?;
-        let mut sounds = prepared.sounds.clone();
-        allocator.remap(&mut sounds)?;
-        let path = options
-            .record_replay
-            .as_deref()
-            .map(|base| replay_path(base, player))
-            .transpose()?;
-        let capture = if path.is_some() {
-            Some(LiveReplayCapture::new_at_with_chart_seed(
-                &judge,
-                HOST,
-                ReplayCodecLimits::new(
-                    options.replay_max_bytes,
-                    options.replay_max_records,
-                    4096,
-                    beatkernel::input::CodecLimits::new(65536, 32768)?,
-                )?,
-                Timestamp::from_nanos(options.start_ns),
-                options.chart_seed,
-            )?)
-        } else {
-            None
-        };
-        states.push(PlayerState {
-            player,
-            capture,
-            competition: LiveCompetition::prepare_for_at_with_chart_seed(
-                player,
-                &competition_options,
-                &prepared.source,
-                &judge,
-                HOST,
-                Timestamp::from_nanos(options.start_ns),
-                options.chart_seed,
-            )?,
-            completion: if options.end_ns.is_none() {
-                Some(SongCompletion::prepare(
-                    &prepared,
-                    options.late,
-                    options.offset,
-                    options.preroll,
-                    OUTPUT,
-                )?)
-            } else {
-                None
-            },
-            score: ScoreSummary::default(),
-            last_song: options.song_origin()?,
-        });
-        save_paths.push(path);
-        configs.push(MemberConfig {
-            player,
-            device: Some(device),
-            bindings,
-            judge,
-            sounds,
-        });
-    }
+        .enumerate()
+        .map(|(index, &(player, _))| (player, selected[index]))
+        .collect();
+    let PreparedCohort {
+        configs,
+        mut states,
+        save_paths,
+        reserved,
+    } = prepare_cohort(
+        &prepared,
+        &assignments,
+        &competition_options,
+        &CohortPreparation {
+            host: HOST,
+            output: OUTPUT,
+            early: options.early,
+            late: options.late,
+            offset: options.offset,
+            preroll: options.preroll,
+            start: Timestamp::from_nanos(options.start_ns),
+            end: options.end_ns.map(Timestamp::from_nanos),
+            chart_seed: options.chart_seed,
+            bindings: &options.bindings,
+            record_replay: options.record_replay.as_deref(),
+            replay_max_bytes: options.replay_max_bytes,
+            replay_max_records: options.replay_max_records,
+        },
+    )?;
     const SLACK: usize = 1024;
     let capacity = AudioLimits::MAX_COMMANDS;
     let (mut producer, consumer) = command_queue(capacity)?;
@@ -491,19 +415,15 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             domain: HOST,
             timestamp: estimated_origin(pair, output_origin())?,
         };
-        let mut group = RuntimeGroup::new(
-            HOST,
+        let (mut group, mut merger) = activate_cohort(
+            configs,
+            &reserved,
+            host_origin,
             OUTPUT,
             Transport::new(host_origin.timestamp, song_origin, Rate::NORMAL),
             producer,
-            configs,
-            4096,
-            &reserved,
+            options.end_ns.map(Timestamp::from_nanos),
         )?;
-        if let Some(end) = options.end_ns {
-            group.set_song_end(Timestamp::from_nanos(end))?;
-        }
-        let mut merger = InputMerger::new(HOST, host_origin, selected.clone(), 65536)?;
         let pump = {
             let mut device = CohortDevice {
                 stream: &mut stream,
@@ -566,22 +486,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     if let Err(error) = &close {
         eprintln!("IOHID close error: {error}");
     }
-    let failed = outcome.is_err() || stop.is_err() || close.is_err();
-    let mut saves = Vec::new();
-    for (mut state, path) in states.into_iter().zip(save_paths) {
-        if let Some(competition) = state.competition.as_mut() {
-            competition.finish();
-        }
-        if let Err(error) = save_capture(state.capture, path.as_deref(), failed) {
-            let detail = format!(
-                "player{} replay save after cleanup: {error}",
-                state.player.0
-            );
-            eprintln!("{detail}");
-            saves.push(detail);
-        }
-    }
-    let mut failures = saves;
+    let mut failures = Vec::new();
     if let Err(error) = outcome {
         failures.push(format!("local session: {error}"));
     }
@@ -591,11 +496,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     if let Err(error) = close {
         failures.push(format!("input cleanup: {error}"));
     }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(failures.join("; ").into())
-    }
+    finish_cohort(states, save_paths, failures, save_capture)
 }
 
 #[cfg(test)]
