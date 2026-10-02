@@ -103,18 +103,23 @@ async function workerHarness(options = {}) {
     setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); },
   });
-  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView"], function () {
+  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView", "BrowserGame"], function () {
     this.setExport("default", async () => {
       if (options.initError) throw new Error(options.initError);
     });
     this.setExport("BrowserLibrary", BrowserLibrary);
     this.setExport("BrowserView", BrowserView);
+    this.setExport("BrowserGame", class {
+      constructor() { throw new Error("Preview fixtures must not create gameplay owners"); }
+    });
   }, { context });
   const helpers = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
+  const playHelpers = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./host_model.mjs") return helpers;
+    if (specifier === "./play-model.mjs") return playHelpers;
     throw new Error(`Unexpected Worker import: ${specifier}`);
   });
   await worker.evaluate();

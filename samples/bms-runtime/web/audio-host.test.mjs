@@ -110,6 +110,12 @@ async function harness(faults = {}) {
       this.destination = { context: this };
       this.closes = 0;
       this.handlersAtClose = [];
+      this.outputReads = 0;
+      this.getOutputTimestamp = () => {
+        this.outputReads++;
+        return Object.hasOwn(faults, "outputEvidence") ? faults.outputEvidence
+          : { contextTime: 0, performanceTime: 0 };
+      };
       this.resumes = 0;
       this.audioWorklet = {
         addModule: url => {
@@ -170,7 +176,11 @@ async function harness(faults = {}) {
       constructor(...args) { super(...(args.length ? args : [now])); }
       static now() { return now; }
     },
-    performance: { now: () => now },
+    performance: { now: () => {
+      const value = faults.performanceTimes?.length ? faults.performanceTimes.shift() : now;
+      trace.push(["performance-now", value]);
+      return value;
+    } },
     setTimeout(callback, delay, ...args) {
       const id = ++timerId;
       timers.set(id, { at: now + delay, callback: () => callback(...args) });
@@ -380,6 +390,42 @@ test("currentFrame is a checked context-time estimate independent of command and
   assert.equal(owner.currentFrame, 0n);
   await stop(h, owner);
   await localError(h, () => owner.currentFrame, "state");
+});
+
+test("control clock snapshots Window brackets while outputTimestamp returns separate native evidence", async () => {
+  const h = await harness();
+  const owner = await open(h);
+  const context = h.contexts[0];
+  context.currentTime = 2.5;
+  h.faults.performanceTimes = [123456.125, 123456.375];
+  assert.deepEqual(structuredClone(owner.controlClock()), {
+    beforeMs: 123456.125, contextTime: 2.5, afterMs: 123456.375, sampleRate: 48000,
+  });
+  assert.equal(h.sent.length, 0);
+  assert.equal(context.outputReads, 0, "a control snapshot is not presentation evidence");
+  for (const bracket of [[2, 1], [-1, 1], [1, Infinity], [NaN, 2]]) {
+    h.faults.performanceTimes = [...bracket];
+    await localError(h, () => owner.controlClock(), "state");
+  }
+  for (const evidence of [null, {}, { contextTime: 0, performanceTime: 10 },
+    { contextTime: 1, performanceTime: 0 }, { contextTime: -1, performanceTime: 1 },
+    { contextTime: 1, performanceTime: NaN }, { contextTime: "1", performanceTime: 1 }]) {
+    h.faults.outputEvidence = evidence;
+    await localError(h, () => owner.outputTimestamp(), "state");
+  }
+  const evidence = { contextTime: 2.25, performanceTime: 123400.5 };
+  h.faults.outputEvidence = evidence;
+  const captured = owner.outputTimestamp();
+  assert.deepEqual(structuredClone(captured), evidence);
+  evidence.contextTime = 99;
+  assert.equal(captured.contextTime, 2.25);
+  const reads = context.outputReads;
+  context.getOutputTimestamp = undefined;
+  await localError(h, () => owner.outputTimestamp(), "unsupported");
+  assert.equal(context.outputReads, reads);
+  await stop(h, owner);
+  await localError(h, () => owner.controlClock(), "state");
+  await localError(h, () => owner.outputTimestamp(), "state");
 });
 
 test("sample preflight rejects unsafe buffers and bounds without posting, and overlap never builds a queue", async () => {
