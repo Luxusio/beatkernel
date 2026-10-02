@@ -449,6 +449,44 @@ mod fixtures {
         view.nodes.paints()
     }
     #[test]
+    fn composition_range_only_updates_selected_editor_or_profile_without_sibling_repaint() {
+        let view = SettingsView::new(ScreenInstanceId(9), 960, 720).unwrap();
+        let fields = fields(30);
+        let base = LineEditor::new("", 4096).unwrap();
+        let first = base.preedit("별é", Some((0, 3))).unwrap();
+        let second = base.preedit("별é", Some((0, 5))).unwrap();
+        let mut scene = Scene::new(960, 720);
+        let mut hits = Vec::new();
+        for profile_focused in [false, true] {
+            let preview = |editor| {
+                let mut update = if profile_focused {
+                    frame(&fields, &base, editor)
+                } else {
+                    frame(&fields, editor, &base)
+                };
+                update.profile_focused = profile_focused;
+                update
+            };
+            view.update(preview(&first)).unwrap();
+            view.compose(&mut scene, &mut hits).unwrap();
+            let before = paints(&view);
+            view.update(preview(&second)).unwrap();
+            let after = paints(&view);
+            assert_eq!(before.iter().zip(&after).filter(|(a, b)| a != b).count(), 1);
+            view.compose(&mut scene, &mut hits).unwrap();
+            let expected = if profile_focused {
+                [168.0, 582.0, 24.0, 2.0]
+            } else {
+                [288.0, 144.0, 24.0, 2.0]
+            };
+            assert!(scene.rectangles().iter().any(|r| r.bounds == expected));
+            view.update(preview(&second)).unwrap();
+            assert_eq!(paints(&view), after);
+            assert!(!view.dirty());
+        }
+        assert_eq!(fields[0].value, "0:04");
+    }
+    #[test]
     fn editor_cursor_status_and_profile_focus_invalidate_only_their_dependencies() {
         let view = SettingsView::new(ScreenInstanceId(9), 960, 720).unwrap();
         let fields = fields(30);

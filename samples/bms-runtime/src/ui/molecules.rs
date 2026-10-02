@@ -1,7 +1,7 @@
 //! Small compositions of drawing atoms, reusable across screens.
 use super::atoms::{rect, text};
 use super::interaction::Bounds;
-use super::text_input::LineEditor;
+use super::text_input::{LineEditor, VisibleLine};
 use crate::scene::Scene;
 use std::ops::RangeInclusive;
 
@@ -11,8 +11,7 @@ pub fn text_field(scene: &mut Scene, editor: &LineEditor, bounds: Bounds, focuse
         return;
     }
     let cells = usize::try_from((bounds.width - 16) / 12).unwrap_or(usize::MAX);
-    let (visible, caret) = editor.visible(cells);
-    paint_line(scene, visible, focused.then_some(caret), bounds);
+    paint_line(scene, editor.visible_line(cells), bounds, focused);
 }
 
 /// An unfocused field borrows its value without constructing an editor per frame.
@@ -25,30 +24,62 @@ pub fn text_field_value(scene: &mut Scene, value: &str, bounds: Bounds) {
         .char_indices()
         .nth(cells)
         .map_or(value.len(), |(at, _)| at);
-    paint_line(scene, &value[..end], None, bounds);
+    paint_line(
+        scene,
+        VisibleLine {
+            value: &value[..end],
+            caret: 0,
+            caret_visible: true,
+            composition: None,
+            selection: None,
+        },
+        bounds,
+        false,
+    );
 }
 
-fn paint_line(scene: &mut Scene, visible: &str, caret: Option<usize>, bounds: Bounds) {
+fn paint_line(scene: &mut Scene, line: VisibleLine<'_>, bounds: Bounds, focused: bool) {
     rect(
         scene,
         bounds.x,
         bounds.y,
         bounds.width,
         bounds.height,
-        if caret.is_some() { 0x354e6c } else { 0x263d59 },
+        if focused { 0x354e6c } else { 0x263d59 },
     );
     let x = bounds.x.saturating_add(8);
     let y = bounds.y.saturating_add(8);
+    let cell_offset = |column| i64::try_from(column).unwrap_or(i64::MAX).saturating_mul(12);
+    if let Some((start, end)) = line.selection.filter(|_| focused) {
+        rect(
+            scene,
+            x.saturating_add(cell_offset(start)),
+            y,
+            cell_offset(end - start),
+            16,
+            0x42688a,
+        );
+    }
     text(
         scene,
         usize::try_from(x).unwrap_or(usize::MAX),
         usize::try_from(y).unwrap_or(usize::MAX),
-        visible,
+        line.value,
         2,
         0xf0f4ff,
     );
-    if let Some(caret) = caret {
-        let offset = i64::try_from(caret).unwrap_or(i64::MAX).saturating_mul(12);
+    if let Some((start, end)) = line.composition.filter(|_| focused) {
+        rect(
+            scene,
+            x.saturating_add(cell_offset(start)),
+            y.saturating_add(16),
+            cell_offset(end - start),
+            2,
+            0x74e5c5,
+        );
+    }
+    if focused && line.caret_visible {
+        let offset = cell_offset(line.caret);
         rect(scene, x.saturating_add(offset), y, 2, 16, 0x74e5c5);
     }
 }
@@ -157,6 +188,75 @@ pub fn note(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn composition_and_selection_use_scalar_cells_and_clip_to_the_visible_field() {
+        let mut base = LineEditor::new("a별b", 32).unwrap();
+        base.left();
+        let editor = base.preedit("音é", Some((3, 5))).unwrap();
+        let mut scene = Scene::new(100, 100);
+        let mut bounds = Bounds {
+            x: 10,
+            y: 10,
+            width: 76,
+            height: 32,
+        };
+        text_field(&mut scene, &editor, bounds, true);
+        let packets = scene.rectangles();
+        assert_eq!(packets.len(), 9); // background, selection, 5 glyphs, underline, caret
+        assert_eq!(packets[1].bounds, [54.0, 18.0, 12.0, 16.0]);
+        assert_eq!(packets[7].bounds, [42.0, 34.0, 24.0, 2.0]);
+        assert_eq!(packets[8].bounds, [54.0, 18.0, 2.0, 16.0]);
+        bounds.width = 28; // One visible scalar cell containing é.
+        scene.clear();
+        text_field(&mut scene, &editor, bounds, true);
+        assert_eq!(scene.rectangles().len(), 5);
+        assert_eq!(scene.rectangles()[1].bounds, [18.0, 18.0, 12.0, 16.0]);
+        assert_eq!(scene.rectangles()[3].bounds, [18.0, 34.0, 12.0, 2.0]);
+        assert_eq!(scene.rectangles()[4].bounds, [18.0, 18.0, 2.0, 16.0]);
+        for rectangle in scene.rectangles() {
+            assert!(rectangle.bounds[0] >= 10.0);
+            assert!(rectangle.bounds[0] + rectangle.bounds[2] <= 38.0);
+        }
+        assert_eq!((base.value(), base.cursor()), ("a별b", 4));
+    }
+    #[test]
+    fn empty_selection_and_unfocused_fields_do_not_draw_selection_or_stale_underlines() {
+        let base = LineEditor::new("", 32).unwrap();
+        let bounds = Bounds {
+            x: 10,
+            y: 10,
+            width: 76,
+            height: 32,
+        };
+        let mut scene = Scene::new(100, 100);
+        for selected in [None, Some((0, 0)), Some((3, 3))] {
+            let editor = base.preedit("音é", selected).unwrap();
+            scene.clear();
+            text_field(&mut scene, &editor, bounds, true);
+            assert_eq!(
+                scene.rectangles().len(),
+                if selected.is_some() { 5 } else { 4 }
+            );
+            assert_eq!(scene.rectangles()[3].bounds, [18.0, 34.0, 24.0, 2.0]);
+            scene.clear();
+            text_field(&mut scene, &editor, bounds, false);
+            assert_eq!(scene.rectangles().len(), 3);
+        }
+        scene.clear();
+        text_field(&mut scene, &base.preedit("", None).unwrap(), bounds, true);
+        assert_eq!(scene.rectangles().len(), 2); // background + ordinary caret
+        scene.clear();
+        text_field(
+            &mut scene,
+            &base.preedit("音", Some((0, 3))).unwrap(),
+            Bounds {
+                width: 16,
+                ..bounds
+            },
+            true,
+        );
+        assert_eq!(scene.rectangles().len(), 2); // no visible cells, no range geometry
+    }
     #[test]
     fn fields_clip_glyph_count_and_keep_caret_in_bounds() {
         let bounds = Bounds {

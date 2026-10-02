@@ -464,6 +464,53 @@ mod fixtures {
         view.nodes.paints()
     }
     #[test]
+    fn ime_selection_end_only_repaints_search_and_keeps_catalog_nodes_retained() {
+        let view = view(30);
+        let base = LineEditor::new("", 256).unwrap();
+        let first = base.preedit("音é", Some((0, 3))).unwrap();
+        let second = base.preedit("音é", Some((0, 5))).unwrap();
+        assert_eq!(
+            (first.value(), first.cursor()),
+            (second.value(), second.cursor())
+        );
+        view.set_search(&first, true).unwrap();
+        let mut scene = Scene::new(960, 720);
+        let mut hits = Vec::new();
+        view.compose(&mut scene, &mut hits).unwrap();
+        let before = paints(&view);
+        view.set_search(&first, true).unwrap();
+        assert_eq!(paints(&view), before);
+        assert!(!view.dirty());
+        view.set_search(&second, true).unwrap();
+        let after = paints(&view);
+        assert_eq!(before.iter().zip(&after).filter(|(a, b)| a != b).count(), 1);
+        assert_eq!(&before[4..19], &after[4..19]);
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert!(
+            scene
+                .rectangles()
+                .iter()
+                .any(|r| r.bounds == [448.0, 110.0, 24.0, 16.0])
+        );
+        assert!(
+            scene
+                .rectangles()
+                .iter()
+                .any(|r| r.bounds == [448.0, 126.0, 24.0, 2.0])
+        );
+        view.set_search(&second, true).unwrap();
+        assert_eq!(paints(&view), after);
+        assert!(!view.dirty());
+        view.set_search(&base, true).unwrap();
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert!(
+            !scene
+                .rectangles()
+                .iter()
+                .any(|r| r.bounds == [448.0, 126.0, 24.0, 2.0])
+        );
+    }
+    #[test]
     fn artist_lines_keep_bitmap_row_bounds_and_empty_artist_placement() {
         let view = SelectionView::new(
             ScreenInstanceId(7),

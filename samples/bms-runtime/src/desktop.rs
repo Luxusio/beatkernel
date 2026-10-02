@@ -4854,6 +4854,76 @@ mod tests {
         }
     }
     #[test]
+    fn ime_ranges_reach_retained_scenes_and_clear_without_committing_preview_text() {
+        let mut app = lifecycle_fixture();
+        app.set_search_focus(true);
+        app.ime_event(Ime::Enabled);
+        let projection = app.catalog_search.indices();
+        for (end, columns) in [(3, 1), (5, 2)] {
+            app.ime_event(Ime::Preedit("音é".into(), Some((0, end))));
+            let line = app
+                .ime_editor(ImeField::Search, &app.search_editor)
+                .visible_line(40);
+            assert_eq!(line.composition, Some((0, 2)));
+            assert_eq!(line.selection, Some((0, columns)));
+            assert!(line.caret_visible);
+            app.draw_selection().unwrap();
+            assert!(!app.selection_view.as_ref().unwrap().dirty());
+            app.scene.status().unwrap();
+            assert_eq!(app.search_editor.value(), "");
+            assert!(Arc::ptr_eq(&projection, &app.catalog_search.indices()));
+        }
+        app.ime_event(Ime::Preedit("音é".into(), None));
+        assert!(
+            !app.ime_editor(ImeField::Search, &app.search_editor)
+                .visible_line(40)
+                .caret_visible
+        );
+        app.draw_selection().unwrap();
+        app.ime_event(Ime::Commit("音é".into()));
+        app.draw_selection().unwrap();
+        assert_eq!(app.search_editor.value(), "音é");
+        assert!(app.ime.preview.is_none());
+        assert!(app.search_editor.composition().is_none());
+        assert!(app.search_editor.visible_line(40).caret_visible);
+        app.open_settings();
+        app.settings.as_mut().unwrap().profile_focused = true;
+        app.sync_ime();
+        app.ime_event(Ime::Enabled);
+        let args = app.settings.as_ref().unwrap().values.native_args();
+        for switch_field in [false, true] {
+            app.ime_event(Ime::Preedit("별é".into(), Some((0, 5))));
+            let profile = &app.settings.as_ref().unwrap().profile;
+            let line = app.ime_editor(ImeField::Profile, profile).visible_line(40);
+            assert_eq!(
+                (line.composition, line.selection),
+                (Some((0, 2)), Some((0, 2)))
+            );
+            app.draw_settings_view().unwrap();
+            assert!(!app.settings_view.as_ref().unwrap().dirty());
+            app.scene.status().unwrap();
+            if switch_field {
+                app.settings.as_mut().unwrap().profile_focused = false;
+                app.sync_ime();
+            } else {
+                app.ime_event(Ime::Disabled);
+            }
+            app.draw_settings_view().unwrap();
+            assert!(app.ime.preview.is_none());
+            let profile = &app.settings.as_ref().unwrap().profile;
+            assert!(
+                app.ime_editor(ImeField::Profile, profile)
+                    .composition()
+                    .is_none()
+            );
+            assert_eq!(profile.value(), "");
+            assert_eq!(app.settings.as_ref().unwrap().values.native_args(), args);
+            app.ime_event(Ime::Enabled);
+        }
+        assert!(app.renderer.is_none());
+        assert!(app.window.is_none());
+    }
+    #[test]
     fn ime_preview_is_visual_and_commit_updates_only_acknowledged_search_or_setting() {
         let mut app = lifecycle_fixture();
         app.set_search_focus(true);
