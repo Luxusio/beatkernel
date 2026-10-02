@@ -83,6 +83,22 @@ struct TextureResource {
     _texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     bytes: u64,
+    extent: [u32; 2],
+}
+
+fn validate_texture_update(
+    id: TextureId,
+    current: Option<[u32; 2]>,
+    image: &RgbaImage,
+) -> Result<(), String> {
+    if id == TextureId::WHITE || id == TextureId::FONT {
+        return Err("cannot update built-in white/font textures".into());
+    }
+    let extent = current.ok_or("texture is stale or belongs to another renderer")?;
+    if extent != [image.width(), image.height()] {
+        return Err("texture update must preserve its extent".into());
+    }
+    Ok(())
 }
 
 struct NoteLayer {
@@ -383,6 +399,39 @@ impl Renderer {
         Ok(id)
     }
 
+    /// Replaces pixels at the same extent, retaining identity, bindings and budgets.
+    pub fn update_texture(&mut self, id: TextureId, image: &RgbaImage) -> Result<(), String> {
+        self.check_failure()?;
+        validate_texture_update(id, self.textures.get(&id).map(|value| value.extent), image)?;
+        let texture = &self.textures[&id];
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture._texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            image.pixels(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(
+                    image
+                        .width()
+                        .checked_mul(4)
+                        .ok_or("texture row byte overflow")?,
+                ),
+                rows_per_image: Some(image.height()),
+            },
+            wgpu::Extent3d {
+                width: image.width(),
+                height: image.height(),
+                depth_or_array_layers: 1,
+            },
+        );
+        self.redraw_pending = true;
+        self.check_failure()
+    }
+
     fn validate_texture(&self, image: &RgbaImage) -> Result<u64, String> {
         let limit = self.device.limits().max_texture_dimension_2d;
         if image.width() > limit || image.height() > limit {
@@ -458,6 +507,7 @@ impl Renderer {
                 _texture: texture,
                 bind_group,
                 bytes: image.byte_len(),
+                extent: [image.width(), image.height()],
             },
         );
         self.texture_bytes = total;
@@ -705,6 +755,17 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn texture_updates_require_owned_custom_identity_and_exact_extent() {
+        let id = TextureId::allocate().unwrap();
+        let image = RgbaImage::new(2, 3, vec![0; 24]).unwrap();
+        assert!(validate_texture_update(id, Some([2, 3]), &image).is_ok());
+        assert!(validate_texture_update(id, None, &image).is_err());
+        assert!(validate_texture_update(id, Some([3, 2]), &image).is_err());
+        for builtin in [TextureId::WHITE, TextureId::FONT] {
+            assert!(validate_texture_update(builtin, Some([2, 3]), &image).is_err());
+        }
+    }
     #[test]
     fn presentation_admission_uses_exact_surface_capabilities() {
         let modes = [wgpu::PresentMode::Fifo, wgpu::PresentMode::Immediate];
