@@ -206,10 +206,12 @@ the accepted preview and reports the available actual score.
 Input uses original Window event timestamps and bounded FIFO steps. Graphics
 animation timestamps never advance the song. Runtime processing and audio
 command admission continue independently against bounded queues. Actual Mixer
-reports credit rolling BGM. The nominal bracketed software start projection
-has not yet been disciplined with output timestamps; it is not measured output
-latency or a guarantee against acoustic drift. Capture/replay and browser
-networking are still unfinished.
+reports credit rolling BGM. Actual output/performance timestamp pairs feed the
+same bounded presentation observer as native playback. Correction changes the
+input transport rate continuously after a complete accepted input watermark;
+original event timestamps and historical judgments remain unchanged. The
+nominal start projection and browser estimates are not measured acoustic latency
+or an accuracy guarantee. Capture/replay and browser networking remain unfinished.
 
 Natural completion uses the existing shared SongCompletion owner. Every original
 object must finish judging; BGM and outgoing/local command work must finish;
@@ -223,8 +225,15 @@ extrapolation by elapsed UI time. It accepts points at most one second old and
 subtracts the exact armed start conservatively. Zero, stale, future, regressing
 and prestart evidence cannot complete playback. Missing output timestamp support
 keeps manual Stop available. Malformed or suspended-owner evidence fails the
-session. This browser-reported estimate is not acoustic latency validation and
-does not yet discipline the input timeline's drift.
+session. This browser-reported estimate is not acoustic latency validation.
+The observer retains at most 64 pairs, spaced by at least 100 ms, warms up over
+at least one second and updates no more often than once per second. Its native
+default bounds are 1,000 ppm rate deviation, 250 ms phase error and a ten-second
+phase correction horizon. These are initial policy bounds, not device accuracy.
+Missing or stale observations skip correction and hold the current transport
+rate; duplicate output does not refresh evidence. Coarse host timestamps without
+host progress defer admission. Excessive rate/phase error or malformed clock
+relations fail explicitly rather than rewriting committed input.
 
 Additional deferred regressions are authored for the portable Rust owner,
 Worker adapter and shared numeric helpers. Execute only when the deferred test

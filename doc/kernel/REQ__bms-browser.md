@@ -72,7 +72,8 @@ timestamps are presentation scheduling only, never an audio clock. The shared
 visible-note query, retained GPU note cache and BGA opacity rules are reused.
 
 The host now contains a playable start/stop source path through the common
-Runtime and separate AudioWorklet Mixer. Output presentation discipline, complete
+Runtime and separate AudioWorklet Mixer. The bounded native presentation
+observer is reused for continuous input-transport correction. Complete
 result/capture/replay integration and browser network transport remain follow-on
 work. Source integration does not complete or validate the requested player.
 
@@ -162,8 +163,8 @@ waiting does not prove that the browser released its internal audio resources.
 
 The player UI calls these components through prepared-sample transfer, a
 nonblocking shared SoloRuntime and bounded input/audio message ownership.
-Actual getOutputTimestamp presentation discipline and complete
-result/capture/replay integration remain unfinished. Browser input timestamps use
+Actual getOutputTimestamp pairs feed the existing native presentation
+discipline; complete result/capture/replay integration remains unfinished. Browser input timestamps use
 the originating Window performance domain; Worker and Window origins are not
 implicitly equal. Physical keyboards cannot be distinguished by DOM key events.
 The full player Goal remains open, with generated bindings, processor execution,
@@ -204,8 +205,9 @@ BGM admission before choosing a future absolute start frame. A pristine-only
 activation reanchors the same shared runtime after setup; this is not a seek.
 Window performance and AudioContext time are bracketed for a nominal software
 start projection. This projection does not compensate acoustic latency or clock
-drift. The AudioHost outputTimestamp accessor exposes genuine browser evidence,
-but the player has not yet integrated that evidence into clock discipline.
+drift. The AudioHost outputTimestamp accessor supplies genuine browser pairs
+to bounded continuous rate correction after accepted gameplay watermarks.
+An initial projection remains an estimate and past judgments are not revised.
 
 The DOM admits at most 1,024 queued key events and sends at most 256 per step.
 Only one step, one render-report request and one outgoing audio batch await
@@ -246,9 +248,8 @@ Completion retains the gameplay owner until the Window's captured input prefix
 and outstanding steps/audio batch join, then uses the same bounded stop/disposal
 handshake. A manual stop, cancellation or failure does not become a natural
 finish. A browser without usable output timestamp evidence keeps manual Stop
-available and cannot claim natural completion. Input/output drift discipline,
-capture/replay, persistence and browser networking remain separate unfinished
-work; this acceptance contract is not evidence that the source was executed.
+available and cannot claim natural completion. Capture/replay, persistence
+and browser networking remain separate unfinished work; this acceptance contract is not evidence that the source was executed.
 
 A gameplay disposal error during completion or manual stop is retained as a
 cleanup failure. The Window terminates that Worker and requires reload before
@@ -258,3 +259,22 @@ The numeric Worklet-report decoder belongs to the existing portable application
 audio boundary. WASM bindings delegate to its single implementation; direct
 decoder fixtures can run as ordinary host Rust tests without generated bindings
 or a browser. This changes no PCM callback or serialized byte format.
+
+## Bounded input/output clock discipline
+
+The browser gameplay owner shall reuse the existing portable native
+PresentationDiscipline with preallocated bounded observations. Actual paired
+output position and Window performanceTime estimate provide its only evidence;
+accuracy remains Unknown. Missing, stale or duplicate evidence shall not invent
+progress or refresh the observation age. A nominal transport remains available
+when evidence is absent. Coarse host time without host progress defers admission.
+
+Correction shall apply only after an accepted complete input prefix and host
+watermark, continuously at that same host instant. Captured event timestamps,
+committed judgments, past transport history and scheduled original audio
+commands shall remain unchanged. Explicit rate/phase/domain/chronology/overflow
+failures shall fence the owner and retain committed score. Freshness is one
+second; all other initial policy bounds use the existing native default. This
+policy is an estimate-based drift correction, not an acoustic timing guarantee.
+Native shared callers remain opt-in. Completion still consumes actual output
+positions independently of transport correction.
