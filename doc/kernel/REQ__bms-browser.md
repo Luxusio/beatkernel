@@ -74,8 +74,8 @@ visible-note query, retained GPU note cache and BGA opacity rules are reused.
 The host now contains a playable start/stop source path through the common
 Runtime and separate AudioWorklet Mixer. The bounded native presentation
 observer is reused for continuous input-transport correction. Complete
-result/capture/replay integration and browser network transport remain follow-on
-work. Source integration does not complete or validate the requested player.
+browser replay viewing, persistent result catalog and network transport remain
+follow-on work. Optional shared capture and canonical export are source-integrated. Source integration does not complete or validate the requested player.
 
 ## Known ceiling
 
@@ -164,7 +164,8 @@ waiting does not prove that the browser released its internal audio resources.
 The player UI calls these components through prepared-sample transfer, a
 nonblocking shared SoloRuntime and bounded input/audio message ownership.
 Actual getOutputTimestamp pairs feed the existing native presentation
-discipline; complete result/capture/replay integration remains unfinished. Browser input timestamps use
+discipline. Optional common capture exports canonical replay bytes; browser
+replay playback and persistent result integration remain unfinished. Browser input timestamps use
 the originating Window performance domain; Worker and Window origins are not
 implicitly equal. Physical keyboards cannot be distinguished by DOM key events.
 The full player Goal remains open, with generated bindings, processor execution,
@@ -248,7 +249,7 @@ Completion retains the gameplay owner until the Window's captured input prefix
 and outstanding steps/audio batch join, then uses the same bounded stop/disposal
 handshake. A manual stop, cancellation or failure does not become a natural
 finish. A browser without usable output timestamp evidence keeps manual Stop
-available and cannot claim natural completion. Capture/replay, persistence
+available and cannot claim natural completion. Replay playback, persistence
 and browser networking remain separate unfinished work; this acceptance contract is not evidence that the source was executed.
 
 A gameplay disposal error during completion or manual stop is retained as a
@@ -278,3 +279,28 @@ second; all other initial policy bounds use the existing native default. This
 policy is an estimate-based drift correction, not an acoustic timing guarantee.
 Native shared callers remain opt-in. Completion still consumes actual output
 positions independently of transport correction.
+
+## Optional shared recording and replay export
+
+Recording shall be an explicit optional choice, disabled by default. The shared
+StepGameplay owner shall reuse LiveReplayCapture and the canonical replay codec,
+retaining actual RuntimeReport inputs, original provenance and accepted song
+time, including continuous clock correction. The prepared chart's actual branch
+seed shall be carried into the existing versioned replay metadata. Native/shared
+callers remain opt-in and audio callbacks acquire no recording work.
+
+The browser policy shall cap encoded data at 64 MiB and accepted operations at
+1,000,000. The byte cap is not a complete process-memory cap or unlimited-song
+recording promise. Capture failure shall fence the run, retain committed score
+and the prior replay prefix, and not retry accepted inputs. Disabled capture
+shall not constrain song duration by these recording limits. Canonical export
+shall be available only after stopping/fencing the owner and taken at most once.
+
+The Worker shall always attempt game release, separately reporting serialization
+and resource cleanup errors. It shall transfer standalone bounded encoded bytes
+before freeing the WASM game. Cancellation/failure yields a prefix; a complete
+label requires genuine natural-completion evidence and both game/audio cleanup
+joins. The Window shall retain at most one result and offer an explicit download
+only after joins. Export URLs shall be revoked on replacement/page hiding. No
+auto download, persisted browser library or browser replay playback is implied
+by this export slice; those remain separate unfinished work.

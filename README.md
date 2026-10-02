@@ -75,7 +75,8 @@ A separate `browser-audio` component uses the common Rust Mixer in an
 AudioWorklet. The host transfers original PCM and originating Window keyboard
 timestamps through bounded message owners. Natural completion uses the shared
 judge/Mixer drain and actual reported output timestamps. Browser input transport
-reuses bounded native presentation discipline; capture/replay and browser
+reuses bounded native presentation discipline. Optional shared recording exports
+canonical replay bytes after cleanup; browser replay playback, persistence and
 networking remain unfinished.
 See the [browser host instructions](samples/bms-runtime/web/README.md).
 Browser source compilation does not establish playable browser behavior.
@@ -276,7 +277,8 @@ OffscreenCanvas. It previews the actual compiled notes and static BGA at an
 explicit song position through the shared renderer and draws actual judgments
 and score during the authored keyboard/audio gameplay path. Actual output/host
 pairs feed bounded continuous transport correction through the native shared
-observer. Complete results/capture/replay and networking remain follow-on work. See the
+observer. Optional canonical replay export uses the common capture owner.
+Browser replay playback, persistent results and networking remain follow-on work. See the
 [browser build and usage instructions](samples/bms-runtime/web/README.md) and
 [browser contract](doc/kernel/REQ__bms-browser.md). Generated bindings and actual
 browser/GPU execution remain unverified. Check the reusable graphics library with:

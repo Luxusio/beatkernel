@@ -211,7 +211,9 @@ same bounded presentation observer as native playback. Correction changes the
 input transport rate continuously after a complete accepted input watermark;
 original event timestamps and historical judgments remain unchanged. The
 nominal start projection and browser estimates are not measured acoustic latency
-or an accuracy guarantee. Capture/replay and browser networking remain unfinished.
+or an accuracy guarantee. Optional shared capture and replay download are
+source-integrated; browser replay playback, persistent records and networking
+remain unfinished.
 
 Natural completion uses the existing shared SongCompletion owner. Every original
 object must finish judging; BGM and outgoing/local command work must finish;
@@ -245,3 +247,32 @@ node --experimental-vm-modules --test samples/bms-runtime/web/play-model.test.mj
 
 No JS assertions, browser runtime, generated bindings or audio output have been
 executed in this phase. Compilation and fixture authoring are not player QA.
+
+## Optional replay recording
+
+Enable **Record replay** before Play to record the actual shared Runtime reports.
+It is disabled by default. Actual prepared branch seed, input provenance and
+accepted song times use the existing native replay metadata and codec. Clock
+correction is reflected in accepted song times; input timestamps are preserved.
+The initial limit is 64 MiB of encoded data and 1,000,000 accepted operations.
+Reaching a capture limit stops the run with its available prior prefix and actual
+score. These are recording limits, not the core song-time range, and disabled
+recording adds no recording duration limit. Allocations/copies can exceed the
+encoded-data limit in aggregate; capture runs on the control owner, never the
+audio callback.
+
+After game and audio cleanup finish, **Download last replay** exports the last
+recorded result. It is labeled complete only after genuine natural completion
+and successful cleanup; manual stop, cancellation and failure produce a prefix.
+That label is in the UI/filename, not a new trusted field in the canonical file.
+Native replay tools can decode the existing format using the matching chart
+setup; the setup fingerprint is noncryptographic and excludes device/audio-file
+identity. A renamed file does not prove complete playback.
+
+Only one result is retained. Downloads are explicit; no file is automatically
+written or uploaded. Blob URLs are created only on a download click, revoked on
+replacement/page hiding and after at most 60 seconds. Stopped capture extraction
+is a single encoding attempt; serialization failure remains explicit and does
+not hide game cleanup failure. Browser persistence, replay import/viewing and
+network opponents remain follow-on work. Source checks and authored fixtures
+do not establish that a browser download or replay ran.
