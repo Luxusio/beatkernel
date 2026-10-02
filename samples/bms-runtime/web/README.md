@@ -15,8 +15,8 @@ QUIC. Its common session owner composes setup matching and software start
 agreement, with bounded events and exact complete-write receipt IDs. Native
 QUIC already delegates those transitions to the common owner. Callable
 `BrowserMultiplayer` WASM bindings and `multiplayer-transport.mjs` provide the
-session and WebTransport stream boundaries. Their connection to gameplay-derived
-setup, the existing host controls and a compatible HTTP/3 service remains
+session and WebTransport stream boundaries. Their integration into the existing
+Window/Worker Play flow and a compatible HTTP/3 service remains
 unfinished; Play does not open a multiplayer connection.
 
 The DOM owns file selection, controls and layout. A dedicated module Worker owns
@@ -31,6 +31,17 @@ canonical setup bytes, a host/join role and actual preroll. `with_policy` expose
 the software start bounds. `WebTransportChannel.open` in
 `multiplayer-transport.mjs` owns the browser stream. These components are not yet
 called by the existing Play flow.
+
+`BrowserGame.competition_identity()` derives those bytes from the actual pristine
+gameplay judge and resolved chart seed without configuring capture. The
+`BrowserMultiplayerOwner` in `multiplayer-owner.mjs` drives a supplied session
+and channel with bounded duplex loops. `open` requires a `now` function returning
+BigInt nanoseconds on the caller's host clock; the owner's `origin` maps elapsed
+software targets back to that same coordinate system. `request_ready` follows
+actual preparation. `submit(progress, finalPrefix)` resolves a complete local
+write, while `wait_final_ack` observes the separate final application ACK.
+One submission and one final waiter are permitted. The Window/Worker Play flow
+still needs to instantiate and integrate this owner.
 
 An integrating owner requests readiness after preparation, reads at most
 `needed_bytes()` using `readPrefix`, then passes that bounded prefix to

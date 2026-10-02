@@ -18,7 +18,9 @@ adapter. Invalid time or fatal protocol errors make the session unusable.
 This prepares the shared state owner required by a browser adapter. The subsequent
 [browser transport change](CHANGE__browser-multiplayer-transport.md) provides
 callable WASM bindings and WebTransport stream source. HTTP/3 endpoint service,
-gameplay-derived setup and browser competition integration remain unfinished.
+browser competition integration remain unfinished. Subsequent
+[identity and controller source](CHANGE__browser-multiplayer-owner.md) prepares
+gameplay-derived setup without enabling capture.
 WebTransport connects to an HTTP/3
 service and opens a bidirectional stream; the native raw-QUIC ALPN is not that
 service. See [MDN WebTransport](https://developer.mozilla.org/en-US/docs/Web/API/WebTransport)

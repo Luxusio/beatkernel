@@ -35,9 +35,11 @@ and [stream creation](https://developer.mozilla.org/en-US/docs/Web/API/WebTransp
 A [stream writer promise](https://developer.mozilla.org/en-US/docs/Web/API/WritableStreamDefaultWriter/write)
 describes local sink completion, not peer application consumption.
 
-Known ceiling: these callable source components are not yet connected to the
-gameplay-derived setup, browser multiplayer controls or a compatible HTTP/3
-service. Generated bindings, actual browser/network sessions and independent
+The subsequent [multiplayer owner change](CHANGE__browser-multiplayer-owner.md)
+provides a gameplay identity query and a controller of these components.
+Known ceiling: the existing Play flow still needs browser multiplayer controls,
+software-target audio startup and a compatible HTTP/3 service. Generated
+bindings, actual browser/network sessions and independent
 fixture assertions have not run. Formal review, QA and hardware acceptance
 remain deferred; the full player Goal stays active.
 

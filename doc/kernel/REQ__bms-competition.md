@@ -58,6 +58,8 @@ Decoder failures also fence the binding's session operations.
 The WebTransport adapter opens one reliable bidirectional stream over an HTTPS
 HTTP/3 session. It retains only a bounded received chunk, exposes bounded read
 prefixes, and keeps one reader operation and one writer operation in flight.
+Detached incoming backing buffers reject immediately; their reported zero
+length must not be interpreted as an ordinary empty chunk.
 Outbound bytes are snapshotted before awaiting the write. Only resolved complete
 local writes may be reported to the shared session; they do not imply a final
 peer application ACK. Finite setup and I/O deadlines, abort and remote closure
@@ -65,9 +67,37 @@ fence late results, with idempotent cancellation and cleanup. No automatic
 fallback, certificate bypass, UI-driven connection or protocol implementation
 belongs in this transport component.
 
-Callable binding and transport source remain separate from gameplay-derived
-setup, browser competition UI and the compatible HTTP/3 service. Those require
+Callable binding and transport source remain separate from browser competition
+UI and the compatible HTTP/3 service. Those require
 further integration and deferred browser/network acceptance.
+
+## Browser gameplay identity and session controller
+
+Browser compatibility bytes derive from the actual pristine gameplay judge,
+profile and resolved chart seed using the same bounded header construction and
+runtime version as native competition. Querying compatibility must neither
+enable recording nor mutate its accepted prefix. Capture setup uses the same
+header helper, retaining its existing format. Started or fenced gameplay rejects
+setup queries; bounded setup refusal leaves a pristine owner usable.
+
+One browser controller drives the actual Rust session and byte channel. It owns
+a single explicit elapsed clock epoch, an absolute setup deadline covering
+connection and shared preparation, duplex read/write loops, bounded submission,
+event forwarding and cancellation. It never implements a second wire protocol
+or judges remote scores. One pending application submission is permitted; extra
+submissions reject explicitly. Local write completion and final application ACK
+remain distinct observations.
+Already proven local completion and final ACK are recorded before invoking
+consumer callbacks, so callback-driven cleanup cannot revoke those observations.
+
+The controller slices reads to the decoder need and credits only matching frame
+IDs after complete local writes. WASM write objects are consumed and freed
+before waiting on transport. Closure fences late connection/read/write results,
+rejects pending callers and releases its owned Rust state exactly once. Waiting
+uses an interruptible finite tick. Actual audio preparation requests readiness;
+the returned software start schedule still requires caller-owned mapping and
+audio startup. Window/Worker controls, that startup integration and a compatible
+HTTP/3 service remain separate unfinished work.
 
 ## Saved-record opponents
 

@@ -115,6 +115,10 @@ transport adapter.
 Callable browser WASM session bindings and a bounded WebTransport stream adapter
 are also provided as source components. Browser gameplay/UI wiring and the
 compatible HTTP/3 service remain unfinished.
+Browser gameplay can derive the same canonical identity without recording,
+and a controller composes the shared WASM session with the byte channel. It
+retains one pending submission and distinguishes local writes from final peer
+ACKs. Existing Play controls and audio start mapping still need integration.
 WebTransport requires its own compatible HTTP/3 server integration and remains
 unfinished. QUIC socket/TLS execution is still deferred.
 Use an explicit reachable IP for another machine. Network loss leaves local
