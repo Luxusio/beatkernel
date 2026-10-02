@@ -64,6 +64,8 @@ pub mod multiplayer;
 pub mod multiplayer_clock;
 /// Checked bilateral commitment to a future software start.
 pub mod multiplayer_start;
+/// Common queue, rolling BGM and mixer construction/replenishment.
+pub mod native_audio;
 /// Shared native local-cohort gameplay and per-player report ownership.
 pub mod native_cohort;
 /// Shared local member construction, activation and recording finalization.
