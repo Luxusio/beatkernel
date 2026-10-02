@@ -1045,7 +1045,11 @@ mod native {
         fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
             match self.stream {
                 super::live_output::Output::Wasapi(_) => {
-                    if let Some((_, snapshot)) = self.stream.startup_observation(discipline)? {
+                    if let Some(NativeStartObservation {
+                        evidence: super::live_output::StartupEvidence::Wasapi(snapshot),
+                        ..
+                    }) = self.stream.startup_observation(discipline)?
+                    {
                         self.last_snapshot = Some(snapshot);
                     }
                 }
@@ -1127,7 +1131,7 @@ mod native {
         physical: PresentationDiscipline,
     }
     impl NativeStartDevice for StartupDevice<'_> {
-        type Evidence = beatkernel_platform::audio::AudioStreamSnapshot;
+        type Evidence = super::live_output::StartupEvidence;
         fn start(&mut self) -> NativeStartResult<()> {
             self.stream.start()
         }
@@ -1145,10 +1149,14 @@ mod native {
             )
         }
         fn observe(&mut self) -> NativeStartResult<Option<NativeStartObservation<Self::Evidence>>> {
-            Ok(self
-                .stream
-                .startup_observation(&mut self.physical)?
-                .map(|(pair, evidence)| NativeStartObservation { pair, evidence }))
+            self.stream.startup_observation(&mut self.physical)
+        }
+        fn seed_end(
+            &mut self,
+            end: &mut beatkernel_bms_runtime::native_end::NativeEnd,
+            observation: &NativeStartObservation<Self::Evidence>,
+        ) -> NativeStartResult<()> {
+            observation.evidence.seed_end(end, observation.timing)
         }
         fn render_report(&mut self) -> NativeStartResult<Option<beatkernel::audio::RenderReport>> {
             self.stream.render_report()
@@ -1379,8 +1387,7 @@ mod native {
             )?;
         const LIVE_SLACK: usize = beatkernel_bms_runtime::native_audio::LIVE_COMMAND_RESERVE;
         let capacity = AudioLimits::MAX_COMMANDS;
-        let network_start =
-            options.backend == Backend::Wasapi && competition_options.network.is_some();
+        let network_start = competition_options.network.is_some();
         let PreparedNativeAudio {
             mut producer,
             bgm,
@@ -1497,15 +1504,16 @@ mod native {
                     HOST,
                     options.song_origin()?,
                 )?;
-                // Retain the exact native snapshot whose accepted pair bracketed presentation.
-                discipline.observe(observation.evidence)?;
+                // Seed from the exact native source, retaining ASIO interval provenance.
+                observation.evidence.seed_discipline(&mut discipline)?;
                 let transport = beatkernel::transport::Transport::new(
                     origin.timestamp,
                     options.song_origin()?,
                     Rate::NORMAL,
                 );
                 println!(
-                    "WASAPI applied start={plan:?}; host={origin:?}; physical accuracy unmeasured"
+                    "native applied start={plan:?}; nominal host={origin:?}; host window={:?}; physical accuracy unmeasured",
+                    started.host_window,
                 );
                 (
                     transport,
@@ -1614,7 +1622,7 @@ mod native {
                         advance_lag: beatkernel::time::Duration::from_nanos(options.advance_lag),
                         seconds: options.seconds,
                         pause_supported,
-                        logical_schedule: options.backend == Backend::Wasapi,
+                        logical_schedule: options.backend == Backend::Wasapi || network_start,
                     },
                 )
             };

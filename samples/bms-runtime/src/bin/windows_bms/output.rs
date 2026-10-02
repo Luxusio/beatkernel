@@ -12,6 +12,9 @@ use beatkernel::{
     transport::Transport,
 };
 #[cfg(feature = "asio-sdk")]
+use beatkernel_bms_runtime::native_start::StartInterval;
+use beatkernel_bms_runtime::native_start::{NativeStartObservation, NativeStartTiming};
+#[cfg(feature = "asio-sdk")]
 use beatkernel_platform::{
     audio::asio::{
         AsioBufferRequest, AsioPresentationClock, AsioPresentationError,
@@ -130,7 +133,9 @@ impl Setup {
             )?)),
             #[cfg(feature = "asio-sdk")]
             Self::Asio {
-                control, window, ..
+                control,
+                window,
+                format,
             } => {
                 // Keep the driver local newer than the HWND binding so every
                 // setup rejection drops/releases it before destroying sysref.
@@ -148,7 +153,7 @@ impl Setup {
                 println!(
                     "ASIO requested={request:?}; reported={constraints:?}; resolved={resolved} frames"
                 );
-                let stream = AsioStream::prepare_with_clock(
+                let mut stream = AsioStream::prepare_with_clock(
                     control,
                     mixer,
                     options
@@ -158,8 +163,22 @@ impl Setup {
                     request,
                     clock,
                 )?;
+                // The actual primed Mixer block reflects the size used by native
+                // preparation, even if constraints changed since the earlier query.
+                let buffer_frames = u32::try_from(
+                    stream
+                        .snapshot()?
+                        .render
+                        .ok_or("ASIO primed render report missing")?
+                        .frames,
+                )?;
+                if buffer_frames == 0 {
+                    return Err("ASIO prepared buffer is empty".into());
+                }
                 Ok(Output::Asio(AsioOutput {
                     stream,
+                    buffer_frames,
+                    sample_rate: format.sample_rate(),
                     _window: window,
                     clock,
                     anchor: None,
@@ -177,17 +196,48 @@ pub(super) enum Output {
     #[cfg(feature = "asio-sdk")]
     Asio(AsioOutput),
 }
+#[derive(Clone, Copy, Debug)]
+pub(super) enum StartupEvidence {
+    Wasapi(beatkernel_platform::audio::AudioStreamSnapshot),
+    #[cfg(feature = "asio-sdk")]
+    Asio(AsioPresentationObservation),
+}
+impl StartupEvidence {
+    pub(super) fn seed_discipline(self, discipline: &mut PresentationDiscipline) -> Result<()> {
+        match self {
+            Self::Wasapi(snapshot) => {
+                discipline.observe(snapshot)?;
+            }
+            #[cfg(feature = "asio-sdk")]
+            Self::Asio(observation) => {
+                discipline.observe_asio(observation)?;
+            }
+        }
+        Ok(())
+    }
+    pub(super) fn seed_end(
+        self,
+        end: &mut beatkernel_bms_runtime::native_end::NativeEnd,
+        timing: NativeStartTiming,
+    ) -> Result<()> {
+        match self {
+            Self::Wasapi(_) => {
+                end.observe(None, timing.point()?)?;
+            }
+            #[cfg(feature = "asio-sdk")]
+            Self::Asio(observation) => {
+                end.observe_asio(observation)?;
+            }
+        }
+        Ok(())
+    }
+}
 impl Output {
-    /// Actual WASAPI native counters, retained with the exact accepted snapshot.
+    /// Preserve native counters or the complete ASIO interval and render evidence.
     pub(super) fn startup_observation(
         &mut self,
         discipline: &mut PresentationDiscipline,
-    ) -> Result<
-        Option<(
-            beatkernel::time::ClockPair,
-            beatkernel_platform::audio::AudioStreamSnapshot,
-        )>,
-    > {
+    ) -> Result<Option<NativeStartObservation<StartupEvidence>>> {
         match self {
             Self::Wasapi(stream) => {
                 let snapshot = stream.snapshot();
@@ -200,12 +250,13 @@ impl Output {
                 }
                 match discipline.observe(snapshot) {
                     Ok(ObservationAdmission::Retained | ObservationAdmission::Progress) => {
-                        Ok(Some((
-                            discipline
+                        Ok(Some(NativeStartObservation {
+                            timing: discipline
                                 .latest_pair()
-                                .ok_or("accepted startup relation missing")?,
-                            snapshot,
-                        )))
+                                .ok_or("accepted startup relation missing")?
+                                .into(),
+                            evidence: StartupEvidence::Wasapi(snapshot),
+                        }))
                     }
                     Ok(
                         ObservationAdmission::Unchanged
@@ -216,14 +267,37 @@ impl Output {
                 }
             }
             #[cfg(feature = "asio-sdk")]
-            Self::Asio(_) => Err("ASIO startup requires bounded-interval projection".into()),
+            Self::Asio(output) => {
+                let Some(observation) = output.observation()? else {
+                    return Ok(None);
+                };
+                if observation.render.frames != output.buffer_frames as usize
+                    || observation.sample_rate != output.sample_rate
+                {
+                    return Err("ASIO startup render configuration changed".into());
+                }
+                // The discipline validates the actual rate/origin/grid and source.
+                // Its midpoint is never used as the startup observation. Coarse
+                // intervals can progress while that midpoint remains unchanged.
+                match discipline.observe_asio(observation)? {
+                    ObservationAdmission::Unchanged => Ok(None),
+                    _ => Ok(Some(NativeStartObservation {
+                        timing: NativeStartTiming::Interval(StartInterval::new(
+                            observation.output,
+                            observation.host.before,
+                            observation.host.after,
+                        )?),
+                        evidence: StartupEvidence::Asio(observation),
+                    })),
+                }
+            }
         }
     }
     pub(super) fn startup_buffer_frames(&self) -> Result<u32> {
         match self {
             Self::Wasapi(stream) => Ok(stream.configuration().buffer_frames),
             #[cfg(feature = "asio-sdk")]
-            Self::Asio(_) => Err("ASIO startup requires bounded-interval projection".into()),
+            Self::Asio(output) => Ok(output.buffer_frames),
         }
     }
     pub(super) fn start(&mut self) -> Result<()> {
@@ -435,6 +509,8 @@ impl Output {
 pub(super) struct AsioOutput {
     // Drop order and explicit Drop guarantee close/drain before HWND destruction.
     stream: AsioStream,
+    buffer_frames: u32,
+    sample_rate: u32,
     _window: Window,
     clock: QpcClock,
     anchor: Option<MultimediaClockAnchor>,

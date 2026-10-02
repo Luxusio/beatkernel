@@ -3,6 +3,9 @@
 use beatkernel::time::{ClockPair, ClockPoint, Timestamp};
 use std::fmt;
 
+pub mod interval;
+pub use interval::StartInterval;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartProjectionError {
     Chronology,
@@ -307,9 +310,39 @@ pub type NativeStartResult<T> = Result<T, Box<dyn std::error::Error>>;
 pub const MAX_START_INPUT_EVENTS: usize = 4096;
 
 #[derive(Clone, Copy, Debug)]
+pub enum NativeStartTiming {
+    Point(ClockPair),
+    Interval(StartInterval),
+}
+impl NativeStartTiming {
+    /// Point-only adapters must not discard an interval to obtain a pair.
+    pub fn point(self) -> Result<ClockPair, StartProjectionError> {
+        match self {
+            Self::Point(pair) => Ok(pair),
+            Self::Interval(_) => Err(StartProjectionError::Domains),
+        }
+    }
+    fn bounds(self) -> StartInterval {
+        match self {
+            Self::Point(pair) => StartInterval {
+                output: pair.source,
+                before: pair.target,
+                after: pair.target,
+            },
+            Self::Interval(interval) => interval,
+        }
+    }
+}
+impl From<ClockPair> for NativeStartTiming {
+    fn from(pair: ClockPair) -> Self {
+        Self::Point(pair)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
 pub struct NativeStartObservation<E> {
-    pub pair: ClockPair,
-    /// Unmodified native evidence belonging to this exact pair.
+    pub timing: NativeStartTiming,
+    /// Unmodified native evidence belonging to these exact observations/bounds.
     pub evidence: E,
 }
 
@@ -322,6 +355,16 @@ pub trait NativeStartDevice {
     fn render_report(&mut self) -> NativeStartResult<Option<beatkernel::audio::RenderReport>>;
     fn buffer_frames(&self) -> NativeStartResult<u32>;
     fn host_now(&self) -> NativeStartResult<ClockPoint>;
+    /// Seed the cloned finite observer before arming. Interval adapters retain
+    /// their native report/grid evidence through their own typed observation API.
+    fn seed_end(
+        &mut self,
+        end: &mut crate::native_end::NativeEnd,
+        observation: &NativeStartObservation<Self::Evidence>,
+    ) -> NativeStartResult<()> {
+        end.observe(None, observation.timing.point()?)?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -338,6 +381,9 @@ pub struct NativeStartConfig {
 pub struct NativeStarted<E> {
     pub plan: OutputStartPlan,
     pub observation: NativeStartObservation<E>,
+    /// Retained arrival uncertainty; readiness waits for its upper endpoint.
+    pub host_window: HostStartWindow,
+    /// Nominal transport anchor only. Interval evidence remains in host_window.
     pub host_origin: ClockPoint,
 }
 
@@ -382,35 +428,41 @@ impl NativeStartAgreement for crate::competition_live::LiveCompetition {
 fn startup_observation<D: NativeStartDevice>(
     device: &mut D,
     origin: ClockPoint,
-    previous: &mut Option<ClockPair>,
+    previous: &mut Option<NativeStartTiming>,
 ) -> NativeStartResult<Option<NativeStartObservation<D::Evidence>>> {
     let Some(observation) = device.observe()? else {
         return Ok(None);
     };
-    let pair = observation.pair;
-    if pair.source.domain != origin.domain || pair.target.domain == origin.domain {
+    let bounds = observation.timing.bounds();
+    bounds.validate()?;
+    if bounds.output.domain != origin.domain {
         return Err(StartProjectionError::Domains.into());
     }
-    if pair.source.timestamp < origin.timestamp {
+    if bounds.output.timestamp < origin.timestamp {
         return Err(StartProjectionError::Chronology.into());
     }
     if let Some(last) = previous {
-        if pair.target.domain != last.target.domain {
+        if std::mem::discriminant(last) != std::mem::discriminant(&observation.timing) {
+            return Err("native startup timing source changed".into());
+        }
+        let last = last.bounds();
+        if bounds.before.domain != last.before.domain {
             return Err(StartProjectionError::Domains.into());
         }
-        if pair.source.timestamp < last.source.timestamp
-            || pair.target.timestamp < last.target.timestamp
+        if bounds.output.timestamp < last.output.timestamp
+            || bounds.before.timestamp < last.before.timestamp
+            || bounds.after.timestamp < last.after.timestamp
         {
             return Err(StartProjectionError::Chronology.into());
         }
     }
-    *previous = Some(pair);
+    *previous = Some(observation.timing);
     Ok(Some(observation))
 }
 
 /// Calibrate a silent device, arm one committed frame, and await actual presentation.
 /// Cancellation returns None; the caller always owns native stop/input cleanup.
-/// Pair interpolation preserves unknown physical accuracy rather than proving sync.
+/// Point interpolation and assessed interval bounds do not prove physical sync.
 pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
     device: &mut D,
     agreement: &mut A,
@@ -451,13 +503,15 @@ pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
         let observation = startup_observation(device, config.output_origin, &mut previous)?;
         feed(device.render_report()?, producer)?;
         if let Some(observation) = observation {
-            let lower = *first.get_or_insert(observation.pair);
-            if observation.pair.source.timestamp > lower.source.timestamp
-                && i128::from(observation.pair.target.timestamp.as_nanos())
-                    - i128::from(lower.target.timestamp.as_nanos())
+            let lower = *first.get_or_insert(observation.timing);
+            let current = observation.timing.bounds();
+            let initial = lower.bounds();
+            if current.output.timestamp > initial.output.timestamp
+                && i128::from(current.before.timestamp.as_nanos())
+                    - i128::from(initial.after.timestamp.as_nanos())
                     >= 100_000_000
             {
-                break (lower, observation.pair);
+                break (lower, observation);
             }
         }
         std::thread::sleep(Duration::from_millis(1));
@@ -468,7 +522,7 @@ pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
         }
         if let Some(observation) = startup_observation(device, config.output_origin, &mut previous)?
         {
-            latest = observation.pair;
+            latest = observation;
         }
         feed(device.render_report()?, producer)?;
         Ok(true)
@@ -479,7 +533,7 @@ pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
     let mut sampled_host = None;
     let bracket = agreement.host_bracket(&mut || {
         let host = device.host_now()?;
-        if host.domain != latest.target.domain {
+        if host.domain != latest.timing.bounds().before.domain {
             return Err(StartProjectionError::Domains.into());
         }
         sampled_host = Some(host);
@@ -499,23 +553,40 @@ pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
         .start_frame
         .checked_add(frames)
         .ok_or(StartProjectionError::Overflow)?;
-    let plan = OutputStartPlan::from_pairs(
-        window,
-        first,
-        latest,
-        config.output_origin,
-        config.sample_rate,
-        rendered_end,
-        u64::from(buffer),
-        config.max_rate_error_ppm,
-    )?;
+    let plan = match (first, latest.timing) {
+        (NativeStartTiming::Point(first), NativeStartTiming::Point(latest)) => {
+            OutputStartPlan::from_pairs(
+                window,
+                first,
+                latest,
+                config.output_origin,
+                config.sample_rate,
+                rendered_end,
+                u64::from(buffer),
+                config.max_rate_error_ppm,
+            )?
+        }
+        (NativeStartTiming::Interval(first), NativeStartTiming::Interval(latest)) => {
+            interval::project(
+                window,
+                first,
+                latest,
+                config.output_origin,
+                config.sample_rate,
+                rendered_end,
+                u64::from(buffer),
+                config.max_rate_error_ppm,
+            )?
+        }
+        _ => return Err("native startup timing source changed".into()),
+    };
     // Reject observer setup failures before changing either the queue or live observers.
     let next_pause = pause.clone().with_start_frame(plan.selected_frame())?;
     let next_end = end
         .clone()
         .map(|observer| -> NativeStartResult<_> {
             let mut observer = observer.with_start_frame(plan.selected_frame())?;
-            observer.observe(None, latest)?;
+            device.seed_end(&mut observer, &latest)?;
             Ok(observer)
         })
         .transpose()?;
@@ -525,7 +596,7 @@ pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
     producer.schedule_start_at(plan.selected_frame())?;
     *pause = next_pause;
     *end = next_end;
-    let mut lower = latest;
+    let mut lower = latest.timing;
     let mut pending = None;
     loop {
         if !device.service_input(true)? {
@@ -538,8 +609,8 @@ pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
         let report = device.render_report()?;
         feed(report, producer)?;
         if let Some(observation) = observation.filter(|_| pending.is_none()) {
-            if observation.pair.source.timestamp < plan.selected_output().timestamp {
-                lower = observation.pair;
+            if observation.timing.bounds().output.timestamp < plan.selected_output().timestamp {
+                lower = observation.timing;
             } else {
                 let applied = producer.applied_start_frame();
                 if applied.is_some_and(|frame| frame != plan.selected_frame()) {
@@ -550,11 +621,37 @@ pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
                         report.playback_end_physical_frame == Some(plan.selected_frame())
                     });
                 if applied.is_some() || empty_end {
-                    let host_origin =
-                        presented_output(plan.selected_output(), lower, observation.pair)?;
+                    let host_window = match (lower, observation.timing) {
+                        (NativeStartTiming::Point(lower), NativeStartTiming::Point(upper)) => {
+                            let host = presented_output(plan.selected_output(), lower, upper)?;
+                            HostStartWindow {
+                                earliest: host,
+                                latest: host,
+                            }
+                        }
+                        (
+                            NativeStartTiming::Interval(lower),
+                            NativeStartTiming::Interval(upper),
+                        ) => interval::crossing(
+                            plan.selected_output(),
+                            lower,
+                            upper,
+                            config.max_rate_error_ppm,
+                        )?,
+                        _ => return Err("native startup timing source changed".into()),
+                    };
+                    let midpoint = i128::from(host_window.earliest.timestamp.as_nanos())
+                        + (i128::from(host_window.latest.timestamp.as_nanos())
+                            - i128::from(host_window.earliest.timestamp.as_nanos()))
+                            / 2;
+                    let host_origin = ClockPoint {
+                        domain: host_window.earliest.domain,
+                        timestamp: Timestamp::from_nanos(i64::try_from(midpoint)?),
+                    };
                     pending = Some(NativeStarted {
                         plan,
                         observation,
+                        host_window,
                         host_origin,
                     });
                 }
@@ -572,7 +669,7 @@ pub fn start_committed<D: NativeStartDevice, A: NativeStartAgreement>(
         }
         last_host = host;
         if let Some(started) = pending {
-            if host.timestamp >= started.host_origin.timestamp {
+            if host.timestamp >= started.host_window.latest.timestamp {
                 return Ok(Some(started));
             }
         }
@@ -620,10 +717,10 @@ mod fixtures {
             self.frame += 100;
             let ns = i64::try_from(self.frame * 1_000_000).unwrap();
             Ok(Some(NativeStartObservation {
-                pair: ClockPair {
+                timing: NativeStartTiming::Point(ClockPair {
                     source: point(if self.invalid_domain { 3 } else { 2 }, ns),
                     target: point(1, ns),
-                },
+                }),
                 evidence: self.frame,
             }))
         }
@@ -760,6 +857,182 @@ mod fixtures {
             max_rate_error_ppm: 1_000,
         }
     }
+    // Synthetic native telemetry around actual Mixer blocks, without a driver.
+    struct IntervalDevice {
+        inner: Device,
+        sounds: Vec<(u64, f32)>,
+        seeded: Option<beatkernel_platform::audio::asio::AsioPresentationObservation>,
+    }
+    impl NativeStartDevice for IntervalDevice {
+        type Evidence = beatkernel_platform::audio::asio::AsioPresentationObservation;
+        fn start(&mut self) -> NativeStartResult<()> {
+            self.inner.start()
+        }
+        fn service_input(&mut self, retain: bool) -> NativeStartResult<bool> {
+            self.inner.service_input(retain)
+        }
+        fn observe(&mut self) -> NativeStartResult<Option<NativeStartObservation<Self::Evidence>>> {
+            use beatkernel_platform::audio::asio::MultimediaHostInterval;
+            let report = self.inner.mixer.render(&mut self.inner.pcm)?;
+            self.inner.report = Some(report);
+            self.inner.frame += 100;
+            self.sounds.extend(
+                self.inner
+                    .pcm
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, value)| {
+                        (*value != 0.0).then_some((report.start_frame + index as u64, *value))
+                    }),
+            );
+            let ns = i64::try_from(report.start_frame * 1_000_000)?;
+            let evidence = Self::Evidence::from_render(
+                report,
+                1_000,
+                MultimediaHostInterval {
+                    before: point(1, ns - 1_000_000),
+                    after: point(1, ns + 1_000_000),
+                },
+                0,
+                0,
+                point(2, 0),
+            )?;
+            Ok(Some(NativeStartObservation {
+                timing: NativeStartTiming::Interval(StartInterval::new(
+                    evidence.output,
+                    evidence.host.before,
+                    evidence.host.after,
+                )?),
+                evidence,
+            }))
+        }
+        fn render_report(&mut self) -> NativeStartResult<Option<beatkernel::audio::RenderReport>> {
+            self.inner.render_report()
+        }
+        fn buffer_frames(&self) -> NativeStartResult<u32> {
+            self.inner.buffer_frames()
+        }
+        fn host_now(&self) -> NativeStartResult<ClockPoint> {
+            self.inner.host_now()
+        }
+        fn seed_end(
+            &mut self,
+            end: &mut crate::native_end::NativeEnd,
+            observation: &NativeStartObservation<Self::Evidence>,
+        ) -> NativeStartResult<()> {
+            end.observe_asio(observation.evidence)?;
+            self.seeded = Some(observation.evidence);
+            Ok(())
+        }
+    }
+    #[test]
+    fn interval_start_retains_native_evidence_and_waits_upper_arrival_for_finite_sections() {
+        for finite in [None, Some(2), Some(0)] {
+            let (mut inner, mut producer, mut pause, mut end) = device(true, finite);
+            inner.future_host = true;
+            let mut device = IntervalDevice {
+                inner,
+                sounds: Vec::new(),
+                seeded: None,
+            };
+            let mut agreement = Agreement {
+                cancel: false,
+                target: 1_000_000_000,
+            };
+            let mut feeds = 0;
+            let started = start_committed(
+                &mut device,
+                &mut agreement,
+                &mut producer,
+                &mut pause,
+                &mut end,
+                config(finite),
+                |_, _| {
+                    feeds += 1;
+                    Ok(())
+                },
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(device.inner.starts, 1);
+            assert_eq!(started.plan.selected_frame(), 1_052);
+            assert!(started.plan.earliest_frame() < started.plan.latest_frame());
+            let evidence = started.observation.evidence;
+            let NativeStartTiming::Interval(timing) = started.observation.timing else {
+                panic!("interval must remain an interval");
+            };
+            assert_eq!(timing.output, evidence.output);
+            assert_eq!(timing.before, evidence.host.before);
+            assert_eq!(timing.after, evidence.host.after);
+            assert!(started.observation.timing.point().is_err());
+            assert!(started.host_window.earliest().timestamp < started.host_origin.timestamp);
+            assert!(started.host_origin.timestamp < started.host_window.latest().timestamp);
+            assert!(device.host_now().unwrap().timestamp >= started.host_window.latest().timestamp);
+            assert_eq!(evidence.render.start_frame, 1_100);
+            assert!(evidence.render.start_frame < device.inner.report.unwrap().start_frame);
+            assert_eq!(&device.inner.stages[..4], &[false; 4]);
+            assert!(device.inner.stages[4..].iter().all(|retain| *retain));
+            assert_eq!(feeds, device.inner.stages.len());
+            let report = device.inner.report.unwrap();
+            let logical_end = report.playback_start_frame + report.playback_frames as u64;
+            assert_eq!(
+                pause.scheduling_point(report).unwrap(),
+                point(2, logical_end as i64 * 1_000_000),
+            );
+            assert!(logical_end < report.start_frame + report.frames as u64);
+            if finite == Some(0) {
+                assert_eq!(producer.applied_start_frame(), None);
+                assert!(device.sounds.is_empty());
+                assert_eq!(evidence.render.playback_end_physical_frame, Some(1_052));
+            } else {
+                assert_eq!(producer.applied_start_frame(), Some(1_052));
+                assert_eq!(device.sounds, [(1_052, 0.25), (1_053, 0.5)]);
+            }
+            if let Some(end) = &mut end {
+                let seed = device.seeded.unwrap();
+                assert_eq!(seed.render.start_frame, 300);
+                assert!(seed.render.paused);
+                let boundary = end.observe_asio(evidence).unwrap().unwrap();
+                assert_eq!(boundary.physical_frame, 1_052 + finite.unwrap());
+                assert_eq!(boundary.host, evidence.host.after);
+            } else {
+                assert!(device.seeded.is_none());
+            }
+        }
+    }
+    #[test]
+    fn interval_start_cancellation_keeps_cleanup_with_caller() {
+        for after_gate in [false, true] {
+            let (mut inner, mut producer, mut pause, mut end) = device(true, None);
+            inner.cancel_retained = after_gate;
+            let mut device = IntervalDevice {
+                inner,
+                sounds: Vec::new(),
+                seeded: None,
+            };
+            let mut agreement = Agreement {
+                cancel: !after_gate,
+                target: 1_000_000_000,
+            };
+            assert!(
+                start_committed(
+                    &mut device,
+                    &mut agreement,
+                    &mut producer,
+                    &mut pause,
+                    &mut end,
+                    config(None),
+                    |_, _| Ok(()),
+                )
+                .unwrap()
+                .is_none()
+            );
+            assert_eq!(device.inner.starts, 1);
+            assert_eq!(device.inner.stages.last(), Some(&after_gate));
+            assert_eq!(producer.applied_start_frame(), None);
+            assert!(device.sounds.is_empty());
+        }
+    }
     #[test]
     fn common_owner_uses_actual_gate_and_preserves_crossing_evidence() {
         for finite in [None, Some(2), Some(0)] {
@@ -788,7 +1061,7 @@ mod fixtures {
             assert_eq!(started.host_origin, point(1, 1_000_000_000));
             assert_eq!(started.observation.evidence, device.frame);
             assert_eq!(
-                started.observation.pair.source,
+                started.observation.timing.point().unwrap().source,
                 point(2, device.frame as i64 * 1_000_000)
             );
             assert_eq!(&device.stages[..3], &[false, false, false]);
@@ -807,7 +1080,7 @@ mod fixtures {
             }
             if let Some(end) = &mut end {
                 let boundary = end
-                    .observe(device.report, started.observation.pair)
+                    .observe(device.report, started.observation.timing.point().unwrap())
                     .unwrap()
                     .unwrap();
                 assert_eq!(boundary.physical_frame, 1_000 + finite.unwrap());
@@ -942,7 +1215,10 @@ mod fixtures {
         .unwrap();
         assert_eq!(started.host_origin, point(1, 1_000_000_000));
         assert_eq!(started.observation.evidence, 1_100);
-        assert_eq!(started.observation.pair.source, point(2, 1_100_000_000));
+        assert_eq!(
+            started.observation.timing.point().unwrap().source,
+            point(2, 1_100_000_000)
+        );
         assert_eq!(device.frame, 1_700);
         assert_eq!(device.host_now().unwrap(), started.host_origin);
         assert_eq!(producer.applied_start_frame(), Some(1_000));

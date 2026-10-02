@@ -573,7 +573,10 @@ mod native {
         fn observe(&mut self) -> NativeStartResult<Option<NativeStartObservation<()>>> {
             let pair = observe(self.stream, !self.observed)?;
             self.observed |= pair.is_some();
-            Ok(pair.map(|pair| NativeStartObservation { pair, evidence: () }))
+            Ok(pair.map(|pair| NativeStartObservation {
+                timing: pair.into(),
+                evidence: (),
+            }))
         }
         fn render_report(&mut self) -> NativeStartResult<Option<beatkernel::audio::RenderReport>> {
             Ok(self.stream.last_render_report())
@@ -908,7 +911,7 @@ mod native {
                     return Ok(());
                 };
                 let plan = started.plan;
-                let pair = started.observation.pair;
+                let pair = started.observation.timing.point()?;
                 let host_origin = started.host_origin;
                 let mut discipline = PresentationDiscipline::new_with_playback_origin(
                     DisciplineConfig::default(),
