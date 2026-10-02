@@ -54,6 +54,8 @@ pub struct CompetitionOptions {
     pub setup_timeout: Duration,
     /// Bounds for software-start negotiation and startup-owner release.
     pub start_policy: crate::multiplayer_start::StartPolicy,
+    /// Actual native preroll; supplied by the native preparation entry point.
+    pub preroll_ns: i64,
 }
 impl Default for CompetitionOptions {
     fn default() -> Self {
@@ -62,6 +64,7 @@ impl Default for CompetitionOptions {
             network: None,
             setup_timeout: Duration::from_secs(10),
             start_policy: crate::multiplayer_start::StartPolicy::default(),
+            preroll_ns: 0,
         }
     }
 }
@@ -302,6 +305,33 @@ impl LiveCompetition {
         )
     }
 
+    /// Supplies the actual native preroll before files, socket setup or readiness.
+    pub fn prepare_native_section_at_with_chart_seed(
+        options: &CompetitionOptions,
+        source: &BmsChart,
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        start: Timestamp,
+        chart_seed: u64,
+        end: Option<Timestamp>,
+        preroll_ns: i64,
+    ) -> Result<Option<Self>> {
+        if preroll_ns < 0 {
+            return Err("native competition preroll cannot be negative".into());
+        }
+        let mut native_options = options.clone();
+        native_options.preroll_ns = preroll_ns;
+        Self::prepare_section_at_with_chart_seed(
+            &native_options,
+            source,
+            judge,
+            domain,
+            start,
+            chart_seed,
+            end,
+        )
+    }
+
     /// Prepare solo competition with an optional original-song endpoint.
     /// Invalid finite geometry rejects before feature selection, files or sockets.
     pub fn prepare_section_at_with_chart_seed(
@@ -335,6 +365,9 @@ impl LiveCompetition {
         chart_seed: u64,
         end: Option<Timestamp>,
     ) -> Result<Option<Self>> {
+        if options.preroll_ns < 0 {
+            return Err("native competition preroll cannot be negative".into());
+        }
         if end.is_some_and(|end| start.as_nanos() < 0 || end.as_nanos() < 0 || end <= start) {
             return Err("competition section endpoint must be nonnegative and after start".into());
         }
@@ -360,6 +393,7 @@ impl LiveCompetition {
         let settings = MultiplayerOptions {
             setup_timeout: options.setup_timeout,
             start_policy: options.start_policy,
+            preroll_ns: options.preroll_ns,
             ..MultiplayerOptions::default()
         };
         let network = match options.network {
@@ -692,6 +726,7 @@ mod fixtures {
     fn committed_release_keeps_future_boundary_and_configurable_lateness() {
         let schedule = crate::multiplayer_start::StartSchedule {
             target_ns: 1_000,
+            song_target_ns: 1_000,
             uncertainty_ns: 20,
         };
         assert!(!start_release_due(schedule, 999, 25).unwrap());
@@ -701,6 +736,7 @@ mod fixtures {
         assert!(start_release_due(schedule, -1, 25).is_err());
         let extreme = crate::multiplayer_start::StartSchedule {
             target_ns: i64::MAX,
+            song_target_ns: i64::MAX,
             uncertainty_ns: 0,
         };
         assert!(start_release_due(extreme, i64::MAX, 0).unwrap());
@@ -884,6 +920,22 @@ mod fixtures {
             ..CompetitionOptions::default()
         };
         for options in [&inactive, &selected] {
+            let error = LiveCompetition::prepare_native_section_at_with_chart_seed(
+                options,
+                &source,
+                &judge,
+                ClockDomainId(17),
+                Timestamp::ZERO,
+                3,
+                None,
+                -1,
+            )
+            .err()
+            .unwrap();
+            assert_eq!(
+                error.to_string(),
+                "native competition preroll cannot be negative"
+            );
             for (start, end) in [(-1, 1), (0, -1), (0, 0), (1, 1), (2, 1)] {
                 let error = LiveCompetition::prepare_section_at_with_chart_seed(
                     options,

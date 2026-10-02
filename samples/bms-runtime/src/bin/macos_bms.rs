@@ -842,7 +842,7 @@ mod native {
             )?,
         )?;
         let mut competition =
-            beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_section_at_with_chart_seed(
+            beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_native_section_at_with_chart_seed(
                 &competition_options,
                 &prepared.source,
                 &judge,
@@ -850,6 +850,7 @@ mod native {
                 Timestamp::from_nanos(options.start_ns),
                 options.chart_seed,
                 options.end_ns.map(Timestamp::from_nanos),
+                options.preroll,
             )?;
         const SLACK: usize = 1024;
         let capacity = AudioLimits::MAX_COMMANDS;
