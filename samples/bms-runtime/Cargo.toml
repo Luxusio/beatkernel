@@ -7,10 +7,14 @@ license.workspace = true
 publish = false
 default-run = "beatkernel-bms-runtime"
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [features]
 default = ["desktop"]
 desktop = ["graphics", "dep:winit", "dep:pollster", "dep:arboard"]
 graphics = ["dep:wgpu", "dep:bytemuck", "dep:floem_reactive", "dep:ab_glyph"]
+browser = ["graphics", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
 asio-sdk = ["beatkernel-platform/asio-sdk"]
 
 [dependencies]
@@ -30,6 +34,12 @@ pollster = { version = "=0.4.0", optional = true }
 floem_reactive = { version = "=0.2.0", optional = true }
 ab_glyph = { version = "=0.2.32", optional = true }
 arboard = { version = "=3.6.1", default-features = false, features = ["wayland-data-control"], optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { version = "=0.2.129", optional = true }
+wasm-bindgen-futures = { version = "=0.4.79", optional = true }
+js-sys = { version = "=0.3.106", optional = true }
+web-sys = { version = "=0.3.106", features = ["OffscreenCanvas"], optional = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "=0.59.0", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_System_Performance", "Win32_System_Threading", "Win32_UI_Input", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }

@@ -12,6 +12,10 @@ mod asset_source_fixtures;
 pub mod bga;
 /// Rolling BGM admission on an explicitly configured output frame grid.
 pub mod bgm;
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
+pub mod browser;
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
+mod browser_canvas;
 /// Strict bounded application chart decoding before the UTF-8 parser.
 pub mod chart_text;
 /// Saved-record opponents and actual judgment summaries.
