@@ -8,7 +8,7 @@ use crate::{
     completion::{CompletionError, SongCompletion},
     local_runtime::{GroupError, SoloRuntime},
     native_judge::NativeJudgeConfig,
-    replay_capture::{CaptureError, LiveReplayCapture},
+    replay_capture::{CaptureError, LiveReplayCapture, setup_header},
 };
 use beatkernel::{
     audio::{
@@ -347,6 +347,35 @@ impl StepGameplay {
         } else {
             Ok(())
         }
+    }
+
+    /// Exact native-compatible setup identity without enabling capture or
+    /// changing the pristine judge. Original-song start is zero for this owner;
+    /// host/output origins, preroll and capture choice do not change identity.
+    pub fn competition_identity(
+        &self,
+        limits: ReplayCodecLimits,
+        chart_seed: u64,
+    ) -> Result<Vec<u8>, StepGameplayError> {
+        self.ensure_usable()?;
+        if self.started {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "competition identity requires an unprocessed runtime",
+            ));
+        }
+        let header = setup_header(
+            self.runtime.judge(),
+            self.host_domain,
+            limits,
+            Timestamp::ZERO,
+            chart_seed,
+        )
+        .map_err(|error| StepGameplayError::Capture {
+            error,
+            report: None,
+        })?;
+        crate::multiplayer::competition_identity(&header, env!("CARGO_PKG_VERSION"), limits)
+            .map_err(|error| StepGameplayError::Setup(error.to_string()))
     }
 
     /// Opt in while the original judge is pristine, using the resolved chart

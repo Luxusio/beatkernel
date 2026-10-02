@@ -198,6 +198,16 @@ impl BrowserGame {
     pub fn sample_count(&self) -> usize {
         self.samples.len()
     }
+
+    /// Actual pristine judge/profile/chart-branch identity for the shared native
+    /// protocol. Capture remains optional and unchanged; bytes are bounded by
+    /// the common 65536-byte identity limit before returning to JavaScript.
+    pub fn competition_identity(&self) -> Result<Vec<u8>, JsValue> {
+        let limits = crate::competition_live::replay_limits().map_err(error)?;
+        self.game
+            .competition_identity(limits, self.chart_seed)
+            .map_err(error)
+    }
     /// Optional bounded canonical replay capture; must precede gameplay input
     /// or advancement. The seed comes from the actual prepared chart owner.
     pub fn configure_capture(&mut self, max_bytes: u32, max_records: u32) -> Result<(), JsValue> {

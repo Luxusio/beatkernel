@@ -51,6 +51,78 @@ impl std::fmt::Display for CaptureError {
 }
 impl std::error::Error for CaptureError {}
 
+/// Canonical pristine compiled setup, shared by capture and multiplayer identity.
+/// The identity excludes asset/device/binding provenance and is noncryptographic.
+/// Callers retain canonical codec file-limit validation for their final envelope.
+pub fn setup_header(
+    judge: &JudgeEngine,
+    domain: ClockDomainId,
+    limits: ReplayCodecLimits,
+    start: Timestamp,
+    chart_seed: u64,
+) -> Result<ReplayHeader, CaptureError> {
+    if start.as_nanos() < 0 {
+        return Err(CaptureError::InvalidStart);
+    }
+    if judge.effective_song_time().is_some() {
+        return Err(ReplayError::AlreadyStarted.into());
+    }
+    let hash = judge.stable_hash().map_err(ReplayError::from)?;
+    let mut identity = b"bms-judge-setup/v1:".to_vec();
+    identity.extend_from_slice(&hash.to_le_bytes());
+    let profile = judge.profile();
+    let (prefix, start_bytes): (&[u8], usize) = if chart_seed != 0 {
+        (b"bms-judge-profile/v3:", 16)
+    } else if start == Timestamp::ZERO {
+        (b"bms-judge-profile/v1:", 0)
+    } else {
+        (b"bms-judge-profile/v2:", 8)
+    };
+    let options_size = profile
+        .windows()
+        .len()
+        .checked_mul(20)
+        .and_then(|bytes| bytes.checked_add(prefix.len() + start_bytes + 16))
+        .ok_or(ReplayCodecError::LengthOverflow)?;
+    let header_size = options_size
+        .checked_add(identity.len())
+        .and_then(|bytes| bytes.checked_add(b"beatkernel-bms/builtin-judge/v1".len()))
+        .and_then(|bytes| bytes.checked_add(env!("CARGO_PKG_VERSION").len()))
+        .ok_or(ReplayCodecError::LengthOverflow)?;
+    if header_size > limits.max_header_bytes() {
+        return Err(ReplayCodecError::HeaderTooLarge.into());
+    }
+    let mut options = prefix.to_vec();
+    options
+        .try_reserve_exact(options_size - options.len())
+        .map_err(|_| ReplayCodecError::AllocationFailed)?;
+    if chart_seed != 0 {
+        options.extend_from_slice(&chart_seed.to_le_bytes());
+    }
+    if chart_seed != 0 || start != Timestamp::ZERO {
+        options.extend_from_slice(&start.as_nanos().to_le_bytes());
+    }
+    options.extend_from_slice(&profile.input_offset().as_nanos().to_le_bytes());
+    options.extend_from_slice(
+        &u64::try_from(profile.windows().len())
+            .map_err(|_| ReplayCodecError::LengthOverflow)?
+            .to_le_bytes(),
+    );
+    for window in profile.windows() {
+        options.extend_from_slice(&window.grade.0.to_le_bytes());
+        options.extend_from_slice(&window.early.as_nanos().to_le_bytes());
+        options.extend_from_slice(&window.late.as_nanos().to_le_bytes());
+    }
+    Ok(ReplayHeader {
+        version: REPLAY_VERSION,
+        chart_identity: identity,
+        rules_identity: b"beatkernel-bms/builtin-judge/v1".to_vec(),
+        options,
+        seed: 0,
+        normalized_clock: domain,
+    })
+}
+
 /// Optional application-owned capture; never judges or accesses native clocks.
 ///
 /// The encoded-byte cap is an exact durable-data cap, not a process-memory cap.
@@ -95,66 +167,7 @@ impl LiveReplayCapture {
         start: Timestamp,
         chart_seed: u64,
     ) -> Result<Self, CaptureError> {
-        if start.as_nanos() < 0 {
-            return Err(CaptureError::InvalidStart);
-        }
-        if judge.effective_song_time().is_some() {
-            return Err(ReplayError::AlreadyStarted.into());
-        }
-        let hash = judge.stable_hash().map_err(ReplayError::from)?;
-        let mut identity = b"bms-judge-setup/v1:".to_vec();
-        identity.extend_from_slice(&hash.to_le_bytes());
-        let profile = judge.profile();
-        let (prefix, start_bytes): (&[u8], usize) = if chart_seed != 0 {
-            (b"bms-judge-profile/v3:", 16)
-        } else if start == Timestamp::ZERO {
-            (b"bms-judge-profile/v1:", 0)
-        } else {
-            (b"bms-judge-profile/v2:", 8)
-        };
-        let options_size = profile
-            .windows()
-            .len()
-            .checked_mul(20)
-            .and_then(|bytes| bytes.checked_add(prefix.len() + start_bytes + 16))
-            .ok_or(ReplayCodecError::LengthOverflow)?;
-        let header_size = options_size
-            .checked_add(identity.len())
-            .and_then(|bytes| bytes.checked_add(b"beatkernel-bms/builtin-judge/v1".len()))
-            .and_then(|bytes| bytes.checked_add(env!("CARGO_PKG_VERSION").len()))
-            .ok_or(ReplayCodecError::LengthOverflow)?;
-        if header_size > limits.max_header_bytes() {
-            return Err(ReplayCodecError::HeaderTooLarge.into());
-        }
-        let mut options = prefix.to_vec();
-        options
-            .try_reserve_exact(options_size - options.len())
-            .map_err(|_| ReplayCodecError::AllocationFailed)?;
-        if chart_seed != 0 {
-            options.extend_from_slice(&chart_seed.to_le_bytes());
-        }
-        if chart_seed != 0 || start != Timestamp::ZERO {
-            options.extend_from_slice(&start.as_nanos().to_le_bytes());
-        }
-        options.extend_from_slice(&profile.input_offset().as_nanos().to_le_bytes());
-        options.extend_from_slice(
-            &u64::try_from(profile.windows().len())
-                .map_err(|_| ReplayCodecError::LengthOverflow)?
-                .to_le_bytes(),
-        );
-        for window in profile.windows() {
-            options.extend_from_slice(&window.grade.0.to_le_bytes());
-            options.extend_from_slice(&window.early.as_nanos().to_le_bytes());
-            options.extend_from_slice(&window.late.as_nanos().to_le_bytes());
-        }
-        let header = ReplayHeader {
-            version: REPLAY_VERSION,
-            chart_identity: identity,
-            rules_identity: b"beatkernel-bms/builtin-judge/v1".to_vec(),
-            options,
-            seed: 0,
-            normalized_clock: domain,
-        };
+        let header = setup_header(judge, domain, limits, start, chart_seed)?;
         let header_bytes =
             encode_replay(&ReplayFile::new(header.clone(), Vec::new()), limits)?.len();
         Ok(Self {

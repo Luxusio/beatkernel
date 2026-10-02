@@ -81,6 +81,8 @@ mod mp3_fixture;
 pub mod multiplayer;
 /// Checked software peer-clock offset intervals and deadline conversion.
 pub mod multiplayer_clock;
+#[cfg(test)]
+mod multiplayer_identity_fixtures;
 /// Shared framed multiplayer data and state, independent of transport I/O.
 pub mod multiplayer_protocol;
 #[cfg(test)]
