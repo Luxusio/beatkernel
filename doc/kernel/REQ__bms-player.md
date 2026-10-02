@@ -1423,3 +1423,21 @@ Native setup/resource cleanup and independent create-new replay saves remain
 with their owners. Linux uses bounded fair sweeps across sources; native Raw
 Input/HID queues retain bounded collection and exact device-loss semantics.
 Physical timing, ASIO startup parity and native runtime acceptance remain unproven.
+
+## Shared native preparation policy
+
+Live play and replay watching resolve omitted native defaults through one shared
+preparation owner. Validate original options before querying native metadata.
+Explicit settings retain their exact values and validation errors. Solo live
+input may choose an available keyboard automatically; assigned local players
+never trigger automatic keyboard selection, and replay watching never queries
+keyboards. Native adapters expose default output identity, actual output format,
+keyboard candidates and explicit ASIO replay format operations only.
+
+Query only metadata required by omitted fields. Reject unavailable defaults,
+bounded-catalog violations and invalid native formats without substituting
+parser-only placeholder identities. ASIO has no implicit OS default driver; an
+explicit driver remains required. Output routing, clock assessments and exact
+buffer requests survive projection. Metadata work belongs to the game owner,
+with no device discovery or waiting on UI/audio callbacks. Compilation does not
+establish native device availability or physical timing.
