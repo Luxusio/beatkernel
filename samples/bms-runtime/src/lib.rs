@@ -21,6 +21,9 @@ pub mod browser_audio;
 mod browser_canvas;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_game;
+/// Browser bindings for the common multiplayer session and bounded framing.
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
+pub mod browser_multiplayer;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_replay;
 /// Strict bounded application chart decoding before the UTF-8 parser.
