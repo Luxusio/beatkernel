@@ -60,7 +60,7 @@ as before; this work does not remove that behavior.
 The application owns explicit bounded raster preparation and original-song
 Base/Layer composition; the adapter does not interpret native clocks or upload
 images. BMP00/Poor selections do not imply continuous poor display. Video,
-crop/opacity and extended poor-overlay modes remain outside supported
+crop/opacity and additional layer channels remain outside supported
 visual semantics. Authored parser/timing/seed/limit fixtures are source-compiled
 for later execution, not format conformance or native GPU acceptance.
 
@@ -75,3 +75,7 @@ selection after an actual accepted miss. Its default 500ms lifetime and bounded
 configurable policy belong to presentation, not adapter timing or chart identity.
 The adapter retains the independent original-song channel06 index; no parser
 IO, judge object or replay operation is introduced by miss background display.
+
+
+## POORBGA header
+Case-insensitive selected #POORBGA headers accept exact single digits 0, 1, or 2; absent means Replace. Preserve the header in metadata and use existing duplicate and seeded conditional rules. Typed modes Replace/Overlay/Off concern presentation only; malformed active values reject, inactive branches retain existing structural/bounded-source validation. A checked accessor rejects fabricated invalid metadata before PlayerChart preparation. Gameplay source objects, timing, keysounds, replay identity and grading remain unaffected when gameplay physical lines are unchanged. Overlay composes raw Poor above Base/Layer; it does not imply Layer2/opacity/video support or Poor black-key transformation.
