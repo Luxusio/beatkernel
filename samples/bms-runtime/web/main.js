@@ -3,7 +3,7 @@ import { AudioHost } from "./audio-host.mjs";
 import { KEY_BINDINGS, bindingsFor, millisecondsToNanos, frameNanos, startProjection, presentationPair } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
-const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export"].map(id => [id, byId(id)]));
+const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name"].map(id => [id, byId(id)]));
 let canvas = byId("canvas");
 let worker = null;
 let observer = null;
@@ -24,6 +24,7 @@ let activePlay = null;
 let lastReplay = null;
 let replayURL = null;
 let replayURLTimer = null;
+let selectedReplay = null;
 
 function status(text, error = false) {
   ui.status.textContent = text;
@@ -39,6 +40,8 @@ function controls() {
   ui.stop.disabled = !playing || activePlay.phase === "closing";
   ui.record.disabled = ui.play.disabled;
   ui.export.disabled = playing || lastReplay === null;
+  ui["replay-file"].disabled = !initialized || importing || preparing || playing;
+  ui["replay-play"].disabled = ui.play.disabled || selectedReplay === null;
 }
 function stop() {
   revokeReplayURL();
@@ -149,6 +152,9 @@ function start() {
   libraryId = importId = selectId = selectedId = seekId = 0;
   importing = preparing = hasPreview = false;
   audioModule = null;
+  selectedReplay = null;
+  ui["replay-file"].value = "";
+  ui["replay-name"].textContent = "Choose a recording and prepare its matching chart. Replay uses the recorded seed and section.";
   ui.keys.textContent = "";
   ui.folder.value = ui.files.value = "";
   ui.chart.replaceChildren(new Option("Choose files first", ""));
@@ -213,7 +219,23 @@ byId("seek-form").addEventListener("submit", event => {
 window.addEventListener("pagehide", stop);
 window.addEventListener("pageshow", event => { if (event.persisted) start(); });
 window.addEventListener("resize", resize);
-ui.play.addEventListener("click", play);
+ui.play.addEventListener("click", () => { void play("live"); });
+ui["replay-play"].addEventListener("click", () => { void play("replay"); });
+ui["replay-file"].addEventListener("change", event => {
+  if (!initialized || importing || preparing || activePlay) return;
+  try {
+    const files = event.target.files;
+    if (!files?.length) return;
+    const file = files[0];
+    if (files.length !== 1 || !(file instanceof File) || !Number.isSafeInteger(file.size)
+      || file.size < 1 || file.size > 64 * 1024 * 1024) throw new Error("Choose one nonempty replay no larger than 64 MiB.");
+    selectedReplay = file;
+    ui["replay-name"].textContent = `${file.name.slice(0, 256)} · ${file.size} bytes · uses recorded seed and section`;
+    controls();
+    status("Replay selected. Prepare its matching chart, then choose Play replay.");
+  } catch (error) { status(String(error.message).slice(0, 4096), true); }
+  finally { event.target.value = ""; }
+});
 ui.stop.addEventListener("click", () => { void stopPlay("Playback stopped."); });
 ui.export.addEventListener("click", downloadReplay);
 window.addEventListener("blur", () => { void stopPlay("Playback stopped after losing focus."); });
@@ -267,19 +289,21 @@ function playRpc(session, kind, fields = {}) {
   });
 }
 
-async function play() {
+async function play(mode = "live") {
   if (!initialized || !hasPreview || !audioModule || importing || preparing || activePlay) return;
-  const session = { id: ++serial, owner, phase: "preparing", controller: new AbortController(), audio: null, opening: null,
+  if (mode === "replay" && selectedReplay === null) return;
+  const session = { id: ++serial, owner, mode, phase: "preparing", controller: new AbortController(), audio: null, opening: null,
     rpc: null, timer: null, events: [], pressed: new Set(), bindings: [], sequence: 0n,
     tickId: 0, tickPending: null, audioBusy: false, batch: null, startFrame: null,
     origin: null, lastHost: 0n, lastStatus: 0, stopping: null, renderId: 0, renderPending: null,
     workerStarted: false, workerReleased: false, workerStop: null, finalScore: null,
     completionReady: false, lastPresentation: null, cleanupError: null,
-    recordReplay: ui.record.checked === true, replay: null, replayError: null, naturalFinishRequested: false,
+    recordReplay: mode === "live" && ui.record.checked === true, replay: null, replayError: null, naturalFinishRequested: false,
+    replayFile: mode === "replay" ? selectedReplay : null,
     preview: { title: ui.title.textContent, details: ui.details.textContent, position: ui.position.value } };
   activePlay = session;
   controls();
-  status("Preparing playable chart and audio…");
+  status(mode === "replay" ? "Preparing recorded replay and audio…" : "Preparing playable chart and audio…");
   try {
     // open invokes resume synchronously here, inside the button's user gesture.
     const opening = AudioHost.open({ module: audioModule, generation: session.id, channels: 2,
@@ -290,13 +314,17 @@ async function play() {
     session.audio = await opening;
     if (activePlay !== session || session.phase === "closing") { await session.audio.stop(); return; }
     session.workerStarted = true;
+    const source = mode === "replay" ? { mode, replayFile: session.replayFile }
+      : { mode, seed: ui.seed.value, recordReplay: session.recordReplay,
+        keyPairs: Uint32Array.from(KEY_BINDINGS.flatMap(row => [row[0], row[2]])) };
     const prepared = await playRpc(session, "play-start", { libraryId, path: ui.chart.value,
-      rate: session.audio.sampleRate, seed: ui.seed.value, recordReplay: session.recordReplay,
-      keyPairs: Uint32Array.from(KEY_BINDINGS.flatMap(row => [row[0], row[2]])) });
+      rate: session.audio.sampleRate, ...source });
+    if (mode === "replay" ? prepared.mode !== "replay" : prepared.mode !== undefined && prepared.mode !== "live") throw new Error("Playback preparation mode changed.");
     ui.title.textContent = prepared.title || ui.chart.value;
     ui.details.textContent = `${prepared.artist || "Unknown artist"} · ${prepared.notes} notes · ${prepared.samples} sounds · ${session.audio.sampleRate} Hz output`;
-    session.bindings = bindingsFor(prepared.lanes);
-    ui.keys.textContent = session.bindings.map(row => `${row[0].toString(16).toUpperCase()}: ${row[1]}`).join(" · ");
+    session.bindings = mode === "replay" ? [] : bindingsFor(prepared.lanes);
+    ui.keys.textContent = mode === "replay" ? "Recorded input playback · Escape stops the replay."
+      : session.bindings.map(row => `${row[0].toString(16).toUpperCase()}: ${row[1]}`).join(" · ");
     for (let index = 0; index < prepared.samples; index++) {
       const sample = await playRpc(session, "play-sample");
       if (sample?.kind !== "sample") throw new Error("Prepared audio asset count changed.");
@@ -329,8 +357,8 @@ async function play() {
     ui.rate.value = String(session.audio.sampleRate);
     controls();
     ui.stop.focus();
-    status("Playing. Stop ends this session; leaving the page stops playback.");
-    session.timer = setInterval(() => { pumpInput(session); void pumpAudio(session); }, 8);
+    status(mode === "replay" ? "Playing recorded replay. Stop ends this session." : "Playing. Stop ends this session; leaving the page stops playback.");
+    session.timer = setInterval(() => { if (session.mode === "live") pumpInput(session); void pumpAudio(session); }, 8);
   } catch (error) {
     if (activePlay === session && session.phase !== "closing") await stopPlay(`Playback failed: ${String(error.message).slice(0, 4096)}`, true);
   }
@@ -380,11 +408,11 @@ function finishPlay(session) {
   if (activePlay === session && session.phase === "playing" && session.completionReady
     && session.events.length === 0 && session.tickPending === null && session.renderPending === null
     && session.batch === null && !session.audioBusy) {
-    void stopPlay("Song completed.", false, true);
+    void stopPlay(session.mode === "replay" ? "Recorded replay ended." : "Song completed.", false, true);
   }
 }
 function pumpInput(session) {
-  if (activePlay !== session || session.phase !== "playing" || session.tickPending !== null) return;
+  if (activePlay !== session || session.mode !== "live" || session.phase !== "playing" || session.tickPending !== null) return;
   try {
     const events = session.events.splice(0, 256);
     let watermark = null;
@@ -475,6 +503,13 @@ function receivePlay(data) {
     clearTimeout(session.renderPending.timer);
     session.renderPending = null;
     session.completionReady = data.completed;
+    if (session.mode === "replay") {
+      if (typeof data.songNs === "bigint") ui.position.value = seconds(data.songNs.toString());
+      if (performance.now() - session.lastStatus >= 100) {
+        session.lastStatus = performance.now();
+        status(`Replay · Hits ${data.hits ?? "unavailable"} · Misses ${data.misses ?? "unavailable"} · Combo ${data.combo ?? "unavailable"}`);
+      }
+    }
     finishPlay(session);
   } else if (data.kind === "play-step-done" && session.phase === "playing") {
     const pending = session.tickPending;

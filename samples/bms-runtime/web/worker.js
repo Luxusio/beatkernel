@@ -1,6 +1,7 @@
-import init, { BrowserGame, BrowserLibrary, BrowserView } from "./pkg/beatkernel_bms_runtime.js";
+import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
 import { bindingsFor, renderedCursor } from "./play-model.mjs";
+const { BrowserGame, BrowserLibrary, BrowserReplay, BrowserView } = runtime;
 let ready = null;
 let view = null;
 let library = null;
@@ -44,7 +45,8 @@ function scheduleDraw(reset = true) {
   const draw = () => {
     redraw = null;
     try {
-      if (play?.game) view.draw_game(play.game);
+      if (play?.game && play.mode === "replay") view.draw_replay(play.game);
+      else if (play?.game) view.draw_game(play.game);
       else view.draw();
       if (view.needs_redraw()) {
         if (++retries <= 3) scheduleDraw(false);
@@ -204,7 +206,7 @@ function disposeGame(state) {
   if (!game) return result;
   let stopped = false;
   try { game.stop(); stopped = true; } catch (cause) { result.cleanupError = cause; }
-  if (state.recordReplay && stopped) {
+  if (state.mode === "live" && state.recordReplay && stopped) {
     try {
       const bytes = game.take_replay();
       if (!(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer)
@@ -267,37 +269,61 @@ async function preparePlay(state, request) {
   let prepared = null;
   try {
     rpc(state, request, true);
+    if (request.mode !== undefined && request.mode !== "live" && request.mode !== "replay") throw new Error("Invalid playback mode.");
+    state.mode = request.mode ?? "live";
+    let replayFile = null;
+    let replaySize = 0;
+    if (state.mode === "replay") {
+      if (!(request.replayFile instanceof File)) throw new Error("Select an actual replay file.");
+      replayFile = request.replayFile;
+      replaySize = replayFile.size;
+      if (!integer(replaySize, 1, 64 * 1024 * 1024)) throw new Error("Select a nonempty replay file no larger than 64 MiB.");
+    }
     await ready;
     if (failed || play !== state) return;
     if (importing || importPumpRunning || pendingImport || stagedLibrary
       || !library || request.libraryId !== libraryId) throw new Error("Wait for the accepted library before starting gameplay.");
-    if (typeof request.path !== "string" || !request.path.length
-      || !integer(request.rate, 1, 0xffffffff)
-      || typeof request.seed !== "string" || !/^\d{1,20}$/.test(request.seed) || BigInt(request.seed) > U64_MAX) {
-      throw new Error("Invalid gameplay chart, sample rate or seed.");
+    if (typeof request.path !== "string" || !request.path.length || !integer(request.rate, 1, 0xffffffff)) {
+      throw new Error("Invalid gameplay chart or sample rate.");
     }
     if (request.recordReplay !== undefined && typeof request.recordReplay !== "boolean") throw new Error("Invalid replay recording choice.");
-    if (!(request.keyPairs instanceof Uint32Array) || request.keyPairs.length > 36 || request.keyPairs.length % 2 !== 0) {
-      throw new Error("Invalid bounded gameplay key bindings.");
-    }
-    const pairs = request.keyPairs.slice();
+    let pairs = null;
     const lanes = [];
     const keys = new Set();
-    for (let index = 0; index < pairs.length; index += 2) {
-      lanes.push(pairs[index]);
-      if (!integer(pairs[index + 1], 1, 65535) || keys.has(pairs[index + 1])) throw new Error("Gameplay keys must be valid and unique.");
-      keys.add(pairs[index + 1]);
+    if (state.mode === "replay") {
+      if (request.recordReplay === true) throw new Error("Replay playback cannot record live input.");
+      const bytes = await replayFile.arrayBuffer();
+      if (failed || play !== state) return;
+      if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== replaySize) throw new Error("Replay file size changed or returned an invalid buffer.");
+      prepared = library.prepare_replay_chart(request.path, new Uint8Array(bytes), request.rate, 2,
+        64 * 1024 * 1024, 256 * 1024 * 1024, 1296);
+    } else {
+      if (typeof request.seed !== "string" || !/^\d{1,20}$/.test(request.seed) || BigInt(request.seed) > U64_MAX) throw new Error("Invalid gameplay chart seed.");
+      if (!(request.keyPairs instanceof Uint32Array) || request.keyPairs.length > 36 || request.keyPairs.length % 2 !== 0) throw new Error("Invalid bounded gameplay key bindings.");
+      pairs = request.keyPairs.slice();
+      for (let index = 0; index < pairs.length; index += 2) {
+        lanes.push(pairs[index]);
+        if (!integer(pairs[index + 1], 1, 65535) || keys.has(pairs[index + 1])) throw new Error("Gameplay keys must be valid and unique.");
+        keys.add(pairs[index + 1]);
+      }
+      bindingsFor(lanes);
+      prepared = library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, 1296);
     }
-    bindingsFor(lanes);
-    prepared = library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, 1296);
     const chartLanes = Array.from(prepared.lanes);
     bindingsFor(chartLanes);
-    if (chartLanes.some(lane => !lanes.includes(lane))) throw new Error("A prepared lane has no supplied key binding.");
+    if (state.mode === "live" && chartLanes.some(lane => !lanes.includes(lane))) throw new Error("A prepared lane has no supplied key binding.");
     const metadata = { title: prepared.title, artist: prepared.artist, notes: prepared.note_count, lanes: chartLanes };
     const moved = prepared;
     prepared = null; // A consuming Rust constructor also owns the argument on Err.
-    state.game = new BrowserGame(moved, 0n, 100000000n, 50000000n, 50000000n, 0n, pairs);
-    if (request.recordReplay === true) {
+    state.game = state.mode === "replay"
+      ? new BrowserReplay(moved, 100000000n)
+      : new BrowserGame(moved, 0n, 100000000n, 50000000n, 50000000n, 0n, pairs);
+    if (state.mode === "replay") {
+      const recordedUntilNs = state.game.recorded_until_ns ?? null;
+      if (recordedUntilNs !== null && !signed(recordedUntilNs)) throw new Error("Invalid actual replay prefix extent.");
+      metadata.mode = "replay";
+      metadata.recordedUntilNs = recordedUntilNs;
+    } else if (request.recordReplay === true) {
       state.game.configure_capture(64 * 1024 * 1024, 1000000);
       state.recordReplay = true;
     }
@@ -357,6 +383,7 @@ function pumpCommands(state) {
 }
 
 function stepPlay(state, request) {
+  if (state.mode !== "live") throw new Error("Replay playback cannot accept live gameplay steps.");
   if (!state.active || !identity(request.tickId) || request.tickId <= state.lastTick
     || !Array.isArray(request.events) || request.events.length > 256 || !hostTime(request.audioNs)
     || !(request.watermark === null || hostTime(request.watermark))) throw new Error("Invalid active gameplay step.");
@@ -406,6 +433,7 @@ function handlePlay(request) {
       batch: null, lastRpc: 0, lastTick: 0, lastRender: 0,
       lastHost: null, lastSequence: null, preOriginInputs: 0,
       recordReplay: false, completed: false,
+      mode: "live",
     };
     play = state; // Reserve before the ready await so stop cannot race a late owner.
     lastPlayId = state.id;
@@ -435,7 +463,7 @@ function handlePlay(request) {
       pumpCommands(state);
     } else if (request.kind === "play-activate") {
       if (state.active || !hostTime(request.hostNs) || !unsigned(request.startFrame)) throw new Error("Invalid or repeated gameplay activation.");
-      state.game.activate(request.hostNs);
+      if (state.mode === "live") state.game.activate(request.hostNs);
       state.origin = request.hostNs;
       state.startFrame = request.startFrame;
       state.active = true;
@@ -443,15 +471,19 @@ function handlePlay(request) {
     } else if (request.kind === "play-step") stepPlay(state, request);
     else if (request.kind === "play-render") {
       if (!state.active || !identity(request.renderId) || request.renderId <= state.lastRender) throw new Error("Invalid rendered-report identity or state.");
-      if (!(request.presentedNs === null && request.presentedHostNs === null)
+      if (state.mode === "replay") {
+        if (!(request.presentedNs === null || hostTime(request.presentedNs))) throw new Error("Invalid replay output presentation point.");
+      } else if (!(request.presentedNs === null && request.presentedHostNs === null)
         && !(hostTime(request.presentedNs) && hostTime(request.presentedHostNs))) throw new Error("Invalid output presentation pair.");
       renderedCursor(request.report, state.startFrame);
       const completed = state.game.observe_output(request.report.words, request.presentedNs);
       if (typeof completed !== "boolean" || (completed && state.batch !== null)) throw new Error("Invalid completion with outstanding gameplay commands.");
-      if (request.presentedNs !== null) state.game.observe_presentation(request.presentedNs, request.presentedHostNs);
+      if (state.mode === "live" && request.presentedNs !== null) state.game.observe_presentation(request.presentedNs, request.presentedHostNs);
       state.completed = completed;
       state.lastRender = request.renderId;
-      report("play-render-done", { playId: state.id, renderId: request.renderId, completed });
+      report("play-render-done", { playId: state.id, renderId: request.renderId, completed,
+        ...(state.mode === "replay" ? statistics(state) : {}) });
+      if (state.mode === "replay") scheduleDraw();
       pumpCommands(state);
     } else throw new Error("Unknown gameplay request.");
   } catch (error) { failPlay(state, error, request); }
