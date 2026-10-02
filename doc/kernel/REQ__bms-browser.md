@@ -217,11 +217,44 @@ both audio cleanup and a correlated Worker release before re-enabling controls.
 Pending setup cancellation reports null score when no runtime exists. Page
 teardown or a bounded missing-stop-receipt deadline terminates Worker ownership;
 a missing receipt or failed audio cleanup requires reloading before further play. The saved accepted
-preview metadata and position are restored after ordinary stop. Full automatic
-song completion is not implemented; stopping is currently explicit. Source,
-fixtures and cargo check evidence are distinct from behavioral acceptance.
+preview metadata and position are restored after ordinary stop. The automatic
+completion source path below also uses this cleanup handshake. Source, fixtures
+and cargo check evidence are distinct from behavioral acceptance.
 
 Audio opening failures preserve the original setup error and attach cleanupError
 when bounded stop/close also fails. Cancellation waits for the opening promise
 and propagates this cleanup evidence before releasing the UI owner. Failed
 opening cleanup requires reload even when no usable AudioHost was returned.
+
+
+## Browser automatic song completion
+
+Natural completion must use the existing shared SongCompletion evidence: every
+original chart object resolved after its inclusive deadline, complete BGM
+admission/render credit, no queued or awaiting-ACK producer work, then a later
+idle Mixer block and an actual reported output position past that block. Neither
+a chart duration, last-note timer nor admitted command count proves completion.
+Any new producer work resets the pending drain barrier before re-observation.
+
+The supplied host obtains actual AudioContext output timestamps and converts
+context position to the armed Mixer grid conservatively with integer arithmetic.
+Only fresh, nonregressing reports are forwarded; unavailable, future, stale,
+zero or prestart reports remain unavailable. Elapsed UI time never advances a
+reported output cursor. The browser's estimate does not prove acoustic latency.
+
+Completion retains the gameplay owner until the Window's captured input prefix
+and outstanding steps/audio batch join, then uses the same bounded stop/disposal
+handshake. A manual stop, cancellation or failure does not become a natural
+finish. A browser without usable output timestamp evidence keeps manual Stop
+available and cannot claim natural completion. Input/output drift discipline,
+capture/replay, persistence and browser networking remain separate unfinished
+work; this acceptance contract is not evidence that the source was executed.
+
+A gameplay disposal error during completion or manual stop is retained as a
+cleanup failure. The Window terminates that Worker and requires reload before
+another play; an earlier natural-finish candidate does not hide the error.
+
+The numeric Worklet-report decoder belongs to the existing portable application
+audio boundary. WASM bindings delegate to its single implementation; direct
+decoder fixtures can run as ordinary host Rust tests without generated bindings
+or a browser. This changes no PCM callback or serialized byte format.

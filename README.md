@@ -73,8 +73,9 @@ Browser reuse currently provides bounded selected-file preparation and a Worker
 chart/BGA preview plus an authored Play/Stop path through the common SoloRuntime.
 A separate `browser-audio` component uses the common Rust Mixer in an
 AudioWorklet. The host transfers original PCM and originating Window keyboard
-timestamps through bounded message owners; output clock discipline, automatic
-completion, capture/replay and browser networking remain unfinished.
+timestamps through bounded message owners. Natural completion uses the shared
+judge/Mixer drain and actual reported output timestamps. Output clock drift
+discipline, capture/replay and browser networking remain unfinished.
 See the [browser host instructions](samples/bms-runtime/web/README.md).
 Browser source compilation does not establish playable browser behavior.
 

@@ -5,8 +5,9 @@ application crate. This host imports user-selected files, prepares chart/audio/
 image data through the common Rust algorithms, and displays compiled notes and
 static BGA at an explicit song position. The Play source path also transfers
 prepared PCM to an AudioWorklet and feeds originating Window keyboard timestamps
-into the same SoloRuntime used by native gameplay. Capture/replay, automatic
-song completion and multiplayer are not yet wired to this host.
+into the same SoloRuntime used by native gameplay. The natural-completion source
+path joins terminal judging, Mixer drain and reported output timestamps.
+Capture/replay and multiplayer are not yet wired to this host.
 
 The DOM owns file selection, controls and layout. A dedicated module Worker owns
 the imported bytes, preparation and wgpu rendering on a transferred
@@ -119,7 +120,7 @@ review/QA remain deferred; the full player task stays open.
 The separate `browser-audio` feature exports the existing Rust Mixer through a
 numeric ABI for `audio-worklet.js`. It belongs to the same application crate
 and excludes graphics. The Play controls connect the component to common gameplay and keyboard input.
-Capture, replay, automatic completion and network play remain separate work.
+Capture, replay and network play remain separate work.
 
 When execution is scheduled, build and generate this artifact separately from
 the graphics bindings above. Each Cargo build replaces the common output WASM,
@@ -207,8 +208,23 @@ animation timestamps never advance the song. Runtime processing and audio
 command admission continue independently against bounded queues. Actual Mixer
 reports credit rolling BGM. The nominal bracketed software start projection
 has not yet been disciplined with output timestamps; it is not measured output
-latency or a guarantee against acoustic drift. Completion, capture/replay and
-browser networking are still unfinished.
+latency or a guarantee against acoustic drift. Capture/replay and browser
+networking are still unfinished.
+
+Natural completion uses the existing shared SongCompletion owner. Every original
+object must finish judging; BGM and outgoing/local command work must finish;
+then a subsequent idle Mixer block must be covered by a genuine reported output
+timestamp. The Window joins its captured input and outstanding operations before
+closing the game/audio owner and showing the actual final score. A duration or
+last-note timer never substitutes for output drain.
+
+The host forwards output timestamps at their reported context position, with no
+extrapolation by elapsed UI time. It accepts points at most one second old and
+subtracts the exact armed start conservatively. Zero, stale, future, regressing
+and prestart evidence cannot complete playback. Missing output timestamp support
+keeps manual Stop available. Malformed or suspended-owner evidence fails the
+session. This browser-reported estimate is not acoustic latency validation and
+does not yet discipline the input timeline's drift.
 
 Additional deferred regressions are authored for the portable Rust owner,
 Worker adapter and shared numeric helpers. Execute only when the deferred test
