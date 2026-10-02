@@ -244,8 +244,8 @@ Existing default queue and ordinary pause behavior remain intact. Pure checked
 session/host bracketing and nominal ClockPair output-frame projection preserve
 intervals, check domains/overflow and enforce future frame margins.
 These prerequisites now support Linux solo network startup as specified below.
-Windows/macOS still use the existing software call commitment; their native
-calibration/frame arming ports remain required. Authored fixtures compile only;
+CoreAudio and WASAPI now use held-device calibration/frame arming below; ASIO
+still requires its bounded-interval startup port. Authored fixtures compile only;
 runtime/formal acceptance remains deferred.
 
 ## Linux calibrated initial frame startup
@@ -260,8 +260,8 @@ Explicit startup geometry lets pause/end observers validate silent prefix and
 finite suffix without weakening default guards. Preserve up to4096 actual evdev
 events after arm until origin known, then use original timestamps in existing
 runtime input filtering. Cancellation/loss/resync/overflow/native errors remain
-explicit inside joined native cleanup. Offline/ghost/local cohorts and Windows/
-macOS retain previous startup until their later port. Actual physical accuracy,
+explicit inside joined native cleanup. Offline/ghost/local cohorts retain previous
+startup; CoreAudio/WASAPI ports are specified below. Actual physical accuracy,
 drift/device/socket execution and formal acceptance remain unverified/deferred.
 
 Calibration requires at least100ms of advancing native host/source observations;
@@ -270,3 +270,43 @@ is bounded by2s, then readiness/commit and actual crossing use the configured
 multiplayer setup timeout. Session bracket freshness uses start-policy max age.
 A zero-length finite section uses its exact physical end marker plus native
 crossing, because it cannot publish a positive-playback start acknowledgement.
+
+## CoreAudio and WASAPI calibrated initial frame startup
+
+MacOS CoreAudio and Windows WASAPI shared/exclusive solo network paths use the
+held-device frame startup contract, actual native clock observations, conservative
+future projection, bounded calibration/commit/crossing and original post-arm input
+retention. IOHID registry/health/loss and Raw Input foreground cleanup/removal/close
+remain explicit. Windows physical stream-clock zero and playback-start coordinate
+are separate: converting a WASAPI position never adds the selected playback frame.
+PresentationDiscipline::new_with_playback_origin validates same output domain and
+playback origin at/after stream origin before observations; default new uses the
+same coordinate for both. Desired song phase subtracts playback origin, while
+native conversion and source identity retain original physical stream origin.
+Network keysound commands stay on logical playback grid even without manual pause.
+Synthetic raw-snapshot regression fixtures must preserve physical positions and
+zero phase error across a delayed start. ASIO still uses the existing software
+start-call commitment; its bounded presentation intervals require separate startup
+projection and SDK/device evidence. Offline/ghost/local groups and wireversion6
+remain unchanged. Physical accuracy, drift, actual devices/sockets and formal
+acceptance stay unverified; tests are authored/compiled without execution.
+
+## Shared native runtime ownership
+
+Native capabilities must be maximally abstracted while preserving their actual
+semantics. Multiplayer/gameplay/lifecycle/scheduling policy is shared. A single
+native_start::start_committed owns the held-device startup sequence for normalized
+pair/counter backends; OS code supplies NativeStartDevice operations/evidence,
+not separate calibration/commit/arming/crossing workflows. NativeStartAgreement
+adapts shared LiveCompetition; fake native adapters with an actual gated mixer
+exercise the same owner without sockets or native hardware. Original evidence
+and clock domains remain intact. ASIO interval support stays explicit. Broader
+shared gameplay-pump migration remains required; this startup migration does not
+claim every native entry point is already thin. See ADR__native-runtime-boundaries.md.
+
+Native presentation metadata may legitimately name a future host coordinate.
+The shared owner retains the first qualifying crossing and its original evidence,
+continues acquisition/native status/BGM service under the same deadline, and
+publishes ready only once actual normalized host_now reaches the interpolated
+playback origin. Reject host-domain changes/regression; cancellation preserves
+cleanup ownership. Do not replace that crossing with later observations.
