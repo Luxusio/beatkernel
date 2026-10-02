@@ -1320,7 +1320,30 @@ than silently clamp. Applied first playback frame is independently observable.
 Existing default queue and ordinary pause behavior remain intact. Pure checked
 session/host bracketing and nominal ClockPair output-frame projection preserve
 intervals, check domains/overflow and enforce future frame margins.
-These are prerequisites; native startup loops still use the existing software
-call commitment. Switching to silent device calibration and actual frame arming,
-transport anchoring/presentation and drift handling remain required. Authored
-fixtures compile only; runtime/formal acceptance remains deferred.
+These prerequisites now support Linux solo network startup as specified below.
+Windows/macOS still use the existing software call commitment; their native
+calibration/frame arming ports remain required. Authored fixtures compile only;
+runtime/formal acceptance remains deferred.
+
+## Linux calibrated initial frame startup
+
+Linux solo network playback starts ALSA behind the initial silence gate, measures
+actual advancing native pairs, obtains an early committed target and projects it
+with observed slope to a future physical frame beyond the render/buffer margin.
+Arm once, require matching applied-frame evidence and native presentation crossing,
+then anchor transport/discipline to that physical point. Checked session-to-HOST
+bracketing and retained uncertainty are independent of native physical accuracy.
+Explicit startup geometry lets pause/end observers validate silent prefix and
+finite suffix without weakening default guards. Preserve up to4096 actual evdev
+events after arm until origin known, then use original timestamps in existing
+runtime input filtering. Cancellation/loss/resync/overflow/native errors remain
+explicit inside joined native cleanup. Offline/ghost/local cohorts and Windows/
+macOS retain previous startup until their later port. Actual physical accuracy,
+drift/device/socket execution and formal acceptance remain unverified/deferred.
+
+Calibration requires at least100ms of advancing native host/source observations;
+observed slope must stay within the discipline default1000ppm. Initial calibration
+is bounded by2s, then readiness/commit and actual crossing use the configured
+multiplayer setup timeout. Session bracket freshness uses start-policy max age.
+A zero-length finite section uses its exact physical end marker plus native
+crossing, because it cannot publish a positive-playback start acknowledgement.
