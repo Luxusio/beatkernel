@@ -67,6 +67,8 @@ pub mod multiplayer_start;
 /// Omitted solo option defaults, independent of native discovery.
 pub mod native_defaults;
 pub mod native_end;
+/// Checked nominal session/host/output projection for future native frame startup.
+pub mod native_start;
 /// Full-prefix prepared-object presentation state.
 pub mod note_progress;
 /// Synthetic offline composition using the same runtime and mixer as native apps.
