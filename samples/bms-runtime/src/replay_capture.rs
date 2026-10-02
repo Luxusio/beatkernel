@@ -249,13 +249,18 @@ impl LiveReplayCapture {
         let (header, records) = self.recorder.into_parts();
         ReplayFile::new(header, records)
     }
+    /// Encodes the accepted prefix with its original limits, without file I/O.
+    /// Consuming the capture makes this one export attempt; no judge is rerun.
+    pub fn into_bytes(self) -> Result<Vec<u8>, CaptureError> {
+        let limits = self.limits;
+        Ok(encode_replay(&self.into_file(), limits)?)
+    }
     /// Encodes before exclusive file creation; invoke after native cleanup.
     ///
     /// Existing files remain untouched. A write/flush failure can leave a partial
     /// newly created file. Success means a flushed write, not power-loss safety.
     pub fn save_new(self, path: &Path) -> Result<usize, CaptureError> {
-        let limits = self.limits;
-        let bytes = encode_replay(&self.into_file(), limits)?;
+        let bytes = self.into_bytes()?;
         let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
         file.write_all(&bytes)?;
         file.flush()?;

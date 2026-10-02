@@ -119,6 +119,7 @@ impl BrowserLibrary {
             prepared,
             chart,
             images,
+            chart_seed: seed,
         })
     }
 }
@@ -129,6 +130,7 @@ pub struct BrowserPrepared {
     pub(crate) prepared: PreparedBms,
     pub(crate) chart: PlayerChart,
     pub(crate) images: Arc<ImageAssets>,
+    pub(crate) chart_seed: u64,
 }
 
 #[wasm_bindgen]

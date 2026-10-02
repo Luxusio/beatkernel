@@ -16,9 +16,10 @@ use beatkernel::{
     audio::{AudioCommand, PcmSample, SampleId},
     input::{
         Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector, EventMeta,
-        GameControlId, PhysicalControlId, PhysicalInputEvent,
+        GameControlId, PhysicalControlId, PhysicalInputEvent, codec::CodecLimits,
     },
     judge::JudgeEvent,
+    replay::codec::ReplayCodecLimits,
     runtime::RuntimeReport,
     time::{
         ClockDomainId, ClockMapper, ClockMappingQuality, ClockPair, ClockPoint, Duration, Timestamp,
@@ -99,6 +100,7 @@ pub struct BrowserGame {
     samples: VecDeque<(SampleId, PcmSample)>,
     output_start: Option<u64>,
     output_context: Option<u64>,
+    chart_seed: u64,
 }
 #[wasm_bindgen]
 impl BrowserGame {
@@ -176,10 +178,30 @@ impl BrowserGame {
             samples: bank.into_samples().collect(),
             output_start: None,
             output_context: None,
+            chart_seed: prepared.chart_seed,
         })
     }
     pub fn sample_count(&self) -> usize {
         self.samples.len()
+    }
+    /// Optional bounded canonical replay capture; must precede gameplay input
+    /// or advancement. The seed comes from the actual prepared chart owner.
+    pub fn configure_capture(&mut self, max_bytes: u32, max_records: u32) -> Result<(), JsValue> {
+        let limits = ReplayCodecLimits::new(
+            max_bytes as usize,
+            max_records as usize,
+            4096,
+            CodecLimits::new(65_536, 32_768).map_err(error)?,
+        )
+        .map_err(error)?;
+        self.game
+            .configure_capture(limits, self.chart_seed)
+            .map_err(error)
+    }
+    /// Called after stop/failure and before free; yields owned encoded bytes
+    /// once. The binding does not create a file or infer a complete-song label.
+    pub fn take_replay(&mut self) -> Result<Option<Vec<u8>>, JsValue> {
+        self.game.take_replay().map_err(error)
     }
     pub fn activate(&mut self, host_ns: i64) -> Result<(), JsValue> {
         self.game.activate(point(HOST, host_ns)).map_err(error)
@@ -401,8 +423,13 @@ impl BrowserGame {
                 Ok(())
             }
             Err(failure) => {
-                if let StepGameplayError::Report { report, .. } = &failure {
-                    self.observe(report);
+                match &failure {
+                    StepGameplayError::Report { report, .. }
+                    | StepGameplayError::Capture {
+                        report: Some(report),
+                        ..
+                    } => self.observe(report),
+                    _ => {}
                 }
                 Err(error(failure))
             }

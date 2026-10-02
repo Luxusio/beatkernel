@@ -8,6 +8,7 @@ use crate::{
     completion::{CompletionError, SongCompletion},
     local_runtime::{GroupError, SoloRuntime},
     native_judge::NativeJudgeConfig,
+    replay_capture::{CaptureError, LiveReplayCapture},
 };
 use beatkernel::{
     audio::{
@@ -16,6 +17,7 @@ use beatkernel::{
     },
     input::{BindingMap, PhysicalInputEvent},
     judge::JudgeEngine,
+    replay::codec::ReplayCodecLimits,
     runtime::{RuntimeProcessingClock, RuntimeReport},
     time::{ClockDomainId, ClockMapper, ClockPair, ClockPoint, Duration, Timestamp},
     transport::{Rate, Transport},
@@ -73,6 +75,13 @@ pub enum StepGameplayError {
     Report {
         report: RuntimeReport,
         score_error: Option<CompetitionError>,
+        capture_error: Option<CaptureError>,
+    },
+    /// Capture rejected a committed operation, or setup/export failed without
+    /// an operation. Earlier recorded operations remain the accepted prefix.
+    Capture {
+        error: CaptureError,
+        report: Option<RuntimeReport>,
     },
     Bgm {
         error: BgmFeedError,
@@ -122,13 +131,16 @@ impl fmt::Display for StepGameplayError {
             Self::Report {
                 report,
                 score_error,
+                capture_error,
             } => write!(
                 f,
-                "step gameplay report failed: judge {:?}, {} audio failures, score {:?}",
+                "step gameplay report failed: judge {:?}, {} audio failures, score {:?}, capture {:?}",
                 report.judge_error,
                 report.audio_failures.len(),
-                score_error
+                score_error,
+                capture_error
             ),
+            Self::Capture { error, .. } => write!(f, "step gameplay capture: {error}"),
             Self::Bgm { error, report } => write!(
                 f,
                 "{error}; {} BGM admissions remain committed",
@@ -176,6 +188,7 @@ pub struct StepGameplay {
     last_presented: Option<Timestamp>,
     output_clock: Option<PresentationDiscipline>,
     correction_watermark: Option<ClockPoint>,
+    capture: Option<LiveReplayCapture>,
     score: ScoreSummary,
     song: Timestamp,
     host_domain: ClockDomainId,
@@ -313,6 +326,7 @@ impl StepGameplay {
             last_presented: None,
             output_clock: None,
             correction_watermark: None,
+            capture: None,
             score: ScoreSummary::default(),
             song,
             host_domain: config.host_origin.domain,
@@ -333,6 +347,55 @@ impl StepGameplay {
         } else {
             Ok(())
         }
+    }
+
+    /// Opt in while the original judge is pristine, using the resolved chart
+    /// branch seed. Setup refusal is atomic and leaves this owner usable.
+    /// Preroll reports retain their actual negative song times; the chart's
+    /// original-song section start remains zero in the existing replay header.
+    pub fn configure_capture(
+        &mut self,
+        limits: ReplayCodecLimits,
+        chart_seed: u64,
+    ) -> Result<(), StepGameplayError> {
+        self.ensure_usable()?;
+        if self.started || self.capture.is_some() {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "capture configuration requires an unprocessed, unconfigured runtime",
+            ));
+        }
+        let capture = LiveReplayCapture::new_at_with_chart_seed(
+            self.runtime.judge(),
+            self.host_domain,
+            limits,
+            Timestamp::ZERO,
+            chart_seed,
+        )
+        .map_err(|error| StepGameplayError::Capture {
+            error,
+            report: None,
+        })?;
+        self.capture = Some(capture);
+        Ok(())
+    }
+
+    /// Take the canonical accepted prefix once, only after stop/failure fenced
+    /// further gameplay. Disabled or already consumed capture returns None.
+    /// Encoding failure also consumes this export attempt; no operations retry.
+    pub fn take_replay(&mut self) -> Result<Option<Vec<u8>>, StepGameplayError> {
+        if !self.failed {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "replay export requires a stopped or fenced runtime",
+            ));
+        }
+        self.capture
+            .take()
+            .map(LiveReplayCapture::into_bytes)
+            .transpose()
+            .map_err(|error| StepGameplayError::Capture {
+                error,
+                report: None,
+            })
     }
 
     /// Opt in before any processing. Configuration reserves the existing
@@ -492,6 +555,10 @@ impl StepGameplay {
             self.completion.reset_drain();
         }
         let score_error = self.score.observe(&report.judge_events).err();
+        let capture_error = self
+            .capture
+            .as_mut()
+            .and_then(|capture| capture.record_report(&report).err());
         if score_error.is_some()
             || report.judge_error.is_some()
             || !report.audio_failures.is_empty()
@@ -500,6 +567,14 @@ impl StepGameplay {
             return Err(StepGameplayError::Report {
                 report,
                 score_error,
+                capture_error,
+            });
+        }
+        if let Some(error) = capture_error {
+            self.failed = true;
+            return Err(StepGameplayError::Capture {
+                error,
+                report: Some(report),
             });
         }
         Ok(report)
