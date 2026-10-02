@@ -1235,7 +1235,7 @@ replay-aware preparation, compiling them without execution under the user deferr
 After native audio/input cleanup, a connected solo network owner admits its
 exact latest cumulative prefix and waits at most the configured I/O stall
 timeout for a matching terminal acknowledgement. Periodic50ms throttling must
-not omit that prefix. Wire version2 separates progress, terminal progress and
+not omit that prefix. Wire version3 retains separate progress, terminal progress and
 acknowledgement with ordered sequences and checked cumulative counts. Reject
 duplicate/unsolicited/wrong acknowledgements, repeated terminal frames and
 progress after terminal. Preserve complete-frame writes when prioritizing the
@@ -1251,3 +1251,16 @@ audio threads. This section supersedes the earlier no-guaranteed-final note only
 for a connected peer that explicitly acknowledges the prefix; disconnected peers
 remain undeliverable. Prepare protocol/lifecycle fixtures for later execution;
 native and socket acceptance remain deferred.
+## Network preparation before native playback
+
+Linux ALSA, Windows WASAPI/optionalASIO and macOS CoreAudio solo owners await
+bilateral compatible native readiness immediately before audio start, inside
+the existing cleanup-owned outcome. Use the configured multiplayer setup
+deadline, explicit cancellation and bounded per-pass256 native input/message
+draining. No judgment or replay input is admitted during waiting. Preserve
+native input loss/removal/decode failures and foreground Raw Input cleanup.
+Errors/timeouts cancel the network owner and run existing native cleanup;
+offline and ghost-only modes keep their existing startup. Wireversion3 updates
+the earlier terminal-prefix version2 contract while preserving final/ack data
+semantics. This is a preparation barrier; common-clock scheduled starts and
+measured synchronization still require implementation and later execution.

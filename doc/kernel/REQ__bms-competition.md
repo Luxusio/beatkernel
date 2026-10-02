@@ -79,8 +79,9 @@ results and song times. A selected opponent failing compatibility aborts startup
 Select `--mp-host IP:PORT` or `--mp-join IP:PORT`; ports are nonzero, numeric
 addresses are explicit, and joining an unspecified address is rejected. Optional
 `--mp-timeout-ms` accepts 100..120000 (default 10000). The socket worker starts
-before audio, and local play proceeds without waiting for peer setup. Progress
-publishes only after a compatible handshake, at most once per 50 ms of song
+before audio, and native output waits for compatible bilateral preparation.
+After startup, local play does not wait for score packets. Progress
+publishes only after bilateral readiness, at most once per 50 ms of song
 time. Network errors print an explicit terminal status while local play continues.
 The socket owner is retained for joined cleanup outside the input/advance path.
 After native cleanup the app prints the exact final local prefix and saved
@@ -89,7 +90,7 @@ prefix and waits until the configured I/O stall deadline for its exact peer
 acknowledgement before joining the networking worker. Queue pressure is retryable
 within that deadline; disconnect, cancellation, protocol errors and timeout
 remain explicit failures. This bypasses periodic publication throttling without
-introducing a gameplay/audio wait. The wire protocol is version2; version1 peers
+introducing a gameplay/audio wait. The wire protocol is version3; versions1/2 peers
 are incompatible. Retain received peer-terminal progress separately from ordinary
 progress. A receipt confirms acceptance of a self-reported terminal prefix,
 including aborted sessions; it does not establish completed play or a ranking.
@@ -120,3 +121,24 @@ as files; the application does not silently upload or download them.
 Source checks passed on Linux host, Windows GNU and macOS x86_64. They cover
 authored fixture compilation and the unified/native call paths, not execution,
 linking, real socket exchange, device playback or ASIO SDK/C++ acceptance.
+## Bilateral native preparation
+
+Selected network playback waits for both compatible peers to declare native
+preparation before starting audio. Assets, immutable PCM schedule, device and
+input acquisition complete before one-shot readiness admission. Version3 uses
+an empty ready frame; readiness requires full local frame write and remote
+ready receipt. Reject duplicate/nonempty ready frames and progress/terminal
+frames before bilateral readiness. Versions1/2 are incompatible. The existing
+setup timeout bounds startup waiting; unavailable peers abort before output
+start rather than silently playing alone.
+
+The game owner services bounded native input/messages during waiting, ignoring
+pre-output-origin input without judging/capturing/retimestamping. Native loss,
+removal and decode errors remain explicit. Cancellation exits through existing
+cleanup. Ghost-only/offline playback acquires no new wait. Publish Waiting until
+ready and Connected after both sides' readiness. The main UI and audio callback
+do not wait. This preparation barrier supersedes earlier independent-before-peer
+startup behavior; peers still derive local audio clocks independently. A common
+scheduled start time, clock calibration and physical synchronization are not
+implemented by readiness. Fixtures are authored/compiled only; native/socket
+execution and formal acceptance remain deferred.
