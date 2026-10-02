@@ -1,5 +1,5 @@
 //! Bounded off-thread presentation observations and continuous unit-song correction.
-use super::{observation, PresentationError};
+use super::{PresentationError, observation};
 use crate::audio::AudioStreamSnapshot;
 use beatkernel::{
     time::{ClockDomainId, ClockMappingQuality, ClockPair, ClockPoint, Duration, Timestamp},
@@ -152,6 +152,7 @@ struct Observed {
 pub struct PresentationDiscipline {
     config: DisciplineConfig,
     output_origin: ClockPoint,
+    playback_origin: ClockPoint,
     host_domain: ClockDomainId,
     applied_song_origin: Timestamp,
     retained: Vec<Observed>,
@@ -168,6 +169,29 @@ impl PresentationDiscipline {
         host_domain: ClockDomainId,
         applied_song_origin: Timestamp,
     ) -> Result<Self, DisciplineError> {
+        Self::new_with_playback_origin(
+            config,
+            output_origin,
+            output_origin,
+            host_domain,
+            applied_song_origin,
+        )
+    }
+    /// Separates native stream-clock zero from the physical first playback point.
+    /// Native observation identity/conversion always retains `output_origin`.
+    pub fn new_with_playback_origin(
+        config: DisciplineConfig,
+        output_origin: ClockPoint,
+        playback_origin: ClockPoint,
+        host_domain: ClockDomainId,
+        applied_song_origin: Timestamp,
+    ) -> Result<Self, DisciplineError> {
+        if playback_origin.domain != output_origin.domain {
+            return Err(DisciplineError::DomainMismatch);
+        }
+        if playback_origin.timestamp < output_origin.timestamp {
+            return Err(DisciplineError::InvalidConfig);
+        }
         let spans = [
             config.retention_interval,
             config.min_span,
@@ -195,6 +219,7 @@ impl PresentationDiscipline {
         Ok(Self {
             config,
             output_origin,
+            playback_origin,
             host_domain,
             applied_song_origin,
             retained,
@@ -473,7 +498,7 @@ impl PresentationDiscipline {
         let desired = i128::from(self.applied_song_origin.as_nanos())
             .checked_add(delta(
                 latest.pair.source.timestamp,
-                self.output_origin.timestamp,
+                self.playback_origin.timestamp,
             ))
             .ok_or(DisciplineError::Overflow)?;
         i64::try_from(desired).map_err(|_| DisciplineError::Overflow)?;

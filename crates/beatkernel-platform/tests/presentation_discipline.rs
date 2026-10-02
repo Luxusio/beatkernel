@@ -828,3 +828,98 @@ mod asio_observations {
         }
     }
 }
+
+#[test]
+fn delayed_playback_origin_preserves_native_position_and_song_phase() {
+    let stream = ClockPoint {
+        domain: ClockDomainId(2),
+        timestamp: Timestamp::ZERO,
+    };
+    let playback = ClockPoint {
+        timestamp: Timestamp::from_nanos(5_000_000_000),
+        ..stream
+    };
+    let mut discipline = PresentationDiscipline::new_with_playback_origin(
+        DisciplineConfig::default(),
+        stream,
+        playback,
+        ClockDomainId(1),
+        Timestamp::from_nanos(-100_000_000),
+    )
+    .unwrap();
+    let mut transport = Transport::new(
+        Timestamp::from_nanos(15_000_000_000),
+        Timestamp::from_nanos(-100_000_000),
+        Rate::NORMAL,
+    );
+    discipline
+        .observe(snapshot(5_100_000_000, 15_100_000_000))
+        .unwrap();
+    assert_eq!(
+        discipline
+            .latest_pair()
+            .unwrap()
+            .source
+            .timestamp
+            .as_nanos(),
+        5_100_000_000
+    );
+    discipline
+        .observe(snapshot(6_100_000_000, 16_100_000_000))
+        .unwrap();
+    assert_eq!(
+        discipline
+            .update(host(16_100_000_000), &mut transport)
+            .unwrap(),
+        DisciplineUpdate::Applied {
+            base_rate_ppm: 0,
+            correction_ppm: 0,
+            applied_rate_ppm: 0,
+            phase_error_ns: 0,
+            limited: false
+        }
+    );
+    assert_eq!(
+        transport
+            .position_at(host(16_100_000_000).timestamp)
+            .unwrap()
+            .as_nanos(),
+        1_000_000_000
+    );
+    assert_eq!(
+        discipline
+            .latest_pair()
+            .unwrap()
+            .source
+            .timestamp
+            .as_nanos(),
+        6_100_000_000
+    );
+    assert_eq!(discipline.quality(), ClockMappingQuality::Unknown);
+    assert!(matches!(
+        PresentationDiscipline::new_with_playback_origin(
+            DisciplineConfig::default(),
+            stream,
+            ClockPoint {
+                domain: ClockDomainId(3),
+                ..playback
+            },
+            ClockDomainId(1),
+            Timestamp::ZERO
+        ),
+        Err(DisciplineError::DomainMismatch)
+    ));
+    assert!(matches!(
+        PresentationDiscipline::new_with_playback_origin(
+            DisciplineConfig::default(),
+            stream,
+            ClockPoint {
+                timestamp: Timestamp::from_nanos(-1),
+                ..playback
+            },
+            ClockDomainId(1),
+            Timestamp::ZERO
+        ),
+        Err(DisciplineError::InvalidConfig)
+    ));
+}
