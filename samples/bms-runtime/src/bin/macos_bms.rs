@@ -559,7 +559,8 @@ mod native {
         NativeAudioConfig, PreparedNativeAudio, prepare_audio,
     };
     use beatkernel_bms_runtime::{
-        ChannelPolicy, load_prepared_with_seed,
+        ChannelPolicy,
+        native_chart::{NativeChartConfig, prepare_chart},
         native_end::NativeEnd,
         playback_pause::NativePause,
         player::{self},
@@ -929,22 +930,19 @@ mod native {
         let mut delivery = DeliverySession(beatkernel::telemetry::InputDeliveryTelemetry::new(
             4096, HOST,
         )?);
-        let prepared = load_prepared_with_seed(
-            &options.chart,
-            options.format,
-            PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
-            if options.mono_stereo {
+        let (prepared, section) = prepare_chart(NativeChartConfig {
+            path: &options.chart,
+            format: options.format,
+            limits: PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
+            channels: if options.mono_stereo {
                 ChannelPolicy::MonoToStereo
             } else {
                 ChannelPolicy::Exact
             },
-            options.chart_seed,
-        )?;
-        let (prepared, section) = beatkernel_bms_runtime::section_start::prepare_at(
-            prepared,
-            Timestamp::from_nanos(options.start_ns),
-            PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
-        )?;
+            chart_seed: options.chart_seed,
+            start: Timestamp::from_nanos(options.start_ns),
+            bindings: &options.bindings,
+        })?;
         println!("prepared practice section={section:?}");
         let mut completion = if options.end_ns.is_none() {
             Some(beatkernel_bms_runtime::completion::SongCompletion::prepare(
@@ -959,13 +957,6 @@ mod native {
         };
         for warning in &prepared.source.warnings {
             eprintln!("BMS warning line {}: {}", warning.line, warning.message);
-        }
-        for note in &prepared.source.notes {
-            if !options.bindings.contains_key(&note.lane.channel()) {
-                return Err(
-                    format!("missing --bind for BMS channel {:02X}", note.lane.channel()).into(),
-                );
-            }
         }
         beatkernel_bms_runtime::player::publish_native_chart(
             &options.chart,
