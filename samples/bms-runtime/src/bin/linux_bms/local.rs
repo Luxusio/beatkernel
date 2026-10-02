@@ -4,11 +4,12 @@ use super::*;
 #[cfg(test)]
 use beatkernel::input::PhysicalControlId;
 use beatkernel::{
-    audio::{Mixer, MixerConfig, PcmLimits, command_queue},
+    audio::PcmLimits,
     input::DeviceId,
     time::Duration,
     transport::{Rate, Transport},
 };
+use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio, prepare_audio};
 use beatkernel_bms_runtime::native_cohort_setup::{
     CohortPreparation, PreparedCohort, activate_cohort, admit_cohort as admit_mode, finish_cohort,
     prepare_cohort,
@@ -210,42 +211,25 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             replay_max_records: options.replay_max_records,
         },
     )?;
-    const SLACK: usize = 1024;
-    let capacity = AudioLimits::MAX_COMMANDS;
-    let (mut producer, consumer) = command_queue(capacity)?;
-    let mut bgm = BgmSession(beatkernel_bms_runtime::bgm::BgmFeeder::new(
-        beatkernel_bms_runtime::section_start::relative_commands(
-            prepared.bgm_commands,
-            Timestamp::from_nanos(options.start_ns),
-        )?,
-        beatkernel_bms_runtime::bgm::BgmConfig {
+    let PreparedNativeAudio {
+        mut producer,
+        bgm,
+        mixer,
+    } = prepare_audio(
+        prepared.bank,
+        prepared.bgm_commands,
+        NativeAudioConfig {
             output_origin: output_origin(),
-            sample_rate: options.format.sample_rate(),
+            start: Timestamp::from_nanos(options.start_ns),
             preroll: Duration::from_nanos(options.preroll),
             lookahead: Duration::from_nanos(options.bgm_lookahead),
-            max_pending: capacity - SLACK,
+            voices: options.voices,
+            max_render_frames: options.period as usize,
+            playback_end_frame: playback_end,
+            gated_start: false,
         },
-    )?);
-    bgm.feed(0, capacity - SLACK, |command| producer.try_push(command))?;
-    let mixer = Mixer::new(
-        {
-            let config = MixerConfig::new(
-                options.format,
-                OUTPUT,
-                Timestamp::ZERO,
-                AudioLimits::new(
-                    capacity,
-                    options.voices,
-                    capacity,
-                    options.period as usize,
-                    capacity,
-                )?,
-            );
-            playback_end.map_or(config, |end| config.with_playback_end_frame(end))
-        },
-        prepared.bank,
-        consumer,
     )?;
+    let mut bgm = BgmSession(bgm);
     // Every evdev owner precedes the stream. Native output therefore stops and
     // joins before input handles disappear on both normal and exceptional exits.
     let mut inputs = Vec::with_capacity(count);

@@ -307,15 +307,9 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
                 }
             }
         }
-        if let Some(report) = device.render_report()?.filter(|report| !report.paused) {
-            let cursor = report
-                .playback_start_frame
-                .checked_add(u64::try_from(report.playback_frames)?)
-                .ok_or("BGM render cursor overflow")?;
-            session.bgm.feed(cursor, 256, |command| {
-                session.runtime.enqueue_audio(command)
-            })?;
-        }
+        crate::native_audio::feed_rendered(session.bgm, device.render_report()?, |command| {
+            session.runtime.enqueue_audio(command)
+        })?;
         let received = device.host_now()?;
         if received.domain != config.origin.domain {
             return Err("native host domain changed".into());

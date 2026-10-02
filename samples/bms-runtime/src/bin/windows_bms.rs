@@ -1,5 +1,5 @@
 //! Real BMS/WAV assets, physical keyboard acquisition and explicit WASAPI/ASIO output.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 use beatkernel::audio::AudioCommand;
 #[cfg(test)]
 use beatkernel::time::Timestamp;
@@ -590,20 +590,7 @@ impl Drop for BgmSession {
     }
 }
 #[cfg(target_os = "windows")]
-fn feed_rendered(
-    bgm: &mut BgmSession,
-    report: Option<beatkernel::audio::RenderReport>,
-    admit: impl FnMut(AudioCommand) -> std::result::Result<(), beatkernel::audio::CommandPushError>,
-) -> Result<()> {
-    if let Some(report) = report.filter(|report| !report.paused) {
-        let end = report
-            .playback_start_frame
-            .checked_add(u64::try_from(report.playback_frames)?)
-            .ok_or("BGM render cursor overflow")?;
-        bgm.feed(end, 256, admit)?;
-    }
-    Ok(())
-}
+use beatkernel_bms_runtime::native_audio::feed_rendered;
 
 #[cfg(target_os = "windows")]
 struct DeliverySession(beatkernel::telemetry::InputDeliveryTelemetry);
@@ -716,13 +703,16 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
 mod native {
     use super::*;
     use beatkernel::{
-        audio::{Mixer, MixerConfig, PcmLimits, command_queue, command_queue_with_start_gate},
+        audio::PcmLimits,
         input::{Binding, BindingMap, DeviceSelector, GameControlId, PhysicalControlId},
         judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
         time::{ClockDomainId, ClockMappingQuality, ClockPoint, Timestamp},
         transport::Rate,
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
+    use beatkernel_bms_runtime::native_audio::{
+        NativeAudioConfig, PreparedNativeAudio, prepare_audio,
+    };
     use beatkernel_bms_runtime::{ChannelPolicy, load_prepared_with_seed};
     use beatkernel_bms_runtime::{
         playback_pause::NativePause,
@@ -1408,49 +1398,29 @@ mod native {
                 options.end_ns.map(Timestamp::from_nanos),
                 options.preroll,
             )?;
-        const LIVE_SLACK: usize = 1024;
+        const LIVE_SLACK: usize = beatkernel_bms_runtime::native_audio::LIVE_COMMAND_RESERVE;
         let capacity = AudioLimits::MAX_COMMANDS;
-        let limits = AudioLimits::new(
-            capacity,
-            options.voices,
-            capacity,
-            AudioLimits::MAX_RENDER_FRAMES,
-            capacity,
-        )?;
         let network_start =
             options.backend == Backend::Wasapi && competition_options.network.is_some();
-        let (mut producer, consumer) = if network_start {
-            command_queue_with_start_gate(capacity)?
-        } else {
-            command_queue(capacity)?
-        };
-        let mut bgm = BgmSession(beatkernel_bms_runtime::bgm::BgmFeeder::new(
-            beatkernel_bms_runtime::section_start::relative_commands(
-                prepared.bgm_commands,
-                Timestamp::from_nanos(options.start_ns),
-            )?,
-            beatkernel_bms_runtime::bgm::BgmConfig {
-                output_origin: beatkernel::time::ClockPoint {
-                    domain: OUTPUT,
-                    timestamp: Timestamp::ZERO,
-                },
-                sample_rate: pcm.sample_rate(),
+        let PreparedNativeAudio {
+            mut producer,
+            bgm,
+            mixer,
+        } = prepare_audio(
+            prepared.bank,
+            prepared.bgm_commands,
+            NativeAudioConfig {
+                output_origin,
+                start: Timestamp::from_nanos(options.start_ns),
                 preroll: Duration::from_nanos(options.preroll),
                 lookahead: Duration::from_nanos(options.bgm_lookahead),
-                max_pending: capacity - LIVE_SLACK,
+                voices: options.voices,
+                max_render_frames: AudioLimits::MAX_RENDER_FRAMES,
+                playback_end_frame: playback_end,
+                gated_start: network_start,
             },
-        )?);
-        bgm.feed(0, capacity - LIVE_SLACK, |command| {
-            producer.try_push(command)
-        })?;
-        let mixer = Mixer::new(
-            {
-                let config = MixerConfig::new(pcm, OUTPUT, Timestamp::ZERO, limits);
-                playback_end.map_or(config, |end| config.with_playback_end_frame(end))
-            },
-            prepared.bank,
-            consumer,
         )?;
+        let mut bgm = BgmSession(bgm);
         println!(
             "explicit Any-keyboard bindings={:?}; windows early={}ns late={}ns offset={}ns; channel_policy={} active_voices={} queue/pending={} reserved_live={LIVE_SLACK}",
             options.bindings,

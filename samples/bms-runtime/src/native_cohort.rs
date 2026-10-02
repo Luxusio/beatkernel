@@ -345,15 +345,9 @@ pub fn run_cohort<D: NativeGameplayDevice>(
                 }
             }
         }
-        if let Some(report) = device.render_report()?.filter(|report| !report.paused) {
-            let cursor = report
-                .playback_start_frame
-                .checked_add(u64::try_from(report.playback_frames)?)
-                .ok_or("cohort BGM cursor overflow")?;
-            session
-                .bgm
-                .feed(cursor, 256, |command| session.group.enqueue_audio(command))?;
-        }
+        crate::native_audio::feed_rendered(session.bgm, device.render_report()?, |command| {
+            session.group.enqueue_audio(command)
+        })?;
         // Acquire/admit during acknowledgement waits as well; otherwise native
         // loss and cross-device ordering would be hidden behind a pause request.
         let batch = device.acquire(&mut acquired)?;
