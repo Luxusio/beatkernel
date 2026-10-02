@@ -6,6 +6,8 @@ use crate::{
     bgm::BgmFeedError,
     local_runtime::FailureKind,
     prepare_from_source,
+    replay_capture::CaptureError,
+    replay_playback::{decode_chart_setup, reconstruct},
     step_gameplay::{StepGameplay, StepGameplayConfig, StepGameplayError},
 };
 use beatkernel::{
@@ -14,11 +16,16 @@ use beatkernel::{
         QueuePushError, SampleBank, SampleId, command_queue,
     },
     input::{
-        BackendId, Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector,
-        EventMeta, GameControlId, NativeEventMeta, PhysicalControlId, PhysicalInputEvent,
+        BackendId, Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, DeviceId,
+        DeviceSelector, EventMeta, GameControlId, NativeEventMeta, PhysicalControlId,
+        PhysicalInputEvent,
     },
     interaction::InteractionState,
     judge::{JudgeGrade, JudgeOutcome, JudgeStage, MissReason},
+    replay::{
+        ReplayOperation,
+        codec::{ReplayCodecError, ReplayCodecLimits, decode_replay, encode_replay},
+    },
     runtime::RuntimeError,
     time::{
         AffineClockMapper, ClockDomainId, ClockInterval, ClockPair, ClockPoint, Duration, Timestamp,
@@ -152,6 +159,10 @@ fn wav(samples: &[i16]) -> Vec<u8> {
 }
 
 fn prepared(lines: &str) -> PreparedBms {
+    prepared_seed(lines, 0)
+}
+
+fn prepared_seed(lines: &str, seed: u64) -> PreparedBms {
     let chart = format!("#BPM 60\n#VOLWAV 50\n#LNTYPE 1\n#WAV01 key.wav\n#WAV02 bgm.wav\n{lines}");
     let mut files = MemoryFiles::new(Default::default()).unwrap();
     files
@@ -168,7 +179,7 @@ fn prepared(lines: &str) -> PreparedBms {
         ChannelPolicy::Exact,
         &WavDecoder,
         AssetPathPolicy::AudioVariants,
-        0,
+        seed,
         None,
     )
     .unwrap()
@@ -685,11 +696,13 @@ fn actual_full_queue_preserves_committed_hit_report_score_and_rejected_sound() {
     let StepGameplayError::Report {
         report,
         score_error,
+        capture_error,
     } = error
     else {
         panic!("expected committed partial report: {error:?}")
     };
     assert!(score_error.is_none());
+    assert!(capture_error.is_none());
     assert_eq!(report.judge_events.len(), 2);
     assert!(
         report
@@ -1527,4 +1540,315 @@ fn clock_configuration_is_atomic_setup_and_actual_host_may_precede_nominal_activ
         ));
         assert_fenced(&mut premature, chosen);
     }
+}
+
+fn capture_limits(bytes: usize, records: usize) -> ReplayCodecLimits {
+    ReplayCodecLimits::new(
+        bytes,
+        records,
+        bytes.min(4096),
+        CodecLimits::new(4096, 1024).unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn captured_seeded_and_drift_corrected_operations_reconstruct_the_same_actual_judge() {
+    let seed = u64::MAX;
+    let lines = "#00011:01\n#RANDOM 2\n#IF 1\n#00112:01\n#ELSE\n#00113:01\n#ENDIF\n#ENDRANDOM\n";
+    let prepared = prepared_seed(lines, seed);
+    let lane = prepared
+        .source
+        .notes
+        .iter()
+        .find(|note| note.lane.channel() != 0x11)
+        .unwrap()
+        .lane
+        .channel();
+    let source = prepared_seed(lines, seed).source;
+    let chosen = StepGameplayConfig {
+        early_ns: 1_000_000,
+        late_ns: 1_000_000,
+        ..zero_preroll()
+    };
+    let mapper = clocks(chosen);
+    let limits = capture_limits(65536, 32);
+    let (mut game, _) = StepGameplay::new(prepared, chosen, bindings(false)).unwrap();
+    game.configure_capture(limits, seed).unwrap();
+    game.configure_output_clock(clock_policy()).unwrap();
+    game.activate(chosen.host_origin).unwrap();
+    assert!(matches!(
+        game.take_replay(),
+        Err(StepGameplayError::InvalidConfiguration(_))
+    ));
+    let first = input(chosen, 77, 4, 1, 0, ButtonState::Down);
+    let mut judged = game
+        .process_input(first.clone(), &mapper, chosen.output_origin)
+        .unwrap()
+        .judge_events;
+    for (host, output) in [
+        (1_000_000_000, 1_000_100_000),
+        (2_000_000_000, 2_000_200_000),
+    ] {
+        game.observe_output_clock(observed(chosen, output, host))
+            .unwrap();
+        judged.extend(
+            game.advance_to(host_at(chosen, host), &mapper, chosen.output_origin)
+                .unwrap()
+                .judge_events,
+        );
+        game.update_output_clock(host_at(chosen, host)).unwrap();
+    }
+    judged.extend(
+        game.advance_to(
+            host_at(chosen, 3_000_000_000),
+            &mapper,
+            chosen.output_origin,
+        )
+        .unwrap()
+        .judge_events,
+    );
+    let last_input = input(
+        chosen,
+        77,
+        u16::from(lane - 0x11) + 4,
+        2,
+        4_000_000_000,
+        ButtonState::Down,
+    );
+    let report = game
+        .process_input(
+            last_input.clone(),
+            &mapper,
+            output_at(chosen, 4_000_000_000),
+        )
+        .unwrap();
+    assert_eq!(report.song_time, Timestamp::from_nanos(4_000_240_000));
+    judged.extend(report.judge_events);
+    judged.extend(
+        game.advance_to(
+            host_at(chosen, 5_000_000_000),
+            &mapper,
+            chosen.output_origin,
+        )
+        .unwrap()
+        .judge_events,
+    );
+    let live_hash = game.judge().stable_hash().unwrap();
+    assert_eq!(game.score().hits, 2);
+    game.fail();
+    let bytes = game.take_replay().unwrap().unwrap();
+    assert!(game.take_replay().unwrap().is_none());
+    let file = decode_replay(&bytes, limits).unwrap();
+    assert_eq!(encode_replay(&file, limits).unwrap(), bytes);
+    assert_eq!(decode_chart_setup(&file.header.options).unwrap().2, seed);
+    assert_eq!(
+        file.header.seed, 0,
+        "chart branch seed is separate from the builtin rule seed"
+    );
+    assert_eq!(file.header.normalized_clock, chosen.host_origin.domain);
+    assert_eq!(file.records.len(), 6);
+    assert_eq!(
+        file.records[3].song_time,
+        Timestamp::from_nanos(3_000_120_000)
+    );
+    assert_eq!(
+        file.records[4].song_time,
+        Timestamp::from_nanos(4_000_240_000)
+    );
+    for (index, expected) in [(0, &first), (4, &last_input)] {
+        let ReplayOperation::Input(event) = &file.records[index].operation else {
+            panic!("actual bound input missing")
+        };
+        assert_eq!(&event.physical, expected);
+    }
+    let replay = reconstruct(&source, file, limits).unwrap();
+    assert_eq!(replay.results(), judged.as_slice());
+    assert_eq!(replay.engine().stable_hash().unwrap(), live_hash);
+}
+
+#[test]
+fn capture_record_and_byte_limits_preserve_the_exact_prefix_after_a_committed_report() {
+    let chosen = zero_preroll();
+    let (mut baseline, _) =
+        StepGameplay::new(prepared("#00011:01\n"), chosen, bindings(false)).unwrap();
+    let generous = capture_limits(65536, 32);
+    baseline.configure_capture(generous, 0).unwrap();
+    let event = input(chosen, 1, 4, 1, 0, ButtonState::Down);
+    baseline
+        .process_input(event.clone(), &clocks(chosen), chosen.output_origin)
+        .unwrap();
+    baseline.fail();
+    let prefix = baseline.take_replay().unwrap().unwrap();
+    for record_cap in [false, true] {
+        let limits = if record_cap {
+            capture_limits(65536, 1)
+        } else {
+            capture_limits(prefix.len(), 32)
+        };
+        let (mut game, _) =
+            StepGameplay::new(prepared("#00011:01\n"), chosen, bindings(false)).unwrap();
+        game.configure_capture(limits, 0).unwrap();
+        game.process_input(event.clone(), &clocks(chosen), chosen.output_origin)
+            .unwrap();
+        let error = game
+            .advance_to(host_at(chosen, 1), &clocks(chosen), chosen.output_origin)
+            .unwrap_err();
+        let StepGameplayError::Capture {
+            error: CaptureError::Codec(error),
+            report: Some(report),
+        } = error
+        else {
+            panic!("expected committed report and canonical capture failure")
+        };
+        assert_eq!(
+            error,
+            if record_cap {
+                ReplayCodecError::TooManyRecords
+            } else {
+                ReplayCodecError::FileTooLarge
+            }
+        );
+        assert!(report.input.is_none());
+        assert_eq!(report.song_time, Timestamp::from_nanos(1));
+        assert_eq!(game.song_time(), report.song_time);
+        assert_eq!(game.score().hits, 1);
+        assert_fenced(&mut game, chosen);
+        assert_eq!(game.take_replay().unwrap().unwrap(), prefix);
+        assert!(game.take_replay().unwrap().is_none());
+        let file = decode_replay(&prefix, generous).unwrap();
+        assert_eq!(file.records.len(), 1);
+        assert_eq!(file.records[0].song_time, Timestamp::ZERO);
+    }
+}
+
+#[test]
+fn simultaneous_audio_and_capture_failure_keeps_each_actual_committed_prefix_distinct() {
+    let chosen = StepGameplayConfig {
+        command_capacity: 2,
+        bgm_pending: 1,
+        ..zero_preroll()
+    };
+    let lines = "#00011:01\n#00012:01\n#00001:02\n";
+    for records in [1, 8] {
+        let limits = capture_limits(65536, records);
+        let source = prepared(lines).source;
+        let (mut game, _) = StepGameplay::new(prepared(lines), chosen, bindings(true)).unwrap();
+        game.configure_capture(limits, 0).unwrap();
+        let error = game
+            .process_input(
+                input(chosen, 1, 4, 1, 0, ButtonState::Down),
+                &clocks(chosen),
+                chosen.output_origin,
+            )
+            .unwrap_err();
+        let StepGameplayError::Report {
+            report,
+            score_error,
+            capture_error,
+        } = error
+        else {
+            panic!("actual bounded audio queue should reject its second sound")
+        };
+        assert!(score_error.is_none());
+        assert_eq!(report.audio_commands.len(), 1);
+        assert_eq!(report.audio_failures.len(), 1);
+        assert_eq!(report.judge_events.len(), 2);
+        assert_eq!(game.score().hits, 2);
+        if records == 1 {
+            assert!(matches!(
+                capture_error,
+                Some(CaptureError::Codec(ReplayCodecError::TooManyRecords))
+            ));
+        } else {
+            assert!(capture_error.is_none());
+        }
+        assert_fenced(&mut game, chosen);
+        let file = decode_replay(&game.take_replay().unwrap().unwrap(), limits).unwrap();
+        assert_eq!(file.records.len(), if records == 1 { 0 } else { 2 });
+        let replay = reconstruct(&source, file, limits).unwrap();
+        if records == 1 {
+            assert!(
+                replay.results().is_empty(),
+                "capture rejects a whole report, without inventing a saved partial fanout"
+            );
+        } else {
+            assert_eq!(replay.results(), report.judge_events.as_slice());
+            assert_eq!(
+                replay.engine().stable_hash().unwrap(),
+                game.judge().stable_hash().unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn capture_is_optional_atomic_during_setup_and_exported_only_once_after_stop() {
+    let chosen = config();
+    let (mut game, _) =
+        StepGameplay::new(prepared("#00011:01\n"), chosen, bindings(false)).unwrap();
+    let tiny_header =
+        ReplayCodecLimits::new(65536, 8, 1, CodecLimits::new(4096, 1024).unwrap()).unwrap();
+    assert!(matches!(
+        game.configure_capture(tiny_header, 0),
+        Err(StepGameplayError::Capture {
+            error: CaptureError::Codec(ReplayCodecError::HeaderTooLarge),
+            report: None,
+        })
+    ));
+    assert!(!game.failed());
+    game.activate(chosen.host_origin).unwrap();
+    let limits = capture_limits(65536, 8);
+    game.configure_capture(limits, 0).unwrap();
+    assert!(matches!(
+        game.configure_capture(limits, 0),
+        Err(StepGameplayError::InvalidConfiguration(_))
+    ));
+    game.advance_to(chosen.host_origin, &clocks(chosen), chosen.output_origin)
+        .unwrap();
+    assert!(matches!(
+        game.take_replay(),
+        Err(StepGameplayError::InvalidConfiguration(_))
+    ));
+    let event = input(chosen, 1, 4, 1, 0, ButtonState::Down);
+    let hit = game
+        .process_input(event.clone(), &clocks(chosen), output_at(chosen, 0))
+        .unwrap();
+    let live_hash = game.judge().stable_hash().unwrap();
+    game.fail();
+    let file = decode_replay(&game.take_replay().unwrap().unwrap(), limits).unwrap();
+    assert_eq!(file.records.len(), 2);
+    assert_eq!(
+        file.records[0].song_time,
+        Timestamp::from_nanos(-250_000_001)
+    );
+    assert!(matches!(
+        file.records[0].operation,
+        ReplayOperation::Advance
+    ));
+    assert_eq!(file.records[1].song_time, Timestamp::ZERO);
+    assert!(
+        matches!(&file.records[1].operation, ReplayOperation::Input(recorded) if recorded.physical == event)
+    );
+    let replay = reconstruct(&prepared("#00011:01\n").source, file, limits).unwrap();
+    assert_eq!(replay.results(), hit.judge_events.as_slice());
+    assert_eq!(replay.engine().stable_hash().unwrap(), live_hash);
+    assert!(game.take_replay().unwrap().is_none());
+
+    let (mut disabled, _) = StepGameplay::new(prepared(""), chosen, bindings(false)).unwrap();
+    assert!(matches!(
+        disabled.take_replay(),
+        Err(StepGameplayError::InvalidConfiguration(_))
+    ));
+    disabled
+        .advance_to(chosen.host_origin, &clocks(chosen), chosen.output_origin)
+        .unwrap();
+    assert!(matches!(
+        disabled.configure_capture(limits, 0),
+        Err(StepGameplayError::InvalidConfiguration(_))
+    ));
+    assert!(!disabled.failed());
+    disabled.fail();
+    assert!(disabled.take_replay().unwrap().is_none());
+    assert!(disabled.take_replay().unwrap().is_none());
 }
