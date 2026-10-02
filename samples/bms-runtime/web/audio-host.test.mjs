@@ -407,8 +407,13 @@ test("control clock snapshots Window brackets while outputTimestamp returns sepa
     h.faults.performanceTimes = [...bracket];
     await localError(h, () => owner.controlClock(), "state");
   }
-  for (const evidence of [null, {}, { contextTime: 0, performanceTime: 10 },
-    { contextTime: 1, performanceTime: 0 }, { contextTime: -1, performanceTime: 1 },
+  for (const evidence of [{ contextTime: 0, performanceTime: 10 },
+    { contextTime: 1, performanceTime: 0 }, { contextTime: 0, performanceTime: 0 }]) {
+    h.faults.outputEvidence = evidence;
+    await localError(h, () => owner.outputTimestamp(), "unavailable");
+  }
+  for (const evidence of [null, {}, { contextTime: -1, performanceTime: 1 },
+    { contextTime: 3, performanceTime: 1 },
     { contextTime: 1, performanceTime: NaN }, { contextTime: "1", performanceTime: 1 }]) {
     h.faults.outputEvidence = evidence;
     await localError(h, () => owner.outputTimestamp(), "state");
@@ -419,6 +424,8 @@ test("control clock snapshots Window brackets while outputTimestamp returns sepa
   assert.deepEqual(structuredClone(captured), evidence);
   evidence.contextTime = 99;
   assert.equal(captured.contextTime, 2.25);
+  h.faults.outputEvidence = { contextTime: 2.5, performanceTime: 123400.5 };
+  assert.equal(owner.outputTimestamp().contextTime, context.currentTime);
   const reads = context.outputReads;
   context.getOutputTimestamp = undefined;
   await localError(h, () => owner.outputTimestamp(), "unsupported");

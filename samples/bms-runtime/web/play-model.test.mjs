@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  millisecondsToNanos, secondsToNanos, frameNanos, startProjection, reportWord, renderedCursor,
+  millisecondsToNanos, secondsToNanos, frameNanos, startProjection, presentationPoint, reportWord, renderedCursor,
   KEY_BINDINGS, bindingsFor,
 } from "./play-model.mjs";
 
@@ -135,5 +135,42 @@ test("explicit keyboard bindings preserve both sides and reject unknown or dupli
   assert.deepEqual(bindingsFor([]), []);
   for (const invalid of [null, new Uint32Array([0x11]), [0x11, 0x11], [0x10], [0x2a], ["17"], Array(19).fill(0x11)]) {
     assert.throws(() => bindingsFor(invalid));
+  }
+});
+
+test("presentation uses only fresh reported output and rounds a fractional start conservatively", () => {
+  const actual = { contextTime: 1, performanceTime: 1500 };
+  assert.equal(presentationPoint(actual, 1n, 44100, 1500), 999977324n);
+  assert.equal(presentationPoint(actual, 1n, 44100, 2500), 999977324n,
+    "the full freshness allowance does not extrapolate presentation");
+  assert.equal(presentationPoint(actual, 1n, 44100, 2500.125), null);
+  assert.equal(presentationPoint(actual, 1n, 44100, 1499), null);
+  assert.equal(presentationPoint(actual, 44100n, 44100, 1500), 0n);
+  assert.equal(presentationPoint(actual, 44101n, 44100, 1500), null);
+  assert.equal(presentationPoint(actual, 0n, 48000, 1500, 0), 1000000000n);
+  assert.equal(presentationPoint(actual, 0n, 48000, 1501, 0), null);
+  for (const timestamp of [{ contextTime: 0, performanceTime: 1 },
+    { contextTime: 1, performanceTime: 0 }, { contextTime: 0, performanceTime: 0 }]) {
+    assert.equal(presentationPoint(timestamp, 0n, 48000, 1500), null);
+  }
+  assert.equal(presentationPoint({ contextTime: 2 ** 33 + 2 ** -18, performanceTime: 5000 },
+    8589934592n * 48000n, 48000, 5000), 3814n);
+  assert.equal(presentationPoint({ contextTime: 604800.125, performanceTime: 604800125 },
+    604800n * 48000n, 48000, 604800125), 125000000n);
+});
+
+test("malformed presentation data and unrepresentable grids are errors even before output exists", () => {
+  const actual = { contextTime: 1, performanceTime: 1 };
+  for (const timestamp of [null, {}, { ...actual, contextTime: -1 },
+    { ...actual, contextTime: NaN }, { ...actual, performanceTime: Infinity },
+    { ...actual, contextTime: "1" }, { ...actual, performanceTime: -1 },
+    { ...actual, contextTime: 9223372037 }]) {
+    assert.throws(() => presentationPoint(timestamp, 0n, 48000, 1));
+  }
+  for (const [start, rate, now, age] of [[-1n, 48000, 1, 1000], [U64_MAX + 1n, 48000, 1, 1000],
+    [0, 48000, 1, 1000], [0n, 0, 1, 1000], [0n, 1.5, 1, 1000],
+    [0n, 48000, -1, 1000], [0n, 48000, NaN, 1000], [0n, 48000, 1, -1],
+    [0n, 48000, 1, Infinity], [I64_MAX, 1, 1, 1000]]) {
+    assert.throws(() => presentationPoint({ contextTime: 0, performanceTime: 0 }, start, rate, now, age));
   }
 });

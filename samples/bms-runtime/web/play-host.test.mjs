@@ -131,10 +131,17 @@ async function harness(faults = {}) {
 
   const audio = {
     sampleRate: 48000,
-    samples: [], commandsSeen: [], arms: [], polls: 0, finishes: 0,
+    samples: [], commandsSeen: [], arms: [], polls: 0, finishes: 0, outputReads: 0,
     stopCalls: 0, stopStarts: 0, stopping: null,
     get currentFrame() { return BigInt(Math.floor(now * 48)); },
     controlClock() { return { beforeMs: now, afterMs: now, contextTime: now / 1000, sampleRate: 48000 }; },
+    outputTimestamp() {
+      this.outputReads++;
+      traces.push(["output-timestamp"]);
+      if (faults.outputFailure) throw faults.outputFailure;
+      if (faults.outputEvidence) return { ...faults.outputEvidence };
+      throw Object.assign(new Error("output evidence is not available"), { code: "unavailable" });
+    },
     async sample(value) {
       this.samples.push(value);
       traces.push(["sample", value.id]);
@@ -146,10 +153,14 @@ async function harness(faults = {}) {
       this.commandsSeen.push(structuredClone(commands));
       traces.push(["commands", commands.length]);
       if (faults.commandFailure) throw faults.commandFailure;
+      if (faults.commandGate) await faults.commandGate.promise;
       return { admitted: commands.length };
     },
     async poll() {
       this.polls++;
+      traces.push(["poll"]);
+      if (faults.pollGate) await faults.pollGate.promise;
+      if (faults.renderReport) return structuredClone(faults.renderReport);
       const words = new Uint32Array(56);
       words[50] = 1;
       const start = this.arms.at(-1) ?? 0n;
@@ -464,6 +475,34 @@ test("missing stop receipt and rejected audio cleanup terminate Worker and requi
     assert.equal(h.opens.length, 1, "unproven release cannot silently admit another owner");
     await h.close();
   }
+  for (const natural of [false, true]) {
+    const h = await harness();
+    await h.preview();
+    const session = await h.launch();
+    const worker = h.workers[0];
+    if (natural) {
+      await h.advance(8);
+      await h.receive({ kind: "play-render-done", playId: session.id,
+        renderId: worker.last("play-render").renderId, completed: true });
+      await h.receive({ kind: "play-step-done", playId: session.id,
+        tickId: worker.last("play-step").tickId, songNs: 2350000000n,
+        hits: 3n, misses: 1n, combo: 2n, preOriginInputs: 0 });
+    } else { h.click("stop"); await flush(); }
+    assert.equal(worker.messages("play-stop").length, 1);
+    await h.receive(finalScore(session.id, { kind: "play-error", released: false,
+      message: "actual game disposal failed" }));
+    assert.equal(worker.terminations, 1);
+    assert.equal(h.audio.stopStarts, 1);
+    assert.equal(h.get("play").disabled, true);
+    assert.equal(h.get("files").disabled, true);
+    assert.equal(h.get("status").dataset.error, "true");
+    assert.match(h.get("status").textContent, /Gameplay cleanup failed: actual game disposal failed/);
+    assert.match(h.get("status").textContent, /Reload the page/);
+    assert.doesNotMatch(h.get("status").textContent, /Song completed|Playback stopped/);
+    h.click("play");
+    assert.equal(h.opens.length, 1);
+    await h.close();
+  }
 });
 
 test("pagehide releases the Worker waiter and late audio cleanup cannot restore an older page generation", async () => {
@@ -528,7 +567,7 @@ test("input and render reports each have one in-flight request and watermarks ca
   assert.equal(final.events.at(-1).sequence, 600n);
   assert.equal(final.watermark, 1300000000n);
   const report = worker.last("play-render");
-  await h.receive({ kind: "play-render-done", playId: session.id, renderId: report.renderId });
+  await h.receive({ kind: "play-render-done", playId: session.id, renderId: report.renderId, completed: false });
   await h.advance(8);
   assert.equal(h.audio.polls, 2);
   assert.equal(worker.messages("play-render").length, 2);
@@ -564,10 +603,142 @@ test("setup and active command rejection forward the exact admitted prefix once 
     assert.equal(worker.messages("play-ack").length, 1);
     assert.equal(h.audio.commandsSeen.length, 1, "neither admitted prefix nor remainder is retried");
     assert.ok(worker.last("play-stop"));
-    await h.receive(finalScore(playId, { kind: "play-error", message: "Worker retained exact rejected batch", hits: 2n }));
+    await h.receive(finalScore(playId, { kind: "play-error", released: true, message: "Worker retained exact rejected batch", hits: 2n }));
     assert.match(h.get("status").textContent, /original audio admission failure/);
     assert.doesNotMatch(h.get("status").textContent, /secondary Worker rejection/);
     assert.match(h.get("status").textContent, /Hits 2/);
+    await h.close();
+  }
+});
+
+test("natural completion joins captured input and command admission before the normal release handshake", async () => {
+  const commandGate = deferred();
+  const stopGate = deferred();
+  const h = await harness({ commandGate, stopGate, outputEvidence: { contextTime: 1.3, performanceTime: 1300 } });
+  const saved = await h.preview();
+  const session = await h.launch();
+  h.setNow(1300);
+  await h.advance(8);
+  const worker = h.workers[0];
+  const firstTick = worker.last("play-step");
+  const firstReport = worker.last("play-render");
+  h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1308 });
+  await h.receive({ kind: "play-render-done", playId: session.id,
+    renderId: firstReport.renderId, completed: true });
+  assert.equal(worker.messages("play-stop").length, 0, "captured input and its earlier watermark must join");
+  h.window.emit("keyup", { code: "KeyZ", repeat: false, timeStamp: 1308 });
+  const stepDone = request => h.receive({ kind: "play-step-done", playId: session.id,
+    tickId: request.tickId, songNs: 58000000n, hits: 4n, misses: 1n, combo: 3n, preOriginInputs: 0 });
+  await stepDone(firstTick);
+  const captured = worker.last("play-step");
+  assert.deepEqual(captured.events, [
+    { hostNs: 1308000000n, key: 2, down: true, sequence: 1n },
+    { hostNs: 1308000000n, key: 2, down: false, sequence: 2n },
+  ]);
+  await h.receive({ kind: "play-commands", playId: session.id,
+    batch: { sequence: 9n, commands: [command(3n)] } });
+  await stepDone(captured);
+  assert.equal(worker.messages("play-stop").length, 0);
+  assert.equal(worker.messages("play-ack").length, 0, "ordinary audio work is still pending");
+  commandGate.resolve();
+  await flush();
+  assert.equal(worker.last("play-ack").sequence, 9n);
+  assert.equal(worker.last("play-ack").admitted, 1);
+  assert.equal(worker.messages("play-stop").length, 0, "new input/audio invalidated the older completion receipt");
+  await h.advance(8);
+  const finalReport = worker.last("play-render");
+  const finalTick = worker.last("play-step");
+  assert.ok(finalReport.renderId > firstReport.renderId);
+  await h.receive({ kind: "play-render-done", playId: session.id,
+    renderId: finalReport.renderId, completed: true });
+  assert.equal(worker.messages("play-stop").length, 0);
+  await stepDone(finalTick);
+  assert.equal(worker.messages("play-stop").length, 1);
+  assert.equal(h.audio.stopStarts, 1);
+  assert.equal(h.get("play").disabled, true);
+  await h.receive(finalScore(session.id, { hits: 4n, combo: 3n }));
+  assert.equal(h.get("play").disabled, true, "Worker completion is not audio cleanup");
+  stopGate.resolve();
+  await flush();
+  assert.equal(h.get("play").disabled, false);
+  assert.match(h.get("status").textContent, /Song completed\..*Hits 4.*Misses 1.*Combo 3/);
+  assert.equal(h.get("title").textContent, saved.title);
+  assert.equal(h.get("position").value, saved.position);
+  await h.close();
+});
+
+test("output observations follow poll, retain actual time without extrapolation and drop regressing points", async () => {
+  const pollGate = deferred();
+  const h = await harness({ pollGate, outputEvidence: { contextTime: 1.3, performanceTime: 1300 } });
+  await h.preview();
+  const session = await h.launch();
+  h.setNow(1300);
+  await h.advance(8);
+  const worker = h.workers[0];
+  assert.equal(h.audio.polls, 1);
+  assert.equal(h.audio.outputReads, 0, "pending poll has no matching presentation query yet");
+  assert.equal(worker.messages("play-render").length, 0);
+  pollGate.resolve();
+  await flush();
+  const first = worker.last("play-render");
+  assert.equal(first.presentedNs, 50000000n, "8 ms of host delay does not advance output evidence");
+  const pollIndex = h.traces.findIndex(row => row[0] === "poll");
+  const outputIndex = h.traces.findIndex(row => row[0] === "output-timestamp");
+  assert.ok(outputIndex > pollIndex);
+  await h.receive({ kind: "play-render-done", playId: session.id, renderId: first.renderId, completed: false });
+  h.faults.outputEvidence = { contextTime: 1.29, performanceTime: 1308 };
+  await h.advance(8);
+  const regressed = worker.last("play-render");
+  assert.equal(regressed.presentedNs, null);
+  await h.receive({ kind: "play-render-done", playId: session.id, renderId: regressed.renderId, completed: false });
+  h.faults.outputEvidence = { contextTime: 1.3, performanceTime: 1316 };
+  await h.advance(8);
+  assert.equal(worker.last("play-render").presentedNs, 50000000n, "a missing point does not reset the accepted frontier");
+  assert.equal(worker.messages("play-stop").length, 0);
+  await h.close();
+});
+
+test("unavailable output keeps completion pending while malformed evidence and receipts fail visibly", async () => {
+  for (const code of ["unsupported", "unavailable", "state", "transport"]) {
+    const h = await harness({ outputFailure: Object.assign(new Error(`actual output ${code}`), { code }) });
+    await h.preview();
+    const session = await h.launch();
+    await h.advance(8);
+    const worker = h.workers[0];
+    if (code === "unsupported" || code === "unavailable") {
+      const report = worker.last("play-render");
+      assert.equal(report.presentedNs, null);
+      await h.receive({ kind: "play-render-done", playId: session.id, renderId: report.renderId, completed: false });
+      await h.receive({ kind: "play-step-done", playId: session.id,
+        tickId: worker.last("play-step").tickId, songNs: 604800000000000n,
+        hits: 10000n, misses: 0n, combo: 10000n, preOriginInputs: 0 });
+      assert.equal(worker.messages("play-stop").length, 0, "song age and finished score do not invent presentation");
+      h.click("stop");
+      await flush();
+      await h.receive(finalScore(session.id));
+      assert.match(h.get("status").textContent, /Playback stopped/);
+      assert.doesNotMatch(h.get("status").textContent, /Song completed/);
+    } else {
+      assert.equal(worker.messages("play-render").length, 0);
+      assert.equal(worker.messages("play-stop").length, 1);
+      await h.receive(finalScore(session.id));
+      assert.equal(h.get("status").dataset.error, "true");
+      assert.match(h.get("status").textContent, new RegExp(`actual output ${code}`));
+    }
+    await h.close();
+  }
+  for (const completed of [undefined, "true"]) {
+    const h = await harness();
+    await h.preview();
+    const session = await h.launch();
+    await h.advance(8);
+    const worker = h.workers[0];
+    await h.receive({ kind: "play-render-done", playId: session.id,
+      renderId: worker.last("play-render").renderId, completed });
+    assert.equal(worker.messages("play-stop").length, 1);
+    await h.receive(finalScore(session.id));
+    assert.equal(h.get("status").dataset.error, "true");
+    assert.match(h.get("status").textContent, /completion evidence was malformed/);
     await h.close();
   }
 });
