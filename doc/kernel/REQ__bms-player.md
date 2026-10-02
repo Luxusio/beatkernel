@@ -1387,3 +1387,21 @@ continues acquisition/native status/BGM service under the same deadline, and
 publishes ready only once actual normalized host_now reaches the interpolated
 playback origin. Reject host-domain changes/regression; cancellation preserves
 cleanup ownership. Do not replace that crossing with later observations.
+
+## Shared native solo gameplay owner
+
+A single native_gameplay::run_gameplay owns solo native input admission, actual
+pause/resume acknowledgements, transport/discipline correction, judge/capture/UI/
+competition reports, bounded backlog and finite/full completion policy. Native
+adapters supply observation/render/host/acquisition/end/reseed operations only.
+Retain original input timestamps and native provenance; loss, removal, capacity,
+clock/source changes and cleanup errors remain explicit. Pause resume reseeds
+the same native observation source rather than mixing a supplied pair with raw
+counters. Apply configured advance_lag 0..1s through one monotonic watermark on
+all platforms; Windows must use its parsed lag too. Pending input capacity 65536,
+bounded native batches 256, acquisition continues during acknowledgement waits,
+judgment waits until native backlog is drained at pause/resume boundaries.
+Finite completion requires native boundary plus logical prefix/input drain; full
+completion requires actual judge/BGM/mixer/native drain. Caller owns native stop/
+join and saving captured prefix after cleanup on all exits. Local-cohort loops
+and ASIO interval startup remain next migrations; no runtime acceptance claimed.
