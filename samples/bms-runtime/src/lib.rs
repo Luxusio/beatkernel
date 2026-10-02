@@ -60,6 +60,8 @@ pub mod mp3_decode;
 mod mp3_fixture;
 /// Bounded two-player progress exchange on a dedicated socket worker.
 pub mod multiplayer;
+/// Checked software peer-clock offset intervals and deadline conversion.
+pub mod multiplayer_clock;
 /// Omitted solo option defaults, independent of native discovery.
 pub mod native_defaults;
 pub mod native_end;
