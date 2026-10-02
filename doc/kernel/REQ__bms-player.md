@@ -1547,3 +1547,17 @@ unrepresentable evidence instead of inventing point samples. Author portable
 interval and real gated-mixer startup fixtures for later execution. Ordinary
 source/GNU checks do not cover the SDK/MSVC driver branch; SDK compilation, device,
 network and physical timing acceptance remain deferred.
+
+## Shared solo session finalization
+
+All native solo sessions use one common finalization policy after their output
+stop/join and input close/drop attempts. Finish competition before saving the
+actual captured prefix. Attempt recording publication even when gameplay or
+native cleanup failed; preserve the original capture, destination and exclusive
+create behavior. The save status reflects session/cleanup errors. Return the
+original first error in gameplay, output cleanup, input cleanup, then save order.
+Preserve native diagnostics and original error identity; common finalization
+must not replace native resource-retention or cleanup semantics. Local cohorts
+retain their existing all-members policy and share the same capture publisher.
+Author failure-priority and actual-capture forwarding fixtures using in-memory
+publication callbacks; compilation does not establish file/device acceptance.
