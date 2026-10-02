@@ -37,6 +37,7 @@ pub struct BgaFrame {
     pub layer: Option<BgaSprite>,
     pub layer2: Option<BgaSprite>,
     pub poor_overlay: Option<BgaSprite>,
+    pub opacity: crate::bga_opacity::BgaOpacity,
     pub unavailable: usize,
 }
 impl BgaFrame {
@@ -199,6 +200,7 @@ impl BgaTextureCache {
         let mut frames = [BgaFrame::default(); 4];
         for (frame, presentation) in frames.iter_mut().zip(states) {
             let state = presentation.state;
+            frame.opacity = presentation.opacity;
             frame.active = state.base.is_some()
                 || state.layer.is_some()
                 || state.layer2.is_some()
@@ -269,10 +271,15 @@ pub fn paint(scene: &mut Scene, frame: BgaFrame, bounds: Bounds) -> Result<(), S
         return Ok(());
     }
     scene.rect(bounds.x, bounds.y, bounds.width, bounds.height, 0);
-    for sprite in [frame.base, frame.layer, frame.layer2, frame.poor_overlay]
-        .into_iter()
-        .flatten()
-    {
+    for (sprite, alpha) in [
+        (frame.base, frame.opacity.base),
+        (frame.layer, frame.opacity.layer),
+        (frame.layer2, frame.opacity.layer2),
+        (frame.poor_overlay, frame.opacity.poor),
+    ] {
+        let Some(sprite) = sprite else {
+            continue;
+        };
         let (fit_width, fit_height) = if i128::from(bounds.width) * i128::from(sprite.height)
             <= i128::from(bounds.height) * i128::from(sprite.width)
         {
@@ -288,7 +295,7 @@ pub fn paint(scene: &mut Scene, frame: BgaFrame, bounds: Bounds) -> Result<(), S
                 bounds.height,
             )
         };
-        scene.sprite_clipped(
+        scene.sprite_clipped_alpha(
             sprite.texture,
             [
                 bounds.x + (bounds.width - fit_width) / 2,
@@ -298,6 +305,7 @@ pub fn paint(scene: &mut Scene, frame: BgaFrame, bounds: Bounds) -> Result<(), S
             ],
             [0., 0., 1., 1.],
             0x606060,
+            alpha,
             clip,
         )?;
     }
@@ -552,6 +560,7 @@ mod fixtures {
                 ..state(i as u16 + 1, Some(i as u16 + 5))
             },
             poor_overlay: Some(ImageId(i as u16 + 13)),
+            opacity: Default::default(),
         });
         let normal = selections.map(|p| p.state);
         let mut owner = Owner {
@@ -576,6 +585,24 @@ mod fixtures {
             .sync_presentations(Some(&prepared.bank), &selections, &mut owner)
             .unwrap();
         assert_eq!(owner.attempts, 16);
+        let before = owner.actions.len();
+        let faded = selections.map(|mut presentation| {
+            presentation.opacity = crate::bga_opacity::BgaOpacity {
+                base: 1,
+                layer: 128,
+                layer2: 64,
+                poor: 32,
+            };
+            presentation
+        });
+        let faded_frames = cache
+            .sync_presentations(Some(&prepared.bank), &faded, &mut owner)
+            .unwrap();
+        assert_eq!(owner.actions.len(), before);
+        assert_eq!((owner.live.len(), owner.attempts), (16, 16));
+        for (frame, presentation) in faded_frames.iter().zip(faded) {
+            assert_eq!(frame.opacity, presentation.opacity);
+        }
         cache
             .sync(Some(&prepared.bank), &normal, &mut owner)
             .unwrap();
@@ -619,6 +646,7 @@ mod fixtures {
         let alias = BgaPresentation {
             state: state(1, Some(7)),
             poor_overlay: Some(ImageId(0)),
+            opacity: Default::default(),
         };
         let frames = cache
             .sync_presentations(Some(&bank.bank), &[alias], &mut owner)
@@ -657,6 +685,7 @@ mod fixtures {
             unavailable: 0,
             poor_overlay: None,
             layer2: None,
+            opacity: Default::default(),
         };
         let mut scene = Scene::new(300, 300);
         paint(

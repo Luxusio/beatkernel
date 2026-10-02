@@ -1733,7 +1733,7 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
     }
     let text = "#BPM 120\n#WAV01 tap.wav\n#00111:01\n#STOP01 48\n#00109:01\n\
          #BMP00 poor.png\n#BMP01 first.png\n#BMP02 second.png\n#BMP03 third.png\n\
-         #BMP04 layer.png\n#BMP05 second-layer.png\n#00004:01\n#00104:0203\n#00107:04\n#00106:ZZ\n#0010A:05\n";
+         #BMP04 layer.png\n#BMP05 second-layer.png\n#00004:01\n#00104:0203\n#00107:04\n#00106:ZZ\n#0010A:05\n#0010B:8040\n#0010C:20\n#0010D:10\n#0010E:08\n";
     let source = beatkernel_bms::parse(text, beatkernel_bms::ParseOptions::default()).unwrap();
     let image_dir = Directory::new();
     let chart_path = image_dir.write("chart.bms", text.as_bytes());
@@ -1757,6 +1757,28 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
         layer2: Some(ImageId(5)),
         poor: Some(ImageId(1295)),
     };
+    let stop_opacity = beatkernel_bms_runtime::bga_opacity::BgaOpacity {
+        base: 128,
+        layer: 32,
+        layer2: 16,
+        poor: 8,
+    };
+    assert_eq!(
+        chart.bga_opacity(Timestamp::from_nanos(1_999_999_999)),
+        Default::default()
+    );
+    assert_eq!(
+        chart.bga_opacity(Timestamp::from_nanos(2_000_000_000)),
+        stop_opacity
+    );
+    assert_eq!(
+        chart.bga_opacity(Timestamp::from_nanos(3_499_999_999)),
+        stop_opacity
+    );
+    assert_eq!(
+        chart.bga_opacity(Timestamp::from_nanos(3_500_000_000)).base,
+        64
+    );
     assert_eq!(
         chart.bga_state(Timestamp::from_nanos(2_000_000_000)),
         expected
@@ -1858,6 +1880,12 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
             let shown = viewer.take_latest().unwrap();
             let now = shown.song_time.unwrap();
             let live_state = shown.chart.as_ref().unwrap().bga_state(now);
+            let live_opacity = shown.chart.as_ref().unwrap().bga_opacity(now);
+            assert_eq!(live_opacity, chart.bga_opacity(now));
+            assert_eq!(
+                shown.players[0].chart.as_ref().unwrap().bga_opacity(now),
+                live_opacity
+            );
             let base = live_state.base.unwrap();
             assert_eq!(live_state.layer2, Some(ImageId(5)));
             assert_eq!(
@@ -1882,6 +1910,14 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
             player::publish_replay_prefix(now, &events).map_err(|e| e.to_string())?;
             player::publish_pause(player::PauseState::Paused);
             let replay_shown = viewer.take_latest().unwrap();
+            assert_eq!(
+                replay_shown
+                    .chart
+                    .as_ref()
+                    .unwrap()
+                    .bga_opacity(replay_shown.song_time.unwrap()),
+                live_opacity
+            );
             assert!(std::sync::Arc::ptr_eq(
                 shown.images.as_ref().unwrap(),
                 replay_shown.images.as_ref().unwrap()
@@ -1955,7 +1991,7 @@ fn actual_timeout_capture_replay_and_native_publication_share_poor_interval() {
         }
     }
     let dir = Directory::new();
-    let text = "#BPM 60\n#WAV01 tap.wav\n#00011:01\n#BMP00 poor.bmp\n#BMP01 base.bmp\n#BMP02 changed.bmp\n#BMP03 layer.bmp\n#BMP04 second-layer.bmp\n#00004:01\n#00007:03\n#0000A:04\n#00006:00020000000000000000000000000000";
+    let text = "#BPM 60\n#WAV01 tap.wav\n#00011:01\n#BMP00 poor.bmp\n#BMP01 base.bmp\n#BMP02 changed.bmp\n#BMP03 layer.bmp\n#BMP04 second-layer.bmp\n#00004:01\n#00007:03\n#0000A:04\n#00006:00020000000000000000000000000000\n#0000B:FF\n#0000C:80\n#0000D:40\n#0000E:20";
     let path = dir.write("chart.bms", text.as_bytes());
     for (name, color) in [
         ("poor.bmp", [0, 0, 0]),
@@ -2173,6 +2209,21 @@ fn actual_timeout_capture_replay_and_native_publication_share_poor_interval() {
                 assert_eq!(mode_live[1].state.layer2, Some(ImageId(4)));
             }
             _ => unreachable!(),
+        }
+        let normal_opacity = bga_opacity::BgaOpacity {
+            base: 255,
+            layer: 128,
+            layer2: 64,
+            poor: 32,
+        };
+        assert_eq!(mode_live[0].opacity, normal_opacity);
+        assert_eq!(mode_live[3].opacity, normal_opacity);
+        for selection in &mode_live[1..3] {
+            let mut expected = normal_opacity;
+            if mode == 0 {
+                expected.base = expected.poor;
+            }
+            assert_eq!(selection.opacity, expected);
         }
         assert!(mode_live[0].poor_overlay.is_none() && mode_live[3].poor_overlay.is_none());
         let mut visual = replay_visual::ReplayVisual::new(&variant, &file, cap).unwrap();

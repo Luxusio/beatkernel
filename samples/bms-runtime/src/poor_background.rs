@@ -10,12 +10,15 @@ pub struct BgaPresentation {
     pub state: BgaState,
     /// Raw Poor image drawn after Layer; no Layer black key is applied.
     pub poor_overlay: Option<ImageId>,
+    /// Per-channel alpha multipliers; replacement Base uses the Poor multiplier.
+    pub opacity: crate::bga_opacity::BgaOpacity,
 }
 impl From<BgaState> for BgaPresentation {
     fn from(state: BgaState) -> Self {
         Self {
             state,
             poor_overlay: None,
+            opacity: Default::default(),
         }
     }
 }
@@ -40,8 +43,8 @@ impl PoorBackgroundPolicy {
         }
         Ok(Self { lifetime_ns })
     }
-    /// Compatibility selection-only projection. Overlay mode requires select()
-    /// to carry the separately activated Poor drawing intent.
+    /// Compatibility selection-only projection. Use select() to carry opacity
+    /// and the separately activated Poor overlay drawing intent.
     pub fn project(
         &self,
         chart: &PlayerChart,
@@ -63,6 +66,7 @@ impl PoorBackgroundPolicy {
             return Err("Poor background progress belongs to another prepared chart".into());
         }
         let mut presentation = BgaPresentation::from(chart.bga_state(now));
+        presentation.opacity = chart.bga_opacity(now);
         if let (Some(miss), Some(poor)) = (
             progress.and_then(NoteProgress::last_miss),
             presentation.state.poor,
@@ -74,6 +78,7 @@ impl PoorBackgroundPolicy {
                         presentation.state.base = Some(poor);
                         presentation.state.layer = None;
                         presentation.state.layer2 = None;
+                        presentation.opacity.base = presentation.opacity.poor;
                     }
                     PoorBgaMode::Overlay => {
                         presentation.poor_overlay = Some(poor);

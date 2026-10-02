@@ -1191,6 +1191,12 @@ mod tests {
                 width: 3,
                 height: 2,
             }),
+            opacity: crate::bga_opacity::BgaOpacity {
+                base: 255,
+                layer: 128,
+                layer2: 64,
+                poor: 32,
+            },
             unavailable: 0,
         });
         let mut scene = Scene::new(960, 720);
@@ -1232,6 +1238,12 @@ mod tests {
             .position(|batch| batch.texture == frames[0].layer2.unwrap().texture)
             .unwrap();
         assert!(image < layer && layer < layer2 && layer2 < poor && poor < notes);
+        for (batch_index, alpha) in [(image, 255u8), (layer, 128), (layer2, 64), (poor, 32)] {
+            assert_eq!(
+                scene.rectangles()[scene.batches()[batch_index].first as usize].color[3],
+                f32::from(alpha) / 255.0
+            );
+        }
         let image_rectangle = &scene.rectangles()[scene.batches()[image].first as usize];
         assert!(image_rectangle.bounds[1] >= TOP as f32);
         assert!(image_rectangle.bounds[1] + image_rectangle.bounds[3] <= LINE as f32);

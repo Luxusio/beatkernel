@@ -263,9 +263,23 @@ impl Scene {
         tint: u32,
         clip: ClipRect,
     ) -> Result<(), String> {
+        self.sprite_clipped_alpha(texture, bounds, uv, tint, 255, clip)
+    }
+
+    /// Multiplies sampled straight alpha by this byte without changing pixels
+    /// or texture identity. Clipping and RGB tint retain their usual semantics.
+    pub fn sprite_clipped_alpha(
+        &mut self,
+        texture: TextureId,
+        bounds: [i64; 4],
+        uv: [f32; 4],
+        tint: u32,
+        alpha: u8,
+        clip: ClipRect,
+    ) -> Result<(), String> {
         Self::validate_uv(uv)?;
         if let Some(endpoints) = self.clip_bounds(clip) {
-            self.push_in(texture, bounds, uv, tint, endpoints);
+            self.push_in_alpha(texture, bounds, uv, tint, alpha, endpoints);
         }
         self.status()
     }
@@ -315,6 +329,21 @@ impl Scene {
         color: u32,
         clip: [i64; 4],
     ) {
+        self.push_in_alpha(texture, bounds, uv, color, 255, clip);
+    }
+
+    fn push_in_alpha(
+        &mut self,
+        texture: TextureId,
+        bounds: [i64; 4],
+        uv: [f32; 4],
+        color: u32,
+        alpha: u8,
+        clip: [i64; 4],
+    ) {
+        if alpha == 0 {
+            return;
+        }
         let [x, y, width, height] = bounds;
         if width <= 0 || height <= 0 {
             return;
@@ -359,7 +388,7 @@ impl Scene {
                 ((color >> 16) & 255) as f32 / 255.0,
                 ((color >> 8) & 255) as f32 / 255.0,
                 (color & 255) as f32 / 255.0,
-                1.0,
+                f32::from(alpha) / 255.0,
             ],
             uv: [
                 uv[0] + uv[2] * horizontal as f32,
@@ -406,6 +435,65 @@ impl Scene {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipped_alpha_preserves_uv_tint_and_rejects_invalid_geometry_atomically() {
+        let mut scene = Scene::new(100, 100);
+        let clip = ClipRect::new([25, 25, 50, 50]).unwrap();
+        scene
+            .sprite_clipped_alpha(
+                TextureId::FONT,
+                [0, 0, 100, 100],
+                [0.0, 0.0, 1.0, 1.0],
+                0x406080,
+                128,
+                clip,
+            )
+            .unwrap();
+        let rectangle = scene.rectangles()[0];
+        assert_eq!(rectangle.bounds, [25.0, 25.0, 50.0, 50.0]);
+        assert_eq!(rectangle.uv, [0.25, 0.25, 0.5, 0.5]);
+        assert_eq!(
+            rectangle.color,
+            [64.0 / 255.0, 96.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0]
+        );
+        let epoch = scene.geometry_epoch;
+        scene
+            .sprite_clipped_alpha(
+                TextureId::FONT,
+                [0, 0, 100, 100],
+                [0.0, 0.0, 1.0, 1.0],
+                0,
+                0,
+                clip,
+            )
+            .unwrap();
+        assert!(
+            scene
+                .sprite_clipped_alpha(
+                    TextureId::FONT,
+                    [0, 0, 100, 100],
+                    [f32::NAN, 0.0, 1.0, 1.0],
+                    0,
+                    0,
+                    clip
+                )
+                .is_err()
+        );
+        assert_eq!(scene.geometry_epoch, epoch);
+        assert_eq!(scene.rectangles().len(), 1);
+        scene
+            .sprite_clipped(
+                TextureId::FONT,
+                [0, 0, 100, 100],
+                [0.0, 0.0, 1.0, 1.0],
+                0x406080,
+                clip,
+            )
+            .unwrap();
+        assert_eq!(scene.rectangles()[1].color[3], 1.0);
+        assert_eq!(scene.rectangles()[1].uv, rectangle.uv);
+    }
 
     #[test]
     fn clip_rect_checks_endpoints_and_intersects_signed_origins() {
