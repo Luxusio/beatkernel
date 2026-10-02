@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'">
+  <title>BeatKernel · BMS preview</title>
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./main.js"></script>
+</head>
+<body>
+  <main>
+    <header><p class="eyebrow">BEATKERNEL</p><h1>BMS preview</h1>
+      <p>Choose a song folder to explore its chart and backgrounds. Audio and playable input are still in development.</p>
+    </header>
+    <section aria-label="Song library" class="controls">
+      <div class="files">
+        <label>Song folder <input id="folder" type="file" webkitdirectory multiple disabled></label>
+        <label>Or select files <input id="files" type="file" multiple disabled></label>
+      </div>
+      <p class="hint">Folder selection preserves resource paths. For individual files, select the chart and its sounds/images together. Files stay on this device.</p>
+      <form id="prepare-form">
+        <label class="chart">Chart <select id="chart" required disabled><option value="">Choose files first</option></select></label>
+        <label>Mix sample rate <input id="rate" type="number" min="1" max="4294967295" step="1" value="48000" required disabled></label>
+        <label>Chart seed <input id="seed" type="text" inputmode="numeric" value="0" maxlength="20" required disabled></label>
+        <button id="prepare" type="submit" disabled>Prepare chart</button>
+      </form>
+      <p class="hint">Sounds retain their original sample rates. Mono sounds are prepared as stereo. Audio playback is not available in this preview.</p>
+    </section>
+    <section aria-label="Chart preview" class="preview">
+      <h2 id="title">No chart prepared</h2>
+      <p id="details">Select a song folder to begin.</p>
+      <form id="seek-form">
+        <label>Preview time (seconds) <input id="position" type="text" inputmode="decimal" value="0" maxlength="32" required disabled></label>
+        <button id="seek" type="submit" disabled>Show position</button>
+      </form>
+      <div id="viewport"><canvas id="canvas" width="960" height="720" aria-label="Chart lanes and background at the selected song time"></canvas></div>
+    </section>
+    <p id="status" role="status" aria-live="polite">Initializing graphics…</p>
+  </main>
+</body>
+</html>
