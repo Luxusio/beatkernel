@@ -69,8 +69,8 @@ under the user's deferral; cross-compilation proves source compatibility only.
 
 Eight additional ASIO/backend/routing CLI fixtures are authored and compiled
 without execution. Locked Rust 1.98.1 host workspace and default Windows GNU/macOS
-platform/sample all-target checks passed. Target-only source cfg additionally
-type-checked optional Windows ASIO Rust integration and five pure publication
+platform/sample all-target checks passed. An earlier source snapshot additionally
+used target-only cfg to type-check optional Windows ASIO Rust integration and five pure publication
 fixtures with Cargo SDK compilation inactive and without C++ linkage. Actual
 forwarded-feature SDK/MSVC compilation, native replay output and physical timing
 remain unverified. The host ignores WM_CLOSE on its hidden driver window so
@@ -97,10 +97,12 @@ invocation and waits for prior-owner cleanup. Stop and final checks are attempte
 on cancellation and errors, including start failures.
 
 F9 and Pause/Resume are available for Watch when the native owner obtains an
-actual output/associated-host ClockPair. ALSA and CoreAudio retain the full checked
-native pair; WASAPI pairs accurate position/frequency units with the associated
+actual output/host relation as a ClockPair or a checked interval. ALSA and
+CoreAudio retain the full checked native pair; WASAPI pairs accurate
+position/frequency units with the associated
 host point from the same snapshot. Source-only presentation remains usable for
-ordinary viewing but cannot grant pause capability. ASIO keeps no capability.
+ordinary viewing but cannot grant pause capability. ASIO uses the complete
+interval evidence and acknowledgement policy specified below.
 
 The owner uses the same NativePause coordinator as live play and controls the
 sole command producer. Pending boundaries fence command admission, recorded
@@ -117,9 +119,52 @@ F5 restarts the selected recording after cleanup; live F7/F8 bookmarks remain
 unavailable. Optional seconds includes paused wall time. Native boundary mapping
 quality remains Unknown, and native/GUI/timing acceptance remains unexecuted.
 
-Known ceiling: ASIO recorded output has no validated native-output-zero epoch
-association. Its presentation is unavailable and omitted seconds rejects during
-preflight; explicit seconds permits diagnostic audio only. This differs from
-the separately calibrated live ASIO input composition. WASAPI Accurate clock
-units, ALSA played estimates and CoreAudio checked presentation pairs drive
-recorded visuals; source checks do not prove observed device/audio behavior.
+ASIO recorded output requires the caller's multimedia clock and timer, drift,
+and latency error assessments. Actual block observations retain their assessed
+host upper bounds until a fresh QPC sample reaches them; the resulting physical
+presentation drives recorded visuals and natural drain. Missing observations
+preserve admitted evidence without fabricating newer output. WASAPI Accurate
+clock units, ALSA played estimates and CoreAudio checked presentation pairs drive
+the other backends. Source checks do not prove device output or acoustic timing.
+
+## Interval acknowledgement for recorded playback
+
+Recorded ASIO playback uses the same NativePause and ReplayPause state machine
+as point-based outputs, while retaining its original output-grid/render evidence
+and complete assessed host interval. Never turn the discipline midpoint or
+prepared-frame counter into pause presentation evidence. First valid use binds
+one evidence kind for the session; mixed point/interval calls reject.
+
+Recover the first physical pause/resume frame from validated mixer reports.
+The request and first actual crossing observation bracket that frame. Exact
+anchor equality uses its original interval; otherwise retain the conservative
+[request.before, crossing.after] window without inventing a rate or precise
+interpolation. Keep the first window through delayed polls, duplicate anchor
+refresh and later blocks, and acknowledge only after fresh host time reaches
+its latest endpoint. Metadata, chronology, report identity, arithmetic and
+inconsistent grids reject atomically. Missing observations preserve evidence.
+
+Replay freezes the exact song position derived from the boundary playback frame,
+recorded start and preroll, independently of host uncertainty. Resume preserves
+the cumulative once-rounded pause gap. Queued physical presentation older than
+the actual resume frame cannot update visuals after the gap changes. ASIO's
+bounded presentation queue accepts coherent paused/resumed grids while retaining
+original maturity deadlines; it still reports physical output for final drain.
+
+The common native replay loop consumes typed point or interval evidence without
+platform branches. Audio commands, recorded operations and completion remain
+fenced while pausing/paused/resuming; native polling and cancellation continue.
+Control requests and observations are staged together; evidence validation and
+checked song projection precede publication of state, capability and the mixer
+request. Rejected evidence cannot issue a pause request or partly change phase.
+Interval diagnostics retain both endpoints rather than claiming the upper
+acknowledgement deadline is an exact acoustic timestamp. No live input, new
+recorded operations, capture format or networking is introduced into Watch.
+
+Live/local ASIO pause remains separate work: input inside an uncertainty window
+needs an explicit classification policy and exact logical freeze before enabling
+that capability. A point-based Transport cutoff alone is insufficient evidence.
+Network pause remains unsupported. SDK integration is Windows+asio-sdk+MSVC;
+ordinary GNU checks do not compile that branch. Pure actual-Mixer, interval,
+replay and native-loop fixtures are authored and compiled only. Tests, driver,
+GUI, device, physical timing, formal review and QA execution remain deferred.

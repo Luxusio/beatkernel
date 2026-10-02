@@ -1009,9 +1009,10 @@ boundary and key reconciliation flow; saved-record ghosts remain supported.
 Replay Watch uses the same native/mixer boundary coordinator to stop recorded
 operation progress and sound together, preserving the playback cursor and
 recorded start. It acquires no keyboard or network and does not mutate recordings.
-Capability is announced only from an actual native output/host relation. ASIO
-announces no pause capability and requires a validated
-presentation relation; backend selection cannot invent that relation.
+Capability is announced only from an actual native output/host relation.
+ASIO recorded playback uses the interval policy below; live ASIO pause remains
+unsupported until its input and logical freeze policy is established. Backend
+selection cannot invent a presentation relation.
 Cross-platform native acceptance remains open.
 Local cohorts use one native pause coordinator, one shared Transport and
 one mixer. Each source still maps to its original player, including sparse IDs
@@ -1657,3 +1658,45 @@ its X11/XWayland path where available; unsupported desktops report errors.
 Browser clipboard adapters remain separate work. Fake-backend/editor/desktop
 fixtures are authored and compiled only; real clipboard/IME/close acceptance,
 tests, review and QA remain deferred.
+
+## Interval acknowledgement for recorded playback
+
+Recorded ASIO playback uses the same NativePause and ReplayPause state machine
+as point-based outputs, while retaining its original output-grid/render evidence
+and complete assessed host interval. Never turn the discipline midpoint or
+prepared-frame counter into pause presentation evidence. First valid use binds
+one evidence kind for the session; mixed point/interval calls reject.
+
+Recover the first physical pause/resume frame from validated mixer reports.
+The request and first actual crossing observation bracket that frame. Exact
+anchor equality uses its original interval; otherwise retain the conservative
+[request.before, crossing.after] window without inventing a rate or precise
+interpolation. Keep the first window through delayed polls, duplicate anchor
+refresh and later blocks, and acknowledge only after fresh host time reaches
+its latest endpoint. Metadata, chronology, report identity, arithmetic and
+inconsistent grids reject atomically. Missing observations preserve evidence.
+
+Replay freezes the exact song position derived from the boundary playback frame,
+recorded start and preroll, independently of host uncertainty. Resume preserves
+the cumulative once-rounded pause gap. Queued physical presentation older than
+the actual resume frame cannot update visuals after the gap changes. ASIO's
+bounded presentation queue accepts coherent paused/resumed grids while retaining
+original maturity deadlines; it still reports physical output for final drain.
+
+The common native replay loop consumes typed point or interval evidence without
+platform branches. Audio commands, recorded operations and completion remain
+fenced while pausing/paused/resuming; native polling and cancellation continue.
+Control requests and observations are staged together; evidence validation and
+checked song projection precede publication of state, capability and the mixer
+request. Rejected evidence cannot issue a pause request or partly change phase.
+Interval diagnostics retain both endpoints rather than claiming the upper
+acknowledgement deadline is an exact acoustic timestamp. No live input, new
+recorded operations, capture format or networking is introduced into Watch.
+
+Live/local ASIO pause remains separate work: input inside an uncertainty window
+needs an explicit classification policy and exact logical freeze before enabling
+that capability. A point-based Transport cutoff alone is insufficient evidence.
+Network pause remains unsupported. SDK integration is Windows+asio-sdk+MSVC;
+ordinary GNU checks do not compile that branch. Pure actual-Mixer, interval,
+replay and native-loop fixtures are authored and compiled only. Tests, driver,
+GUI, device, physical timing, formal review and QA execution remain deferred.

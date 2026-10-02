@@ -175,9 +175,10 @@ position, not the physical key event timestamp. Linux ALSA, Windows WASAPI
 shared/exclusive and macOS CoreAudio support solo/local 2..64 F9/Pause without
 network competition, using native-frontier acknowledgement, shared Transport
 fencing and paused-key reconciliation. Replay Watch supports the same F9 control
-when an actual output/host clock pair is available, freezing recorded progress
-and sounds together. ASIO and network pause,
-live scrubbing and gapless repetition remain work; native/GUI execution is
+when an actual output/host clock pair or assessed ASIO presentation interval is
+available. The shared pause owner freezes recorded progress at the exact logical
+playback frame and waits for native presentation acknowledgement. Live/local ASIO
+and network pause, live scrubbing and gapless repetition remain work; native/GUI execution is
 still unverified. In live nonnetwork play, F7 marks a loop start, F10 marks a later
 end and F11 enables a fresh native finite session with exact start/end options.
 Enabling first preflights, cancels, drains and joins the current owner. Audio
@@ -195,8 +196,8 @@ and every member must reach the same logical end. SDK-enabled Windows ASIO
 solo/local owners also accept finite prefixes, using actual rendered block and
 assessed latency intervals. Completion waits for the upper host frontier of a
 block starting at or after the endpoint and drained input; prepared frames alone
-do not finish a session. Physical accuracy remains unknown and ASIO pause is
-still unsupported. Network endpoint support remains unfinished. Portable regression fixtures are prepared for
+do not finish a session. Physical accuracy remains unknown and live/local ASIO
+pause is still unsupported. Network endpoint support remains unfinished. Portable regression fixtures are prepared for
 later execution, while native hardware/GUI/acoustic checks remain unverified.
 Windows WASAPI shared/exclusive and macOS CoreAudio solo and local 2..64 owners also accept
 `--end-ns`, using their actual PCM grid and native output/host clock relation.
@@ -699,8 +700,19 @@ selection and timer/drift/output-latency assessments. Actual rendered blocks
 wait in a bounded queue until fresh QPC reaches their upper presentation interval,
 then advance recorded visuals and natural drain. GUI Watch preserves exact
 frame buffers and routing, and queries omitted rate from the selected driver
-before PCM loading. ASIO pause remains unsupported; physical accuracy and
-SDK/MSVC/driver execution remain unverified.
+before PCM loading.
+
+Recorded ASIO playback uses the common replay pause loop with complete assessed
+intervals. F9 in Watch requests mixer pause/resume; the shared owner retains the
+first actual transition window and acknowledges it when fresh QPC reaches its
+latest endpoint. Repeated observations retain the original deadline. Frozen song
+time comes from the exact logical playback frame. The presentation queue keeps
+physical output points, and resume excludes older points until they reach the
+resumed physical boundary, preventing queued silence from rewinding the visuals.
+The supplied timing bounds remain assessments; physical accuracy and
+SDK/MSVC/driver execution remain unverified. Standard Windows GNU source checks
+exclude the SDK/MSVC wrapper. Live/local ASIO pause still requires separate input
+boundary handling.
 
 The graphical app's Settings → Records → Preview → Watch uses the same playfield
 and native recorded audio. W watches when the record list has focus; F5 retries
