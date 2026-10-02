@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'">
-  <title>BeatKernel · BMS preview</title>
+  <title>BeatKernel · BMS player</title>
   <link rel="stylesheet" href="./style.css">
   <script type="module" src="./main.js"></script>
 </head>
 <body>
   <main>
-    <header><p class="eyebrow">BEATKERNEL</p><h1>BMS preview</h1>
-      <p>Choose a song folder to explore its chart and backgrounds. Audio and playable input are still in development.</p>
+    <header><p class="eyebrow">BEATKERNEL</p><h1>BMS player</h1>
+      <p>Choose a song folder, preview its chart, or play with the keyboard.</p>
     </header>
     <section aria-label="Song library" class="controls">
       <div class="files">
@@ -25,7 +25,7 @@
         <label>Chart seed <input id="seed" type="text" inputmode="numeric" value="0" maxlength="20" required disabled></label>
         <button id="prepare" type="submit" disabled>Prepare chart</button>
       </form>
-      <p class="hint">Sounds retain their original sample rates. Mono sounds are prepared as stereo. Audio playback is not available in this preview.</p>
+      <p class="hint">Preview uses the chosen mix rate. Play prepares audio at the browser's actual rate. Source sound rates are preserved; mono sounds become stereo.</p>
     </section>
     <section aria-label="Chart preview" class="preview">
       <h2 id="title">No chart prepared</h2>
@@ -34,6 +34,9 @@
         <label>Preview time (seconds) <input id="position" type="text" inputmode="decimal" value="0" maxlength="32" required disabled></label>
         <button id="seek" type="submit" disabled>Show position</button>
       </form>
+      <p><button id="play" type="button" disabled>Play from beginning</button> <button id="stop" type="button" disabled>Stop</button></p>
+      <p id="keys" class="hint" aria-label="Keyboard controls"></p>
+      <p class="hint">Escape, switching away from this page, or losing focus stops playback. Use Stop to end a session.</p>
       <div id="viewport"><canvas id="canvas" width="960" height="720" aria-label="Chart lanes and background at the selected song time"></canvas></div>
     </section>
     <p id="status" role="status" aria-live="polite">Initializing graphics…</p>

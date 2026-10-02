@@ -137,6 +137,28 @@ export class AudioHost {
     return BigInt(frame);
   }
 
+  controlClock() {
+    this.currentFrame;
+    const beforeMs = performance.now();
+    const contextTime = this.#context.currentTime;
+    const afterMs = performance.now();
+    if (![beforeMs, contextTime, afterMs].every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)
+      || afterMs < beforeMs) throw this.#error("state", "clock", "Audio control clock observation is invalid.");
+    return { beforeMs, contextTime, afterMs, sampleRate: this.sampleRate };
+  }
+
+  outputTimestamp() {
+    this.currentFrame;
+    if (typeof this.#context.getOutputTimestamp !== "function") {
+      throw this.#error("unsupported", "presentation", "Audio output timestamps are unavailable.");
+    }
+    const timestamp = this.#context.getOutputTimestamp();
+    if (![timestamp?.contextTime, timestamp?.performanceTime].every(value => typeof value === "number" && Number.isFinite(value) && value > 0)) {
+      throw this.#error("state", "presentation", "Audio output timestamp evidence is not available yet.");
+    }
+    return { contextTime: timestamp.contextTime, performanceTime: timestamp.performanceTime };
+  }
+
   static async open(options) {
     const config = configuration(options);
     if (config.signal?.aborted) {
