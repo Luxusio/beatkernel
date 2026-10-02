@@ -1230,3 +1230,24 @@ offline, custom-decoder and replay-aware loaders. Device clipping and historical
 player conformance require later execution; static header gain does not imply
 dynamic97/98 support. Author fixtures for actual shared Runtime/Mixer PCM and
 replay-aware preparation, compiling them without execution under the user deferral.
+## Acknowledged network terminal prefix
+
+After native audio/input cleanup, a connected solo network owner admits its
+exact latest cumulative prefix and waits at most the configured I/O stall
+timeout for a matching terminal acknowledgement. Periodic50ms throttling must
+not omit that prefix. Wire version2 separates progress, terminal progress and
+acknowledgement with ordered sequences and checked cumulative counts. Reject
+duplicate/unsolicited/wrong acknowledgements, repeated terminal frames and
+progress after terminal. Preserve complete-frame writes when prioritizing the
+single pending acknowledgement. Simultaneous finish must write the peer's pending
+acknowledgement before treating local delivery as acknowledged and stopping.
+
+Remote terminal data stays unauthenticated display data; cancellation/error can
+also produce a terminal prefix. It does not establish successful chart completion,
+a winner or synchronized start. Queue pressure, disconnect, cancellation and
+timeout report failure rather than silently declaring delivery. Stop/Drop retain
+immediate cancellation and owned joining; no waiting or socket IO on gameplay or
+audio threads. This section supersedes the earlier no-guaranteed-final note only
+for a connected peer that explicitly acknowledges the prefix; disconnected peers
+remain undeliverable. Prepare protocol/lifecycle fixtures for later execution;
+native and socket acceptance remain deferred.

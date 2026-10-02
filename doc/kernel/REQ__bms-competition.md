@@ -84,9 +84,18 @@ publishes only after a compatible handshake, at most once per 50 ms of song
 time. Network errors print an explicit terminal status while local play continues.
 The socket owner is retained for joined cleanup outside the input/advance path.
 After native cleanup the app prints the exact final local prefix and saved
-opponent hit-count differences, then joins the networking worker. A remote
-snapshot remains the last received prefix with its own song time; it is not
-promoted to an acknowledged complete result or a final online ranking.
+opponent hit-count differences. A connected owner attempts an ordered terminal
+prefix and waits until the configured I/O stall deadline for its exact peer
+acknowledgement before joining the networking worker. Queue pressure is retryable
+within that deadline; disconnect, cancellation, protocol errors and timeout
+remain explicit failures. This bypasses periodic publication throttling without
+introducing a gameplay/audio wait. The wire protocol is version2; version1 peers
+are incompatible. Retain received peer-terminal progress separately from ordinary
+progress. A receipt confirms acceptance of a self-reported terminal prefix,
+including aborted sessions; it does not establish completed play or a ranking.
+An already parsed peer acknowledgement must be fully written before local
+delivery success; subsequent unseen peer-final delivery is not guaranteed.
+See the [desktop terminal-prefix contract](REQ__bms-player.md) for lifecycle rules.
 
 `compete --chart PATH --local-replay PATH --ghost-self PATH --ghost-other PATH
 [--song-ns N]` displays actual saved result prefixes, defaulting to the local
