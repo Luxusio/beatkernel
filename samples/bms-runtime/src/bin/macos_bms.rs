@@ -960,6 +960,29 @@ mod native {
                 );
             }
             check_hid(&input, selected_id, options.keyboard_registry)?;
+            if let Some(competition) = competition.as_mut() {
+                let ready = competition.await_network_ready(|| {
+                    if beatkernel_bms_runtime::player::cancelled() {
+                        return Ok(false);
+                    }
+                    input.poll(WallDuration::from_millis(1))?;
+                    check_hid(&input, selected_id, options.keyboard_registry)?;
+                    for _ in 0..256 {
+                        let Some(sample) = input.pop() else {
+                            break;
+                        };
+                        if sample.event.meta().source == selected_id {
+                            pre_origin = pre_origin.saturating_add(1);
+                        } else {
+                            other_devices = other_devices.saturating_add(1);
+                        }
+                    }
+                    Ok(true)
+                })?;
+                if !ready {
+                    return Ok(());
+                }
+            }
             audio.start()?;
             let mut discipline = PresentationDiscipline::new(
                 DisciplineConfig::default(),

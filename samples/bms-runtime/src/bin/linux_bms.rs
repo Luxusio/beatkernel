@@ -845,6 +845,30 @@ mod native {
                     )?,
                 );
             }
+            if let Some(competition) = competition.as_mut() {
+                let ready = competition.await_network_ready(|| {
+                    if beatkernel_bms_runtime::player::cancelled() {
+                        return Ok(false);
+                    }
+                    for _ in 0..256 {
+                        match input.read_next()? {
+                            EvdevItem::WouldBlock => break,
+                            EvdevItem::Ignored => {}
+                            EvdevItem::Event(_) => before_origin = before_origin.saturating_add(1),
+                            EvdevItem::Dropped | EvdevItem::Resync(_) => {
+                                return Err(
+                                    "evdev loss during multiplayer preparation; restart required"
+                                        .into(),
+                                );
+                            }
+                        }
+                    }
+                    Ok(true)
+                })?;
+                if !ready {
+                    return Ok(());
+                }
+            }
             stream.start()?;
             let mut discipline = PresentationDiscipline::new(
                 DisciplineConfig::default(),

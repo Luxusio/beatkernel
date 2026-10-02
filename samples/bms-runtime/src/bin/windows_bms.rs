@@ -1343,6 +1343,72 @@ mod native {
                     )?,
                 );
             }
+            if let Some(competition) = competition.as_mut() {
+                let ready = competition.await_network_ready(|| {
+                    if beatkernel_bms_runtime::player::cancelled() {
+                        return Ok(false);
+                    }
+                    // SAFETY: MSG is a native plain-data output structure for PeekMessageW.
+                    let mut message: MSG = unsafe { std::mem::zeroed() };
+                    for _ in 0..256 {
+                        // SAFETY: initialized output and messages owned by this game thread.
+                        if unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) } == 0 {
+                            break;
+                        }
+                        if message.message == WM_QUIT || message.message == WM_CLOSE {
+                            return Ok(false);
+                        }
+                        if message.hwnd == acquisition.hwnd() && message.message == WM_INPUT {
+                            let acquired =
+                                input.read_raw_input(message.lParam as usize, Some(message.time));
+                            if message.wParam & 0xff == 0 {
+                                // SAFETY: foreground Raw Input receives default cleanup exactly once.
+                                unsafe {
+                                    DefWindowProcW(
+                                        message.hwnd,
+                                        message.message,
+                                        message.wParam,
+                                        message.lParam,
+                                    );
+                                }
+                            }
+                            for event in acquired?.input.events {
+                                if selected.is_none_or(|(id, _)| event.meta().source.0 == id) {
+                                    pre_origin_inputs = pre_origin_inputs.saturating_add(1);
+                                }
+                            }
+                            continue;
+                        }
+                        if message.hwnd == acquisition.hwnd()
+                            && message.message == WM_INPUT_DEVICE_CHANGE
+                        {
+                            match message.wParam as u32 {
+                                GIDC_ARRIVAL => {
+                                    input.attach_device(message.lParam as usize)?;
+                                }
+                                GIDC_REMOVAL => {
+                                    if selected.is_some_and(|(_, handle)| handle == message.lParam as usize) {
+                                        return Err(
+                                            "selected keyboard detached during multiplayer preparation".into(),
+                                        );
+                                    }
+                                    input.remove_device(message.lParam as usize);
+                                }
+                                _ => {}
+                            }
+                        }
+                        // SAFETY: real initialized native message and stateless owning-window procedure.
+                        unsafe {
+                            TranslateMessage(&message);
+                            DispatchMessageW(&message);
+                        }
+                    }
+                    Ok(true)
+                })?;
+                if !ready {
+                    return Ok(());
+                }
+            }
             stream.start()?;
             let (mut transport, quality) = stream.calibrate(
                 &options,

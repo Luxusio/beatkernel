@@ -43,7 +43,7 @@ pub struct CompetitionOptions {
     pub ghosts: Vec<(OpponentKind, PathBuf)>,
     /// Optional two-peer connection.
     pub network: Option<NetworkRole>,
-    /// Finite initial connection/identity exchange deadline.
+    /// Finite connection/identity and native preparation readiness deadline.
     pub setup_timeout: Duration,
 }
 impl Default for CompetitionOptions {
@@ -187,6 +187,7 @@ pub struct LiveCompetition {
     network_failed: bool,
     network_status: Option<NetworkStatus>,
     last_presentation: Option<Instant>,
+    network_setup_timeout: Duration,
 }
 impl LiveCompetition {
     /// Load ghosts before starting audio; spawn networking only when selected.
@@ -345,6 +346,7 @@ impl LiveCompetition {
             network_failed: false,
             network_status: options.network.as_ref().map(|_| NetworkStatus::Waiting),
             last_presentation: None,
+            network_setup_timeout: options.setup_timeout,
         };
         prepared.publish_presentation(true)?;
         Ok(Some(prepared))
@@ -400,11 +402,12 @@ impl LiveCompetition {
             for event in network.poll() {
                 match event {
                     MultiplayerEvent::Connected => {
-                        self.network_status = Some(NetworkStatus::Connected);
+                        self.network_status = Some(NetworkStatus::Waiting);
                         println!(
-                            "multiplayer peer connected; compatible setup, self-reported progress"
+                            "multiplayer peer compatible; waiting for native preparation readiness"
                         );
                     }
+                    MultiplayerEvent::Ready => self.network_status = Some(NetworkStatus::Connected),
                     MultiplayerEvent::Progress(_)
                     | MultiplayerEvent::FinalProgress(_)
                     | MultiplayerEvent::FinalAcknowledged => {}
@@ -416,7 +419,7 @@ impl LiveCompetition {
             }
             if !self.network_failed
                 && !disconnected
-                && network.is_connected()
+                && network.is_ready()
                 && self
                     .last_publish
                     .is_none_or(|last| i128::from(song) - i128::from(last) >= 50_000_000)
@@ -470,6 +473,60 @@ impl LiveCompetition {
         Ok(())
     }
 
+    /// Native preparation barrier, called before audio starts on the game owner.
+    /// Service bounded native acquisition and cancellation without judging input.
+    pub fn await_network_ready(
+        &mut self,
+        mut service: impl FnMut() -> Result<bool>,
+    ) -> Result<bool> {
+        let Some(network) = self.network.as_mut() else {
+            return Ok(true);
+        };
+        let deadline = Instant::now() + self.network_setup_timeout;
+        let outcome = (|| -> Result<bool> {
+            network.try_ready()?;
+            loop {
+                if !service()? {
+                    return Ok(false);
+                }
+                for event in network.poll() {
+                    if let MultiplayerEvent::Disconnected(error) = event {
+                        return Err(error.into());
+                    }
+                }
+                if Instant::now() >= deadline {
+                    return Err(crate::multiplayer::MultiplayerError::SetupTimeout.into());
+                }
+                if network.is_ready() {
+                    return Ok(true);
+                }
+                std::thread::sleep(
+                    Duration::from_millis(5)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
+            }
+        })();
+        match &outcome {
+            Ok(true) => self.network_status = Some(NetworkStatus::Connected),
+            Ok(false) => {
+                network.request_stop();
+                self.network_status = Some(NetworkStatus::Stopped);
+            }
+            Err(_) => {
+                network.request_stop();
+                self.network_failed = true;
+                self.network_status = Some(NetworkStatus::Disconnected);
+            }
+        }
+        // Preserve the original acquisition/protocol error if presentation also fails.
+        if outcome.is_err() {
+            let _ = self.publish_presentation(true);
+        } else {
+            self.publish_presentation(true)?;
+        }
+        outcome
+    }
+
     fn terminal_prefix(&self) -> Option<Progress> {
         let song_ns = self.competition.song_time()?.as_nanos();
         let score = self.competition.score();
@@ -509,7 +566,7 @@ impl LiveCompetition {
                     self.network_failed = true;
                 }
             }
-            if !self.network_failed && network.is_connected() {
+            if !self.network_failed && network.is_ready() {
                 if let Some(progress) = terminal_prefix {
                     if let Err(error) = network.finish_delivery(progress) {
                         eprintln!("multiplayer terminal prefix was not acknowledged: {error}");
@@ -615,8 +672,15 @@ mod fixtures {
             network_failed: false,
             network_status: None,
             last_presentation: None,
+            network_setup_timeout: Duration::from_secs(10),
         };
         assert_eq!(owner.terminal_prefix(), None); // No invented prefix before an actual report.
+        assert!(
+            owner
+                .await_network_ready(|| panic!("offline competition must not acquire or wait"))
+                .unwrap()
+        );
+        assert_eq!(owner.network_status, None);
         let (producer, _consumer) = command_queue(1).unwrap();
         let mut runtime = Runtime::new(
             ClockDomainId(17),
