@@ -545,9 +545,42 @@ impl LiveCompetition {
 
     /// Native preparation and committed software-start barrier on the game owner.
     /// Service bounded native acquisition and cancellation without judging input.
-    pub fn await_network_ready(
+    pub fn await_network_ready(&mut self, service: impl FnMut() -> Result<bool>) -> Result<bool> {
+        self.await_network_start(service, true)
+    }
+    /// Returns with a future commitment so an already-silent device can arm a frame.
+    pub fn await_network_commit(&mut self, service: impl FnMut() -> Result<bool>) -> Result<bool> {
+        self.await_network_start(service, false)
+    }
+    pub fn committed_start_schedule(&self) -> Option<crate::multiplayer_start::StartSchedule> {
+        self.network.as_ref().and_then(Multiplayer::start_schedule)
+    }
+    /// Brackets a caller's actual native host read without inventing a clock relation.
+    pub fn native_host_bracket(
+        &self,
+        sample: impl FnOnce() -> Result<beatkernel::time::ClockPoint>,
+    ) -> Result<Option<crate::native_start::SessionHostBracket>> {
+        let Some(network) = &self.network else {
+            return Ok(None);
+        };
+        let before = network.clock_now_ns()?;
+        let host = sample()?;
+        let after = network.clock_now_ns()?;
+        Ok(Some(crate::native_start::SessionHostBracket::new(
+            before, host, after,
+        )?))
+    }
+    pub fn network_clock_now_ns(&self) -> Result<Option<i64>> {
+        self.network
+            .as_ref()
+            .map(Multiplayer::clock_now_ns)
+            .transpose()
+            .map_err(Into::into)
+    }
+    fn await_network_start(
         &mut self,
         mut service: impl FnMut() -> Result<bool>,
+        await_release: bool,
     ) -> Result<bool> {
         let Some(network) = self.network.as_mut() else {
             return Ok(true);
@@ -568,6 +601,9 @@ impl LiveCompetition {
                     return Err(crate::multiplayer::MultiplayerError::SetupTimeout.into());
                 }
                 if let Some(schedule) = network.start_schedule() {
+                    if !await_release {
+                        return Ok(true);
+                    }
                     let now = network.clock_now_ns()?;
                     if start_release_due(
                         schedule,
@@ -846,6 +882,19 @@ mod fixtures {
             owner
                 .await_network_ready(|| panic!("offline competition must not acquire or wait"))
                 .unwrap()
+        );
+        assert!(
+            owner
+                .await_network_commit(|| panic!("offline commit must not wait"))
+                .unwrap()
+        );
+        assert_eq!(owner.committed_start_schedule(), None);
+        assert_eq!(owner.network_clock_now_ns().unwrap(), None);
+        assert_eq!(
+            owner
+                .native_host_bracket(|| panic!("offline owner must not sample a session bridge"))
+                .unwrap(),
+            None
         );
         assert_eq!(owner.network_status, None);
         let (producer, _consumer) = command_queue(1).unwrap();

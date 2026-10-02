@@ -1,4 +1,4 @@
-//! Checked nominal projection of a session start into a native physical frame.
+//! Checked observed or nominal projection of a session start into a native physical frame.
 //! ClockPair supplies no drift/error bounds; this is not a physical timing proof.
 use beatkernel::time::{ClockPair, ClockPoint, Timestamp};
 use std::fmt;
@@ -11,6 +11,7 @@ pub enum StartProjectionError {
     InvalidRate,
     Overflow,
     TooClose,
+    Slope,
 }
 impl fmt::Display for StartProjectionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -129,6 +130,75 @@ impl OutputStartPlan {
         rendered_end: u64,
         minimum_ahead_frames: u64,
     ) -> Result<Self, StartProjectionError> {
+        Self::project(
+            window,
+            pair,
+            origin,
+            sample_rate,
+            rendered_end,
+            minimum_ahead_frames,
+            1,
+            1,
+        )
+    }
+    /// Projects through an observed positive slope, rejecting caller-bounded ppm.
+    /// Two native observations still do not establish physical measurement error.
+    pub fn from_pairs(
+        window: HostStartWindow,
+        first: ClockPair,
+        second: ClockPair,
+        origin: ClockPoint,
+        sample_rate: u32,
+        rendered_end: u64,
+        minimum_ahead_frames: u64,
+        maximum_rate_error_ppm: u32,
+    ) -> Result<Self, StartProjectionError> {
+        if first.source.domain != second.source.domain
+            || first.target.domain != second.target.domain
+        {
+            return Err(StartProjectionError::Domains);
+        }
+        let source_span = i128::from(second.source.timestamp.as_nanos())
+            - i128::from(first.source.timestamp.as_nanos());
+        let host_span = i128::from(second.target.timestamp.as_nanos())
+            - i128::from(first.target.timestamp.as_nanos());
+        if source_span <= 0 || host_span <= 0 {
+            return Err(StartProjectionError::Chronology);
+        }
+        if maximum_rate_error_ppm >= 1_000_000
+            || (source_span - host_span).abs() * 1_000_000
+                > host_span * i128::from(maximum_rate_error_ppm)
+        {
+            return Err(StartProjectionError::Slope);
+        }
+        let mut a = source_span;
+        let mut b = host_span;
+        while b != 0 {
+            let next = a % b;
+            a = b;
+            b = next;
+        }
+        Self::project(
+            window,
+            second,
+            origin,
+            sample_rate,
+            rendered_end,
+            minimum_ahead_frames,
+            source_span / a,
+            host_span / a,
+        )
+    }
+    fn project(
+        window: HostStartWindow,
+        pair: ClockPair,
+        origin: ClockPoint,
+        sample_rate: u32,
+        rendered_end: u64,
+        minimum_ahead_frames: u64,
+        slope_numerator: i128,
+        slope_denominator: i128,
+    ) -> Result<Self, StartProjectionError> {
         if pair.source.domain != origin.domain || pair.target.domain != window.earliest.domain {
             return Err(StartProjectionError::Domains);
         }
@@ -136,16 +206,29 @@ impl OutputStartPlan {
             return Err(StartProjectionError::InvalidRate);
         }
         let frame_at = |host: ClockPoint| -> Result<u64, StartProjectionError> {
-            let delta = i128::from(pair.source.timestamp.as_nanos())
-                - i128::from(origin.timestamp.as_nanos())
-                + i128::from(host.timestamp.as_nanos())
+            let base = i128::from(pair.source.timestamp.as_nanos())
+                - i128::from(origin.timestamp.as_nanos());
+            let host_delta = i128::from(host.timestamp.as_nanos())
                 - i128::from(pair.target.timestamp.as_nanos());
-            if delta < 0 {
+            let scaled = base
+                .checked_mul(slope_denominator)
+                .and_then(|value| {
+                    host_delta
+                        .checked_mul(slope_numerator)
+                        .and_then(|offset| value.checked_add(offset))
+                })
+                .ok_or(StartProjectionError::Overflow)?;
+            if scaled < 0 {
                 return Err(StartProjectionError::TooClose);
             }
-            let numerator = delta * i128::from(sample_rate);
-            u64::try_from((numerator + 999_999_999) / 1_000_000_000)
-                .map_err(|_| StartProjectionError::Overflow)
+            let numerator = scaled
+                .checked_mul(i128::from(sample_rate))
+                .ok_or(StartProjectionError::Overflow)?;
+            let denominator = slope_denominator
+                .checked_mul(1_000_000_000)
+                .ok_or(StartProjectionError::Overflow)?;
+            let frame = numerator / denominator + i128::from(numerator % denominator != 0);
+            u64::try_from(frame).map_err(|_| StartProjectionError::Overflow)
         };
         let earliest_frame = frame_at(window.earliest)?;
         let latest_frame = frame_at(window.latest)?;
@@ -181,6 +264,40 @@ impl OutputStartPlan {
     pub fn selected_output(self) -> ClockPoint {
         self.selected_output
     }
+}
+
+/// Interpolates only after actual native observations bracket the applied output.
+/// The returned host coordinate retains Unknown physical measurement accuracy.
+pub fn presented_output(
+    output: ClockPoint,
+    lower: ClockPair,
+    upper: ClockPair,
+) -> Result<ClockPoint, StartProjectionError> {
+    if output.domain != lower.source.domain
+        || output.domain != upper.source.domain
+        || lower.target.domain != upper.target.domain
+    {
+        return Err(StartProjectionError::Domains);
+    }
+    let source_span = i128::from(upper.source.timestamp.as_nanos())
+        - i128::from(lower.source.timestamp.as_nanos());
+    let host_span = i128::from(upper.target.timestamp.as_nanos())
+        - i128::from(lower.target.timestamp.as_nanos());
+    let offset =
+        i128::from(output.timestamp.as_nanos()) - i128::from(lower.source.timestamp.as_nanos());
+    if source_span <= 0 || host_span <= 0 || offset < 0 || offset > source_span {
+        return Err(StartProjectionError::Chronology);
+    }
+    let host = offset
+        .checked_mul(host_span)
+        .map(|value| value / source_span)
+        .and_then(|value| value.checked_add(i128::from(lower.target.timestamp.as_nanos())))
+        .and_then(|value| i64::try_from(value).ok())
+        .ok_or(StartProjectionError::Overflow)?;
+    Ok(ClockPoint {
+        domain: lower.target.domain,
+        timestamp: Timestamp::from_nanos(host),
+    })
 }
 
 #[cfg(test)]
@@ -255,6 +372,66 @@ mod fixtures {
         );
         assert_eq!(producer.applied_start_frame(), Some(3));
         assert_eq!(plan.selected_output(), point(2, 3_000_000));
+    }
+    #[test]
+    fn measured_slope_and_actual_crossing_have_literal_coordinates() {
+        let window = SessionHostBracket::new(0, point(1, 0), 0)
+            .unwrap()
+            .deadline_at(2_000_000_000, 0, 0)
+            .unwrap();
+        let first = ClockPair {
+            source: point(2, 0),
+            target: point(1, 0),
+        };
+        let second = ClockPair {
+            source: point(2, 1_000_500_000),
+            target: point(1, 1_000_000_000),
+        };
+        let plan = OutputStartPlan::from_pairs(
+            window,
+            first,
+            second,
+            point(2, 0),
+            48_000,
+            48_000,
+            256,
+            1000,
+        )
+        .unwrap();
+        assert_eq!(plan.selected_frame(), 96_048);
+        assert_eq!(plan.selected_output(), point(2, 2_001_000_000));
+        assert_eq!(
+            OutputStartPlan::from_pairs(window, first, second, point(2, 0), 48_000, 0, 0, 0),
+            Err(StartProjectionError::Slope)
+        );
+        assert_eq!(
+            OutputStartPlan::from_pairs(window, second, first, point(2, 0), 48_000, 0, 0, 1000),
+            Err(StartProjectionError::Chronology)
+        );
+        let lower = ClockPair {
+            source: point(2, 2_000_000_000),
+            target: point(1, 1_999_000_000),
+        };
+        let upper = ClockPair {
+            source: point(2, 2_002_000_000),
+            target: point(1, 2_001_000_000),
+        };
+        assert_eq!(
+            presented_output(plan.selected_output(), lower, upper).unwrap(),
+            point(1, 2_000_000_000)
+        );
+        assert_eq!(
+            presented_output(point(3, 2_001_000_000), lower, upper),
+            Err(StartProjectionError::Domains)
+        );
+        assert_eq!(
+            presented_output(point(2, 2_003_000_000), lower, upper),
+            Err(StartProjectionError::Chronology)
+        );
+        assert_eq!(
+            presented_output(plan.selected_output(), upper, lower),
+            Err(StartProjectionError::Chronology)
+        );
     }
     #[test]
     fn bracket_interval_and_conservative_physical_frame_are_literal() {
