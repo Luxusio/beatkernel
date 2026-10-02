@@ -108,10 +108,15 @@ bounded setup/start/progress/final protocol on all native platforms. Browser
 and native adapters can now share the transport-independent BKMP v6 framing,
 progress validation, readiness, clock probes and final-acknowledgement state.
 The QUIC reader uses that bounded decoder; its public native types remain stable.
+One shared session owner also handles setup matching, control-message priority,
+software start agreement and exact complete-write receipt IDs. Native QUIC
+delegates these transitions to it; connection and timeout ownership stay in the
+transport adapter.
 WebTransport requires its own compatible HTTP/3 server integration and remains
 unfinished. QUIC socket/TLS execution is still deferred.
 Use an explicit reachable IP for another machine. Network loss leaves local
-play running; remote progress is self-reported and song starts are independent.
+play running; remote progress is self-reported. A committed software start does
+not establish physical audio synchronization across devices.
 The graphical `player` mode uses `winit` on the main thread and `wgpu` to draw
 notes, holds, judgment feedback and counters from actual game snapshots.
 Use `player --library DIR` or `player --chart PATH` with optional advanced native

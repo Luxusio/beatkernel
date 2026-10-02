@@ -11,7 +11,10 @@ Optional capture/download and local canonical replay playback are source-wired
 to this host. Browser multiplayer remains unfinished. The shared Rust
 `multiplayer_protocol` module provides bounded BKMP v6 framing and the same
 progress, readiness, clock-probe and final-acknowledgement state used by native
-QUIC. A browser WebTransport session and compatible HTTP/3 endpoint still need
+QUIC. Its common session owner composes setup matching and software start
+agreement, with bounded events and exact complete-write receipt IDs. Native
+QUIC already delegates those transitions to the common owner. A browser
+WebTransport adapter, WASM session bindings and compatible HTTP/3 endpoint still need
 integration; this module alone does not provide a browser connection.
 
 The DOM owns file selection, controls and layout. A dedicated module Worker owns

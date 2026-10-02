@@ -21,6 +21,31 @@ limit. It uses the existing 8ms latest-state bridge and never enters the audio
 callback. Coalescing affects display only; the final snapshot retains the exact
 last prefixes. Full u64 counters remain exact in the view.
 
+## Shared transport-independent session
+
+One session owner in the existing application protocol module composes exact
+setup identity matching, preparation readiness, software clock probes, start
+agreement, progress and final acknowledgements. Native QUIC delegates this
+orchestration to that owner; browser adapters must use the same owner. Transport
+adapters retain connection, framing, partial-write offsets, cancellation and
+timeout ownership. The session acquires no clock or transport itself.
+
+Caller times are explicit nonnegative monotonic elapsed nanoseconds. Each
+immutable admitted outbound frame has a checked unique ID, with at most one
+in-flight frame. Only a matching completion for that entire frame advances its
+write barrier; stale, duplicate or wrong IDs reject. Partial writes and a local
+write completion do not imply peer acknowledgement. Send priority remains
+readiness, final ACK, pending pong, next ping, start agreement, then application
+progress. The application queue is consumed only at an admitted application
+slot after a committed start, retaining its existing capacity.
+
+Session events have finite storage and explicit overflow failure. Adapters
+forward completion events before attempting another read that might report
+EOF. Invalid caller times or fatal protocol errors make the session unusable,
+preventing continuation after a partially admitted exchange. These are software
+timing and receipt contracts; physical synchronization and an actual browser
+HTTP/3 WebTransport endpoint remain separate implementation and acceptance work.
+
 ## Saved-record opponents
 
 The user can select their own saved replay or another player's saved replay.

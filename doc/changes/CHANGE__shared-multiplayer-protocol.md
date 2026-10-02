@@ -8,6 +8,10 @@ ordering and complete-frame write barriers retain their existing valid-input
 behavior and wire bytes. Socket/thread/runtime ownership stays in the native
 adapter; the shared components acquire no platform clock or transport I/O.
 
+The subsequent [shared session change](CHANGE__shared-multiplayer-session.md)
+also moves setup and control-message orchestration into the common module;
+native QUIC keeps only its transport ownership and supplies explicit evidence.
+
 A checked encoder bounds payloads before allocation. The incremental decoder
 admits only the exact needed header/body prefix and returns consumed bytes,
 allowing fragmented or coalesced transport chunks without dropping leftovers or
