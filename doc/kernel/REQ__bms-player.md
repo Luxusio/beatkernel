@@ -1517,3 +1517,33 @@ member capture/completion still precede opponent loading. Device selectors,
 sound voices, recording paths and native cleanup remain with their existing
 owners. Author actual judge/runtime/capture/replay and completion-boundary fixtures;
 compilation does not establish runtime or physical acceptance.
+
+## Interval-preserving native startup
+
+Committed ASIO network starts must use the common held-device startup owner with
+actual output-grid observations and their complete host before/after bounds.
+Validate calibration consistency against the explicitly assessed rate band, then
+project the committed target uncertainty through that entire band. A past average
+does not tighten future instantaneous-rate bounds. Retain the whole frame range
+and select its latest ceiling frame beyond the rendered frontier plus actual
+buffer. The assessed rate bound is an assumption consistent with observations,
+not measured drift or an acoustic accuracy guarantee.
+
+Preserve original native evidence, sample rate, frame origin and render identity.
+At the first actual gate crossing, retain a bounded host window derived from both
+bracketing observations and wait for native host time to reach its upper endpoint.
+The transport's nominal anchor is distinct from this retained uncertainty. Coarse
+host plateaus are permitted when bounds remain consistent. Point-based backends
+keep their existing projection. Configure pause/end frame grids before arming;
+seed ASIO end and discipline using the original interval observation. Initial
+network gating does not enable manual ASIO pause. Committed ASIO gameplay uses
+the common logical render-grid scheduler, so held startup silence never shifts
+keysound commands by the physical start-frame offset. Ungated ASIO retains its
+existing software-frontier scheduling.
+
+Use actual applied ASIO buffer metadata from prepared stream evidence, never a
+second requested-size estimate. Reject stale, incompatible, inconsistent or
+unrepresentable evidence instead of inventing point samples. Author portable
+interval and real gated-mixer startup fixtures for later execution. Ordinary
+source/GNU checks do not cover the SDK/MSVC driver branch; SDK compilation, device,
+network and physical timing acceptance remain deferred.
