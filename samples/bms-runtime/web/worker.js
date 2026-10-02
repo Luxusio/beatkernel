@@ -419,10 +419,12 @@ function handlePlay(request) {
     } else if (request.kind === "play-step") stepPlay(state, request);
     else if (request.kind === "play-render") {
       if (!state.active || !identity(request.renderId) || request.renderId <= state.lastRender) throw new Error("Invalid rendered-report identity or state.");
-      if (!(request.presentedNs === null || hostTime(request.presentedNs))) throw new Error("Invalid output presentation point.");
+      if (!(request.presentedNs === null && request.presentedHostNs === null)
+        && !(hostTime(request.presentedNs) && hostTime(request.presentedHostNs))) throw new Error("Invalid output presentation pair.");
       renderedCursor(request.report, state.startFrame);
       const completed = state.game.observe_output(request.report.words, request.presentedNs);
       if (typeof completed !== "boolean" || (completed && state.batch !== null)) throw new Error("Invalid completion with outstanding gameplay commands.");
+      if (request.presentedNs !== null) state.game.observe_presentation(request.presentedNs, request.presentedHostNs);
       state.lastRender = request.renderId;
       report("play-render-done", { playId: state.id, renderId: request.renderId, completed });
       pumpCommands(state);

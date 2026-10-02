@@ -20,8 +20,11 @@ use beatkernel::{
     },
     judge::JudgeEvent,
     runtime::RuntimeReport,
-    time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
+    time::{
+        ClockDomainId, ClockMapper, ClockMappingQuality, ClockPair, ClockPoint, Duration, Timestamp,
+    },
 };
+use beatkernel_platform::audio::presentation::discipline::DisciplineConfig;
 use wasm_bindgen::prelude::*;
 
 const HOST: ClockDomainId = ClockDomainId(0x57494e);
@@ -155,7 +158,13 @@ impl BrowserGame {
             bgm_lookahead: Duration::from_nanos(500_000_000),
             telemetry_capacity: 256,
         };
-        let (game, bank) = StepGameplay::new(prepared.prepared, config, bindings).map_err(error)?;
+        let (mut game, bank) =
+            StepGameplay::new(prepared.prepared, config, bindings).map_err(error)?;
+        game.configure_output_clock(DisciplineConfig {
+            max_observation_age: Duration::from_nanos(1_000_000_000),
+            ..DisciplineConfig::default()
+        })
+        .map_err(error)?;
         Ok(Self {
             game,
             chart,
@@ -227,7 +236,27 @@ impl BrowserGame {
         let result = self
             .game
             .advance_to(point(HOST, host_ns), &Explicit, point(OUTPUT, audio_ns));
-        self.accept_report(result)
+        self.accept_report(result)?;
+        self.game
+            .update_output_clock(point(HOST, host_ns))
+            .map(|_| ())
+            .map_err(error)
+    }
+    /// Actual paired browser presentation estimate, in the original Window
+    /// host domain and armed-start-relative output domain. Admission alone never
+    /// corrects transport; only a successful later watermark may apply a rate.
+    pub fn observe_presentation(&mut self, output_ns: i64, host_ns: i64) -> Result<(), JsValue> {
+        if output_ns < 0 || host_ns < 0 {
+            self.game.fail();
+            return Err(error("browser presentation points must be nonnegative"));
+        }
+        self.game
+            .observe_output_clock(ClockPair {
+                source: point(OUTPUT, output_ns),
+                target: point(HOST, host_ns),
+            })
+            .map(|_| ())
+            .map_err(error)
     }
     pub fn feed_audio(&mut self, rendered_frames: u64, budget: u32) -> Result<(), JsValue> {
         self.game

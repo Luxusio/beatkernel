@@ -1,6 +1,6 @@
 import { snapshotFiles, nanoseconds, seconds } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
-import { KEY_BINDINGS, bindingsFor, millisecondsToNanos, frameNanos, startProjection, presentationPoint } from "./play-model.mjs";
+import { KEY_BINDINGS, bindingsFor, millisecondsToNanos, frameNanos, startProjection, presentationPair } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
 const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys"].map(id => [id, byId(id)]));
@@ -359,10 +359,13 @@ function presentedPoint(session) {
     if (error.code === "unsupported" || error.code === "unavailable") return null;
     throw error;
   }
-  const point = presentationPoint(timestamp, session.startFrame, session.audio.sampleRate, performance.now());
-  if (point === null || (session.lastPresentation !== null && point < session.lastPresentation)) return null;
-  session.lastPresentation = point;
-  return point;
+  const pair = presentationPair(timestamp, session.startFrame, session.audio.sampleRate, performance.now());
+  const previous = session.lastPresentation;
+  if (pair === null || (previous !== null && (pair.outputNs < previous.outputNs
+    || pair.hostNs < previous.hostNs || (pair.outputNs > previous.outputNs && pair.hostNs === previous.hostNs)))) return null;
+  // A repeated output position must not refresh the clock observer's age.
+  if (previous === null || pair.outputNs > previous.outputNs) session.lastPresentation = pair;
+  return pair;
 }
 function finishPlay(session) {
   if (activePlay === session && session.phase === "playing" && session.completionReady
@@ -408,7 +411,9 @@ async function pumpAudio(session) {
         if (!Number.isSafeInteger(renderId)) throw new Error("Audio report identity exhausted.");
         const timer = setTimeout(() => { if (session.renderPending?.renderId === renderId) void stopPlay("Audio report Worker stopped responding.", true); }, 10000);
         session.renderPending = { renderId, timer };
-        worker.postMessage({ kind: "play-render", playId: session.id, renderId, report, presentedNs: presentedPoint(session) });
+        const presentation = presentedPoint(session);
+        worker.postMessage({ kind: "play-render", playId: session.id, renderId, report,
+          presentedNs: presentation?.outputNs ?? null, presentedHostNs: presentation?.hostNs ?? null });
       }
     }
   } catch (error) {

@@ -17,8 +17,12 @@ use beatkernel::{
     input::{BindingMap, PhysicalInputEvent},
     judge::JudgeEngine,
     runtime::{RuntimeProcessingClock, RuntimeReport},
-    time::{ClockDomainId, ClockMapper, ClockPoint, Duration, Timestamp},
+    time::{ClockDomainId, ClockMapper, ClockPair, ClockPoint, Duration, Timestamp},
     transport::{Rate, Transport},
+};
+use beatkernel_platform::audio::presentation::discipline::{
+    DisciplineConfig, DisciplineError, DisciplineUpdate, ObservationAdmission,
+    PresentationDiscipline,
 };
 use std::{error::Error, fmt};
 
@@ -62,6 +66,8 @@ pub enum StepGameplayError {
     AllocationFailed,
     SequenceOverflow,
     Runtime(GroupError),
+    /// Original clock discipline failure; committed judgments remain retained.
+    Clock(DisciplineError),
     /// The report's judgments remain committed even when audio admission failed.
     /// Score aggregation is atomic; its error preserves the previous score.
     Report {
@@ -112,6 +118,7 @@ impl fmt::Display for StepGameplayError {
             }
             Self::SequenceOverflow => f.write_str("audio batch sequence exhausted"),
             Self::Runtime(error) => write!(f, "step gameplay: {error}"),
+            Self::Clock(error) => write!(f, "step gameplay: {error}"),
             Self::Report {
                 report,
                 score_error,
@@ -167,6 +174,8 @@ pub struct StepGameplay {
     sample_rate: u32,
     last_render: Option<RenderReport>,
     last_presented: Option<Timestamp>,
+    output_clock: Option<PresentationDiscipline>,
+    correction_watermark: Option<ClockPoint>,
     score: ScoreSummary,
     song: Timestamp,
     host_domain: ClockDomainId,
@@ -302,6 +311,8 @@ impl StepGameplay {
             sample_rate,
             last_render: None,
             last_presented: None,
+            output_clock: None,
+            correction_watermark: None,
             score: ScoreSummary::default(),
             song,
             host_domain: config.host_origin.domain,
@@ -322,6 +333,92 @@ impl StepGameplay {
         } else {
             Ok(())
         }
+    }
+
+    /// Opt in before any processing. Configuration reserves the existing
+    /// discipline's bounded storage; its accuracy remains Unknown. Atomic setup
+    /// refusal leaves this owner usable and does not alter its nominal transport.
+    pub fn configure_output_clock(
+        &mut self,
+        config: DisciplineConfig,
+    ) -> Result<(), StepGameplayError> {
+        self.ensure_usable()?;
+        if self.started || self.output_clock.is_some() {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "output clock configuration requires an unprocessed, unconfigured runtime",
+            ));
+        }
+        let discipline =
+            PresentationDiscipline::new(config, self.output_origin, self.host_domain, self.song)
+                .map_err(StepGameplayError::Clock)?;
+        self.output_clock = Some(discipline);
+        Ok(())
+    }
+
+    /// Admit an actual absolute output/host relation after activation, without
+    /// changing transport or input timestamps. A measured host point may be
+    /// earlier than the estimated activation instant; native warmup/history
+    /// checks remain authoritative. Unchanged output cannot refresh freshness.
+    pub fn observe_output_clock(
+        &mut self,
+        pair: ClockPair,
+    ) -> Result<ObservationAdmission, StepGameplayError> {
+        self.ensure_usable()?;
+        if !self.activated || self.output_clock.is_none() {
+            return Err(self.clock_failure(DisciplineError::InvalidConfig));
+        }
+        if pair.source.domain != self.output_origin.domain || pair.target.domain != self.host_domain
+        {
+            return Err(self.clock_failure(DisciplineError::DomainMismatch));
+        }
+        if pair.source.timestamp < self.output_origin.timestamp {
+            return Err(self.clock_failure(DisciplineError::NonIncreasing));
+        }
+        let result = self
+            .output_clock
+            .as_mut()
+            .expect("configured discipline was checked")
+            .observe_clock_pair(pair);
+        result.map_err(|error| self.clock_failure(error))
+    }
+
+    /// Apply continuous correction only at the latest successfully accepted
+    /// original host watermark, after its complete input prefix. Any later input
+    /// invalidates that permission until another successful advance. Missing or
+    /// stale observations preserve the current transport history without a clock
+    /// substitution; all other observation/update faults fence this owner.
+    pub fn update_output_clock(
+        &mut self,
+        host: ClockPoint,
+    ) -> Result<Option<DisciplineUpdate>, StepGameplayError> {
+        self.ensure_usable()?;
+        if self.output_clock.is_none() {
+            return Ok(None);
+        }
+        if !self.activated {
+            return Err(self.clock_failure(DisciplineError::InvalidConfig));
+        }
+        if host.domain != self.host_domain {
+            return Err(self.clock_failure(DisciplineError::DomainMismatch));
+        }
+        if self.correction_watermark != Some(host) {
+            return Err(self.clock_failure(DisciplineError::NonIncreasing));
+        }
+        let result = self
+            .output_clock
+            .as_mut()
+            .expect("configured discipline was checked")
+            .update(host, self.runtime.transport_mut());
+        match result {
+            Ok(update) => Ok(Some(update)),
+            Err(DisciplineError::NoObservation | DisciplineError::Stale) => Ok(None),
+            Err(error) => Err(self.clock_failure(error)),
+        }
+    }
+
+    fn clock_failure(&mut self, error: DisciplineError) -> StepGameplayError {
+        self.failed = true;
+        StepGameplayError::Clock(error)
     }
 
     /// Optionally choose the actual host anchor once resource transfer is done.
@@ -357,6 +454,7 @@ impl StepGameplay {
     ) -> Result<RuntimeReport, StepGameplayError> {
         self.ensure_usable()?;
         self.started = true;
+        self.correction_watermark = None;
         let result = self.runtime.process_input(event, mapper, audio_at);
         self.observe(result)
     }
@@ -369,8 +467,11 @@ impl StepGameplay {
     ) -> Result<RuntimeReport, StepGameplayError> {
         self.ensure_usable()?;
         self.started = true;
+        self.correction_watermark = None;
         let result = self.runtime.advance_to(host, mapper, audio_at);
-        self.observe(result)
+        let report = self.observe(result)?;
+        self.correction_watermark = Some(host);
+        Ok(report)
     }
 
     fn observe(

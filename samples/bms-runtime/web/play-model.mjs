@@ -38,6 +38,11 @@ export function startProjection(clock, frame) {
 }
 // Actual reported presentation only; never extrapolate it to UI "now".
 export function presentationPoint(timestamp, start, rate, nowMs, maxAgeMs = 1000) {
+  return presentationPair(timestamp, start, rate, nowMs, maxAgeMs)?.outputNs ?? null;
+}
+// Keep the original host coordinate paired with the reported device position.
+// Neither coordinate is acquired or advanced by this numeric boundary.
+export function presentationPair(timestamp, start, rate, nowMs, maxAgeMs = 1000) {
   if (!timestamp || ![timestamp.contextTime, timestamp.performanceTime, nowMs, maxAgeMs]
     .every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)) {
     throw new Error("Invalid audio presentation observation.");
@@ -49,7 +54,7 @@ export function presentationPoint(timestamp, start, rate, nowMs, maxAgeMs = 1000
   const contextNs = secondsToNanos(timestamp.contextTime);
   const startNs = (start * 1000000000n + BigInt(rate) - 1n) / BigInt(rate);
   const relative = contextNs - startNs;
-  return relative < 0n ? null : relative;
+  return relative < 0n ? null : { outputNs: relative, hostNs: millisecondsToNanos(timestamp.performanceTime) };
 }
 export function reportWord(words, index) {
   if (!(words instanceof Uint32Array) || words.length !== 56 || !Number.isInteger(index) || index < 0 || index >= 28) throw new Error("Invalid audio report words.");
