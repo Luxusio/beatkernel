@@ -1,4 +1,5 @@
 //! Common local-player construction and recording finalization outside native callbacks.
+pub use crate::native_finish::save_capture;
 use crate::{
     PreparedBms,
     competition::ScoreSummary,
@@ -299,31 +300,6 @@ pub fn finish_cohort(
         Err(failures.join("; ").into())
     }
 }
-/// Original exclusive-create capture behavior shared by solo and cohort callers.
-pub fn save_capture(
-    capture: Option<LiveReplayCapture>,
-    path: Option<&Path>,
-    failed_session: bool,
-) -> NativeGameplayResult<()> {
-    let Some(capture) = capture else {
-        return Ok(());
-    };
-    let path = path.ok_or("enabled replay capture missing save path")?;
-    let records = capture.records().len();
-    let bytes = capture.encoded_bytes();
-    println!(
-        "replay capture: records={records}, encoded_bytes={bytes}, status={}, path={path:?}; accepted judge operations, physical output unverified",
-        if failed_session {
-            "valid prefix of failed session"
-        } else {
-            "complete recorded session"
-        }
-    );
-    let written = capture.save_new(path)?;
-    println!("replay create_new saved {written} bytes to {path:?}");
-    Ok(())
-}
-
 #[cfg(test)]
 mod fixtures {
     use super::*;

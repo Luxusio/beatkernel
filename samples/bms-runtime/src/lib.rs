@@ -75,6 +75,8 @@ pub mod native_cohort_setup;
 /// Omitted solo option defaults, independent of native discovery.
 pub mod native_defaults;
 pub mod native_end;
+/// Common post-cleanup solo finalization and exclusive capture publication.
+pub mod native_finish;
 /// Shared native solo gameplay sequencing behind device operations.
 pub mod native_gameplay;
 /// Shared native profile, completion and optional capture configuration.
