@@ -1,7 +1,10 @@
 //! Output-only replay pause projected onto the exact recorded song grid.
 //! Native boundary interpolation retains Unknown mapping quality; this model
 //! neither reads clocks nor invents operations beyond the recorded prefix.
-use crate::playback_pause::{NativePause, PauseError, PausePhase};
+use crate::{
+    native_start::HostStartWindow,
+    playback_pause::{NativePause, PauseError, PauseIntervalObservation, PausePhase},
+};
 use beatkernel::{
     audio::RenderReport,
     time::{ClockDomainId, ClockPair, ClockPoint, Duration, Timestamp},
@@ -14,11 +17,20 @@ pub struct ReplayPauseBoundary {
     pub song: Timestamp,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReplayPauseBoundaryWindow {
+    pub paused: bool,
+    pub host: HostStartWindow,
+    pub song: Timestamp,
+}
+
+#[derive(Clone)]
 pub struct ReplayPause {
     native: NativePause,
     origin: ClockPoint,
     rate: u32,
     base: Timestamp,
+    minimum_presentation: Option<ClockPoint>,
 }
 impl ReplayPause {
     pub fn new(
@@ -39,6 +51,7 @@ impl ReplayPause {
             origin,
             rate,
             base,
+            minimum_presentation: None,
         })
     }
     /// Same immutable setup opt-in as live playback; recorded song mapping stays unchanged.
@@ -51,6 +64,48 @@ impl ReplayPause {
     }
     pub fn request(&mut self, paused: bool, reference: ClockPair) -> Result<bool, PauseError> {
         self.native.request(paused, reference)
+    }
+    pub fn request_interval(
+        &mut self,
+        paused: bool,
+        reference: PauseIntervalObservation,
+    ) -> Result<bool, PauseError> {
+        self.native.request_interval(paused, reference)
+    }
+    fn boundary_song(&self, playback_frame: u64) -> Result<Timestamp, PauseError> {
+        let offset = i128::from(playback_frame) * 1_000_000_000 / i128::from(self.rate);
+        let song = i128::from(self.base.as_nanos())
+            .checked_add(offset)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or(PauseError("replay pause boundary song time overflow"))?;
+        Ok(Timestamp::from_nanos(song))
+    }
+    pub fn observe_interval(
+        &mut self,
+        observation: Option<PauseIntervalObservation>,
+        now: ClockPoint,
+    ) -> Result<Option<ReplayPauseBoundaryWindow>, PauseError> {
+        let mut native = self.native.clone();
+        let boundary = native.observe_interval(observation, now)?;
+        let mapped = boundary
+            .map(
+                |boundary| -> Result<ReplayPauseBoundaryWindow, PauseError> {
+                    Ok(ReplayPauseBoundaryWindow {
+                        paused: boundary.paused,
+                        host: boundary.host,
+                        song: self.boundary_song(boundary.playback_frame)?,
+                    })
+                },
+            )
+            .transpose()?;
+        let minimum = if mapped.is_some_and(|boundary| !boundary.paused) {
+            Some(native.resumed_presentation_point()?)
+        } else {
+            self.minimum_presentation
+        };
+        self.native = native;
+        self.minimum_presentation = minimum;
+        Ok(mapped)
     }
     pub fn last_render_report(&self) -> Option<RenderReport> {
         self.native.last_render_report()
@@ -66,20 +121,21 @@ impl ReplayPause {
         let boundary = native.observe(report, pair)?;
         let mapped = boundary
             .map(|boundary| -> Result<ReplayPauseBoundary, PauseError> {
-                let offset =
-                    i128::from(boundary.playback_frame) * 1_000_000_000 / i128::from(self.rate);
-                let song = i128::from(self.base.as_nanos())
-                    .checked_add(offset)
-                    .and_then(|value| i64::try_from(value).ok())
-                    .ok_or(PauseError("replay pause boundary song time overflow"))?;
+                let song = self.boundary_song(boundary.playback_frame)?;
                 Ok(ReplayPauseBoundary {
                     paused: boundary.paused,
                     host: boundary.host,
-                    song: Timestamp::from_nanos(song),
+                    song,
                 })
             })
             .transpose()?;
+        let minimum = if mapped.is_some_and(|boundary| !boundary.paused) {
+            Some(native.resumed_presentation_point()?)
+        } else {
+            self.minimum_presentation
+        };
         self.native = native;
+        self.minimum_presentation = minimum;
         Ok(mapped)
     }
     /// Native physical presentation advances visual song time only while the
@@ -90,7 +146,11 @@ impl ReplayPause {
                 "replay presentation has wrong output domain or precedes origin",
             ));
         }
-        if self.phase() != PausePhase::Running {
+        if self.phase() != PausePhase::Running
+            || self
+                .minimum_presentation
+                .is_some_and(|minimum| source.timestamp < minimum.timestamp)
+        {
             return Ok(None);
         }
         let base = self.native.song_origin_after_pause(self.base)?;

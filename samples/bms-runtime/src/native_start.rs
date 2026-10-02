@@ -107,6 +107,16 @@ pub struct HostStartWindow {
     latest: ClockPoint,
 }
 impl HostStartWindow {
+    /// Preserve an already assessed inclusive host interval without selecting a point.
+    pub fn new(earliest: ClockPoint, latest: ClockPoint) -> Result<Self, StartProjectionError> {
+        if earliest.domain != latest.domain {
+            return Err(StartProjectionError::Domains);
+        }
+        if earliest.timestamp > latest.timestamp {
+            return Err(StartProjectionError::Chronology);
+        }
+        Ok(Self { earliest, latest })
+    }
     pub fn earliest(self) -> ClockPoint {
         self.earliest
     }
@@ -1382,6 +1392,20 @@ mod fixtures {
     }
     #[test]
     fn bracket_interval_and_conservative_physical_frame_are_literal() {
+        let exact = HostStartWindow::new(point(1, 7), point(1, 7)).unwrap();
+        assert_eq!(exact.earliest(), point(1, 7));
+        assert_eq!(exact.latest(), point(1, 7));
+        let full = HostStartWindow::new(point(1, i64::MIN), point(1, i64::MAX)).unwrap();
+        assert_eq!(full.earliest(), point(1, i64::MIN));
+        assert_eq!(full.latest(), point(1, i64::MAX));
+        assert_eq!(
+            HostStartWindow::new(point(1, 8), point(1, 7)),
+            Err(StartProjectionError::Chronology)
+        );
+        assert_eq!(
+            HostStartWindow::new(point(1, 7), point(2, 8)),
+            Err(StartProjectionError::Domains)
+        );
         let bridge = SessionHostBracket::new(1_000_000, point(1, 5_000_000), 2_000_000).unwrap();
         let window = bridge.deadline_at(10_000_000, 2_000_000, 0).unwrap();
         assert_eq!(window.earliest(), point(1, 13_000_000));

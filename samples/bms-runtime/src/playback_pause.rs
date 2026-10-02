@@ -1,5 +1,6 @@
 //! Native-frontier pause acknowledgement and bounded keyboard reconciliation.
 //! Boundary interpolation has unknown physical mapping error; no wall clock is read.
+use crate::native_start::{HostStartWindow, StartInterval};
 use beatkernel::{
     audio::RenderReport,
     input::{ButtonEvent, ButtonState, DeviceId, PhysicalControlId, PhysicalInputEvent},
@@ -28,6 +29,26 @@ pub struct PauseBoundary {
     pub host: ClockPoint,
     pub playback_frame: u64,
 }
+/// Original actual render block and its assessed presentation interval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PauseIntervalObservation {
+    pub output_origin: ClockPoint,
+    pub sample_rate: u32,
+    pub render: RenderReport,
+    pub clock: StartInterval,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntervalPauseBoundary {
+    pub paused: bool,
+    pub host: HostStartWindow,
+    pub physical_frame: u64,
+    pub playback_frame: u64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvidenceKind {
+    Point,
+    Interval,
+}
 #[derive(Clone, Copy, Debug)]
 struct PendingBoundary {
     physical: u64,
@@ -51,6 +72,11 @@ pub struct NativePause {
     setup_locked: bool,
     start_frame: u64,
     start_configured: bool,
+    evidence_kind: Option<EvidenceKind>,
+    interval_reference: Option<PauseIntervalObservation>,
+    last_interval: Option<PauseIntervalObservation>,
+    interval_window: Option<HostStartWindow>,
+    last_now: Option<ClockPoint>,
 }
 impl NativePause {
     pub fn new(
@@ -79,6 +105,11 @@ impl NativePause {
             setup_locked: false,
             start_frame: 0,
             start_configured: false,
+            evidence_kind: None,
+            interval_reference: None,
+            last_interval: None,
+            interval_window: None,
+            last_now: None,
         })
     }
     /// Configures initial silent physical frames before any request/observation.
@@ -147,7 +178,26 @@ impl NativePause {
         }
         Ok(())
     }
+    fn bind(&mut self, kind: EvidenceKind) -> Result<(), PauseError> {
+        if self.evidence_kind.is_some_and(|old| old != kind) {
+            return Err(PauseError("pause evidence kind changed"));
+        }
+        self.evidence_kind = Some(kind);
+        self.setup_locked = true;
+        Ok(())
+    }
     pub fn request(&mut self, paused: bool, reference: ClockPair) -> Result<bool, PauseError> {
+        let mut next = self.clone();
+        next.bind(EvidenceKind::Point)?;
+        let accepted = next.request_point_inner(paused, reference)?;
+        *self = next;
+        Ok(accepted)
+    }
+    fn request_point_inner(
+        &mut self,
+        paused: bool,
+        reference: ClockPair,
+    ) -> Result<bool, PauseError> {
         self.check_pair(reference)?;
         self.setup_locked = true;
         if self.end_marker.is_some() {
@@ -163,6 +213,161 @@ impl NativePause {
         self.last_pair = Some(reference);
         self.boundary = None;
         Ok(true)
+    }
+    fn admit_interval(
+        &mut self,
+        observation: PauseIntervalObservation,
+    ) -> Result<PauseIntervalObservation, PauseError> {
+        observation
+            .clock
+            .validate()
+            .map_err(|_| PauseError("invalid pause presentation interval"))?;
+        if observation.output_origin != self.origin
+            || observation.sample_rate != self.rate
+            || observation.clock.before.domain != self.host
+            || observation.clock.after.domain != self.host
+            || observation.clock.output != self.point(observation.render.start_frame)?
+            || observation.render.frames == 0
+        {
+            return Err(PauseError(
+                "pause interval metadata differs from the output grid",
+            ));
+        }
+        let physical_end = observation
+            .render
+            .start_frame
+            .checked_add(
+                u64::try_from(observation.render.frames)
+                    .map_err(|_| PauseError("render extent overflow"))?,
+            )
+            .ok_or(PauseError("physical frame overflow"))?;
+        if observation.render.counters.rendered_frames != physical_end {
+            return Err(PauseError(
+                "pause interval render counters precede its block",
+            ));
+        }
+        if let Some(old) = self.last_interval {
+            if observation.render.start_frame == old.render.start_frame {
+                if observation.render != old.render {
+                    return Err(PauseError(
+                        "pause interval changed an existing render block",
+                    ));
+                }
+                return Ok(old); // Refreshed bounds cannot move original evidence.
+            }
+            if observation.clock.output.timestamp < old.clock.output.timestamp
+                || observation.clock.before.timestamp < old.clock.before.timestamp
+                || observation.clock.after.timestamp < old.clock.after.timestamp
+            {
+                return Err(PauseError("pause intervals regressed"));
+            }
+        }
+        self.adopt_report(observation.render)?;
+        self.last_interval = Some(observation);
+        Ok(observation)
+    }
+    pub fn request_interval(
+        &mut self,
+        paused: bool,
+        reference: PauseIntervalObservation,
+    ) -> Result<bool, PauseError> {
+        let mut next = self.clone();
+        next.bind(EvidenceKind::Interval)?;
+        let reference = next.admit_interval(reference)?;
+        next.fix_interval_window()?;
+        let phase = match (next.phase, paused, next.end_marker.is_none()) {
+            (PausePhase::Running, true, true) => Some(PausePhase::Pausing),
+            (PausePhase::Paused, false, true) => Some(PausePhase::Resuming),
+            _ => None,
+        };
+        if let Some(phase) = phase {
+            next.phase = phase;
+            next.interval_reference = Some(reference);
+            next.interval_window = None;
+            next.boundary = None;
+        }
+        *self = next;
+        Ok(phase.is_some())
+    }
+    pub fn observe_interval(
+        &mut self,
+        observation: Option<PauseIntervalObservation>,
+        now: ClockPoint,
+    ) -> Result<Option<IntervalPauseBoundary>, PauseError> {
+        let mut next = self.clone();
+        next.bind(EvidenceKind::Interval)?;
+        if now.domain != next.host
+            || next
+                .last_now
+                .is_some_and(|old| now.timestamp < old.timestamp)
+        {
+            return Err(PauseError(
+                "pause host arrival observation regressed or changed domain",
+            ));
+        }
+        if let Some(observation) = observation {
+            next.admit_interval(observation)?;
+        }
+        next.last_now = Some(now);
+        let result = next.interval_boundary(now)?;
+        *self = next;
+        Ok(result)
+    }
+    fn fix_interval_window(&mut self) -> Result<(), PauseError> {
+        let Some(boundary) = self.boundary else {
+            return Ok(());
+        };
+        if self.interval_window.is_none() {
+            let reference = self
+                .interval_reference
+                .ok_or(PauseError("pause interval lacks its request bracket"))?;
+            let output = self.point(boundary.physical)?;
+            if reference.clock.output.timestamp > output.timestamp {
+                return Err(PauseError(
+                    "pause boundary precedes its interval request bracket",
+                ));
+            }
+            let current = self
+                .last_interval
+                .ok_or(PauseError("pause interval lacks native evidence"))?;
+            if current.clock.output.timestamp < output.timestamp {
+                return Ok(());
+            }
+            let (earliest, latest) = if reference.clock.output == output {
+                (reference.clock.before, reference.clock.after)
+            } else if current.clock.output == output {
+                (current.clock.before, current.clock.after)
+            } else {
+                (reference.clock.before, current.clock.after)
+            };
+            self.interval_window = Some(
+                HostStartWindow::new(earliest, latest)
+                    .map_err(|_| PauseError("pause boundary interval is invalid"))?,
+            );
+        }
+        Ok(())
+    }
+    fn interval_boundary(
+        &mut self,
+        now: ClockPoint,
+    ) -> Result<Option<IntervalPauseBoundary>, PauseError> {
+        let Some(boundary) = self.boundary else {
+            return Ok(None);
+        };
+        self.fix_interval_window()?;
+        let Some(host) = self.interval_window else {
+            return Ok(None);
+        };
+        if now.timestamp < host.latest().timestamp {
+            return Ok(None);
+        }
+        let paused = self.commit_boundary(boundary);
+        Ok(Some(IntervalPauseBoundary {
+            paused,
+            host,
+            physical_frame: boundary.physical,
+            playback_frame: boundary.playback,
+        }))
     }
     fn point(&self, frame: u64) -> Result<ClockPoint, PauseError> {
         let nanos = i128::from(frame) * 1_000_000_000 / i128::from(self.rate);
@@ -289,6 +494,13 @@ impl NativePause {
         let (_, playback, _) = self.check_report(report)?;
         self.point(playback)
     }
+    pub(crate) fn resumed_presentation_point(&self) -> Result<ClockPoint, PauseError> {
+        self.point(
+            self.frozen
+                .checked_add(self.gap)
+                .ok_or(PauseError("resume presentation frame overflow"))?,
+        )
+    }
     /// Applies the cumulative gap once, avoiding per-pause rounding drift.
     pub fn song_origin_after_pause(&self, original: Timestamp) -> Result<Timestamp, PauseError> {
         let manual_gap = self
@@ -302,12 +514,116 @@ impl NativePause {
             .ok_or(PauseError("paused song origin overflow"))?;
         Ok(Timestamp::from_nanos(value))
     }
+    fn adopt_report(&mut self, report: RenderReport) -> Result<(), PauseError> {
+        let (physical, playback, gap) = self.check_report(report)?;
+        let startup_held = self.start_frame > 0
+            && report.start_frame <= self.start_frame
+            && physical <= self.start_frame;
+        let terminal_marker = report.playback_end_physical_frame;
+        if matches!(self.phase, PausePhase::Running | PausePhase::Pausing)
+            && !report.paused
+            && !startup_held
+            && gap != self.gap
+        {
+            return Err(PauseError(
+                "active render changed the acknowledged pause gap",
+            ));
+        }
+        if self.phase == PausePhase::Paused
+            && (playback != self.frozen
+                || (report.playback_frames > 0 && self.last_report != Some(report)))
+        {
+            return Err(PauseError(
+                "paused render changed the frozen playback frame",
+            ));
+        }
+        match self.phase {
+            PausePhase::Running if report.paused && terminal_marker.is_none() && !startup_held => {
+                return Err(PauseError("unexpected paused render while running"));
+            }
+            PausePhase::Paused if !report.paused => {
+                return Err(PauseError("unexpected active render while paused"));
+            }
+            PausePhase::Pausing
+                if report.paused
+                    && report.frames > 0
+                    && !startup_held
+                    && self.boundary.is_none() =>
+            {
+                if gap < self.gap {
+                    return Err(PauseError("pause gap regressed"));
+                }
+                self.boundary = Some(PendingBoundary {
+                    physical: if let Some(marker) = terminal_marker {
+                        marker
+                    } else {
+                        playback
+                            .checked_add(self.gap)
+                            .ok_or(PauseError("pause boundary overflow"))?
+                    },
+                    playback,
+                    gap: self.gap,
+                });
+            }
+            PausePhase::Resuming
+                if (!report.paused || terminal_marker.is_some())
+                    && report.frames > 0
+                    && self.boundary.is_none() =>
+            {
+                let gap = if let Some(marker) = terminal_marker {
+                    marker
+                        .checked_sub(
+                            self.playback_end
+                                .ok_or(PauseError("finite endpoint unavailable"))?,
+                        )
+                        .ok_or(PauseError("endpoint manual gap underflow"))?
+                } else {
+                    gap
+                };
+                if report.playback_start_frame < self.frozen || gap <= self.gap {
+                    return Err(PauseError(
+                        "resume report precedes the frozen playback frontier",
+                    ));
+                }
+                self.boundary = Some(PendingBoundary {
+                    physical: self
+                        .frozen
+                        .checked_add(gap)
+                        .ok_or(PauseError("resume boundary overflow"))?,
+                    playback: self.frozen,
+                    gap,
+                });
+            }
+            _ => {}
+        }
+        if terminal_marker.is_some() {
+            self.end_marker = terminal_marker;
+        }
+        self.last_report = Some(report);
+        Ok(())
+    }
+    fn commit_boundary(&mut self, boundary: PendingBoundary) -> bool {
+        let paused = self.phase == PausePhase::Pausing;
+        self.phase = if paused {
+            self.frozen = boundary.playback;
+            PausePhase::Paused
+        } else {
+            self.gap = boundary.gap;
+            PausePhase::Running
+        };
+        self.boundary = None;
+        self.reference = None;
+        self.interval_reference = None;
+        self.interval_window = None;
+        paused
+    }
     pub fn observe(
         &mut self,
         report: Option<RenderReport>,
         pair: ClockPair,
     ) -> Result<Option<PauseBoundary>, PauseError> {
         let mut next = self.clone();
+        next.bind(EvidenceKind::Point)?;
         let result = next.observe_inner(report, pair)?;
         *self = next;
         Ok(result)
@@ -319,93 +635,7 @@ impl NativePause {
     ) -> Result<Option<PauseBoundary>, PauseError> {
         self.check_pair(pair)?;
         if let Some(report) = report {
-            let (physical, playback, gap) = self.check_report(report)?;
-            let startup_held = self.start_frame > 0
-                && report.start_frame <= self.start_frame
-                && physical <= self.start_frame;
-            let terminal_marker = report.playback_end_physical_frame;
-            if matches!(self.phase, PausePhase::Running | PausePhase::Pausing)
-                && !report.paused
-                && !startup_held
-                && gap != self.gap
-            {
-                return Err(PauseError(
-                    "active render changed the acknowledged pause gap",
-                ));
-            }
-            if self.phase == PausePhase::Paused
-                && (playback != self.frozen
-                    || (report.playback_frames > 0 && self.last_report != Some(report)))
-            {
-                return Err(PauseError(
-                    "paused render changed the frozen playback frame",
-                ));
-            }
-            match self.phase {
-                PausePhase::Running
-                    if report.paused && terminal_marker.is_none() && !startup_held =>
-                {
-                    return Err(PauseError("unexpected paused render while running"));
-                }
-                PausePhase::Paused if !report.paused => {
-                    return Err(PauseError("unexpected active render while paused"));
-                }
-                PausePhase::Pausing
-                    if report.paused
-                        && report.frames > 0
-                        && !startup_held
-                        && self.boundary.is_none() =>
-                {
-                    if gap < self.gap {
-                        return Err(PauseError("pause gap regressed"));
-                    }
-                    self.boundary = Some(PendingBoundary {
-                        physical: if let Some(marker) = terminal_marker {
-                            marker
-                        } else {
-                            playback
-                                .checked_add(self.gap)
-                                .ok_or(PauseError("pause boundary overflow"))?
-                        },
-                        playback,
-                        gap: self.gap,
-                    });
-                }
-                PausePhase::Resuming
-                    if (!report.paused || terminal_marker.is_some())
-                        && report.frames > 0
-                        && self.boundary.is_none() =>
-                {
-                    let gap = if let Some(marker) = terminal_marker {
-                        marker
-                            .checked_sub(
-                                self.playback_end
-                                    .ok_or(PauseError("finite endpoint unavailable"))?,
-                            )
-                            .ok_or(PauseError("endpoint manual gap underflow"))?
-                    } else {
-                        gap
-                    };
-                    if report.playback_start_frame < self.frozen || gap <= self.gap {
-                        return Err(PauseError(
-                            "resume report precedes the frozen playback frontier",
-                        ));
-                    }
-                    self.boundary = Some(PendingBoundary {
-                        physical: self
-                            .frozen
-                            .checked_add(gap)
-                            .ok_or(PauseError("resume boundary overflow"))?,
-                        playback: self.frozen,
-                        gap,
-                    });
-                }
-                _ => {}
-            }
-            if terminal_marker.is_some() {
-                self.end_marker = terminal_marker;
-            }
-            self.last_report = Some(report);
+            self.adopt_report(report)?;
         }
         self.last_pair = Some(pair);
         let Some(boundary) = self.boundary else {
@@ -440,16 +670,7 @@ impl NativePause {
             .and_then(|value| value.checked_add(i128::from(lower.target.timestamp.as_nanos())))
             .and_then(|value| i64::try_from(value).ok())
             .ok_or(PauseError("native boundary interpolation overflow"))?;
-        let paused = self.phase == PausePhase::Pausing;
-        self.phase = if paused {
-            self.frozen = boundary.playback;
-            PausePhase::Paused
-        } else {
-            self.gap = boundary.gap;
-            PausePhase::Running
-        };
-        self.boundary = None;
-        self.reference = None;
+        let paused = self.commit_boundary(boundary);
         Ok(Some(PauseBoundary {
             paused,
             host: ClockPoint {
@@ -1198,3 +1419,7 @@ mod fixtures {
         assert!(keys.accept(&button(1, 4, ButtonState::Up, 11, 6)).unwrap());
     }
 }
+
+#[cfg(test)]
+#[path = "playback_pause_interval_fixtures.rs"]
+mod interval_fixtures;
