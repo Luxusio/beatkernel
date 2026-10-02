@@ -1,4 +1,8 @@
 //! Native main-thread presentation of snapshots from the actual gameplay owner.
+use crate::desktop_clipboard::ClipboardWorker;
+#[cfg(test)]
+#[path = "desktop_clipboard_fixtures.rs"]
+mod clipboard_fixtures;
 #[cfg(test)]
 #[path = "font_fixture.rs"]
 mod font_fixture;
@@ -7,6 +11,7 @@ use beatkernel_bms_runtime::bga::BgaState;
 use beatkernel_bms_runtime::ui::{
     atoms::{rect, text},
     catalog_search::CatalogSearch,
+    clipboard::{ClipboardAction, ClipboardEdit},
     devices::{DevicesFrame, DevicesView},
     display::{BUTTONS as DISPLAY_BUTTONS, DisplayFrame, DisplayView},
     interaction::{Bounds, ControlId, Gesture, WheelSteps, logical_point},
@@ -524,6 +529,8 @@ pub(super) fn run(
         catalog_wheel: WheelSteps::default(),
         ime: ImeDraft::default(),
         modifiers: ModifiersState::empty(),
+        clipboard: None,
+        pending_clipboard: None,
         title_font,
         font_text: None,
         input_font: None,
@@ -648,6 +655,26 @@ fn selection_command(
         PhysicalKey::Code(KeyCode::ArrowRight) => Some(SelectionCommand::Right),
         PhysicalKey::Code(KeyCode::Home) => Some(SelectionCommand::Home),
         PhysicalKey::Code(KeyCode::End) => Some(SelectionCommand::End),
+        _ => None,
+    }
+}
+fn clipboard_command(
+    logical: &Key,
+    modifiers: ModifiersState,
+    macos: bool,
+) -> Option<ClipboardAction> {
+    let command = if macos {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::CONTROL
+    };
+    if modifiers != command {
+        return None;
+    }
+    match logical {
+        Key::Character(value) if value.eq_ignore_ascii_case("c") => Some(ClipboardAction::Copy),
+        Key::Character(value) if value.eq_ignore_ascii_case("x") => Some(ClipboardAction::Cut),
+        Key::Character(value) if value.eq_ignore_ascii_case("v") => Some(ClipboardAction::Paste),
         _ => None,
     }
 }
@@ -932,6 +959,25 @@ struct ImeDraft {
     composing: bool,
     preview: Option<LineEditor>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextField {
+    Search,
+    Setting(usize),
+    Profile,
+    Display(usize),
+    PracticeStart,
+    PracticeEnd,
+    RecordDirectory,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TextTarget {
+    screen: ScreenInstanceId,
+    field: TextField,
+}
+struct PendingClipboard {
+    target: TextTarget,
+    edit: ClipboardEdit,
+}
 struct Desktop {
     options: Options,
     active_backend: BackendChoice,
@@ -962,6 +1008,8 @@ struct Desktop {
     catalog_wheel: WheelSteps,
     ime: ImeDraft,
     modifiers: ModifiersState,
+    clipboard: Option<ClipboardWorker>,
+    pending_clipboard: Option<PendingClipboard>,
     title_font: Option<Arc<FontAtlas>>,
     font_text: Option<FontText>,
     input_font: Option<FontText>,
@@ -1216,6 +1264,9 @@ impl Desktop {
             self.commit_route(next);
         }
         self.cancel();
+        if let Some(clipboard) = &mut self.clipboard {
+            clipboard.begin_close();
+        }
     }
     fn metadata_scope(&self) -> Result<(ScreenInstanceId, TaskPermit), String> {
         let scope = match self.navigator.route() {
@@ -2914,6 +2965,7 @@ impl Desktop {
         }
         let target = self.ime_target();
         if target == self.ime.target {
+            self.sync_clipboard();
             return;
         }
         self.ime = ImeDraft {
@@ -2927,6 +2979,7 @@ impl Desktop {
                 window.set_ime_allowed(true);
             }
         }
+        self.sync_clipboard();
     }
     fn ime_owns_keyboard(&self) -> bool {
         self.ime.enabled
@@ -3064,6 +3117,221 @@ impl Desktop {
             ModifiersState::empty()
         };
     }
+    fn text_target(&self) -> Option<TextTarget> {
+        if !self.ui_ready() {
+            return None;
+        }
+        let screen = self.navigator.active_id()?;
+        let field = match self.navigator.route() {
+            ScreenRoute::Selection if self.search_focused => TextField::Search,
+            ScreenRoute::Settings => {
+                let draft = self.settings.as_ref()?;
+                if draft.profile_focused {
+                    TextField::Profile
+                } else {
+                    TextField::Setting(draft.selected)
+                }
+            }
+            ScreenRoute::Display => TextField::Display(self.display.as_ref()?.selected),
+            ScreenRoute::Practice => {
+                if self.practice.as_ref()?.end_focused {
+                    TextField::PracticeEnd
+                } else {
+                    TextField::PracticeStart
+                }
+            }
+            ScreenRoute::Records if self.records.as_ref()?.directory_focused => {
+                TextField::RecordDirectory
+            }
+            _ => return None,
+        };
+        Some(TextTarget { screen, field })
+    }
+    fn text_editor(&self, field: TextField) -> Option<&LineEditor> {
+        match field {
+            TextField::Search => Some(&self.search_editor),
+            TextField::Setting(index) => self
+                .settings
+                .as_ref()
+                .filter(|draft| draft.selected == index)
+                .map(|draft| &draft.editor),
+            TextField::Profile => self.settings.as_ref().map(|draft| &draft.profile),
+            TextField::Display(index) => self.display.as_ref()?.editors.get(index),
+            TextField::PracticeStart => self.practice.as_ref().map(|draft| &draft.editor),
+            TextField::PracticeEnd => self.practice.as_ref().map(|draft| &draft.end_editor),
+            TextField::RecordDirectory => self.records.as_ref().map(|draft| &draft.directory),
+        }
+    }
+    fn text_editor_mut(&mut self, field: TextField) -> Option<&mut LineEditor> {
+        match field {
+            TextField::Search => Some(&mut self.search_editor),
+            TextField::Setting(index) => self
+                .settings
+                .as_mut()
+                .filter(|draft| draft.selected == index)
+                .map(|draft| &mut draft.editor),
+            TextField::Profile => self.settings.as_mut().map(|draft| &mut draft.profile),
+            TextField::Display(index) => self.display.as_mut()?.editors.get_mut(index),
+            TextField::PracticeStart => self.practice.as_mut().map(|draft| &mut draft.editor),
+            TextField::PracticeEnd => self.practice.as_mut().map(|draft| &mut draft.end_editor),
+            TextField::RecordDirectory => self.records.as_mut().map(|draft| &mut draft.directory),
+        }
+    }
+    fn sync_clipboard(&mut self) {
+        if self.pending_clipboard.as_ref().is_some_and(|pending| {
+            self.ime_owns_keyboard()
+                || self.text_target() != Some(pending.target)
+                || self
+                    .text_editor(pending.target.field)
+                    .is_none_or(|editor| !pending.edit.matches(editor))
+        }) {
+            // The worker must still drain an accepted operation. Only publication
+            // into the obsolete draft is cancelled; an OS write cannot be recalled.
+            self.pending_clipboard = None;
+        }
+    }
+    fn clipboard_busy(&self) -> bool {
+        self.clipboard
+            .as_ref()
+            .is_some_and(ClipboardWorker::is_busy)
+    }
+    fn clipboard_error(&mut self, error: Option<String>) {
+        match self.navigator.route() {
+            ScreenRoute::Selection => self.failure = error,
+            ScreenRoute::Settings => {
+                if let Some(draft) = &mut self.settings {
+                    draft.error = error;
+                    draft.message = None;
+                }
+            }
+            ScreenRoute::Display => {
+                if let Some(draft) = &mut self.display {
+                    draft.error = error;
+                }
+            }
+            ScreenRoute::Practice => {
+                if let Some(draft) = &mut self.practice {
+                    draft.error = error;
+                }
+            }
+            ScreenRoute::Records => {
+                if let Some(draft) = &mut self.records {
+                    draft.error = error;
+                    draft.message = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    fn clipboard_settings(
+        &self,
+        field: TextField,
+        editor: &LineEditor,
+    ) -> Result<Option<NativeSettings>, String> {
+        if let TextField::Setting(index) = field {
+            let mut values = self
+                .settings
+                .as_ref()
+                .ok_or("settings draft unavailable")?
+                .values
+                .clone();
+            values.set_value(index, editor.value())?;
+            Ok(Some(values))
+        } else {
+            Ok(None)
+        }
+    }
+    fn begin_clipboard(&mut self, action: ClipboardAction) -> Result<(), String> {
+        self.sync_clipboard();
+        let Some(target) = self.text_target().filter(|_| !self.ime_owns_keyboard()) else {
+            return Ok(());
+        };
+        let editor = self
+            .text_editor(target.field)
+            .ok_or("text field unavailable")?;
+        let Some(edit) = ClipboardEdit::prepare(editor, action)? else {
+            return Ok(());
+        };
+        if let Some(candidate) = edit.candidate() {
+            // Cut validates before the external write, while retaining the draft.
+            self.clipboard_settings(target.field, candidate)?;
+        }
+        if self.clipboard.is_none() {
+            self.clipboard = Some(ClipboardWorker::native()?);
+        }
+        self.clipboard
+            .as_mut()
+            .expect("clipboard worker")
+            .submit(edit.request())?;
+        self.pending_clipboard = Some(PendingClipboard { target, edit });
+        Ok(())
+    }
+    fn commit_clipboard_editor(
+        &mut self,
+        target: TextTarget,
+        editor: LineEditor,
+    ) -> Result<(), String> {
+        // Revalidate aggregate settings: unrelated rows may have changed while
+        // the OS was busy. Prepare the entire model before assigning either part.
+        let settings = self.clipboard_settings(target.field, &editor)?;
+        if target.field == TextField::Search {
+            self.catalog_search.set_query(editor.value())?;
+            self.catalog_wheel.reset();
+            if let Some(index) = self.catalog_search.selected() {
+                self.selected = index;
+            }
+            self.search_editor = editor;
+        } else if let Some(values) = settings {
+            let draft = self.settings.as_mut().ok_or("settings draft unavailable")?;
+            draft.values = values;
+            draft.editor = editor;
+        } else {
+            *self
+                .text_editor_mut(target.field)
+                .ok_or("text field unavailable")? = editor;
+        }
+        Ok(())
+    }
+    fn finish_clipboard(&mut self, reply: Result<Option<String>, String>) {
+        self.sync_clipboard();
+        let Some(pending) = self.pending_clipboard.take() else {
+            return;
+        };
+        let result = pending.edit.complete(reply).and_then(|editor| {
+            if let Some(editor) = editor {
+                self.commit_clipboard_editor(pending.target, editor)?;
+            }
+            Ok(())
+        });
+        self.clipboard_error(result.err());
+        self.invalidate_hits();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
+    fn collect_clipboard(&mut self) {
+        self.sync_clipboard();
+        if let Some(reply) = self.clipboard.as_mut().and_then(ClipboardWorker::poll) {
+            self.finish_clipboard(reply);
+        }
+    }
+    fn clipboard_shortcut(&mut self, logical: &Key, repeat: bool) -> bool {
+        let Some(action) = clipboard_command(logical, self.modifiers, cfg!(target_os = "macos"))
+        else {
+            return false;
+        };
+        if self.text_target().is_none() || self.ime_owns_keyboard() {
+            return false;
+        }
+        if !repeat {
+            if let Err(error) = self.begin_clipboard(action) {
+                self.clipboard_error(Some(error));
+            }
+            self.gesture.cancel();
+            self.invalidate_hits();
+        }
+        true
+    }
     fn select_text(&mut self, physical: PhysicalKey, logical: &Key) -> bool {
         if !self.ui_ready() || self.ime_owns_keyboard() {
             return false;
@@ -3073,34 +3341,10 @@ impl Desktop {
         else {
             return false;
         };
-        let editor = match self.navigator.route() {
-            ScreenRoute::Selection if self.search_focused => Some(&mut self.search_editor),
-            ScreenRoute::Settings => self.settings.as_mut().map(|draft| {
-                if draft.profile_focused {
-                    &mut draft.profile
-                } else {
-                    &mut draft.editor
-                }
-            }),
-            ScreenRoute::Display => self.display.as_mut().map(|draft| {
-                let selected = draft.selected;
-                &mut draft.editors[selected]
-            }),
-            ScreenRoute::Practice => self.practice.as_mut().map(|draft| {
-                if draft.end_focused {
-                    &mut draft.end_editor
-                } else {
-                    &mut draft.editor
-                }
-            }),
-            ScreenRoute::Records => self
-                .records
-                .as_mut()
-                .filter(|draft| draft.directory_focused)
-                .map(|draft| &mut draft.directory),
-            _ => None,
+        let Some(target) = self.text_target() else {
+            return false;
         };
-        let Some(editor) = editor else {
+        let Some(editor) = self.text_editor_mut(target.field) else {
             return false;
         };
         match command {
@@ -3124,6 +3368,9 @@ impl Desktop {
     ) {
         self.sync_ime();
         if self.ime_owns_keyboard() {
+            return;
+        }
+        if self.clipboard_shortcut(logical, repeat) {
             return;
         }
         if self.select_text(physical, logical) {
@@ -3186,6 +3433,7 @@ impl Desktop {
                 }
             }
         }
+        self.sync_clipboard();
         self.sync_input_font();
     }
     fn key(&mut self, key: KeyCode, repeat: bool) {
@@ -3406,6 +3654,9 @@ impl Desktop {
         Ok(())
     }
     fn reactive_waits_for_events(&self) -> bool {
+        self.reactive_scene_idle() && !self.clipboard_busy()
+    }
+    fn reactive_scene_idle(&self) -> bool {
         matches!(
             self.navigator.route(),
             ScreenRoute::Selection
@@ -4273,16 +4524,25 @@ impl ApplicationHandler for Desktop {
         self.collect_game();
         self.collect_profile();
         self.sync_ime();
+        self.collect_clipboard();
         if self.closing()
             && self.game.as_ref().is_none_or(|game| game.joined)
             && self.profile_io.is_none()
+            && self
+                .clipboard
+                .as_ref()
+                .is_none_or(ClipboardWorker::is_finished)
         {
             event_loop.exit();
             return;
         }
         if self.reactive_waits_for_events() {
             event_loop.set_control_flow(ControlFlow::Wait);
-        } else if self.closing() || self.is_suspended() || self.occluded {
+        } else if self.closing()
+            || self.is_suspended()
+            || self.occluded
+            || (self.clipboard_busy() && self.reactive_scene_idle())
+        {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + Duration::from_millis(4),
             ));
@@ -4295,7 +4555,13 @@ impl ApplicationHandler for Desktop {
                 self.next_frame =
                     Instant::now() + Duration::from_secs_f64(1.0 / self.options.fps as f64);
             }
-            event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame));
+            let wake = if self.clipboard_busy() {
+                self.next_frame
+                    .min(Instant::now() + Duration::from_millis(4))
+            } else {
+                self.next_frame
+            };
+            event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
         }
     }
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -4304,6 +4570,7 @@ impl ApplicationHandler for Desktop {
         self.game = None;
         self.release_backgrounds();
         self.profile_io = None;
+        self.clipboard = None;
     }
 }
 
@@ -5316,7 +5583,7 @@ mod tests {
         assert_eq!(app.search_editor.selection(), None);
         assert!(app.game.is_none());
     }
-    fn lifecycle_fixture() -> Desktop {
+    pub(super) fn lifecycle_fixture() -> Desktop {
         fn native_unavailable(_: &[String]) -> Result<(), Box<dyn Error>> {
             Err("fixture must not open native playback".into())
         }
@@ -5368,6 +5635,8 @@ mod tests {
             catalog_wheel: WheelSteps::default(),
             ime: ImeDraft::default(),
             modifiers: ModifiersState::empty(),
+            clipboard: None,
+            pending_clipboard: None,
             title_font: None,
             font_text: None,
             input_font: None,
