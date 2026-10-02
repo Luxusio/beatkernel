@@ -1733,7 +1733,7 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
     }
     let text = "#BPM 120\n#WAV01 tap.wav\n#00111:01\n#STOP01 48\n#00109:01\n\
          #BMP00 poor.png\n#BMP01 first.png\n#BMP02 second.png\n#BMP03 third.png\n\
-         #BMP04 layer.png\n#BMP05 second-layer.png\n#00004:01\n#00104:0203\n#00107:04\n#00106:ZZ\n#0010A:05\n#0010B:8040\n#0010C:20\n#0010D:10\n#0010E:08\n";
+         #BMP04 layer.png\n#BMP05 second-layer.png\n#00004:01\n#00104:0203\n#00107:04\n#00106:ZZ\n#0010A:05\n#0010B:8040\n#0010C:20\n#0010D:10\n#0010E:08\n#BGA02 02 0 0 1 1 10 20\n#@BGA03 03 0 0 1 1 10 20\n";
     let source = beatkernel_bms::parse(text, beatkernel_bms::ParseOptions::default()).unwrap();
     let image_dir = Directory::new();
     let chart_path = image_dir.write("chart.bms", text.as_bytes());
@@ -1898,10 +1898,14 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
                     .pixels(),
                 &[5, 0, 0, 255]
             );
+            let cropped = shown.images.as_ref().unwrap().get(base).unwrap();
+            assert_eq!((cropped.width(), cropped.height()), (256, 256));
+            let offset = (20 * 256 + 10) * 4;
             assert_eq!(
-                shown.images.as_ref().unwrap().get(base).unwrap().pixels(),
+                &cropped.pixels()[offset..offset + 4],
                 &[base.0 as u8, 0, 0, 255]
             );
+            assert_eq!(&cropped.pixels()[..4], &[0, 0, 0, 0]);
             assert_eq!(
                 shown.players[0].chart.as_ref().unwrap().bga_state(now),
                 live_state
@@ -2350,6 +2354,156 @@ fn raster_bmp_pixel(rgb: [u8; 3]) -> Vec<u8> {
     bytes[34..38].copy_from_slice(&4u32.to_le_bytes());
     bytes[54..57].copy_from_slice(&[rgb[2], rgb[1], rgb[0]]);
     bytes
+}
+
+#[test]
+fn cropped_assets_share_aliases_charge_sources_and_variants_and_publish_atomically() {
+    use beatkernel_bms::ImageId;
+    use image_assets::{ImageAssetLimits, ImageAssets, ImageUnavailable};
+    use std::sync::Arc;
+    let dir = Directory::new();
+    dir.write("tap.wav", &wav(1, &[100, -100]));
+    dir.write("black.bmp", &raster_bmp_pixel([0, 0, 0]));
+    dir.write("video.mpg", b"unsupported video");
+    dir.write("broken.png", b"\x89PNG\r\n\x1a\nbad");
+    let text = "#BPM 120\n#WAV01 tap.wav\n#00011:01\n#BMP01 black.bmp\n#BMP02 ./black.bmp\n#BMP09 ../unused.bmp\n#BMPAA missing.bmp\n#BMPAB video.mpg\n#BMPAC broken.png\n#BMPZZ ../unused.bmp\n#BGAZZ ZZ 0 0 1 1 0 0\n#00004:010203040506070809\n#00007:03\n#0000A:04\n";
+    let mut full = text.to_owned();
+    for (id, source) in [
+        ("00", "01"),
+        ("01", "01"),
+        ("02", "02"),
+        ("03", "01"),
+        ("04", "01"),
+        ("05", "AA"),
+        ("06", "AD"),
+        ("07", "AB"),
+        ("08", "AC"),
+        ("09", "01"),
+    ] {
+        full.push_str(&format!("#BGA{id} {source} 0 0 1 1 2 3\n"));
+    }
+    let path = dir.write("chart.bms", full.as_bytes());
+    let prepared = load_prepared(
+        &path,
+        AudioFormat::new(24_000, 2).unwrap(),
+        limits(),
+        ChannelPolicy::MonoToStereo,
+    )
+    .unwrap();
+    let identity = captured_setup_identity(&prepared);
+    let bytes = 4 + 2 * 256 * 256 * 4;
+    let bank = ImageAssets::prepare(
+        &dir.0,
+        &prepared.source,
+        ImageAssetLimits {
+            max_decoded_bytes: bytes,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        (bank.len(), bank.unique_images(), bank.decoded_bytes()),
+        (10, 1, bytes)
+    );
+    let original = bank.get(ImageId(1)).unwrap();
+    for id in [0, 2, 3, 4, 9] {
+        assert!(Arc::ptr_eq(original, bank.get(ImageId(id)).unwrap()));
+    }
+    assert!(!Arc::ptr_eq(original, bank.get_layer(ImageId(3)).unwrap()));
+    assert!(Arc::ptr_eq(
+        bank.get_layer(ImageId(3)).unwrap(),
+        bank.get_layer(ImageId(4)).unwrap()
+    ));
+    let offset = (3 * 256 + 2) * 4;
+    assert_eq!(&original.pixels()[offset..offset + 4], &[0, 0, 0, 255]);
+    assert_eq!(&original.pixels()[..4], &[0, 0, 0, 0]);
+    assert!(
+        bank.get_layer(ImageId(3))
+            .unwrap()
+            .pixels()
+            .iter()
+            .all(|v| *v == 0)
+    );
+    assert_eq!(
+        bank.unavailable(ImageId(5)),
+        Some(&ImageUnavailable::Missing)
+    );
+    assert_eq!(
+        bank.unavailable(ImageId(6)),
+        Some(&ImageUnavailable::Undefined)
+    );
+    assert_eq!(
+        bank.unavailable(ImageId(7)),
+        Some(&ImageUnavailable::Unsupported)
+    );
+    assert!(matches!(
+        bank.unavailable(ImageId(8)),
+        Some(ImageUnavailable::InvalidData(_))
+    ));
+    assert!(bank.get(ImageId(1295)).is_none());
+    for bounds in [
+        ImageAssetLimits {
+            max_decoded_bytes: bytes - 1,
+            ..Default::default()
+        },
+        ImageAssetLimits {
+            max_images: 13,
+            ..Default::default()
+        },
+    ] {
+        assert!(ImageAssets::prepare(&dir.0, &prepared.source, bounds).is_err());
+    }
+    let chart =
+        player_chart::PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart)
+            .unwrap();
+    assert_eq!(
+        chart.bga_state(beatkernel::time::Timestamp::ZERO).poor,
+        Some(ImageId(0))
+    );
+    assert_eq!(identity, captured_setup_identity(&prepared));
+    let (publisher, viewer) = player::channel();
+    player::with_publisher(publisher, || {
+        player::publish_native_chart(
+            &path,
+            &prepared.source,
+            &prepared.compiled.chart,
+            &[local_players::PlayerId(1)],
+        )
+        .map_err(|e| e.to_string())?;
+        let shown = viewer.take_latest().unwrap();
+        let bank = shown.images.as_ref().unwrap();
+        assert_eq!(bank.decoded_bytes(), bytes);
+        assert_eq!(
+            &bank.get(ImageId(0)).unwrap().pixels()[offset..offset + 4],
+            &[0, 0, 0, 255]
+        );
+        assert!(Arc::ptr_eq(
+            bank.get(ImageId(0)).unwrap(),
+            bank.get(ImageId(9)).unwrap()
+        ));
+        assert_eq!(
+            shown
+                .chart
+                .as_ref()
+                .unwrap()
+                .bga_state(beatkernel::time::Timestamp::ZERO)
+                .poor,
+            Some(ImageId(0))
+        );
+        Ok(())
+    })
+    .unwrap();
+    // Fabricated invalid crop data is rejected before even resolving this root.
+    let mut fabricated = prepared.source.clone();
+    fabricated
+        .bga_crops
+        .get_mut(&ImageId(1))
+        .unwrap()
+        .source_rect = [0, 0, 0, 1];
+    let error = ImageAssets::prepare(&dir.0.join("absent"), &fabricated, Default::default())
+        .err()
+        .unwrap();
+    assert!(error.contains("crop"));
 }
 
 #[test]

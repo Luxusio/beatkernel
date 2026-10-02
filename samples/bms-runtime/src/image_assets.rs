@@ -1,6 +1,7 @@
 //! Contained static visual resources, prepared explicitly before playback.
 use crate::{
     asset_paths::{AssetPathPolicy, resolve_asset},
+    image_crop::crop_canvas,
     image_decode::{ImageDecodeError, ImageDecodeLimits, decode},
     image_key::{black_to_transparent, needs_key},
     texture::RgbaImage,
@@ -24,7 +25,7 @@ pub const MAX_IMAGE_BANK_BYTES: u64 = 256 * 1024 * 1024;
 pub struct ImageAssetLimits {
     /// Maximum referenced image IDs, including unavailable resources.
     pub max_images: usize,
-    /// Maximum retained RGBA bytes, counting raw files and changed Layer variants.
+    /// Maximum retained RGBA bytes, counting raw files, crops and Layer variants.
     pub max_decoded_bytes: u64,
     /// Encoded input, dimensions and output bounds for one image.
     pub decode: ImageDecodeLimits,
@@ -68,6 +69,8 @@ pub enum ImageUnavailable {
 /// No GPU resource or native input/audio ownership lives here.
 #[derive(Clone, Default)]
 pub struct ImageAssets {
+    // Keep original dependencies even when a crop replaces their displayed ID.
+    sources: Vec<Arc<RgbaImage>>,
     images: BTreeMap<ImageId, Arc<RgbaImage>>,
     layers: BTreeMap<ImageId, Arc<RgbaImage>>,
     unavailable: BTreeMap<ImageId, ImageUnavailable>,
@@ -108,7 +111,7 @@ fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>, ReadError> {
 }
 
 impl ImageAssets {
-    /// Loads only referenced images and defined BMP00 using exact contained paths.
+    /// Loads referenced images, crop dependencies and initial BMP00/BGA00.
     /// Bad/missing raster data is unavailable; unsafe IO and exhausted limits
     /// reject the entire preparation. Filesystem stability is assumed, as for audio.
     pub fn prepare(
@@ -117,8 +120,38 @@ impl ImageAssets {
         limits: ImageAssetLimits,
     ) -> Result<Self, String> {
         limits.validate()?;
-        if chart.bga.len() > beatkernel::chart::MAX_SOURCE_ITEMS {
+        if chart
+            .bga
+            .len()
+            .checked_add(chart.bga_opacity.len())
+            .is_none_or(|count| count > beatkernel::chart::MAX_SOURCE_ITEMS)
+        {
             return Err("visual source item capacity exceeded".into());
+        }
+        if chart.bga_crops.len() > MAX_IMAGE_REFERENCES {
+            return Err("image crop definition capacity exceeded".into());
+        }
+        for (id, crop) in &chart.bga_crops {
+            if usize::from(id.0) >= MAX_IMAGE_REFERENCES {
+                return Err("image crop identity invalid".into());
+            }
+            crop.validate()
+                .map_err(|e| format!("image crop {}: {e}", id.0))?;
+        }
+        let mut references: BTreeSet<_> = chart.bga.iter().map(|event| event.image).collect();
+        if chart.images.contains_key(&ImageId(0)) || chart.bga_crops.contains_key(&ImageId(0)) {
+            references.insert(ImageId(0));
+        }
+        let sources: BTreeSet<_> = references
+            .iter()
+            .map(|id| chart.bga_crops.get(id).map_or(*id, |crop| crop.source))
+            .collect();
+        if references.union(&sources).count() > limits.max_images
+            || references
+                .union(&sources)
+                .any(|id| usize::from(id.0) >= MAX_IMAGE_REFERENCES)
+        {
+            return Err("image reference capacity exceeded".into());
         }
         let root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
         if !std::fs::metadata(&root)
@@ -127,20 +160,9 @@ impl ImageAssets {
         {
             return Err("image root must be a directory".into());
         }
-        let mut references: BTreeSet<_> = chart.bga.iter().map(|event| event.image).collect();
-        if chart.images.contains_key(&ImageId(0)) {
-            references.insert(ImageId(0));
-        }
-        if references.len() > limits.max_images
-            || references
-                .iter()
-                .any(|id| usize::from(id.0) >= MAX_IMAGE_REFERENCES)
-        {
-            return Err("image reference capacity exceeded".into());
-        }
         let mut bank = Self::default();
         let mut cache = BTreeMap::<PathBuf, Cached>::new();
-        for id in references {
+        for id in sources {
             let Some(name) = chart.images.get(&id) else {
                 bank.unavailable.insert(id, ImageUnavailable::Undefined);
                 continue;
@@ -197,6 +219,63 @@ impl ImageAssets {
                     bank.unavailable.insert(id, reason);
                 }
             }
+        }
+        bank.sources
+            .try_reserve_exact(bank.unique_images)
+            .map_err(|e| e.to_string())?;
+        bank.sources
+            .extend(cache.into_values().filter_map(|resource| match resource {
+                Cached::Loaded(image) => Some(image),
+                Cached::Unavailable(_) => None,
+            }));
+        let originals = std::mem::take(&mut bank.images);
+        let unavailable = std::mem::take(&mut bank.unavailable);
+        let mut variants: Vec<(Arc<RgbaImage>, [i32; 4], [i32; 2], Arc<RgbaImage>)> = Vec::new();
+        variants
+            .try_reserve_exact(references.len())
+            .map_err(|e| e.to_string())?;
+        for id in references {
+            let crop = chart.bga_crops.get(&id);
+            let source = crop.map_or(id, |crop| crop.source);
+            let Some(original) = originals.get(&source) else {
+                bank.unavailable.insert(
+                    id,
+                    unavailable
+                        .get(&source)
+                        .cloned()
+                        .unwrap_or(ImageUnavailable::Undefined),
+                );
+                continue;
+            };
+            let image = if let Some(crop) = crop {
+                if let Some((_, _, _, image)) =
+                    variants.iter().find(|(raw, rect, destination, _)| {
+                        Arc::ptr_eq(raw, original)
+                            && *rect == crop.source_rect
+                            && *destination == crop.destination
+                    })
+                {
+                    Arc::clone(image)
+                } else {
+                    let total = bank
+                        .decoded_bytes
+                        .checked_add(256 * 256 * 4)
+                        .filter(|total| *total <= limits.max_decoded_bytes)
+                        .ok_or("image bank crop byte budget exceeded")?;
+                    let image = crop_canvas(original, *crop)?;
+                    bank.decoded_bytes = total;
+                    variants.push((
+                        Arc::clone(original),
+                        crop.source_rect,
+                        crop.destination,
+                        Arc::clone(&image),
+                    ));
+                    image
+                }
+            } else {
+                Arc::clone(original)
+            };
+            bank.images.insert(id, image);
         }
         let layer_ids = chart
             .bga
@@ -271,7 +350,7 @@ impl ImageAssets {
     pub fn unique_images(&self) -> usize {
         self.unique_images
     }
-    /// Retained raw plus changed Layer RGBA bytes, excluding decoder scratch.
+    /// Retained raw sources plus unique crop and changed Layer RGBA bytes.
     pub fn decoded_bytes(&self) -> u64 {
         self.decoded_bytes
     }

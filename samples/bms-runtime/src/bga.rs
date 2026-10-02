@@ -12,7 +12,7 @@ pub struct BgaState {
     pub layer: Option<ImageId>,
     /// Layer2 channel0A selection.
     pub layer2: Option<ImageId>,
-    /// Initial BMP00 or last channel06 selection.
+    /// Initial BMP00/BGA00 or last channel06 selection.
     pub poor: Option<ImageId>,
 }
 
@@ -74,7 +74,8 @@ impl BgaTimeline {
     pub fn from_chart(chart: &BmsChart) -> Result<Self, String> {
         Self::new(
             chart.compile_bga().map_err(|e| e.to_string())?,
-            chart.images.contains_key(&ImageId(0)).then_some(ImageId(0)),
+            (chart.images.contains_key(&ImageId(0)) || chart.bga_crops.contains_key(&ImageId(0)))
+                .then_some(ImageId(0)),
         )
     }
 
