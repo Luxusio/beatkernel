@@ -382,3 +382,21 @@ player identity rather than a truncating positional zip. Recording publication
 remains create-new. Shared composition does not erase backend capabilities or
 claim native timing, file, socket or desktop acceptance. Fixtures are authored
 and compiled only while execution remains deferred.
+
+## Shared native audio construction and BGM supply
+
+Solo and local native sessions share queue, section-relative BGM admission and
+mixer construction. The prepared sample bank supplies the exact format/rate;
+platform owners supply their real render capacity and supported initial start
+gate. Preserve the 1024-command live reserve, explicit output origin, preroll,
+lookahead and immutable finite playback endpoint, including zero. Backend buffer
+negotiation and clock/calibration evidence remain native capabilities.
+
+Startup and gameplay use one checked BGM replenishment policy: only actual
+completed logical playback frames advance its cursor, absent/paused reports do
+not supply commands, and each replenishment retains the 256-command budget.
+Physical initial silence and pause displacement never shift this logical grid.
+Late/capacity/overflow errors and admitted prefixes remain explicit. Setup runs
+on the game owner; the abstraction adds no native work inside audio callbacks.
+Source fixtures are authored and compiled only; physical playback, files,
+network sessions, graphics and formal acceptance remain deferred.
