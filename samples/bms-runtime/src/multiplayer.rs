@@ -1,10 +1,19 @@
 //! Casual two-player progress transport. Remote scores are unauthenticated display data.
 //! Socket work never runs on the gameplay or audio thread. Software starts are committed.
-use crate::multiplayer_clock::{ClockFilter, ClockSample, OffsetEstimate};
-use crate::multiplayer_quic::{QuicCredentials, QuicEndpoint as Endpoint};
-use crate::multiplayer_start::{
-    StartAgreement, StartMessage, StartPolicy, StartSchedule,
+use crate::multiplayer_clock::OffsetEstimate;
+#[cfg(test)]
+use crate::multiplayer_clock::{ClockFilter, ClockSample};
+use crate::multiplayer_protocol::{
+    CLOCK_PROBES, ClockProbes, FrameDecoder as Frames, MAX_IDENTITY, Outgoing, Protocol, frame,
+    parse_start_frame, start_frame, validate_progress,
 };
+pub use crate::multiplayer_protocol::{MultiplayerError, MultiplayerEvent, Progress};
+#[cfg(test)]
+use crate::multiplayer_protocol::{VERSION, parse_progress, prefix_frame, progress_frame};
+use crate::multiplayer_quic::{QuicCredentials, QuicEndpoint as Endpoint};
+#[cfg(test)]
+use crate::multiplayer_start::StartMessage;
+use crate::multiplayer_start::{StartAgreement, StartPolicy, StartSchedule};
 use beatkernel::{
     replay::{
         ReplayHeader,
@@ -25,11 +34,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-const MAGIC: &[u8; 4] = b"BKMP";
-const VERSION: u16 = 6;
-const CLOCK_PROBES: u64 = 8;
-const MAX_IDENTITY: usize = 65_536;
-const MAX_BODY: usize = MAX_IDENTITY + 7;
 const TICK: Duration = Duration::from_millis(5);
 
 /// Exact chart/rules/options/seed/runtime compatibility, independent of capture clock.
@@ -87,16 +91,6 @@ pub fn competition_identity_for_section(
     Ok(identity)
 }
 
-/// A local cumulative summary; no implicit grade weighting or ranked-score claim.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Progress {
-    pub song_ns: i64,
-    pub hits: u64,
-    pub misses: u64,
-    pub combo: u64,
-    pub max_combo: u64,
-}
-
 #[derive(Clone, Debug)]
 pub struct MultiplayerOptions {
     /// Explicit QUIC server credentials or joining trust anchor/server name.
@@ -125,45 +119,10 @@ impl Default for MultiplayerOptions {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MultiplayerError {
-    InvalidOptions,
-    Io(String),
-    SetupTimeout,
-    IoStalled,
-    IncompatibleSetup,
-    Protocol(String),
-    QueueFull,
-    Closed,
-    WorkerPanicked,
-}
-impl fmt::Display for MultiplayerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-impl std::error::Error for MultiplayerError {}
 impl From<io::Error> for MultiplayerError {
     fn from(error: io::Error) -> Self {
         Self::Io(error.to_string())
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum MultiplayerEvent {
-    Connected,
-    /// Compatible peers both completely sent and received preparation readiness.
-    Ready,
-    /// Minimum-delay software offset interval after eight validated probes.
-    ClockEstimated(OffsetEstimate),
-    /// A committed local session-clock target for the software start call.
-    StartScheduled(StartSchedule),
-    Progress(Progress),
-    /// Peer terminal self-reported prefix, including aborted sessions.
-    FinalProgress(Progress),
-    /// Exact local final was acknowledged and any parsed peer ack was written.
-    FinalAcknowledged,
-    Disconnected(MultiplayerError),
 }
 
 /// Owned worker lifecycle. `stop` and Drop signal shutdown and join the worker.
@@ -534,423 +493,15 @@ fn validate_options(identity: &[u8], options: &MultiplayerOptions) -> Result<(),
     }
     Ok(())
 }
-fn validate_progress(previous: Option<Progress>, next: Progress) -> Result<(), MultiplayerError> {
-    if next.combo > next.max_combo
-        || next.max_combo > next.hits
-        || next.hits.checked_add(next.misses).is_none()
-    {
-        return Err(MultiplayerError::Protocol(
-            "invalid cumulative counts".into(),
-        ));
-    }
-    if let Some(previous) = previous {
-        if next.song_ns < previous.song_ns
-            || next.hits < previous.hits
-            || next.misses < previous.misses
-            || next.max_combo < previous.max_combo
-        {
-            return Err(MultiplayerError::Protocol(
-                "progress regression; reconnect after section restart".into(),
-            ));
-        }
-        let added_hits = next.hits - previous.hits;
-        if next.combo > previous.combo.saturating_add(added_hits)
-            || next.max_combo
-                > previous
-                    .max_combo
-                    .max(previous.combo.saturating_add(added_hits))
-            || (next.misses == previous.misses
-                && (next.combo != previous.combo + added_hits
-                    || next.max_combo != previous.max_combo.max(next.combo)))
-        {
-            return Err(MultiplayerError::Protocol(
-                "inconsistent combo transition".into(),
-            ));
-        }
-    }
-    Ok(())
-}
-fn frame(tag: u8, payload: &[u8]) -> Vec<u8> {
-    let len = 7 + payload.len();
-    let mut bytes = Vec::with_capacity(4 + len);
-    bytes.extend_from_slice(&(len as u32).to_le_bytes());
-    bytes.extend_from_slice(MAGIC);
-    bytes.extend_from_slice(&VERSION.to_le_bytes());
-    bytes.push(tag);
-    bytes.extend_from_slice(payload);
-    bytes
-}
-fn progress_frame(sequence: u64, progress: Progress) -> Vec<u8> {
-    prefix_frame(2, sequence, progress)
-}
-fn prefix_frame(tag: u8, sequence: u64, progress: Progress) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(48);
-    payload.extend_from_slice(&sequence.to_le_bytes());
-    payload.extend_from_slice(&progress.song_ns.to_le_bytes());
-    for value in [
-        progress.hits,
-        progress.misses,
-        progress.combo,
-        progress.max_combo,
-    ] {
-        payload.extend_from_slice(&value.to_le_bytes());
-    }
-    frame(tag, &payload)
-}
-fn parse_progress(
-    payload: &[u8],
-    expected: u64,
-    previous: Option<Progress>,
-) -> Result<Progress, MultiplayerError> {
-    if payload.len() != 48 {
-        return Err(MultiplayerError::Protocol("invalid progress size".into()));
-    }
-    let word = |offset: usize| u64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
-    if word(0) != expected {
-        return Err(MultiplayerError::Protocol("invalid sequence".into()));
-    }
-    let progress = Progress {
-        song_ns: i64::from_le_bytes(payload[8..16].try_into().unwrap()),
-        hits: word(16),
-        misses: word(24),
-        combo: word(32),
-        max_combo: word(40),
-    };
-    validate_progress(previous, progress)?;
-    Ok(progress)
-}
-
 fn elapsed_ns(epoch: Instant) -> Result<i64, MultiplayerError> {
     i64::try_from(epoch.elapsed().as_nanos())
         .map_err(|_| MultiplayerError::Protocol("session clock extent exceeded".into()))
 }
 
-fn start_frame(message: StartMessage) -> Vec<u8> {
-    match message {
-        StartMessage::ClockReady(preroll) => frame(8, &preroll.to_le_bytes()),
-        StartMessage::Propose(time) => frame(9, &time.to_le_bytes()),
-        StartMessage::Accept(time) => frame(10, &time.to_le_bytes()),
-        StartMessage::Commit(time) => frame(11, &time.to_le_bytes()),
-    }
-}
-fn parse_start_frame(tag: u8, payload: &[u8]) -> Result<StartMessage, MultiplayerError> {
-    if !(8..=11).contains(&tag) || payload.len() != 8 {
-        return Err(MultiplayerError::Protocol("invalid start frame".into()));
-    }
-    let time = i64::from_le_bytes(payload.try_into().unwrap());
-    Ok(match tag {
-        8 => StartMessage::ClockReady(time),
-        9 => StartMessage::Propose(time),
-        10 => StartMessage::Accept(time),
-        _ => StartMessage::Commit(time),
-    })
-}
 fn start_error(error: impl fmt::Display) -> MultiplayerError {
     MultiplayerError::Protocol(error.to_string())
 }
 
-/// Finite symmetric software probes; only the worker reads the actual clock.
-#[derive(Default)]
-struct ClockProbes {
-    completed: u64,
-    pending_ping: Option<(u64, i64)>,
-    peer_sequence: u64,
-    peer_send: Option<i64>,
-    pending_pong: Option<(u64, i64, i64)>,
-    last_receive: i64,
-    filter: ClockFilter,
-    emitted: bool,
-}
-impl ClockProbes {
-    fn next_ping(&mut self, now: i64) -> Result<Option<Vec<u8>>, MultiplayerError> {
-        if self.pending_ping.is_some() || self.completed == CLOCK_PROBES {
-            return Ok(None);
-        }
-        if now < self.last_receive {
-            return Err(MultiplayerError::Protocol("probe clock regressed".into()));
-        }
-        let mut payload = Vec::with_capacity(16);
-        payload.extend_from_slice(&self.completed.to_le_bytes());
-        payload.extend_from_slice(&now.to_le_bytes());
-        self.pending_ping = Some((self.completed, now));
-        Ok(Some(frame(6, &payload)))
-    }
-    fn receive_ping(&mut self, payload: &[u8], now: i64) -> Result<(), MultiplayerError> {
-        if payload.len() != 16 {
-            return Err(MultiplayerError::Protocol("invalid clock ping size".into()));
-        }
-        let sequence = u64::from_le_bytes(payload[..8].try_into().unwrap());
-        let sent = i64::from_le_bytes(payload[8..].try_into().unwrap());
-        if sequence != self.peer_sequence
-            || sequence >= CLOCK_PROBES
-            || sent < 0
-            || now < 0
-            || self.peer_send.is_some_and(|previous| sent < previous)
-            || self.pending_pong.is_some()
-        {
-            return Err(MultiplayerError::Protocol(
-                "invalid clock ping sequence/time".into(),
-            ));
-        }
-        self.pending_pong = Some((sequence, sent, now));
-        self.peer_sequence += 1;
-        self.peer_send = Some(sent);
-        Ok(())
-    }
-    fn next_pong(&mut self, now: i64) -> Result<Option<Vec<u8>>, MultiplayerError> {
-        let Some((sequence, echo, received)) = self.pending_pong else {
-            return Ok(None);
-        };
-        if now < received {
-            return Err(MultiplayerError::Protocol(
-                "clock pong send precedes receipt".into(),
-            ));
-        }
-        let mut payload = Vec::with_capacity(32);
-        payload.extend_from_slice(&sequence.to_le_bytes());
-        for timestamp in [echo, received, now] {
-            payload.extend_from_slice(&timestamp.to_le_bytes());
-        }
-        self.pending_pong = None;
-        Ok(Some(frame(7, &payload)))
-    }
-    fn receive_pong(&mut self, payload: &[u8], now: i64) -> Result<(), MultiplayerError> {
-        if payload.len() != 32 {
-            return Err(MultiplayerError::Protocol("invalid clock pong size".into()));
-        }
-        let word =
-            |offset: usize| i64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
-        let sequence = u64::from_le_bytes(payload[..8].try_into().unwrap());
-        let Some((expected, sent)) = self.pending_ping else {
-            return Err(MultiplayerError::Protocol("unsolicited clock pong".into()));
-        };
-        if sequence != expected || word(8) != sent {
-            return Err(MultiplayerError::Protocol(
-                "clock pong sequence/echo mismatch".into(),
-            ));
-        }
-        let sample = ClockSample::new(sent, word(16), word(24), now)
-            .map_err(|error| MultiplayerError::Protocol(error.to_string()))?;
-        self.filter
-            .observe(sample)
-            .map_err(|error| MultiplayerError::Protocol(error.to_string()))?;
-        self.completed += 1;
-        self.last_receive = now;
-        self.pending_ping = None;
-        Ok(())
-    }
-    fn estimate_event(&mut self) -> Option<MultiplayerEvent> {
-        if self.completed != CLOCK_PROBES || self.emitted {
-            return None;
-        }
-        let estimate = self.filter.estimate()?;
-        self.emitted = true;
-        Some(MultiplayerEvent::ClockEstimated(estimate))
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Outgoing {
-    progress: Progress,
-    final_prefix: bool,
-}
-#[derive(Default)]
-struct Protocol {
-    local_ready_sent: bool,
-    local_ready_written: bool,
-    remote_ready: bool,
-    ready_emitted: bool,
-    tx_sequence: u64,
-    rx_sequence: u64,
-    local: Option<Progress>,
-    remote: Option<Progress>,
-    local_final: Option<u64>,
-    local_final_written: bool,
-    remote_final: bool,
-    pending_ack: Option<u64>,
-    ack_in_flight: bool,
-    local_ack_received: bool,
-    acknowledgement_emitted: bool,
-}
-impl Protocol {
-    fn ready(&self) -> bool {
-        self.local_ready_written && self.remote_ready
-    }
-    fn next_ready(&mut self, requested: bool) -> Option<Vec<u8>> {
-        if !requested || self.local_ready_sent {
-            return None;
-        }
-        self.local_ready_sent = true;
-        Some(frame(5, &[]))
-    }
-    fn readiness(&mut self) -> Option<MultiplayerEvent> {
-        if self.ready() && !self.ready_emitted {
-            self.ready_emitted = true;
-            Some(MultiplayerEvent::Ready)
-        } else {
-            None
-        }
-    }
-    fn outgoing(&mut self, message: Outgoing) -> Result<Vec<u8>, MultiplayerError> {
-        if !self.ready() {
-            return Err(MultiplayerError::Protocol(
-                "bilateral readiness required".into(),
-            ));
-        }
-        if self.local_final.is_some() {
-            return Err(MultiplayerError::Protocol(
-                "progress after local final".into(),
-            ));
-        }
-        validate_progress(self.local, message.progress)?;
-        let next = self
-            .tx_sequence
-            .checked_add(1)
-            .ok_or_else(|| MultiplayerError::Protocol("sequence exhausted".into()))?;
-        let bytes = if message.final_prefix {
-            prefix_frame(3, self.tx_sequence, message.progress)
-        } else {
-            progress_frame(self.tx_sequence, message.progress)
-        };
-        if message.final_prefix {
-            self.local_final = Some(self.tx_sequence);
-        }
-        self.tx_sequence = next;
-        self.local = Some(message.progress);
-        Ok(bytes)
-    }
-    fn receive(
-        &mut self,
-        tag: u8,
-        payload: &[u8],
-    ) -> Result<Option<MultiplayerEvent>, MultiplayerError> {
-        if tag != 5 && !self.ready() {
-            return Err(MultiplayerError::Protocol(
-                "data before bilateral readiness".into(),
-            ));
-        }
-        match tag {
-            5 => {
-                if !payload.is_empty() || self.remote_ready {
-                    return Err(MultiplayerError::Protocol(
-                        "invalid or duplicate readiness".into(),
-                    ));
-                }
-                self.remote_ready = true;
-                Ok(None)
-            }
-            2 | 3 => {
-                if self.remote_final {
-                    return Err(MultiplayerError::Protocol(
-                        "progress after peer final".into(),
-                    ));
-                }
-                let progress = parse_progress(payload, self.rx_sequence, self.remote)?;
-                let next = self
-                    .rx_sequence
-                    .checked_add(1)
-                    .ok_or_else(|| MultiplayerError::Protocol("sequence exhausted".into()))?;
-                if tag == 3 {
-                    self.pending_ack = Some(self.rx_sequence);
-                    self.remote_final = true;
-                }
-                self.rx_sequence = next;
-                self.remote = Some(progress);
-                Ok(Some(if tag == 3 {
-                    MultiplayerEvent::FinalProgress(progress)
-                } else {
-                    MultiplayerEvent::Progress(progress)
-                }))
-            }
-            4 => {
-                if payload.len() != 8 {
-                    return Err(MultiplayerError::Protocol(
-                        "invalid acknowledgement size".into(),
-                    ));
-                }
-                let sequence = u64::from_le_bytes(payload.try_into().unwrap());
-                if self.local_final != Some(sequence)
-                    || !self.local_final_written
-                    || self.local_ack_received
-                {
-                    return Err(MultiplayerError::Protocol(
-                        "unsolicited, duplicate or wrong acknowledgement".into(),
-                    ));
-                }
-                self.local_ack_received = true;
-                Ok(None)
-            }
-            _ => Err(MultiplayerError::Protocol("unexpected message".into())),
-        }
-    }
-    // Called only between complete frames: acknowledgements never interrupt payloads.
-    fn next_ack(&mut self) -> Option<Vec<u8>> {
-        let sequence = self.pending_ack.take()?;
-        self.ack_in_flight = true;
-        Some(frame(4, &sequence.to_le_bytes()))
-    }
-    fn written(&mut self, tag: u8) {
-        if tag == 5 {
-            self.local_ready_written = true;
-        }
-        if tag == 3 {
-            self.local_final_written = true;
-        }
-        if tag == 4 {
-            self.ack_in_flight = false;
-        }
-    }
-    fn acknowledgement(&mut self) -> Option<MultiplayerEvent> {
-        if self.local_ack_received
-            && self.pending_ack.is_none()
-            && !self.ack_in_flight
-            && !self.acknowledgement_emitted
-        {
-            self.acknowledgement_emitted = true;
-            Some(MultiplayerEvent::FinalAcknowledged)
-        } else {
-            None
-        }
-    }
-}
-
-/// Incremental decoder preserves partial headers/bodies and bounds allocation before reading.
-struct Frames {
-    bytes: Vec<u8>,
-}
-impl Frames {
-    fn new() -> Self {
-        Self {
-            bytes: Vec::with_capacity(MAX_BODY + 4),
-        }
-    }
-    fn needed(&self) -> Result<usize, MultiplayerError> {
-        if self.bytes.len() < 4 {
-            return Ok(4 - self.bytes.len());
-        }
-        let length = u32::from_le_bytes(self.bytes[..4].try_into().unwrap()) as usize;
-        if !(7..=MAX_BODY).contains(&length) {
-            return Err(MultiplayerError::Protocol("invalid frame length".into()));
-        }
-        Ok(length + 4 - self.bytes.len())
-    }
-    fn take(&mut self) -> Result<Option<(u8, Vec<u8>)>, MultiplayerError> {
-        if self.needed()? != 0 {
-            return Ok(None);
-        }
-        if &self.bytes[4..8] != MAGIC
-            || u16::from_le_bytes(self.bytes[8..10].try_into().unwrap()) != VERSION
-        {
-            return Err(MultiplayerError::Protocol(
-                "unknown protocol/version".into(),
-            ));
-        }
-        let tag = self.bytes[10];
-        let payload = self.bytes[11..].to_vec();
-        self.bytes.clear();
-        Ok(Some((tag, payload)))
-    }
-}
 fn run(
     endpoint: Endpoint,
     identity: Vec<u8>,
@@ -1044,7 +595,12 @@ fn run(
                 match stream.read(&mut buffer[..needed]) {
                     Ok(0) => return Err(MultiplayerError::Closed),
                     Ok(count) => {
-                        rx.bytes.extend_from_slice(&buffer[..count]);
+                        let consumed = rx.push(&buffer[..count])?;
+                        if consumed != count {
+                            return Err(MultiplayerError::Protocol(
+                                "decoder did not admit bounded transport read".into(),
+                            ));
+                        }
                         last_read = Instant::now();
                     }
                     Err(error)

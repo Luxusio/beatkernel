@@ -78,6 +78,10 @@ mod mp3_fixture;
 pub mod multiplayer;
 /// Checked software peer-clock offset intervals and deadline conversion.
 pub mod multiplayer_clock;
+/// Shared framed multiplayer data and state, independent of transport I/O.
+pub mod multiplayer_protocol;
+#[cfg(test)]
+mod multiplayer_protocol_fixtures;
 /// Checked bilateral commitment to a future software start.
 pub mod multiplayer_start;
 /// Common queue, rolling BGM and mixer construction/replenishment.
