@@ -286,6 +286,14 @@ pub struct CompiledBms {
     /// Independently scheduled per-role opacity markers.
     pub bga_opacity: Vec<ScheduledBgaOpacity>,
 }
+pub(crate) fn parse_wav_gain(value: &str, line: usize) -> Result<f32, BmsError> {
+    let percentage = rational::decimal(value, line)?;
+    let gain = ((percentage.n as f64 / percentage.d as f64) / 100.0) as f32;
+    if !gain.is_finite() {
+        return Err(BmsError::new(line, BmsErrorKind::Overflow));
+    }
+    Ok(gain)
+}
 pub(crate) fn parse_canvas_size(value: &str) -> Option<[u32; 2]> {
     let mut fields = value.split_whitespace();
     let mut size = [0; 2];
@@ -305,6 +313,13 @@ pub(crate) fn parse_canvas_size(value: &str) -> Option<[u32; 2]> {
     Some(size)
 }
 impl BmsChart {
+    /// Reads static VOLWAV percentage as finite gain; absent metadata is 100%.
+    /// Rejects malformed fabricated metadata using the same checked parser.
+    pub fn wav_gain(&self) -> Result<f32, BmsError> {
+        self.metadata
+            .get("VOLWAV")
+            .map_or(Ok(1.0), |value| parse_wav_gain(value, 0))
+    }
     /// Reads explicit CANVASSIZE, rejecting malformed fabricated metadata.
     /// Absent metadata preserves the resource's legacy canvas policy.
     pub fn canvas_size(&self) -> Result<Option<[u32; 2]>, BmsError> {
@@ -1073,5 +1088,113 @@ mod canvas_fixtures {
         .unwrap();
         assert_eq!(baseline.source, sized.source);
         assert_eq!(baseline.compile().unwrap(), sized.compile().unwrap());
+    }
+}
+
+#[cfg(test)]
+mod wav_gain_fixtures {
+    use super::*;
+    #[test]
+    fn percentages_default_mute_amplification_and_finite_precision() {
+        assert_eq!(
+            parse("", ParseOptions::default())
+                .unwrap()
+                .wav_gain()
+                .unwrap(),
+            1.0
+        );
+        for (raw, gain) in [
+            ("0", 0.0),
+            ("50", 0.5),
+            ("200", 2.0),
+            ("+12.5", 0.125),
+            (".5", 0.005),
+            ("100.", 1.0),
+            ("00050.000", 0.5),
+        ] {
+            let chart = parse(&format!("#volwav {raw}"), ParseOptions::default()).unwrap();
+            assert_eq!(chart.wav_gain().unwrap(), gain);
+            assert_eq!(chart.metadata["VOLWAV"], raw);
+        }
+        let large = parse_wav_gain("999999999999999999", 7).unwrap();
+        assert!(large.is_finite() && large > 1.0e15);
+        assert!(parse_wav_gain("0.00000000000000001", 7).unwrap() > 0.0);
+    }
+    #[test]
+    fn malformed_values_and_fabricated_metadata_reject_with_source_line() {
+        for raw in [
+            "",
+            "-0",
+            "-50",
+            "NaN",
+            "inf",
+            "1e2",
+            "++1",
+            ".",
+            "+",
+            "1.2.3",
+            "５０",
+            "1 2",
+            "1000000000000000000",
+            "0.000000000000000001",
+        ] {
+            let error = parse(
+                &format!("#TITLE test\n#VOLWAV {raw}"),
+                ParseOptions::default(),
+            )
+            .unwrap_err();
+            assert_eq!(error.line, 2, "{raw}");
+            let mut fabricated = parse("", ParseOptions::default()).unwrap();
+            fabricated.metadata.insert("VOLWAV".into(), raw.into());
+            assert!(fabricated.wav_gain().is_err(), "{raw}");
+        }
+    }
+    #[test]
+    fn duplicate_and_selected_branch_policies_preserve_raw_value() {
+        let source = "#VOLWAV 50\n#VOLWAV +200.0";
+        assert_eq!(parse(source, ParseOptions::default()).unwrap_err().line, 2);
+        let chart = parse(
+            source,
+            ParseOptions {
+                duplicates: DuplicatePolicy::LastWins,
+                ..ParseOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(chart.wav_gain().unwrap(), 2.0);
+        assert_eq!(chart.metadata["VOLWAV"], "+200.0");
+        let conditional = "#RANDOM 2\n#IF 1\n#VOLWAV 50\n#ELSE\n#VOLWAV 200\n#ENDIF";
+        assert_eq!(
+            parse_seeded(conditional, ParseOptions::default(), 0)
+                .unwrap()
+                .wav_gain()
+                .unwrap(),
+            2.0
+        );
+        assert_eq!(
+            parse_seeded(conditional, ParseOptions::default(), 3)
+                .unwrap()
+                .wav_gain()
+                .unwrap(),
+            0.5
+        );
+        let inactive = parse(
+            "#SETRANDOM 1\n#IF 2\n#VOLWAV malformed\n#ENDIF",
+            ParseOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(inactive.wav_gain().unwrap(), 1.0);
+    }
+    #[test]
+    fn volume_metadata_keeps_gameplay_bgm_and_visual_identity() {
+        let source = "#BPM 120\n#WAV01 note.wav\n#00011:01\n#00001:01\n#00004:0100\n";
+        let original = parse(source, ParseOptions::default()).unwrap();
+        for gain in ["0", "50", "200", "12.5"] {
+            let changed =
+                parse(&format!("{source}#VOLWAV {gain}"), ParseOptions::default()).unwrap();
+            assert_eq!(original.source, changed.source);
+            assert_eq!(original.notes, changed.notes);
+            assert_eq!(original.compile().unwrap(), changed.compile().unwrap());
+        }
     }
 }

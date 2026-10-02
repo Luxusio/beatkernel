@@ -426,7 +426,8 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 "metadata header",
                 options.duplicates,
             )?;
-        } else if command == "VOLWAV" && decimal(value, line)? == (Ratio { n: 100, d: 1 }) {
+        } else if command == "VOLWAV" {
+            parse_wav_gain(value, line)?;
             define(
                 &mut metadata,
                 command,
