@@ -1477,3 +1477,23 @@ Late/capacity/overflow errors and admitted prefixes remain explicit. Setup runs
 on the game owner; the abstraction adds no native work inside audio callbacks.
 Source fixtures are authored and compiled only; physical playback, files,
 network sessions, graphics and formal acceptance remain deferred.
+
+## Shared native chart preparation
+
+All native solo and local sessions use one chart preparation owner for asset
+loading, practice-section slicing and required lane-binding coverage. Forward
+the exact chart path, actual output format, channel policy and chart seed to the
+existing loader. The same supplied PCM limits govern loading and section tails.
+Reject negative starts before loading; check bindings against retained notes
+after slicing, so excluded heads and crossing holds need no bindings. Preserve
+absolute song coordinates, original warnings and actual overlapping BGM suffixes.
+Missing required bindings reject during preparation before completion reporting.
+
+Preparation does not publish a chart or eagerly load BGA images. Keep the existing
+player publication/cancellation stage at each native resource boundary: Windows
+solo selects its input and bindings first, Linux solo binds first, and macOS
+solo/local publishes before opening input. Existing headless publication avoids
+image loading. Native device ownership, exact roster identities and cleanup remain
+unchanged. Author real-component regression fixtures for request forwarding,
+section/binding boundaries, PCM tails and error propagation; execution and physical
+acceptance remain deferred.
