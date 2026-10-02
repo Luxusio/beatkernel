@@ -189,6 +189,32 @@ pub fn note(
 mod tests {
     use super::*;
     #[test]
+    fn committed_selection_clips_without_composition_and_hides_when_unfocused() {
+        let mut editor = LineEditor::new("a별éz", 32).unwrap();
+        editor.select_all();
+        let bounds = Bounds {
+            x: 10,
+            y: 10,
+            width: 40,
+            height: 32,
+        };
+        let mut scene = Scene::new(100, 100);
+        text_field(&mut scene, &editor, bounds, true);
+        assert_eq!(scene.rectangles().len(), 5); // background, selection, 2 glyphs, caret
+        assert_eq!(scene.rectangles()[1].bounds, [18.0, 18.0, 24.0, 16.0]);
+        assert_eq!(scene.rectangles()[4].bounds, [42.0, 18.0, 2.0, 16.0]);
+        assert_eq!(editor.visible_line(2).value, "éz");
+        assert_eq!(editor.visible_line(2).composition, None);
+        scene.clear();
+        text_field(&mut scene, &editor, bounds, false);
+        assert_eq!(scene.rectangles().len(), 3);
+        assert_eq!(editor.selection(), Some((0, 7)));
+        editor.clear_selection();
+        scene.clear();
+        text_field(&mut scene, &editor, bounds, true);
+        assert_eq!(scene.rectangles().len(), 4);
+    }
+    #[test]
     fn composition_and_selection_use_scalar_cells_and_clip_to_the_visible_field() {
         let mut base = LineEditor::new("a별b", 32).unwrap();
         base.left();

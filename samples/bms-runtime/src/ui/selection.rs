@@ -464,6 +464,40 @@ mod fixtures {
         view.nodes.paints()
     }
     #[test]
+    fn committed_selection_only_repaints_search_and_identical_selection_stays_idle() {
+        let view = view(30);
+        let mut editor = LineEditor::new("音é", 256).unwrap();
+        view.set_search(&editor, true).unwrap();
+        let mut scene = Scene::new(960, 720);
+        let mut hits = Vec::new();
+        view.compose(&mut scene, &mut hits).unwrap();
+        let before = paints(&view);
+        editor.select_all(); // Same text and caret; only the anchor changes.
+        view.set_search(&editor, true).unwrap();
+        let after = paints(&view);
+        assert_eq!(before.iter().zip(&after).filter(|(a, b)| a != b).count(), 1);
+        assert_eq!(&before[4..19], &after[4..19]);
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert!(
+            scene
+                .rectangles()
+                .iter()
+                .any(|r| r.bounds == [448.0, 110.0, 24.0, 16.0])
+        );
+        view.set_search(&editor, true).unwrap();
+        assert_eq!(paints(&view), after);
+        assert!(!view.dirty());
+        view.set_search(&editor, false).unwrap();
+        view.compose(&mut scene, &mut hits).unwrap();
+        assert!(
+            !scene
+                .rectangles()
+                .iter()
+                .any(|r| r.bounds == [448.0, 110.0, 24.0, 16.0])
+        );
+        assert_eq!(editor.selection(), Some((0, 5)));
+    }
+    #[test]
     fn ime_selection_end_only_repaints_search_and_keeps_catalog_nodes_retained() {
         let view = view(30);
         let base = LineEditor::new("", 256).unwrap();

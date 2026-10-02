@@ -449,6 +449,43 @@ mod fixtures {
         view.nodes.paints()
     }
     #[test]
+    fn committed_selection_changes_only_the_focused_setting_or_profile_node() {
+        let view = SettingsView::new(ScreenInstanceId(9), 960, 720).unwrap();
+        let fields = fields(30);
+        let base = LineEditor::new("別é", 4096).unwrap();
+        let mut selected = base.clone();
+        selected.select_all();
+        let mut scene = Scene::new(960, 720);
+        let mut hits = Vec::new();
+        for profile_focused in [false, true] {
+            let update = |editor| {
+                let mut frame = if profile_focused {
+                    frame(&fields, &base, editor)
+                } else {
+                    frame(&fields, editor, &base)
+                };
+                frame.profile_focused = profile_focused;
+                frame
+            };
+            view.update(update(&base)).unwrap();
+            view.compose(&mut scene, &mut hits).unwrap();
+            let before = paints(&view);
+            view.update(update(&selected)).unwrap();
+            let after = paints(&view);
+            assert_eq!(before.iter().zip(&after).filter(|(a, b)| a != b).count(), 1);
+            view.compose(&mut scene, &mut hits).unwrap();
+            let expected = if profile_focused {
+                [168.0, 566.0, 24.0, 16.0]
+            } else {
+                [288.0, 128.0, 24.0, 16.0]
+            };
+            assert!(scene.rectangles().iter().any(|r| r.bounds == expected));
+            view.update(update(&selected)).unwrap();
+            assert_eq!(paints(&view), after);
+            assert!(!view.dirty());
+        }
+    }
+    #[test]
     fn composition_range_only_updates_selected_editor_or_profile_without_sibling_repaint() {
         let view = SettingsView::new(ScreenInstanceId(9), 960, 720).unwrap();
         let fields = fields(30);

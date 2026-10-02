@@ -54,7 +54,7 @@ use winit::{
     dpi::LogicalSize,
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{Key, KeyCode, PhysicalKey},
+    keyboard::{Key, KeyCode, ModifiersState, PhysicalKey},
     window::{Window, WindowId},
 };
 
@@ -523,6 +523,7 @@ pub(super) fn run(
         search_focused: false,
         catalog_wheel: WheelSteps::default(),
         ime: ImeDraft::default(),
+        modifiers: ModifiersState::empty(),
         title_font,
         font_text: None,
         selection_diagnostics,
@@ -612,6 +613,41 @@ fn edit_line(
         _ => return value.map_or(Ok(()), |value| editor.insert(value)),
     }
     Ok(())
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectionCommand {
+    All,
+    Left,
+    Right,
+    Home,
+    End,
+}
+fn selection_command(
+    physical: PhysicalKey,
+    logical: &Key,
+    modifiers: ModifiersState,
+    macos: bool,
+) -> Option<SelectionCommand> {
+    let command = if macos {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::CONTROL
+    };
+    if modifiers == command
+        && matches!(logical, Key::Character(value) if value.eq_ignore_ascii_case("a"))
+    {
+        return Some(SelectionCommand::All);
+    }
+    if modifiers != ModifiersState::SHIFT {
+        return None;
+    }
+    match physical {
+        PhysicalKey::Code(KeyCode::ArrowLeft) => Some(SelectionCommand::Left),
+        PhysicalKey::Code(KeyCode::ArrowRight) => Some(SelectionCommand::Right),
+        PhysicalKey::Code(KeyCode::Home) => Some(SelectionCommand::Home),
+        PhysicalKey::Code(KeyCode::End) => Some(SelectionCommand::End),
+        _ => None,
+    }
 }
 const DISPLAY_FLAGS: [&str; 4] = [
     "--gpu-backend",
@@ -923,6 +959,7 @@ struct Desktop {
     search_focused: bool,
     catalog_wheel: WheelSteps,
     ime: ImeDraft,
+    modifiers: ModifiersState,
     title_font: Option<Arc<FontAtlas>>,
     font_text: Option<FontText>,
     selection_diagnostics: Arc<[String]>,
@@ -2776,6 +2813,9 @@ impl Desktop {
         Some(ImeTarget { screen, field })
     }
     fn sync_ime(&mut self) {
+        if !self.ui_ready() {
+            self.modifiers = ModifiersState::empty();
+        }
         let target = self.ime_target();
         if target == self.ime.target {
             return;
@@ -2920,6 +2960,136 @@ impl Desktop {
                 Some(view.id()) == self.navigator.active_id()
                     && point.is_some_and(|point| view.contains_chart(point))
             })
+    }
+    fn modifiers_changed(&mut self, modifiers: ModifiersState) {
+        self.modifiers = if self.ui_ready() {
+            modifiers
+        } else {
+            ModifiersState::empty()
+        };
+    }
+    fn select_text(&mut self, physical: PhysicalKey, logical: &Key) -> bool {
+        if !self.ui_ready() || self.ime_owns_keyboard() {
+            return false;
+        }
+        let Some(command) =
+            selection_command(physical, logical, self.modifiers, cfg!(target_os = "macos"))
+        else {
+            return false;
+        };
+        let editor = match self.navigator.route() {
+            ScreenRoute::Selection if self.search_focused => Some(&mut self.search_editor),
+            ScreenRoute::Settings => self.settings.as_mut().map(|draft| {
+                if draft.profile_focused {
+                    &mut draft.profile
+                } else {
+                    &mut draft.editor
+                }
+            }),
+            ScreenRoute::Display => self.display.as_mut().map(|draft| {
+                let selected = draft.selected;
+                &mut draft.editors[selected]
+            }),
+            ScreenRoute::Practice => self.practice.as_mut().map(|draft| {
+                if draft.end_focused {
+                    &mut draft.end_editor
+                } else {
+                    &mut draft.editor
+                }
+            }),
+            ScreenRoute::Records => self
+                .records
+                .as_mut()
+                .filter(|draft| draft.directory_focused)
+                .map(|draft| &mut draft.directory),
+            _ => None,
+        };
+        let Some(editor) = editor else {
+            return false;
+        };
+        match command {
+            SelectionCommand::All => editor.select_all(),
+            SelectionCommand::Left => editor.move_left(true),
+            SelectionCommand::Right => editor.move_right(true),
+            SelectionCommand::Home => editor.move_home(true),
+            SelectionCommand::End => editor.move_end(true),
+        }
+        self.gesture.cancel();
+        self.invalidate_hits();
+        true
+    }
+    /// The actual pressed-key route, also callable without an OS window in fixtures.
+    fn keyboard_input(
+        &mut self,
+        physical: PhysicalKey,
+        logical: &Key,
+        text: Option<&str>,
+        repeat: bool,
+    ) {
+        self.sync_ime();
+        if self.ime_owns_keyboard() {
+            return;
+        }
+        if self.select_text(physical, logical) {
+            return;
+        }
+        let editing = self.navigator.active_id();
+        let navigation = matches!(
+            physical,
+            PhysicalKey::Code(
+                KeyCode::Escape
+                    | KeyCode::Enter
+                    | KeyCode::Tab
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::ArrowUp
+                    | KeyCode::ArrowDown
+                    | KeyCode::ArrowLeft
+                    | KeyCode::ArrowRight
+                    | KeyCode::Home
+                    | KeyCode::End
+                    | KeyCode::Backspace
+                    | KeyCode::Delete
+                    | KeyCode::F4
+            )
+        );
+        if let PhysicalKey::Code(key) = physical {
+            self.key(key, repeat);
+        }
+        if editing.is_some_and(|id| self.navigator.accepts(id)) && !navigation && self.ui_ready() {
+            let value = text.or_else(|| match logical {
+                Key::Character(value) => Some(value.as_str()),
+                _ => None,
+            });
+            if let Some(value) = value {
+                match self.navigator.route() {
+                    ScreenRoute::Practice => {
+                        if let Some(practice) = &mut self.practice {
+                            practice.edit(None, Some(value));
+                        }
+                    }
+                    ScreenRoute::Selection if self.search_focused => {
+                        self.edit_search(None, Some(value))
+                    }
+                    ScreenRoute::Records => {
+                        if let Some(records) = &mut self.records {
+                            records.edit(None, Some(value));
+                        }
+                    }
+                    ScreenRoute::Display => {
+                        if let Some(display) = &mut self.display {
+                            display.edit(None, Some(value));
+                        }
+                    }
+                    ScreenRoute::Settings => {
+                        if let Some(draft) = &mut self.settings {
+                            draft.edit(None, Some(value));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
     fn key(&mut self, key: KeyCode, repeat: bool) {
         self.sync_ime();
@@ -3951,71 +4121,14 @@ impl ApplicationHandler for Desktop {
                     }
                 }
             }
+            WindowEvent::ModifiersChanged(modifiers) => self.modifiers_changed(modifiers.state()),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                self.sync_ime();
-                if self.ime_owns_keyboard() {
-                    return;
-                }
-                let editing = self.navigator.active_id();
-                let navigation = matches!(
+                self.keyboard_input(
                     event.physical_key,
-                    PhysicalKey::Code(
-                        KeyCode::Escape
-                            | KeyCode::Enter
-                            | KeyCode::Tab
-                            | KeyCode::PageUp
-                            | KeyCode::PageDown
-                            | KeyCode::ArrowUp
-                            | KeyCode::ArrowDown
-                            | KeyCode::ArrowLeft
-                            | KeyCode::ArrowRight
-                            | KeyCode::Home
-                            | KeyCode::End
-                            | KeyCode::Backspace
-                            | KeyCode::Delete
-                            | KeyCode::F4
-                    )
+                    &event.logical_key,
+                    event.text.as_deref(),
+                    event.repeat,
                 );
-                if let PhysicalKey::Code(key) = event.physical_key {
-                    self.key(key, event.repeat);
-                }
-                if editing.is_some_and(|id| self.navigator.accepts(id))
-                    && !navigation
-                    && self.ui_ready()
-                {
-                    let value = event.text.as_deref().or_else(|| match &event.logical_key {
-                        Key::Character(value) => Some(value.as_str()),
-                        _ => None,
-                    });
-                    if let Some(value) = value {
-                        match self.navigator.route() {
-                            ScreenRoute::Practice => {
-                                if let Some(practice) = &mut self.practice {
-                                    practice.edit(None, Some(value));
-                                }
-                            }
-                            ScreenRoute::Selection if self.search_focused => {
-                                self.edit_search(None, Some(value))
-                            }
-                            ScreenRoute::Records => {
-                                if let Some(records) = &mut self.records {
-                                    records.edit(None, Some(value));
-                                }
-                            }
-                            ScreenRoute::Display => {
-                                if let Some(display) = &mut self.display {
-                                    display.edit(None, Some(value));
-                                }
-                            }
-                            ScreenRoute::Settings => {
-                                if let Some(draft) = &mut self.settings {
-                                    draft.edit(None, Some(value));
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
             }
             WindowEvent::RedrawRequested
                 if !self.is_suspended() && !self.closing() && !self.occluded =>
@@ -4780,6 +4893,239 @@ mod tests {
         assert_eq!(app.search_editor.value(), "FIX");
         assert_eq!(app.entries[0].path, PathBuf::from("fixture.bms"));
     }
+    fn select_all_input(app: &mut Desktop) {
+        app.modifiers_changed(if cfg!(target_os = "macos") {
+            ModifiersState::SUPER
+        } else {
+            ModifiersState::CONTROL
+        });
+        // Logical A on a different physical key must still select all.
+        app.keyboard_input(
+            PhysicalKey::Code(KeyCode::KeyQ),
+            &Key::Character("a".into()),
+            Some("a"),
+            false,
+        );
+    }
+    fn pressed_input(app: &mut Desktop, key: KeyCode, text: Option<&str>) {
+        app.keyboard_input(
+            PhysicalKey::Code(key),
+            &Key::Character(text.unwrap_or("").into()),
+            text,
+            false,
+        );
+    }
+    fn field_editor(app: &Desktop, field: usize) -> &LineEditor {
+        match field {
+            0 => &app.search_editor,
+            1 => &app.settings.as_ref().unwrap().editor,
+            2 => &app.settings.as_ref().unwrap().profile,
+            3 => &app.display.as_ref().unwrap().editors[2],
+            4 => &app.practice.as_ref().unwrap().editor,
+            5 => &app.practice.as_ref().unwrap().end_editor,
+            6 => &app.records.as_ref().unwrap().directory,
+            _ => unreachable!(),
+        }
+    }
+    #[test]
+    fn selection_shortcuts_follow_platform_logical_keys_and_exclude_extra_modifiers() {
+        for macos in [false, true] {
+            let command = if macos {
+                ModifiersState::SUPER
+            } else {
+                ModifiersState::CONTROL
+            };
+            let other = if macos {
+                ModifiersState::CONTROL
+            } else {
+                ModifiersState::SUPER
+            };
+            let physical = PhysicalKey::Code(KeyCode::KeyQ);
+            for character in ["a", "A"] {
+                assert_eq!(
+                    selection_command(physical, &Key::Character(character.into()), command, macos),
+                    Some(SelectionCommand::All)
+                );
+            }
+            for modifiers in [
+                ModifiersState::empty(),
+                other,
+                command | other,
+                command | ModifiersState::ALT,
+                command | ModifiersState::SHIFT,
+            ] {
+                assert_eq!(
+                    selection_command(physical, &Key::Character("a".into()), modifiers, macos),
+                    None
+                );
+            }
+            assert_eq!(
+                selection_command(
+                    PhysicalKey::Code(KeyCode::KeyA),
+                    &Key::Character("q".into()),
+                    command,
+                    macos
+                ),
+                None
+            );
+            for (key, expected) in [
+                (KeyCode::ArrowLeft, SelectionCommand::Left),
+                (KeyCode::ArrowRight, SelectionCommand::Right),
+                (KeyCode::Home, SelectionCommand::Home),
+                (KeyCode::End, SelectionCommand::End),
+            ] {
+                let physical = PhysicalKey::Code(key);
+                let logical = Key::Character("".into());
+                assert_eq!(
+                    selection_command(physical, &logical, ModifiersState::SHIFT, macos),
+                    Some(expected)
+                );
+                for extra in [command, other, ModifiersState::ALT] {
+                    assert_eq!(
+                        selection_command(physical, &logical, ModifiersState::SHIFT | extra, macos),
+                        None
+                    );
+                }
+            }
+        }
+    }
+    #[test]
+    fn actual_keyboard_route_selects_and_replaces_each_editable_draft_without_inserting_shortcut() {
+        for field in 0..7 {
+            let mut app = lifecycle_fixture();
+            if field == 0 {
+                app.set_search_focus(true);
+            } else {
+                app.open_settings();
+                match field {
+                    1 => {
+                        let draft = app.settings.as_mut().unwrap();
+                        let index = draft
+                            .values
+                            .fields()
+                            .iter()
+                            .position(|field| field.flag == "--record-replay")
+                            .unwrap();
+                        draft.select(index).unwrap();
+                    }
+                    2 => app.settings.as_mut().unwrap().profile_focused = true,
+                    3 => {
+                        app.open_display();
+                        app.display.as_mut().unwrap().selected = 2;
+                    }
+                    4 | 5 => {
+                        app.open_practice();
+                        app.practice.as_mut().unwrap().end_focused = field == 5;
+                    }
+                    6 => app.open_records(),
+                    _ => unreachable!(),
+                }
+            }
+            select_all_input(&mut app);
+            app.modifiers_changed(ModifiersState::empty());
+            pressed_input(&mut app, KeyCode::KeyX, Some("a別b"));
+            assert_eq!(field_editor(&app, field).value(), "a別b", "field {field}");
+            select_all_input(&mut app);
+            assert_eq!(field_editor(&app, field).value(), "a別b");
+            assert_eq!(field_editor(&app, field).selection(), Some((0, 5)));
+            app.modifiers_changed(ModifiersState::empty());
+            pressed_input(&mut app, KeyCode::ArrowLeft, None);
+            assert_eq!(field_editor(&app, field).cursor(), 0);
+            app.modifiers_changed(ModifiersState::SHIFT);
+            pressed_input(&mut app, KeyCode::ArrowRight, None);
+            pressed_input(&mut app, KeyCode::ArrowRight, None);
+            assert_eq!(field_editor(&app, field).selection(), Some((0, 4)));
+            app.modifiers_changed(ModifiersState::empty());
+            pressed_input(&mut app, KeyCode::KeyE, Some("é"));
+            assert_eq!(field_editor(&app, field).value(), "éb");
+            assert_eq!(field_editor(&app, field).selection(), None);
+            select_all_input(&mut app);
+            app.modifiers_changed(ModifiersState::empty());
+            pressed_input(&mut app, KeyCode::Backspace, None);
+            assert_eq!(field_editor(&app, field).value(), "");
+            assert!(app.options.native.is_empty());
+            assert!(app.window.is_none());
+            assert!(app.renderer.is_none());
+            assert!(app.game.is_none());
+        }
+    }
+    #[test]
+    fn selected_ime_preview_cancels_or_replaces_once_and_owns_selection_shortcuts() {
+        let mut app = lifecycle_fixture();
+        app.set_search_focus(true);
+        app.edit_search(None, Some("a別b"));
+        select_all_input(&mut app);
+        let original = app.search_editor.clone();
+        let projection = app.catalog_search.indices();
+        app.ime_event(Ime::Enabled);
+        app.ime_event(Ime::Preedit("音".into(), Some((3, 3))));
+        assert_eq!(app.ime.preview.as_ref().unwrap().value(), "音");
+        assert_eq!(app.search_editor, original);
+        select_all_input(&mut app);
+        assert_eq!(app.search_editor, original);
+        assert_eq!(app.ime.preview.as_ref().unwrap().value(), "音");
+        assert!(Arc::ptr_eq(&projection, &app.catalog_search.indices()));
+        app.ime_event(Ime::Preedit("".into(), None));
+        assert!(app.ime.preview.is_none());
+        assert_eq!(app.search_editor, original);
+        app.ime_event(Ime::Preedit("音".into(), None));
+        app.ime_event(Ime::Commit("音".into()));
+        assert_eq!(app.search_editor.value(), "音");
+        assert_eq!(app.search_editor.selection(), None);
+        assert_eq!(app.search_editor.composition(), None);
+        app.draw_selection().unwrap();
+        assert!(!app.selection_view.as_ref().unwrap().dirty());
+    }
+    #[test]
+    fn selection_modifiers_reset_on_unavailable_ui_and_drafts_keep_their_own_selection() {
+        let mut app = lifecycle_fixture();
+        app.open_settings();
+        app.settings.as_mut().unwrap().profile_focused = true;
+        pressed_input(&mut app, KeyCode::KeyX, Some("profile.bkp"));
+        select_all_input(&mut app);
+        let selected = app.settings.as_ref().unwrap().profile.clone();
+        app.settings.as_mut().unwrap().profile_focused = false;
+        app.sync_ime();
+        assert!(!app.modifiers.is_empty()); // Field change retains held hardware modifiers.
+        assert_eq!(app.settings.as_ref().unwrap().profile, selected);
+        assert_eq!(app.settings.as_ref().unwrap().editor.selection(), None);
+        for unavailable in 0..4 {
+            app.modifiers_changed(ModifiersState::SHIFT);
+            match unavailable {
+                0 => app.active = false,
+                1 => app.occluded = true,
+                2 => app.navigator.suspend(),
+                _ => {
+                    let (owner, permit) = app.metadata_scope().unwrap();
+                    app.profile_io = Some(ProfileOperation {
+                        owner,
+                        permit,
+                        worker: None,
+                    });
+                }
+            }
+            app.sync_ime();
+            assert!(app.modifiers.is_empty());
+            let before = app.settings.as_ref().unwrap().editor.clone();
+            select_all_input(&mut app);
+            assert!(app.modifiers.is_empty());
+            assert_eq!(app.settings.as_ref().unwrap().editor, before);
+            assert_eq!(app.settings.as_ref().unwrap().profile, selected);
+            app.active = true;
+            app.occluded = false;
+            app.profile_io = None;
+            app.navigator.resume();
+            app.sync_ime();
+        }
+        app.modifiers_changed(ModifiersState::SHIFT);
+        app.request_close();
+        assert!(app.modifiers.is_empty());
+        let mut app = lifecycle_fixture();
+        select_all_input(&mut app); // No focused search field.
+        assert_eq!(app.search_editor.value(), "");
+        assert_eq!(app.search_editor.selection(), None);
+        assert!(app.game.is_none());
+    }
     fn lifecycle_fixture() -> Desktop {
         fn native_unavailable(_: &[String]) -> Result<(), Box<dyn Error>> {
             Err("fixture must not open native playback".into())
@@ -4831,6 +5177,7 @@ mod tests {
             search_focused: false,
             catalog_wheel: WheelSteps::default(),
             ime: ImeDraft::default(),
+            modifiers: ModifiersState::empty(),
             title_font: None,
             font_text: None,
             selection_diagnostics: Arc::from([]),
