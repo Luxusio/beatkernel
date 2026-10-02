@@ -575,7 +575,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
 mod native {
     use super::*;
     use beatkernel::{
-        audio::{Mixer, MixerConfig, PcmLimits, command_queue},
+        audio::{Mixer, MixerConfig, PcmLimits, command_queue, command_queue_with_start_gate},
         input::{Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId},
         judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
         runtime::RuntimeReport,
@@ -596,11 +596,14 @@ mod native {
         macos::{
             audio::{CoreAudioRequest, CoreAudioStream},
             clock::MachClock,
-            input::{HidDevice, HidInput},
+            input::{HidDevice, HidInput, HidSample},
             presentation::coreaudio_presentation_pair,
         },
     };
-    use std::time::{Duration as WallDuration, Instant};
+    use std::{
+        collections::VecDeque,
+        time::{Duration as WallDuration, Instant},
+    };
     pub(super) const M_NATIVE: ClockDomainId = ClockDomainId(1);
     pub(super) const HOST: ClockDomainId = ClockDomainId(2);
     pub(super) const OUTPUT: ClockDomainId = ClockDomainId(3);
@@ -681,6 +684,88 @@ mod native {
             clock,
         )?)
     }
+    use beatkernel_bms_runtime::native_start::{
+        MAX_START_INPUT_EVENTS, NativeStartConfig, NativeStartDevice, NativeStartObservation,
+        NativeStartResult, start_committed,
+    };
+    struct StartupDevice<'a> {
+        audio: &'a mut CoreAudioStream,
+        input: &'a mut HidInput,
+        clock: &'a MachClock,
+        selected: DeviceId,
+        registry: u64,
+        pre_origin: &'a mut u64,
+        other_devices: &'a mut u64,
+        retained: &'a mut VecDeque<HidSample>,
+    }
+    impl NativeStartDevice for StartupDevice<'_> {
+        type Evidence = ();
+        fn start(&mut self) -> NativeStartResult<()> {
+            Ok(self.audio.start()?)
+        }
+        fn service_input(&mut self, retain: bool) -> NativeStartResult<bool> {
+            startup_input(
+                self.input,
+                self.selected,
+                self.registry,
+                self.pre_origin,
+                self.other_devices,
+                if retain {
+                    Some(&mut *self.retained)
+                } else {
+                    None
+                },
+            )
+        }
+        fn observe(&mut self) -> NativeStartResult<Option<NativeStartObservation<()>>> {
+            Ok(observe(self.audio, self.clock)?
+                .map(|pair| NativeStartObservation { pair, evidence: () }))
+        }
+        fn render_report(&mut self) -> NativeStartResult<Option<beatkernel::audio::RenderReport>> {
+            Ok(self.audio.last_render_report())
+        }
+        fn buffer_frames(&self) -> NativeStartResult<u32> {
+            Ok(self.audio.configuration().buffer_frames)
+        }
+        fn host_now(&self) -> NativeStartResult<ClockPoint> {
+            Ok(self.clock.sample()?.normalized)
+        }
+    }
+    fn retain_startup_sample(events: &mut VecDeque<HidSample>, sample: HidSample) -> Result<()> {
+        if events.len() == MAX_START_INPUT_EVENTS {
+            return Err("startup HID input capacity exceeded; restart required".into());
+        }
+        events.push_back(sample);
+        Ok(())
+    }
+    fn startup_input(
+        input: &mut HidInput,
+        selected: DeviceId,
+        registry: u64,
+        pre_origin: &mut u64,
+        other_devices: &mut u64,
+        retained: Option<&mut VecDeque<HidSample>>,
+    ) -> Result<bool> {
+        if player::cancelled() {
+            return Ok(false);
+        }
+        input.poll(WallDuration::from_millis(1))?;
+        check_hid(input, selected, registry)?;
+        let mut retained = retained;
+        for _ in 0..256 {
+            let Some(sample) = input.pop() else {
+                break;
+            };
+            if sample.event.meta().source != selected {
+                *other_devices = other_devices.saturating_add(1);
+            } else if let Some(events) = retained.as_deref_mut() {
+                retain_startup_sample(events, sample)?;
+            } else {
+                *pre_origin = pre_origin.saturating_add(1);
+            }
+        }
+        Ok(true)
+    }
     fn seed(
         audio: &CoreAudioStream,
         input: &mut HidInput,
@@ -759,6 +844,74 @@ mod native {
         }
         Ok(())
     }
+    #[cfg(test)]
+    mod startup_fixtures {
+        use super::*;
+        use beatkernel::input::{
+            BackendId, ButtonEvent, ButtonState, EventMeta, NativeEventMeta, PhysicalInputEvent,
+        };
+        fn sample(sequence: u64) -> HidSample {
+            let native = ClockPoint {
+                domain: M_NATIVE,
+                timestamp: Timestamp::from_nanos(77),
+            };
+            let normalized = ClockPoint {
+                domain: HOST,
+                timestamp: Timestamp::from_nanos(99),
+            };
+            let mut meta = EventMeta::new(DeviceId(1), normalized, sequence);
+            meta.native = Some(NativeEventMeta {
+                backend: BackendId(7),
+                code: Some(4),
+                timestamp: Some(native),
+            });
+            HidSample {
+                event: PhysicalInputEvent::Button(ButtonEvent {
+                    meta,
+                    control: PhysicalControlId::keyboard(4),
+                    state: ButtonState::Down,
+                }),
+                mach_ticks: 77,
+                integer_value: 1,
+                element_cookie: 4,
+            }
+        }
+        #[test]
+        fn startup_retains_actual_hid_provenance_in_order_and_rejects_capacity_atomically() {
+            let mut events = VecDeque::with_capacity(4096);
+            let original = sample(1);
+            retain_startup_sample(&mut events, original.clone()).unwrap();
+            assert_eq!(events.front(), Some(&original));
+            for sequence in 2..=4096 {
+                retain_startup_sample(&mut events, sample(sequence)).unwrap();
+            }
+            let first = events.front().cloned();
+            let last = events.back().cloned();
+            assert!(retain_startup_sample(&mut events, sample(4097)).is_err());
+            assert_eq!(events.len(), 4096);
+            assert_eq!(events.front(), first.as_ref());
+            assert_eq!(events.back(), last.as_ref());
+            for sequence in 1..=4096 {
+                let retained = events.pop_front().unwrap();
+                assert_eq!(retained.event.meta().sequence, sequence);
+                assert_eq!(retained.mach_ticks, 77);
+                assert_eq!(retained.integer_value, 1);
+                assert_eq!(retained.element_cookie, 4);
+                assert_eq!(retained.event.meta().timestamp, Timestamp::from_nanos(99));
+                assert_eq!(
+                    retained
+                        .event
+                        .meta()
+                        .native
+                        .unwrap()
+                        .timestamp
+                        .unwrap()
+                        .domain,
+                    M_NATIVE
+                );
+            }
+        }
+    }
     pub(super) fn run(
         options: Options,
         competition_options: beatkernel_bms_runtime::competition_live::CompetitionOptions,
@@ -776,7 +929,8 @@ mod native {
             .map(|end| NativeEnd::new(output_origin(), HOST, options.format.sample_rate(), end))
             .transpose()?;
         let clock = MachClock::new(M_NATIVE, HOST)?;
-        let pause_supported = competition_options.network.is_none();
+        let network_start = competition_options.network.is_some();
+        let pause_supported = !network_start;
         // Declared before device owners so every exit reports after their cleanup.
         let mut delivery = DeliverySession(beatkernel::telemetry::InputDeliveryTelemetry::new(
             4096, HOST,
@@ -854,7 +1008,11 @@ mod native {
             )?;
         const SLACK: usize = 1024;
         let capacity = AudioLimits::MAX_COMMANDS;
-        let (mut producer, consumer) = command_queue(capacity)?;
+        let (mut producer, consumer) = if network_start {
+            command_queue_with_start_gate(capacity)
+        } else {
+            command_queue(capacity)
+        }?;
         let mut bgm = BgmSession(beatkernel_bms_runtime::bgm::BgmFeeder::new(
             beatkernel_bms_runtime::section_start::relative_commands(
                 prepared.bgm_commands,
@@ -942,6 +1100,7 @@ mod native {
         let mut other_devices = 0u64;
         let mut pre_origin = 0u64;
         let mut capture = None;
+        let mut startup_inputs = VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
         let outcome = (|| -> Result<()> {
             if options.record_replay.is_some() {
                 let limits = beatkernel::replay::codec::ReplayCodecLimits::new(
@@ -961,53 +1120,85 @@ mod native {
                 );
             }
             check_hid(&input, selected_id, options.keyboard_registry)?;
-            if let Some(competition) = competition.as_mut() {
-                let ready = competition.await_network_ready(|| {
-                    if beatkernel_bms_runtime::player::cancelled() {
-                        return Ok(false);
-                    }
-                    input.poll(WallDuration::from_millis(1))?;
-                    check_hid(&input, selected_id, options.keyboard_registry)?;
-                    for _ in 0..256 {
-                        let Some(sample) = input.pop() else {
-                            break;
-                        };
-                        if sample.event.meta().source == selected_id {
-                            pre_origin = pre_origin.saturating_add(1);
-                        } else {
-                            other_devices = other_devices.saturating_add(1);
-                        }
-                    }
-                    Ok(true)
-                })?;
-                if !ready {
+            let (mut discipline, pair, origin, discipline_origin) = if network_start {
+                let competition = competition
+                    .as_mut()
+                    .ok_or("network startup owner missing")?;
+                let started = {
+                    let mut device = StartupDevice {
+                        audio: &mut audio,
+                        input: &mut input,
+                        clock: &clock,
+                        selected: selected_id,
+                        registry: options.keyboard_registry,
+                        pre_origin: &mut pre_origin,
+                        other_devices: &mut other_devices,
+                        retained: &mut startup_inputs,
+                    };
+                    start_committed(
+                        &mut device,
+                        competition,
+                        &mut producer,
+                        &mut pause,
+                        &mut native_end,
+                        NativeStartConfig {
+                            output_origin: output_origin(),
+                            sample_rate: options.format.sample_rate(),
+                            playback_end_frame: playback_end,
+                            setup_timeout: competition_options.setup_timeout,
+                            max_clock_age_ns: competition_options.start_policy.max_age_ns,
+                            max_rate_error_ppm: DisciplineConfig::default().max_rate_error_ppm,
+                        },
+                        |report, producer| {
+                            feed_rendered(&mut bgm, report, |command| producer.try_push(command))
+                        },
+                    )?
+                };
+                let Some(started) = started else {
                     return Ok(());
-                }
-            }
-            audio.start()?;
-            let mut discipline = PresentationDiscipline::new(
-                DisciplineConfig::default(),
-                output_origin(),
-                HOST,
-                song_origin,
-            )?;
-            let pair = seed(
-                &audio,
-                &mut input,
-                &clock,
-                selected_id,
-                options.keyboard_registry,
-                &mut discipline,
-                &mut bgm,
-                &mut producer,
-            )?;
-            let origin = ClockPoint {
-                domain: HOST,
-                timestamp: estimated_origin(pair, output_origin())?,
+                };
+                let plan = started.plan;
+                let pair = started.observation.pair;
+                let origin = started.host_origin;
+                let mut discipline = PresentationDiscipline::new_with_playback_origin(
+                    DisciplineConfig::default(),
+                    output_origin(),
+                    plan.selected_output(),
+                    HOST,
+                    song_origin,
+                )?;
+                discipline.observe_clock_pair(pair)?;
+                println!(
+                    "native applied start={plan:?}; host={origin:?}; physical accuracy unmeasured"
+                );
+                (discipline, pair, origin, plan.selected_output())
+            } else {
+                audio.start()?;
+                let mut discipline = PresentationDiscipline::new(
+                    DisciplineConfig::default(),
+                    output_origin(),
+                    HOST,
+                    song_origin,
+                )?;
+                let pair = seed(
+                    &audio,
+                    &mut input,
+                    &clock,
+                    selected_id,
+                    options.keyboard_registry,
+                    &mut discipline,
+                    &mut bgm,
+                    &mut producer,
+                )?;
+                let origin = ClockPoint {
+                    domain: HOST,
+                    timestamp: estimated_origin(pair, output_origin())?,
+                };
+                (discipline, pair, origin, output_origin())
             };
             let transport = Transport::new(origin.timestamp, song_origin, Rate::NORMAL);
             println!(
-                "estimated output-zero host={origin:?}; actual seed={pair:?}; config={:?}; quality={:?}; future presentation retained, physical latency unmeasured",
+                "estimated playback-zero host={origin:?}; actual seed={pair:?}; config={:?}; quality={:?}; future presentation retained, physical latency unmeasured",
                 discipline.config(),
                 discipline.quality()
             );
@@ -1099,7 +1290,7 @@ mod native {
                             pause_committed = false;
                             discipline = PresentationDiscipline::new(
                                 DisciplineConfig::default(),
-                                output_origin(),
+                                discipline_origin,
                                 HOST,
                                 pause.song_origin_after_pause(song_origin)?,
                             )?;
@@ -1117,7 +1308,12 @@ mod native {
                     }
                     let mut backlog = true;
                     for _ in 0..256 {
-                        let Some(sample) = input.pop() else {
+                        let sample = if let Some(sample) = startup_inputs.pop_front() {
+                            Some(sample)
+                        } else {
+                            input.pop()
+                        };
+                        let Some(sample) = sample else {
                             backlog = false;
                             break;
                         };

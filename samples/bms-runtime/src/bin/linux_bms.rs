@@ -581,6 +581,49 @@ mod native {
             stream.configuration().format.sample_rate(),
         )?)
     }
+    use beatkernel_bms_runtime::native_start::{
+        MAX_START_INPUT_EVENTS, NativeStartConfig, NativeStartDevice, NativeStartObservation,
+        NativeStartResult, start_committed,
+    };
+    struct StartupDevice<'a> {
+        stream: &'a mut AlsaStream,
+        input: &'a mut EvdevDevice,
+        clock: &'a MonotonicClock,
+        before_origin: &'a mut u64,
+        retained: &'a mut VecDeque<PhysicalInputEvent>,
+        observed: bool,
+    }
+    impl NativeStartDevice for StartupDevice<'_> {
+        type Evidence = ();
+        fn start(&mut self) -> NativeStartResult<()> {
+            Ok(self.stream.start()?)
+        }
+        fn service_input(&mut self, retain: bool) -> NativeStartResult<bool> {
+            startup_input(
+                self.input,
+                self.before_origin,
+                if retain {
+                    Some(&mut *self.retained)
+                } else {
+                    None
+                },
+            )
+        }
+        fn observe(&mut self) -> NativeStartResult<Option<NativeStartObservation<()>>> {
+            let pair = observe(self.stream, !self.observed)?;
+            self.observed |= pair.is_some();
+            Ok(pair.map(|pair| NativeStartObservation { pair, evidence: () }))
+        }
+        fn render_report(&mut self) -> NativeStartResult<Option<beatkernel::audio::RenderReport>> {
+            Ok(self.stream.last_render_report())
+        }
+        fn buffer_frames(&self) -> NativeStartResult<u32> {
+            Ok(self.stream.configuration().buffer_frames)
+        }
+        fn host_now(&self) -> NativeStartResult<ClockPoint> {
+            Ok(self.clock.now()?)
+        }
+    }
     // The owner drains bounded batches; the audio callback never waits on input.
     fn startup_input(
         input: &mut EvdevDevice,
@@ -597,7 +640,7 @@ mod native {
                 EvdevItem::Ignored => {}
                 EvdevItem::Event(event) => {
                     if let Some(events) = retained.as_deref_mut() {
-                        if events.len() == 4096 {
+                        if events.len() == MAX_START_INPUT_EVENTS {
                             return Err("startup input capacity exceeded; restart required".into());
                         }
                         events.push_back(event);
@@ -870,7 +913,7 @@ mod native {
         );
         let mut before_origin = 0u64;
         let mut capture = None;
-        let mut startup_inputs = VecDeque::with_capacity(4096);
+        let mut startup_inputs = VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
         let outcome = (|| -> Result<()> {
             if options.record_replay.is_some() {
                 let limits = beatkernel::replay::codec::ReplayCodecLimits::new(
@@ -890,121 +933,46 @@ mod native {
                 );
             }
             let (mut discipline, pair, host_origin, discipline_origin) = if network_start {
-                use beatkernel_bms_runtime::native_start::{OutputStartPlan, presented_output};
-                stream.start()?;
-                let calibration_deadline = Instant::now() + WallDuration::from_secs(2);
-                let mut first = None;
-                let (first, mut latest) = loop {
-                    if !startup_input(&mut input, &mut before_origin, None)? {
-                        return Ok(());
-                    }
-                    if Instant::now() >= calibration_deadline {
-                        return Err("native startup calibration timed out".into());
-                    }
-                    if let Some(pair) = observe(&stream, true)? {
-                        let lower = *first.get_or_insert(pair);
-                        if pair.source.timestamp > lower.source.timestamp
-                            && i128::from(pair.target.timestamp.as_nanos())
-                                - i128::from(lower.target.timestamp.as_nanos())
-                                >= 100_000_000
-                        {
-                            break (lower, pair);
-                        }
-                    }
-                    std::thread::sleep(WallDuration::from_millis(1));
-                };
                 let competition = competition
                     .as_mut()
                     .ok_or("network startup owner missing")?;
-                if !competition.await_network_commit(|| {
-                    if !startup_input(&mut input, &mut before_origin, None)? {
-                        return Ok(false);
-                    }
-                    if let Some(pair) = observe(&stream, false)? {
-                        latest = pair;
-                    }
-                    Ok(true)
-                })? {
-                    return Ok(());
-                }
-                let schedule = competition
-                    .committed_start_schedule()
-                    .ok_or("committed start missing")?;
-                let bracket = competition
-                    .native_host_bracket(|| Ok(clock.now()?))?
-                    .ok_or("session clock missing")?;
-                let now = competition
-                    .network_clock_now_ns()?
-                    .ok_or("session clock missing")?;
-                let window = bracket.deadline_for_schedule(
-                    schedule,
-                    now,
-                    competition_options.start_policy.max_age_ns,
-                )?;
-                let report = stream
-                    .last_render_report()
-                    .ok_or("calibration render frontier missing")?;
-                let rendered_end = report
-                    .start_frame
-                    .checked_add(report.frames as u64)
-                    .ok_or("render frontier overflow")?;
-                let plan = OutputStartPlan::from_pairs(
-                    window,
-                    first,
-                    latest,
-                    output_origin(),
-                    stream.configuration().format.sample_rate(),
-                    rendered_end,
-                    u64::from(stream.configuration().buffer_frames),
-                    DisciplineConfig::default().max_rate_error_ppm,
-                )?;
-                pause = pause.with_start_frame(plan.selected_frame())?;
-                if let Some(end) = native_end.take() {
-                    let mut end = end.with_start_frame(plan.selected_frame())?;
-                    end.observe(None, latest)?;
-                    native_end = Some(end);
-                }
-                producer.schedule_start_at(plan.selected_frame())?;
-                let crossing_deadline = Instant::now() + competition_options.setup_timeout;
-                let mut lower = latest;
-                let (pair, host_origin) = loop {
-                    if !startup_input(&mut input, &mut before_origin, Some(&mut startup_inputs))? {
-                        return Ok(());
-                    }
-                    if Instant::now() >= crossing_deadline {
-                        return Err("native applied-start presentation timed out".into());
-                    }
-                    feed_rendered(&mut bgm, stream.last_render_report(), |command| {
-                        producer.try_push(command)
-                    })?;
-                    if let Some(pair) = observe(&stream, false)? {
-                        if pair.source.timestamp < plan.selected_output().timestamp {
-                            lower = pair;
-                        } else {
-                            let applied = producer.applied_start_frame();
-                            if applied.is_some_and(|frame| frame != plan.selected_frame()) {
-                                return Err(
-                                    "native applied frame differs from committed frame".into()
-                                );
-                            }
-                            // A zero-length finite section has no positive-playback acknowledgement.
-                            let empty_end_reached = playback_end == Some(0)
-                                && stream.last_render_report().is_some_and(|report| {
-                                    report.playback_end_physical_frame
-                                        == Some(plan.selected_frame())
-                                });
-                            if applied.is_some() || empty_end_reached {
-                                break (
-                                    pair,
-                                    presented_output(plan.selected_output(), lower, pair)?,
-                                );
-                            }
-                        }
-                    }
-                    std::thread::sleep(WallDuration::from_millis(1));
+                let started = {
+                    let mut device = StartupDevice {
+                        stream: &mut stream,
+                        input: &mut input,
+                        clock: &clock,
+                        before_origin: &mut before_origin,
+                        retained: &mut startup_inputs,
+                        observed: false,
+                    };
+                    start_committed(
+                        &mut device,
+                        competition,
+                        &mut producer,
+                        &mut pause,
+                        &mut native_end,
+                        NativeStartConfig {
+                            output_origin: output_origin(),
+                            sample_rate: options.format.sample_rate(),
+                            playback_end_frame: playback_end,
+                            setup_timeout: competition_options.setup_timeout,
+                            max_clock_age_ns: competition_options.start_policy.max_age_ns,
+                            max_rate_error_ppm: DisciplineConfig::default().max_rate_error_ppm,
+                        },
+                        |report, producer| {
+                            feed_rendered(&mut bgm, report, |command| producer.try_push(command))
+                        },
+                    )?
                 };
-                let mut discipline = PresentationDiscipline::new(
+                let Some(started) = started else {
+                    return Ok(());
+                };
+                let plan = started.plan;
+                let pair = started.observation.pair;
+                let host_origin = started.host_origin;
+                let mut discipline = PresentationDiscipline::new_with_playback_origin(
                     DisciplineConfig::default(),
+                    output_origin(),
                     plan.selected_output(),
                     HOST,
                     song_origin,

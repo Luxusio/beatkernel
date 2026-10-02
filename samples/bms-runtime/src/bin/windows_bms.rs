@@ -736,7 +736,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
 mod native {
     use super::*;
     use beatkernel::{
-        audio::{Mixer, MixerConfig, PcmLimits, command_queue},
+        audio::{Mixer, MixerConfig, PcmLimits, command_queue, command_queue_with_start_gate},
         input::{Binding, BindingMap, DeviceSelector, GameControlId, PhysicalControlId},
         judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
         runtime::RuntimeReport,
@@ -979,7 +979,7 @@ mod native {
         Err("no usable increasing presentation observations within 2 seconds".into())
     }
 
-    fn skippable_observation(error: &DisciplineError) -> bool {
+    pub(super) fn skippable_observation(error: &DisciplineError) -> bool {
         matches!(
             error,
             DisciplineError::Presentation(
@@ -1117,6 +1117,127 @@ mod native {
             )?;
         }
         Ok(())
+    }
+    use beatkernel_bms_runtime::native_start::{
+        MAX_START_INPUT_EVENTS, NativeStartConfig, NativeStartDevice, NativeStartObservation,
+        NativeStartResult, start_committed,
+    };
+    struct StartupDevice<'a> {
+        stream: &'a mut super::live_output::Output,
+        input: &'a mut WindowsInput,
+        acquisition: &'a AcquisitionWindow,
+        clock: &'a QpcClock,
+        selected: Option<(u64, usize)>,
+        pre_origin: &'a mut u64,
+        retained: &'a mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
+        physical: PresentationDiscipline,
+    }
+    impl NativeStartDevice for StartupDevice<'_> {
+        type Evidence = beatkernel_platform::audio::AudioStreamSnapshot;
+        fn start(&mut self) -> NativeStartResult<()> {
+            self.stream.start()
+        }
+        fn service_input(&mut self, retain: bool) -> NativeStartResult<bool> {
+            startup_messages(
+                self.input,
+                self.acquisition,
+                self.selected,
+                self.pre_origin,
+                if retain {
+                    Some(&mut *self.retained)
+                } else {
+                    None
+                },
+            )
+        }
+        fn observe(&mut self) -> NativeStartResult<Option<NativeStartObservation<Self::Evidence>>> {
+            Ok(self
+                .stream
+                .startup_observation(&mut self.physical)?
+                .map(|(pair, evidence)| NativeStartObservation { pair, evidence }))
+        }
+        fn render_report(&mut self) -> NativeStartResult<Option<beatkernel::audio::RenderReport>> {
+            self.stream.render_report()
+        }
+        fn buffer_frames(&self) -> NativeStartResult<u32> {
+            self.stream.startup_buffer_frames()
+        }
+        fn host_now(&self) -> NativeStartResult<ClockPoint> {
+            Ok(self.clock.sample()?.normalized)
+        }
+    }
+    fn startup_messages(
+        input: &mut WindowsInput,
+        acquisition: &AcquisitionWindow,
+        selected: Option<(u64, usize)>,
+        pre_origin: &mut u64,
+        retained: Option<&mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>>,
+    ) -> Result<bool> {
+        if player::cancelled() {
+            return Ok(false);
+        }
+        let mut retained = retained;
+        // SAFETY: initialized native message storage, owned by this game thread.
+        let mut message: MSG = unsafe { std::mem::zeroed() };
+        for _ in 0..256 {
+            // SAFETY: live writable output on the message owner.
+            if unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) } == 0 {
+                break;
+            }
+            if message.message == WM_QUIT || message.message == WM_CLOSE {
+                return Ok(false);
+            }
+            if message.hwnd == acquisition.hwnd() && message.message == WM_INPUT {
+                let acquired = input.read_raw_input(message.lParam as usize, Some(message.time));
+                if message.wParam & 0xff == 0 {
+                    // SAFETY: foreground Raw Input cleanup occurs once, even on decode failure.
+                    unsafe {
+                        DefWindowProcW(
+                            message.hwnd,
+                            message.message,
+                            message.wParam,
+                            message.lParam,
+                        );
+                    }
+                }
+                for event in acquired?.input.events {
+                    if selected.is_some_and(|(id, _)| event.meta().source.0 != id) {
+                        continue;
+                    }
+                    if let Some(events) = retained.as_deref_mut() {
+                        if events.len() >= MAX_START_INPUT_EVENTS {
+                            return Err(
+                                "startup Raw Input buffer exhausted; restart required".into()
+                            );
+                        }
+                        events.push_back(event);
+                    } else {
+                        *pre_origin = pre_origin.saturating_add(1);
+                    }
+                }
+                continue;
+            }
+            if message.hwnd == acquisition.hwnd() && message.message == WM_INPUT_DEVICE_CHANGE {
+                match message.wParam as u32 {
+                    GIDC_ARRIVAL => {
+                        input.attach_device(message.lParam as usize)?;
+                    }
+                    GIDC_REMOVAL => {
+                        if selected.is_some_and(|(_, handle)| handle == message.lParam as usize) {
+                            return Err("selected keyboard detached during startup".into());
+                        }
+                        input.remove_device(message.lParam as usize);
+                    }
+                    _ => {}
+                }
+            }
+            // SAFETY: real message and stateless owning-window procedure.
+            unsafe {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+        Ok(true)
     }
     pub(super) fn run(
         options: Options,
@@ -1266,7 +1387,13 @@ mod native {
             AudioLimits::MAX_RENDER_FRAMES,
             capacity,
         )?;
-        let (mut producer, consumer) = command_queue(capacity)?;
+        let network_start =
+            options.backend == Backend::Wasapi && competition_options.network.is_some();
+        let (mut producer, consumer) = if network_start {
+            command_queue_with_start_gate(capacity)?
+        } else {
+            command_queue(capacity)?
+        };
         let mut bgm = BgmSession(beatkernel_bms_runtime::bgm::BgmFeeder::new(
             beatkernel_bms_runtime::section_start::relative_commands(
                 prepared.bgm_commands,
@@ -1326,6 +1453,7 @@ mod native {
         }
         let mut capture = None;
         let mut pre_origin_inputs = 0u64;
+        let mut startup_inputs = std::collections::VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
         let outcome = (|| -> Result<()> {
             if options.record_replay.is_some() {
                 let limits = beatkernel::replay::codec::ReplayCodecLimits::new(
@@ -1344,95 +1472,105 @@ mod native {
                     )?,
                 );
             }
-            if let Some(competition) = competition.as_mut() {
-                let ready = competition.await_network_ready(|| {
-                    if beatkernel_bms_runtime::player::cancelled() {
-                        return Ok(false);
-                    }
-                    // SAFETY: MSG is a native plain-data output structure for PeekMessageW.
-                    let mut message: MSG = unsafe { std::mem::zeroed() };
-                    for _ in 0..256 {
-                        // SAFETY: initialized output and messages owned by this game thread.
-                        if unsafe { PeekMessageW(&mut message, ptr::null_mut(), 0, 0, PM_REMOVE) } == 0 {
-                            break;
-                        }
-                        if message.message == WM_QUIT || message.message == WM_CLOSE {
-                            return Ok(false);
-                        }
-                        if message.hwnd == acquisition.hwnd() && message.message == WM_INPUT {
-                            let acquired =
-                                input.read_raw_input(message.lParam as usize, Some(message.time));
-                            if message.wParam & 0xff == 0 {
-                                // SAFETY: foreground Raw Input receives default cleanup exactly once.
-                                unsafe {
-                                    DefWindowProcW(
-                                        message.hwnd,
-                                        message.message,
-                                        message.wParam,
-                                        message.lParam,
-                                    );
-                                }
-                            }
-                            for event in acquired?.input.events {
-                                if selected.is_none_or(|(id, _)| event.meta().source.0 == id) {
-                                    pre_origin_inputs = pre_origin_inputs.saturating_add(1);
-                                }
-                            }
-                            continue;
-                        }
-                        if message.hwnd == acquisition.hwnd()
-                            && message.message == WM_INPUT_DEVICE_CHANGE
-                        {
-                            match message.wParam as u32 {
-                                GIDC_ARRIVAL => {
-                                    input.attach_device(message.lParam as usize)?;
-                                }
-                                GIDC_REMOVAL => {
-                                    if selected.is_some_and(|(_, handle)| handle == message.lParam as usize) {
-                                        return Err(
-                                            "selected keyboard detached during multiplayer preparation".into(),
-                                        );
-                                    }
-                                    input.remove_device(message.lParam as usize);
-                                }
-                                _ => {}
-                            }
-                        }
-                        // SAFETY: real initialized native message and stateless owning-window procedure.
-                        unsafe {
-                            TranslateMessage(&message);
-                            DispatchMessageW(&message);
-                        }
-                    }
-                    Ok(true)
-                })?;
-                if !ready {
+            let (transport, quality, mut discipline) = if network_start {
+                let competition = competition
+                    .as_mut()
+                    .ok_or("network startup owner missing")?;
+                let started = {
+                    let mut device = StartupDevice {
+                        stream: &mut stream,
+                        input: &mut input,
+                        acquisition: &acquisition,
+                        clock: &clock,
+                        selected,
+                        pre_origin: &mut pre_origin_inputs,
+                        retained: &mut startup_inputs,
+                        physical: PresentationDiscipline::new(
+                            DisciplineConfig::default(),
+                            output_origin,
+                            HOST,
+                            options.song_origin()?,
+                        )?,
+                    };
+                    start_committed(
+                        &mut device,
+                        competition,
+                        &mut producer,
+                        &mut pause,
+                        &mut native_end,
+                        NativeStartConfig {
+                            output_origin,
+                            sample_rate: pcm.sample_rate(),
+                            playback_end_frame: playback_end,
+                            setup_timeout: competition_options.setup_timeout,
+                            max_clock_age_ns: competition_options.start_policy.max_age_ns,
+                            max_rate_error_ppm: DisciplineConfig::default().max_rate_error_ppm,
+                        },
+                        |report, producer| {
+                            feed_rendered(&mut bgm, report, |command| producer.try_push(command))
+                        },
+                    )?
+                };
+                let Some(started) = started else {
                     return Ok(());
+                };
+                let plan = started.plan;
+                let observation = started.observation;
+                let origin = started.host_origin;
+                let mut discipline = PresentationDiscipline::new_with_playback_origin(
+                    DisciplineConfig::default(),
+                    output_origin,
+                    plan.selected_output(),
+                    HOST,
+                    options.song_origin()?,
+                )?;
+                // Retain the exact native snapshot whose accepted pair bracketed presentation.
+                discipline.observe(observation.evidence)?;
+                let transport = beatkernel::transport::Transport::new(
+                    origin.timestamp,
+                    options.song_origin()?,
+                    Rate::NORMAL,
+                );
+                println!(
+                    "WASAPI applied start={plan:?}; host={origin:?}; physical accuracy unmeasured"
+                );
+                (transport, ClockMappingQuality::Unknown, discipline)
+            } else {
+                if let Some(competition) = competition.as_mut() {
+                    if !competition.await_network_ready(|| {
+                        startup_messages(
+                            &mut input,
+                            &acquisition,
+                            selected,
+                            &mut pre_origin_inputs,
+                            None,
+                        )
+                    })? {
+                        return Ok(());
+                    }
                 }
-            }
-            stream.start()?;
-            let (mut transport, quality) = stream.calibrate(
-                &options,
-                calibration_extent(
-                    options.seconds.unwrap_or_else(|| {
-                        completion.as_ref().map_or(2, |c| c.calibration_seconds())
-                    }),
-                    options.preroll,
-                )?,
-                &mut bgm,
-                &mut producer,
-            )?;
-            transport.set_rate(transport.anchor().host_time, Rate::NORMAL)?;
-            let mut discipline = PresentationDiscipline::new(
-                DisciplineConfig::default(),
-                ClockPoint {
-                    domain: OUTPUT,
-                    timestamp: Timestamp::ZERO,
-                },
-                HOST,
-                options.song_origin()?,
-            )?;
-            stream.seed(&mut discipline, &mut bgm, &mut producer)?;
+                stream.start()?;
+                let (mut transport, quality) = stream.calibrate(
+                    &options,
+                    calibration_extent(
+                        options.seconds.unwrap_or_else(|| {
+                            completion.as_ref().map_or(2, |c| c.calibration_seconds())
+                        }),
+                        options.preroll,
+                    )?,
+                    &mut bgm,
+                    &mut producer,
+                )?;
+                transport.set_rate(transport.anchor().host_time, Rate::NORMAL)?;
+                let mut discipline = PresentationDiscipline::new(
+                    DisciplineConfig::default(),
+                    output_origin,
+                    HOST,
+                    options.song_origin()?,
+                )?;
+                stream.seed(&mut discipline, &mut bgm, &mut producer)?;
+                (transport, quality, discipline)
+            };
             discipline.validate_host(clock.sample()?.normalized)?;
             println!(
                 "presentation discipline seed={:?} config={:?} quality={:?}; ongoing continuous transport correction, PCM/BGM rate unchanged",
@@ -1478,9 +1616,29 @@ mod native {
             let mut pause_committed = false;
             // Keep acquisition running while waiting for presentation: Raw Input
             // timestamps are QPC receipt times. Delay judge admission, not receipt.
-            let mut pending_input = std::collections::VecDeque::new();
+            let mut pending_input = std::collections::VecDeque::with_capacity(4096);
             if pause_supported {
                 player::publish_pause(PauseState::Running);
+            }
+            while let Some(event) = startup_inputs.pop_front() {
+                let host = ClockPoint {
+                    domain: event.meta().clock_domain,
+                    timestamp: event.meta().timestamp,
+                };
+                if host.timestamp < initial_host {
+                    pre_origin_inputs = pre_origin_inputs
+                        .checked_add(1)
+                        .ok_or("pre-origin input counter overflow")?;
+                    continue;
+                }
+                let received = clock.sample()?.normalized;
+                discipline.validate_host(received)?;
+                discipline.validate_host(host)?;
+                if host.timestamp > received.timestamp {
+                    return Err("startup Raw Input is later than fresh QPC receipt".into());
+                }
+                delivery.observe(host, received)?;
+                park_pause_input(&mut pending_input, event)?;
             }
             'pump: while deadline.is_none_or(|deadline| Instant::now() < deadline)
                 && !beatkernel_bms_runtime::player::cancelled()
@@ -1579,17 +1737,17 @@ mod native {
                             // Raw Input metadata is QPC receipt time; this fresh point
                             // measures software delivery, not native hardware age.
                             let received = clock.sample()?.normalized;
+                            if host.timestamp < initial_host {
+                                pre_origin_inputs = pre_origin_inputs
+                                    .checked_add(1)
+                                    .ok_or("pre-origin input counter overflow")?;
+                                continue;
+                            }
                             if options.backend == Backend::Asio {
                                 if host.timestamp > received.timestamp {
                                     return Err(
                                         "ASIO live input is later than fresh QPC receipt".into()
                                     );
-                                }
-                                if host.timestamp < initial_host {
-                                    pre_origin_inputs = pre_origin_inputs
-                                        .checked_add(1)
-                                        .ok_or("pre-origin input counter overflow")?;
-                                    continue;
                                 }
                                 if host.timestamp < last_accepted_host {
                                     return Err("ASIO live input host chronology regressed".into());
@@ -1671,7 +1829,7 @@ mod native {
                     if pause_supported && !keyboard.accept(&event)? {
                         continue;
                     }
-                    let schedule = if pause_supported {
+                    let schedule = if pause_supported || network_start {
                         playback_schedule(&pause, &mut stream)?
                     } else {
                         stream.schedule(pcm.sample_rate())?
@@ -1739,7 +1897,7 @@ mod native {
                     std::thread::sleep(WallDuration::from_millis(1));
                     continue;
                 }
-                let schedule = if pause_supported {
+                let schedule = if pause_supported || network_start {
                     playback_schedule(&pause, &mut stream)?
                 } else {
                     stream.schedule(pcm.sample_rate())?

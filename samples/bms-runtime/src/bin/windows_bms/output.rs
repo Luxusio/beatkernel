@@ -178,6 +178,54 @@ pub(super) enum Output {
     Asio(AsioOutput),
 }
 impl Output {
+    /// Actual WASAPI native counters, retained with the exact accepted snapshot.
+    pub(super) fn startup_observation(
+        &mut self,
+        discipline: &mut PresentationDiscipline,
+    ) -> Result<
+        Option<(
+            beatkernel::time::ClockPair,
+            beatkernel_platform::audio::AudioStreamSnapshot,
+        )>,
+    > {
+        match self {
+            Self::Wasapi(stream) => {
+                let snapshot = stream.snapshot();
+                if snapshot.status != beatkernel_platform::audio::AudioStreamStatus::Running {
+                    return Err(format!(
+                        "native startup observation terminated: {:?}",
+                        snapshot.status
+                    )
+                    .into());
+                }
+                match discipline.observe(snapshot) {
+                    Ok(ObservationAdmission::Retained | ObservationAdmission::Progress) => {
+                        Ok(Some((
+                            discipline
+                                .latest_pair()
+                                .ok_or("accepted startup relation missing")?,
+                            snapshot,
+                        )))
+                    }
+                    Ok(
+                        ObservationAdmission::Unchanged
+                        | ObservationAdmission::AwaitingHostProgress,
+                    ) => Ok(None),
+                    Err(error) if super::native::skippable_observation(&error) => Ok(None),
+                    Err(error) => Err(error.into()),
+                }
+            }
+            #[cfg(feature = "asio-sdk")]
+            Self::Asio(_) => Err("ASIO startup requires bounded-interval projection".into()),
+        }
+    }
+    pub(super) fn startup_buffer_frames(&self) -> Result<u32> {
+        match self {
+            Self::Wasapi(stream) => Ok(stream.configuration().buffer_frames),
+            #[cfg(feature = "asio-sdk")]
+            Self::Asio(_) => Err("ASIO startup requires bounded-interval projection".into()),
+        }
+    }
     pub(super) fn start(&mut self) -> Result<()> {
         match self {
             Self::Wasapi(s) => Ok(s.start()?),
