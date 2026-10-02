@@ -26,6 +26,13 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+const START_POLICY_FLAGS: [&str; 5] = [
+    "--mp-start-lead-ms",
+    "--mp-start-min-lead-ms",
+    "--mp-clock-max-age-ms",
+    "--mp-clock-max-uncertainty-ms",
+    "--mp-start-max-lateness-ms",
+];
 
 /// Explicit connection role; only one peer is admitted in the initial mode.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,6 +52,8 @@ pub struct CompetitionOptions {
     pub network: Option<NetworkRole>,
     /// Finite connection/identity and native preparation readiness deadline.
     pub setup_timeout: Duration,
+    /// Bounds for software-start negotiation and startup-owner release.
+    pub start_policy: crate::multiplayer_start::StartPolicy,
 }
 impl Default for CompetitionOptions {
     fn default() -> Self {
@@ -52,6 +61,7 @@ impl Default for CompetitionOptions {
             ghosts: Vec::new(),
             network: None,
             setup_timeout: Duration::from_secs(10),
+            start_policy: crate::multiplayer_start::StartPolicy::default(),
         }
     }
 }
@@ -62,12 +72,14 @@ impl CompetitionOptions {
         let mut rest = Vec::new();
         let mut index = 0;
         let mut timeout_seen = false;
+        let mut start_seen = [false; 5];
         while index < args.len() {
             let flag = args[index].as_str();
             if !matches!(
                 flag,
                 "--ghost-self" | "--ghost-other" | "--mp-host" | "--mp-join" | "--mp-timeout-ms"
-            ) {
+            ) && !START_POLICY_FLAGS.contains(&flag)
+            {
                 rest.push(args[index].clone());
                 // Existing native CLIs use pairs; consume both so a value that
                 // happens to look like a competition flag remains a value.
@@ -128,13 +140,34 @@ impl CompetitionOptions {
                     options.setup_timeout = Duration::from_millis(millis);
                     timeout_seen = true;
                 }
-                _ => unreachable!(),
+                _ => {
+                    let field = START_POLICY_FLAGS
+                        .iter()
+                        .position(|candidate| *candidate == flag)
+                        .unwrap();
+                    if start_seen[field] {
+                        return Err("duplicate multiplayer start policy option".into());
+                    }
+                    let nanos = value
+                        .parse::<u64>()?
+                        .checked_mul(1_000_000)
+                        .ok_or("multiplayer start milliseconds overflow nanoseconds")?;
+                    match field {
+                        0 => options.start_policy.lead_ns = nanos,
+                        1 => options.start_policy.min_remaining_ns = nanos,
+                        2 => options.start_policy.max_age_ns = nanos,
+                        3 => options.start_policy.max_uncertainty_ns = nanos,
+                        _ => options.start_policy.max_release_lateness_ns = nanos,
+                    }
+                    start_seen[field] = true;
+                }
             }
             index += 2;
         }
-        if timeout_seen && options.network.is_none() {
-            return Err("multiplayer timeout requires host or join".into());
+        if (timeout_seen || start_seen.iter().any(|seen| *seen)) && options.network.is_none() {
+            return Err("multiplayer timing options require host or join".into());
         }
+        options.start_policy.validate()?;
         Ok((options, rest))
     }
 
@@ -326,6 +359,7 @@ impl LiveCompetition {
         options.load_opponents(source, &mut competition, limits)?;
         let settings = MultiplayerOptions {
             setup_timeout: options.setup_timeout,
+            start_policy: options.start_policy,
             ..MultiplayerOptions::default()
         };
         let network = match options.network {
@@ -410,6 +444,7 @@ impl LiveCompetition {
                     MultiplayerEvent::Ready => self.network_status = Some(NetworkStatus::Connected),
                     MultiplayerEvent::Progress(_)
                     | MultiplayerEvent::ClockEstimated(_)
+                    | MultiplayerEvent::StartScheduled(_)
                     | MultiplayerEvent::FinalProgress(_)
                     | MultiplayerEvent::FinalAcknowledged => {}
                     MultiplayerEvent::Disconnected(error) => {
@@ -474,7 +509,7 @@ impl LiveCompetition {
         Ok(())
     }
 
-    /// Native preparation barrier, called before audio starts on the game owner.
+    /// Native preparation and committed software-start barrier on the game owner.
     /// Service bounded native acquisition and cancellation without judging input.
     pub fn await_network_ready(
         &mut self,
@@ -498,8 +533,15 @@ impl LiveCompetition {
                 if Instant::now() >= deadline {
                     return Err(crate::multiplayer::MultiplayerError::SetupTimeout.into());
                 }
-                if network.is_ready() && network.clock_estimate().is_some() {
-                    return Ok(true);
+                if let Some(schedule) = network.start_schedule() {
+                    let now = network.clock_now_ns()?;
+                    if start_release_due(
+                        schedule,
+                        now,
+                        network.start_policy().max_release_lateness_ns,
+                    )? {
+                        return Ok(true);
+                    }
                 }
                 std::thread::sleep(
                     Duration::from_millis(5)
@@ -618,9 +660,97 @@ fn display_basename(label: &str) -> String {
     }
 }
 
+/// Software gate release only; downstream device output latency is separate.
+fn start_release_due(
+    schedule: crate::multiplayer_start::StartSchedule,
+    now: i64,
+    max_lateness_ns: u64,
+) -> Result<bool> {
+    if now < 0 || schedule.target_ns < 0 {
+        return Err(crate::multiplayer::MultiplayerError::Protocol(
+            "negative committed start timestamp".into(),
+        )
+        .into());
+    }
+    if now < schedule.target_ns {
+        return Ok(false);
+    }
+    if (now - schedule.target_ns) as u64 > max_lateness_ns {
+        return Err(crate::multiplayer::MultiplayerError::Protocol(
+            "committed software start release exceeded lateness policy".into(),
+        )
+        .into());
+    }
+    Ok(true)
+}
+
 #[cfg(test)]
 mod fixtures {
     use super::*;
+
+    #[test]
+    fn committed_release_keeps_future_boundary_and_configurable_lateness() {
+        let schedule = crate::multiplayer_start::StartSchedule {
+            target_ns: 1_000,
+            uncertainty_ns: 20,
+        };
+        assert!(!start_release_due(schedule, 999, 25).unwrap());
+        assert!(start_release_due(schedule, 1_000, 0).unwrap());
+        assert!(start_release_due(schedule, 1_025, 25).unwrap());
+        assert!(start_release_due(schedule, 1_026, 25).is_err());
+        assert!(start_release_due(schedule, -1, 25).is_err());
+        let extreme = crate::multiplayer_start::StartSchedule {
+            target_ns: i64::MAX,
+            uncertainty_ns: 0,
+        };
+        assert!(start_release_due(extreme, i64::MAX, 0).unwrap());
+    }
+
+    #[test]
+    fn software_start_flags_are_configurable_checked_and_network_only() {
+        let values = args(&[
+            "--mp-host",
+            "127.0.0.1:1234",
+            "--mp-start-lead-ms",
+            "3000",
+            "--mp-start-min-lead-ms",
+            "200",
+            "--mp-clock-max-age-ms",
+            "7000",
+            "--mp-clock-max-uncertainty-ms",
+            "0",
+            "--mp-start-max-lateness-ms",
+            "0",
+        ]);
+        let (options, rest) = CompetitionOptions::extract(&values).unwrap();
+        assert!(rest.is_empty());
+        assert_eq!(options.start_policy.lead_ns, 3_000_000_000);
+        assert_eq!(options.start_policy.min_remaining_ns, 200_000_000);
+        assert_eq!(options.start_policy.max_age_ns, 7_000_000_000);
+        assert_eq!(options.start_policy.max_uncertainty_ns, 0);
+        assert_eq!(options.start_policy.max_release_lateness_ns, 0);
+        for invalid in [
+            vec!["--mp-start-lead-ms", "3000"],
+            vec!["--mp-host", "127.0.0.1:1234", "--mp-start-min-lead-ms", "0"],
+            vec!["--mp-host", "127.0.0.1:1234", "--mp-start-lead-ms", "100"],
+            vec![
+                "--mp-host",
+                "127.0.0.1:1234",
+                "--mp-start-lead-ms",
+                "18446744073709551615",
+            ],
+            vec![
+                "--mp-host",
+                "127.0.0.1:1234",
+                "--mp-start-lead-ms",
+                "3000",
+                "--mp-start-lead-ms",
+                "4000",
+            ],
+        ] {
+            assert!(CompetitionOptions::extract(&args(&invalid)).is_err());
+        }
+    }
     #[test]
     fn terminal_prefix_uses_latest_actual_judgments_even_inside_publish_throttle() {
         use beatkernel::{

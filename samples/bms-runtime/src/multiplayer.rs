@@ -1,6 +1,9 @@
 //! Casual two-player progress transport. Remote scores are unauthenticated display data.
-//! Socket work never runs on the gameplay or audio thread. Each peer starts locally.
+//! Socket work never runs on the gameplay or audio thread. Software starts are committed.
 use crate::multiplayer_clock::{ClockFilter, ClockSample, OffsetEstimate};
+use crate::multiplayer_start::{
+    StartAgreement, StartMessage, StartPolicy, StartRole, StartSchedule,
+};
 use beatkernel::{
     replay::{
         ReplayHeader,
@@ -22,7 +25,7 @@ use std::{
 };
 
 const MAGIC: &[u8; 4] = b"BKMP";
-const VERSION: u16 = 4;
+const VERSION: u16 = 5;
 const CLOCK_PROBES: u64 = 8;
 const MAX_IDENTITY: usize = 65_536;
 const MAX_BODY: usize = MAX_IDENTITY + 7;
@@ -101,6 +104,8 @@ pub struct MultiplayerOptions {
     pub queue_capacity: usize,
     /// Maximum lack of I/O progress while a frame is pending; quiet peers stay connected.
     pub io_stall_timeout: Duration,
+    /// Checked software-start lead, clock age and uncertainty bounds.
+    pub start_policy: StartPolicy,
 }
 impl Default for MultiplayerOptions {
     fn default() -> Self {
@@ -108,6 +113,7 @@ impl Default for MultiplayerOptions {
             setup_timeout: Duration::from_secs(10),
             queue_capacity: 32,
             io_stall_timeout: Duration::from_secs(5),
+            start_policy: StartPolicy::default(),
         }
     }
 }
@@ -143,6 +149,8 @@ pub enum MultiplayerEvent {
     Ready,
     /// Minimum-delay software offset interval after eight validated probes.
     ClockEstimated(OffsetEstimate),
+    /// A committed local session-clock target for the software start call.
+    StartScheduled(StartSchedule),
     Progress(Progress),
     /// Peer terminal self-reported prefix, including aborted sessions.
     FinalProgress(Progress),
@@ -163,6 +171,8 @@ pub struct Multiplayer {
     ready: bool,
     clock_epoch: Instant,
     clock_estimate: Option<OffsetEstimate>,
+    start_schedule: Option<StartSchedule>,
+    start_policy: StartPolicy,
     worker: Option<JoinHandle<()>>,
     local: Option<Progress>,
     remote: Option<Progress>,
@@ -207,6 +217,7 @@ impl Multiplayer {
         let ready_requested = Arc::new(AtomicBool::new(false));
         let worker_ready = ready_requested.clone();
         let finish_timeout = options.io_stall_timeout;
+        let start_policy = options.start_policy;
         let clock_epoch = Instant::now();
         let worker = thread::Builder::new()
             .name("bms-multiplayer".into())
@@ -233,6 +244,8 @@ impl Multiplayer {
             ready: false,
             clock_epoch,
             clock_estimate: None,
+            start_schedule: None,
+            start_policy,
             worker: Some(worker),
             local: None,
             remote: None,
@@ -269,14 +282,20 @@ impl Multiplayer {
     pub fn clock_estimate(&self) -> Option<OffsetEstimate> {
         self.clock_estimate
     }
+    pub fn start_schedule(&self) -> Option<StartSchedule> {
+        self.start_schedule
+    }
+    pub fn start_policy(&self) -> StartPolicy {
+        self.start_policy
+    }
     /// Gameplay-side admission only; performs no socket I/O and never waits for capacity.
     pub fn try_publish(&mut self, progress: Progress) -> Result<(), MultiplayerError> {
         if self.closed || self.stop_flag.load(Ordering::Acquire) {
             return Err(MultiplayerError::Closed);
         }
-        if !self.is_ready() {
+        if !self.is_ready() || self.start_schedule.is_none() {
             return Err(MultiplayerError::Protocol(
-                "bilateral readiness required".into(),
+                "committed start required".into(),
             ));
         }
         if self.local_final {
@@ -312,9 +331,9 @@ impl Multiplayer {
         if self.closed || self.stop_flag.load(Ordering::Acquire) {
             return Err(MultiplayerError::Closed);
         }
-        if !self.is_ready() {
+        if !self.is_ready() || self.start_schedule.is_none() {
             return Err(MultiplayerError::Protocol(
-                "bilateral readiness required".into(),
+                "committed start required".into(),
             ));
         }
         if self.local_final {
@@ -393,6 +412,7 @@ impl Multiplayer {
             MultiplayerEvent::Connected => self.connected = true,
             MultiplayerEvent::Ready => self.ready = true,
             MultiplayerEvent::ClockEstimated(estimate) => self.clock_estimate = Some(*estimate),
+            MultiplayerEvent::StartScheduled(schedule) => self.start_schedule = Some(*schedule),
             MultiplayerEvent::Progress(progress) => self.remote = Some(*progress),
             MultiplayerEvent::FinalProgress(progress) => {
                 self.remote = Some(*progress);
@@ -493,6 +513,10 @@ fn validate_identity(identity: &[u8]) -> Result<(), MultiplayerError> {
 }
 fn validate_options(identity: &[u8], options: &MultiplayerOptions) -> Result<(), MultiplayerError> {
     validate_identity(identity)?;
+    options
+        .start_policy
+        .validate()
+        .map_err(|_| MultiplayerError::InvalidOptions)?;
     if options.setup_timeout < Duration::from_millis(1)
         || options.setup_timeout > Duration::from_secs(120)
         || options.io_stall_timeout < Duration::from_millis(1)
@@ -592,6 +616,32 @@ fn parse_progress(
 fn elapsed_ns(epoch: Instant) -> Result<i64, MultiplayerError> {
     i64::try_from(epoch.elapsed().as_nanos())
         .map_err(|_| MultiplayerError::Protocol("session clock extent exceeded".into()))
+}
+
+fn start_frame(message: StartMessage) -> Vec<u8> {
+    match message {
+        StartMessage::ClockReady => frame(8, &[]),
+        StartMessage::Propose(time) => frame(9, &time.to_le_bytes()),
+        StartMessage::Accept(time) => frame(10, &time.to_le_bytes()),
+        StartMessage::Commit(time) => frame(11, &time.to_le_bytes()),
+    }
+}
+fn parse_start_frame(tag: u8, payload: &[u8]) -> Result<StartMessage, MultiplayerError> {
+    if tag == 8 && payload.is_empty() {
+        return Ok(StartMessage::ClockReady);
+    }
+    if !(9..=11).contains(&tag) || payload.len() != 8 {
+        return Err(MultiplayerError::Protocol("invalid start frame".into()));
+    }
+    let time = i64::from_le_bytes(payload.try_into().unwrap());
+    Ok(match tag {
+        9 => StartMessage::Propose(time),
+        10 => StartMessage::Accept(time),
+        _ => StartMessage::Commit(time),
+    })
+}
+fn start_error(error: impl fmt::Display) -> MultiplayerError {
+    MultiplayerError::Protocol(error.to_string())
 }
 
 /// Finite symmetric software probes; only the worker reads the actual clock.
@@ -906,6 +956,12 @@ fn run(
     outgoing: Receiver<Outgoing>,
     incoming: SyncSender<MultiplayerEvent>,
 ) -> Result<(), MultiplayerError> {
+    let role = match &endpoint {
+        Endpoint::Host(_) => StartRole::Host,
+        Endpoint::Join(_) => StartRole::Join,
+    };
+    let mut start = StartAgreement::new(role, options.start_policy).map_err(start_error)?;
+    let mut start_in_flight = None;
     let deadline = Instant::now() + options.setup_timeout;
     let mut stream = loop {
         if stop.load(Ordering::Acquire) {
@@ -953,7 +1009,10 @@ fn run(
         if stop.load(Ordering::Acquire) {
             return Ok(());
         }
-        if (!connected || !protocol.ready() || clocks.completed < CLOCK_PROBES)
+        if (!connected
+            || !protocol.ready()
+            || clocks.completed < CLOCK_PROBES
+            || !start.committed())
             && Instant::now() >= deadline
         {
             return Err(MultiplayerError::SetupTimeout);
@@ -972,6 +1031,16 @@ fn run(
                     last_write = Instant::now();
                     if written == tx.len() {
                         protocol.written(tx_tag);
+                        if let Some(message) = start_in_flight.take() {
+                            start
+                                .written(message, elapsed_ns(clock_epoch)?)
+                                .map_err(start_error)?;
+                        }
+                        if let Some(schedule) = start.take_schedule() {
+                            incoming
+                                .try_send(MultiplayerEvent::StartScheduled(schedule))
+                                .map_err(queue_error)?;
+                        }
                         if let Some(event) = protocol.readiness() {
                             incoming.try_send(event).map_err(queue_error)?;
                         }
@@ -1030,7 +1099,21 @@ fn run(
                 } else {
                     clocks.receive_pong(&payload, now)?;
                 }
+            } else if (8..=11).contains(&tag) {
+                if !protocol.ready() {
+                    return Err(MultiplayerError::Protocol(
+                        "start before native readiness".into(),
+                    ));
+                }
+                start
+                    .receive(parse_start_frame(tag, &payload)?, elapsed_ns(clock_epoch)?)
+                    .map_err(start_error)?;
             } else {
+                if matches!(tag, 2 | 3) && !start.committed() {
+                    return Err(MultiplayerError::Protocol(
+                        "progress before committed start".into(),
+                    ));
+                }
                 if let Some(event) = protocol.receive(tag, &payload)? {
                     incoming.try_send(event).map_err(queue_error)?;
                 }
@@ -1064,6 +1147,14 @@ fn run(
                 tx_tag = 6;
                 written = 0;
                 last_write = Instant::now();
+            } else if let Some(message) =
+                start.next(elapsed_ns(clock_epoch)?).map_err(start_error)?
+            {
+                tx = start_frame(message);
+                tx_tag = tx[10];
+                start_in_flight = Some(message);
+                written = 0;
+                last_write = Instant::now();
             } else {
                 match outgoing.try_recv() {
                     Ok(message) => {
@@ -1084,7 +1175,15 @@ fn run(
             incoming.try_send(event).map_err(queue_error)?;
         }
         if let Some(event) = clocks.estimate_event() {
+            if let MultiplayerEvent::ClockEstimated(estimate) = &event {
+                start.prepare(*estimate).map_err(start_error)?;
+            }
             incoming.try_send(event).map_err(queue_error)?;
+        }
+        if let Some(schedule) = start.take_schedule() {
+            incoming
+                .try_send(MultiplayerEvent::StartScheduled(schedule))
+                .map_err(queue_error)?;
         }
         thread::park_timeout(TICK);
     }
@@ -1213,6 +1312,27 @@ mod clock_probe_fixtures {
         assert_eq!((negative.lower_ns(), negative.upper_ns()), (-60, -40));
         assert_eq!(left.pending_ping, None);
         assert_eq!(right.pending_ping, None);
+    }
+
+    #[test]
+    fn start_wire_fragmentation_exact_lengths_and_echo_preservation() {
+        for message in [
+            StartMessage::ClockReady,
+            StartMessage::Propose(i64::MAX),
+            StartMessage::Accept(123),
+            StartMessage::Commit(123),
+        ] {
+            let wire = start_frame(message);
+            let payload = decode(&wire, wire[10]);
+            assert_eq!(parse_start_frame(wire[10], &payload).unwrap(), message);
+        }
+        assert!(parse_start_frame(8, &[0]).is_err());
+        for tag in 9..=11 {
+            assert!(parse_start_frame(tag, &[]).is_err());
+            assert!(parse_start_frame(tag, &[0; 7]).is_err());
+            assert!(parse_start_frame(tag, &[0; 9]).is_err());
+        }
+        assert!(parse_start_frame(12, &[0; 8]).is_err());
     }
 }
 
@@ -1586,7 +1706,7 @@ mod final_prefix_fixtures {
         state.next_ready(true).unwrap();
         state.written(5);
         assert_eq!(state.readiness(), Some(MultiplayerEvent::Ready));
-        for version in [1u16, 2, 3] {
+        for version in [1u16, 2, 3, 4] {
             let mut frames = Frames::new();
             frames.bytes = frame(5, &[]);
             frames.bytes[8..10].copy_from_slice(&version.to_le_bytes());
@@ -1598,6 +1718,7 @@ mod final_prefix_fixtures {
         let (mut owner, outgoing, incoming, _terminal) = owner();
         owner.try_publish(progress(1)).unwrap(); // occupy the one data slot
         owner.ready = false;
+        owner.start_schedule = None;
         owner.ready_requested.store(false, Ordering::Release);
         assert!(!owner.is_ready());
         assert!(owner.try_publish(progress(2)).is_err());
@@ -1610,6 +1731,7 @@ mod final_prefix_fixtures {
         incoming.try_send(MultiplayerEvent::Ready).unwrap();
         assert_eq!(owner.poll(), vec![MultiplayerEvent::Ready]);
         assert!(owner.is_ready());
+        assert!(owner.try_publish(progress(2)).is_err());
         let mut filter = ClockFilter::new();
         filter
             .observe(ClockSample::new(100, 160, 180, 140).unwrap())
@@ -1623,6 +1745,19 @@ mod final_prefix_fixtures {
             vec![MultiplayerEvent::ClockEstimated(estimate)]
         );
         assert_eq!(owner.clock_estimate(), Some(estimate));
+        assert!(owner.try_finish(progress(2)).is_err());
+        let schedule = StartSchedule {
+            target_ns: 1_000,
+            uncertainty_ns: 20,
+        };
+        incoming
+            .try_send(MultiplayerEvent::StartScheduled(schedule))
+            .unwrap();
+        assert_eq!(
+            owner.poll(),
+            vec![MultiplayerEvent::StartScheduled(schedule)]
+        );
+        assert_eq!(owner.start_schedule(), Some(schedule));
         assert!(owner.clock_now_ns().unwrap() >= 0);
         owner.request_stop();
         assert!(!owner.is_ready());
@@ -1747,7 +1882,7 @@ mod final_prefix_fixtures {
         assert!(state.local_ack_received);
     }
     #[test]
-    fn version_four_wire_and_coalesced_complete_frames() {
+    fn version_five_wire_and_coalesced_complete_frames() {
         let mut wire = progress_frame(0, progress(1));
         wire.extend_from_slice(&prefix_frame(3, 1, progress(2)));
         let mut frames = Frames::new();
@@ -1796,6 +1931,11 @@ mod final_prefix_fixtures {
                 ready: true,
                 clock_epoch: Instant::now(),
                 clock_estimate: None,
+                start_schedule: Some(StartSchedule {
+                    target_ns: 1_000,
+                    uncertainty_ns: 0,
+                }),
+                start_policy: StartPolicy::default(),
                 worker: None,
                 local: None,
                 remote: None,
