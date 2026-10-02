@@ -45,6 +45,24 @@ test("preview boundaries reserve the exact two-second lookahead without rounding
   ]) assert.throws(() => nanoseconds(value), value);
 });
 
+test("signed replay display keeps one leading sign while preview admission remains nonnegative", () => {
+  for (const [ns, decimal] of [
+    ["-1", "-0.000000001"],
+    ["-100000000", "-0.1"],
+    ["-999999999", "-0.999999999"],
+    ["-1000000000", "-1"],
+    ["-1000000001", "-1.000000001"],
+    ["-12345678901", "-12.345678901"],
+    ["-604800000000000", "-604800"],
+    ["-9223372036854775808", "-9223372036.854775808"],
+  ]) {
+    assert.equal(seconds(ns), decimal);
+    assert.throws(() => previewNanos(ns));
+    assert.throws(() => nanoseconds(decimal));
+  }
+  assert.equal(seconds("-0"), "0");
+});
+
 test("relative paths preserve case and Unicode while rejecting unsafe names", () => {
   assert.equal(normalizedPath("Song\\.\\音楽//Kick.WAV"), "Song/音楽/Kick.WAV");
   assert.equal(normalizedPath("./song/chart.bms"), "song/chart.bms");

@@ -42,8 +42,9 @@ export function preflight(files, limits = LIMITS) {
 
 export function seconds(ns) {
   const value = BigInt(ns);
-  const fraction = (value % 1000000000n).toString().padStart(9, "0").replace(/0+$/, "");
-  return `${value / 1000000000n}${fraction ? `.${fraction}` : ""}`;
+  const magnitude = value < 0n ? -value : value;
+  const fraction = (magnitude % 1000000000n).toString().padStart(9, "0").replace(/0+$/, "");
+  return `${value < 0n ? "-" : ""}${magnitude / 1000000000n}${fraction ? `.${fraction}` : ""}`;
 }
 
 export function previewNanos(input) {
