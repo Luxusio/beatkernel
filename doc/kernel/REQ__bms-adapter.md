@@ -60,7 +60,7 @@ as before; this work does not remove that behavior.
 The application owns explicit bounded raster preparation and original-song
 Base/Layer composition; the adapter does not interpret native clocks or upload
 images. BMP00/Poor selections do not imply continuous poor display. Video,
-crop/opacity and miss-triggered poor-overlay policies remain outside supported
+crop/opacity and extended poor-overlay modes remain outside supported
 visual semantics. Authored parser/timing/seed/limit fixtures are source-compiled
 for later execution, not format conformance or native GPU acceptance.
 
@@ -69,3 +69,9 @@ chart-declared Layer resources; the adapter preserves original definitions and
 timing. Raw Base/Poor pixels remain intact even when the same file is used by
 both roles. This is BeatKernel's RGBA8 rendering policy; historical thresholds,
 EXBMP and other player-specific extensions are not implied.
+
+The application can temporarily substitute the current BMP00/channel06 Poor
+selection after an actual accepted miss. Its default 500ms lifetime and bounded
+configurable policy belong to presentation, not adapter timing or chart identity.
+The adapter retains the independent original-song channel06 index; no parser
+IO, judge object or replay operation is introduced by miss background display.

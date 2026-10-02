@@ -1181,8 +1181,8 @@ nothing. Retain per-visible-view unavailable counts for a user-facing caption.
 Compose centered aspect-fit base then layer in a black playfield background,
 darkened below notes for readability; keep alpha, clipped field bounds, local
 member time, note/pressed/feedback/judgement painter order and original timing.
-Existing playfield wrappers retain plain lane geometry. Poor selection remains
-a selection until miss activation policy exists; do not display it continuously.
+Existing playfield wrappers retain plain lane geometry. Poor selection uses
+the temporary miss activation policy below; do not display it continuously.
 Videos, additional raster formats and extended color-key policies remain
 pending. GPU upload on selection changes may stall the UI; there is no measured
 frame latency or native correctness claim until deferred execution.
@@ -1195,3 +1195,7 @@ is not native GPU/device acceptance.
 
 ### Static BGA exact-black Layer preparation
 BeatKernel uses an explicit RGBA8 policy: chart-declared channel 07 Layer images make exactly RGB (0,0,0) transparent before GPU filtering. Base and Poor retain source pixels. Preparation happens once on the game owner; unchanged images share the original Arc and canonical aliases share any changed variant. Changed unique variants count toward the existing aggregate decoded-byte admission limit; retaining a raw image and its changed variant costs both buffers. No threshold, EXBMP, per-frame pixel scan, or video behavior is implied. Pure pixel, alias, capacity, cache-role and native publication fixtures are authored for later execution; source compilation does not establish GPU visual correctness.
+
+
+### Poor background activation
+PoorBackgroundPolicy defaults to a 500ms original-song interval after the latest known, matching, newly accepted miss transition retained in exact-chart full-prefix NoteProgress. Its public lifetime accepts 0..10seconds, zero disables; the Desktop uses the default. During that interval, replace Base/Layer with the current BMP00/channel06 Poor selection using original raw pixels; no Poor selection preserves normal backgrounds. Declared undefined/missing selections remain explicit blank resources. Hits do not cancel the interval. Use i128 subtraction and per-member clocks/progress; pause freezes reported time. Unknown/custom/mismatched/duplicate completed events do not retrigger. Future miss timestamps activate only when reached; seek/restart must rebuild the admitted prefix and fresh progress. Retention is independent of the recent128 HUD limit, constant-size and allocation-free in projection. Equivalent but independently allocated charts reject progress mismatch. Extended POORBGA headers/modes are pending. Author real runtime/replay/publisher and pure boundary/dense-prefix/local fixtures for later execution; no runtime or GPU acceptance is claimed.
