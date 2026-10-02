@@ -164,6 +164,26 @@ const COMMON: &[Spec] = &[
         "NETWORK TIMEOUT (MS)",
         "100..120000 milliseconds; requires host or join.",
     ),
+    (
+        "--mp-cert",
+        "QUIC HOST CERTIFICATE",
+        "Host certificate chain path (PEM or DER); requires --mp-key.",
+    ),
+    (
+        "--mp-key",
+        "QUIC HOST PRIVATE KEY",
+        "Host private key path (PEM or DER); requires --mp-cert.",
+    ),
+    (
+        "--mp-ca",
+        "QUIC JOIN TRUST ANCHOR",
+        "Join trust anchor path (PEM or DER); requires --mp-server-name.",
+    ),
+    (
+        "--mp-server-name",
+        "QUIC SERVER NAME",
+        "Certificate server identity for join; requires --mp-ca.",
+    ),
 ];
 const WINDOWS: &[Spec] = &[
     (

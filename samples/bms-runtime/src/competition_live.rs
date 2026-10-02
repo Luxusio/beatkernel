@@ -6,6 +6,7 @@ use crate::{
         Multiplayer, MultiplayerEvent, MultiplayerOptions, Progress,
         competition_identity_for_section,
     },
+    multiplayer_quic::QuicCredentials,
     player::{self, CompetitionSnapshot, GhostSnapshot, NetworkSnapshot, NetworkStatus},
     replay_capture::LiveReplayCapture,
     replay_playback::read_replay,
@@ -46,6 +47,8 @@ pub enum NetworkRole {
 /// Competition features are opt-in and retained independently of native options.
 #[derive(Clone, Debug)]
 pub struct CompetitionOptions {
+    /// Explicit native QUIC TLS configuration; incomplete settings stay drafts.
+    pub quic: QuicCredentials,
     /// Saved own/other replays; at most eight opponents.
     pub ghosts: Vec<(OpponentKind, PathBuf)>,
     /// Optional two-peer connection.
@@ -60,6 +63,7 @@ pub struct CompetitionOptions {
 impl Default for CompetitionOptions {
     fn default() -> Self {
         Self {
+            quic: QuicCredentials::default(),
             ghosts: Vec::new(),
             network: None,
             setup_timeout: Duration::from_secs(10),
@@ -76,11 +80,20 @@ impl CompetitionOptions {
         let mut index = 0;
         let mut timeout_seen = false;
         let mut start_seen = [false; 5];
+        let mut quic_seen = [false; 4];
         while index < args.len() {
             let flag = args[index].as_str();
             if !matches!(
                 flag,
-                "--ghost-self" | "--ghost-other" | "--mp-host" | "--mp-join" | "--mp-timeout-ms"
+                "--ghost-self"
+                    | "--ghost-other"
+                    | "--mp-host"
+                    | "--mp-join"
+                    | "--mp-timeout-ms"
+                    | "--mp-cert"
+                    | "--mp-key"
+                    | "--mp-ca"
+                    | "--mp-server-name"
             ) && !START_POLICY_FLAGS.contains(&flag)
             {
                 rest.push(args[index].clone());
@@ -102,6 +115,27 @@ impl CompetitionOptions {
                 .filter(|value| !value.is_empty())
                 .ok_or("competition option requires a nonempty value")?;
             match flag {
+                "--mp-cert" | "--mp-key" | "--mp-ca" | "--mp-server-name" => {
+                    let field = match flag {
+                        "--mp-cert" => 0,
+                        "--mp-key" => 1,
+                        "--mp-ca" => 2,
+                        _ => 3,
+                    };
+                    if quic_seen[field] {
+                        return Err("duplicate QUIC credential option".into());
+                    }
+                    if value.len() > 4096 || value.chars().any(char::is_control) {
+                        return Err("invalid QUIC credential path or server name".into());
+                    }
+                    match field {
+                        0 => options.quic.cert = Some(value.into()),
+                        1 => options.quic.key = Some(value.into()),
+                        2 => options.quic.ca = Some(value.into()),
+                        _ => options.quic.server_name = Some(value.clone()),
+                    }
+                    quic_seen[field] = true;
+                }
                 "--ghost-self" | "--ghost-other" => {
                     if options.ghosts.len() == 8 {
                         return Err("at most eight replay opponents are supported".into());
@@ -169,6 +203,18 @@ impl CompetitionOptions {
         }
         if (timeout_seen || start_seen.iter().any(|seen| *seen)) && options.network.is_none() {
             return Err("multiplayer timing options require host or join".into());
+        }
+        if quic_seen.iter().any(|seen| *seen) {
+            match options.network {
+                None => return Err("QUIC credentials require host or join".into()),
+                Some(NetworkRole::Host(_)) if quic_seen[2] || quic_seen[3] => {
+                    return Err("QUIC host uses certificate/key, not joining trust options".into());
+                }
+                Some(NetworkRole::Join(_)) if quic_seen[0] || quic_seen[1] => {
+                    return Err("QUIC join uses CA/server name, not host credentials".into());
+                }
+                _ => {}
+            }
         }
         options.start_policy.validate()?;
         Ok((options, rest))
@@ -391,6 +437,7 @@ impl LiveCompetition {
         let mut competition = Competition::new(header.clone(), 8)?;
         options.load_opponents(source, &mut competition, limits)?;
         let settings = MultiplayerOptions {
+            quic: options.quic.clone(),
             setup_timeout: options.setup_timeout,
             start_policy: options.start_policy,
             preroll_ns: options.preroll_ns,

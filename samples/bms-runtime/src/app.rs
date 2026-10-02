@@ -69,7 +69,7 @@ fn desktop(args: &[String]) -> Result<()> {
 fn play(args: &[String]) -> Result<()> {
     if args.is_empty() || args == ["--help"] {
         println!(
-            "Competition options: --ghost-self PATH and --ghost-other PATH (up to 8 total); --mp-host IP:PORT or --mp-join IP:PORT, optional --mp-timeout-ms 100..120000 (default10000). Explicit numeric addresses; host port must be nonzero. Peer loss disables multiplayer while local play continues."
+            "Competition options: --ghost-self PATH and --ghost-other PATH (up to 8 total); QUIC --mp-host IP:PORT with --mp-cert PATH --mp-key PATH, or --mp-join IP:PORT with --mp-ca PATH --mp-server-name NAME. TLS files accept PEM or DER, at most 1MiB each; no certificate-verification bypass. Optional --mp-timeout-ms 100..120000 (default10000). Explicit numeric addresses; host port must be nonzero. Peer loss disables multiplayer while local play continues."
         );
         return native(args);
     }
