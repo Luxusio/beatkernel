@@ -1,10 +1,12 @@
-# Browser chart preview
+# Browser BMS player
 
 The optional `browser` feature belongs to the existing `beatkernel-bms-runtime`
 application crate. This host imports user-selected files, prepares chart/audio/
 image data through the common Rust algorithms, and displays compiled notes and
-static BGA at an explicit song position. It does not yet play audio, acquire
-gameplay input, judge notes, capture/replay a session or connect multiplayer.
+static BGA at an explicit song position. The Play source path also transfers
+prepared PCM to an AudioWorklet and feeds originating Window keyboard timestamps
+into the same SoloRuntime used by native gameplay. Capture/replay, automatic
+song completion and multiplayer are not yet wired to this host.
 
 The DOM owns file selection, controls and layout. A dedicated module Worker owns
 the imported bytes, preparation and wgpu rendering on a transferred
@@ -106,8 +108,9 @@ node --experimental-vm-modules --test samples/bms-runtime/web/host_model.test.mj
 ```
 
 This command has not been executed. It does not replace real DOM/Worker/WebGPU
-acceptance. Host, Windows GNU, macOS, headless, WASM graphics and WASM browser
-source configurations compiled with Rust 1.98.1. Tests, binding
+acceptance. Current host workspace, headless application, WASM browser and
+WASM browser-audio source configurations compile with Rust 1.98.1. Historical
+Windows/macOS checks do not establish current native QUIC cross compilation. Tests, binding
 generation, browser/Worker/GPU execution, audio/timing acceptance and formal
 review/QA remain deferred; the full player task stays open.
 
@@ -115,8 +118,8 @@ review/QA remain deferred; the full player task stays open.
 
 The separate `browser-audio` feature exports the existing Rust Mixer through a
 numeric ABI for `audio-worklet.js`. It belongs to the same application crate
-and excludes graphics. The component does not yet connect the preview controls
-to gameplay, keyboard input, capture, replay or network play.
+and excludes graphics. The Play controls connect the component to common gameplay and keyboard input.
+Capture, replay, automatic completion and network play remain separate work.
 
 When execution is scheduled, build and generate this artifact separately from
 the graphics bindings above. Each Cargo build replaces the common output WASM,
@@ -128,8 +131,8 @@ wasm-bindgen --target web --out-dir samples/bms-runtime/web/audio-pkg target/was
 ```
 
 `audio-pkg/` is ignored generated output. These commands have not been executed.
-The eventual host must compile its WASM outside the callback, provide the
-compiled module to the processor, and activate AudioContext from a user gesture.
+The host compiles its WASM outside the callback, provides the compiled module
+to the processor and activates AudioContext from the Play user gesture.
 The processor's preparation and control protocol is documented in its source.
 It imports the UTF-8 compatibility bootstrap before generated bindings, because
 encoding constructors may be absent in an AudioWorklet global.
@@ -145,8 +148,7 @@ reports outside the callback; those reports are not output-presentation or
 acoustic timing evidence.
 
 `audio-host.mjs` adds the actual AudioContext/AudioWorkletNode owner. It is a
-component for subsequent player integration; the preview page does not yet call
-it. Prepare a `WebAssembly.Module` for the audio artifact before the user gesture,
+component called by the player page. Prepare a `WebAssembly.Module` for the audio artifact before the user gesture,
 then call `AudioHost.open` from that gesture with explicit generation, channels,
 PCM limits and audio limits. Opening requests resume immediately and waits for
 the exact Worklet readiness response within one setup deadline. An optional
@@ -176,8 +178,45 @@ globals. They have not been executed and do not establish actual browser output:
 node --experimental-vm-modules --test samples/bms-runtime/web/audio-host.test.mjs
 ```
 
-Prepared-resource wiring and the shared nonblocking gameplay owner still need
-implementation.
+Prepared-resource wiring and the shared nonblocking gameplay owner are authored
+and compile on the host/headless/browser source configurations. Behavioral
+acceptance has not been executed.
 Browser device buffering, JavaScript/GC and MessagePort do not provide a hard
 realtime guarantee or native WASAPI/ASIO controls. Generated bindings, Worklet
 execution, browser output and behavioral tests remain deferred.
+
+
+## Play source path
+
+Build both `pkg/` and `audio-pkg/` as described above, generating each package
+immediately after its own feature build. Prepare a preview, then choose **Play
+from beginning**. Playback re-prepares the selected chart at the actual context
+rate; the preview position does not act as a playback seek. PCM transfer and
+initial BGM queue admission complete before selecting a future one-shot start.
+
+The page shows the actual lane bindings. The first keyboard side uses left
+Shift for scratch and Z/S/X/D/C/F/V for seven-key lanes; Space covers the
+additional lane. The second uses right Shift and N/J/M/K/Comma/L/Period, with
+Slash for its additional lane. DOM keyboard events provide one logical device.
+Stop, Escape, focus loss and page hiding cancel the session. Controls remain
+locked until audio and Worker ownership are released; ordinary stop restores
+the accepted preview and reports the available actual score.
+
+Input uses original Window event timestamps and bounded FIFO steps. Graphics
+animation timestamps never advance the song. Runtime processing and audio
+command admission continue independently against bounded queues. Actual Mixer
+reports credit rolling BGM. The nominal bracketed software start projection
+has not yet been disciplined with output timestamps; it is not measured output
+latency or a guarantee against acoustic drift. Completion, capture/replay and
+browser networking are still unfinished.
+
+Additional deferred regressions are authored for the portable Rust owner,
+Worker adapter and shared numeric helpers. Execute only when the deferred test
+phase is resumed:
+
+```sh
+node --experimental-vm-modules --test samples/bms-runtime/web/play-model.test.mjs samples/bms-runtime/web/play-worker.test.mjs samples/bms-runtime/web/audio-host.test.mjs samples/bms-runtime/web/worker.test.mjs
+```
+
+No JS assertions, browser runtime, generated bindings or audio output have been
+executed in this phase. Compilation and fixture authoring are not player QA.

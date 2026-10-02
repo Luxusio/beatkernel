@@ -71,10 +71,10 @@ validated decimal text, preserving signed 64-bit values. Animation callback
 timestamps are presentation scheduling only, never an audio clock. The shared
 visible-note query, retained GPU note cache and BGA opacity rules are reused.
 
-Browser audio output/presentation evidence, input acquisition/clock mapping,
-actual Runtime judging/capture/replay, local-device limitations and browser
-network transport remain required follow-on adapters. The preview is an
-intermediate implementation, not completion of the requested browser player.
+The host now contains a playable start/stop source path through the common
+Runtime and separate AudioWorklet Mixer. Output presentation discipline, complete
+result/capture/replay integration and browser network transport remain follow-on
+work. Source integration does not complete or validate the requested player.
 
 ## Known ceiling
 
@@ -160,12 +160,63 @@ fails. Neither ACKs nor context time establish acoustic presentation.
 A timed-out context-close promise is an explicit cleanup failure; bounded host
 waiting does not prove that the browser released its internal audio resources.
 
-These components alone do not enable the player UI's audio or gameplay. Required
-follow-on work is prepared-sample wiring, nonblocking shared
-SoloRuntime session/input watermarks, actual getOutputTimestamp presentation
-mapping, result/capture/replay integration and end-user start/stop controls.
-The current preview remains labeled accordingly. Browser input timestamps use
+The player UI calls these components through prepared-sample transfer, a
+nonblocking shared SoloRuntime and bounded input/audio message ownership.
+Actual getOutputTimestamp presentation discipline and complete
+result/capture/replay integration remain unfinished. Browser input timestamps use
 the originating Window performance domain; Worker and Window origins are not
 implicitly equal. Physical keyboards cannot be distinguished by DOM key events.
 The full player Goal remains open, with generated bindings, processor execution,
 audio/device behavior and formal acceptance still deferred.
+
+## Nonblocking gameplay integration
+
+The browser gameplay owner executes the existing SoloRuntime, JudgeEngine,
+ScoreSummary and rolling BgmFeeder. It has no native polling loop, OS clock or
+audio callback ownership. Software profiling is disabled until an explicit
+browser processing clock is configured. Actual prepared sample identity, rate
+and channel layout survive transfer into the separate Worklet memory.
+
+Input and deadline messages retain the originating Window performance domain.
+One FIFO boundary carries bounded event batches and explicit advancement
+watermarks; graphics Worker timestamps never replace physical event timestamps.
+Actual core reports drive song time, judgments and score. Unsupported or late
+input is rejected explicitly, without silently moving its time. The browser
+currently exposes one logical keyboard, with explicit code/lane bindings.
+
+The gameplay owner retains one bounded outgoing command batch awaiting Worklet
+acknowledgement. Core input/advance operations may continue against the bounded
+local queue; they never wait synchronously for MessagePort/audio completion.
+Exact full-prefix acknowledgement releases the outgoing batch. Partial
+admission, correlation failure or local queue failure fences the session and
+retains committed evidence; neither inputs nor commands are retried. BGM rolling
+credit uses actual completed Mixer cursor reports, not UI elapsed time.
+
+Play setup requires a user gesture. Stop/focus/page lifecycle cancels preparation
+and closes audio/game ownership; library/preview mutation is fenced while a live
+owner exists. Full output completion requires actual judge, mixer and output
+presentation evidence and is not inferred from the last note or a timer.
+
+
+The supplied Play path re-prepares the selected chart at the actual AudioContext
+sample rate, transfers each original PCM asset once and acknowledges initial
+BGM admission before choosing a future absolute start frame. A pristine-only
+activation reanchors the same shared runtime after setup; this is not a seek.
+Window performance and AudioContext time are bracketed for a nominal software
+start projection. This projection does not compensate acoustic latency or clock
+drift. The AudioHost outputTimestamp accessor exposes genuine browser evidence,
+but the player has not yet integrated that evidence into clock discipline.
+
+The DOM admits at most 1,024 queued key events and sends at most 256 per step.
+Only one step, one render-report request and one outgoing audio batch await
+correlated acknowledgement at each boundary. No unbounded MessagePort backlog
+is used to hide a delayed Worker. Deadline or capacity failure stops the owner.
+
+Stop preserves the actual available score before game disposal and waits for
+both audio cleanup and a correlated Worker release before re-enabling controls.
+Pending setup cancellation reports null score when no runtime exists. Page
+teardown or a bounded missing-stop-receipt deadline terminates Worker ownership;
+a missing receipt or failed audio cleanup requires reloading before further play. The saved accepted
+preview metadata and position are restored after ordinary stop. Full automatic
+song completion is not implemented; stopping is currently explicit. Source,
+fixtures and cargo check evidence are distinct from behavioral acceptance.

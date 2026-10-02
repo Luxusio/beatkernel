@@ -70,8 +70,11 @@ have native source implementations; Linux/macOS native runtime evidence is pendi
 ## Unified BMS application
 
 Browser reuse currently provides bounded selected-file preparation and a Worker
-chart/BGA preview. A separate `browser-audio` component uses the common Rust
-Mixer in an AudioWorklet; its host gameplay/input bridge remains unfinished.
+chart/BGA preview plus an authored Play/Stop path through the common SoloRuntime.
+A separate `browser-audio` component uses the common Rust Mixer in an
+AudioWorklet. The host transfers original PCM and originating Window keyboard
+timestamps through bounded message owners; output clock discipline, automatic
+completion, capture/replay and browser networking remain unfinished.
 See the [browser host instructions](samples/bms-runtime/web/README.md).
 Browser source compilation does not establish playable browser behavior.
 
@@ -268,8 +271,9 @@ GPU geometry and async renderer initialization are exposed by the `graphics`
 feature, independently of desktop window ownership. The optional `browser`
 feature adds selected-file preparation and a dedicated Worker with a transferred
 OffscreenCanvas. It previews the actual compiled notes and static BGA at an
-explicit song position through the shared renderer. Browser audio, input clocks,
-judging, capture/replay and networking remain follow-on work. See the
+explicit song position through the shared renderer and draws actual judgments
+and score during the authored keyboard/audio gameplay path. Output presentation
+discipline, complete results/capture/replay and networking remain follow-on work. See the
 [browser build and usage instructions](samples/bms-runtime/web/README.md) and
 [browser contract](doc/kernel/REQ__bms-browser.md). Generated bindings and actual
 browser/GPU execution remain unverified. Check the reusable graphics library with:
