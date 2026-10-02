@@ -304,6 +304,7 @@ fn estimated_origin(pair: ClockPair, origin: ClockPoint) -> Result<Timestamp> {
     Ok(Timestamp::from_nanos(i64::try_from(host)?))
 }
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(test)]
 fn watermark(
     origin: ClockPoint,
     last_operation: ClockPoint,
@@ -330,6 +331,7 @@ fn watermark(
     }))
 }
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(test)]
 fn input_in_epoch(input: ClockPoint, now: ClockPoint, origin: ClockPoint) -> Result<bool> {
     if input.domain != origin.domain || now.domain != origin.domain {
         return Err(
@@ -343,6 +345,7 @@ fn input_in_epoch(input: ClockPoint, now: ClockPoint, origin: ClockPoint) -> Res
 }
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 enum PauseInputStage {
     Live,
     Paused,
@@ -351,6 +354,7 @@ enum PauseInputStage {
 /// Original IOHID timestamps choose their pause side; post-resume events are
 /// parked until the collector is empty so release reconciliation comes first.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(test)]
 fn pause_input_stage(
     host: ClockPoint,
     paused: Option<ClockPoint>,
@@ -377,6 +381,7 @@ fn pause_input_stage(
     Ok(PauseInputStage::Live)
 }
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(test)]
 fn park_resume_event(
     events: &mut Vec<beatkernel::input::PhysicalInputEvent>,
     event: beatkernel::input::PhysicalInputEvent,
@@ -388,6 +393,7 @@ fn park_resume_event(
     Ok(())
 }
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg(test)]
 fn validate_input_chronology(input: ClockPoint, last_operation: ClockPoint) -> Result<()> {
     if input.domain != last_operation.domain || input.timestamp < last_operation.timestamp {
         return Err("IOHID input host chronology regressed behind the last accepted operation; explicit restart required".into());
@@ -578,7 +584,6 @@ mod native {
         audio::{Mixer, MixerConfig, PcmLimits, command_queue, command_queue_with_start_gate},
         input::{Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId},
         judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
-        runtime::RuntimeReport,
         time::{ClockDomainId, ClockMapper, ClockMappingQuality, Duration},
         transport::{Rate, Transport},
     };
@@ -586,13 +591,11 @@ mod native {
     use beatkernel_bms_runtime::{
         ChannelPolicy, load_prepared_with_seed,
         native_end::NativeEnd,
-        playback_pause::{NativePause, PauseKeyboard, PausePhase},
-        player::{self, PauseState},
+        playback_pause::NativePause,
+        player::{self},
     };
     use beatkernel_platform::{
-        audio::presentation::discipline::{
-            DisciplineConfig, DisciplineUpdate, PresentationDiscipline,
-        },
+        audio::presentation::discipline::{DisciplineConfig, PresentationDiscipline},
         macos::{
             audio::{CoreAudioRequest, CoreAudioStream},
             clock::MachClock,
@@ -731,6 +734,88 @@ mod native {
             Ok(self.clock.sample()?.normalized)
         }
     }
+    use beatkernel_bms_runtime::native_gameplay::{
+        InputBatch, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
+        NativeGameplaySession, retain_input, run_gameplay,
+    };
+    struct GameplayDevice<'a> {
+        audio: &'a mut CoreAudioStream,
+        input: &'a mut HidInput,
+        clock: &'a MachClock,
+        selected: DeviceId,
+        registry: u64,
+        other_devices: &'a mut u64,
+        retained: &'a mut VecDeque<HidSample>,
+    }
+    impl NativeGameplayDevice for GameplayDevice<'_> {
+        fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
+            self.input.poll(WallDuration::from_millis(1))?;
+            check_hid(self.input, self.selected, self.registry)?;
+            if let Some(pair) = observe(self.audio, self.clock)? {
+                discipline.observe_clock_pair(pair)?;
+            }
+            Ok(())
+        }
+        fn render_report(
+            &mut self,
+        ) -> NativeGameplayResult<Option<beatkernel::audio::RenderReport>> {
+            Ok(self.audio.last_render_report())
+        }
+        fn host_now(&self) -> NativeGameplayResult<ClockPoint> {
+            Ok(self.clock.sample()?.normalized)
+        }
+        fn acquire(
+            &mut self,
+            events: &mut VecDeque<beatkernel::input::PhysicalInputEvent>,
+        ) -> NativeGameplayResult<InputBatch> {
+            for _ in 0..256 {
+                let sample = if let Some(sample) = self.retained.pop_front() {
+                    Some(sample)
+                } else {
+                    self.input.pop()
+                };
+                let Some(sample) = sample else {
+                    return Ok(InputBatch {
+                        backlog: false,
+                        closed: false,
+                    });
+                };
+                if sample.event.meta().source != self.selected {
+                    *self.other_devices = self.other_devices.saturating_add(1);
+                } else {
+                    retain_input(events, sample.event)?;
+                }
+            }
+            Ok(InputBatch {
+                backlog: true,
+                closed: false,
+            })
+        }
+        fn observe_end(
+            &mut self,
+            end: &mut NativeEnd,
+            discipline: &PresentationDiscipline,
+            report: Option<beatkernel::audio::RenderReport>,
+        ) -> NativeGameplayResult<Option<beatkernel_bms_runtime::native_end::EndBoundary>> {
+            Ok(end.observe(
+                report,
+                discipline
+                    .latest_pair()
+                    .ok_or("native end clock relation missing")?,
+            )?)
+        }
+        fn seed_resume(
+            &mut self,
+            discipline: &mut PresentationDiscipline,
+            reference: ClockPair,
+        ) -> NativeGameplayResult<()> {
+            discipline.observe_clock_pair(reference)?;
+            Ok(())
+        }
+        fn fallback_schedule(&mut self, _: u32) -> NativeGameplayResult<ClockPoint> {
+            Err("CoreAudio uses logical mixer scheduling".into())
+        }
+    }
     fn retain_startup_sample(events: &mut VecDeque<HidSample>, sample: HidSample) -> Result<()> {
         if events.len() == MAX_START_INPUT_EVENTS {
             return Err("startup HID input capacity exceeded; restart required".into());
@@ -790,59 +875,6 @@ mod native {
             }
         }
         Err("no valid native CoreAudio presentation seed within two seconds".into())
-    }
-    fn playback_schedule(pause: &NativePause, stream: &CoreAudioStream) -> Result<ClockPoint> {
-        Ok(pause.scheduling_point(
-            stream
-                .last_render_report()
-                .or_else(|| pause.last_render_report())
-                .ok_or("mixer playback boundary unavailable for keysound scheduling")?,
-        )?)
-    }
-    fn reconcile_resume(
-        keyboard: &mut PauseKeyboard,
-        at: ClockPoint,
-        pause: &NativePause,
-        stream: &CoreAudioStream,
-        runtime: &mut Runtime,
-        capture: &mut Option<beatkernel_bms_runtime::replay_capture::LiveReplayCapture>,
-        competition: &mut Option<beatkernel_bms_runtime::competition_live::LiveCompetition>,
-    ) -> Result<()> {
-        for event in keyboard.resume(at)? {
-            print_report(
-                runtime.process_input(
-                    event,
-                    &ExplicitDomains,
-                    playback_schedule(pause, stream)?,
-                )?,
-                capture,
-                competition,
-            )?;
-        }
-        Ok(())
-    }
-    fn print_report(
-        report: RuntimeReport,
-        capture: &mut Option<beatkernel_bms_runtime::replay_capture::LiveReplayCapture>,
-        competition: &mut Option<beatkernel_bms_runtime::competition_live::LiveCompetition>,
-    ) -> Result<()> {
-        if let Some(capture) = capture.as_mut() {
-            capture.record_report(&report)?;
-        }
-        beatkernel_bms_runtime::player::publish_report(&report)?;
-        if let Some(competition) = competition.as_mut() {
-            competition.observe(&report)?;
-        }
-        for result in report.judge_events {
-            println!("judge={result:?}");
-        }
-        if !report.audio_failures.is_empty() {
-            eprintln!("exact failed audio commands={:?}", report.audio_failures);
-        }
-        if let Some(error) = report.judge_error {
-            return Err(error.into());
-        }
-        Ok(())
     }
     #[cfg(test)]
     mod startup_fixtures {
@@ -1218,299 +1250,44 @@ mod native {
             if let Some(end) = options.end_ns {
                 runtime.set_song_end(Timestamp::from_nanos(end))?;
             }
-            let mut end_boundary = if let Some(end) = &mut native_end {
-                end.observe(audio.last_render_report(), pair)?
-            } else {
-                None
+            let pump = {
+                let mut device = GameplayDevice {
+                    audio: &mut audio,
+                    input: &mut input,
+                    clock: &clock,
+                    selected: selected_id,
+                    registry: options.keyboard_registry,
+                    other_devices: &mut other_devices,
+                    retained: &mut startup_inputs,
+                };
+                run_gameplay(
+                    &mut device,
+                    NativeGameplaySession {
+                        runtime: &mut runtime,
+                        bgm: &mut bgm,
+                        discipline: &mut discipline,
+                        pause: &mut pause,
+                        end: &mut native_end,
+                        completion: &mut completion,
+                        capture: &mut capture,
+                        competition: &mut competition,
+                        delivery: &mut delivery,
+                        pre_origin_inputs: &mut pre_origin,
+                    },
+                    NativeGameplayConfig {
+                        origin,
+                        stream_origin: output_origin(),
+                        playback_origin: discipline_origin,
+                        song_origin,
+                        sample_rate: options.format.sample_rate(),
+                        end_song: options.end_ns.map(Timestamp::from_nanos),
+                        advance_lag: Duration::from_nanos(options.advance_lag),
+                        seconds: options.seconds,
+                        pause_supported,
+                        logical_schedule: true,
+                    },
+                )
             };
-            let mut end_rendered = false;
-            let deadline = options
-                .seconds
-                .map(|seconds| Instant::now() + WallDuration::from_secs(seconds));
-            let mut last_song = song_origin;
-            let mut last_acquired = origin;
-            let mut keyboard = PauseKeyboard::new();
-            let mut paused_boundary: Option<ClockPoint> = None;
-            let mut resume_boundary: Option<ClockPoint> = None;
-            let mut resume_events = Vec::new();
-            resume_events.try_reserve_exact(4096)?;
-            let mut pause_committed = false;
-            if pause_supported {
-                player::publish_pause(PauseState::Running);
-            }
-            let mut last_operation = origin;
-            let mut last_progress = None;
-            let mut waiting_logged = false;
-            let pump = (|| -> Result<()> {
-                while deadline.is_none_or(|deadline| Instant::now() < deadline)
-                    && !beatkernel_bms_runtime::player::cancelled()
-                {
-                    player::retry_pause_publication();
-                    input.poll(WallDuration::from_millis(1))?;
-                    check_hid(&input, selected_id, options.keyboard_registry)?;
-                    if let Some(pair) = observe(&audio, &clock)? {
-                        discipline.observe_clock_pair(pair)?;
-                    }
-                    let reference = discipline
-                        .latest_pair()
-                        .ok_or("pause requires native clock relation")?;
-                    let rendered = audio.last_render_report();
-                    if let Some(end) = &mut native_end {
-                        end_rendered |= rendered
-                            .is_some_and(|report| report.playback_end_physical_frame.is_some());
-                        if let Some(boundary) = end.observe(rendered, reference)? {
-                            end_boundary = Some(boundary);
-                        }
-                    }
-                    if pause_supported
-                        && !end_rendered
-                        && (pause.phase() == PausePhase::Running || pause_committed)
-                        && resume_boundary.is_none()
-                        && pause.request(player::pause_requested(), reference)?
-                    {
-                        let desired = pause.phase() == PausePhase::Pausing;
-                        runtime.request_audio_pause(desired);
-                        player::publish_pause(if desired {
-                            PauseState::Pausing
-                        } else {
-                            PauseState::Resuming
-                        });
-                    }
-                    if let Some(boundary) = pause.observe(rendered, reference)? {
-                        if boundary.paused {
-                            if !end_rendered {
-                                runtime.transport_mut().pause(boundary.host.timestamp)?;
-                                paused_boundary = Some(boundary.host);
-                                pause_committed = false;
-                            }
-                        } else {
-                            runtime.transport_mut().resume(boundary.host.timestamp)?;
-                            resume_boundary = Some(boundary.host);
-                            paused_boundary = None;
-                            pause_committed = false;
-                            discipline = PresentationDiscipline::new(
-                                DisciplineConfig::default(),
-                                discipline_origin,
-                                HOST,
-                                pause.song_origin_after_pause(song_origin)?,
-                            )?;
-                            discipline.observe_clock_pair(reference)?;
-                        }
-                    }
-                    feed_rendered(&mut bgm, audio.last_render_report(), |command| {
-                        runtime.enqueue_audio(command)
-                    })?;
-                    discipline.validate_host(clock.sample()?.normalized)?;
-                    if pause.last_render_report().is_none()
-                        || matches!(pause.phase(), PausePhase::Pausing | PausePhase::Resuming)
-                    {
-                        continue;
-                    }
-                    let mut backlog = true;
-                    for _ in 0..256 {
-                        let sample = if let Some(sample) = startup_inputs.pop_front() {
-                            Some(sample)
-                        } else {
-                            input.pop()
-                        };
-                        let Some(sample) = sample else {
-                            backlog = false;
-                            break;
-                        };
-                        if sample.event.meta().source != selected_id {
-                            other_devices = other_devices.saturating_add(1);
-                            continue;
-                        }
-                        let host = ClockPoint {
-                            domain: sample.event.meta().clock_domain,
-                            timestamp: sample.event.meta().timestamp,
-                        };
-                        let now = clock.sample()?.normalized;
-                        discipline.validate_host(now)?;
-                        if !input_in_epoch(host, now, origin)? {
-                            pre_origin = pre_origin.saturating_add(1);
-                            if pre_origin == 1 {
-                                eprintln!(
-                                    "ignoring pre-output-origin selected input, original native provenance retained: {:?}",
-                                    sample
-                                );
-                            }
-                            continue;
-                        }
-                        validate_input_chronology(host, last_acquired)?;
-                        last_acquired = host;
-                        // IOHID has already normalized mach ticks once; no new clock
-                        // conversion or timestamp replacement occurs in Runtime.
-                        discipline.validate_host(host)?;
-                        delivery.observe(host, now)?;
-                        match pause_input_stage(host, paused_boundary, resume_boundary)? {
-                            PauseInputStage::Paused => {
-                                keyboard.observe_paused(sample.event)?;
-                                continue;
-                            }
-                            PauseInputStage::AfterResume => {
-                                park_resume_event(&mut resume_events, sample.event)?;
-                                continue;
-                            }
-                            PauseInputStage::Live => {}
-                        }
-                        if !before_finite_end(host, end_boundary.map(|boundary| boundary.host))? {
-                            continue;
-                        }
-                        validate_input_chronology(host, last_operation)?;
-                        if !keyboard.accept(&sample.event)? {
-                            continue;
-                        }
-                        print_report(
-                            runtime.process_input(
-                                sample.event,
-                                &ExplicitDomains,
-                                playback_schedule(&pause, &audio)?,
-                            )?,
-                            &mut capture,
-                            &mut competition,
-                        )?;
-                        last_operation = host;
-                    }
-                    if !backlog {
-                        if let Some(at) = resume_boundary.take() {
-                            reconcile_resume(
-                                &mut keyboard,
-                                at,
-                                &pause,
-                                &audio,
-                                &mut runtime,
-                                &mut capture,
-                                &mut competition,
-                            )?;
-                            last_operation = at;
-                            for event in resume_events.drain(..) {
-                                let host = ClockPoint {
-                                    domain: event.meta().clock_domain,
-                                    timestamp: event.meta().timestamp,
-                                };
-                                if !before_finite_end(
-                                    host,
-                                    end_boundary.map(|boundary| boundary.host),
-                                )? {
-                                    continue;
-                                }
-                                validate_input_chronology(host, last_operation)?;
-                                if keyboard.accept(&event)? {
-                                    print_report(
-                                        runtime.process_input(
-                                            event,
-                                            &ExplicitDomains,
-                                            playback_schedule(&pause, &audio)?,
-                                        )?,
-                                        &mut capture,
-                                        &mut competition,
-                                    )?;
-                                    last_operation = host;
-                                }
-                            }
-                            player::publish_pause(PauseState::Running);
-                        }
-                        if let Some(at) = paused_boundary.filter(|_| !pause_committed) {
-                            let report = runtime.advance_to(
-                                at,
-                                &ExplicitDomains,
-                                playback_schedule(&pause, &audio)?,
-                            )?;
-                            last_operation = at;
-                            last_song = report.song_time;
-                            print_report(report, &mut capture, &mut competition)?;
-                            pause_committed = true;
-                            player::publish_pause(PauseState::Paused);
-                        }
-                    }
-                    if (pause.phase() == PausePhase::Paused && !end_rendered)
-                        || resume_boundary.is_some()
-                    {
-                        continue;
-                    }
-                    let now = clock.sample()?.normalized;
-                    discipline.validate_host(now)?;
-                    if now.timestamp < origin.timestamp {
-                        if !waiting_logged {
-                            println!(
-                                "waiting for future estimated output origin {origin:?}; judge operations deferred"
-                            );
-                            waiting_logged = true;
-                        }
-                        continue;
-                    }
-                    if let DisciplineUpdate::Applied {
-                        base_rate_ppm,
-                        correction_ppm,
-                        applied_rate_ppm,
-                        phase_error_ns,
-                        limited,
-                    } = discipline.update(now, runtime.transport_mut())?
-                    {
-                        println!(
-                            "discipline measured={base_rate_ppm:+}ppm correction={correction_ppm:+}ppm applied={applied_rate_ppm:+}ppm phase={phase_error_ns}ns limited={limited} quality={:?}",
-                            discipline.quality()
-                        );
-                    }
-                    if let Some(at) =
-                        watermark(origin, last_operation, now, options.advance_lag, backlog)?
-                    {
-                        let report = runtime.advance_to(
-                            at,
-                            &ExplicitDomains,
-                            playback_schedule(&pause, &audio)?,
-                        )?;
-                        last_operation = at;
-                        last_song = report.song_time;
-                        let nanos = last_song.as_nanos();
-                        let second = nanos.div_euclid(1_000_000_000);
-                        if last_progress != Some(second) {
-                            if nanos < 0 {
-                                println!(
-                                    "logical countdown={}s song={nanos}ns",
-                                    (-i128::from(nanos) + 999_999_999) / 1_000_000_000
-                                );
-                            } else {
-                                println!("logical song={nanos}ns");
-                            }
-                            last_progress = Some(second);
-                        }
-                        print_report(report, &mut capture, &mut competition)?;
-                    }
-                    if finite_session_done(
-                        options.end_ns,
-                        end_boundary.map(|boundary| boundary.host),
-                        last_operation,
-                        last_song,
-                        backlog,
-                        resume_boundary.is_some(),
-                    ) {
-                        player::publish_section_end(Timestamp::from_nanos(
-                            options.end_ns.expect("finite endpoint admitted"),
-                        ));
-                        println!(
-                            "finite song prefix completed: native endpoint presented and HID collector drained; remaining notes are not forced complete"
-                        );
-                        break;
-                    }
-                    if let Some(completion) = &mut completion {
-                        if completion.observe(
-                            runtime.judge(),
-                            last_song,
-                            bgm.report(),
-                            audio.last_render_report(),
-                            discipline.latest_pair().map(|pair| pair.source),
-                        )? {
-                            println!(
-                                "full song completed: terminal judge, drained BGM/mixer and native presentation frontier"
-                            );
-                            break;
-                        }
-                    }
-                }
-                Ok(())
-            })();
             println!(
                 "runtime processing={:?} counters={:?}; other-device ignored={other_devices}; pre-origin ignored={pre_origin}",
                 runtime.telemetry().processing(),
