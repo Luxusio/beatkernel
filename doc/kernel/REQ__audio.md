@@ -232,3 +232,18 @@ allocator test counts allocation, reallocation and deallocation on silent, activ
 completion, Stop, Seek, invalid, full-capacity and disconnected render paths.
 Native output and physical latency require their own evidence; offline PCM
 assertions prove neither device operation nor input-to-sound latency.
+
+## Physical-frame startup foundation
+
+A dedicated initially held command queue permits silent native calibration while
+physical output frames advance and playback/commands remain frozen. The producer
+can arm one immutable physical start frame; a straddling render emits the silent
+prefix then playback frame0 exactly at that frame. Missed starts reject rather
+than silently clamp. Applied first playback frame is independently observable.
+Existing default queue and ordinary pause behavior remain intact. Pure checked
+session/host bracketing and nominal ClockPair output-frame projection preserve
+intervals, check domains/overflow and enforce future frame margins.
+These are prerequisites; native startup loops still use the existing software
+call commitment. Switching to silent device calibration and actual frame arming,
+transport anchoring/presentation and drift handling remain required. Authored
+fixtures compile only; runtime/formal acceptance remains deferred.

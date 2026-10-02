@@ -1309,3 +1309,18 @@ Replay/judgment identity and offline/ghost playback remain independent.
 Checked arithmetic rejects overflow, negative geometry and insufficient lead.
 This aligns nominal software start plus preroll, not measured hardware output-zero
 or device latency/drift. Execution/formal acceptance remain deferred.
+
+## Physical-frame startup foundation
+
+A dedicated initially held command queue permits silent native calibration while
+physical output frames advance and playback/commands remain frozen. The producer
+can arm one immutable physical start frame; a straddling render emits the silent
+prefix then playback frame0 exactly at that frame. Missed starts reject rather
+than silently clamp. Applied first playback frame is independently observable.
+Existing default queue and ordinary pause behavior remain intact. Pure checked
+session/host bracketing and nominal ClockPair output-frame projection preserve
+intervals, check domains/overflow and enforce future frame margins.
+These are prerequisites; native startup loops still use the existing software
+call commitment. Switching to silent device calibration and actual frame arming,
+transport anchoring/presentation and drift handling remain required. Authored
+fixtures compile only; runtime/formal acceptance remains deferred.
