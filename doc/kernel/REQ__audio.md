@@ -326,5 +326,23 @@ bounded native batches 256, acquisition continues during acknowledgement waits,
 judgment waits until native backlog is drained at pause/resume boundaries.
 Finite completion requires native boundary plus logical prefix/input drain; full
 completion requires actual judge/BGM/mixer/native drain. Caller owns native stop/
-join and saving captured prefix after cleanup on all exits. Local-cohort loops
-and ASIO interval startup remain next migrations; no runtime acceptance claimed.
+join and saving captured prefix after cleanup on all exits. Local cohorts use the shared owner below;
+ASIO interval startup remains pending, with no runtime acceptance claimed.
+
+## Shared native local-cohort gameplay
+
+All native local cohorts use one common gameplay owner over RuntimeGroup and
+InputMerger. Native adapters acquire bounded original events and observations,
+while the owner handles clock validation, pause acknowledgement, ordering, lag,
+judgment, each player’s captured reports/score/competition and shared completion.
+Acquisition continues during pause/resume acknowledgement waits. A native backlog
+prevents judgment/deadline release; actual pause/resume boundaries retain the
+ordered input prefix and reconcile releases before post-resume input. Resume
+reseeds the same native observation source. Finite completion requires every
+member’s logical prefix and an actually committed input frontier crossing the
+native endpoint. Full completion requires each member’s actual completion and
+drained native/merged input; absent completion metadata is not completion.
+Native setup/resource cleanup and independent create-new replay saves remain
+with their owners. Linux uses bounded fair sweeps across sources; native Raw
+Input/HID queues retain bounded collection and exact device-loss semantics.
+Physical timing, ASIO startup parity and native runtime acceptance remain unproven.
