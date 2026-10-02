@@ -1733,7 +1733,7 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
     }
     let text = "#BPM 120\n#WAV01 tap.wav\n#00111:01\n#STOP01 48\n#00109:01\n\
          #BMP00 poor.png\n#BMP01 first.png\n#BMP02 second.png\n#BMP03 third.png\n\
-         #BMP04 layer.png\n#BMP05 second-layer.png\n#00004:01\n#00104:0203\n#00107:04\n#00106:ZZ\n#0010A:05\n#0010B:8040\n#0010C:20\n#0010D:10\n#0010E:08\n#BGA02 02 0 0 1 1 10 20\n#@BGA03 03 0 0 1 1 10 20\n";
+         #BMP04 layer.png\n#BMP05 second-layer.png\n#00004:01\n#00104:0203\n#00107:04\n#00106:ZZ\n#0010A:05\n#0010B:8040\n#0010C:20\n#0010D:10\n#0010E:08\n#BGA02 02 0 0 1 1 10 20\n#@BGA03 03 0 0 1 1 10 20\n#CANVASSIZE 64 32\n";
     let source = beatkernel_bms::parse(text, beatkernel_bms::ParseOptions::default()).unwrap();
     let image_dir = Directory::new();
     let chart_path = image_dir.write("chart.bms", text.as_bytes());
@@ -1895,12 +1895,12 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
                     .unwrap()
                     .get_layer(ImageId(5))
                     .unwrap()
-                    .pixels(),
-                &[5, 0, 0, 255]
+                    .pixels()[..4],
+                [5, 0, 0, 255]
             );
             let cropped = shown.images.as_ref().unwrap().get(base).unwrap();
-            assert_eq!((cropped.width(), cropped.height()), (256, 256));
-            let offset = (20 * 256 + 10) * 4;
+            assert_eq!((cropped.width(), cropped.height()), (64, 32));
+            let offset = (20 * 64 + 10) * 4;
             assert_eq!(
                 &cropped.pixels()[offset..offset + 4],
                 &[base.0 as u8, 0, 0, 255]
@@ -2354,6 +2354,132 @@ fn raster_bmp_pixel(rgb: [u8; 3]) -> Vec<u8> {
     bytes[34..38].copy_from_slice(&4u32.to_le_bytes());
     bytes[54..57].copy_from_slice(&[rgb[2], rgb[1], rgb[0]]);
     bytes
+}
+
+#[test]
+fn explicit_canvas_pads_aliases_and_crops_with_exact_accounting_before_native_publication() {
+    use beatkernel_bms::ImageId;
+    use image_assets::{ImageAssetLimits, ImageAssets};
+    use std::sync::Arc;
+    let dir = Directory::new();
+    dir.write("tap.wav", &wav(1, &[100, -100]));
+    dir.write("red.bmp", &raster_bmp_pixel([200, 40, 20]));
+    let text = "#BPM 120\n#WAV01 tap.wav\n#00011:01\n#BMP01 red.bmp\n#BMP02 ./red.bmp\n#BGA03 01 0 0 1 1 0 0\n#00004:010203\n#00007:02\n#CANVASSIZE 3 2\n";
+    let path = dir.write("chart.bms", text.as_bytes());
+    let prepared = load_prepared(
+        &path,
+        AudioFormat::new(24_000, 2).unwrap(),
+        limits(),
+        ChannelPolicy::MonoToStereo,
+    )
+    .unwrap();
+    let bank = ImageAssets::prepare(
+        &dir.0,
+        &prepared.source,
+        ImageAssetLimits {
+            max_decoded_bytes: 28,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!((bank.unique_images(), bank.decoded_bytes()), (1, 28));
+    let image = bank.get(ImageId(1)).unwrap();
+    assert_eq!((image.width(), image.height()), (3, 2));
+    assert_eq!(&image.pixels()[..4], &[200, 40, 20, 255]);
+    assert!(image.pixels()[4..].iter().all(|v| *v == 0));
+    assert!(Arc::ptr_eq(image, bank.get(ImageId(2)).unwrap()));
+    assert!(Arc::ptr_eq(image, bank.get(ImageId(3)).unwrap()));
+    assert!(Arc::ptr_eq(image, bank.get_layer(ImageId(2)).unwrap()));
+    assert!(
+        ImageAssets::prepare(
+            &dir.0,
+            &prepared.source,
+            ImageAssetLimits {
+                max_decoded_bytes: 27,
+                ..Default::default()
+            }
+        )
+        .is_err()
+    );
+    let exact = beatkernel_bms::parse(
+        "#BMP01 red.bmp\n#00004:01\n#CANVASSIZE 1 1",
+        Default::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        ImageAssets::prepare(
+            &dir.0,
+            &exact,
+            ImageAssetLimits {
+                max_decoded_bytes: 4,
+                ..Default::default()
+            }
+        )
+        .unwrap()
+        .decoded_bytes(),
+        4
+    );
+    let original = beatkernel_bms::parse("#BMP01 red.bmp\n#00004:01", Default::default()).unwrap();
+    assert_eq!(
+        ImageAssets::prepare(&dir.0, &original, Default::default())
+            .unwrap()
+            .get(ImageId(1))
+            .unwrap()
+            .width(),
+        1
+    );
+    let (publisher, viewer) = player::channel();
+    player::with_publisher(publisher, || {
+        player::publish_native_chart(
+            &path,
+            &prepared.source,
+            &prepared.compiled.chart,
+            &[local_players::PlayerId(1)],
+        )
+        .map_err(|e| e.to_string())?;
+        let shown = viewer.take_latest().unwrap();
+        let bank = shown.images.as_ref().unwrap();
+        assert_eq!(bank.decoded_bytes(), 28);
+        assert!(Arc::ptr_eq(
+            bank.get(ImageId(1)).unwrap(),
+            bank.get(ImageId(3)).unwrap()
+        ));
+        Ok(())
+    })
+    .unwrap();
+    for (value, bounds) in [
+        ("bad", ImageAssetLimits::default()),
+        ("9999 9999", ImageAssetLimits::default()),
+        (
+            "3 2",
+            ImageAssetLimits {
+                decode: image_decode::ImageDecodeLimits {
+                    max_width: 2,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ),
+        (
+            "3 2",
+            ImageAssetLimits {
+                decode: image_decode::ImageDecodeLimits {
+                    max_decoded_bytes: 23,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        ),
+    ] {
+        let mut fabricated = prepared.source.clone();
+        fabricated
+            .metadata
+            .insert("CANVASSIZE".into(), value.into());
+        let error = ImageAssets::prepare(&dir.0.join("absent"), &fabricated, bounds)
+            .err()
+            .unwrap();
+        assert!(error.to_ascii_lowercase().contains("canvas"), "{error}");
+    }
 }
 
 #[test]

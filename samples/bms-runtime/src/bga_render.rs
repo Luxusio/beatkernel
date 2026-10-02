@@ -403,7 +403,7 @@ mod fixtures {
     #[test]
     fn cropped_aliases_share_gpu_ownership_and_keep_canvas_placement_beneath_layers() {
         let mut prepared = bank();
-        let chart = beatkernel_bms::parse("#BMP01 red.bmp\n#BMP02 ./red.bmp\n#BGA01 01 0 0 1 1 10 20\n#@BGA02 02 0 0 1 1 10 20\n#BGA03 01 0 0 1 1 30 40\n#00004:010203\n#00007:02", ParseOptions::default()).unwrap();
+        let chart = beatkernel_bms::parse("#BMP01 red.bmp\n#BMP02 ./red.bmp\n#BGA01 01 0 0 1 1 10 20\n#@BGA02 02 0 0 1 1 10 20\n#BGA03 01 0 0 1 1 30 10\n#00004:010203\n#00007:02\n#CANVASSIZE 64 32", ParseOptions::default()).unwrap();
         prepared.bank =
             Arc::new(ImageAssets::prepare(&prepared.path, &chart, Default::default()).unwrap());
         assert!(Arc::ptr_eq(
@@ -419,7 +419,7 @@ mod fixtures {
             .sync(Some(&prepared.bank), &[state(1, Some(2))], &mut owner)
             .unwrap();
         assert_eq!(owner.attempts, 1);
-        assert_eq!(first[0].base.unwrap().width, 256);
+        assert_eq!(first[0].base.unwrap().width, 64);
         assert_eq!(
             first[0].base.unwrap().texture,
             first[0].layer.unwrap().texture
@@ -443,7 +443,7 @@ mod fixtures {
         )
         .unwrap();
         assert_eq!(scene.rectangles().len(), 3); // black, fitted Base canvas, Layer canvas
-        assert_eq!(scene.rectangles()[1].bounds, [50.0, 75.0, 100.0, 100.0]);
+        assert_eq!(scene.rectangles()[1].bounds, [50.0, 100.0, 100.0, 50.0]);
         assert_eq!(scene.rectangles()[1].uv, [0.0, 0.0, 1.0, 1.0]);
         assert_eq!(scene.rectangles()[2].bounds, scene.rectangles()[1].bounds);
         cache.clear(&mut owner).unwrap();

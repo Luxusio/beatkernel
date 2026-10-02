@@ -1,12 +1,12 @@
 //! Contained static visual resources, prepared explicitly before playback.
 use crate::{
     asset_paths::{AssetPathPolicy, resolve_asset},
-    image_crop::crop_canvas,
+    image_crop::crop_canvas_sized,
     image_decode::{ImageDecodeError, ImageDecodeLimits, decode},
     image_key::{black_to_transparent, needs_key},
     texture::RgbaImage,
 };
-use beatkernel_bms::{BgaChannel, BmsChart, ImageId};
+use beatkernel_bms::{BgaChannel, BgaCrop, BmsChart, ImageId};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::File,
@@ -120,6 +120,8 @@ impl ImageAssets {
         limits: ImageAssetLimits,
     ) -> Result<Self, String> {
         limits.validate()?;
+        let explicit_canvas = chart.canvas_size().map_err(|e| e.to_string())?;
+        let canvas = explicit_canvas.unwrap_or([256, 256]);
         if chart
             .bga
             .len()
@@ -141,6 +143,21 @@ impl ImageAssets {
         let mut references: BTreeSet<_> = chart.bga.iter().map(|event| event.image).collect();
         if chart.images.contains_key(&ImageId(0)) || chart.bga_crops.contains_key(&ImageId(0)) {
             references.insert(ImageId(0));
+        }
+        let canvas_bytes = u64::from(canvas[0])
+            .checked_mul(u64::from(canvas[1]))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or("canvas extent overflow")?;
+        if explicit_canvas.is_some() || references.iter().any(|id| chart.bga_crops.contains_key(id))
+        {
+            if canvas[0] == 0
+                || canvas[1] == 0
+                || canvas[0] > limits.decode.max_width
+                || canvas[1] > limits.decode.max_height
+                || canvas_bytes > limits.decode.max_decoded_bytes
+            {
+                return Err("canvas extent or decoded byte limit exceeded".into());
+            }
         }
         let sources: BTreeSet<_> = references
             .iter()
@@ -247,7 +264,25 @@ impl ImageAssets {
                 );
                 continue;
             };
-            let image = if let Some(crop) = crop {
+            let transform = if let Some(crop) = crop {
+                Some(*crop)
+            } else if explicit_canvas.is_some() && [original.width(), original.height()] != canvas {
+                Some(BgaCrop {
+                    source,
+                    source_rect: [
+                        0,
+                        0,
+                        i32::try_from(original.width())
+                            .map_err(|_| "canvas source width overflow")?,
+                        i32::try_from(original.height())
+                            .map_err(|_| "canvas source height overflow")?,
+                    ],
+                    destination: [0, 0],
+                })
+            } else {
+                None
+            };
+            let image = if let Some(crop) = transform {
                 if let Some((_, _, _, image)) =
                     variants.iter().find(|(raw, rect, destination, _)| {
                         Arc::ptr_eq(raw, original)
@@ -259,10 +294,10 @@ impl ImageAssets {
                 } else {
                     let total = bank
                         .decoded_bytes
-                        .checked_add(256 * 256 * 4)
+                        .checked_add(canvas_bytes)
                         .filter(|total| *total <= limits.max_decoded_bytes)
                         .ok_or("image bank crop byte budget exceeded")?;
-                    let image = crop_canvas(original, *crop)?;
+                    let image = crop_canvas_sized(original, crop, canvas)?;
                     bank.decoded_bytes = total;
                     variants.push((
                         Arc::clone(original),
