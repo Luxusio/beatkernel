@@ -17,6 +17,7 @@ pub struct Mixer {
     frame_cursor: u64,
     playback_frame_cursor: u64,
     paused: bool,
+    start_gate_open: bool,
     playback_end_physical_frame: Option<u64>,
     counters: AudioCounters,
     rate: Rate,
@@ -148,6 +149,7 @@ impl Mixer {
             frame_cursor: 0,
             playback_frame_cursor: 0,
             paused: false,
+            start_gate_open: false,
             playback_end_physical_frame: None,
             counters: AudioCounters::default(),
             rate: Rate::NORMAL,
@@ -177,6 +179,10 @@ impl Mixer {
     /// Command targets use the playback grid, excluding paused output frames.
     /// An immutable playback endpoint limits the active prefix, zeros its
     /// physical suffix and remains paused even if the producer requests resume.
+    /// A gated queue emits silent startup frames without draining commands. Its
+    /// first positive playback is exact even inside a block. An armed target
+    /// missed before adoption, or manual pause spanning that target, rejects
+    /// without mutation; pauses after gate opening retain ordinary semantics.
     pub fn render(&mut self, output: &mut [f32]) -> Result<RenderReport, AudioError> {
         let channels = usize::from(self.config.format().channels());
         if !output.len().is_multiple_of(channels) {
@@ -193,29 +199,78 @@ impl Mixer {
             .ok_or(AudioError::Overflow)?;
         let start = self.frame_cursor;
         let playback_start = self.playback_frame_cursor;
-        let active_extent = self
-            .config
-            .playback_end_frame()
-            .map_or(extent, |end| extent.min(end.saturating_sub(playback_start)));
-        let playback_end = playback_start
-            .checked_add(active_extent)
-            .ok_or(AudioError::Overflow)?;
-        let active_frames = usize::try_from(active_extent).map_err(|_| AudioError::Overflow)?;
-        let active_samples = active_frames * channels;
-        let physical_prefix_end = start
-            .checked_add(active_extent)
-            .ok_or(AudioError::Overflow)?;
         if frames == 0 {
             return Ok(self.report(start, playback_start, 0));
         }
-        self.paused = self.consumer.pause_requested() || active_extent == 0;
-        if self.paused {
-            self.mark_playback_end(start);
+        let pause_requested = self.consumer.pause_requested();
+        let mut prefix_extent = 0;
+        let mut opens_gate = false;
+        if !self.start_gate_open {
+            if let Some(target) = self.consumer.start_gate() {
+                match target {
+                    None => {
+                        if self.consumer.is_disconnected() {
+                            return Err(AudioError::StartGateDisconnected);
+                        }
+                        prefix_extent = extent;
+                    }
+                    Some(target) => {
+                        if target < start {
+                            return Err(AudioError::StartGateMissed);
+                        }
+                        prefix_extent = extent.min(target - start);
+                        if prefix_extent < extent {
+                            if pause_requested {
+                                return Err(AudioError::StartGatePaused);
+                            }
+                            opens_gate = true;
+                        }
+                    }
+                }
+            }
+        }
+        let available_extent = extent - prefix_extent;
+        let active_extent = self
+            .config
+            .playback_end_frame()
+            .map_or(available_extent, |end| {
+                available_extent.min(end.saturating_sub(playback_start))
+            });
+        let playback_end = playback_start
+            .checked_add(active_extent)
+            .ok_or(AudioError::Overflow)?;
+        let prefix_frames = usize::try_from(prefix_extent).map_err(|_| AudioError::Overflow)?;
+        let active_frames = usize::try_from(active_extent).map_err(|_| AudioError::Overflow)?;
+        let prefix_samples = prefix_frames * channels;
+        let active_samples = active_frames * channels;
+        let active_start = start
+            .checked_add(prefix_extent)
+            .ok_or(AudioError::Overflow)?;
+        let physical_prefix_end = active_start
+            .checked_add(active_extent)
+            .ok_or(AudioError::Overflow)?;
+        // All failure paths precede state, output, queue and evidence changes.
+        if prefix_extent == extent {
+            self.paused = true;
             output.fill(0.0);
             self.frame_cursor = end;
+            self.consumer.publish_physical_frontier(end);
             self.counters.rendered_frames = self.counters.rendered_frames.saturating_add(extent);
             return Ok(self.report(start, playback_start, frames));
         }
+        if opens_gate {
+            self.start_gate_open = true;
+        }
+        self.paused = pause_requested || active_extent == 0;
+        if self.paused {
+            self.mark_playback_end(active_start);
+            output.fill(0.0);
+            self.frame_cursor = end;
+            self.consumer.publish_physical_frontier(end);
+            self.counters.rendered_frames = self.counters.rendered_frames.saturating_add(extent);
+            return Ok(self.report(start, playback_start, frames));
+        }
+        output[..prefix_samples].fill(0.0);
 
         let budget = self
             .consumer
@@ -246,7 +301,9 @@ impl Mixer {
             );
         }
 
-        for frame in output[..active_samples].chunks_exact_mut(channels) {
+        for frame in
+            output[prefix_samples..prefix_samples + active_samples].chunks_exact_mut(channels)
+        {
             while self
                 .pending
                 .first()
@@ -261,8 +318,12 @@ impl Mixer {
             self.mix_frame(frame);
             self.playback_frame_cursor += 1;
         }
-        output[active_samples..].fill(0.0);
+        output[prefix_samples + active_samples..].fill(0.0);
         self.frame_cursor = end;
+        self.consumer.publish_physical_frontier(end);
+        if opens_gate && active_frames > 0 {
+            self.consumer.publish_applied_start(active_start);
+        }
         self.paused = self
             .config
             .playback_end_frame()
@@ -494,4 +555,44 @@ fn gcd(mut left: i128, mut right: i128) -> i128 {
         (left, right) = (right, left % right);
     }
     left
+}
+
+#[cfg(test)]
+mod start_gate_race_fixtures {
+    use super::*;
+    use crate::{
+        audio::{AudioFormat, AudioLimits, PcmLimits, command_queue_with_start_gate},
+        time::ClockDomainId,
+    };
+    #[test]
+    fn target_missed_during_publication_rejects_without_callback_mutation() {
+        let format = AudioFormat::new(1000, 1).unwrap();
+        let limits = AudioLimits::new(1, 1, 1, 8, 1).unwrap();
+        let bank = SampleBank::new(format, PcmLimits::new(4, 4, 1).unwrap()).unwrap();
+        let (mut producer, consumer) = command_queue_with_start_gate(1).unwrap();
+        let mut mixer = Mixer::new(
+            MixerConfig::new(format, ClockDomainId(1), Timestamp::ZERO, limits),
+            bank,
+            consumer,
+        )
+        .unwrap();
+        producer
+            .try_push(AudioCommand::Seek {
+                at: Timestamp::ZERO,
+                song_time: Timestamp::from_nanos(99),
+            })
+            .unwrap();
+        producer.schedule_start_at(2).unwrap();
+        // Model the race where a held render already selected its silent span
+        // before publication, then passed the target without opening the gate.
+        mixer.frame_cursor = 3;
+        let before = mixer.report(3, 0, 0);
+        let mut output = [99.0; 2];
+        assert_eq!(mixer.render(&mut output), Err(AudioError::StartGateMissed));
+        assert_eq!(output, [99.0; 2]);
+        assert_eq!(mixer.report(3, 0, 0), before);
+        assert_eq!(producer.applied_start_frame(), None);
+        assert_eq!(mixer.consumer.available(), 1);
+        assert_eq!(mixer.render(&mut []).unwrap(), before);
+    }
 }

@@ -61,6 +61,12 @@ struct Shared {
     producer_alive: AtomicBool,
     consumer_alive: AtomicBool,
     pause_requested: AtomicBool,
+    start_gated: bool,
+    start_frame: AtomicU64,
+    start_armed: AtomicBool,
+    applied_start_frame: AtomicU64,
+    start_applied: AtomicBool,
+    physical_frontier: AtomicU64,
 }
 
 struct Slot {
@@ -171,6 +177,21 @@ impl Slot {
 /// publishes disconnect; the final endpoint destruction frees backing storage
 /// and must happen outside rendering. Concurrent stress supplements this proof.
 pub fn command_queue(capacity: usize) -> Result<(CommandProducer, CommandConsumer), AudioError> {
+    queue(capacity, false)
+}
+
+/// Allocates a queue whose mixer initially advances only silent physical frames.
+/// Commands remain queued until its one-shot exact start target is reached.
+/// Storage and disconnect rules are identical to [`command_queue`].
+pub fn command_queue_with_start_gate(
+    capacity: usize,
+) -> Result<(CommandProducer, CommandConsumer), AudioError> {
+    queue(capacity, true)
+}
+fn queue(
+    capacity: usize,
+    start_gated: bool,
+) -> Result<(CommandProducer, CommandConsumer), AudioError> {
     if capacity == 0 || capacity > AudioLimits::MAX_COMMANDS {
         return Err(AudioError::InvalidCapacity);
     }
@@ -184,6 +205,12 @@ pub fn command_queue(capacity: usize) -> Result<(CommandProducer, CommandConsume
         producer_alive: AtomicBool::new(true),
         consumer_alive: AtomicBool::new(true),
         pause_requested: AtomicBool::new(false),
+        start_gated,
+        start_frame: AtomicU64::new(0),
+        start_armed: AtomicBool::new(false),
+        applied_start_frame: AtomicU64::new(0),
+        start_applied: AtomicBool::new(false),
+        physical_frontier: AtomicU64::new(0),
     });
     Ok((
         CommandProducer {
@@ -196,6 +223,35 @@ pub fn command_queue(capacity: usize) -> Result<(CommandProducer, CommandConsume
 }
 
 impl CommandProducer {
+    /// Arms one exact initial physical frame independently of command capacity.
+    /// A callback racing admission rechecks the target; missed targets never clamp.
+    /// A concurrent consumer drop may follow the connected observation.
+    pub fn schedule_start_at(&mut self, frame: u64) -> Result<(), AudioError> {
+        if !self.shared.start_gated {
+            return Err(AudioError::StartGateUnavailable);
+        }
+        if self.is_disconnected() {
+            return Err(AudioError::StartGateDisconnected);
+        }
+        if self.shared.start_armed.load(Ordering::Acquire) {
+            return Err(AudioError::StartGateAlreadyArmed);
+        }
+        if frame < self.shared.physical_frontier.load(Ordering::Acquire) {
+            return Err(AudioError::StartGateMissed);
+        }
+        self.shared.start_frame.store(frame, Ordering::Relaxed);
+        self.shared.start_armed.store(true, Ordering::Release);
+        Ok(())
+    }
+    /// Actual immutable physical frame of first positive playback, if observed.
+    /// Empty, held and zero-length finite playback never publish this evidence.
+    pub fn applied_start_frame(&self) -> Option<u64> {
+        self.shared
+            .start_applied
+            .load(Ordering::Acquire)
+            .then(|| self.shared.applied_start_frame.load(Ordering::Relaxed))
+    }
+
     /// Requests silence with playback scheduling frozen on a subsequent valid
     /// nonempty render. This independent desired state uses no queue slot and
     /// does not change admission counters; requests may coalesce before render.
@@ -243,6 +299,28 @@ impl CommandProducer {
 }
 
 impl CommandConsumer {
+    pub(crate) fn start_gate(&self) -> Option<Option<u64>> {
+        self.shared.start_gated.then(|| {
+            self.shared
+                .start_armed
+                .load(Ordering::Acquire)
+                .then(|| self.shared.start_frame.load(Ordering::Relaxed))
+        })
+    }
+    pub(crate) fn publish_physical_frontier(&self, frame: u64) {
+        if self.shared.start_gated {
+            self.shared
+                .physical_frontier
+                .store(frame, Ordering::Release);
+        }
+    }
+    pub(crate) fn publish_applied_start(&self, frame: u64) {
+        self.shared
+            .applied_start_frame
+            .store(frame, Ordering::Relaxed);
+        self.shared.start_applied.store(true, Ordering::Release);
+    }
+
     pub(crate) fn pause_requested(&self) -> bool {
         self.shared.pause_requested.load(Ordering::Acquire)
     }

@@ -391,6 +391,16 @@ pub enum AudioError {
     RenderCapacity,
     /// Checked time, frame or allocation arithmetic overflowed.
     Overflow,
+    /// Startup scheduling was requested on an ordinary queue.
+    StartGateUnavailable,
+    /// This gated queue already owns an immutable start target.
+    StartGateAlreadyArmed,
+    /// The relevant endpoint disconnected before startup admission/application.
+    StartGateDisconnected,
+    /// The exact physical start target is behind the rendered frontier.
+    StartGateMissed,
+    /// Manual pause intersects the initial target and would move first playback.
+    StartGatePaused,
     /// Rate cannot be represented by the configured sample-head arithmetic.
     UnsupportedRate,
 }
@@ -412,6 +422,11 @@ impl fmt::Display for AudioError {
             Self::InvalidBuffer => "audio buffer must contain complete interleaved frames",
             Self::RenderCapacity => "render block exceeds configured frame capacity",
             Self::Overflow => "audio time/frame/storage arithmetic overflow",
+            Self::StartGateUnavailable => "queue has no initial start gate",
+            Self::StartGateAlreadyArmed => "initial start target is immutable",
+            Self::StartGateDisconnected => "startup endpoint disconnected",
+            Self::StartGateMissed => "initial physical start frame was missed",
+            Self::StartGatePaused => "manual pause intersects initial start frame",
             Self::UnsupportedRate => "rate is not representable by this mixer",
         })
     }
