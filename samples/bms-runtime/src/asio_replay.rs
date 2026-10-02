@@ -5,7 +5,8 @@ use beatkernel_platform::audio::asio::AsioPresentationObservation;
 use std::collections::VecDeque;
 
 /// Retains future actual blocks until a fresh host reading reaches their upper
-/// presentation bound. Missing observations freeze the last matured output.
+/// presentation bound. Paused blocks still advance this physical output grid;
+/// the shared replay pause owner maps it to logical playback separately.
 pub struct AsioReplayPresentation {
     origin: ClockPoint,
     host: ClockDomainId,
@@ -312,6 +313,299 @@ mod fixtures {
                 .unwrap()
         );
     }
+
+    #[test]
+    fn paused_blocks_use_original_deadlines_capacity_credit_and_physical_positions() {
+        let (mut mixer, mut producer) = mixer();
+        let mut model = model(1);
+        let running = observation(mixer.render(&mut [0.0; 2]).unwrap());
+        assert_eq!(model.observe(Some(running), host(0)).unwrap(), None);
+        producer.request_pause(true);
+        let mut silence = [1.0; 2];
+        let paused = observation(mixer.render(&mut silence).unwrap());
+        assert_eq!(silence, [0.0; 2]);
+        assert_eq!(paused.render.playback_start_frame, 2);
+        assert_eq!(paused.render.playback_frames, 0);
+        let before = snapshot(&model);
+        assert!(model.observe(Some(paused), host(9_999_999)).is_err());
+        same(&model, &before);
+        assert_eq!(
+            model.observe(Some(paused), host(10_000_000)).unwrap(),
+            Some(output(0))
+        );
+        let before = snapshot(&model);
+        let mut changed_same_block = paused;
+        changed_same_block.render.active_voices += 1;
+        assert!(
+            model
+                .observe(Some(changed_same_block), host(12_000_000))
+                .is_err()
+        );
+        same(&model, &before);
+        let mut refreshed = paused;
+        refreshed.host = MultimediaHostInterval {
+            before: host(-100),
+            after: host(100_000_000),
+        };
+        assert_eq!(
+            model.observe(Some(refreshed), host(11_999_999)).unwrap(),
+            Some(output(0))
+        );
+        assert_eq!(model.last, Some(paused));
+        assert_eq!(
+            model.pending.front(),
+            Some(&(output(2_000_000), host(12_000_000)))
+        );
+        assert_eq!(
+            model.observe(None, host(12_000_000)).unwrap(),
+            Some(output(2_000_000))
+        );
+        let still_paused = observation(mixer.render(&mut silence).unwrap());
+        assert_eq!(still_paused.render.playback_start_frame, 2);
+        assert_eq!(
+            model.observe(Some(still_paused), host(14_000_000)).unwrap(),
+            Some(output(4_000_000))
+        );
+        producer.request_pause(false);
+        let resumed = observation(mixer.render(&mut silence).unwrap());
+        assert_eq!(resumed.render.playback_start_frame, 2);
+        assert_eq!(resumed.render.playback_frames, 2);
+        assert_eq!(
+            model.observe(Some(resumed), host(16_000_000)).unwrap(),
+            Some(output(6_000_000))
+        );
+    }
+
+    #[test]
+    fn skipped_manual_transitions_preserve_monotonic_playback_and_frozen_paused_reports() {
+        let (mut mixer, mut producer) = mixer();
+        let mut model = model(4);
+        let first = observation(mixer.render(&mut [0.0; 2]).unwrap());
+        model.observe(Some(first), host(0)).unwrap();
+        producer.request_pause(true);
+        mixer.render(&mut [0.0; 2]).unwrap(); // Physical 2, playback 2.
+        mixer.render(&mut [0.0; 2]).unwrap(); // Physical 4, playback 2.
+        producer.request_pause(false);
+        mixer.render(&mut [0.0; 2]).unwrap(); // Physical 6, playback 2.
+        let active = observation(mixer.render(&mut [0.0; 2]).unwrap());
+        assert_eq!(
+            (
+                active.render.start_frame,
+                active.render.playback_start_frame
+            ),
+            (8, 4)
+        );
+        assert_eq!(
+            model.observe(Some(active), host(18_000_000)).unwrap(),
+            Some(output(8_000_000))
+        );
+        producer.request_pause(true);
+        let paused = observation(mixer.render(&mut [0.0; 2]).unwrap());
+        assert_eq!(
+            (
+                paused.render.start_frame,
+                paused.render.playback_start_frame
+            ),
+            (10, 6)
+        );
+        model.observe(Some(paused), host(20_000_000)).unwrap();
+        mixer.render(&mut [0.0; 2]).unwrap();
+        let still_paused = observation(mixer.render(&mut [0.0; 2]).unwrap());
+        assert_eq!(
+            (
+                still_paused.render.start_frame,
+                still_paused.render.playback_start_frame
+            ),
+            (14, 6)
+        );
+        assert_eq!(
+            model.observe(Some(still_paused), host(24_000_000)).unwrap(),
+            Some(output(14_000_000))
+        );
+        producer.request_pause(false);
+        mixer.render(&mut [0.0; 2]).unwrap();
+        let resumed = observation(mixer.render(&mut [0.0; 2]).unwrap());
+        assert_eq!(
+            (
+                resumed.render.start_frame,
+                resumed.render.playback_start_frame
+            ),
+            (18, 8)
+        );
+        assert_eq!(
+            model.observe(Some(resumed), host(28_000_000)).unwrap(),
+            Some(output(18_000_000))
+        );
+    }
+
+    #[test]
+    fn malformed_paused_or_resumed_grids_preserve_even_a_mature_pending_prefix() {
+        let (mut mixer, mut producer) = mixer();
+        let mut model = model(4);
+        let first = observation(mixer.render(&mut [0.0; 2]).unwrap());
+        model.observe(Some(first), host(0)).unwrap();
+        producer.request_pause(true);
+        let paused = observation(mixer.render(&mut [0.0; 2]).unwrap());
+        model.observe(Some(paused), host(2_000_000)).unwrap();
+        let adjacent = observation(mixer.render(&mut [0.0; 2]).unwrap());
+        let skipped = observation(mixer.render(&mut [0.0; 2]).unwrap());
+        assert_eq!(adjacent.render.start_frame, 4);
+        assert_eq!(skipped.render.start_frame, 6);
+        let mut active_extent = adjacent;
+        active_extent.render.paused = false; // Still has zero playback frames.
+        let mut paused_extent = adjacent;
+        paused_extent.render.playback_frames = 1;
+        let mut ahead = adjacent;
+        ahead.render.playback_start_frame = 5;
+        let mut adjacent_jump = adjacent;
+        adjacent_jump.render.playback_start_frame = 3;
+        let mut frozen_jump = skipped;
+        frozen_jump.render.playback_start_frame = 3; // Gap can grow, frozen song cannot.
+        let mut lost_gap = skipped;
+        lost_gap.render.paused = false;
+        lost_gap.render.playback_frames = 2;
+        lost_gap.render.playback_start_frame = 5; // Cannot recover already silent frames.
+        let mut regressed = skipped;
+        regressed.render.paused = false;
+        regressed.render.playback_frames = 2;
+        regressed.render.playback_start_frame = 1;
+        let mut terminal = adjacent;
+        terminal.render.playback_end_physical_frame = Some(4);
+        let mut counter = adjacent;
+        counter.render.counters.rendered_frames -= 1;
+        let mut overflow = adjacent;
+        overflow.render.paused = false;
+        overflow.render.playback_start_frame = u64::MAX;
+        overflow.render.playback_frames = 2;
+        let before = snapshot(&model);
+        for bad in [
+            active_extent,
+            paused_extent,
+            ahead,
+            adjacent_jump,
+            frozen_jump,
+            lost_gap,
+            regressed,
+            terminal,
+            counter,
+            overflow,
+        ] {
+            assert!(model.observe(Some(bad), host(20_000_000)).is_err());
+            same(&model, &before);
+        }
+        assert_eq!(
+            model.observe(Some(skipped), host(20_000_000)).unwrap(),
+            Some(output(6_000_000))
+        );
+    }
+
+    #[test]
+    fn shared_interval_pause_keeps_queued_physical_points_from_rewinding_replay_song() {
+        use crate::{
+            native_start::StartInterval,
+            playback_pause::{PauseIntervalObservation, PausePhase},
+            replay_pause::ReplayPause,
+        };
+        use beatkernel::time::Duration;
+        let pause_observation = |value: AsioPresentationObservation| PauseIntervalObservation {
+            output_origin: value.output_origin,
+            sample_rate: value.sample_rate,
+            render: value.render,
+            clock: StartInterval::new(value.output, value.host.before, value.host.after).unwrap(),
+        };
+        let (mut mixer, mut producer) = mixer();
+        let mut model = model(4);
+        let mut pause = ReplayPause::new(
+            output(0),
+            ClockDomainId(1),
+            1000,
+            Timestamp::from_nanos(50_000_000),
+            Duration::from_nanos(3_000_000),
+        )
+        .unwrap();
+        let first = observation(mixer.render(&mut [0.0; 2]).unwrap());
+        model.observe(Some(first), host(0)).unwrap();
+        assert!(
+            pause
+                .request_interval(true, pause_observation(first))
+                .unwrap()
+        );
+        producer.request_pause(true);
+        let paused = observation(mixer.render(&mut [0.0; 2]).unwrap());
+        model.observe(Some(paused), host(2_000_000)).unwrap();
+        assert!(
+            pause
+                .observe_interval(Some(pause_observation(paused)), host(11_999_999))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(pause.phase(), PausePhase::Pausing);
+        let frozen = pause
+            .observe_interval(None, host(12_000_000))
+            .unwrap()
+            .unwrap();
+        assert!(frozen.paused);
+        assert_eq!(frozen.song, Timestamp::from_nanos(49_000_000));
+        let point = model.observe(None, host(12_000_000)).unwrap().unwrap();
+        assert_eq!(point, output(2_000_000));
+        assert_eq!(pause.presentation_song(point).unwrap(), None);
+
+        let still_paused = observation(mixer.render(&mut [0.0; 2]).unwrap());
+        model.observe(Some(still_paused), host(12_000_000)).unwrap();
+        pause
+            .observe_interval(Some(pause_observation(still_paused)), host(12_000_000))
+            .unwrap();
+        assert!(
+            pause
+                .request_interval(false, pause_observation(still_paused))
+                .unwrap()
+        );
+        producer.request_pause(false);
+        let resumed = observation(mixer.render(&mut [0.0; 2]).unwrap());
+        assert_eq!(
+            (
+                resumed.render.start_frame,
+                resumed.render.playback_start_frame
+            ),
+            (6, 2)
+        );
+        assert!(
+            pause
+                .observe_interval(Some(pause_observation(resumed)), host(15_999_999))
+                .unwrap()
+                .is_none()
+        );
+        let old_point = model.observe(None, host(15_999_999)).unwrap().unwrap();
+        assert_eq!(old_point, output(4_000_000));
+        assert_eq!(pause.presentation_song(old_point).unwrap(), None);
+        let running = pause
+            .observe_interval(None, host(16_000_000))
+            .unwrap()
+            .unwrap();
+        assert!(!running.paused);
+        assert_eq!(running.song, Timestamp::from_nanos(49_000_000));
+        assert_eq!(pause.phase(), PausePhase::Running);
+        assert_eq!(pause.presentation_song(old_point).unwrap(), None);
+        let point = model
+            .observe(Some(resumed), host(16_000_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(point, output(6_000_000));
+        assert_eq!(
+            pause.presentation_song(point).unwrap(),
+            Some(Timestamp::from_nanos(49_000_000))
+        );
+        let later = observation(mixer.render(&mut [0.0; 2]).unwrap());
+        let point = model
+            .observe(Some(later), host(18_000_000))
+            .unwrap()
+            .unwrap();
+        assert_eq!(point, output(8_000_000));
+        assert_eq!(
+            pause.presentation_song(point).unwrap(),
+            Some(Timestamp::from_nanos(51_000_000))
+        );
+    }
 }
 impl AsioReplayPresentation {
     pub fn new(
@@ -361,13 +655,20 @@ impl AsioReplayPresentation {
                 u64::try_from(report.frames).map_err(|_| "ASIO replay block extent overflow")?,
             )
             .ok_or("ASIO replay physical grid overflow")?;
+        let playback_end = report
+            .playback_start_frame
+            .checked_add(
+                u64::try_from(report.playback_frames)
+                    .map_err(|_| "ASIO replay playback extent overflow")?,
+            )
+            .ok_or("ASIO replay playback grid overflow")?;
         if observation.sample_rate != self.rate
             || observation.output_origin != self.origin
             || observation.output != self.point(report.start_frame)?
             || report.frames == 0
-            || report.paused
-            || report.playback_start_frame != report.start_frame
-            || report.playback_frames != report.frames
+            || report.playback_start_frame > report.start_frame
+            || (report.paused && report.playback_frames != 0)
+            || (!report.paused && report.playback_frames != report.frames)
             || report.playback_end_physical_frame.is_some()
             || report.counters.rendered_frames != end
             || observation.host.before.domain != self.host
@@ -380,6 +681,7 @@ impl AsioReplayPresentation {
             );
         }
         self.point(end)?;
+        self.point(playback_end)?;
         if let Some(old) = self.last {
             // Anchor refresh may change a repeated block's interval; it must not
             // replace the originally admitted upper or occupy another slot.
@@ -391,6 +693,20 @@ impl AsioReplayPresentation {
                 || observation.host.after.timestamp < old.host.after.timestamp
             {
                 return Err("ASIO replay actual block or host upper frontier regressed".into());
+            }
+            let old_playback_end =
+                old.render.playback_start_frame + old.render.playback_frames as u64; // Validated on admission.
+            let old_gap = old.render.counters.rendered_frames - old_playback_end;
+            let gap = report.start_frame - report.playback_start_frame;
+            if report.playback_start_frame < old_playback_end
+                || gap < old_gap
+                || (report.start_frame == old.render.counters.rendered_frames
+                    && report.playback_start_frame != old_playback_end)
+                || (report.paused
+                    && old.render.paused
+                    && report.playback_start_frame != old_playback_end)
+            {
+                return Err("ASIO replay playback or pause gap is inconsistent".into());
             }
         }
         Ok(true)
