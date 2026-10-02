@@ -60,8 +60,8 @@ as before; this work does not remove that behavior.
 The application owns explicit bounded raster preparation and original-song
 Base/Layer composition; the adapter does not interpret native clocks or upload
 images. BMP00/Poor selections do not imply continuous poor display.
-ARGB RGB/color-key, crop and video remain outside supported
-visual semantics. Authored parser/timing/seed/limit fixtures are source-compiled
+Static cropping is defined below; ARGB RGB/color-key and video remain
+outside supported visual semantics. Authored parser/timing/seed/limit fixtures are source-compiled
 for later execution, not format conformance or native GPU acceptance.
 
 The application prepares exactly RGB (0,0,0) pixels with alpha zero for
@@ -82,8 +82,12 @@ Case-insensitive selected #POORBGA headers accept exact single digits 0, 1, or 2
 
 
 ## Second visual layer
-Channel0A maps to BgaChannel::Layer2 and shares existing independent visual-only grid compilation, nonzero undefined-resource admission, zero rests, per-channel duplicate policy, conditional selection and source caps. Simultaneous channels remain independent. Visual denominators and BPM/STOP scheduling do not change SourceChart gameplay objects/timing/keysounds when physical gameplay lines stay fixed. The app owns exact-black prepared Layer2 pixels, original-song indexing and composition above Layer1 and below activated Poor; channel opacity is defined below; ARGB RGB/color-key, crop and video remain unsupported.
+Channel0A maps to BgaChannel::Layer2 and shares existing independent visual-only grid compilation, nonzero undefined-resource admission, zero rests, per-channel duplicate policy, conditional selection and source caps. Simultaneous channels remain independent. Visual denominators and BPM/STOP scheduling do not change SourceChart gameplay objects/timing/keysounds when physical gameplay lines stay fixed. The app owns exact-black prepared Layer2 pixels, original-song indexing and composition above Layer1 and below activated Poor; channel opacity is defined below; static cropping is defined below; ARGB RGB/color-key and video remain unsupported.
 
 
 ## Independent channel opacity
-Accept channels0B..0E with nonzero hexadecimal byte tokens mapped to Base/Layer/Layer2/Poor. 00 is a rest. Preserve explicit alpha bytes in a separate typed opacity namespace, never ImageId or judged objects. Use independent per-role opacity duplicate maps and shared visual grid/ordinals/source caps/seeded conditional selection. Default opaque255, direct byte normalization alpha/255 without guessed rounding or interpolation. Combined visual counts and checked BPM/STOP rescaling bound fabricated charts too. Images and opacity scheduled by separate typed vectors remain independent of gameplay SourceChart timing/keysounds/replay identity for unchanged physical gameplay lines. SharedARGB alpha compatibility, historical threshold behavior and native conformance are not claimed without execution; ARGB directives/RGB, crop and video remain unsupported.
+Accept channels0B..0E with nonzero hexadecimal byte tokens mapped to Base/Layer/Layer2/Poor. 00 is a rest. Preserve explicit alpha bytes in a separate typed opacity namespace, never ImageId or judged objects. Use independent per-role opacity duplicate maps and shared visual grid/ordinals/source caps/seeded conditional selection. Default opaque255, direct byte normalization alpha/255 without guessed rounding or interpolation. Combined visual counts and checked BPM/STOP rescaling bound fabricated charts too. Images and opacity scheduled by separate typed vectors remain independent of gameplay SourceChart timing/keysounds/replay identity for unchanged physical gameplay lines. SharedARGB alpha compatibility, historical threshold behavior and native conformance are not claimed without execution; static cropping is defined below; ARGB directives/RGB and video remain unsupported.
+
+
+## Static BGA crop definitions
+Accept selected #BGAxx source x1 y1 x2 y2 dx dy and #@BGAxx source sx sy w h dx dy into a separate BgaCrop map. IDs00..ZZ, source one/two ASCII base36 digits (one padded); signed i32 coordinates, positive half-open extents and checked sugar endpoints. Separate BMP/crop duplicate namespaces use existing reject/last-wins and seeded branches/line caps. Crop definitions take precedence for selected IDs, including00 initialPoor; their source refers only to original BMP definitions, never another crop. Preserve gameplay/timing/audio/replay identity for unmoved gameplay lines; no IO or recursive graph. The app produces fixed256x256 transparent RGBA canvases, clamps negative source origin before drawing at dx/dy and clips actual source plus destination. This explicit bounded policy does not claim inclusive BM98 endpoints, oversized-canvas spill, historical decimal source indexing or full conformance. Unsupported video/ARGB RGB/color-key remain pending. Parser/pure-pixel/identity fixtures authored for later execution.
