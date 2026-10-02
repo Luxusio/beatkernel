@@ -1,11 +1,29 @@
 //! Bounded UTF-8 scalar editing for menus, independent of platform key events.
 pub const MAX_LINE_BYTES: usize = 4096;
 
+/// Absolute UTF-8 byte ranges in a visual preedit, never a committed selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Composition {
+    pub range: (usize, usize),
+    pub selection: Option<(usize, usize)>,
+}
+/// Borrowed field window with scalar-column decorations clipped to its text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct VisibleLine<'a> {
+    pub value: &'a str,
+    pub caret: usize,
+    /// Native preedit with no cursor range hides the caret even when its text is clipped.
+    pub caret_visible: bool,
+    pub composition: Option<(usize, usize)>,
+    pub selection: Option<(usize, usize)>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LineEditor {
     value: String,
     cursor: usize,
     max_bytes: usize,
+    composition: Option<Composition>,
 }
 impl LineEditor {
     pub fn new(value: &str, max_bytes: usize) -> Result<Self, String> {
@@ -23,6 +41,7 @@ impl LineEditor {
             value: text,
             cursor: value.len(),
             max_bytes,
+            composition: None,
         })
     }
     pub fn value(&self) -> &str {
@@ -32,7 +51,10 @@ impl LineEditor {
     pub const fn cursor(&self) -> usize {
         self.cursor
     }
-    /// Validation failure preserves both content and cursor.
+    pub const fn composition(&self) -> Option<Composition> {
+        self.composition
+    }
+    /// Validation failure preserves content, cursor and composition metadata.
     pub fn insert(&mut self, text: &str) -> Result<(), String> {
         if text.chars().any(invalid_character) {
             return Err("text input cannot contain control characters".into());
@@ -47,6 +69,7 @@ impl LineEditor {
         }
         self.value.insert_str(self.cursor, text);
         self.cursor += text.len();
+        self.composition = None;
         Ok(())
     }
     /// Creates visual composition text at the committed caret without changing
@@ -69,31 +92,43 @@ impl LineEditor {
         if let Some((start, _)) = cursor {
             preview.cursor = self.cursor + start;
         }
+        if !text.is_empty() {
+            preview.composition = Some(Composition {
+                range: (self.cursor, self.cursor + text.len()),
+                selection: cursor.map(|(start, end)| (self.cursor + start, self.cursor + end)),
+            });
+        }
         Ok(preview)
     }
     pub fn left(&mut self) {
+        self.composition = None;
         self.cursor = self.value[..self.cursor]
             .char_indices()
             .next_back()
             .map_or(0, |(at, _)| at);
     }
     pub fn right(&mut self) {
+        self.composition = None;
         if let Some(character) = self.value[self.cursor..].chars().next() {
             self.cursor += character.len_utf8();
         }
     }
     pub fn home(&mut self) {
+        self.composition = None;
         self.cursor = 0;
     }
     pub fn end(&mut self) {
+        self.composition = None;
         self.cursor = self.value.len();
     }
     pub fn backspace(&mut self) {
+        self.composition = None;
         let previous = self.cursor;
         self.left();
         self.value.replace_range(self.cursor..previous, "");
     }
     pub fn delete(&mut self) {
+        self.composition = None;
         if let Some(character) = self.value[self.cursor..].chars().next() {
             self.value
                 .replace_range(self.cursor..self.cursor + character.len_utf8(), "");
@@ -101,11 +136,34 @@ impl LineEditor {
     }
     /// A bounded scalar window and caret column using the bitmap font metrics.
     pub fn visible(&self, max_chars: usize) -> (&str, usize) {
+        let line = self.visible_line(max_chars);
+        (line.value, line.caret)
+    }
+    /// Projects preedit decorations without allocating or splitting UTF-8 scalars.
+    pub fn visible_line(&self, max_chars: usize) -> VisibleLine<'_> {
+        let caret_visible = self
+            .composition
+            .is_none_or(|composition| composition.selection.is_some());
         if max_chars == 0 {
-            return (&self.value[self.cursor..self.cursor], 0);
+            return VisibleLine {
+                value: &self.value[self.cursor..self.cursor],
+                caret: 0,
+                caret_visible,
+                composition: None,
+                selection: None,
+            };
         }
         let column = self.value[..self.cursor].chars().count();
-        let first = column.saturating_sub(max_chars);
+        let first = self.composition.map_or_else(
+            || column.saturating_sub(max_chars),
+            |composition| {
+                self.value[..composition.range.1]
+                    .chars()
+                    .count()
+                    .saturating_sub(max_chars)
+                    .min(column)
+            },
+        );
         let start = self
             .value
             .char_indices()
@@ -115,7 +173,25 @@ impl LineEditor {
             .char_indices()
             .nth(max_chars)
             .map_or(self.value.len(), |(at, _)| start + at);
-        (&self.value[start..end], column - first)
+        let value = &self.value[start..end];
+        let last = first + value.chars().count();
+        let clip = |(begin, end): (usize, usize)| {
+            let begin = self.value[..begin].chars().count().max(first);
+            let end = self.value[..end].chars().count().min(last);
+            (begin < end).then(|| (begin - first, end - first))
+        };
+        VisibleLine {
+            value,
+            caret: column - first,
+            caret_visible,
+            composition: self
+                .composition
+                .and_then(|composition| clip(composition.range)),
+            selection: self
+                .composition
+                .and_then(|composition| composition.selection)
+                .and_then(clip),
+        }
     }
 }
 fn invalid_character(character: char) -> bool {
@@ -125,6 +201,174 @@ fn invalid_character(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_missing_cursor_hides_preedit_caret_until_composition_is_cleared() {
+        let base = LineEditor::new("ab", 16).unwrap();
+        let hidden = base.preedit("音", None).unwrap();
+        assert!(!hidden.visible_line(8).caret_visible);
+        assert!(!hidden.visible_line(0).caret_visible);
+        assert_eq!(hidden.visible(8), ("ab音", 3));
+        for selection in [Some((0, 0)), Some((0, 3)), Some((3, 3))] {
+            let shown = base.preedit("音", selection).unwrap();
+            assert!(shown.visible_line(8).caret_visible);
+            assert!(shown.visible_line(0).caret_visible);
+        }
+        assert!(base.visible_line(0).caret_visible);
+        assert!(
+            base.preedit("", None)
+                .unwrap()
+                .visible_line(8)
+                .caret_visible
+        );
+        assert!(
+            hidden
+                .preedit("", None)
+                .unwrap()
+                .visible_line(0)
+                .caret_visible
+        );
+    }
+    #[test]
+    fn absolute_multibyte_composition_and_native_selection_project_scalar_columns() {
+        let mut base = LineEditor::new("a별b", 32).unwrap();
+        base.left();
+        let original = base.clone();
+        let preview = base.preedit("音é", Some((3, 5))).unwrap();
+        assert_eq!(
+            preview.composition(),
+            Some(Composition {
+                range: (4, 9),
+                selection: Some((7, 9))
+            })
+        );
+        assert_eq!(
+            preview.visible_line(8),
+            VisibleLine {
+                value: "a별音éb",
+                caret: 3,
+                caret_visible: true,
+                composition: Some((2, 4)),
+                selection: Some((3, 4))
+            }
+        );
+        assert_eq!(
+            preview.visible_line(2),
+            VisibleLine {
+                value: "音é",
+                caret: 1,
+                caret_visible: true,
+                composition: Some((0, 2)),
+                selection: Some((1, 2))
+            }
+        );
+        assert_eq!(preview.visible(2), ("音é", 1));
+        assert_eq!(base, original);
+    }
+    #[test]
+    fn selected_end_changes_equality_without_changing_value_caret_or_full_range() {
+        let base = LineEditor::new("a", 16).unwrap();
+        let collapsed = base.preedit("音é", Some((0, 0))).unwrap();
+        let selected = base.preedit("音é", Some((0, 3))).unwrap();
+        assert_eq!(collapsed.value(), selected.value());
+        assert_eq!(collapsed.cursor(), selected.cursor());
+        assert_eq!(
+            collapsed.composition().unwrap().range,
+            selected.composition().unwrap().range
+        );
+        assert_ne!(collapsed, selected);
+        assert_eq!(collapsed.visible_line(8).selection, None);
+        assert_eq!(selected.visible_line(8).selection, Some((1, 2)));
+        assert_eq!(
+            base.preedit("音é", None)
+                .unwrap()
+                .composition()
+                .unwrap()
+                .selection,
+            None
+        );
+    }
+    #[test]
+    fn long_composition_scrolls_toward_its_end_without_hiding_the_caret() {
+        let base = LineEditor::new("ab", 64).unwrap();
+        let start = base.preedit("音별éxyz", Some((0, 8))).unwrap();
+        assert_eq!(
+            start.visible_line(3),
+            VisibleLine {
+                value: "音별é",
+                caret: 0,
+                caret_visible: true,
+                composition: Some((0, 3)),
+                selection: Some((0, 3))
+            }
+        );
+        let middle = base.preedit("音별éxyz", Some((8, 11))).unwrap();
+        assert_eq!(
+            middle.visible_line(3),
+            VisibleLine {
+                value: "xyz",
+                caret: 0,
+                caret_visible: true,
+                composition: Some((0, 3)),
+                selection: Some((0, 3))
+            }
+        );
+        let end = base.preedit("音별éxyz", None).unwrap();
+        assert_eq!(
+            end.visible_line(3),
+            VisibleLine {
+                value: "xyz",
+                caret: 3,
+                caret_visible: false,
+                composition: Some((0, 3)),
+                selection: None
+            }
+        );
+        assert_eq!(
+            end.visible_line(0),
+            VisibleLine {
+                value: "",
+                caret: 0,
+                caret_visible: false,
+                composition: None,
+                selection: None
+            }
+        );
+        assert_eq!(start.visible_line(1).value, "音");
+        assert_eq!(end.visible_line(usize::MAX).value, "ab音별éxyz");
+    }
+    #[test]
+    fn rejected_edits_retain_preview_and_successful_mutations_clear_only_metadata() {
+        let base = LineEditor::new("ab", 8).unwrap();
+        let preview = base.preedit("音", Some((0, 3))).unwrap();
+        let mut rejected = preview.clone();
+        for text in ["\n", "別別"] {
+            assert!(rejected.insert(text).is_err());
+            assert_eq!(rejected, preview);
+        }
+        assert!(rejected.preedit("音", Some((1, 3))).is_err());
+        assert_eq!(rejected, preview);
+        let mut insert = preview.clone();
+        insert.insert("").unwrap();
+        assert!(insert.composition().is_none());
+        assert_eq!(insert.value(), preview.value());
+        for edit in [
+            LineEditor::left,
+            LineEditor::right,
+            LineEditor::home,
+            LineEditor::end,
+            LineEditor::backspace,
+            LineEditor::delete,
+        ] {
+            let mut edited = preview.clone();
+            edit(&mut edited);
+            assert!(edited.composition().is_none());
+            assert!(edited.value().is_char_boundary(edited.cursor()));
+        }
+        let empty = preview.preedit("", None).unwrap();
+        assert!(empty.composition().is_none());
+        assert_eq!(empty.value(), preview.value());
+        assert_eq!(base.composition(), None);
+    }
     #[test]
     fn preedit_unicode_middle_insertion_tracks_byte_cursor_and_preserves_base() {
         let mut base = LineEditor::new("a별b", 12).unwrap();
