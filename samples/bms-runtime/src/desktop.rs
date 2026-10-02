@@ -4287,13 +4287,16 @@ fn background_states(
         let members = &snapshot.players[first..(first + 4).min(snapshot.players.len())];
         for (slot, member) in members.iter().enumerate() {
             if let (Some(chart), Some(now)) = (&member.chart, member.song_time) {
-                states[slot] = chart.bga_state(now);
+                states[slot] =
+                    beatkernel_bms_runtime::poor_background::PoorBackgroundPolicy::default()
+                        .project(chart, now, member.note_progress.as_ref())?;
             }
         }
         members.len()
     } else {
         if let (Some(chart), Some(now)) = (&snapshot.chart, snapshot.song_time) {
-            states[0] = chart.bga_state(now);
+            states[0] = beatkernel_bms_runtime::poor_background::PoorBackgroundPolicy::default()
+                .project(chart, now, snapshot.note_progress.as_ref())?;
         }
         1
     };
@@ -4471,6 +4474,82 @@ mod tests {
         draw_game_with_background(&mut scene, &game, 1_000_000_000, &frames).unwrap();
     }
 
+    #[test]
+    fn poor_background_uses_each_members_prefix_and_solo_alias_without_wall_time() {
+        use beatkernel::{
+            judge::{JudgeEvent, JudgeOutcome, JudgeStage, MissReason},
+            time::Timestamp,
+        };
+        use beatkernel_bms::ImageId;
+        let source = beatkernel_bms::parse(
+            "#BPM 120\n#WAV01 tap.wav\n#00011:01\n#BMP00 poor.bmp\n#00004:01\n#00007:02\n#00106:03",
+            beatkernel_bms::ParseOptions::default(),
+        )
+        .unwrap();
+        let chart = Arc::new(
+            player_chart::PlayerChart::from_compiled(&source, &source.compile().unwrap().chart)
+                .unwrap(),
+        );
+        let event = JudgeEvent {
+            object: chart.notes[0].object,
+            stage: JudgeStage::Instant,
+            outcome: JudgeOutcome::Miss {
+                reason: MissReason::HeadTimeout,
+            },
+            at: Timestamp::ZERO,
+            input: None,
+        };
+        let mut missed =
+            beatkernel_bms_runtime::note_progress::NoteProgress::new(chart.clone()).unwrap();
+        missed.apply(&[event]);
+        let mut snapshot = player::PlayerSnapshot {
+            players: [7, u32::MAX, 2]
+                .into_iter()
+                .map(|id| player::LocalPlayerSnapshot {
+                    player: PlayerId(id),
+                    chart: Some(chart.clone()),
+                    song_time: Some(Timestamp::ZERO),
+                    score: Default::default(),
+                    last_judge: None,
+                    recent_results: vec![],
+                    pressed_lanes: 0,
+                    note_progress: Some(if id == u32::MAX {
+                        beatkernel_bms_runtime::note_progress::NoteProgress::new(chart.clone())
+                            .unwrap()
+                    } else {
+                        missed.clone()
+                    }),
+                    competition: None,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        snapshot.players[2].song_time = Some(Timestamp::from_nanos(499_999_999));
+        let (states, count) = background_states(&snapshot, 0).unwrap();
+        assert_eq!(count, 3);
+        assert_eq!(states[0].base, Some(ImageId(0)));
+        assert!(states[0].layer.is_none());
+        assert_eq!(states[1].base, Some(ImageId(1)));
+        assert_eq!(states[1].layer, Some(ImageId(2)));
+        assert_eq!(states[2], states[0]);
+        assert_eq!(states[3], BgaState::default());
+        snapshot.pause = player::PauseState::Paused;
+        assert_eq!(background_states(&snapshot, 0).unwrap().0, states);
+        snapshot.players[0].song_time = Some(Timestamp::from_nanos(500_000_000));
+        assert_eq!(background_states(&snapshot, 0).unwrap().0[0], states[1]);
+        snapshot.players.clear();
+        snapshot.chart = Some(chart.clone());
+        snapshot.song_time = Some(Timestamp::ZERO);
+        snapshot.note_progress = Some(missed);
+        assert_eq!(background_states(&snapshot, 0).unwrap().0[0], states[0]);
+        snapshot.note_progress = Some(
+            beatkernel_bms_runtime::note_progress::NoteProgress::new(Arc::new(
+                chart.as_ref().clone(),
+            ))
+            .unwrap(),
+        );
+        assert!(background_states(&snapshot, 0).is_err());
+    }
     #[test]
     fn visible_background_states_use_exact_member_clock_and_page_without_wall_time() {
         use beatkernel::time::Timestamp;

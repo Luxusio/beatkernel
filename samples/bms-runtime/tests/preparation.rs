@@ -1916,6 +1916,262 @@ fn actual_runtime_replay_and_fresh_practice_share_pre_stop_bga_song_time() {
     assert_eq!(chart.bga_state(Timestamp::ZERO).base, Some(ImageId(1)));
 }
 
+#[test]
+fn actual_timeout_capture_replay_and_native_publication_share_poor_interval() {
+    use beatkernel::{
+        input::BindingMap,
+        judge::{JudgeEngine, JudgeGrade, JudgeOutcome, JudgeProfile, JudgeWindow},
+        runtime::Runtime,
+        time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
+        transport::{Rate, Transport},
+    };
+    use beatkernel_bms::ImageId;
+    use poor_background::PoorBackgroundPolicy;
+    struct Identity;
+    impl ClockMapper for Identity {
+        fn map(&self, from: ClockPoint, to: ClockDomainId) -> Option<Timestamp> {
+            (from.domain == to).then_some(from.timestamp)
+        }
+        fn quality(&self) -> ClockMappingQuality {
+            ClockMappingQuality::Exact
+        }
+    }
+    let dir = Directory::new();
+    let text = "#BPM 60\n#WAV01 tap.wav\n#00011:01\n#BMP00 poor.bmp\n#BMP01 base.bmp\n#BMP02 changed.bmp\n#BMP03 layer.bmp\n#00004:01\n#00007:03\n#00006:00020000000000000000000000000000";
+    let path = dir.write("chart.bms", text.as_bytes());
+    for (name, color) in [
+        ("poor.bmp", [0, 0, 0]),
+        ("base.bmp", [10, 20, 30]),
+        ("changed.bmp", [30, 20, 10]),
+        ("layer.bmp", [0, 0, 30]),
+    ] {
+        dir.write(name, &raster_bmp_pixel(color));
+    }
+    let source = beatkernel_bms::parse(text, beatkernel_bms::ParseOptions::default()).unwrap();
+    let compiled = source.compile().unwrap();
+    let profile = JudgeProfile::new(
+        vec![JudgeWindow {
+            grade: JudgeGrade(1),
+            early: Duration::ZERO,
+            late: Duration::from_nanos(100_000_000),
+        }],
+        Duration::ZERO,
+    )
+    .unwrap();
+    let judge = JudgeEngine::new(compiled.chart.clone(), source.rules(), profile).unwrap();
+    let cap = competition_live::replay_limits().unwrap();
+    let mut capture =
+        replay_capture::LiveReplayCapture::new(&judge, ClockDomainId(17), cap).unwrap();
+    let (producer, _consumer) = command_queue(1).unwrap();
+    let mut runtime = Runtime::new(
+        ClockDomainId(17),
+        ClockDomainId(17),
+        Transport::new(Timestamp::ZERO, Timestamp::ZERO, Rate::NORMAL),
+        BindingMap::default(),
+        judge,
+        producer,
+        vec![],
+        0,
+    )
+    .unwrap();
+    let point = |ns| ClockPoint {
+        domain: ClockDomainId(17),
+        timestamp: Timestamp::from_nanos(ns),
+    };
+    let mut reports = vec![
+        runtime.advance_to(point(0), &Identity, point(0)).unwrap(),
+        runtime
+            .advance_to(point(150_000_000), &Identity, point(150_000_000))
+            .unwrap(),
+    ];
+    assert!(reports[0].judge_events.is_empty());
+    assert_eq!(reports[1].judge_events.len(), 1);
+    let miss = reports[1].judge_events[0];
+    assert!(matches!(miss.outcome, JudgeOutcome::Miss { .. }));
+    let expiry = miss.at.as_nanos().checked_add(500_000_000).unwrap();
+    for ns in [300_000_000, expiry] {
+        reports.push(runtime.advance_to(point(ns), &Identity, point(ns)).unwrap());
+    }
+    for report in &reports {
+        capture.record_report(report).unwrap();
+    }
+    let file = capture.into_file();
+    let file = beatkernel::replay::codec::decode_replay(
+        &beatkernel::replay::codec::encode_replay(&file, cap).unwrap(),
+        cap,
+    )
+    .unwrap();
+    let mut restored = replay_playback::reconstruct(&source, file.clone(), cap).unwrap();
+    restored.seek_cursor(file.records.len()).unwrap();
+    assert_eq!(
+        restored.engine().stable_hash().unwrap(),
+        runtime.judge().stable_hash().unwrap()
+    );
+    let (publisher, viewer) = player::channel();
+    let live = player::with_publisher(publisher, || {
+        player::publish_native_chart(
+            &path,
+            &source,
+            &compiled.chart,
+            &[local_players::PlayerId(1)],
+        )
+        .map_err(|e| e.to_string())?;
+        let mut snapshots = Vec::new();
+        for (i, report) in reports.iter().enumerate() {
+            player::publish_report(report).map_err(|e| e.to_string())?;
+            player::publish_pause(if i % 2 == 0 {
+                player::PauseState::Running
+            } else {
+                player::PauseState::Paused
+            });
+            snapshots.push(viewer.take_latest().unwrap());
+        }
+        Ok(snapshots)
+    })
+    .unwrap();
+    let policy = PoorBackgroundPolicy::default();
+    let selected = |snapshot: &player::PlayerSnapshot| {
+        policy
+            .project(
+                snapshot.chart.as_ref().unwrap(),
+                snapshot.song_time.unwrap(),
+                snapshot.note_progress.as_ref(),
+            )
+            .unwrap()
+    };
+    assert_eq!(selected(&live[0]).base, Some(ImageId(1)));
+    assert_eq!(selected(&live[1]).base, Some(ImageId(0)));
+    assert!(selected(&live[1]).layer.is_none());
+    assert_eq!(
+        live[1]
+            .images
+            .as_ref()
+            .unwrap()
+            .get(ImageId(0))
+            .unwrap()
+            .pixels(),
+        &[0, 0, 0, 255]
+    );
+    assert_eq!(selected(&live[2]).base, Some(ImageId(2)));
+    assert!(selected(&live[2]).layer.is_none());
+    assert_eq!(selected(&live[3]).base, Some(ImageId(1)));
+    assert_eq!(selected(&live[3]).layer, Some(ImageId(3)));
+    let mut visual = replay_visual::ReplayVisual::new(&source, &file, cap).unwrap();
+    let (publisher, viewer) = player::channel();
+    player::with_publisher(publisher, || {
+        player::publish_native_chart(
+            &path,
+            &source,
+            &compiled.chart,
+            &[local_players::PlayerId(1)],
+        )
+        .map_err(|e| e.to_string())?;
+        for (i, expected) in live.iter().enumerate() {
+            let now = expected.song_time.unwrap();
+            let events = visual.advance_to(now).map_err(|e| e.to_string())?;
+            player::publish_replay_prefix(now, &events).map_err(|e| e.to_string())?;
+            player::publish_pause(if i % 2 == 0 {
+                player::PauseState::Running
+            } else {
+                player::PauseState::Paused
+            });
+            let replay = viewer.take_latest().unwrap();
+            assert_eq!(selected(&replay), selected(expected));
+            assert_eq!(
+                replay.note_progress.as_ref().unwrap().last_miss(),
+                expected.note_progress.as_ref().unwrap().last_miss()
+            );
+        }
+        Ok(())
+    })
+    .unwrap();
+    let fresh_chart = std::sync::Arc::new(
+        player_chart::PlayerChart::from_compiled(&source, &compiled.chart).unwrap(),
+    );
+    let fresh = note_progress::NoteProgress::new(fresh_chart.clone()).unwrap();
+    // A fresh practice prefix at the same original-song position inherits no miss.
+    assert_eq!(
+        policy
+            .project(&fresh_chart, live[2].song_time.unwrap(), Some(&fresh))
+            .unwrap()
+            .base,
+        Some(ImageId(1))
+    );
+}
+
+#[test]
+fn full_prefix_miss_survives_recent_history_eviction_by_later_hits() {
+    use beatkernel::{
+        judge::{JudgeEvent, JudgeGrade, JudgeOutcome, JudgeStage, MissReason},
+        time::{Duration, Timestamp},
+    };
+    let source = beatkernel_bms::parse(
+        &format!(
+            "#BPM 60\n#WAV01 tap.wav\n#BMP00 poor.bmp\n#00004:01\n#00007:02\n#00011:{}",
+            "01".repeat(140)
+        ),
+        beatkernel_bms::ParseOptions::default(),
+    )
+    .unwrap();
+    let compiled = source.compile().unwrap();
+    let events: Vec<_> = compiled
+        .chart
+        .objects()
+        .iter()
+        .enumerate()
+        .map(|(i, object)| JudgeEvent {
+            object: object.id,
+            stage: JudgeStage::Instant,
+            outcome: if i == 0 {
+                JudgeOutcome::Miss {
+                    reason: MissReason::HeadTimeout,
+                }
+            } else {
+                JudgeOutcome::Hit {
+                    grade: JudgeGrade(1),
+                    delta: Duration::ZERO,
+                }
+            },
+            at: Timestamp::from_nanos(10),
+            input: None,
+        })
+        .collect();
+    let (publisher, viewer) = player::channel();
+    player::with_publisher(publisher, || {
+        player::publish_chart(&source, &compiled.chart).map_err(|e| e.to_string())?;
+        // Authored publisher-admission fixture; actual engine event parity is
+        // covered separately by the timeout/capture/reconstruct fixture.
+        player::publish_replay_prefix(Timestamp::from_nanos(10), &events)
+            .map_err(|e| e.to_string())?;
+        player::publish_pause(player::PauseState::Running);
+        let shown = viewer.take_latest().unwrap();
+        assert_eq!(shown.recent_results.len(), 128);
+        assert!(
+            shown
+                .recent_results
+                .iter()
+                .all(|e| matches!(e.outcome, JudgeOutcome::Hit { .. }))
+        );
+        assert_eq!(
+            shown.note_progress.as_ref().unwrap().last_miss(),
+            Some(Timestamp::from_nanos(10))
+        );
+        assert_eq!(
+            poor_background::PoorBackgroundPolicy::default()
+                .project(
+                    shown.chart.as_ref().unwrap(),
+                    shown.song_time.unwrap(),
+                    shown.note_progress.as_ref()
+                )
+                .unwrap()
+                .base,
+            Some(beatkernel_bms::ImageId(0))
+        );
+        Ok(())
+    })
+    .unwrap();
+}
+
 fn raster_bmp_pixel(rgb: [u8; 3]) -> Vec<u8> {
     // Original one-pixel 24-bit BMP with its four-byte padded row.
     let mut bytes = vec![0; 58];
