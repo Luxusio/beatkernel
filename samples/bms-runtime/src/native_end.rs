@@ -35,6 +35,8 @@ pub struct NativeEnd {
     last_report: Option<RenderReport>,
     physical: Option<u64>,
     emitted: bool,
+    start_frame: u64,
+    start_configured: bool,
 }
 impl NativeEnd {
     pub fn new(
@@ -58,9 +60,37 @@ impl NativeEnd {
             last_report: None,
             physical: None,
             emitted: false,
+            start_frame: 0,
+            start_configured: false,
         };
         result.point(end)?;
         Ok(result)
+    }
+    /// Configures an immutable initial physical-frame prefix before observation.
+    pub fn with_start_frame(mut self, frame: u64) -> Result<Self, EndError> {
+        if self.start_configured || self.last_pair.is_some() || self.last_report.is_some() {
+            return Err(EndError("end startup is already configured or observed"));
+        }
+        self.point(
+            frame
+                .checked_add(self.end)
+                .ok_or(EndError("startup endpoint overflow"))?,
+        )?;
+        self.start_frame = frame;
+        self.start_configured = true;
+        Ok(self)
+    }
+    fn startup_prefix(&self, report: RenderReport) -> Result<u64, EndError> {
+        Ok(u64::try_from(report.frames)
+            .map_err(|_| EndError("physical extent overflow"))?
+            .min(self.start_frame.saturating_sub(report.start_frame)))
+    }
+    fn report_gap(&self, report: RenderReport) -> Result<u64, EndError> {
+        report
+            .start_frame
+            .checked_add(self.startup_prefix(report)?)
+            .and_then(|frame| frame.checked_sub(report.playback_start_frame))
+            .ok_or(EndError("playback exceeds physical startup grid"))
     }
     fn point(&self, frame: u64) -> Result<ClockPoint, EndError> {
         let nanos = i128::from(frame) * 1_000_000_000 / i128::from(self.rate);
@@ -90,7 +120,7 @@ impl NativeEnd {
         }
         Ok(())
     }
-    fn grids(report: RenderReport) -> Result<(u64, u64), EndError> {
+    fn grids(&self, report: RenderReport) -> Result<(u64, u64), EndError> {
         let physical = report
             .start_frame
             .checked_add(
@@ -104,9 +134,28 @@ impl NativeEnd {
                     .map_err(|_| EndError("playback extent overflow"))?,
             )
             .ok_or(EndError("playback grid overflow"))?;
+        let prefix = self.startup_prefix(report)?;
+        let frames =
+            u64::try_from(report.frames).map_err(|_| EndError("physical extent overflow"))?;
+        let startup_held = self.start_frame > 0
+            && report.start_frame <= self.start_frame
+            && physical <= self.start_frame;
+        let gap = self.report_gap(report)?;
         if report.playback_start_frame > report.start_frame
-            || report.playback_frames > report.frames
-            || (!report.paused && report.playback_frames != report.frames)
+            || report.playback_frames as u64 > frames - prefix
+            || (!report.paused && report.playback_frames as u64 != frames - prefix)
+            || (report.start_frame < self.start_frame && report.playback_start_frame != 0)
+            || (startup_held && (playback != 0 || (frames > 0 && !report.paused)))
+            || (!startup_held && gap < self.start_frame)
+            || (self.start_configured
+                && self.start_frame > 0
+                && report.playback_start_frame == 0
+                && report.playback_frames > 0
+                && gap != self.start_frame)
+            || (prefix > 0
+                && prefix < frames
+                && report.paused
+                && report.playback_end_physical_frame.is_none())
             || report.counters.rendered_frames != physical
         {
             return Err(EndError("end render grids or counters are inconsistent"));
@@ -114,22 +163,33 @@ impl NativeEnd {
         Ok((physical, playback))
     }
     fn check_report(&self, report: RenderReport) -> Result<Option<u64>, EndError> {
-        let (physical, playback) = Self::grids(report)?;
+        let (physical, playback) = self.grids(report)?;
         self.point(physical)?;
         if playback > self.end {
             return Err(EndError("render exceeded configured playback end"));
         }
         if let Some(old) = self.last_report {
-            let (old_physical, old_playback) = Self::grids(old)?;
+            let (old_physical, old_playback) = self.grids(old)?;
             if report.start_frame < old.start_frame
                 || physical < old_physical
                 || playback < old_playback
-                || report.start_frame - report.playback_start_frame
-                    < old.start_frame - old.playback_start_frame
+                || self.report_gap(report)? < self.report_gap(old)?
             {
                 return Err(EndError("end render grid regressed"));
             }
         }
+        let prefix = self.startup_prefix(report)?;
+        let active_start = report
+            .start_frame
+            .checked_add(prefix)
+            .ok_or(EndError("startup prefix overflow"))?;
+        let earliest_end = self
+            .start_frame
+            .checked_add(self.end)
+            .ok_or(EndError("startup endpoint overflow"))?;
+        let startup_held = self.start_frame > 0
+            && report.start_frame <= self.start_frame
+            && physical <= self.start_frame;
         let marker = report.playback_end_physical_frame;
         if self.physical.is_some() && marker != self.physical {
             return Err(EndError(
@@ -139,18 +199,18 @@ impl NativeEnd {
         if let Some(frame) = marker {
             if !report.paused
                 || playback != self.end
-                || frame < self.end
+                || frame < earliest_end
                 || frame > physical
                 || (report.playback_frames > 0
-                    && frame != report.start_frame + report.playback_frames as u64)
-                || (report.playback_frames == 0 && frame > report.start_frame)
+                    && frame != active_start + report.playback_frames as u64)
+                || (report.playback_frames == 0 && frame > active_start)
             {
                 return Err(EndError(
                     "physical endpoint does not match the finite playback grid",
                 ));
             }
             self.point(frame)?;
-        } else if report.frames > 0 && playback == self.end {
+        } else if report.frames > 0 && !startup_held && playback == self.end {
             return Err(EndError(
                 "finite end render lacks physical endpoint evidence",
             ));
@@ -296,6 +356,9 @@ mod fixtures {
         }
     }
     fn mixer(end: u64) -> (Mixer, beatkernel::audio::CommandProducer) {
+        mixer_queue(end, false)
+    }
+    fn mixer_queue(end: u64, gated: bool) -> (Mixer, beatkernel::audio::CommandProducer) {
         let format = AudioFormat::new(1000, 1).unwrap();
         let pcm = PcmLimits::new(1024, 1024, 2).unwrap();
         let mut bank = SampleBank::new(format, pcm).unwrap();
@@ -304,7 +367,12 @@ mod fixtures {
             PcmSample::new(format, vec![0.5; 16], pcm).unwrap(),
         )
         .unwrap();
-        let (mut producer, consumer) = command_queue(8).unwrap();
+        let (mut producer, consumer) = if gated {
+            beatkernel::audio::command_queue_with_start_gate(8)
+        } else {
+            command_queue(8)
+        }
+        .unwrap();
         producer
             .try_push(AudioCommand::Play {
                 at: Timestamp::ZERO,
@@ -328,6 +396,98 @@ mod fixtures {
             .unwrap(),
             producer,
         )
+    }
+    #[test]
+    fn gated_first_block_endpoint_retains_actual_native_lower_bracket() {
+        for end in [0, 3] {
+            let (mut mixer, mut producer) = mixer_queue(end, true);
+            let mut observer = NativeEnd::new(output(0), ClockDomainId(1), 1000, end)
+                .unwrap()
+                .with_start_frame(4)
+                .unwrap();
+            observer.observe(None, pair(0)).unwrap();
+            let held = mixer.render(&mut [99.0; 2]).unwrap();
+            assert_eq!(observer.observe(Some(held), pair(1_000_000)).unwrap(), None);
+            assert_eq!(held.playback_end_physical_frame, None);
+            producer.schedule_start_at(4).unwrap();
+            let crossed = mixer.render(&mut [99.0; 6]).unwrap();
+            assert_eq!(crossed.playback_end_physical_frame, Some(4 + end));
+            assert_eq!(
+                observer.observe(Some(crossed), pair(3_000_000)).unwrap(),
+                None
+            );
+            let endpoint = (4 + end) as i64 * 1_000_000;
+            let boundary = observer.observe(None, pair(endpoint)).unwrap().unwrap();
+            assert_eq!(
+                (boundary.physical_frame, boundary.playback_frame),
+                (4 + end, end)
+            );
+            assert_eq!(boundary.output, output(endpoint));
+            assert_eq!(
+                boundary.host.timestamp,
+                Timestamp::from_nanos(endpoint + 1000)
+            );
+            assert_eq!(observer.observe(None, pair(endpoint + 1)).unwrap(), None);
+            let mut default = NativeEnd::new(output(0), ClockDomainId(1), 1000, end).unwrap();
+            assert!(default.observe(Some(crossed), pair(3_000_000)).is_err());
+            assert!(default.last_report.is_none());
+        }
+    }
+    #[test]
+    fn configured_start_accepts_unpaused_crossing_and_default_rejects_it() {
+        let (mut mixer, mut producer) = mixer_queue(16, true);
+        let mut observer = NativeEnd::new(output(0), ClockDomainId(1), 1000, 16)
+            .unwrap()
+            .with_start_frame(4)
+            .unwrap();
+        let held = mixer.render(&mut [99.0; 2]).unwrap();
+        observer.observe(Some(held), pair(0)).unwrap();
+        producer.schedule_start_at(4).unwrap();
+        let crossing = mixer.render(&mut [99.0; 4]).unwrap();
+        assert!(!crossing.paused);
+        assert_eq!(crossing.playback_frames, 2);
+        assert_eq!(
+            observer.observe(Some(crossing), pair(3_000_000)).unwrap(),
+            None
+        );
+        let mut default = NativeEnd::new(output(0), ClockDomainId(1), 1000, 16).unwrap();
+        assert!(default.observe(Some(crossing), pair(3_000_000)).is_err());
+        let before = observer.clone();
+        let mut misplaced = crossing;
+        misplaced.playback_start_frame = 1;
+        assert!(observer.observe(Some(misplaced), pair(4_000_000)).is_err());
+        assert_eq!(observer.last_report, before.last_report);
+    }
+    #[test]
+    fn startup_end_setup_shape_and_regression_rejections_are_atomic() {
+        let fresh = || NativeEnd::new(output(0), ClockDomainId(1), 1000, 3).unwrap();
+        assert!(
+            fresh()
+                .with_start_frame(0)
+                .unwrap()
+                .with_start_frame(0)
+                .is_err()
+        );
+        assert!(fresh().with_start_frame(u64::MAX).is_err());
+        let mut observed = fresh();
+        observed.observe(None, pair(0)).unwrap();
+        assert!(observed.with_start_frame(4).is_err());
+        let (mut mixer, mut producer) = mixer_queue(3, true);
+        producer.schedule_start_at(4).unwrap();
+        let held = mixer.render(&mut [99.0; 2]).unwrap();
+        let crossed = mixer.render(&mut [99.0; 6]).unwrap();
+        let mut observer = fresh().with_start_frame(4).unwrap();
+        observer.observe(Some(held), pair(0)).unwrap();
+        let before = observer.clone();
+        let mut malformed = crossed;
+        malformed.playback_frames += 1;
+        assert!(observer.observe(Some(malformed), pair(1_000_000)).is_err());
+        assert_eq!(observer.last_report, before.last_report);
+        observer.observe(Some(crossed), pair(3_000_000)).unwrap();
+        let before = observer.clone();
+        assert!(observer.observe(Some(held), pair(4_000_000)).is_err());
+        assert_eq!(observer.last_report, before.last_report);
+        assert_eq!(observer.physical, before.physical);
     }
     fn asio(
         render: RenderReport,

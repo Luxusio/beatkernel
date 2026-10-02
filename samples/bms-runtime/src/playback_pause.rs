@@ -49,6 +49,8 @@ pub struct NativePause {
     playback_end: Option<u64>,
     end_marker: Option<u64>,
     setup_locked: bool,
+    start_frame: u64,
+    start_configured: bool,
 }
 impl NativePause {
     pub fn new(
@@ -75,7 +77,30 @@ impl NativePause {
             playback_end: None,
             end_marker: None,
             setup_locked: false,
+            start_frame: 0,
+            start_configured: false,
         })
+    }
+    /// Configures initial silent physical frames before any request/observation.
+    /// Playback scheduling remains relative to logical frame zero.
+    pub fn with_start_frame(mut self, frame: u64) -> Result<Self, PauseError> {
+        if self.setup_locked
+            || self.last_pair.is_some()
+            || self.last_report.is_some()
+            || self.start_configured
+        {
+            return Err(PauseError(
+                "pause startup is already configured or observed",
+            ));
+        }
+        let physical_end = frame
+            .checked_add(self.playback_end.unwrap_or(0))
+            .ok_or(PauseError("startup endpoint overflow"))?;
+        self.point(physical_end)?;
+        self.start_frame = frame;
+        self.start_configured = true;
+        self.gap = frame;
+        Ok(self)
     }
     /// Opts into one immutable endpoint before any request or clock/report
     /// observation. Unlimited owners retain strict manual-pause validation.
@@ -89,7 +114,11 @@ impl NativePause {
                 "finite pause setup is already configured or observed",
             ));
         }
-        self.point(end)?;
+        self.point(
+            self.start_frame
+                .checked_add(end)
+                .ok_or(PauseError("startup endpoint overflow"))?,
+        )?;
         self.playback_end = Some(end);
         Ok(self)
     }
@@ -146,6 +175,18 @@ impl NativePause {
             timestamp: Timestamp::from_nanos(value),
         })
     }
+    fn startup_prefix(&self, report: RenderReport) -> Result<u64, PauseError> {
+        Ok(u64::try_from(report.frames)
+            .map_err(|_| PauseError("render extent overflow"))?
+            .min(self.start_frame.saturating_sub(report.start_frame)))
+    }
+    fn report_gap(&self, report: RenderReport) -> Result<u64, PauseError> {
+        report
+            .start_frame
+            .checked_add(self.startup_prefix(report)?)
+            .and_then(|frame| frame.checked_sub(report.playback_start_frame))
+            .ok_or(PauseError("playback grid exceeds physical grid"))
+    }
     fn check_report(&self, report: RenderReport) -> Result<(u64, u64, u64), PauseError> {
         let physical = report
             .start_frame
@@ -160,12 +201,27 @@ impl NativePause {
                     .map_err(|_| PauseError("playback extent overflow"))?,
             )
             .ok_or(PauseError("playback frame overflow"))?;
-        let gap = report
-            .start_frame
-            .checked_sub(report.playback_start_frame)
-            .ok_or(PauseError("playback grid exceeds physical grid"))?;
-        if report.playback_frames > report.frames
-            || (!report.paused && report.playback_frames != report.frames)
+        let prefix = self.startup_prefix(report)?;
+        let frames =
+            u64::try_from(report.frames).map_err(|_| PauseError("render extent overflow"))?;
+        let gap = self.report_gap(report)?;
+        let startup_held = self.start_frame > 0
+            && physical <= self.start_frame
+            && report.start_frame <= self.start_frame;
+        if report.playback_frames as u64 > frames - prefix
+            || (!report.paused && report.playback_frames as u64 != frames - prefix)
+            || (report.start_frame < self.start_frame && report.playback_start_frame != 0)
+            || (startup_held && (playback != 0 || (frames > 0 && !report.paused)))
+            || (!startup_held && gap < self.start_frame)
+            || (self.start_configured
+                && self.start_frame > 0
+                && report.playback_start_frame == 0
+                && report.playback_frames > 0
+                && gap != self.start_frame)
+            || (prefix > 0
+                && prefix < frames
+                && report.paused
+                && report.playback_end_physical_frame.is_none())
         {
             return Err(PauseError("render pause extent is inconsistent"));
         }
@@ -185,14 +241,15 @@ impl NativePause {
                         .ok_or(PauseError("physical endpoint precedes playback endpoint"))?;
                     let prefix_end = report
                         .start_frame
-                        .checked_add(report.playback_frames as u64)
+                        .checked_add(prefix)
+                        .and_then(|frame| frame.checked_add(report.playback_frames as u64))
                         .ok_or(PauseError("endpoint prefix overflow"))?;
                     if !report.paused
                         || playback != expected
                         || marker > physical
                         || manual_gap < self.gap
                         || (report.playback_frames > 0 && marker != prefix_end)
-                        || (report.playback_frames == 0 && marker > report.start_frame)
+                        || (report.playback_frames == 0 && marker > report.start_frame + prefix)
                         || self.end_marker.is_some_and(|old| old != marker)
                     {
                         return Err(PauseError(
@@ -200,7 +257,9 @@ impl NativePause {
                         ));
                     }
                     self.point(marker)?;
-                } else if self.end_marker.is_some() || (report.frames > 0 && playback == expected) {
+                } else if self.end_marker.is_some()
+                    || (report.frames > 0 && !startup_held && playback == expected)
+                {
                     return Err(PauseError("reached endpoint lost its physical marker"));
                 }
             }
@@ -218,7 +277,7 @@ impl NativePause {
             if report.start_frame < old.start_frame
                 || physical < old_end
                 || playback < old_play_end
-                || gap < old.start_frame - old.playback_start_frame
+                || gap < self.report_gap(old)?
             {
                 return Err(PauseError("render report grid regressed"));
             }
@@ -232,7 +291,11 @@ impl NativePause {
     }
     /// Applies the cumulative gap once, avoiding per-pause rounding drift.
     pub fn song_origin_after_pause(&self, original: Timestamp) -> Result<Timestamp, PauseError> {
-        let gap = i128::from(self.gap) * 1_000_000_000 / i128::from(self.rate);
+        let manual_gap = self
+            .gap
+            .checked_sub(self.start_frame)
+            .ok_or(PauseError("manual pause gap precedes startup"))?;
+        let gap = i128::from(manual_gap) * 1_000_000_000 / i128::from(self.rate);
         let value = i128::from(original.as_nanos())
             .checked_sub(gap)
             .and_then(|value| i64::try_from(value).ok())
@@ -256,10 +319,14 @@ impl NativePause {
     ) -> Result<Option<PauseBoundary>, PauseError> {
         self.check_pair(pair)?;
         if let Some(report) = report {
-            let (_, playback, gap) = self.check_report(report)?;
+            let (physical, playback, gap) = self.check_report(report)?;
+            let startup_held = self.start_frame > 0
+                && report.start_frame <= self.start_frame
+                && physical <= self.start_frame;
             let terminal_marker = report.playback_end_physical_frame;
             if matches!(self.phase, PausePhase::Running | PausePhase::Pausing)
                 && !report.paused
+                && !startup_held
                 && gap != self.gap
             {
                 return Err(PauseError(
@@ -275,14 +342,19 @@ impl NativePause {
                 ));
             }
             match self.phase {
-                PausePhase::Running if report.paused && terminal_marker.is_none() => {
+                PausePhase::Running
+                    if report.paused && terminal_marker.is_none() && !startup_held =>
+                {
                     return Err(PauseError("unexpected paused render while running"));
                 }
                 PausePhase::Paused if !report.paused => {
                     return Err(PauseError("unexpected active render while paused"));
                 }
                 PausePhase::Pausing
-                    if report.paused && report.frames > 0 && self.boundary.is_none() =>
+                    if report.paused
+                        && report.frames > 0
+                        && !startup_held
+                        && self.boundary.is_none() =>
                 {
                     if gap < self.gap {
                         return Err(PauseError("pause gap regressed"));
@@ -721,6 +793,12 @@ mod fixtures {
         );
     }
     fn finite_mixer(end: u64) -> (beatkernel::audio::CommandProducer, beatkernel::audio::Mixer) {
+        mixer_queue(end, false)
+    }
+    fn mixer_queue(
+        end: u64,
+        gated: bool,
+    ) -> (beatkernel::audio::CommandProducer, beatkernel::audio::Mixer) {
         use beatkernel::audio::*;
         let format = AudioFormat::new(1000, 1).unwrap();
         let limits = AudioLimits::new(8, 2, 8, 32, 8).unwrap();
@@ -731,7 +809,12 @@ mod fixtures {
             PcmSample::new(format, vec![0.25; 16], pcm_limits).unwrap(),
         )
         .unwrap();
-        let (mut producer, consumer) = command_queue(8).unwrap();
+        let (mut producer, consumer) = if gated {
+            command_queue_with_start_gate(8)
+        } else {
+            command_queue(8)
+        }
+        .unwrap();
         producer
             .try_push(AudioCommand::Play {
                 voice: VoiceId(1),
@@ -743,6 +826,126 @@ mod fixtures {
         let config = MixerConfig::new(format, ClockDomainId(1), Timestamp::ZERO, limits)
             .with_playback_end_frame(end);
         (producer, Mixer::new(config, bank, consumer).unwrap())
+    }
+    #[test]
+    fn gated_start_hold_crossing_and_manual_pause_keep_logical_schedule() {
+        let (mut producer, mut mixer) = mixer_queue(16, true);
+        let mut pause = NativePause::new(point(1, 0), ClockDomainId(2), 1000)
+            .unwrap()
+            .with_playback_end_frame(16)
+            .unwrap()
+            .with_start_frame(4)
+            .unwrap();
+        pause.observe(None, pair(0)).unwrap();
+        let empty = mixer.render(&mut []).unwrap();
+        assert_eq!(pause.observe(Some(empty), pair(0)).unwrap(), None);
+        let held = mixer.render(&mut [99.0; 2]).unwrap();
+        assert!(held.paused);
+        assert_eq!(pause.observe(Some(held), pair(1_000_000)).unwrap(), None);
+        assert_eq!(pause.phase(), PausePhase::Running);
+        producer.schedule_start_at(4).unwrap();
+        let mut output = [99.0; 4];
+        let active = mixer.render(&mut output).unwrap();
+        assert_eq!(output, [0.0, 0.0, 0.25, 0.25]);
+        assert!(!active.paused);
+        assert_eq!(pause.observe(Some(active), pair(5_000_000)).unwrap(), None);
+        assert_eq!(pause.scheduling_point(active).unwrap(), point(1, 2_000_000));
+        assert_eq!(
+            pause.song_origin_after_pause(Timestamp::ZERO).unwrap(),
+            Timestamp::ZERO
+        );
+        let mut default = NativePause::new(point(1, 0), ClockDomainId(2), 1000)
+            .unwrap()
+            .with_playback_end_frame(16)
+            .unwrap();
+        assert!(default.observe(Some(active), pair(5_000_000)).is_err());
+        assert!(default.last_report.is_none());
+        pause.request(true, pair(5_000_000)).unwrap();
+        producer.request_pause(true);
+        let frozen = mixer.render(&mut [99.0; 2]).unwrap();
+        assert_eq!(
+            pause
+                .observe(Some(frozen), pair(6_000_000))
+                .unwrap()
+                .unwrap()
+                .playback_frame,
+            2
+        );
+        pause.request(false, pair(7_000_000)).unwrap();
+        producer.request_pause(false);
+        let resumed = mixer.render(&mut [99.0; 2]).unwrap();
+        let boundary = pause
+            .observe(Some(resumed), pair(8_000_000))
+            .unwrap()
+            .unwrap();
+        assert!(!boundary.paused);
+        assert_eq!(boundary.host, point(2, 8_010_000));
+        assert_eq!(boundary.playback_frame, 2);
+        assert_eq!(
+            pause.song_origin_after_pause(Timestamp::ZERO).unwrap(),
+            Timestamp::from_nanos(-2_000_000)
+        );
+        assert_eq!(
+            pause.scheduling_point(resumed).unwrap(),
+            point(1, 4_000_000)
+        );
+    }
+    #[test]
+    fn gated_finite_first_prefix_and_zero_endpoint_preserve_strict_setup() {
+        for end in [0, 3] {
+            let (mut producer, mut mixer) = mixer_queue(end, true);
+            let mut pause = NativePause::new(point(1, 0), ClockDomainId(2), 1000)
+                .unwrap()
+                .with_start_frame(4)
+                .unwrap()
+                .with_playback_end_frame(end)
+                .unwrap();
+            let held = mixer.render(&mut [99.0; 2]).unwrap();
+            assert_eq!(pause.observe(Some(held), pair(0)).unwrap(), None);
+            producer.schedule_start_at(4).unwrap();
+            let crossed = mixer.render(&mut [99.0; 6]).unwrap();
+            assert_eq!(crossed.playback_end_physical_frame, Some(4 + end));
+            assert_eq!(pause.observe(Some(crossed), pair(4_000_000)).unwrap(), None);
+            assert_eq!(pause.phase(), PausePhase::Running);
+            let before = pause.clone();
+            let mut malformed = crossed;
+            malformed.playback_end_physical_frame = Some(3 + end);
+            assert!(pause.observe(Some(malformed), pair(5_000_000)).is_err());
+            assert_eq!(pause.last_report, before.last_report);
+        }
+        let fresh = || NativePause::new(point(1, 0), ClockDomainId(2), 1000).unwrap();
+        assert!(fresh().with_start_frame(u64::MAX).is_err());
+        assert!(
+            fresh()
+                .with_start_frame(0)
+                .unwrap()
+                .with_start_frame(0)
+                .is_err()
+        );
+        let mut observed = fresh();
+        observed.observe(None, pair(0)).unwrap();
+        assert!(observed.with_start_frame(4).is_err());
+        let mut requested = fresh();
+        requested.request(false, pair(0)).unwrap();
+        assert!(requested.with_start_frame(4).is_err());
+        // At the exact target, an empty telemetry call still cannot open the gate.
+        let (mut producer, mut mixer) = mixer_queue(0, true);
+        producer.schedule_start_at(4).unwrap();
+        let mut at_target = fresh()
+            .with_start_frame(4)
+            .unwrap()
+            .with_playback_end_frame(0)
+            .unwrap();
+        let held = mixer.render(&mut [99.0; 4]).unwrap();
+        at_target.observe(Some(held), pair(0)).unwrap();
+        let empty = mixer.render(&mut []).unwrap();
+        assert_eq!(
+            at_target.observe(Some(empty), pair(1_000_000)).unwrap(),
+            None
+        );
+        assert_eq!(at_target.phase(), PausePhase::Running);
+        let finite = fresh().with_playback_end_frame(1).unwrap();
+        assert!(finite.with_start_frame(u64::MAX).is_err());
     }
     #[test]
     fn finite_running_and_pending_pause_use_actual_retained_marker() {
