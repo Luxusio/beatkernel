@@ -215,7 +215,7 @@ Worker adapter and shared numeric helpers. Execute only when the deferred test
 phase is resumed:
 
 ```sh
-node --experimental-vm-modules --test samples/bms-runtime/web/play-model.test.mjs samples/bms-runtime/web/play-worker.test.mjs samples/bms-runtime/web/audio-host.test.mjs samples/bms-runtime/web/worker.test.mjs
+node --experimental-vm-modules --test samples/bms-runtime/web/play-model.test.mjs samples/bms-runtime/web/play-worker.test.mjs samples/bms-runtime/web/play-host.test.mjs samples/bms-runtime/web/audio-host.test.mjs samples/bms-runtime/web/worker.test.mjs
 ```
 
 No JS assertions, browser runtime, generated bindings or audio output have been
