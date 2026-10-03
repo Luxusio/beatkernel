@@ -154,11 +154,61 @@ export const KEY_BINDINGS = Object.freeze([
   [0x26, "ShiftRight", 10], [0x21, "KeyN", 11], [0x22, "KeyJ", 12], [0x23, "KeyM", 13],
   [0x24, "KeyK", 14], [0x25, "Comma", 15], [0x28, "KeyL", 16], [0x29, "Period", 17], [0x27, "Slash", 18],
 ].map(row => Object.freeze(row)));
-export function bindingsFor(lanes) {
+
+// W3C KeyboardEvent.code names; IDs are this browser app's source namespace.
+// Keep all assigned IDs, including 19+, fixed; append future choices with new IDs.
+export const KEY_CHOICES = Object.freeze([
+  ...KEY_BINDINGS.map(([, code, id]) => [code, id]),
+  ["KeyA", 19], ["KeyB", 20], ["KeyE", 21], ["KeyG", 22], ["KeyH", 23], ["KeyI", 24],
+  ["KeyO", 25], ["KeyP", 26], ["KeyQ", 27], ["KeyR", 28], ["KeyT", 29], ["KeyU", 30], ["KeyW", 31], ["KeyY", 32],
+  ["Digit0", 33], ["Digit1", 34], ["Digit2", 35], ["Digit3", 36], ["Digit4", 37],
+  ["Digit5", 38], ["Digit6", 39], ["Digit7", 40], ["Digit8", 41], ["Digit9", 42],
+  ["Backquote", 43], ["Minus", 44], ["Equal", 45], ["BracketLeft", 46], ["BracketRight", 47],
+  ["Backslash", 48], ["Semicolon", 49], ["Quote", 50], ["IntlBackslash", 51], ["IntlRo", 52], ["IntlYen", 53],
+  ["ArrowLeft", 54], ["ArrowDown", 55], ["ArrowUp", 56], ["ArrowRight", 57],
+  ["Numpad0", 58], ["Numpad1", 59], ["Numpad2", 60], ["Numpad3", 61], ["Numpad4", 62],
+  ["Numpad5", 63], ["Numpad6", 64], ["Numpad7", 65], ["Numpad8", 66], ["Numpad9", 67],
+  ["NumpadDecimal", 68], ["NumpadComma", 69], ["NumpadAdd", 70], ["NumpadSubtract", 71],
+  ["NumpadMultiply", 72], ["NumpadDivide", 73], ["NumpadEnter", 74], ["NumpadEqual", 75],
+  ["ControlLeft", 76], ["ControlRight", 77], ["Enter", 78], ["Backspace", 79], ["Tab", 80],
+].map(row => Object.freeze(row)));
+const keyIds = new Map(KEY_CHOICES);
+const knownLanes = new Set(KEY_BINDINGS.map(row => row[0]));
+
+export function snapshotBindings(rows) {
+  if (!Array.isArray(rows) || rows.length > 18) throw new Error("Keyboard bindings must contain at most 18 lane rows.");
+  const lanes = new Set();
+  const codes = new Set();
+  const selected = [];
+  for (const row of rows) {
+    if (!Array.isArray(row) || row.length !== 2 || !knownLanes.has(row[0])
+      || typeof row[1] !== "string" || row[1].length > 32 || lanes.has(row[0])) throw new Error("Keyboard binding rows need unique supported lanes and physical key codes.");
+    const [lane, code] = row;
+    lanes.add(lane);
+    if (code === "") continue;
+    const id = keyIds.get(code);
+    if (id === undefined) throw new Error("Choose a supported physical key; Escape is reserved for Stop.");
+    if (codes.has(code)) throw new Error(`Keyboard key ${code} is assigned to more than one lane.`);
+    codes.add(code);
+    selected.push(Object.freeze([lane, code, id]));
+  }
+  return Object.freeze(selected);
+}
+
+export function bindingsFor(lanes, selection = KEY_BINDINGS) {
   if (!(lanes instanceof Uint8Array) && !Array.isArray(lanes)) throw new Error("Invalid prepared lanes.");
   if (lanes.length > 18 || new Set(lanes).size !== lanes.length) throw new Error("Invalid prepared lane count.");
+  let selected = selection;
+  if (selection !== KEY_BINDINGS) {
+    if (!Array.isArray(selection) || selection.length > 18) throw new Error("Invalid keyboard binding snapshot.");
+    selected = snapshotBindings(Array.from(selection, row => {
+      if (!Array.isArray(row) || row.length !== 3 || typeof row[1] !== "string" || row[1].length > 32
+        || !keyIds.has(row[1]) || keyIds.get(row[1]) !== row[2]) throw new Error("Keyboard binding snapshot has an unknown physical key identity.");
+      return [row[0], row[1]];
+    }));
+  }
   return Array.from(lanes, lane => {
-    const binding = KEY_BINDINGS.find(row => row[0] === lane);
+    const binding = selected.find(row => row[0] === lane);
     if (!binding) throw new Error("Prepared lane has no keyboard mapping.");
     return binding;
   });

@@ -40,6 +40,11 @@
         <label>Late window (ms) <input id="judge-late" type="text" inputmode="decimal" value="50" maxlength="21" disabled></label>
         <label>Input offset (ms) <input id="judge-offset" type="text" inputmode="decimal" value="0" maxlength="21" disabled></label></div>
       <p class="hint">Live judge windows are nonnegative; input offset may be signed. Use up to six decimal places. Replay uses its recorded judge. Saved opponents and multiplayer require compatible timing settings.</p>
+      <details class="binding-editor"><summary>Keyboard bindings</summary>
+        <div id="bindings" aria-label="Live lane keyboard bindings"></div>
+        <button id="bindings-reset" type="button" disabled>Reset keyboard defaults</button>
+        <p class="hint">Choose physical key positions for each lane. Unbound lanes must be absent from the prepared chart; one key can belong to only one lane. These page-local settings affect live play. Replay uses recorded inputs, and Escape always stops playback. Browser or system shortcuts may prevent some keys from reaching the game.</p>
+      </details>
       <p><button id="play" type="button" disabled>Play live</button> <button id="stop" type="button" disabled>Stop</button></p>
       <div class="replay-controls"><label><input id="multiplayer" type="checkbox" disabled> Multiplayer live play</label>
         <label>Server <input id="multiplayer-url" type="url" placeholder="https://server.example/room" maxlength="4096" disabled></label>

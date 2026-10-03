@@ -2,10 +2,10 @@ import { snapshotFiles, nanoseconds, seconds } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
 import { RecordsStore } from "./record-store.mjs";
 import { SavedOpponentSelection, opponentLabel, validateOpponentSnapshot } from "./saved-opponents.mjs";
-import { KEY_BINDINGS, PLAY_PCM_SAMPLES, bindingsFor, timingFromMilliseconds, startFromSeconds, validateStart, millisecondsToNanos, frameNanos, startProjection, committedStartProjection, presentationPair } from "./play-model.mjs";
+import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, startFromSeconds, validateStart, millisecondsToNanos, frameNanos, startProjection, committedStartProjection, presentationPair } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
-const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start"].map(id => [id, byId(id)]));
+const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "bindings", "bindings-reset"].map(id => [id, byId(id)]));
 let canvas = byId("canvas");
 let worker = null;
 let observer = null;
@@ -35,6 +35,26 @@ let importedReplayKeys = new WeakMap();
 let importedReplayId = 0;
 let opponentButtons = [];
 let opponentResultRows = [];
+const bindingFields = createBindingFields();
+
+function createBindingFields() {
+  const rows = document.createDocumentFragment();
+  const fields = KEY_BINDINGS.map(([lane, code]) => {
+    const label = document.createElement("label");
+    label.textContent = `Lane ${lane.toString(16).toUpperCase()}`;
+    const field = document.createElement("select");
+    field.id = `binding-${lane.toString(16)}`;
+    field.disabled = true;
+    field.append(new Option("Unbound", ""));
+    for (const [choice] of KEY_CHOICES) field.append(new Option(choice, choice));
+    field.value = code;
+    label.append(field);
+    rows.append(label);
+    return [lane, field];
+  });
+  ui.bindings.append(rows);
+  return fields;
+}
 
 function status(text, error = false) {
   ui.status.textContent = text;
@@ -56,6 +76,8 @@ function controls() {
   ui["replay-file"].disabled = !initialized || importing || preparing || playing || busy;
   ui["replay-play"].disabled = ui.play.disabled || selectedReplay === null;
   const recordsDisabled = !initialized || importing || preparing || playing || busy;
+  ui["bindings-reset"].disabled = recordsDisabled;
+  for (const [, field] of bindingFields) field.disabled = recordsDisabled;
   for (const field of [ui["judge-early"], ui["judge-late"], ui["judge-offset"], ui["live-start"]]) field.disabled = recordsDisabled;
   ui.records.disabled = ui["records-refresh"].disabled = recordsDisabled;
   ui["records-save"].disabled = recordsDisabled || lastReplay === null;
@@ -280,6 +302,11 @@ ui["replay-file"].addEventListener("change", event => {
   finally { event.target.value = ""; }
 });
 ui.stop.addEventListener("click", () => { void stopPlay("Playback stopped."); });
+ui["bindings-reset"].addEventListener("click", () => {
+  if (!initialized || importing || preparing || activePlay || recordsOperation) return;
+  for (let index = 0; index < bindingFields.length; index++) bindingFields[index][1].value = KEY_BINDINGS[index][1];
+  status("Keyboard bindings reset to defaults.");
+});
 ui.export.addEventListener("click", downloadReplay);
 ui.records.addEventListener("change", controls);
 for (const [id, action] of [["records-refresh", "refresh"], ["records-save", "save"], ["records-use", "use"], ["records-delete", "delete"], ["records-opponent", "opponent"]]) {
@@ -388,6 +415,7 @@ async function play(mode = "live") {
   try {
     session.timing = mode === "live" ? timingFromMilliseconds(ui["judge-early"].value, ui["judge-late"].value, ui["judge-offset"].value) : null;
     session.startNs = mode === "live" ? startFromSeconds(ui["live-start"].value) : null;
+    session.bindingSelection = mode === "live" ? snapshotBindings(bindingFields.map(([lane, field]) => [lane, field.value])) : null;
     session.multiplayer = mode === "live" && ui.multiplayer.checked === true ? multiplayerConfiguration() : null;
     ui["multiplayer-status"].textContent = session.multiplayer ? "Preparing local audio before connecting…"
       : mode === "replay" ? "Local replay · no multiplayer connection." : "Solo play selected.";
@@ -406,7 +434,7 @@ async function play(mode = "live") {
       : { mode, seed: ui.seed.value, recordReplay: session.recordReplay, timing: session.timing, startNs: session.startNs,
         ...(session.multiplayer ? { multiplayer: session.multiplayer } : {}),
         ...(session.opponentSelection ? { opponents: session.opponentSelection } : {}),
-        keyPairs: Uint32Array.from(KEY_BINDINGS.flatMap(row => [row[0], row[2]])) };
+        keyPairs: Uint32Array.from(session.bindingSelection.flatMap(row => [row[0], row[2]])) };
     const prepared = await playRpc(session, "play-start", { libraryId, path: ui.chart.value,
       rate: session.audio.sampleRate, ...source });
     if (mode === "replay" ? prepared.mode !== "replay" : prepared.mode !== undefined && prepared.mode !== "live") throw new Error("Playback preparation mode changed.");
@@ -421,7 +449,7 @@ async function play(mode = "live") {
     session.opponentSelection = null;
     ui.title.textContent = prepared.title || ui.chart.value;
     ui.details.textContent = `${prepared.artist || "Unknown artist"} · ${prepared.notes} notes · ${prepared.samples} sounds · ${session.audio.sampleRate} Hz output · start ${seconds(preparedStart.toString())} s`;
-    session.bindings = mode === "replay" ? [] : bindingsFor(prepared.lanes);
+    session.bindings = mode === "replay" ? [] : bindingsFor(prepared.lanes, session.bindingSelection);
     ui.keys.textContent = mode === "replay" ? "Recorded input playback · Escape stops the replay."
       : session.bindings.map(row => `${row[0].toString(16).toUpperCase()}: ${row[1]}`).join(" · ");
     for (let index = 0; index < prepared.samples; index++) {
