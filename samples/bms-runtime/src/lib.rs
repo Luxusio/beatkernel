@@ -98,6 +98,10 @@ pub mod multiplayer_start;
 /// Actual optional HTTP/3 WebTransport relay with bounded stream ownership.
 #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
 pub mod multiplayer_webtransport;
+/// Native relay client metadata and optional HTTP/3 WebTransport ownership.
+pub mod multiplayer_webtransport_client;
+#[cfg(test)]
+mod multiplayer_webtransport_client_fixtures;
 #[cfg(all(test, not(target_arch = "wasm32"), feature = "webtransport"))]
 mod multiplayer_webtransport_fixtures;
 /// Common queue, rolling BGM and mixer construction/replenishment.

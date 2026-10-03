@@ -233,7 +233,7 @@ impl ServerOptions {
     }
 }
 
-fn valid_origin(origin: &str) -> bool {
+pub(crate) fn valid_origin(origin: &str) -> bool {
     if origin.is_empty() || origin.len() > 4096 {
         return false;
     }
@@ -285,7 +285,7 @@ fn credential_bytes(path: &Path) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn pem_sections(bytes: &[u8], key: bool) -> io::Result<usize> {
+pub(crate) fn pem_sections(bytes: &[u8], key: bool) -> io::Result<usize> {
     if bytes.is_empty() || bytes.len() > FILE_LIMIT {
         return Err(invalid("PEM must contain 1..=1048576 bytes"));
     }

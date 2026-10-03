@@ -78,6 +78,10 @@ fn validate_name(name: &str) -> io::Result<()> {
 pub use native::{QuicEndpoint, QuicStream};
 #[cfg(all(not(target_arch = "wasm32"), test))]
 pub(crate) use native::{client_config, server_config};
+#[cfg(all(not(target_arch = "wasm32"), any(test, feature = "webtransport")))]
+pub(crate) use native::client_tls;
+#[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
+pub(crate) use native::{read_credential, wait};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
@@ -129,7 +133,7 @@ mod native {
         }
         Ok(())
     }
-    fn read_credential(path: &Path) -> io::Result<Vec<u8>> {
+    pub(crate) fn read_credential(path: &Path) -> io::Result<Vec<u8>> {
         // Check before open as well so ordinary directory/device/FIFO paths do
         // not enter the read path. Recheck the actual opened regular file.
         let metadata = fs::metadata(path)?;
@@ -248,6 +252,17 @@ mod native {
     pub(crate) fn client_config(ca_bytes: &[u8], name: &str) -> io::Result<ClientConfig> {
         validate_name(name)?;
         ServerName::try_from(name).map_err(|_| invalid("invalid QUIC TLS server name"))?;
+        let tls = client_tls(ca_bytes, ALPN)?;
+        let crypto = QuicClientConfig::try_from(tls)
+            .map_err(|_| data_error("invalid QUIC client TLS configuration"))?;
+        let mut config = ClientConfig::new(Arc::new(crypto));
+        config.transport_config(Arc::new(transport(false)));
+        Ok(config)
+    }
+
+    /// Shared explicit trust anchors, TLS 1.3 and no early data. Each transport
+    /// supplies its genuine ALPN; URL/name verification remains with its caller.
+    pub(crate) fn client_tls(ca_bytes: &[u8], alpn: &[u8]) -> io::Result<rustls::ClientConfig> {
         let mut roots = rustls::RootCertStore::empty();
         for certificate in certificates(ca_bytes)? {
             roots
@@ -260,13 +275,9 @@ mod native {
             .map_err(|_| data_error("invalid QUIC TLS provider"))?
             .with_root_certificates(roots)
             .with_no_client_auth();
-        tls.alpn_protocols = vec![ALPN.to_vec()];
+        tls.alpn_protocols = vec![alpn.to_vec()];
         tls.enable_early_data = false;
-        let crypto = QuicClientConfig::try_from(tls)
-            .map_err(|_| data_error("invalid QUIC client TLS configuration"))?;
-        let mut config = ClientConfig::new(Arc::new(crypto));
-        config.transport_config(Arc::new(transport(false)));
-        Ok(config)
+        Ok(tls)
     }
 
     enum Prepared {
@@ -400,7 +411,7 @@ mod native {
         }
     }
 
-    fn wait<F: Future>(
+    pub(crate) fn wait<F: Future>(
         runtime: &Runtime,
         future: F,
         stop: &AtomicBool,

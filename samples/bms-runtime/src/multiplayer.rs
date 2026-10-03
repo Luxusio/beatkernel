@@ -12,7 +12,10 @@ use crate::multiplayer_protocol::{
     ClockProbes, Protocol, VERSION, frame, parse_progress, parse_start_frame, prefix_frame,
     progress_frame, start_frame,
 };
-use crate::multiplayer_quic::{QuicCredentials, QuicEndpoint as Endpoint};
+use crate::multiplayer_quic::{QuicCredentials, QuicEndpoint, QuicStream};
+use crate::multiplayer_webtransport_client::WebTransportOptions;
+#[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
+use crate::multiplayer_webtransport_client::{WebTransportEndpoint, WebTransportStream};
 #[cfg(test)]
 use crate::multiplayer_start::StartMessage;
 use crate::multiplayer_start::{StartPolicy, StartSchedule};
@@ -36,6 +39,78 @@ use std::{
 };
 
 const TICK: Duration = Duration::from_millis(5);
+
+// Transport ownership varies; framing and every peer transition remain in the
+// same Session and network-worker loop below.
+enum Endpoint {
+    Quic(QuicEndpoint),
+    #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
+    WebTransport(WebTransportEndpoint),
+}
+impl Endpoint {
+    fn role(&self) -> crate::multiplayer_start::StartRole {
+        match self {
+            Self::Quic(endpoint) => endpoint.role(),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
+            Self::WebTransport(endpoint) => endpoint.role(),
+        }
+    }
+    fn connect(self, stop: &AtomicBool, deadline: Instant) -> io::Result<Stream> {
+        match self {
+            Self::Quic(endpoint) => endpoint.connect(stop, deadline).map(Stream::Quic),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
+            Self::WebTransport(endpoint) => {
+                endpoint.connect(stop, deadline).map(Stream::WebTransport)
+            }
+        }
+    }
+}
+enum Stream {
+    Quic(QuicStream),
+    #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
+    WebTransport(WebTransportStream),
+}
+impl Stream {
+    fn idle(&self, duration: Duration) {
+        match self {
+            Self::Quic(stream) => stream.idle(duration),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
+            Self::WebTransport(stream) => stream.idle(duration),
+        }
+    }
+    fn finish(&mut self, timeout: Duration) -> io::Result<()> {
+        match self {
+            Self::Quic(stream) => stream.finish(timeout),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
+            Self::WebTransport(stream) => stream.finish(timeout),
+        }
+    }
+}
+impl Read for Stream {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Quic(stream) => stream.read(buffer),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
+            Self::WebTransport(stream) => stream.read(buffer),
+        }
+    }
+}
+impl Write for Stream {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        match self {
+            Self::Quic(stream) => stream.write(buffer),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
+            Self::WebTransport(stream) => stream.write(buffer),
+        }
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        match self {
+            Self::Quic(stream) => stream.flush(),
+            #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
+            Self::WebTransport(stream) => stream.flush(),
+        }
+    }
+}
 
 /// Exact chart/rules/options/seed/runtime compatibility, independent of capture clock.
 pub fn competition_identity(
@@ -158,7 +233,7 @@ impl Multiplayer {
         options: MultiplayerOptions,
     ) -> Result<Self, MultiplayerError> {
         validate_options(&identity, &options)?;
-        let endpoint = Endpoint::host(address, &options.quic)?;
+        let endpoint = Endpoint::Quic(QuicEndpoint::host(address, &options.quic)?);
         Self::spawn(endpoint, identity, options)
     }
     pub fn join(
@@ -167,8 +242,38 @@ impl Multiplayer {
         options: MultiplayerOptions,
     ) -> Result<Self, MultiplayerError> {
         validate_options(&identity, &options)?;
-        let endpoint = Endpoint::join(address, &options.quic)?;
+        let endpoint = Endpoint::Quic(QuicEndpoint::join(address, &options.quic)?);
         Self::spawn(endpoint, identity, options)
+    }
+    /// Connect to an HTTP/3 relay; the explicit role controls start negotiation,
+    /// independently of both peers being network clients.
+    pub fn webtransport(
+        connection: WebTransportOptions,
+        identity: Vec<u8>,
+        options: MultiplayerOptions,
+    ) -> Result<Self, MultiplayerError> {
+        #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
+        {
+            validate_options(&identity, &options)?;
+            if options.quic.cert.is_some()
+                || options.quic.key.is_some()
+                || options.quic.server_name.is_some()
+                || options
+                    .quic
+                    .ca
+                    .as_ref()
+                    .is_some_and(|ca| ca != &connection.ca)
+            {
+                return Err(MultiplayerError::InvalidOptions);
+            }
+            let endpoint = Endpoint::WebTransport(WebTransportEndpoint::prepare(&connection)?);
+            Self::spawn(endpoint, identity, options)
+        }
+        #[cfg(not(all(not(target_arch = "wasm32"), feature = "webtransport")))]
+        {
+            let _ = (connection, identity, options);
+            Err(crate::multiplayer_webtransport_client::unavailable().into())
+        }
     }
     fn spawn(
         endpoint: Endpoint,

@@ -42,6 +42,12 @@ pub enum NetworkRole {
     Host(SocketAddr),
     /// Join the supplied address without DNS or service discovery.
     Join(SocketAddr),
+    /// Both relay participants connect as clients; this role controls the shared start.
+    WebTransport {
+        url: String,
+        role: crate::multiplayer_start::StartRole,
+        origin: String,
+    },
 }
 
 /// Competition features are opt-in and retained independently of native options.
@@ -81,6 +87,7 @@ impl CompetitionOptions {
         let mut timeout_seen = false;
         let mut start_seen = [false; 5];
         let mut quic_seen = [false; 4];
+        let mut webtransport = [None, None, None];
         while index < args.len() {
             let flag = args[index].as_str();
             if !matches!(
@@ -94,6 +101,9 @@ impl CompetitionOptions {
                     | "--mp-key"
                     | "--mp-ca"
                     | "--mp-server-name"
+                    | "--mp-webtransport"
+                    | "--mp-role"
+                    | "--mp-origin"
             ) && !START_POLICY_FLAGS.contains(&flag)
             {
                 rest.push(args[index].clone());
@@ -115,6 +125,20 @@ impl CompetitionOptions {
                 .filter(|value| !value.is_empty())
                 .ok_or("competition option requires a nonempty value")?;
             match flag {
+                "--mp-webtransport" | "--mp-role" | "--mp-origin" => {
+                    let field = match flag {
+                        "--mp-webtransport" => 0,
+                        "--mp-role" => 1,
+                        _ => 2,
+                    };
+                    if webtransport[field].is_some() {
+                        return Err("duplicate WebTransport option".into());
+                    }
+                    if value.len() > 4096 || value.chars().any(char::is_control) {
+                        return Err("invalid bounded WebTransport option".into());
+                    }
+                    webtransport[field] = Some(value.clone());
+                }
                 "--mp-cert" | "--mp-key" | "--mp-ca" | "--mp-server-name" => {
                     let field = match flag {
                         "--mp-cert" => 0,
@@ -201,17 +225,39 @@ impl CompetitionOptions {
             }
             index += 2;
         }
+        if webtransport.iter().any(Option::is_some) {
+            if options.network.is_some() {
+                return Err("WebTransport and raw QUIC modes are mutually exclusive".into());
+            }
+            let [Some(url), Some(role), Some(origin)] = webtransport else {
+                return Err(
+                    "WebTransport requires --mp-webtransport, --mp-role and --mp-origin together"
+                        .into(),
+                );
+            };
+            let role = match role.as_str() {
+                "host" => crate::multiplayer_start::StartRole::Host,
+                "join" => crate::multiplayer_start::StartRole::Join,
+                _ => return Err("WebTransport --mp-role must be host or join".into()),
+            };
+            options.network = Some(NetworkRole::WebTransport { url, role, origin });
+        }
         if (timeout_seen || start_seen.iter().any(|seen| *seen)) && options.network.is_none() {
             return Err("multiplayer timing options require host or join".into());
         }
         if quic_seen.iter().any(|seen| *seen) {
-            match options.network {
+            match &options.network {
                 None => return Err("QUIC credentials require host or join".into()),
                 Some(NetworkRole::Host(_)) if quic_seen[2] || quic_seen[3] => {
                     return Err("QUIC host uses certificate/key, not joining trust options".into());
                 }
                 Some(NetworkRole::Join(_)) if quic_seen[0] || quic_seen[1] => {
                     return Err("QUIC join uses CA/server name, not host credentials".into());
+                }
+                Some(NetworkRole::WebTransport { .. })
+                    if quic_seen[0] || quic_seen[1] || quic_seen[3] =>
+                {
+                    return Err("WebTransport uses CA trust without host certificate/key or a server-name override".into());
                 }
                 _ => {}
             }
@@ -443,12 +489,28 @@ impl LiveCompetition {
             preroll_ns: options.preroll_ns,
             ..MultiplayerOptions::default()
         };
-        let network = match options.network {
+        let network = match &options.network {
             Some(NetworkRole::Host(address)) => {
-                Some(Multiplayer::host(address, identity, settings)?)
+                Some(Multiplayer::host(*address, identity, settings)?)
             }
             Some(NetworkRole::Join(address)) => {
-                Some(Multiplayer::join(address, identity, settings)?)
+                Some(Multiplayer::join(*address, identity, settings)?)
+            }
+            Some(NetworkRole::WebTransport { url, role, origin }) => {
+                Some(Multiplayer::webtransport(
+                    crate::multiplayer_webtransport_client::WebTransportOptions {
+                        url: url.clone(),
+                        origin: origin.clone(),
+                        role: *role,
+                        ca: options
+                            .quic
+                            .ca
+                            .clone()
+                            .ok_or("WebTransport requires --mp-ca")?,
+                    },
+                    identity,
+                    settings,
+                )?)
             }
             None => None,
         };
