@@ -37,3 +37,19 @@ increased. Encoded-byte limits bound durable data, not total process memory;
 temporary encoding and in-memory recording consume additional memory. A capture
 contains judgment inputs and advances, not PCM or a reproduction of physical
 audio timing. Execution tests and native recording checks remain deferred.
+
+
+## Finite recorded sections
+
+The section-aware capture API preserves an optional original-song end. A finite
+section uses `bms-judge-profile/v4:` followed by little-endian u64 chart seed,
+i64 start and i64 end, then the existing offset/count/windows body. Start is
+nonnegative and end strictly follows start. V4 accepts chart seed zero; absent
+end keeps the exact prior v1/v2/v3 bytes. The core replay version and rule seed
+remain unchanged. The additional bytes count toward normal header/file limits.
+
+Finite capture rejects accepted operations beyond the end and bound inputs at
+the exclusive end before recording mutation. An explicit advance at the end is
+valid. Preroll operations and valid failed-session prefixes remain recordable;
+no synthetic terminal advance is added. Existing capture entrypoints still
+produce unlimited metadata until their finite owner integration is connected.

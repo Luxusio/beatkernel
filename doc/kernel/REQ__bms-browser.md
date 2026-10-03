@@ -647,3 +647,9 @@ choice. Recording, comparison and network identity reuse the existing common
 logic; no extra per-frame update, input clock or judging path is added. Drafts
 are page-local, with no saved-profile claim. Authored fixtures and whitespace
 checks do not prove browser/input/audio acceptance.
+
+
+Finite replay setup now has a section-aware logical API preserving original
+start/end and branch seed. Existing browser owners still use the legacy APIs;
+they refuse finite metadata until finite game/replay ownership is integrated.
+This does not enable a finite page recording or playback control by itself.

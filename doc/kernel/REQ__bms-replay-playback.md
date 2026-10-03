@@ -48,3 +48,20 @@ Logical, offline-render and native-replay entrypoints extract the recorded chart
 All native live entrypoints accept `--chart-seed` as nonempty unsigned decimal u64 (including zero/MAX, excluding signs and overflow); absent means zero. The retained common settings field treats empty as default zero, persists explicit values through existing profiles/overlays and defers incomplete draft semantic validation to apply/launch. A shared local session resolves the chart once with that seed, and all independent player captures/competition setup headers receive the same provenance. Practice retry/bookmark/finite-loop invocations preserve the pinned seed rather than choosing new branches.
 
 Saved record preview restores the recorded chart seed before logical reconstruction and requires the current comparison draft seed/profile/start to match. Saved competition restores the local recording's seed. Replay launch projection excludes live chart-seed overrides because the recording owns the branch selection. Existing generic settings editing/profile UI displays the new field without a new widget lifecycle. Library discovery continues using zero for stable catalog metadata; actual gameplay projections come from the seeded prepared chart. No cryptographic seed provenance, random seed generation or platform-accepted playback is claimed. Meaningful profile/launch/native/competition/record fixtures are authored and compiled for later execution.
+
+
+## Section-aware finite reconstruction
+
+`decode_section_setup` retains profile, start, chart seed and optional end.
+Finite v4 requires a nonnegative start, strictly later end and exact metadata
+extent before window allocation. `validate_section_setup` and
+`reconstruct_section` reconstruct the actual pristine builtin judge and compare
+the canonical section header before applying any recorded operation. Records
+beyond the end and input records at the end reject; advances at the end and
+valid prefixes remain supported. Original times and input offset apply once.
+
+Legacy tuple decoders and reconstruction entrypoints refuse finite metadata,
+so an end cannot be silently dropped by an unlimited consumer. Native/browser,
+record catalogs and multiplayer callers still use those legacy entrypoints
+until their explicit finite owner integration is connected. Logical section
+reconstruction alone does not implement finite audio/gameplay or page controls.
