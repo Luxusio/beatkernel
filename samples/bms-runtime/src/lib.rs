@@ -88,6 +88,10 @@ pub mod multiplayer_protocol;
 #[cfg(test)]
 mod multiplayer_protocol_fixtures;
 #[cfg(test)]
+mod multiplayer_room_fixtures;
+/// Bounded waiting and paired stream ownership, independent of transport I/O.
+pub mod multiplayer_rooms;
+#[cfg(test)]
 mod multiplayer_session_fixtures;
 /// Checked bilateral commitment to a future software start.
 pub mod multiplayer_start;
