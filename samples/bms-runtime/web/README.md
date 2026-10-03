@@ -434,3 +434,12 @@ network errors do not relabel a genuine locally completed recording as a prefix.
 The page's HTTPS connection policy allows the explicitly selected server.
 Source fixtures and compile-only checks are preparation for later validation,
 not evidence of browser playback or multiplayer execution.
+
+
+The common application crate also provides a bounded room/participant ownership
+foundation for the future HTTP/3 service. It returns precise closure leases,
+expires only waiters and fences stale disconnects from newer same-key rooms.
+It performs no socket/TLS/HTTP/3 work and does not make the browser server
+available. Current BKMP remains bilateral; local-player extensibility does not
+by itself provide a multi-party network protocol. See the
+[room ownership component](../../../doc/changes/CHANGE__multiplayer-room-ownership.md).

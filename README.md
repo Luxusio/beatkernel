@@ -994,3 +994,11 @@ peer-reported scores separate from local judgment. Solo and replay remain local.
 A compatible HTTP/3 pairing service, generated browser bindings and actual
 network/audio execution remain unfinished or unverified; see the
 [browser host](samples/bms-runtime/web/README.md#multiplayer-live-play).
+
+
+A std-only room ownership component in the existing application crate prepares
+the HTTP/3 service boundary: bounded pairs, checked waiter expiry, precise
+closure leases and stale-disconnect fencing. It does not implement the server
+or extend the bilateral network protocol to more players. The
+[component contract](doc/changes/CHANGE__multiplayer-room-ownership.md) records
+its limits and deferred execution.

@@ -586,3 +586,30 @@ must not replace native resource-retention or cleanup semantics. Local cohorts
 retain their existing all-members policy and share the same capture publisher.
 Author failure-priority and actual-capture forwarding fixtures using in-memory
 publication callbacks; compilation does not establish file/device acceptance.
+
+
+## Portable paired-stream ownership
+
+A future HTTP/3 adapter shall share one bounded, OS-independent room registry in
+the existing application crate. Its caller supplies monotonic nonnegative
+nanoseconds and owns all transport resources. Each exact bounded room key admits
+at most two participants for the current bilateral BKMP session; capacity never
+evicts existing occupants. Compatibility, readiness, clocks, start and scoring
+remain the end-to-end Session's responsibilities, not relay judgments. This
+foundation neither authenticates participants nor implements ranked results.
+
+Every participant lease shall be nonzero, monotonic and never reused throughout
+the registry lifetime. Releasing either member of a pair shall return both
+closure tickets. Unknown or stale releases shall not close a newer same-key room.
+Waiters have a checked finite deadline; explicit expiry returns the precise
+resources to close, including equality at the deadline. A rejected admission
+shall not silently discard an expired participant. Pairing removes the waiting
+deadline; active play shall not expire under a waiting-room timeout. Key, time,
+capacity, ID and deadline validation shall precede membership mutation.
+
+The registry is an implementation component, not an HTTP/3 or WebTransport
+server. Endpoint/TLS/stream acceptance, pairing integration and native/browser
+interoperability remain unfinished. More than two network participants requires
+a deliberate multi-party protocol design; existing local-player collections
+remain independently extensible. Registry fixtures are authored and compiled
+for later execution; runtime checks and formal acceptance remain deferred.
