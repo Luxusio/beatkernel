@@ -124,6 +124,29 @@ The Worklet does not drain commands before the armed start, so initial queued
 BGM must also fit the chosen queue. Smaller batches do not prove that every
 workload fits every capacity. Source fixtures remain authored and unexecuted.
 
+## Finite practice output component
+
+Browser finite practice is developed in dependent stages: exact output fence,
+common stepped gameplay/recorded section completion, then Window/Worker end
+controls. Output component support alone does not implement the user-facing
+finite practice feature. The current page still launches unlimited output.
+
+WorkletAudioBuilder::finish_at admits an immutable optional exclusive Mixer
+playback frame endpoint; ordinary finish retains unlimited behavior. AudioHost
+and the actual Worklet finish protocol accept an optional u64 BigInt endFrame,
+validate it independently and forward it to the actual BrowserAudio finite
+builder method. Omitted fields preserve the old call. Invalid values or a
+failed finite binding do not silently fall back to unlimited output.
+
+Arm checks absolute start plus the endpoint for overflow before mutation. The
+Mixer emits the active prefix and silence after the exact endpoint, preserving
+the immutable marker and callback chronology. Its relative marker is measured
+after Worklet prestart silence; the absolute context endpoint adds the armed
+start once. Zero is a valid output-component fence. User practice sections
+still require a strictly later logical end when their controls are connected.
+No UI clock authorizes a cutoff. Genuine Mixer and host-boundary fixtures are
+authored; runtime execution and full finite-game/replay acceptance remain pending.
+
 ## Known ceiling
 
 Selected-file limits bound retained encoded data, not the entire process.

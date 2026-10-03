@@ -610,3 +610,19 @@ at most 4096 crossing music suffixes. The 64 MiB asset and 256 MiB aggregate PCM
 limits remain. This does not prove acoustic synchronization or gapless restart.
 Browser execution, generated bindings, test execution, formal review and QA
 remain deferred.
+
+## Finite practice component status
+
+The output component accepts an optional exclusive playback frame endpoint in
+AudioHost.finish(endFrame), independently validated as a u64 BigInt and forwarded
+through the actual Worklet to BrowserAudio and the common Mixer. Omitting it
+keeps ordinary unlimited finish. Mixer output ends exactly at the configured
+frame and fills the rest of the callback with silence; context callbacks still
+advance. The relative endpoint starts after Worklet prestart silence, so its
+absolute context position adds the armed start once. Arm refuses overflow.
+
+The supplied page currently uses ordinary finish. Stepped finite gameplay,
+recorded section completion and Window/Worker end controls are dependent stages
+still to be connected. Output-component support alone does not make browser
+finite practice available. Genuine Mixer and host/Worklet fixtures are authored;
+execution, generated bindings and full finite-game/replay acceptance remain pending.
