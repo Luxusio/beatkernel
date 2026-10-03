@@ -433,6 +433,71 @@ test("successful setup transfers exact PCM ownership and preserves command width
   await stop(h, owner);
 });
 
+test("finish preserves the unlimited wire shape and transmits finite endpoints as exact optional u64 values", async () => {
+  for (const args of [[], [undefined], [0n], [1n], [9007199254740993n], [U64_MAX]]) {
+    const h = await harness();
+    const owner = await open(h);
+    const pending = observe(() => owner.finish(...args));
+    const sent = h.last();
+    assert.equal(sent.kind, "finish");
+    assert.equal(sent.generation, 17);
+    assert.equal(sent.sequence, 1);
+    assert.equal(Object.hasOwn(sent, "endFrame"), args[0] !== undefined);
+    if (args[0] !== undefined) assert.equal(sent.endFrame, args[0]);
+    else assert.deepEqual(Object.keys(sent).sort(), ["generation", "kind", "sequence"]);
+    assert.equal(h.sent[0].transfers.length, 0);
+    assert.equal(owner.state, "setup", "a submitted endpoint is not successful allocation evidence");
+    await localError(h, () => owner.finish(2n), "busy");
+    assert.equal(pending.settled, false);
+    h.reply(sent);
+    const result = await pending.result;
+    assert.equal(result.ok, true);
+    assert.equal(result.value.admitted, 0);
+    assert.equal(owner.state, "allocated");
+    await localError(h, () => owner.finish(2n), "state");
+    await acknowledged(h, () => owner.arm(0n));
+    assert.equal(owner.state, "armed");
+    assert.deepEqual(h.sent.map(entry => entry.message.kind), ["finish", "arm"]);
+    await stop(h, owner);
+  }
+});
+
+test("finish endpoint validation leaves setup reusable while remote or malformed ACK failure never retries unlimited output", async () => {
+  const local = await harness();
+  const reusable = await open(local);
+  for (const end of [null, 0, 1, "1", -1n, U64_MAX + 1n, 1.5, Infinity, NaN, {}, []]) {
+    const error = await localError(local, () => reusable.finish(end));
+    assert.equal(error.operation, "finish");
+    assert.equal(reusable.state, "setup");
+  }
+  await acknowledged(local, () => reusable.finish(0n));
+  assert.equal(local.last().sequence, 1, "invalid endpoints consume neither control slots nor sequence identities");
+  assert.equal(local.last().endFrame, 0n);
+  await stop(local, reusable);
+
+  for (const [reply, code] of [[{ status: 9, admitted: 0, error: "audio" }, "remote"],
+    [{ status: 0, admitted: 1 }, "protocol"]]) {
+    const h = await harness();
+    const owner = await open(h);
+    const pending = observe(() => owner.finish(9007199254740993n));
+    const sent = h.last();
+    h.reply(sent, reply);
+    const original = failure(await pending.result, code);
+    if (code === "remote") {
+      assert.equal(original.operation, "finish");
+      assert.equal(original.sequence, sent.sequence);
+      assert.equal(original.status, 9);
+      assert.equal(original.admitted, 0);
+    }
+    await flush();
+    assert.equal(h.sent.filter(entry => entry.message.kind === "finish").length, 1);
+    assert.equal(sent.endFrame, 9007199254740993n);
+    assert.equal(h.last().kind, "stop");
+    assert.equal(await localError(h, () => owner.finish(), code), original);
+    await stop(h, owner, "failed");
+  }
+});
+
 test("currentFrame is a checked context-time estimate independent of command and render evidence", async () => {
   const h = await harness();
   const owner = await open(h);

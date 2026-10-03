@@ -47,7 +47,7 @@ async function harness(faults = {}) {
     constructor(...args) {
       if (faults.constructorError) throw new Error("binding constructor failed");
       this.args = args;
-      this.calls = { samples: [], finish: 0, arm: [], enqueue: [], render: [], reports: [], metadata: 0 };
+      this.calls = { samples: [], finish: 0, finishAt: [], arm: [], enqueue: [], render: [], reports: [], metadata: 0 };
       this.frees = 0;
       this.pcm = new Float32Array(0);
       this.words = new Uint32Array(56);
@@ -56,6 +56,11 @@ async function harness(faults = {}) {
     status() { return faults.status ?? 0; }
     insert_sample(...args) { this.calls.samples.push(args); return faults.sampleStatus ?? 0; }
     finish() { this.calls.finish++; return faults.finishStatus ?? 0; }
+    finish_at(end) {
+      this.calls.finishAt.push(end);
+      if (faults.finishAtThrows) throw new Error("finite binding finish failed");
+      return faults.finishAtStatus ?? 0;
+    }
     channels() { this.calls.metadata++; return faults.channels ?? this.args[1]; }
     max_frames() { this.calls.metadata++; return faults.maxFrames ?? this.args[8]; }
     output_ptr() { this.calls.metadata++; return faults.pointer ?? 64; }
@@ -201,6 +206,76 @@ test("sample limits and malformed PCM reject before binding copies while exact b
   assert.deepEqual(h.owners[0].calls.samples[0].slice(0, 3), [1n, 44100, 2]);
   assert.equal(h.send(processor, "finish", 3).status, 0);
   h.send(processor, "stop", 4);
+});
+
+test("finite finish selects the exact binding once and omitted endpoints preserve unlimited setup", async () => {
+  for (const fields of [{}, { endFrame: undefined }, { endFrame: 0n }, { endFrame: 1n },
+    { endFrame: 9007199254740993n }, { endFrame: 18446744073709551615n }]) {
+    const h = await harness();
+    const processor = h.create();
+    const owner = h.owners[0];
+    const ack = h.send(processor, "finish", 1, fields);
+    assert.equal(ack.status, 0);
+    assert.equal(ack.admitted, 0);
+    assert.equal(ack.operation, "finish");
+    assert.equal(ack.sequence, 1);
+    assert.equal(owner.calls.finish, fields.endFrame === undefined ? 1 : 0);
+    assert.deepEqual(owner.calls.finishAt, fields.endFrame === undefined ? [] : [fields.endFrame]);
+    assert.ok(owner.calls.metadata > 0, "fixed storage is acquired only after the selected finish succeeds");
+    const polled = h.send(processor, "poll", 2);
+    assert.equal(polled.report.available, false, "configuration alone cannot fabricate a finite render marker");
+    assert.ok(polled.report.words.every(value => value === 0));
+    assert.equal(h.send(processor, "arm", 3, { frame: 0n }).status, 0);
+    assert.deepEqual(owner.calls.arm, [[0n, 0n]]);
+    const value = command();
+    assert.equal(h.send(processor, "commands", 4, { commands: [value] }).admitted, 1);
+    assert.deepEqual(owner.calls.enqueue[0], [value.kind, value.voice, value.sample, value.at, value.gain, value.value, value.denominator]);
+    assert.equal(notices(processor, "terminal").length, 0);
+    h.send(processor, "stop", 5);
+    assert.equal(owner.frees, 1);
+  }
+});
+
+test("worklet independently rejects malformed finite endpoints and fences binding failures without an unlimited fallback", async () => {
+  for (const endFrame of [null, 0, "1", -1n, 18446744073709551616n, 1.5, NaN, Infinity, {}, []]) {
+    const h = await harness();
+    const processor = h.create();
+    const owner = h.owners[0];
+    const ack = h.send(processor, "finish", 1, { endFrame });
+    assert.equal(ack.status, 100);
+    assert.equal(ack.error, "finish-end");
+    assert.equal(ack.admitted, 0);
+    assert.equal(owner.calls.finish, 0);
+    assert.deepEqual(owner.calls.finishAt, []);
+    assert.equal(owner.calls.metadata, 0);
+    const output = planar(3);
+    assert.equal(h.process(processor, 0, output), false);
+    assertSilent(output);
+    assert.equal(notices(processor, "terminal").length, 1);
+    assert.equal(owner.frees, 0);
+    h.send(processor, "stop", 2);
+    assert.equal(owner.frees, 1);
+  }
+  for (const [faults, absent, status] of [[{ finishAtStatus: 9 }, false, 9],
+    [{ finishAtThrows: true }, false, 106], [{}, true, 106]]) {
+    const h = await harness(faults);
+    const processor = h.create();
+    const owner = h.owners[0];
+    if (absent) owner.finish_at = undefined;
+    const ack = h.send(processor, "finish", 1, { endFrame: 3n });
+    assert.equal(ack.status, status);
+    assert.equal(ack.admitted, 0);
+    assert.equal(owner.calls.finish, 0);
+    assert.deepEqual(owner.calls.finishAt, absent ? [] : [3n]);
+    assert.equal(owner.calls.metadata, 0);
+    assert.deepEqual(processor.port.messages.slice(-2).map(message => message.kind), ["ack", "terminal"]);
+    assert.equal(h.send(processor, "finish", 2).status, 103);
+    assert.equal(owner.calls.finish, 0, "even a later unlimited request cannot recover a failed finite owner");
+    assert.equal(notices(processor, "terminal").length, 1);
+    assert.equal(owner.frees, 0);
+    h.send(processor, "stop", 3);
+    assert.equal(owner.frees, 1);
+  }
 });
 
 test("setup stays silent and unavailable; fixed view copies varied planar blocks with exact frame words", async () => {
