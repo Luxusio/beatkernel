@@ -906,6 +906,44 @@ pub(crate) fn validate_output_evidence(
     rendered: Option<RenderReport>,
     presented: Option<ClockPoint>,
 ) -> Result<Option<ClockPoint>, CompletionError> {
+    validate_section_output_evidence(
+        output_origin,
+        sample_rate,
+        last_render,
+        last_presented,
+        rendered,
+        presented,
+        None,
+    )
+}
+
+/// Validate original-grid output against an optional immutable relative end.
+/// Finite evidence must be nonempty; absent evidence is supplied as `None`.
+/// This only validates and normalizes evidence; no completion state is adopted.
+pub fn validate_section_output_evidence(
+    output_origin: ClockPoint,
+    sample_rate: u32,
+    last_render: Option<RenderReport>,
+    last_presented: Option<Timestamp>,
+    rendered: Option<RenderReport>,
+    presented: Option<ClockPoint>,
+    expected_end: Option<u64>,
+) -> Result<Option<ClockPoint>, CompletionError> {
+    if sample_rate == 0 {
+        return Err(CompletionError("completion output sample rate is zero"));
+    }
+    if let Some(end) = expected_end {
+        let ns = (i128::from(end) * 1_000_000_000 + i128::from(sample_rate) - 1)
+            / i128::from(sample_rate);
+        let duration = Duration::from_nanos(
+            i64::try_from(ns)
+                .map_err(|_| CompletionError("completion endpoint duration overflow"))?,
+        );
+        output_origin
+            .timestamp
+            .checked_add(duration)
+            .ok_or(CompletionError("completion endpoint clock overflow"))?;
+    }
     let normalized = presented
         .map(|point| {
             if point.domain != output_origin.domain {
@@ -935,17 +973,9 @@ pub(crate) fn validate_output_evidence(
     let Some(report) = rendered else {
         return Ok(normalized);
     };
-    if report.paused || report.playback_end_physical_frame.is_some() || report.producer_disconnected
-    {
-        return Err(CompletionError(
-            "completion requires connected unlimited unpaused output",
-        ));
-    }
     if report.frames > AudioLimits::MAX_RENDER_FRAMES
         || report.active_voices > AudioLimits::MAX_VOICES
         || report.pending_commands > AudioLimits::MAX_COMMANDS
-        || report.start_frame != report.playback_start_frame
-        || report.frames != report.playback_frames
     {
         return Err(CompletionError(
             "completion render capacity or playback grid differs",
@@ -957,6 +987,41 @@ pub(crate) fn validate_output_evidence(
         .start_frame
         .checked_add(frames)
         .ok_or(CompletionError("completion render cursor overflow"))?;
+    if let Some(endpoint) = expected_end {
+        if frames == 0 {
+            return Err(CompletionError(
+                "finite output evidence requires nonempty render",
+            ));
+        }
+        let playback_frames = frames.min(endpoint.saturating_sub(report.start_frame));
+        let marker = (end >= endpoint).then_some(endpoint);
+        if report.playback_start_frame != report.start_frame.min(endpoint)
+            || report.playback_frames != playback_frames as usize
+            || report.paused != marker.is_some()
+            || report.playback_end_physical_frame != marker
+            || report.producer_disconnected
+        {
+            return Err(CompletionError(
+                "completion output differs from its configured finite playback grid",
+            ));
+        }
+    } else {
+        if report.paused
+            || report.playback_end_physical_frame.is_some()
+            || report.producer_disconnected
+        {
+            return Err(CompletionError(
+                "completion requires connected unlimited unpaused output",
+            ));
+        }
+        if report.start_frame != report.playback_start_frame
+            || report.frames != report.playback_frames
+        {
+            return Err(CompletionError(
+                "completion render capacity or playback grid differs",
+            ));
+        }
+    }
     let end_ns =
         (i128::from(end) * 1_000_000_000 + i128::from(sample_rate) - 1) / i128::from(sample_rate);
     let duration = Duration::from_nanos(
@@ -997,6 +1062,18 @@ pub(crate) fn validate_output_evidence(
             .any(|(current, previous)| current < previous)
         {
             return Err(CompletionError("completion mixer counters regressed"));
+        }
+        if expected_end.is_some()
+            && previous.playback_end_physical_frame.is_some()
+            && (report.playback_end_physical_frame != previous.playback_end_physical_frame
+                || report.song_position != previous.song_position
+                || report.active_voices != previous.active_voices
+                || report.pending_commands != previous.pending_commands
+                || counter_values(counters)[1..] != counter_values(previous.counters)[1..])
+        {
+            return Err(CompletionError(
+                "completion state changed after the finite endpoint",
+            ));
         }
     }
     Ok(normalized)

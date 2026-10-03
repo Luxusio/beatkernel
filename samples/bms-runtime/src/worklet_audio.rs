@@ -243,6 +243,15 @@ pub(crate) struct OutputEvidence {
 /// the first active suffix and later variable nonempty buffer lengths are valid.
 #[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
 pub(crate) fn decode_output(words: &[u32]) -> Result<OutputEvidence, &'static str> {
+    decode_section_output(words, None)
+}
+
+/// Admit finite output only against its independently configured relative end.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser")))]
+pub(crate) fn decode_section_output(
+    words: &[u32],
+    expected_end: Option<u64>,
+) -> Result<OutputEvidence, &'static str> {
     if words.len() != 56 {
         return Err("browser output report requires exactly 56 words");
     }
@@ -263,6 +272,11 @@ pub(crate) fn decode_output(words: &[u32]) -> Result<OutputEvidence, &'static st
         return Err("browser output absent context cursor is nonzero");
     }
     let start = values[26];
+    if let Some(end) = expected_end {
+        start
+            .checked_add(end)
+            .ok_or("browser configured output endpoint overflows its context grid")?;
+    }
     let context = (values[23] == 1).then_some(values[24]);
     if values[0] == 0 {
         if values[1..23].iter().any(|&value| value != 0)
@@ -279,20 +293,32 @@ pub(crate) fn decode_output(words: &[u32]) -> Result<OutputEvidence, &'static st
     if !(1..=4096).contains(&values[2]) || values[8] > 4096 || values[9] > 4096 {
         return Err("browser output report exceeds configured render or mixer capacity");
     }
-    if values[1] != values[3]
-        || values[2] != values[4]
-        || values[5] != 0
-        || values[6] != 0
-        || values[7] != 0
-        || values[11] != 0
-    {
-        return Err(
-            "browser output requires connected unlimited unpaused playback on its original grid",
-        );
-    }
     let end = values[1]
         .checked_add(values[2])
         .ok_or("browser output render cursor overflow")?;
+    let (playback_start, playback_frames, paused, marker) = match expected_end {
+        Some(endpoint) => (
+            values[1].min(endpoint),
+            values[2].min(endpoint.saturating_sub(values[1])),
+            end >= endpoint,
+            (end >= endpoint).then_some(endpoint),
+        ),
+        None => (values[1], values[2], false, None),
+    };
+    if values[3] != playback_start
+        || values[4] != playback_frames
+        || values[5] != u64::from(paused)
+        || values[6] != u64::from(marker.is_some())
+        || values[7] != marker.unwrap_or(0)
+        || values[11] != 0
+    {
+        return Err(match expected_end {
+            Some(_) => "browser output differs from its configured finite playback grid",
+            None => {
+                "browser output requires connected unlimited unpaused playback on its original grid"
+            }
+        });
+    }
     let absolute_end = start
         .checked_add(end)
         .ok_or("browser output context cursor overflow")?;
@@ -304,12 +330,12 @@ pub(crate) fn decode_output(words: &[u32]) -> Result<OutputEvidence, &'static st
         frames: values[2] as usize,
         playback_start_frame: values[3],
         playback_frames: values[4] as usize,
-        paused: false,
-        playback_end_physical_frame: None,
+        paused: values[5] != 0,
+        playback_end_physical_frame: (values[6] == 1).then_some(values[7]),
         active_voices: values[8] as usize,
         pending_commands: values[9] as usize,
         song_position: Timestamp::from_nanos(values[10] as i64),
-        producer_disconnected: false,
+        producer_disconnected: values[11] != 0,
         counters: AudioCounters {
             rendered_frames: values[12],
             commands_consumed: values[13],
