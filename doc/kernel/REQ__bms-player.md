@@ -1,5 +1,32 @@
 # BMS desktop player
 
+## Portable finite live ownership
+
+An explicit finite StepGameplay setup must use the existing SoloRuntime logical
+song endpoint. Original-song start and strictly later end are immutable; actual
+input acquisition remains validated at/after the end while binding is suppressed
+and the judge advances only to the end. Capture records these real reports with
+section metadata, preserving provenance and applying input offset once. No
+terminal report is synthesized from audio silence or a UI clock.
+
+The output frame endpoint uses the same PracticeLoop mapping as finite replay.
+BGM and remote keysound targets rounding onto or past the exclusive frame fence
+are excluded without erasing committed judgments. Finite completion requires
+the logical end report, actual configured Mixer fence, actual presentation
+crossing, all commands acknowledged and queues/feeder credits resolved, with
+consumed/applied counts equal to acknowledged commands. Frozen voices need not
+drain. Missing evidence keeps playback incomplete; rejected execution fails.
+Original BGM targets at/after the logical end are excluded before output-time
+conversion, so unreachable future cues cannot overflow a finite setup.
+Invalid BGM command kinds and nonfinite gains remain refused even outside the
+section. Filtering a queue prefix must not hide an eligible command behind it;
+snapshot extraction stays bounded by the queue's actual capacity.
+
+Unlimited setup retains existing full-song completion and recording bytes.
+Finite competition identity includes the end through the existing section
+identity envelope. Browser finite live bindings/controls and native finite
+capture integration still require separate work and actual verification.
+
 Records displays the selected record's own/other opponent occurrence counts.
 Remove Own and Remove Other clear exactly the first matching kind and literal
 path in the parent settings draft; duplicates remain individually removable.

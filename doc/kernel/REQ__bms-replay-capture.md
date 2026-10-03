@@ -1,5 +1,14 @@
 # Native BMS replay capture
 
+The portable finite stepped live owner must install the existing core logical
+endpoint before processing. Capture uses its immutable original start/end and
+chart seed, recording actual capped reports in the section-aware format. Input
+at/after the end is validated by core acquisition but not bound; the resulting
+actual advance report remains at the end. Output frame rounding never replaces
+this logical boundary. Unlimited captures retain legacy bytes. Native capture
+adapters and browser live callers require explicit integration before claiming
+finite recording support across hosts.
+
 The separate `beatkernel-bms-runtime` crate can capture the accepted operations
 of its actual live Runtime through the core ReplayRecorder. Each report is
 recorded once, including its successful bound-input prefix after a judge error,
