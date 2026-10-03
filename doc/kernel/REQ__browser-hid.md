@@ -48,3 +48,8 @@ usage are unsigned 16-bit. Require vendor for product and usagePage for usage.
 An empty list is valid, while an empty filter dictionary is refused before the
 native chooser. Revalidate active ownership after the external sequence hook
 before delivering a report to consumers.
+
+The [common report-profile contract](REQ__hid-profiles.md) supplies bounded
+explicit button/axis interpretation through the shared DeviceAdapter/Registry.
+Browser interpretation belongs on Worker using this same implementation.
+Report profiles do not replace page forwarding or logical gameplay bindings.
