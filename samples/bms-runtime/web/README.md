@@ -527,3 +527,25 @@ JavaScript boundary fixtures are authored but unparsed/unexecuted. Generated
 bindings, actual browser/audio behavior, interoperability and formal acceptance
 remain deferred. See the
 [host contract](../../../doc/changes/CHANGE__browser-saved-opponents-play.md).
+
+
+## Live judge timing
+
+Set Early window, Late window and Input offset before live Play. Values are
+milliseconds, with up to six decimal places (one nanosecond precision). Defaults
+are 50 ms early, 50 ms late and zero offset. Windows must be nonnegative; offset
+may be signed. Decimal text is converted through BigInt directly, including the
+full signed 64-bit nanosecond boundary, without floating-point rounding. Spaces,
+exponents, excess precision and out-of-range values are rejected.
+
+A live launch retains one immutable timing snapshot before asynchronous audio
+preparation. Busy controls prevent changes during preparation, recording-store
+operations and playback; values remain editable for a retry after cleanup. The
+Worker validates the snapshot independently and passes it to the existing Rust
+BrowserGame constructor. Actual constructor limits remain authoritative. Replay
+uses its recorded judge and ignores these live fields. Saved opponents and live
+multiplayer use the genuine resulting profile for compatibility.
+
+Six focused fixture groups were authored for exact boundaries, Worker routing
+and Window lifecycle. They have not been parsed or executed; browser, audio,
+formal review and QA acceptance remain deferred.

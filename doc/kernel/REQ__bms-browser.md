@@ -460,3 +460,27 @@ audio, capture completion and optional multiplayer. Saved counters are distinct
 from peer-reported network data and do not authenticate a result. No recording
 bytes or chart assets are uploaded to the relay. Source integration still
 requires later browser/bindings/audio execution evidence.
+
+
+## Adjustable live judge timing
+
+The browser live host exposes separate early/late windows and signed input
+offset as retained millisecond text drafts. Defaults are 50 ms early, 50 ms late
+and zero offset. Parse bounded decimal milliseconds with at most six fractional
+digits directly through integer arithmetic into nanoseconds: early/late are
+nonnegative signed-i64 values, offset spans the full signed-i64 range. Reject
+exponents, whitespace, malformed text, excess precision and range overflow
+without rounding. Capture one immutable timing snapshot for each live launch
+before asynchronous preparation; preserve the original audio resume gesture.
+Disable edits while the existing import/preparation/play/record-load owner is
+busy, and retain drafts after failed preparation or stopped playback.
+
+The Worker independently validates the requested BigInt timing fields before
+chart preparation, defaults only an absent configuration, and forwards the
+actual values to BrowserGame's existing constructor. Constructor/setup refusal
+uses the existing cleanup flow. Recorded replay playback ignores these live
+fields and retains the recorded judge. Saved-record compatibility and live
+multiplayer identity use the genuine resulting profile through existing shared
+logic; no new timing schema, rounding, judging implementation or clock source is
+introduced. Authored fixtures and source integration are not browser execution
+or timing acceptance.

@@ -81,6 +81,8 @@ preparation/render bindings reuse the existing replay audio and visual owners.
 Window/Worker replay launch uses the same audio host and recorded seed/section.
 Explicit saved-record browsing/storage feeds that replay path. Competition
 against browser records and live WebTransport Play are source-integrated.
+Browser live judge windows and signed input offset are configurable with exact
+integer parsing; replay retains its recorded profile.
 See the [browser host instructions](samples/bms-runtime/web/README.md).
 Browser source compilation does not establish playable browser behavior.
 
