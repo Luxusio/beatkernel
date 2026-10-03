@@ -171,7 +171,7 @@ async function workerHarness(options = {}) {
     },
   };
   const context = createContext({
-    self, File: FileType, TextEncoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer,
+    self, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer,
     performance: self.performance,
     setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); },
@@ -194,6 +194,7 @@ async function workerHarness(options = {}) {
   const playHelpers = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const opponentHelpers = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
   const physicalHelpers = new SourceTextModule(await readFile(new URL("./physical-input.mjs", import.meta.url), "utf8"), { context });
+  const hidProfileHelpers = new SourceTextModule(await readFile(new URL("./hid-profile.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
@@ -202,6 +203,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./multiplayer-owner.mjs") return network;
     if (specifier === "./saved-opponents.mjs") return opponentHelpers;
     if (specifier === "./physical-input.mjs") return physicalHelpers;
+    if (specifier === "./hid-profile.mjs") return hidProfileHelpers;
     throw new Error(`Unexpected Worker import: ${specifier}`);
   });
   await worker.evaluate();

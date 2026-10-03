@@ -385,7 +385,7 @@ async function workerHarness(options = {}) {
     addEventListener(name, callback) { assert.equal(name, "message"); receive = callback; },
   };
   const context = createContext({
-    self, File: FileType, TextEncoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
+    self, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
     performance: { timeOrigin: 10000, now() {
       if (!options.allowNetworkClock) throw new Error("Solo Worker timestamps cannot replace Window provenance");
       return networkNow;
@@ -411,6 +411,7 @@ async function workerHarness(options = {}) {
   const playHelper = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const opponentHelper = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
   const physicalHelper = new SourceTextModule(await readFile(new URL("./physical-input.mjs", import.meta.url), "utf8"), { context });
+  const hidProfileHelper = new SourceTextModule(await readFile(new URL("./hid-profile.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
@@ -419,6 +420,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./multiplayer-owner.mjs") return network;
     if (specifier === "./saved-opponents.mjs") return opponentHelper;
     if (specifier === "./physical-input.mjs") return physicalHelper;
+    if (specifier === "./hid-profile.mjs") return hidProfileHelper;
     throw new Error(`Unexpected import: ${specifier}`);
   });
   await worker.evaluate();
@@ -535,6 +537,91 @@ function hidEvent(fields = {}) {
 function inputCalls(game) {
   return game.calls.filter(call => ["input", "blob", "touch", "hid", "advance"].includes(call[0]));
 }
+
+function controllerProfile(acquire, suppliedBytes) {
+  const bytes = suppliedBytes ?? new TextEncoder().encode(JSON.stringify({ version: 1, profiles: [{ vendorId: 1, productId: 2,
+    bindingWords: [0x11, 0, 9, 1, 0x12, 0, 9, 2],
+    fieldWords: [1, 9, 1, 0, 9, 1, 0, 1, 0, 0, 0, 0, 1, 9, 1, 0, 9, 2, 1, 1, 0, 0, 0, 0], axisParams: [0, 0, 0, 0] }] }));
+  const file = new FileType([bytes], "controller.json"); let reads = 0;
+  file.arrayBuffer = () => { reads++; return acquire ? acquire() : Promise.resolve(bytes.slice().buffer); };
+  return { file, bytes, get reads() { return reads; } };
+}
+const profileDevices = () => [{ source: HID_SOURCE, vendorId: 1, productId: 2 }, { source: 3n, vendorId: 9, productId: 9 }];
+
+test("Worker acquires a profile once and actual matching supplies only admitted full-width sources and HID-only constructor coverage", async () => {
+  for (const inputMode of ["physical", "physical-contact"]) {
+    const selected = controllerProfile(), devices = profileDevices(), h = await catalogWorker();
+    h.post(startRequest({ inputMode, keyPairs: new Uint32Array(), hidProfileFile: selected.file, hidDevices: devices, recordReplay: true }));
+    devices[0].source = 4n; devices[0].vendorId = 9;
+    await flushJobs();
+    assert.equal(selected.reads, 1);
+    const prepared = h.of("play-reply").at(-1).result;
+    assert.equal(prepared.kind, "prepared"); assert.equal(prepared.hidSourceCount, 1);
+    assert.deepEqual(prepared.hidSources, [HID_SOURCE]);
+    const construction = (inputMode === "physical" ? h.physicalConstructions : h.contactConstructions)[0];
+    assert.deepEqual(Array.from(construction.args[5]), [0x11, 1, 0xffffffff, 0xffffffff, 0, 9, 1, 0x12, 1, 0xffffffff, 0xffffffff, 0, 9, 2]);
+    const game = h.games[0], configured = game.calls.find(call => call[0] === "hid-setup");
+    assert.deepEqual(Array.from(configured[1]), [0xffffffff, 0xffffffff, 1, 1, 1, 2]);
+    assert.deepEqual(Array.from(configured[2]), [0, 1, 9, 1, 0, 9, 1, 0, 1, 0, 0, 0, 0, 0, 1, 9, 1, 0, 9, 2, 1, 1, 0, 0, 0, 0]);
+    assert.ok(game.calls.indexOf(configured) < game.calls.findIndex(call => call[0] === "capture"));
+    await h.send({ kind: "play-activate", playId: 7, rpcId: 2, hostNs: ORIGIN, startFrame: START });
+    await h.send(step({ events: [hidEvent({ data: Uint8Array.from([3]) })] }));
+    assert.equal(inputCalls(game)[0][0], "hid");
+    await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+  }
+});
+
+test("profile-file metadata, mutually exclusive setup and malformed actual read extents refuse without a constructed gameplay owner", async () => {
+  for (const alter of [request => { request.hidSetup = hidSetup(); }, request => { request.inputMode = undefined; },
+    request => { request.mode = "replay"; request.replayFile = replayFile().file; }, request => { request.hidDevices = []; },
+    request => { request.hidDevices[0].source = 3; }, request => { request.hidDevices[0].vendorId = 65536; },
+    request => { request.hidDevices[1].source = HID_SOURCE; }, request => { request.hidProfileFile = { size: 1, arrayBuffer() { assert.fail("not a File"); } }; }]) {
+    const selected = controllerProfile(), h = await catalogWorker();
+    const request = startRequest({ inputMode: "physical", hidProfileFile: selected.file, hidDevices: profileDevices() }); alter(request);
+    await h.send(request);
+    assert.equal(selected.reads, 0); assert.equal(h.games.length + h.replays.length, 0);
+    assert.equal(h.of("play-error").length, 1);
+  }
+  for (const size of [0, 1048577, 1.5]) {
+    const selected = controllerProfile(); Object.defineProperty(selected.file, "size", { value: size });
+    const h = await catalogWorker();
+    await h.send(startRequest({ inputMode: "physical", hidProfileFile: selected.file, hidDevices: profileDevices() }));
+    assert.equal(selected.reads, 0); assert.equal(h.games.length, 0);
+  }
+  for (const acquire of [() => Promise.resolve(new Uint8Array(1)), () => Promise.resolve(new ArrayBuffer(1)),
+    () => Promise.reject(new Error("profile acquisition denied"))]) {
+    const selected = controllerProfile(acquire), h = await catalogWorker();
+    await h.send(startRequest({ inputMode: "physical", hidProfileFile: selected.file, hidDevices: profileDevices() }));
+    assert.equal(selected.reads, 1); assert.equal(h.games.length, 0); assert.equal(h.of("play-error").length, 1);
+  }
+  for (const bytes of [Uint8Array.from([0xc3, 0x28]), new TextEncoder().encode('{"version":1,"profiles":[]}')]) {
+    const selected = controllerProfile(null, bytes), h = await catalogWorker();
+    await h.send(startRequest({ inputMode: "physical", hidProfileFile: selected.file, hidDevices: profileDevices() }));
+    assert.equal(selected.reads, 1); assert.equal(h.games.length, 0); assert.equal(h.of("play-error").length, 1);
+  }
+});
+
+test("cancelled profile reads cannot admit a late owner and actual profile or consuming constructor failures never retry numeric fallback", async () => {
+  const gate = deferred(), selected = controllerProfile(() => gate.promise), h = await catalogWorker();
+  await h.send(startRequest({ inputMode: "physical", hidProfileFile: selected.file, hidDevices: profileDevices() }));
+  assert.equal(selected.reads, 1); assert.equal(h.games.length, 0);
+  await h.send({ kind: "play-stop", playId: 7 });
+  await h.send(startRequest({ playId: 8 })); const next = h.games[0], before = h.messages.length;
+  gate.resolve(selected.bytes.slice().buffer); await flushJobs();
+  assert.equal(h.messages.length, before); assert.equal(h.games.length, 1); assert.equal(next.stops, 0);
+  assert.equal(h.physicalConstructions.length, 0);
+  await h.send({ kind: "play-stop", playId: 8 });
+  for (const options of [{ hidSetupError: "actual common profile refused" }, { physicalConstructError: "actual physical constructor refused" }]) {
+    const selected = controllerProfile(), failed = await catalogWorker(options);
+    await failed.send(startRequest({ inputMode: "physical", hidProfileFile: selected.file, hidDevices: profileDevices(), recordReplay: true }));
+    assert.equal(selected.reads, 1); assert.equal(failed.physicalConstructions.length, 1);
+    assert.equal(failed.of("play-reply").some(reply => reply.result?.kind === "prepared"), false);
+    assert.equal(failed.preparedOwners[1].moved, true); assert.equal(failed.preparedOwners[1].frees, 0);
+    if (options.hidSetupError) {
+      assertReleased(failed); assert.equal(failed.games[0].calls.some(call => ["capture", "sample", "activate"].includes(call[0])), false);
+    } else assert.equal(failed.games.length, 0);
+  }
+});
 
 test("HID setup snapshots full-width constructor words before readiness and supports HID-only lanes beside keyboard and contact", async () => {
   for (const inputMode of ["physical", "physical-contact"]) {

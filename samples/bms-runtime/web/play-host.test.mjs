@@ -34,6 +34,16 @@ function chooseRecording(h, files) {
   h.get("replay-file").files = files;
   h.get("replay-file").emit("change");
 }
+function selectedControllerProfile(size = 128) {
+  const file = new File(["{\"version\":1}"], "controller-profile.json");
+  Object.defineProperty(file, "size", { value: size });
+  let reads = 0;
+  file.arrayBuffer = () => { reads++; throw new Error("Window must not read or interpret HID profiles"); };
+  return { file, get reads() { return reads; } };
+}
+function chooseControllerProfile(h, file) {
+  h.get("hid-profile").files = [file]; h.get("hid-profile").emit("change");
+}
 function watchPlayDisplay(h) {
   const writes = [];
   for (const [id, property] of [["status", "textContent"], ["position", "value"],
@@ -146,6 +156,35 @@ async function harness(faults = {}) {
     transferControlToOffscreen() { return { surface: this.id }; }
     focus() { this.focuses++; }
   }
+  class HidDevice extends Events {
+    constructor(index, metadata) {
+      super(); Object.assign(this, metadata);
+      this.index = index; this.opened = false; this.opens = 0; this.closes = 0;
+    }
+    async open() {
+      this.opens++; traces.push(["hid-open", this.index]);
+      if (faults.hidOpenGate) await faults.hidOpenGate.promise;
+      this.opened = true;
+    }
+    async close() {
+      this.closes++; traces.push(["hid-close", this.index]);
+      if (faults.hidCloseGate) await faults.hidCloseGate.promise;
+      if (faults.hidCloseError) throw faults.hidCloseError;
+      this.opened = false;
+    }
+  }
+  const hidDevices = (faults.hidDescriptors ?? [{ vendorId: 1, productId: 2 }, { vendorId: 9, productId: 9 }])
+    .map((metadata, index) => new HidDevice(index, metadata));
+  const hid = new Events();
+  hid.gets = 0; hid.requests = [];
+  hid.getDevices = () => {
+    hid.gets++; traces.push(["hid-discover"]);
+    return faults.hidConnectGate?.promise ?? Promise.resolve(hidDevices);
+  };
+  hid.requestDevice = options => {
+    hid.requests.push({ options, gesture }); traces.push(["hid-authorize", gesture]);
+    return faults.hidAuthorizeGate?.promise ?? Promise.resolve(hidDevices);
+  };
   class Option extends Element {
     constructor(text, value) { super("option"); this.textContent = text; this.value = value; }
   }
@@ -156,7 +195,8 @@ async function harness(faults = {}) {
     "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
     "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end",
     "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate",
-    "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input"]) {
+    "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input",
+    "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status"]) {
     elements.set(id, new Element(id === "chart" || id === "records" ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
@@ -206,6 +246,7 @@ async function harness(faults = {}) {
       // Node versions may clone File as Blob. Preserve the selected immutable
       // File endpoint here; this fake Worker never acquires its bytes.
       if (value.replayFile instanceof File) posted.replayFile = value.replayFile;
+      if (value.hidProfileFile instanceof File) posted.hidProfileFile = value.hidProfileFile;
       if (Array.isArray(value.opponents)) posted.opponents = value.opponents.map((entry, index) => ({
         ...posted.opponents[index], file: entry.file,
       }));
@@ -305,8 +346,8 @@ async function harness(faults = {}) {
   }
   const context = createContext({
     document, window, Worker, ResizeObserver, Option,
-    navigator: { maxTouchPoints: faults.touchPoints ?? (faults.touchSupported ? 2 : 0) },
-    AbortController, AbortSignal, URL: ControlledURL, Blob, TextEncoder, File, Uint8Array, Uint32Array, Float32Array,
+    navigator: { maxTouchPoints: faults.touchPoints ?? (faults.touchSupported ? 2 : 0), ...(faults.hidSupported ? { hid } : {}) },
+    AbortController, AbortSignal, URL: ControlledURL, Blob, TextEncoder, File, Uint8Array, Uint32Array, Float32Array, DataView,
     ArrayBuffer, structuredClone, performance: { timeOrigin: 9000, now: () => now },
     WebAssembly: { compile: async binary => {
       assert.deepEqual(Array.from(binary), [0, 97, 115, 109, 1, 0, 0, 0]);
@@ -382,7 +423,7 @@ async function harness(faults = {}) {
     this.setExport("RecordsStore", RecordsStore);
   }, { context });
   const modules = new Map();
-  for (const name of ["host_model.mjs", "play-model.mjs", "saved-opponents.mjs", "main.js"]) {
+  for (const name of ["host_model.mjs", "play-model.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "main.js"]) {
     const url = new URL(name, import.meta.url);
     modules.set(name, new SourceTextModule(await readFile(url, "utf8"), {
       context, identifier: url.href, initializeImportMeta(meta) { meta.url = url.href; },
@@ -445,6 +486,8 @@ async function harness(faults = {}) {
     await reply(start, { kind: "prepared", title: "Actual runtime", artist: "Runtime artist",
       notes: 6, samples: sampleCount, lanes: [0x11], opponentCount: start.opponents?.length ?? 0,
       startNs: start.mode === "replay" ? faults.replayStart ?? 0n : start.startNs ?? 0n,
+      ...(start.hidProfileFile ? { hidSources: faults.hidAdmittedSources ?? start.hidDevices.map(device => device.source),
+        hidSourceCount: (faults.hidAdmittedSources ?? start.hidDevices).length } : {}),
       ...(start.mode === "replay" ? { mode: "replay", recordedUntilNs: 2350000000n } : {}) });
     for (let index = 0; index < sampleCount; index++) {
       await reply(worker.last("play-sample"), { kind: "sample", id: BigInt(index + 1), rate: 44100,
@@ -482,7 +525,7 @@ async function harness(faults = {}) {
     await flush();
   }
   return { get, workers, get audio() { return audio; }, opens, traces, faults, timers, moduleToken, window, document, urls, revoked, downloads,
-    recordOpens, recordCalls, recordOwners, captures, releases, get layoutReads() { return layoutReads; },
+    recordOpens, recordCalls, recordOwners, captures, releases, hid, hidDevices, get layoutReads() { return layoutReads; },
     resize(width, height) { viewport = { width, height }; resizeObservers.at(-1).callback(); },
     click, receive, reply, preview, begin, prepared, launch, advance,
     setNow(value) { assert.ok(value >= now); now = value; },
@@ -494,6 +537,138 @@ async function harness(faults = {}) {
     },
   };
 }
+
+test("HID permission remains an explicit gesture, retains profile metadata only and joins cancelled native ownership without stale page updates", async () => {
+  const unsupported = await harness(); await unsupported.preview();
+  assert.equal(unsupported.get("hid-authorize").disabled, true);
+  assert.equal(unsupported.get("hid-input").disabled, true);
+  await unsupported.close();
+  for (const cancel of [false, true]) {
+    const discover = deferred(), closing = deferred(), opening = deferred();
+    const h = await harness({ hidSupported: true, hidAuthorizeGate: discover, hidCloseGate: closing,
+      ...(cancel ? { hidOpenGate: opening } : {}) }); await h.preview();
+    const selected = selectedControllerProfile(); chooseControllerProfile(h, selected.file);
+    assert.equal(h.get("hid-input").checked, true); assert.equal(selected.reads, 0);
+    const name = h.get("hid-profile-name").textContent;
+    for (const size of [0, 1048577]) chooseControllerProfile(h, selectedControllerProfile(size).file);
+    assert.equal(h.get("hid-profile-name").textContent, name);
+    h.click("hid-authorize");
+    assert.equal(h.hid.requests.length, 1, "the native chooser starts inside the synchronous click gesture");
+    assert.equal(h.hid.requests[0].gesture, true); assert.deepEqual(Array.from(h.hid.requests[0].options.filters), []);
+    assert.equal(h.hid.gets, 0); assert.equal(h.get("play").disabled, true);
+    h.click("hid-authorize"); assert.equal(h.hid.requests.length, 1);
+    if (cancel) {
+      discover.resolve(h.hidDevices); await flush();
+      assert.equal(h.hidDevices[0].opens, 1);
+      h.window.emit("pagehide");
+    }
+    const staleStatus = h.get("hid-status").textContent;
+    if (cancel) opening.resolve(); else discover.resolve(h.hidDevices);
+    await flush();
+    if (!cancel) {
+      assert.ok(h.hidDevices.every(device => device.opens === 1 && device.closes === 1));
+      assert.equal(h.get("play").disabled, true, "permission ownership remains busy until native closes settle");
+    }
+    closing.resolve(); await flush();
+    assert.equal(selected.reads, 0); assert.equal(h.opens.length, 0);
+    assert.ok(h.hidDevices.every(device => device.opens === device.closes));
+    if (cancel) assert.equal(h.get("hid-status").textContent, staleStatus);
+    else assert.equal(h.get("play").disabled, false);
+    await h.close();
+  }
+});
+
+test("live HID discovers authorized interfaces automatically and queues original reports beside touch and keyboard without Window interpretation", async () => {
+  const h = await harness({ hidSupported: true, touchSupported: true, hidAdmittedSources: [3n] });
+  const preview = await h.preview(), selected = selectedControllerProfile(); chooseControllerProfile(h, selected.file);
+  const start = await h.begin(), worker = h.workers[0];
+  assert.equal(start.hidProfileFile, selected.file);
+  assert.deepEqual(start.hidDevices, [{ source: 3n, vendorId: 1, productId: 2 }, { source: 4n, vendorId: 9, productId: 9 }]);
+  assert.equal(h.hid.gets, 1); assert.equal(h.hid.requests.length, 0); assert.equal(h.opens[0].gesture, true);
+  assert.ok(h.hidDevices.every(device => device.opens === 1));
+  const native = h.hidDevices[0], buffer = Uint8Array.from([99, 7, 255, 0, 88]);
+  const report = (timeStamp = 1300.125) => native.emit("inputreport", { device: native, timeStamp, reportId: 7, data: new DataView(buffer.buffer, 1, 3) });
+  report(1000); assert.equal(worker.messages("play-step").length, 0, "preparation does not acquire gameplay sequence or forward raw reports");
+  const commands = await h.prepared(start); await h.reply(commands, null);
+  await h.reply(worker.last("play-activate"), null);
+  assert.equal(h.get("hid-input").disabled, true); assert.equal(h.get("hid-profile").disabled, true);
+  h.setNow(1300.125); const display = watchPlayDisplay(h), reads = h.layoutReads;
+  report(); const first = worker.last("play-step");
+  assert.deepEqual(first.events, [{ kind: "hid", hostNs: 1300125000n, source: 3n, sequence: 1n, reportId: 7, data: Uint8Array.from([7, 255, 0]) }]);
+  buffer.fill(0); assert.deepEqual(Array.from(first.events[0].data), [7, 255, 0]);
+  h.get("canvas").emit("pointerdown", { pointerType: "touch", pointerId: 1, timeStamp: 1300.25, offsetX: 120, offsetY: 180, pressure: 0.5 });
+  h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300.5 });
+  const done = request => h.receive({ kind: "play-step-done", playId: start.playId, tickId: request.tickId,
+    songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+  await done(first); const mixed = worker.last("play-step");
+  assert.deepEqual(mixed.events.map(event => event.sequence), [2n, 3n]);
+  assert.deepEqual(mixed.events.map(event => event.hostNs), [1300250000n, 1300500000n]);
+  assert.equal(mixed.events[0].kind, "touch"); assert.equal(mixed.events[1].key, 2);
+  await done(mixed);
+  const before = worker.messages("play-step").length, ignored = h.hidDevices[1];
+  ignored.emit("inputreport", { device: ignored, timeStamp: 1301, reportId: 1, data: new DataView(new ArrayBuffer(0)) });
+  assert.equal(worker.messages("play-step").length, before);
+  assert.equal(h.layoutReads, reads); assert.deepEqual(display, []); assert.equal(selected.reads, 0);
+  h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+  assert.ok(h.hidDevices.every(device => device.closes === 1));
+  assert.equal(h.get("position").value, preview.position);
+  chooseRecording(h, [selectedRecording().file]);
+  const replay = await h.launch(0, "replay");
+  assert.equal(Object.hasOwn(replay.start, "hidProfileFile"), false); assert.equal(Object.hasOwn(replay.start, "hidDevices"), false);
+  assert.equal(h.hid.gets, 1, "recorded playback never reopens a live HID owner");
+  h.click("stop"); await flush(); await h.receive(finalScore(replay.id)); await h.close();
+});
+
+test("HID source receipts precede PCM and matched disconnect or failed cleanup fences ownership while stale and unmatched sources cannot stop another play", async () => {
+  for (const metadata of [{ hidSources: [3n, 3n], hidSourceCount: 2 }, { hidSources: [5n], hidSourceCount: 1 },
+    { hidSources: [3], hidSourceCount: 1 }, { hidSources: [3n], hidSourceCount: 2 }, {}]) {
+    const h = await harness({ hidSupported: true }); await h.preview(); chooseControllerProfile(h, selectedControllerProfile().file);
+    const start = await h.begin(), worker = h.workers[0];
+    await h.reply(start, { kind: "prepared", title: "Bad sources", samples: 1, lanes: [0x11], startNs: 0n, opponentCount: 0, ...metadata });
+    assert.equal(worker.messages("play-sample").length, 0); assert.equal(h.audio.samples.length, 0);
+    assert.equal(worker.last("play-stop").playId, start.playId);
+    await h.receive(finalScore(start.playId)); assert.ok(h.hidDevices.every(device => device.closes === 1)); await h.close();
+  }
+  const connecting = deferred(), cancelled = await harness({ hidSupported: true, hidConnectGate: connecting });
+  await cancelled.preview(); chooseControllerProfile(cancelled, selectedControllerProfile().file);
+  assert.equal(await cancelled.begin(), undefined);
+  cancelled.click("stop"); await flush(); assert.equal(cancelled.get("play").disabled, true);
+  connecting.resolve(cancelled.hidDevices); await flush();
+  assert.equal(cancelled.workers[0].messages("play-start").length, 0);
+  assert.ok(cancelled.hidDevices.every(device => device.opens === 0 && device.closes === 0));
+  assert.equal(cancelled.audio.stopStarts, 1);
+  assert.equal(cancelled.get("play").disabled, false);
+  await cancelled.close();
+  for (const failClose of [false, true]) {
+    const closing = deferred(), faults = { hidSupported: true, hidAdmittedSources: [3n], hidCloseGate: closing };
+    if (failClose) faults.hidCloseError = new Error("owned HID close rejected");
+    const h = await harness(faults); await h.preview(); chooseControllerProfile(h, selectedControllerProfile().file);
+    for (const lane of [...Array.from({ length: 9 }, (_, index) => 0x11 + index), ...Array.from({ length: 9 }, (_, index) => 0x21 + index)]) h.get(`binding-${lane.toString(16)}`).value = "";
+    const session = await h.launch(), worker = h.workers[0], matched = h.hidDevices[0];
+    assert.equal(session.start.keyPairs.length, 0, "actual HID union coverage permits an explicitly unbound keyboard");
+    const retiredListener = [...matched.listeners.get("inputreport")][0];
+    h.hid.emit("disconnect", { device: h.hidDevices[1], timeStamp: 1300 }); await flush();
+    assert.equal(worker.messages("play-stop").length, 0);
+    h.hid.emit("disconnect", { device: matched, timeStamp: 1301 }); await flush();
+    assert.equal(worker.last("play-stop").playId, session.id);
+    assert.equal(worker.messages("play-step").length, 0, "disconnect never fabricates typed releases");
+    assert.equal(matched.listeners.get("inputreport")?.size ?? 0, 0);
+    await h.receive(finalScore(session.id)); assert.equal(h.get("play").disabled, true);
+    closing.resolve(); await flush();
+    assert.ok(h.hidDevices.every(device => device.closes === 1));
+    if (failClose) {
+      assert.match(h.get("status").textContent, /cleanup|close|reload/i);
+      assert.equal(h.get("play").disabled, true);
+    } else {
+      assert.equal(h.get("play").disabled, false);
+      const next = await h.launch(); const messages = worker.posts.length;
+      retiredListener({ device: matched, reportId: 1, timeStamp: 1400, data: new DataView(new ArrayBuffer(0)) });
+      await flush(); assert.equal(worker.posts.length, messages);
+      h.click("stop"); await flush(); await h.receive(finalScore(next.id));
+    }
+    await h.close();
+  }
+});
 
 test("the library opens only explicitly and saves joined capture bytes and actual score without autosave", async () => {
   const stopGate = deferred();
