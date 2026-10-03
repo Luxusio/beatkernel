@@ -1,6 +1,7 @@
-//! Bounded ownership of buttons admitted by the runtime, independent of judgement.
+//! Bounded ownership of admitted buttons and contacts, independent of judgement.
 use beatkernel::input::{
-    ButtonState, DeviceId, GameControlId, GameInputEvent, PhysicalControlId, PhysicalInputEvent,
+    ButtonState, ContactId, DeviceId, GameControlId, GameInputEvent, PhysicalControlId,
+    PhysicalInputEvent, TouchPhase,
 };
 
 const MAX_OWNERS: usize = 4096;
@@ -23,14 +24,63 @@ pub fn validate_mask(mask: u32) -> Result<(), String> {
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
+enum OwnerKind {
+    Button,
+    Contact(ContactId),
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
 struct Owner {
     device: DeviceId,
     physical: PhysicalControlId,
     game: GameControlId,
+    kind: OwnerKind,
 }
 
-/// At most 4096 device/control/binding owners, with retained transactional scratch.
-/// Repeats do not acquire ownership and releases affect only the matching owner.
+enum Action {
+    Acquire,
+    Release,
+}
+
+fn action(event: &GameInputEvent) -> Option<(Owner, Action, u32)> {
+    let bit = lane_bit(event.game_control)?;
+    let (device, physical, kind, action) = match &event.physical {
+        PhysicalInputEvent::Button(button) => (
+            button.meta.source,
+            button.control,
+            OwnerKind::Button,
+            match button.state {
+                ButtonState::Down => Action::Acquire,
+                ButtonState::Up => Action::Release,
+                ButtonState::Repeat => return None,
+            },
+        ),
+        PhysicalInputEvent::Touch(touch) => (
+            touch.meta.source,
+            touch.control,
+            OwnerKind::Contact(touch.contact),
+            match touch.phase {
+                TouchPhase::Down => Action::Acquire,
+                TouchPhase::Up | TouchPhase::Cancel => Action::Release,
+                TouchPhase::Move => return None,
+            },
+        ),
+        _ => return None,
+    };
+    Some((
+        Owner {
+            device,
+            physical,
+            game: event.game_control,
+            kind,
+        },
+        action,
+        bit,
+    ))
+}
+
+/// At most 4096 exact button or contact owners, with retained transactional scratch.
+/// Repeats and contact moves do not acquire ownership. Releases and contact cancels
+/// affect only the exact owner; each lane stays pressed until its last owner leaves.
 #[derive(Default)]
 pub struct PressedKeys {
     owners: Vec<Owner>,
@@ -41,23 +91,12 @@ impl PressedKeys {
     /// Applies a complete admitted batch atomically. Empty batches do no work.
     pub fn apply(&mut self, events: &[GameInputEvent]) -> Result<(), String> {
         if let [event] = events {
-            let Some(bit) = lane_bit(event.game_control) else {
+            let Some((owner, action, bit)) = action(event) else {
                 return Ok(());
-            };
-            let PhysicalInputEvent::Button(button) = &event.physical else {
-                return Ok(());
-            };
-            if button.state == ButtonState::Repeat {
-                return Ok(());
-            }
-            let owner = Owner {
-                device: button.meta.source,
-                physical: button.control,
-                game: event.game_control,
             };
             let found = self.owners.iter().position(|existing| *existing == owner);
-            match (button.state, found) {
-                (ButtonState::Down, None) => {
+            match (action, found) {
+                (Action::Acquire, None) => {
                     if self.owners.len() == MAX_OWNERS {
                         return Err("pressed ownership exceeds 4096 owners".into());
                     }
@@ -67,7 +106,7 @@ impl PressedKeys {
                     self.owners.push(owner);
                     self.mask |= bit;
                 }
-                (ButtonState::Up, Some(index)) => {
+                (Action::Release, Some(index)) => {
                     self.owners.swap_remove(index);
                     if !self
                         .owners
@@ -97,37 +136,28 @@ impl PressedKeys {
         self.mask = 0;
     }
     pub(crate) fn prepare(&mut self, events: &[GameInputEvent]) -> Result<Option<u32>, String> {
-        if !events.iter().any(|event| matches!(&event.physical, PhysicalInputEvent::Button(button) if button.state != ButtonState::Repeat && lane_bit(event.game_control).is_some())) { return Ok(None); }
+        if !events.iter().any(|event| action(event).is_some()) {
+            return Ok(None);
+        }
         self.scratch.clear();
         self.scratch
             .try_reserve_exact(MAX_OWNERS)
             .map_err(|_| "pressed ownership allocation failed")?;
         self.scratch.extend_from_slice(&self.owners);
         for event in events {
-            if lane_bit(event.game_control).is_none() {
+            let Some((owner, action, _)) = action(event) else {
                 continue;
-            }
-            let PhysicalInputEvent::Button(button) = &event.physical else {
-                continue;
-            };
-            if button.state == ButtonState::Repeat {
-                continue;
-            }
-            let owner = Owner {
-                device: button.meta.source,
-                physical: button.control,
-                game: event.game_control,
             };
             let found = self.scratch.iter().position(|existing| *existing == owner);
-            match (button.state, found) {
-                (ButtonState::Down, None) => {
+            match (action, found) {
+                (Action::Acquire, None) => {
                     if self.scratch.len() == MAX_OWNERS {
                         return Err("pressed ownership exceeds 4096 owners".into());
                     }
 
                     self.scratch.push(owner);
                 }
-                (ButtonState::Up, Some(index)) => {
+                (Action::Release, Some(index)) => {
                     self.scratch.swap_remove(index);
                 }
                 _ => {}
