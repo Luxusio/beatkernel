@@ -1,5 +1,11 @@
 //! Pure report ABI fixtures: no JS values, generated bindings or browser calls.
-use super::decode_output;
+use super::{
+    decode_output, decode_section_output, WorkletAudio, WorkletAudioBuilder, WorkletAudioConfig,
+};
+use beatkernel::{
+    audio::{AudioCommand, AudioFormat, AudioLimits, PcmLimits, SampleId, VoiceId},
+    time::Timestamp,
+};
 
 fn put(words: &mut [u32; 56], field: usize, value: u64) {
     words[field * 2] = value as u32;
@@ -25,6 +31,182 @@ fn rendered(start: u64, cursor: u64, frames: u64) -> [u32; 56] {
         put(&mut words, field, value);
     }
     words
+}
+
+fn finite_worklet(end: u64, start: u64, current: u64) -> WorkletAudio {
+    let format = AudioFormat::new(1000, 1).unwrap();
+    let mut builder = WorkletAudioBuilder::new(WorkletAudioConfig {
+        format,
+        pcm_limits: PcmLimits::new(32, 32, 1).unwrap(),
+        audio_limits: AudioLimits::new(4, 2, 4, 8, 4).unwrap(),
+    })
+    .unwrap();
+    builder
+        .insert_sample(SampleId(1), format, vec![0.25; 8])
+        .unwrap();
+    let mut audio = builder.finish_at(end).unwrap();
+    audio
+        .enqueue(AudioCommand::Play {
+            voice: VoiceId(1),
+            sample: SampleId(1),
+            at: Timestamp::ZERO,
+            gain: 1.0,
+        })
+        .unwrap();
+    audio.arm(start, current).unwrap();
+    audio
+}
+
+// Encode actual owner evidence in the documented BrowserAudio::report_word ABI.
+// No callback counts are used to invent playback, endpoint or counter values.
+fn actual_words(audio: &WorkletAudio) -> [u32; 56] {
+    let mut words = [0; 56];
+    for (field, value) in [
+        (23, u64::from(audio.context_frame().is_some())),
+        (24, audio.context_frame().unwrap_or(0)),
+        (25, u64::from(audio.start_frame().is_some())),
+        (26, audio.start_frame().unwrap_or(0)),
+        (27, u64::from(audio.failed())),
+    ] {
+        put(&mut words, field, value);
+    }
+    if let Some(report) = audio.report() {
+        let c = report.counters;
+        let fields = [
+            1,
+            report.start_frame,
+            report.frames as u64,
+            report.playback_start_frame,
+            report.playback_frames as u64,
+            u64::from(report.paused),
+            u64::from(report.playback_end_physical_frame.is_some()),
+            report.playback_end_physical_frame.unwrap_or(0),
+            report.active_voices as u64,
+            report.pending_commands as u64,
+            report.song_position.as_nanos() as u64,
+            u64::from(report.producer_disconnected),
+            c.rendered_frames,
+            c.commands_consumed,
+            c.commands_applied,
+            c.late_commands,
+            c.pending_full,
+            c.voice_full,
+            c.unknown_samples,
+            c.unknown_stops,
+            c.invalid_gains,
+            c.invalid_rates,
+            c.invalid_times,
+        ];
+        for (field, value) in fields.into_iter().enumerate() {
+            put(&mut words, field, value);
+        }
+    }
+    words
+}
+
+#[test]
+fn finite_decoder_preserves_actual_partial_worklet_reports_across_exact_crossing_and_zero_ends() {
+    let base = (1u64 << 53) + 101;
+    for endpoint in [0, 3] {
+        for parts in [vec![8], vec![2, 3, 3], vec![1; 8]] {
+            let mut audio = finite_worklet(endpoint, base + 2, base);
+            let absent = decode_section_output(&actual_words(&audio), Some(endpoint)).unwrap();
+            assert!(absent.report.is_none());
+            assert_eq!(absent.start, base + 2);
+            assert_eq!(absent.context, None);
+            let mut current = base;
+            for frames in parts {
+                audio.render(current, frames).unwrap();
+                current += frames as u64;
+                let words = actual_words(&audio);
+                let decoded = decode_section_output(&words, Some(endpoint)).unwrap();
+                assert_eq!(decoded.report, audio.report());
+                assert_eq!(decoded.context, Some(current));
+                assert_eq!(decoded.start, base + 2);
+                if let Some(report) = decoded.report {
+                    if report.playback_end_physical_frame.is_some() {
+                        assert!(
+                            decode_output(&words).is_err(),
+                            "unlimited consumers must not silently adopt a finite fence"
+                        );
+                        assert_eq!(
+                            decoded.start + report.playback_end_physical_frame.unwrap(),
+                            base + 2 + endpoint
+                        );
+                    } else {
+                        assert_eq!(
+                            decode_section_output(&words, None).unwrap().report,
+                            decode_output(&words).unwrap().report
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                audio.report().unwrap().playback_end_physical_frame,
+                Some(endpoint)
+            );
+            assert_eq!(audio.context_frame(), Some(base + 8));
+        }
+    }
+}
+
+#[test]
+fn finite_decoder_requires_configured_marker_original_grid_and_checked_absolute_extent() {
+    let mut audio = finite_worklet(3, 100, 100);
+    audio.render(100, 1).unwrap();
+    let before = actual_words(&audio);
+    for (field, value) in [(5, 1), (6, 1), (7, 3)] {
+        let mut invalid = before;
+        put(&mut invalid, field, value);
+        assert!(decode_section_output(&invalid, Some(3)).is_err());
+    }
+    audio.render(101, 4).unwrap();
+    let ended = actual_words(&audio);
+    assert_eq!(
+        decode_section_output(&ended, Some(3)).unwrap().report,
+        audio.report()
+    );
+    for (field, value) in [
+        (3, 2),
+        (4, 4),
+        (5, 0),
+        (6, 0),
+        (6, 2),
+        (7, 4),
+        (11, 1),
+        (23, 0),
+        (24, 103),
+        (25, 0),
+        (27, 1),
+    ] {
+        let mut invalid = ended;
+        put(&mut invalid, field, value);
+        assert!(
+            decode_section_output(&invalid, Some(3)).is_err(),
+            "field {field}={value}"
+        );
+    }
+    assert!(decode_section_output(&ended, Some(4)).is_err());
+    assert!(decode_section_output(&ended[..55], Some(3)).is_err());
+    let mut overflow = ended;
+    put(&mut overflow, 1, u64::MAX);
+    put(&mut overflow, 3, 3);
+    assert!(decode_section_output(&overflow, Some(3)).is_err());
+    let unavailable = finite_worklet(0, u64::MAX, u64::MAX);
+    let words = actual_words(&unavailable);
+    assert!(
+        decode_section_output(&words, Some(0))
+            .unwrap()
+            .report
+            .is_none()
+    );
+    assert!(
+        decode_section_output(&words, Some(1)).is_err(),
+        "configured end overflow rejects even absent render evidence"
+    );
+    let mut stray = words;
+    put(&mut stray, 6, 1);
+    assert!(decode_section_output(&stray, Some(0)).is_err());
 }
 
 #[test]
