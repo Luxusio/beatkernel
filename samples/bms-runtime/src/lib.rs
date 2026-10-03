@@ -25,6 +25,8 @@ pub mod browser_game;
 mod browser_hid_fixtures;
 /// Portable bounded HID profile setup using the common platform decoder.
 pub mod browser_hid_input;
+#[cfg(test)]
+mod browser_hid_runtime_fixtures;
 /// Portable bounded preparation and decoding of canonical browser physical input.
 pub mod browser_input;
 #[cfg(test)]
