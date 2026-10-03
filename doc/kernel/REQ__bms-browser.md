@@ -794,3 +794,30 @@ that failure must retain the committed runtime report and fail explicitly.
 Existing capture stores admitted bound GameInputEvent values, including
 physical metadata and control identity, rather than rerunning device binding.
 Unbound raw reports are not automatically captured as judged gameplay input.
+
+
+## Page physical-input routing
+
+Live page setup must explicitly request the physical input route and require
+the same route in preparation metadata before transferring samples. The replay page
+omits live input route choices. Worker compatibility requests may keep the
+legacy keyboard path; explicit physical requests must fail on missing APIs
+instead of silently choosing legacy constructors.
+
+The Window acquires keyboard transitions; the Worker encodes their complete
+bounded batch into canonical BKPI button events before the first runtime call.
+Preserve acquisition time, sequence and output scheduling. Historical browser
+key IDs are adapter codes, not USB HID usages: physical routing uses Native
+controls in browser keyboard namespace 0x574b4559. Source 1 represents the
+Window keyboard aggregate; it does not distinguish physical keyboards.
+Original acquisition clock provenance uses the actual Window HOST domain
+0x57494e and event timestamp; Worker receipt time never replaces it.
+
+Keep one consuming setup owner, actual finite/unlimited metadata, pre-origin
+filtering, monotonic input watermarks, audio ACKs and joined stop/capture barriers.
+Touch/HID acquisition and application device permissions remain further work.
+
+No-note charts with no prepared lanes may use an empty physical binding set,
+preserving the existing all-Unbound page configuration. Empty bindings must
+still validate input budgets and must fail when any prepared lane needs binding.
+Do not invent a control or fall back to legacy ownership to admit such charts.

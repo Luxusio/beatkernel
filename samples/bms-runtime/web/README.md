@@ -669,6 +669,15 @@ Those adapters and application controls remain separate integration work.
 `BrowserGame.new_physical` accepts seven-word physical binding rows, optional
 original-song end and encoded/payload byte budgets. `input_blob(bytes, audioNs)`
 accepts exactly one canonical BKPI event in the original Window host clock
-domain `0x57494e`, preserving its acquisition timestamp and sequence. The page
-still uses the compatible keyboard path; application routing to this new API
-and generated-binding/runtime acceptance remain pending.
+domain `0x57494e`, preserving its acquisition timestamp and sequence. The live page
+now requests this physical route explicitly and checks matching preparation
+metadata before PCM transfer. Worker compatibility callers may still omit the
+route to use the old keyboard API. Generated-binding/runtime acceptance remains
+pending.
+
+Keyboard acquisition remains on Window while packet encoding runs on Worker.
+The Worker validates and encodes the entire bounded input batch before its first
+runtime call. Physical keyboard controls use Native browser backend `0x574b4559`
+with historical adapter key IDs; these IDs are not USB HID usage values. Native
+metadata retains the original Window acquisition point. A zero-lane chart may
+use empty bindings; charts with lanes still require complete coverage.
