@@ -1,5 +1,6 @@
 //! Bounded, portable host composition for per-device vendor report adapters.
 
+pub mod hid_profile;
 pub mod hid_report;
 
 use beatkernel::input::{
