@@ -38,6 +38,8 @@ pub mod completion;
 pub mod device_catalog;
 #[cfg(test)]
 mod finite_replay_fixtures;
+#[cfg(test)]
+mod finite_step_replay_fixtures;
 /// Native FLAC asset decoding during bounded preparation.
 pub mod flac_decode;
 #[cfg(test)]
