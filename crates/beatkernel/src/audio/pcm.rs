@@ -25,6 +25,23 @@ impl PcmSample {
         Ok(Self { format, samples })
     }
 
+    /// Copies owned PCM during setup, subject to the new per-asset limit.
+    ///
+    /// Storage is checked before allocation; immutable validated samples retain
+    /// their exact bits and format. This operation is not for the audio thread.
+    pub fn try_clone(&self, limits: PcmLimits) -> Result<Self, AudioError> {
+        validate_storage(self.format, self.samples.len(), limits)?;
+        let mut samples = Vec::new();
+        samples
+            .try_reserve_exact(self.samples.len())
+            .map_err(|_| AudioError::AllocationFailed)?;
+        samples.extend_from_slice(&self.samples);
+        Ok(Self {
+            format: self.format,
+            samples,
+        })
+    }
+
     /// Decodes strict RIFF WAVE PCM16/24/32 or IEEE float32 off the audio thread.
     ///
     /// All chunks, format fields, limits and floating samples are validated

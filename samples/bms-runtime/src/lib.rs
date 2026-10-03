@@ -196,7 +196,7 @@ mod vorbis_fixture;
 
 use beatkernel::replay::codec::{ReplayCodecLimits, ReplayFile, encode_replay};
 use beatkernel::{
-    audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, VoiceId},
+    audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId},
     judge::JudgeStage,
     runtime::SoundBinding,
 };
@@ -204,7 +204,7 @@ use beatkernel_bms::{BmsChart, CompiledBms, ParseOptions, parse_seeded};
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 /// Fully prepared chart and owned assets; all timestamps remain in song time.
@@ -408,6 +408,8 @@ fn prepare_seeded(
 
 /// Prepares the same chart and assets from bounded bytes and a scoped resource source.
 /// Replay setup is validated before any resource acquisition.
+/// Equal resolved keys reuse decoding within this call; source bytes and the
+/// decoder must remain stable during preparation. Each sample ID owns its PCM.
 pub fn prepare_from_source(
     chart_bytes: &[u8],
     assets: &dyn asset_source::AssetSource,
@@ -441,12 +443,21 @@ pub fn prepare_from_source(
         return Err("referenced asset count exceeds PCM limits".into());
     }
     let mut bank = SampleBank::new(format, pcm_limits)?;
+    let mut decoded: BTreeMap<PathBuf, SampleId> = BTreeMap::new();
     for sample in referenced {
         let name = source
             .samples
             .get(&u16::try_from(sample.0)?)
             .ok_or("referenced sample has no WAV definition")?;
         let asset_path = assets.resolve(name, paths)?;
+        if let Some(&first) = decoded.get(&asset_path) {
+            let pcm = bank
+                .get(first)
+                .expect("cached PCM was inserted into this bank")
+                .try_clone(pcm_limits)?;
+            bank.insert(sample, pcm)?;
+            continue;
+        }
         let encoded = assets.read(&asset_path, 64 * 1024 * 1024)?;
         if encoded.len() > 64 * 1024 * 1024 {
             return Err("encoded file exceeds preparation limit".into());
@@ -454,6 +465,7 @@ pub fn prepare_from_source(
         let pcm = decoder.decode(&asset_path, &encoded, pcm_limits)?;
         let pcm = prepare_channels(pcm, format, pcm_limits, channels)?;
         bank.insert(sample, pcm)?;
+        decoded.insert(asset_path, sample);
     }
 
     let objects: BTreeMap<_, _> = compiled
