@@ -1,8 +1,9 @@
-// Canonical core BKPI v1 boundaries for browser keyboard and touch adapters.
+// Canonical core BKPI v1 boundaries for browser keyboard, touch and HID adapters.
 // Historical key IDs are adapter codes, not USB HID usage values. Source 1 is
 // the Window keyboard aggregate; the browser does not identify each keyboard.
 const KEYBOARD_BACKEND = 0x574b4559;
 const TOUCH_BACKEND = 0x57544f55;
+const HID_BACKEND = 0x57484944;
 const HOST_DOMAIN = 0x57494e;
 const I64_MAX = 9223372036854775807n;
 const U64_MAX = 18446744073709551615n;
@@ -139,4 +140,44 @@ export function projectTouchEvent(event, logicalWidth, logicalHeight) {
   const y = Math.fround(event.y / event.height * logicalHeight);
   if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("Projected touch position exceeds finite float32 coordinates.");
   return { x, y };
+}
+
+export function encodeRawHidEvent(event) {
+  if (!event || typeof event !== "object" || Array.isArray(event) || event.kind !== "hid") {
+    throw new Error("Invalid raw HID event.");
+  }
+  const { hostNs, source, sequence, reportId, data } = event;
+  if (typeof hostNs !== "bigint" || hostNs < 0n || hostNs > I64_MAX
+    || typeof source !== "bigint" || source < 3n || source > U64_MAX
+    || typeof sequence !== "bigint" || sequence < 0n || sequence > U64_MAX
+    || !Number.isInteger(reportId) || reportId < 0 || reportId > 255
+    || !(data instanceof Uint8Array) || data.byteLength > 1024) {
+    throw new Error("Raw HID input requires bounded acquisition identity, report ID and payload.");
+  }
+  // Reconstructing even an empty view rejects a detached input buffer. WebHID
+  // has already separated the report ID: every payload byte stays unchanged.
+  const payload = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  const offset = reportId === 0 ? 64 : 65;
+  const bytes = new Uint8Array(offset + payload.byteLength);
+  const view = new DataView(bytes.buffer);
+  bytes.set([0x42, 0x4b, 0x50, 0x49]);
+  view.setUint16(4, 1, true);
+  view.setUint8(6, 5); // PhysicalInputEvent::RawHidReport.
+  view.setBigUint64(7, source, true);
+  view.setBigInt64(15, hostNs, true);
+  view.setUint32(23, HOST_DOMAIN, true);
+  view.setBigUint64(27, sequence, true);
+  view.setUint8(35, 1);
+  view.setUint32(36, HID_BACKEND, true);
+  view.setUint8(40, 1);
+  view.setUint32(41, reportId, true);
+  view.setUint8(45, 1);
+  view.setUint32(46, HOST_DOMAIN, true);
+  view.setBigInt64(50, hostNs, true);
+  // Byte 58: no extra original clock point; acquisition is already HOST time.
+  view.setUint8(59, reportId === 0 ? 0 : 1);
+  if (reportId !== 0) view.setUint8(60, reportId);
+  view.setUint32(offset - 4, payload.byteLength, true);
+  bytes.set(payload, offset);
+  return bytes;
 }
