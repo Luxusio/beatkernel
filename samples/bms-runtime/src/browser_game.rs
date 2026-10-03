@@ -515,6 +515,21 @@ impl BrowserGame {
             .configure_touch_router(setup.router)
             .map_err(error)
     }
+    /// Actual full-size rendered lane slots in prepared chart order.
+    #[wasm_bindgen(getter)]
+    pub fn touch_bounds(&self) -> Result<Vec<f32>, JsValue> {
+        crate::playfield_layout::default_touch_bounds(&self.chart.lanes).map_err(error)
+    }
+    /// Logical scene width used by rendering and projected touch hit points.
+    #[wasm_bindgen(getter)]
+    pub fn touch_width(&self) -> u32 {
+        crate::playfield_layout::LOGICAL_EXTENT[0]
+    }
+    /// Logical scene height used by rendering and projected touch hit points.
+    #[wasm_bindgen(getter)]
+    pub fn touch_height(&self) -> u32 {
+        crate::playfield_layout::LOGICAL_EXTENT[1]
+    }
     /// Called after stop/failure and before free; yields owned encoded bytes
     /// once. The binding does not create a file or infer a complete-song label.
     pub fn take_replay(&mut self) -> Result<Option<Vec<u8>>, JsValue> {

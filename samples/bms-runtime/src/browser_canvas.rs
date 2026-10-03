@@ -10,6 +10,7 @@ use crate::{
     graphics::{self, BackendChoice, Presentation, Renderer},
     image_assets::ImageAssets,
     player_chart::PlayerChart,
+    playfield_layout::LOGICAL_EXTENT,
     poor_background::PoorBackgroundPolicy,
     scene::Scene,
     ui::organisms,
@@ -39,7 +40,7 @@ impl BrowserCanvas {
             canvas,
             instance,
             renderer,
-            scene: Scene::new(960, 720),
+            scene: Scene::new(LOGICAL_EXTENT[0], LOGICAL_EXTENT[1]),
             backgrounds: BgaTextureCache::default(),
             extent,
         })

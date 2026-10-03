@@ -8,13 +8,16 @@ use crate::{
     competition::{OpponentKind, ScoreSummary},
     player::{CompetitionSnapshot, LocalPlayerSnapshot, NetworkStatus},
     player_chart::PlayerChart,
+    playfield_layout::{DEFAULT_BOUNDS, partition_lane},
     scene::Scene,
 };
 use beatkernel::{
     judge::{JudgeEvent, JudgeOutcome},
     time::Timestamp,
 };
+#[cfg(test)]
 const TOP: i64 = 110;
+#[cfg(test)]
 const LINE: i64 = 610;
 #[cfg(test)]
 fn note_y(time: Timestamp, now: Timestamp, lookahead: i64) -> i64 {
@@ -29,11 +32,6 @@ fn project_note(time: Timestamp, now: Timestamp, lookahead: i64, top: i64, line:
 #[cfg(test)]
 fn lane_bounds(index: usize, lanes: usize) -> (i64, i64) {
     partition_lane(index, lanes, 80, 640)
-}
-fn partition_lane(index: usize, lanes: usize, x: i64, width: i64) -> (i64, i64) {
-    let left = x + (index as i128 * i128::from(width) / lanes.max(1) as i128) as i64;
-    let right = x + ((index + 1) as i128 * i128::from(width) / lanes.max(1) as i128) as i64;
-    (left, right)
 }
 
 pub fn playfield(
@@ -107,10 +105,10 @@ pub fn playfield_with_background(
         now,
         lookahead,
         Bounds {
-            x: 80,
-            y: TOP - 4,
-            width: 640,
-            height: LINE - TOP + 28,
+            x: DEFAULT_BOUNDS[0],
+            y: DEFAULT_BOUNDS[1],
+            width: DEFAULT_BOUNDS[2],
+            height: DEFAULT_BOUNDS[3],
         },
         recent,
         pressed_lanes,

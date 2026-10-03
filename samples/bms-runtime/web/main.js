@@ -5,8 +5,10 @@ import { SavedOpponentSelection, opponentLabel, validateOpponentSnapshot } from 
 import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, frameNanos, startProjection, committedStartProjection, presentationPair } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
-const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands"].map(id => [id, byId(id)]));
+const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input"].map(id => [id, byId(id)]));
 let canvas = byId("canvas");
+let cssExtent = [0, 0];
+ui["touch-input"].checked = typeof window.PointerEvent === "function" && globalThis.navigator?.maxTouchPoints > 0;
 let worker = null;
 let observer = null;
 let density = null;
@@ -77,6 +79,7 @@ function controls() {
   ui["replay-play"].disabled = ui.play.disabled || selectedReplay === null;
   const recordsDisabled = !initialized || importing || preparing || playing || busy;
   ui["bindings-reset"].disabled = recordsDisabled;
+  ui["touch-input"].disabled = recordsDisabled;
   for (const [, field] of bindingFields) field.disabled = recordsDisabled;
   for (const field of [ui["judge-early"], ui["judge-late"], ui["judge-offset"], ui["live-start"], ui["live-end"]]) field.disabled = recordsDisabled;
   ui["output-latency"].disabled = ui["output-rate"].disabled = recordsDisabled;
@@ -121,6 +124,7 @@ function fatal(error) {
 function resize() {
   if (!worker) return;
   const box = ui.viewport.getBoundingClientRect();
+  cssExtent = [box.width, box.height];
   const dpr = window.devicePixelRatio || 1;
   // Do not assign canvas backing dimensions here; the renderer validates first.
   const dimensions = [box.width, box.height].map(value => Math.round(value * dpr));
@@ -225,6 +229,11 @@ function start() {
   fresh.setAttribute("aria-label", "Chart lanes and background at the selected song time");
   canvas.replaceWith(fresh);
   canvas = fresh;
+  cssExtent = [0, 0];
+  for (const [name, phase] of [["pointerdown", 0], ["pointermove", 1], ["pointerup", 2], ["pointercancel", 3]]) {
+    fresh.addEventListener(name, event => touch(event, phase, fresh), { passive: false });
+  }
+  fresh.addEventListener("lostpointercapture", event => touch(event, 3, fresh, true), { passive: false });
   controls();
   status("Initializing graphics…");
   try {
@@ -404,6 +413,7 @@ async function play(mode = "live") {
   if (mode === "replay" && selectedReplay === null) return;
   const session = { id: ++serial, owner, mode, phase: "preparing", controller: new AbortController(), audio: null, opening: null,
     rpc: null, timer: null, events: [], pressed: new Set(), bindings: [], sequence: 0n,
+    canvas, touchInput: false, contacts: new Map(), nextContact: 0n,
     tickId: 0, tickPending: null, audioBusy: false, batch: null, startFrame: null,
     origin: null, lastHost: 0n, stopping: null, renderId: 0, renderPending: null,
     workerStarted: false, workerReleased: false, workerStop: null, finalScore: null,
@@ -417,6 +427,13 @@ async function play(mode = "live") {
   controls();
   status(mode === "replay" ? "Preparing recorded replay and audio…" : "Preparing playable chart and audio…");
   try {
+    session.touchInput = mode === "live" && ui["touch-input"].checked === true;
+    if (session.touchInput && (typeof window.PointerEvent !== "function"
+      || typeof session.canvas.setPointerCapture !== "function" || typeof session.canvas.releasePointerCapture !== "function")) {
+      throw new Error("Touch play requires Pointer Events and canvas pointer capture support.");
+    }
+    session.inputMode = session.touchInput ? "physical-contact" : "physical";
+    if (session.touchInput) session.canvas.dataset.touchInput = "true";
     session.contextOptions = audioOutputFromFields(ui["output-latency"].value, ui["output-latency-ms"].value, ui["output-rate"].value);
     session.audioLimits = audioLimitsFromFields({ queueCapacity: ui["audio-queue"].value, maxVoices: ui["audio-voices"].value,
       pendingCapacity: ui["audio-pending"].value, maxFrames: ui["audio-frames"].value, maxCommandsPerRender: ui["audio-commands"].value });
@@ -442,7 +459,7 @@ async function play(mode = "live") {
     if (activePlay !== session || session.phase === "closing") { await session.audio.stop(); return; }
     session.workerStarted = true;
     const source = mode === "replay" ? { mode, replayFile: session.replayFile }
-      : { mode, inputMode: "physical", seed: ui.seed.value, recordReplay: session.recordReplay, timing: session.timing, startNs: session.startNs,
+      : { mode, inputMode: session.inputMode, seed: ui.seed.value, recordReplay: session.recordReplay, timing: session.timing, startNs: session.startNs,
         ...(session.requestedEndNs === undefined ? {} : { endNs: session.requestedEndNs }),
         ...(session.multiplayer ? { multiplayer: session.multiplayer } : {}),
         ...(session.opponentSelection ? { opponents: session.opponentSelection } : {}),
@@ -450,7 +467,7 @@ async function play(mode = "live") {
     const prepared = await playRpc(session, "play-start", { libraryId, path: ui.chart.value,
       rate: session.audio.sampleRate, commandBatchLimit: session.commandBatchLimit, ...source });
     if (mode === "replay" ? prepared.mode !== "replay" : prepared.mode !== undefined && prepared.mode !== "live") throw new Error("Playback preparation mode changed.");
-    if (mode === "live" && prepared.inputMode !== "physical") throw new Error("Preparation did not admit the requested physical input route.");
+    if (mode === "live" && prepared.inputMode !== session.inputMode) throw new Error("Preparation did not admit the requested physical input route.");
     const preparedStart = prepared.startNs === undefined && mode === "live" && session.startNs === 0n ? 0n : prepared.startNs;
     if (typeof preparedStart !== "bigint") throw new Error("Preparation omitted its actual song start.");
     validateStart(preparedStart);
@@ -469,7 +486,8 @@ async function play(mode = "live") {
       + (session.endNs === undefined ? "" : ` · ${mode === "replay" ? "recorded end" : "end"} ${seconds(session.endNs.toString())} s`);
     session.bindings = mode === "replay" ? [] : bindingsFor(prepared.lanes, session.bindingSelection);
     ui.keys.textContent = mode === "replay" ? "Recorded input playback · Escape stops the replay."
-      : session.bindings.map(row => `${row[0].toString(16).toUpperCase()}: ${row[1]}`).join(" · ");
+      : session.bindings.map(row => `${row[0].toString(16).toUpperCase()}: ${row[1]}`).join(" · ")
+        + (session.touchInput ? " · Touch lanes enabled" : "");
     for (let index = 0; index < prepared.samples; index++) {
       const sample = await playRpc(session, "play-sample");
       if (sample?.kind !== "sample") throw new Error("Prepared audio asset count changed.");
@@ -547,6 +565,67 @@ function key(event, down) {
     session.completionReady = false;
     pumpInput(session);
   } catch (error) { void stopPlay(`Playback failed: ${error.message}`, true); }
+}
+
+function finiteTouchSample(value) {
+  return typeof value === "number" && Number.isFinite(value) && Number.isFinite(Math.fround(value));
+}
+
+function touch(event, phase, surface, lost = false) {
+  const session = activePlay;
+  if (!session || session.phase !== "playing" || !session.touchInput || session.mode !== "live"
+    || surface !== canvas || surface !== session.canvas || session.owner !== owner) return;
+  if (!lost && event.pointerType !== "touch") return;
+  const id = event.pointerId;
+  const previous = session.contacts.get(id);
+  if (lost && !previous) return;
+  if ((phase === 0 && previous) || (phase !== 0 && !previous)) return;
+  event.preventDefault();
+  try {
+    if (!Number.isInteger(id) || id < -2147483648 || id > 2147483647) throw new Error("Touch pointer identity exceeds signed 32 bits.");
+    if (session.events.length >= 1024) throw new Error("Pending input capacity exceeded.");
+    if (phase === 0 && session.contacts.size >= 256) throw new Error("Touch contact capacity exceeded.");
+    const hostNs = millisecondsToNanos(event.timeStamp);
+    if (hostNs < session.lastHost) throw new Error("Touch input arrived behind the accepted gameplay watermark.");
+    const x = lost && !finiteTouchSample(event.offsetX) ? previous.x : event.offsetX;
+    const y = lost && !finiteTouchSample(event.offsetY) ? previous.y : event.offsetY;
+    const pressure = lost && !finiteTouchSample(event.pressure) ? previous.pressure : event.pressure;
+    const width = lost && !(Number.isFinite(cssExtent[0]) && cssExtent[0] > 0) ? previous.width : cssExtent[0];
+    const height = lost && !(Number.isFinite(cssExtent[1]) && cssExtent[1] > 0) ? previous.height : cssExtent[1];
+    if (!finiteTouchSample(x) || !finiteTouchSample(y) || !finiteTouchSample(pressure)
+      || !Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+      throw new Error("Touch input requires finite coordinates, pressure and a positive canvas extent.");
+    }
+    const sequence = session.sequence + 1n;
+    const contact = previous?.contact ?? session.nextContact + 1n;
+    if (sequence > 18446744073709551615n || contact > 18446744073709551615n) throw new Error("Touch acquisition identity exhausted.");
+    const current = { contact, x, y, pressure, width, height };
+    if (phase === 0) {
+      // Capture belongs to this contact before any event can reach the Worker.
+      surface.setPointerCapture(id);
+      session.contacts.set(id, current);
+      session.nextContact = contact;
+    } else if (phase === 2 || phase === 3) {
+      session.contacts.delete(id);
+      // Native release may emit lost capture; the removed owner cannot cancel twice.
+      if (!lost) surface.releasePointerCapture(id);
+    } else session.contacts.set(id, current);
+    session.sequence = sequence;
+    session.events.push({ kind: "touch", hostNs, sequence, contact, phase, code: id >>> 0,
+      x, y, pressure, width, height });
+    session.completionReady = false;
+    pumpInput(session);
+  } catch (error) { void stopPlay(`Playback failed: ${String(error.message).slice(0, 4096)}`, true); }
+}
+
+function releaseTouches(session) {
+  delete session.canvas.dataset.touchInput;
+  // Remove ownership before releasing any capture, including synchronous callbacks.
+  const ids = [...session.contacts.keys()];
+  session.contacts.clear();
+  for (const id of ids) {
+    try { session.canvas.releasePointerCapture(id); } catch { /* Browser may already have released it. */ }
+  }
 }
 
 function audioSchedule(session) {
@@ -730,6 +809,7 @@ function stopPlay(reason, failed = false, completed = false) {
   }
   session.events.length = 0;
   session.pressed.clear();
+  releaseTouches(session);
   session.batch = null;
   let workerStopped = Promise.resolve();
   if (session.workerStarted && !session.workerReleased && worker) {

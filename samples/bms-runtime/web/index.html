@@ -58,6 +58,8 @@
         <button id="bindings-reset" type="button" disabled>Reset keyboard defaults</button>
         <p class="hint">Choose physical key positions for each lane. Unbound lanes must be absent from the prepared chart; one key can belong to only one lane. These page-local settings affect live play. Replay uses recorded inputs, and Escape always stops playback. Browser or system shortcuts may prevent some keys from reaching the game.</p>
       </details>
+      <label><input id="touch-input" type="checkbox" disabled> Touch lanes with keyboard controls</label>
+      <p class="hint">Enabled automatically on touch-capable browsers. A contact keeps its first lane until release; leaving the page stops playback. Use the same input mode for multiplayer and saved comparisons. Replay uses recorded input.</p>
       <p><button id="play" type="button" disabled>Play live</button> <button id="stop" type="button" disabled>Stop</button></p>
       <div class="replay-controls"><label><input id="multiplayer" type="checkbox" disabled> Multiplayer live play</label>
         <label>Server <input id="multiplayer-url" type="url" placeholder="https://server.example/room" maxlength="4096" disabled></label>

@@ -3,7 +3,7 @@ import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
 import { PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, renderedCursor } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { validateSelections, validateOpponentSnapshot } from "./saved-opponents.mjs";
-import { keyboardBindingWords, encodeKeyboardEvent } from "./physical-input.mjs";
+import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, projectTouchEvent } from "./physical-input.mjs";
 const { BrowserGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
 let ready = null;
 let view = null;
@@ -482,10 +482,11 @@ async function preparePlay(state, request) {
     state.commandBatchLimit = commandBatchLimit;
     if (request.mode !== undefined && request.mode !== "live" && request.mode !== "replay") throw new Error("Invalid playback mode.");
     state.mode = request.mode ?? "live";
-    if (request.inputMode !== undefined && (request.inputMode !== "physical" || state.mode !== "live")) {
+    if (request.inputMode !== undefined && (!["physical", "physical-contact"].includes(request.inputMode) || state.mode !== "live")) {
       throw new Error("Invalid live gameplay input mode.");
     }
-    state.physicalInput = request.inputMode === "physical";
+    state.touchInput = request.inputMode === "physical-contact";
+    state.physicalInput = request.inputMode === "physical" || state.touchInput;
     const timing = state.mode === "live" ? validateTiming(request.timing) : null;
     const requestedStart = state.mode === "live" ? validateStart(request.startNs) : null;
     const requestedEnd = state.mode === "live" ? validateEnd(requestedStart, request.endNs) : undefined;
@@ -545,9 +546,13 @@ async function preparePlay(state, request) {
     bindingsFor(chartLanes);
     if (state.mode === "live" && chartLanes.some(lane => !lanes.includes(lane))) throw new Error("A prepared lane has no supplied key binding.");
     const metadata = { title: prepared.title, artist: prepared.artist, notes: prepared.note_count, lanes: chartLanes, startNs };
-    if (state.physicalInput && (typeof BrowserGame?.new_physical !== "function"
+    if (state.physicalInput && (typeof (state.touchInput ? BrowserGame?.new_physical_contact : BrowserGame?.new_physical) !== "function"
       || typeof BrowserGame?.prototype?.input_blob !== "function")) {
       throw new Error("The gameplay binding does not provide canonical physical input ownership.");
+    }
+    if (state.touchInput && (typeof BrowserGame?.prototype?.configure_touch_regions !== "function"
+      || typeof BrowserGame?.prototype?.input_blob_at !== "function")) {
+      throw new Error("The gameplay binding does not provide contact routing ownership.");
     }
     if (state.mode === "live" && !state.physicalInput && requestedEnd !== undefined && typeof BrowserGame.new_section !== "function") {
       throw new Error("The gameplay binding does not provide finite section ownership.");
@@ -556,12 +561,33 @@ async function preparePlay(state, request) {
     prepared = null; // A consuming Rust constructor also owns the argument on Err.
     state.game = state.mode === "replay"
       ? new BrowserReplay(moved, 100000000n)
-      : state.physicalInput
-        ? BrowserGame.new_physical(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, bindingWords, requestedEnd, 4096, 1024)
-        : requestedEnd === undefined
-          ? new BrowserGame(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs)
-          : BrowserGame.new_section(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs, requestedEnd);
-    if (state.physicalInput) metadata.inputMode = "physical";
+      : state.touchInput
+        ? BrowserGame.new_physical_contact(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, bindingWords, requestedEnd, 4096, 1024)
+        : state.physicalInput
+          ? BrowserGame.new_physical(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, bindingWords, requestedEnd, 4096, 1024)
+          : requestedEnd === undefined
+            ? new BrowserGame(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs)
+            : BrowserGame.new_section(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs, requestedEnd);
+    if (state.physicalInput) metadata.inputMode = request.inputMode;
+    if (state.touchInput) {
+      const bounds = state.game.touch_bounds;
+      const width = state.game.touch_width;
+      const height = state.game.touch_height;
+      if (!(bounds instanceof Float32Array) || bounds.length !== chartLanes.length * 4
+        || !integer(width, 1, 0xffffffff) || !integer(height, 1, 0xffffffff)) {
+        throw new Error("Actual touch layout dimensions or lane bounds are invalid.");
+      }
+      for (let index = 0; index < bounds.length; index += 4) {
+        if (!Number.isFinite(bounds[index]) || !Number.isFinite(bounds[index + 1])
+          || !Number.isFinite(bounds[index + 2]) || !Number.isFinite(bounds[index + 3])
+          || bounds[index] >= bounds[index + 2] || bounds[index + 1] >= bounds[index + 3]) {
+          throw new Error("Actual touch layout has invalid region bounds.");
+        }
+      }
+      state.game.configure_touch_regions(touchBindingWords(chartLanes), bounds, 256);
+      state.touchWidth = width;
+      state.touchHeight = height;
+    }
     const output = replayOutputFromMetadata(startNs, state.game.end_ns, state.game.playback_end_frame, request.rate);
     if (state.mode === "live" && output.endNs !== requestedEnd) throw new Error("Actual live section end differs from its request.");
     if (output.endFrame !== undefined) {
@@ -672,12 +698,19 @@ function stepPlay(state, request) {
   const encoded = state.physicalInput ? [] : null;
   // Validate the complete bounded batch before the first actual Runtime call.
   for (const event of request.events) {
-    if (!event || !hostTime(event.hostNs) || !integer(event.key, 1, 65535) || !state.keys.has(event.key)
-      || typeof event.down !== "boolean" || !unsigned(event.sequence)
+    if (!event || typeof event !== "object" || Array.isArray(event) || !hostTime(event.hostNs) || !unsigned(event.sequence)
       || (host !== null && event.hostNs < host) || (sequence !== null && event.sequence < sequence)) {
       throw new Error("Invalid gameplay input or source chronology.");
     }
-    if (encoded !== null) encoded.push(encodeKeyboardEvent(event));
+    if (event.kind === "touch") {
+      if (!state.touchInput) throw new Error("Touch input requires the prepared contact mode.");
+      const position = projectTouchEvent(event, state.touchWidth, state.touchHeight);
+      encoded.push({ bytes: encodeTouchEvent(event), position });
+    } else {
+      if (event.kind !== undefined || !integer(event.key, 1, 65535) || !state.keys.has(event.key)
+        || typeof event.down !== "boolean") throw new Error("Invalid gameplay keyboard input.");
+      if (encoded !== null) encoded.push({ bytes: encodeKeyboardEvent(event), position: null });
+    }
     host = event.hostNs;
     sequence = event.sequence;
     if (host < state.origin) ignored++;
@@ -689,8 +722,11 @@ function stepPlay(state, request) {
   for (let index = 0; index < request.events.length; index++) {
     const event = request.events[index];
     if (event.hostNs < state.origin) state.preOriginInputs++;
-    else if (encoded !== null) state.game.input_blob(encoded[index], request.audioNs);
-    else state.game.input(event.hostNs, event.key, event.down, event.sequence, request.audioNs);
+    else if (encoded !== null) {
+      const entry = encoded[index];
+      if (entry.position === null) state.game.input_blob(entry.bytes, request.audioNs);
+      else state.game.input_blob_at(entry.bytes, entry.position.x, entry.position.y, request.audioNs);
+    } else state.game.input(event.hostNs, event.key, event.down, event.sequence, request.audioNs);
     state.lastHost = event.hostNs;
     state.lastSequence = event.sequence;
   }
@@ -719,7 +755,8 @@ function handlePlay(request) {
       batch: null, lastRpc: 0, lastTick: 0, lastRender: 0,
       lastHost: null, lastSequence: null, preOriginInputs: 0,
       recordReplay: false, completed: false,
-      mode: "live", physicalInput: false, rate: null, network: null, samplesEnded: false, commandsDrained: false,
+      mode: "live", physicalInput: false, touchInput: false, touchWidth: null, touchHeight: null,
+      rate: null, network: null, samplesEnded: false, commandsDrained: false,
       prepared: false, opponentCount: 0, opponentsFailed: false, lastOpponents: null,
     };
     play = state; // Reserve before the ready await so stop cannot race a late owner.

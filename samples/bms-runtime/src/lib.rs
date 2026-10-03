@@ -30,6 +30,8 @@ mod browser_input_fixtures;
 pub mod browser_multiplayer;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_replay;
+#[cfg(test)]
+mod browser_touch_fixtures;
 /// Strict bounded application chart decoding before the UTF-8 parser.
 pub mod chart_text;
 /// Saved-record opponents and actual judgment summaries.
@@ -149,6 +151,8 @@ pub mod player;
 pub mod player_chart;
 #[cfg(feature = "graphics")]
 mod playfield_gpu;
+/// Shared playfield partitions for rendering and projected physical touch routing.
+pub mod playfield_layout;
 /// Exact original-song practice positions and native-setting draft updates.
 pub mod practice;
 pub mod practice_loop;

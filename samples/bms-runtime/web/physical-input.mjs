@@ -1,7 +1,8 @@
-// Canonical core BKPI v1 boundaries for the existing browser keyboard adapter.
+// Canonical core BKPI v1 boundaries for browser keyboard and touch adapters.
 // Historical key IDs are adapter codes, not USB HID usage values. Source 1 is
 // the Window keyboard aggregate; the browser does not identify each keyboard.
 const KEYBOARD_BACKEND = 0x574b4559;
+const TOUCH_BACKEND = 0x57544f55;
 const HOST_DOMAIN = 0x57494e;
 const I64_MAX = 9223372036854775807n;
 const U64_MAX = 18446744073709551615n;
@@ -57,4 +58,85 @@ export function encodeKeyboardEvent(event) {
   view.setUint32(64, key, true);
   view.setUint8(68, down ? 0 : 1);
   return bytes;
+}
+
+// Source 2 is the Window touch aggregate, not a physical panel identity.
+export function touchBindingWords(lanes) {
+  if ((!Array.isArray(lanes) && !(lanes instanceof Uint8Array)) || lanes.length > 18) {
+    throw new Error("Touch bindings require at most eighteen BMS lanes.");
+  }
+  const snapshot = lanes.slice();
+  const seen = new Set();
+  const words = new Uint32Array(snapshot.length * 7);
+  for (let index = 0; index < snapshot.length; index++) {
+    const lane = snapshot[index];
+    if (!Number.isInteger(lane) || !((lane >= 0x11 && lane <= 0x19) || (lane >= 0x21 && lane <= 0x29)) || seen.has(lane)) {
+      throw new Error("Touch bindings require unique valid BMS lanes.");
+    }
+    seen.add(lane);
+    words.set([lane, 0, 0, 0, 1, TOUCH_BACKEND, 0], index * 7);
+  }
+  return words;
+}
+
+function finiteFloat(value) {
+  return typeof value === "number" && Number.isFinite(value) && Number.isFinite(Math.fround(value));
+}
+
+function validateTouch(event) {
+  if (!event || typeof event !== "object" || Array.isArray(event) || event.kind !== "touch") throw new Error("Invalid touch event.");
+  if (typeof event.hostNs !== "bigint" || event.hostNs < 0n || event.hostNs > I64_MAX
+    || typeof event.sequence !== "bigint" || event.sequence < 0n || event.sequence > U64_MAX
+    || typeof event.contact !== "bigint" || event.contact < 0n || event.contact > U64_MAX
+    || !Number.isInteger(event.phase) || event.phase < 0 || event.phase > 3
+    || !Number.isInteger(event.code) || event.code < 0 || event.code > 0xffffffff
+    || !finiteFloat(event.x) || !finiteFloat(event.y)
+    || (event.pressure !== null && !finiteFloat(event.pressure))
+    || typeof event.width !== "number" || !Number.isFinite(event.width) || event.width <= 0
+    || typeof event.height !== "number" || !Number.isFinite(event.height) || event.height <= 0) {
+    throw new Error("Touch input requires bounded acquisition identity, finite samples and a positive CSS extent.");
+  }
+}
+
+export function encodeTouchEvent(event) {
+  validateTouch(event);
+  const bytes = new Uint8Array(event.pressure === null ? 86 : 90);
+  const view = new DataView(bytes.buffer);
+  bytes.set([0x42, 0x4b, 0x50, 0x49]);
+  view.setUint16(4, 1, true);
+  view.setUint8(6, 2); // PhysicalInputEvent::Touch.
+  view.setBigUint64(7, 2n, true);
+  view.setBigInt64(15, event.hostNs, true);
+  view.setUint32(23, HOST_DOMAIN, true);
+  view.setBigUint64(27, event.sequence, true);
+  view.setUint8(35, 1);
+  view.setUint32(36, TOUCH_BACKEND, true);
+  view.setUint8(40, 1);
+  view.setUint32(41, event.code, true);
+  view.setUint8(45, 1);
+  view.setUint32(46, HOST_DOMAIN, true);
+  view.setBigInt64(50, event.hostNs, true);
+  // Byte 58: no extra original clock point; acquisition is already HOST time.
+  view.setUint8(59, 1); // PhysicalControlId::Native, one aggregate touch surface.
+  view.setUint32(60, TOUCH_BACKEND, true);
+  view.setUint32(64, 0, true);
+  view.setBigUint64(68, event.contact, true);
+  view.setUint8(76, event.phase);
+  view.setFloat32(77, event.x, true);
+  view.setFloat32(81, event.y, true);
+  view.setUint8(85, event.pressure === null ? 0 : 1);
+  if (event.pressure !== null) view.setFloat32(86, event.pressure, true);
+  return bytes;
+}
+
+export function projectTouchEvent(event, logicalWidth, logicalHeight) {
+  validateTouch(event);
+  if (!Number.isInteger(logicalWidth) || logicalWidth < 1 || logicalWidth > 0xffffffff
+    || !Number.isInteger(logicalHeight) || logicalHeight < 1 || logicalHeight > 0xffffffff) {
+    throw new Error("Touch projection requires positive 32-bit logical dimensions.");
+  }
+  const x = Math.fround(event.x / event.width * logicalWidth);
+  const y = Math.fround(event.y / event.height * logicalHeight);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error("Projected touch position exceeds finite float32 coordinates.");
+  return { x, y };
 }
