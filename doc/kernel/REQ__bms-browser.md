@@ -35,12 +35,12 @@ performance acceptance.
 Canvas drawing and local/replay score HUD presentation run in Worker. Window
 no longer duplicates their continuous score/status and song-position DOM writes
 on step/render responses; final summaries and preview/menu updates remain
-event-driven. Saved/network opponent DOM presentation and parts of the host
-bridge remain to be moved; touch/pointer/HID input routes also remain to be
-completed and verified. Keyboard and live touch forwarding have source
-implementations. HID acquisition, profile launch and mixed report forwarding
-also have source implementations on Window/Worker. Source changes do not
-establish performance acceptance.
+event-driven. Saved and network opponent presentation also have Worker-owned
+source implementations; parts of the audio host bridge remain to be moved.
+Keyboard and live touch forwarding have source implementations. HID acquisition,
+profile launch and mixed report forwarding also have source implementations on
+Window/Worker. Input route completeness, browser execution and measured latency
+remain to be verified. Source changes do not establish performance acceptance.
 
 ## Worker-owned saved opponent presentation
 
@@ -63,6 +63,33 @@ The shared view retains actual admitted opponent identity and scores. Empty
 selection, replay, unavailable comparisons and stale final receipts have explicit
 behavior. Source fixtures and compilation do not establish rendering or
 main-thread performance acceptance.
+
+## Worker-owned multiplayer peer presentation
+
+Retain the actual peer prefix and connection lifecycle on Worker. Coalesce normal
+peer progress at the existing display cadence and update the Rust HUD through a
+bounded numeric interface, preserving signed i64 song time and all u64 counters.
+Use the common progress validator; do not infer a song clock, local judgement,
+authenticated score or peer identity. The shared competition scoreboard labels
+the peer's data as reported and displays its independent connection state.
+
+Saved and peer presentation failures are independent: disabling one preserves
+the other's retained snapshot. A presentation error cannot change local scoring,
+capture completeness, transport framing or actual final write/ACK results.
+Invalid HUD updates refuse atomically. No update revives a stopped/disconnected
+presentation owner, and rendering never advances a network or replay clock.
+
+Window receives setup/lifecycle/error notifications but no normal periodic peer
+counter updates. Clock estimation and committed-start ownership remain on their
+existing paths. Final peer progress goes immediately to the Worker HUD, not to
+a live DOM counter. Stop/error receipts preserve the last actually received peer
+prefix and whether it was a final prefix, independently of local final write and
+peer ACK. Present that prefix once after joined cleanup for the current page and
+session; an absent peer prefix remains absent. Stale callbacks cannot change a
+new session or resurrect a disposed owner.
+
+Source fixtures and compilation do not prove browser presentation, network
+interoperability or performance acceptance.
 
 ## Finite live section controls
 

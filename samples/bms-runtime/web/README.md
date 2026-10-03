@@ -788,6 +788,23 @@ the current page/session. Preserve labels, Own/Other choice, full-width counters
 and recorded extent; never infer unrecorded-tail results. Source fixtures and
 compilation do not establish actual browser presentation or performance.
 
+## Worker multiplayer peer display
+
+Normal peer summaries are coalesced on Worker at the existing display cadence
+and update the retained Rust competition HUD, alongside any saved opponents.
+Signed song time and full-width counters retain their actual received values.
+The common view labels these as peer-reported prefixes; they never judge local
+input, advance a song clock or establish an authenticated score.
+
+Window receives setup/lifecycle/error messages and final cleanup results rather
+than live peer counter updates. Stop/error receipts retain the actual last peer
+prefix and its final flag, independently of local final write and peer ACK.
+Display final data once after joined cleanup for the current page/session.
+Peer and saved display failure are independent and preserve local gameplay.
+
+Source fixtures and Rust compilation do not verify browser/network execution or
+measured main-thread performance.
+
 ## Optional controller profiles
 
 Choose a controller profile file to enable HID for live play. Authorize new
