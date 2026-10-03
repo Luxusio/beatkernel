@@ -5,10 +5,12 @@ use crate::{
     bgm::{BgmConfig, BgmFeedError, BgmFeedReport, BgmFeeder},
     competition::{CompetitionError, ScoreSummary},
     completion::{CompletionError, ReplayCompletion},
-    replay_audio::{ReplayAudioError, completed_render_cursor, plan_audio},
+    replay_audio::{
+        ReplayAudioError, completed_render_cursor, plan_section_audio, section_end_frame,
+    },
     replay_visual::ReplayVisual,
     step_gameplay::{
-        StepAudioBatch, StepGameplayError, acknowledge_batch, validate_output_evidence,
+        StepAudioBatch, StepGameplayError, acknowledge_batch, validate_section_output_evidence,
     },
 };
 use beatkernel::{
@@ -97,7 +99,7 @@ impl Error for StepReplayError {}
 
 /// A bounded remote-audio producer plus the existing validated replay judge.
 /// Preparation must already select the recorded section through
-/// `section_start::prepare_replay`; this owner never selects a PCM suffix twice.
+/// `section_start::prepare_section_replay`; this owner never selects a PCM suffix twice.
 pub struct StepReplay {
     config: StepReplayConfig,
     sample_rate: u32,
@@ -107,6 +109,8 @@ pub struct StepReplay {
     score: ScoreSummary,
     song_origin: Timestamp,
     song: Timestamp,
+    end: Option<Timestamp>,
+    playback_end_frame: Option<u64>,
     events: Vec<JudgeEvent>,
     rendered_cursor: u64,
     last_render: Option<RenderReport>,
@@ -145,12 +149,28 @@ impl StepReplay {
                 "nonnegative preroll, positive lookahead and bounded pending capacity required",
             ));
         }
-        let visual =
-            ReplayVisual::new(&prepared.source, &file, limits).map_err(StepReplayError::Setup)?;
+        let visual = ReplayVisual::new_section(&prepared.source, &file, limits)
+            .map_err(StepReplayError::Setup)?;
         let song_origin = visual.start().checked_sub(config.preroll).ok_or(
             StepReplayError::InvalidConfiguration("replay song origin overflow"),
         )?;
-        let plan = plan_audio(
+        let sample_rate = prepared.bank.format().sample_rate();
+        let end = visual.end();
+        let playback_end_frame = end
+            .map(|end| section_end_frame(visual.start(), end, config.preroll, sample_rate))
+            .transpose()
+            .map_err(|error| StepReplayError::Setup(error.into()))?;
+        validate_section_output_evidence(
+            config.output_origin,
+            sample_rate,
+            None,
+            None,
+            None,
+            None,
+            playback_end_frame,
+        )
+        .map_err(|error| StepReplayError::InvalidConfiguration(error.0))?;
+        let plan = plan_section_audio(
             &prepared,
             file,
             limits,
@@ -158,7 +178,6 @@ impl StepReplay {
             config.preroll,
         )
         .map_err(StepReplayError::Setup)?;
-        let sample_rate = prepared.bank.format().sample_rate();
         let remaining = plan.commands.len();
         let feeder = BgmFeeder::from_output_commands(
             plan.commands,
@@ -187,6 +206,8 @@ impl StepReplay {
                 score: ScoreSummary::default(),
                 song_origin,
                 song: song_origin,
+                end,
+                playback_end_frame,
                 events: Vec::new(),
                 rendered_cursor: 0,
                 last_render: None,
@@ -281,13 +302,14 @@ impl StepReplay {
         presented: Option<ClockPoint>,
     ) -> Result<bool, StepReplayError> {
         self.ensure_usable()?;
-        let normalized = validate_output_evidence(
+        let normalized = validate_section_output_evidence(
             self.config.output_origin,
             self.sample_rate,
             self.last_render,
             self.last_presented,
             rendered,
             presented,
+            self.playback_end_frame,
         )
         .map_err(|error| self.output_failure(error, rendered, presented))?;
         let cursor = rendered
@@ -304,20 +326,54 @@ impl StepReplay {
             .transpose()?;
         let song = normalized
             .map(|point| {
+                let ns = i128::from(self.song_origin.as_nanos())
+                    + i128::from(point.timestamp.as_nanos());
                 let ns = self
-                    .song_origin
-                    .as_nanos()
-                    .checked_add(point.timestamp.as_nanos())
-                    .ok_or_else(|| {
-                        self.output_failure(
-                            CompletionError("replay presentation song mapping overflow"),
-                            rendered,
-                            presented,
-                        )
-                    })?;
+                    .end
+                    .map_or(ns, |end| ns.min(i128::from(end.as_nanos())));
+                let ns = i64::try_from(ns).map_err(|_| {
+                    self.output_failure(
+                        CompletionError("replay presentation song mapping overflow"),
+                        rendered,
+                        presented,
+                    )
+                })?;
                 Ok::<_, StepReplayError>(Timestamp::from_nanos(ns))
             })
             .transpose()?;
+        let finite_audio_complete = if let Some(endpoint) = self.playback_end_frame {
+            let feed = self.feeder.report();
+            let endpoint_report = rendered
+                .or(self.last_render)
+                .filter(|report| report.playback_end_physical_frame == Some(endpoint));
+            if self.pending.is_some() || feed.remaining != 0 || feed.outstanding != 0 {
+                false
+            } else if let Some(report) = endpoint_report {
+                let admitted = u64::try_from(feed.total_admitted).map_err(|_| {
+                    self.output_failure(
+                        CompletionError("finite replay admission count overflow"),
+                        Some(report),
+                        presented,
+                    )
+                })?;
+                if report.counters.commands_consumed != admitted
+                    || report.counters.commands_applied != admitted
+                {
+                    return Err(self.output_failure(
+                        CompletionError(
+                            "finite replay endpoint omitted or added planned audio execution",
+                        ),
+                        Some(report),
+                        presented,
+                    ));
+                }
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
         // Every untrusted evidence check precedes any feeder or visual mutation.
         if let Some(cursor) = cursor {
             self.rendered_cursor = cursor;
@@ -351,6 +407,16 @@ impl StepReplay {
             self.completion.reset_drain();
             return Ok(false);
         }
+        if let Some(endpoint) = self.playback_end_frame {
+            let endpoint_ns = (i128::from(endpoint) * 1_000_000_000 + i128::from(self.sample_rate)
+                - 1)
+                / i128::from(self.sample_rate);
+            return Ok(finite_audio_complete
+                && self.visual.finished()
+                && self
+                    .last_presented
+                    .is_some_and(|point| i128::from(point.as_nanos()) >= endpoint_ns));
+        }
         self.completion
             .observe(
                 self.visual.finished(),
@@ -382,6 +448,12 @@ impl StepReplay {
     }
     pub fn song_time(&self) -> Timestamp {
         self.song
+    }
+    pub fn end_ns(&self) -> Option<i64> {
+        self.end.map(|end| end.as_nanos())
+    }
+    pub fn playback_end_frame(&self) -> Option<u64> {
+        self.playback_end_frame
     }
     pub fn score(&self) -> &ScoreSummary {
         &self.score

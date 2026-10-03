@@ -63,6 +63,19 @@ pub fn prepare_replay(
     Ok(prepare_at(prepared, start, pcm_limits)?.0)
 }
 
+/// Validate an explicit finite or unlimited recording before selecting original PCM.
+/// Supply fresh original assets; the section must not already have sliced music.
+pub fn prepare_section_replay(
+    prepared: PreparedBms,
+    file: &beatkernel::replay::codec::ReplayFile,
+    limits: beatkernel::replay::codec::ReplayCodecLimits,
+    pcm_limits: PcmLimits,
+) -> Result<PreparedBms> {
+    crate::replay_playback::validate_section_setup(&prepared.source, file, limits)?;
+    let setup = crate::replay_playback::decode_section_setup(&file.header.options)?;
+    Ok(prepare_at(prepared, setup.start, pcm_limits)?.0)
+}
+
 /// Original-source selection evidence; native presentation remains uncertain.
 #[derive(Debug)]
 pub struct TailSelection {

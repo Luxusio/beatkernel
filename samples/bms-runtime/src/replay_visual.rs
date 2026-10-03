@@ -1,5 +1,7 @@
 //! Incremental actual recorded operations for presentation, without synthetic judging.
-use crate::replay_playback::{decode_setup, reconstruct, validate_setup};
+use crate::replay_playback::{
+    decode_section_setup, reconstruct, reconstruct_section, validate_section_setup, validate_setup,
+};
 use beatkernel::{
     judge::{JudgeEngine, JudgeEvent},
     replay::{
@@ -19,6 +21,7 @@ pub struct ReplayVisual {
     records: Vec<ReplayRecord>,
     cursor: usize,
     start: Timestamp,
+    end: Option<Timestamp>,
     observed: Option<Timestamp>,
     pressed: crate::pressed_keys::PressedKeys,
 }
@@ -29,10 +32,34 @@ impl ReplayVisual {
         file: &ReplayFile,
         limits: ReplayCodecLimits,
     ) -> Result<Self, BoxError> {
-        let engine = validate_setup(source, file, limits)?;
+        Self::new_with_section(source, file, limits, false)
+    }
+    /// Explicitly preserves finite metadata while replaying only recorded operations.
+    pub fn new_section(
+        source: &BmsChart,
+        file: &ReplayFile,
+        limits: ReplayCodecLimits,
+    ) -> Result<Self, BoxError> {
+        Self::new_with_section(source, file, limits, true)
+    }
+    fn new_with_section(
+        source: &BmsChart,
+        file: &ReplayFile,
+        limits: ReplayCodecLimits,
+        allow_finite: bool,
+    ) -> Result<Self, BoxError> {
+        let engine = if allow_finite {
+            validate_section_setup(source, file, limits)?
+        } else {
+            validate_setup(source, file, limits)?
+        };
         // Whole-log judge validation must precede native output. The clone is
         // bounded by canonical validation above, not trusted caller extents.
-        drop(reconstruct(source, file.clone(), limits)?);
+        if allow_finite {
+            drop(reconstruct_section(source, file.clone(), limits)?);
+        } else {
+            drop(reconstruct(source, file.clone(), limits)?);
+        }
         let mut pressed = crate::pressed_keys::PressedKeys::default();
         for record in &file.records {
             if let ReplayOperation::Input(input) = &record.operation {
@@ -41,18 +68,22 @@ impl ReplayVisual {
         }
         // Keep preallocated bounded storage, but start at the empty prefix.
         pressed.clear();
-        let (_, start) = decode_setup(&file.header.options)?;
+        let setup = decode_section_setup(&file.header.options)?;
         Ok(Self {
             engine,
             records: file.records.clone(),
             cursor: 0,
-            start,
+            start: setup.start,
+            end: setup.end,
             observed: None,
             pressed,
         })
     }
     pub const fn start(&self) -> Timestamp {
         self.start
+    }
+    pub const fn end(&self) -> Option<Timestamp> {
+        self.end
     }
     pub fn pressed_lanes(&self) -> u32 {
         self.pressed.mask()

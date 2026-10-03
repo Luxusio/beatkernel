@@ -2,7 +2,9 @@
 
 use crate::{
     PreparedBms,
-    replay_playback::{decode_setup, reconstruct},
+    practice::PracticeStart,
+    practice_loop::PracticeLoop,
+    replay_playback::{decode_section_setup, reconstruct, reconstruct_section},
 };
 use beatkernel::{
     audio::{AudioCommand, RenderReport, SampleId},
@@ -89,6 +91,33 @@ fn output_time(
     ))
 }
 
+pub(crate) fn section_end_frame(
+    start: Timestamp,
+    end: Timestamp,
+    preroll: Duration,
+    sample_rate: u32,
+) -> Result<u64, String> {
+    let start = PracticeStart::from_nanoseconds(start.as_nanos())?;
+    let end = PracticeStart::from_nanoseconds(end.as_nanos())?;
+    PracticeLoop::new(start, end)?.playback_end_frame(start, preroll, sample_rate)
+}
+
+fn before_endpoint(
+    at: Timestamp,
+    output_origin: ClockPoint,
+    sample_rate: u32,
+    end: Option<u64>,
+) -> Result<bool, ReplayAudioError> {
+    let Some(end) = end else { return Ok(true) };
+    let nanos = i128::from(at.as_nanos()) - i128::from(output_origin.timestamp.as_nanos());
+    let scaled = nanos
+        .checked_mul(i128::from(sample_rate))
+        .ok_or(ReplayAudioError::Overflow)?;
+    let frame =
+        scaled.div_euclid(1_000_000_000) + i128::from(scaled.rem_euclid(1_000_000_000) != 0);
+    Ok(frame < i128::from(end))
+}
+
 /// Reconstructs the same judge and maps its selected sounds onto an explicit output.
 ///
 /// This recovers operation song time from effective judge time by removing the
@@ -104,11 +133,44 @@ pub fn plan_audio(
     output_origin: ClockPoint,
     preroll: Duration,
 ) -> Result<ReplayAudioPlan, Box<dyn Error>> {
+    plan_with_section(prepared, file, limits, output_origin, preroll, false)
+}
+
+/// Plan finite or unlimited section audio, excluding every command whose rounded
+/// execution frame reaches the immutable endpoint. Recorded judge results stay exact.
+pub fn plan_section_audio(
+    prepared: &PreparedBms,
+    file: ReplayFile,
+    limits: ReplayCodecLimits,
+    output_origin: ClockPoint,
+    preroll: Duration,
+) -> Result<ReplayAudioPlan, Box<dyn Error>> {
+    plan_with_section(prepared, file, limits, output_origin, preroll, true)
+}
+
+fn plan_with_section(
+    prepared: &PreparedBms,
+    file: ReplayFile,
+    limits: ReplayCodecLimits,
+    output_origin: ClockPoint,
+    preroll: Duration,
+    allow_finite: bool,
+) -> Result<ReplayAudioPlan, Box<dyn Error>> {
     if preroll.as_nanos() < 0 {
         return Err(ReplayAudioError::InvalidConfiguration("negative preroll").into());
     }
-    let session = reconstruct(&prepared.source, file, limits)?;
-    let (_, start) = decode_setup(&session.header().options)?;
+    let session = if allow_finite {
+        reconstruct_section(&prepared.source, file, limits)?
+    } else {
+        reconstruct(&prepared.source, file, limits)?
+    };
+    let setup = decode_section_setup(&session.header().options)?;
+    let start = setup.start;
+    let sample_rate = prepared.bank.format().sample_rate();
+    let end = setup
+        .end
+        .map(|end| section_end_frame(start, end, preroll, sample_rate))
+        .transpose()?;
     if session.engine().chart() != &prepared.compiled.chart {
         return Err(ReplayAudioError::InvalidConfiguration(
             "prepared chart differs from reconstructed chart",
@@ -154,6 +216,9 @@ pub fn plan_audio(
             continue;
         }
         let at = output_time(i128::from(song.as_nanos()), start, output_origin, preroll)?;
+        if !before_endpoint(at, output_origin, sample_rate, end)? {
+            continue;
+        }
         scheduled
             .try_reserve(1)
             .map_err(|_| ReplayAudioError::AllocationFailed)?;
@@ -178,6 +243,9 @@ pub fn plan_audio(
         };
         let song = i128::from(event.at.as_nanos()) - i128::from(offset);
         let at = output_time(song, start, output_origin, preroll)?;
+        if !before_endpoint(at, output_origin, sample_rate, end)? {
+            continue;
+        }
         for sound in group {
             let command = sound
                 .command_for(event, at)

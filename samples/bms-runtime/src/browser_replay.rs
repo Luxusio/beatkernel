@@ -8,7 +8,7 @@ use crate::{
     note_progress::NoteProgress,
     player_chart::PlayerChart,
     step_replay::{StepReplay, StepReplayConfig, StepReplayError},
-    worklet_audio::decode_output,
+    worklet_audio::decode_section_output,
 };
 use beatkernel::{
     audio::{PcmSample, SampleId},
@@ -112,10 +112,11 @@ impl BrowserReplay {
         if self.replay.failed() {
             return Err(error("replay owner is fenced"));
         }
-        let evidence = decode_output(&words).map_err(|reason| {
-            self.replay.fail();
-            error(reason)
-        })?;
+        let evidence =
+            decode_section_output(&words, self.replay.playback_end_frame()).map_err(|reason| {
+                self.replay.fail();
+                error(reason)
+            })?;
         if self
             .output_start
             .is_some_and(|start| start != evidence.start)
@@ -163,6 +164,14 @@ impl BrowserReplay {
     #[wasm_bindgen(getter)]
     pub fn recorded_until_ns(&self) -> Option<i64> {
         self.replay.recorded_until().map(|time| time.as_nanos())
+    }
+    #[wasm_bindgen(getter)]
+    pub fn end_ns(&self) -> Option<i64> {
+        self.replay.end_ns()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn playback_end_frame(&self) -> Option<u64> {
+        self.replay.playback_end_frame()
     }
     #[wasm_bindgen(getter)]
     pub fn hits(&self) -> u64 {

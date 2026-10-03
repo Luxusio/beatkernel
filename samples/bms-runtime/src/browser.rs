@@ -186,8 +186,10 @@ impl BrowserLibrary {
     ) -> Result<BrowserPrepared, JsValue> {
         let limits = crate::competition_live::replay_limits().map_err(js_error)?;
         let file = decode_replay(&bytes, limits).map_err(js_error)?;
-        let (_, start, seed) =
-            crate::replay_playback::decode_chart_setup(&file.header.options).map_err(js_error)?;
+        let setup =
+            crate::replay_playback::decode_section_setup(&file.header.options).map_err(js_error)?;
+        let start = setup.start;
+        let seed = setup.chart_seed;
         let original = self.prepare_chart(
             path,
             sample_rate,
@@ -203,9 +205,13 @@ impl BrowserLibrary {
             max_samples as usize,
         )
         .map_err(js_error)?;
-        let prepared =
-            crate::section_start::prepare_replay(original.prepared, &file, limits, pcm_limits)
-                .map_err(js_error)?;
+        let prepared = crate::section_start::prepare_section_replay(
+            original.prepared,
+            &file,
+            limits,
+            pcm_limits,
+        )
+        .map_err(js_error)?;
         let chart = PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart)
             .map_err(js_error)?;
         Ok(BrowserPrepared {
