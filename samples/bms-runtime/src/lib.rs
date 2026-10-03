@@ -198,6 +198,8 @@ pub mod step_replay;
 mod step_replay_fixtures;
 /// Validated portable raw texture resources.
 pub mod texture;
+#[cfg(test)]
+mod touch_gameplay_fixtures;
 /// Atomic Design-style presentation compositions, independent of native I/O.
 #[cfg(feature = "graphics")]
 pub mod ui;
