@@ -26,8 +26,9 @@ impl PhysicalInputSetup {
         max_encoded: u32,
         max_payload: u32,
     ) -> Result<Self, String> {
-        if words.is_empty() || words.len() > 256 * 7 || words.len() % 7 != 0 {
-            return Err("physical bindings require 1..=256 complete seven-word rows".into());
+        if (words.is_empty() && !lanes.is_empty()) || words.len() > 256 * 7 || words.len() % 7 != 0
+        {
+            return Err("physical bindings require complete seven-word rows, at most 256, and chart coverage".into());
         }
         if lanes.len() > 18 {
             return Err("prepared browser chart exceeds eighteen lanes".into());

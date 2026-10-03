@@ -3,6 +3,7 @@ import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
 import { PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, renderedCursor } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { validateSelections, validateOpponentSnapshot } from "./saved-opponents.mjs";
+import { keyboardBindingWords, encodeKeyboardEvent } from "./physical-input.mjs";
 const { BrowserGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
 let ready = null;
 let view = null;
@@ -481,6 +482,10 @@ async function preparePlay(state, request) {
     state.commandBatchLimit = commandBatchLimit;
     if (request.mode !== undefined && request.mode !== "live" && request.mode !== "replay") throw new Error("Invalid playback mode.");
     state.mode = request.mode ?? "live";
+    if (request.inputMode !== undefined && (request.inputMode !== "physical" || state.mode !== "live")) {
+      throw new Error("Invalid live gameplay input mode.");
+    }
+    state.physicalInput = request.inputMode === "physical";
     const timing = state.mode === "live" ? validateTiming(request.timing) : null;
     const requestedStart = state.mode === "live" ? validateStart(request.startNs) : null;
     const requestedEnd = state.mode === "live" ? validateEnd(requestedStart, request.endNs) : undefined;
@@ -505,6 +510,7 @@ async function preparePlay(state, request) {
     state.rate = request.rate;
     if (request.recordReplay !== undefined && typeof request.recordReplay !== "boolean") throw new Error("Invalid replay recording choice.");
     let pairs = null;
+    let bindingWords = null;
     const lanes = [];
     const keys = new Set();
     if (state.mode === "replay") {
@@ -524,6 +530,7 @@ async function preparePlay(state, request) {
         keys.add(pairs[index + 1]);
       }
       bindingsFor(lanes);
+      if (state.physicalInput) bindingWords = keyboardBindingWords(pairs);
       prepared = requestedStart === 0n
         ? library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, 1296)
         : library.prepare_chart_at(request.path, request.rate, 2, BigInt(request.seed), requestedStart,
@@ -538,16 +545,23 @@ async function preparePlay(state, request) {
     bindingsFor(chartLanes);
     if (state.mode === "live" && chartLanes.some(lane => !lanes.includes(lane))) throw new Error("A prepared lane has no supplied key binding.");
     const metadata = { title: prepared.title, artist: prepared.artist, notes: prepared.note_count, lanes: chartLanes, startNs };
-    if (state.mode === "live" && requestedEnd !== undefined && typeof BrowserGame.new_section !== "function") {
+    if (state.physicalInput && (typeof BrowserGame?.new_physical !== "function"
+      || typeof BrowserGame?.prototype?.input_blob !== "function")) {
+      throw new Error("The gameplay binding does not provide canonical physical input ownership.");
+    }
+    if (state.mode === "live" && !state.physicalInput && requestedEnd !== undefined && typeof BrowserGame.new_section !== "function") {
       throw new Error("The gameplay binding does not provide finite section ownership.");
     }
     const moved = prepared;
     prepared = null; // A consuming Rust constructor also owns the argument on Err.
     state.game = state.mode === "replay"
       ? new BrowserReplay(moved, 100000000n)
-      : requestedEnd === undefined
-        ? new BrowserGame(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs)
-        : BrowserGame.new_section(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs, requestedEnd);
+      : state.physicalInput
+        ? BrowserGame.new_physical(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, bindingWords, requestedEnd, 4096, 1024)
+        : requestedEnd === undefined
+          ? new BrowserGame(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs)
+          : BrowserGame.new_section(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs, requestedEnd);
+    if (state.physicalInput) metadata.inputMode = "physical";
     const output = replayOutputFromMetadata(startNs, state.game.end_ns, state.game.playback_end_frame, request.rate);
     if (state.mode === "live" && output.endNs !== requestedEnd) throw new Error("Actual live section end differs from its request.");
     if (output.endFrame !== undefined) {
@@ -655,6 +669,7 @@ function stepPlay(state, request) {
   let host = state.lastHost;
   let sequence = state.lastSequence;
   let ignored = 0;
+  const encoded = state.physicalInput ? [] : null;
   // Validate the complete bounded batch before the first actual Runtime call.
   for (const event of request.events) {
     if (!event || !hostTime(event.hostNs) || !integer(event.key, 1, 65535) || !state.keys.has(event.key)
@@ -662,6 +677,7 @@ function stepPlay(state, request) {
       || (host !== null && event.hostNs < host) || (sequence !== null && event.sequence < sequence)) {
       throw new Error("Invalid gameplay input or source chronology.");
     }
+    if (encoded !== null) encoded.push(encodeKeyboardEvent(event));
     host = event.hostNs;
     sequence = event.sequence;
     if (host < state.origin) ignored++;
@@ -670,8 +686,10 @@ function stepPlay(state, request) {
   if (!Number.isSafeInteger(state.preOriginInputs + ignored)) throw new Error("Pre-origin input count overflow.");
   state.lastTick = request.tickId;
   if (request.events.length !== 0) state.completed = false;
-  for (const event of request.events) {
+  for (let index = 0; index < request.events.length; index++) {
+    const event = request.events[index];
     if (event.hostNs < state.origin) state.preOriginInputs++;
+    else if (encoded !== null) state.game.input_blob(encoded[index], request.audioNs);
     else state.game.input(event.hostNs, event.key, event.down, event.sequence, request.audioNs);
     state.lastHost = event.hostNs;
     state.lastSequence = event.sequence;
@@ -701,7 +719,7 @@ function handlePlay(request) {
       batch: null, lastRpc: 0, lastTick: 0, lastRender: 0,
       lastHost: null, lastSequence: null, preOriginInputs: 0,
       recordReplay: false, completed: false,
-      mode: "live", rate: null, network: null, samplesEnded: false, commandsDrained: false,
+      mode: "live", physicalInput: false, rate: null, network: null, samplesEnded: false, commandsDrained: false,
       prepared: false, opponentCount: 0, opponentsFailed: false, lastOpponents: null,
     };
     play = state; // Reserve before the ready await so stop cannot race a late owner.

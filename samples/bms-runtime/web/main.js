@@ -442,7 +442,7 @@ async function play(mode = "live") {
     if (activePlay !== session || session.phase === "closing") { await session.audio.stop(); return; }
     session.workerStarted = true;
     const source = mode === "replay" ? { mode, replayFile: session.replayFile }
-      : { mode, seed: ui.seed.value, recordReplay: session.recordReplay, timing: session.timing, startNs: session.startNs,
+      : { mode, inputMode: "physical", seed: ui.seed.value, recordReplay: session.recordReplay, timing: session.timing, startNs: session.startNs,
         ...(session.requestedEndNs === undefined ? {} : { endNs: session.requestedEndNs }),
         ...(session.multiplayer ? { multiplayer: session.multiplayer } : {}),
         ...(session.opponentSelection ? { opponents: session.opponentSelection } : {}),
@@ -450,6 +450,7 @@ async function play(mode = "live") {
     const prepared = await playRpc(session, "play-start", { libraryId, path: ui.chart.value,
       rate: session.audio.sampleRate, commandBatchLimit: session.commandBatchLimit, ...source });
     if (mode === "replay" ? prepared.mode !== "replay" : prepared.mode !== undefined && prepared.mode !== "live") throw new Error("Playback preparation mode changed.");
+    if (mode === "live" && prepared.inputMode !== "physical") throw new Error("Preparation did not admit the requested physical input route.");
     const preparedStart = prepared.startNs === undefined && mode === "live" && session.startNs === 0n ? 0n : prepared.startNs;
     if (typeof preparedStart !== "bigint") throw new Error("Preparation omitted its actual song start.");
     validateStart(preparedStart);
