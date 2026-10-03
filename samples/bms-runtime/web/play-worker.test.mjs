@@ -65,6 +65,7 @@ async function workerHarness(options = {}) {
   function makePrepared(path) {
     const prepared = {
       path, title: "Actual prepared metadata", artist: "Fixture", duration_ns: 604800000000000n,
+      start_ns: 0n,
       note_count: 23, sample_count: 2, image_count: 1,
       lanes: new Uint8Array(options.lanes ?? [0x11, 0x12]), moved: false, frees: 0,
       free() { assert.equal(this.moved, false); assert.equal(++this.frees, 1); },
@@ -406,7 +407,8 @@ test("prepared ownership, original-rate PCM transfers and setup batches retain t
   const h = await started({ batches: [first, second] });
   const game = h.games[0];
   const metadata = h.of("play-reply")[0].result;
-  assert.deepEqual(metadata, { kind: "prepared", samples: 2, title: "Actual prepared metadata", artist: "Fixture", notes: 23, lanes: [0x11, 0x12] });
+  assert.deepEqual(structuredClone(metadata), { kind: "prepared", samples: 2, opponentCount: 0, startNs: 0n,
+    title: "Actual prepared metadata", artist: "Fixture", notes: 23, lanes: [0x11, 0x12] });
   assert.deepEqual(h.libraries[0].preparations[1].args, [48000, 2, 18446744073709551615n, 64 * 1024 * 1024, 256 * 1024 * 1024, 1296]);
   assert.deepEqual(game.args.slice(0, 5), [0n, 100000000n, 50000000n, 50000000n, 0n]);
   assert.deepEqual(Array.from(game.args[5]), Array.from(pairs()));

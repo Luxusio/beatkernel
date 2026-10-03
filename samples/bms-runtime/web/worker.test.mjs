@@ -32,11 +32,22 @@ async function workerHarness(options = {}) {
   const libraries = [];
   const views = [];
   const games = [];
+  const preparedOwners = [];
   const calls = [];
   const timers = new Map();
   let now = 0;
   let timerId = 0;
   let receive;
+  function makePrepared(path, start = 0n) {
+    const prepared = {
+      title: `Prepared ${path}`, artist: "Fixture", duration_ns: 604800000000000n,
+      note_count: 3, sample_count: 2, image_count: 1, lanes: [0x11], path, moved: false, frees: 0,
+      free() { assert.equal(this.moved, false); assert.equal(++this.frees, 1); },
+    };
+    if (!options.omitPreparedStart) prepared.start_ns = Object.hasOwn(options, "preparedStart") ? options.preparedStart : start;
+    preparedOwners.push(prepared);
+    return prepared;
+  }
   class BrowserLibrary {
     constructor(...limits) {
       this.limits = limits;
@@ -57,16 +68,20 @@ async function workerHarness(options = {}) {
       assert.ok(this.files.some(entry => entry.path === path), "prepare from the owning library");
       this.preparations.push({ path, args });
       if (path === options.rejectPreparation) throw new Error("sample rate mismatch");
-      const prepared = {
-        title: `Prepared ${path}`, artist: "Fixture", duration_ns: 604800000000000n,
-        note_count: 3, sample_count: 2, image_count: 1, lanes: [0x11], path, moved: false, frees: 0,
-        free() { assert.equal(this.moved, false); this.frees++; },
-      };
-      return prepared;
+      return makePrepared(path);
+    }
+    prepare_chart_at(path, ...args) {
+      assert.equal(this.frees, 0);
+      assert.ok(this.files.some(entry => entry.path === path));
+      this.preparations.push({ path, args, method: "prepare_chart_at" });
+      calls.push(["prepare-section", ...args]);
+      return makePrepared(path, args[3]);
     }
     prepare_replay_chart(path, bytes, rate) {
       calls.push(["prepare-replay", Array.from(bytes)]);
-      return this.prepare_chart(path, rate);
+      const prepared = this.prepare_chart(path, rate);
+      if (!options.omitPreparedStart) prepared.start_ns = options.replayStart ?? 0n;
+      return prepared;
     }
     free() { this.frees++; assert.equal(this.frees, 1); }
   }
@@ -103,6 +118,7 @@ async function workerHarness(options = {}) {
       if (!options.gameplay) throw new Error("Preview fixtures must not create gameplay owners");
       assert.equal(prepared.moved, false);
       prepared.moved = true;
+      this.prepared = prepared;
       this.constructorArgs = constructorArgs;
       this.frees = 0;
       this.stops = 0;
@@ -132,7 +148,7 @@ async function workerHarness(options = {}) {
       return options.snapshot?.(this) ?? [];
     }
     configure_capture(...limits) { calls.push(["capture", ...limits]); }
-    sample_count() { return 0; }
+    sample_count() { return options.sampleCount ?? 0; }
     next_sample() { return undefined; }
     commands() { return null; }
     activate(at) { calls.push(["activate", at]); }
@@ -188,7 +204,7 @@ async function workerHarness(options = {}) {
   });
   await worker.evaluate();
   return {
-    messages, libraries, views, timers, games, calls,
+    messages, libraries, views, timers, games, preparedOwners, calls,
     setNow(value) { assert.ok(value >= now); now = value; },
     async send(request) { receive({ data: request }); await flushJobs(); },
     async tick() {
@@ -231,6 +247,94 @@ function startGame(worker, opponents, extra = {}) {
     path: "song/chart.bms", rate: 48000, seed: "0", keyPairs: new Uint32Array([0x11, 4]),
     opponents, ...extra });
 }
+
+test("section start routes fresh preparations and exact source metadata before capture while zero remains compatible", async () => {
+  for (const startNs of [undefined, 0n, 1125000001n, 604800000000001n]) {
+    const worker = await gameWorker();
+    await startGame(worker, [], { startNs, seed: "18446744073709551615", recordReplay: true });
+    const entry = worker.libraries[0].preparations[0];
+    const game = worker.games[0];
+    if (startNs) {
+      assert.equal(entry.method, "prepare_chart_at");
+      assert.deepEqual(entry.args, [48000, 2, 18446744073709551615n, startNs, 64 * 1024 * 1024, 256 * 1024 * 1024, 1296]);
+    } else {
+      assert.equal(entry.method, undefined);
+      assert.deepEqual(entry.args, [48000, 2, 18446744073709551615n, 64 * 1024 * 1024, 256 * 1024 * 1024, 1296]);
+    }
+    assert.equal(worker.of("play-reply").at(-1).result.startNs, startNs ?? 0n);
+    assert.equal(game.prepared.start_ns, startNs ?? 0n);
+    assert.deepEqual(game.constructorArgs.slice(0, 2), [0n, 100000000n], "original-song start belongs to the prepared owner, not the output-origin argument");
+    assert.ok(worker.calls.findIndex(call => call[0] === "new-game") < worker.calls.findIndex(call => call[0] === "capture"));
+    await worker.send({ kind: "play-stop", playId: 1 });
+    await startGame(worker, [], { playId: 2, startNs: 2000000001n });
+    assert.equal(worker.libraries[0].preparations.length, 2);
+    assert.notEqual(worker.games[1].prepared, game.prepared, "restart constructs from the library again");
+    assert.equal(worker.games[1].prepared.start_ns, 2000000001n);
+    assert.equal(game.frees, 1);
+    await worker.send({ kind: "play-stop", playId: 2 });
+  }
+  const legacy = await gameWorker({ omitPreparedStart: true });
+  await startGame(legacy, []);
+  assert.equal(legacy.of("play-reply").at(-1).result.startNs, 0n);
+  await legacy.send({ kind: "play-stop", playId: 1 });
+  const full = await gameWorker({ sampleCount: 5392 });
+  await startGame(full, [], { startNs: 1n });
+  assert.equal(full.of("play-reply").at(-1).result.samples, 5392);
+  assert.equal(full.libraries[0].preparations[0].args.at(-1), 1296);
+  await full.send({ kind: "play-stop", playId: 1 });
+});
+
+test("invalid requested starts fail before acquisition and mismatched prepared starts release unconsumed owners", async () => {
+  for (const startNs of [null, "1", 1, -1n, 9223372036854775808n]) {
+    const worker = await gameWorker();
+    const unread = opponentFile("must-not-read.bkr");
+    await startGame(worker, [opponentChoice(unread, "file:1")], { startNs });
+    assert.equal(worker.libraries[0].preparations.length, 0);
+    assert.equal(worker.games.length, 0);
+    assert.equal(unread.reads, 0);
+    assert.equal(worker.of("play-error").length, 1);
+  }
+  for (const options of [{ omitPreparedStart: true }, { preparedStart: 0n }, { preparedStart: 1 },
+    { preparedStart: -1n }, { preparedStart: 9223372036854775808n }]) {
+    const worker = await gameWorker(options);
+    await startGame(worker, [], { startNs: 1000000000n, recordReplay: true });
+    assert.equal(worker.preparedOwners.length, 1);
+    assert.equal(worker.preparedOwners[0].moved, false);
+    assert.equal(worker.preparedOwners[0].frees, 1);
+    assert.equal(worker.games.length, 0);
+    assert.equal(worker.calls.some(call => call[0] === "capture"), false);
+    assert.equal(worker.of("play-error").length, 1);
+    assert.equal(worker.of("play-reply").some(reply => reply.result?.kind === "prepared"), false);
+  }
+  const oversized = await gameWorker({ sampleCount: 5393 });
+  await startGame(oversized, [], { startNs: 1n });
+  assert.equal(oversized.of("play-error").length, 1);
+  assert.equal(oversized.of("play-reply").some(reply => reply.result?.kind === "prepared"), false);
+  assert.equal(oversized.games[0].frees, 1);
+});
+
+test("cancelled section preparation cannot revive and replay retains its actual recorded start independently", async () => {
+  const cancelled = await gameWorker();
+  const pending = startGame(cancelled, [], { startNs: 9000000001n });
+  const stopping = cancelled.send({ kind: "play-stop", playId: 1 });
+  await Promise.all([pending, stopping]);
+  assert.equal(cancelled.libraries[0].preparations.length, 0);
+  assert.equal(cancelled.games.length, 0);
+  assert.equal(cancelled.of("play-stopped").length, 1);
+  await startGame(cancelled, [], { playId: 2, startNs: 4000000001n });
+  assert.equal(cancelled.games[0].prepared.start_ns, 4000000001n);
+  await cancelled.send({ kind: "play-stop", playId: 2 });
+  const worker = await gameWorker({ replayStart: 604800000000001n });
+  const replay = opponentFile("section-prefix.bkr");
+  await startGame(worker, undefined, { mode: "replay", replayFile: replay.file, startNs: "invalid live draft" });
+  assert.equal(replay.reads, 1);
+  assert.equal(worker.calls.filter(call => call[0] === "prepare-replay").length, 1);
+  assert.equal(worker.calls.some(call => call[0] === "prepare-section" || call[0] === "capture"), false);
+  assert.equal(worker.of("play-reply").at(-1).result.startNs, 604800000000001n);
+  assert.equal(worker.games[0].prepared.start_ns, 604800000000001n);
+  assert.deepEqual(worker.games[0].constructorArgs, [100000000n]);
+  await worker.send({ kind: "play-stop", playId: 1 });
+});
 
 test("live judge timing forwards exact validated constructor values while omitted timing preserves defaults", async () => {
   const defaults = await gameWorker();

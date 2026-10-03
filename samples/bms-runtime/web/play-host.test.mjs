@@ -121,7 +121,7 @@ async function harness(faults = {}) {
     "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete",
     "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status",
     "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
-    "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset"]) {
+    "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start"]) {
     elements.set(id, new Element(id === "chart" || id === "records" ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
@@ -132,6 +132,7 @@ async function harness(faults = {}) {
   elements.get("judge-early").value = "50";
   elements.get("judge-late").value = "50";
   elements.get("judge-offset").value = "0";
+  elements.get("live-start").value = "0";
 
   const document = new Events();
   document.body = new Element("body");
@@ -386,6 +387,7 @@ async function harness(faults = {}) {
     const worker = workers.at(-1);
     await reply(start, { kind: "prepared", title: "Actual runtime", artist: "Runtime artist",
       notes: 6, samples: sampleCount, lanes: [0x11], opponentCount: start.opponents?.length ?? 0,
+      startNs: start.mode === "replay" ? faults.replayStart ?? 0n : start.startNs ?? 0n,
       ...(start.mode === "replay" ? { mode: "replay", recordedUntilNs: 2350000000n } : {}) });
     for (let index = 0; index < sampleCount; index++) {
       await reply(worker.last("play-sample"), { kind: "sample", id: BigInt(index + 1), rate: 44100,
@@ -725,7 +727,7 @@ test("replay preparation cancellation, mode mismatch and rejected audio prefixes
     await h.preview();
     chooseRecording(h, [selectedRecording().file]);
     const start = await h.begin("replay");
-    await h.reply(start, { kind: "prepared", mode, title: "Wrong mode", notes: 1, samples: 1, lanes: [0x11] });
+    await h.reply(start, { kind: "prepared", mode, startNs: 0n, title: "Wrong mode", notes: 1, samples: 1, lanes: [0x11] });
     assert.equal(h.workers[0].messages("play-sample").length, 0);
     assert.equal(h.audio.samples.length, 0);
     assert.equal(h.audio.arms.length, 0);
@@ -1644,6 +1646,95 @@ test("invalid timing never opens audio, setup refusal preserves drafts for retry
   h.click("stop"); await flush(); await h.receive(finalScore(replay.id));
   assert.deepEqual(fields.map(field => field.value), ["bad draft", "-1", "1e100"]);
   assert.ok(fields.every(field => !field.disabled));
+  await h.close();
+});
+
+test("live section start snapshots before audio opens, retains drafts and prepares a fresh original-source session", async () => {
+  const opening = deferred(), loading = deferred(), stopping = deferred();
+  const h = await harness({ openGate: opening, recordsList: [savedRecord()], recordsLoadGate: loading, stopGate: stopping });
+  await h.preview();
+  const draft = h.get("live-start");
+  assert.equal(draft.value, "0");
+  h.click("records-refresh"); await flush(); h.click("records-use"); await flush();
+  assert.equal(draft.disabled, true);
+  assert.equal(h.opens.length, 0);
+  loading.resolve(); await flush();
+  assert.equal(draft.disabled, false);
+  draft.value = "2.125000001";
+  h.click("play");
+  assert.equal(h.opens.length, 1);
+  assert.equal(h.opens[0].gesture, true);
+  assert.equal(draft.disabled, true);
+  assert.equal(h.opens[0].options.pcmLimits.maxSamples, 5392);
+  assert.equal(h.opens[0].options.pcmLimits.maxAssetBytes, 64 * 1024 * 1024);
+  assert.equal(h.opens[0].options.pcmLimits.maxTotalBytes, 256 * 1024 * 1024);
+  draft.value = "7.250000001";
+  opening.resolve(h.audio); await flush();
+  const worker = h.workers[0];
+  const start = worker.last("play-start");
+  assert.equal(start.startNs, 2125000001n);
+  await h.reply(await h.prepared(start), null);
+  const activation = worker.last("play-activate");
+  assert.equal(activation.hostNs, 1250000000n, "section song coordinates do not offset the chosen host/output start");
+  assert.equal(activation.startFrame, 60000n);
+  await h.reply(activation, null);
+  assert.equal(draft.disabled, true);
+  h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+  assert.equal(draft.disabled, true, "pending output cleanup still owns the section draft");
+  stopping.resolve(); await flush();
+  assert.equal(draft.disabled, false);
+  assert.equal(draft.value, "7.250000001");
+  delete h.faults.openGate;
+  const next = await h.launch();
+  assert.notEqual(next.id, start.playId);
+  assert.equal(next.start.startNs, 7250000001n);
+  assert.equal(next.start.libraryId, start.libraryId);
+  assert.equal(next.start.path, start.path);
+  assert.equal(h.opens[1].gesture, true);
+  h.click("stop"); await flush(); await h.receive(finalScore(next.id));
+  await h.close();
+});
+
+test("section draft and preparation errors stay recoverable while replay uses only its recorded start", async () => {
+  const h = await harness({ replayStart: 604800000000001n });
+  await h.preview();
+  const draft = h.get("live-start"), worker = h.workers[0];
+  for (const text of ["-1", "1.0000000001", "9223372034.854775808"]) {
+    draft.value = text;
+    h.click("play"); await flush();
+    assert.equal(h.opens.length, 0);
+    assert.equal(worker.messages("play-start").length, 0);
+    assert.equal(draft.disabled, false);
+    assert.equal(draft.value, text);
+    assert.equal(h.get("status").dataset.error, "true");
+  }
+  draft.value = "2.000000001";
+  for (const startNs of [undefined, 0n, "2000000001"]) {
+    const start = await h.begin();
+    await h.reply(start, { kind: "prepared", title: "Wrong section", notes: 1, samples: 1,
+      lanes: [0x11], opponentCount: 0, ...(startNs === undefined ? {} : { startNs }) });
+    assert.equal(worker.messages("play-sample").length, 0);
+    assert.deepEqual(h.audio.arms, []);
+    assert.equal(worker.last("play-stop").playId, start.playId);
+    await h.receive(finalScore(start.playId));
+    assert.equal(draft.disabled, false);
+    assert.equal(draft.value, "2.000000001");
+  }
+  const retried = await h.launch();
+  assert.equal(retried.start.startNs, 2000000001n);
+  h.click("stop"); await flush(); await h.receive(finalScore(retried.id));
+  const recording = selectedRecording();
+  chooseRecording(h, [recording.file]);
+  draft.value = "invalid live start";
+  const replay = await h.launch(0, "replay");
+  assert.equal(Object.hasOwn(replay.start, "startNs"), false);
+  assert.equal(recording.reads, 0);
+  assert.equal(h.opens.at(-1).gesture, true);
+  assert.equal(draft.disabled, true);
+  assert.equal(worker.messages("play-stop").some(message => message.playId === replay.id), false);
+  h.click("stop"); await flush(); await h.receive(finalScore(replay.id));
+  assert.equal(draft.value, "invalid live start");
+  assert.equal(draft.disabled, false);
   await h.close();
 });
 
