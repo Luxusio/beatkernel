@@ -1,7 +1,5 @@
 //! Numeric separate-instance AudioWorklet binding; setup owns all allocations.
-use crate::worklet_audio::{
-    WorkletAudio, WorkletAudioBuilder, WorkletAudioConfig, WorkletAudioError,
-};
+use crate::worklet_audio::{WorkletAudio, WorkletAudioBuilder, WorkletAudioConfig, WorkletAudioError};
 use beatkernel::{
     audio::{
         AudioCommand, AudioError, AudioFormat, AudioLimits, PcmLimits, QueuePushError, SampleId,
@@ -38,6 +36,26 @@ fn worklet_status(error: WorkletAudioError) -> u32 {
         WorkletAudioError::InvalidExtent => 1,
         WorkletAudioError::Render(_) => 8,
         WorkletAudioError::Failed => 5,
+    }
+}
+impl BrowserAudio {
+    fn finish_with_end(&mut self, end: Option<u64>) -> u32 {
+        self.status = if let Some(builder) = self.builder.take() {
+            let result = match end {
+                Some(end) => builder.finish_at(end),
+                None => builder.finish(),
+            };
+            match result {
+                Ok(audio) => {
+                    self.audio = Some(audio);
+                    0
+                }
+                Err(error) => audio_status(error),
+            }
+        } else {
+            2
+        };
+        self.status
     }
 }
 #[wasm_bindgen]
@@ -102,18 +120,10 @@ impl BrowserAudio {
         self.status
     }
     pub fn finish(&mut self) -> u32 {
-        self.status = if let Some(builder) = self.builder.take() {
-            match builder.finish() {
-                Ok(audio) => {
-                    self.audio = Some(audio);
-                    0
-                }
-                Err(error) => audio_status(error),
-            }
-        } else {
-            2
-        };
-        self.status
+        self.finish_with_end(None)
+    }
+    pub fn finish_at(&mut self, end: u64) -> u32 {
+        self.finish_with_end(Some(end))
     }
     pub fn arm(&mut self, start: u64, current: u64) -> u32 {
         self.status = if let Some(audio) = self.audio.as_mut() {

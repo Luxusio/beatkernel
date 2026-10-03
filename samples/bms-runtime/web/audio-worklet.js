@@ -53,7 +53,7 @@ function validOptions(options) {
 }
 
 // Controls use generation and consecutive sequence numbers beginning at 1.
-// sample: {id: bigint, rate, channels, pcm: Float32Array}; finish; arm: {frame: bigint};
+// sample: {id: bigint, rate, channels, pcm: Float32Array}; finish: {endFrame?: bigint}; arm: {frame: bigint};
 // commands: {commands: [{kind, voice, sample, at, gain, value, denominator}]}; poll; stop.
 // Command IDs/denominator are u64 BigInt; at/value are i64 BigInt. No fields default.
 // ACK admitted counts only this batch's exact successful queue prefix. A failed
@@ -202,7 +202,12 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
           this.reject(message, STATE, "finish-state");
           return;
         }
-        status = this.owner.finish();
+        const endFrame = message.endFrame;
+        if (endFrame !== undefined && !unsigned(endFrame)) {
+          this.reject(message, INVALID, "finish-end");
+          return;
+        }
+        status = endFrame === undefined ? this.owner.finish() : this.owner.finish_at(endFrame);
         if (status === 0) {
           this.memory = BrowserAudio.memory();
           this.buffer = this.memory.buffer;

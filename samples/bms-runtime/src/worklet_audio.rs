@@ -40,6 +40,13 @@ impl WorkletAudioBuilder {
             .insert(id, PcmSample::new(format, samples, self.config.pcm_limits)?)
     }
     pub fn finish(self) -> Result<WorkletAudio, AudioError> {
+        self.finish_with_end(None)
+    }
+    /// Fence playback at an immutable relative Mixer frame after prestart silence.
+    pub fn finish_at(self, end: u64) -> Result<WorkletAudio, AudioError> {
+        self.finish_with_end(Some(end))
+    }
+    fn finish_with_end(self, playback_end_frame: Option<u64>) -> Result<WorkletAudio, AudioError> {
         let length = self
             .config
             .audio_limits
@@ -52,21 +59,23 @@ impl WorkletAudioBuilder {
             .map_err(|_| AudioError::AllocationFailed)?;
         output.resize(length, 0.0);
         let (producer, consumer) = command_queue(self.config.audio_limits.queue_capacity())?;
-        let mixer = Mixer::new(
-            MixerConfig::new(
-                self.config.format,
-                ClockDomainId(1),
-                Timestamp::ZERO,
-                self.config.audio_limits,
-            ),
-            self.bank,
-            consumer,
-        )?;
+        let mixer_config = MixerConfig::new(
+            self.config.format,
+            ClockDomainId(1),
+            Timestamp::ZERO,
+            self.config.audio_limits,
+        );
+        let mixer_config = match playback_end_frame {
+            Some(end) => mixer_config.with_playback_end_frame(end),
+            None => mixer_config,
+        };
+        let mixer = Mixer::new(mixer_config, self.bank, consumer)?;
         Ok(WorkletAudio {
             producer,
             mixer,
             output,
             config: self.config,
+            playback_end_frame,
             start: None,
             armed_current: None,
             expected: None,
@@ -97,6 +106,7 @@ pub struct WorkletAudio {
     mixer: Mixer,
     output: Vec<f32>,
     config: WorkletAudioConfig,
+    playback_end_frame: Option<u64>,
     start: Option<u64>,
     armed_current: Option<u64>,
     expected: Option<u64>,
@@ -117,6 +127,12 @@ impl WorkletAudio {
         }
         if start < current {
             return Err(WorkletAudioError::StaleStart);
+        }
+        if self
+            .playback_end_frame
+            .is_some_and(|end| start.checked_add(end).is_none())
+        {
+            return Err(WorkletAudioError::Overflow);
         }
         self.start = Some(start);
         self.armed_current = Some(current);
@@ -205,6 +221,10 @@ impl WorkletAudio {
     }
     pub fn start_frame(&self) -> Option<u64> {
         self.start
+    }
+    /// Immutable endpoint on the Mixer grid, excluding Worklet prestart silence.
+    pub fn playback_end_frame(&self) -> Option<u64> {
+        self.playback_end_frame
     }
     pub fn failed(&self) -> bool {
         self.failed

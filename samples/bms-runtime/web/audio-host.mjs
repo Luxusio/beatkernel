@@ -312,9 +312,10 @@ export class AudioHost {
     });
   }
 
-  async finish() {
+  async finish(endFrame = undefined) {
     this.#gate("finish", ["setup"]);
-    return this.#request("finish", {}, 0, [], () => { this.#state = "allocated"; });
+    if (endFrame !== undefined && !unsigned(endFrame)) throw this.#error("validation", "finish", "Playback end frame must be a u64 BigInt.");
+    return this.#request("finish", endFrame === undefined ? {} : { endFrame }, 0, [], () => { this.#state = "allocated"; });
   }
 
   async arm(frame) {
