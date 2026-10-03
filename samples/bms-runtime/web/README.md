@@ -653,9 +653,8 @@ Gameplay canvas and local/replay score HUDs belong to the graphics Worker. The
 Window does not repeat score/status or song-position DOM updates on step/render
 responses; preview/menu controls and final summaries remain event-driven. Input
 acquisition is intended to support keyboard, touch/pointer and HID through common
-physical-event types, preserving acquisition time and source identity. Browser
-input is currently keyboard-only; touch/HID adapters, opponent HUD migration
-and remaining host-bridge work are pending. Main-thread performance is unmeasured.
+physical-event types, preserving acquisition time and source identity. The live keyboard route is connected; the touch bridge below is being added.
+WebHID adapters, opponent HUD migration and remaining host-bridge work are pending. Main-thread performance is unmeasured.
 
 
 The physical browser API is authored beside the existing keyboard API.
@@ -681,3 +680,29 @@ runtime call. Physical keyboard controls use Native browser backend `0x574b4559`
 with historical adapter key IDs; these IDs are not USB HID usage values. Native
 metadata retains the original Window acquisition point. A zero-lane chart may
 use empty bindings; charts with lanes still require complete coverage.
+
+## Actual browser touch bridge
+
+The live page exposes a pre-play touch policy, enabled automatically on
+touch-capable PointerEvent browsers. It selects `physical-contact` mode and
+keeps keyboard input available. The choice locks for the session; recorded
+replay uses its recorded rules. Different contact/button-only rule identities
+are not silently merged for competition.
+
+Window collects genuine canvas touch pointers, original event timestamps,
+native pointer provenance, generated contact identities, coordinates and
+pressure. It retains pointer capture through release/cancel and shares the
+bounded acquisition queue and sequence with keyboard input. Cached surface
+dimensions avoid per-event layout queries. No lane selection or canonical
+packet serialization happens in the input callback.
+
+Worker serializes canonical BKPI Touch packets, validates the entire mixed
+batch before gameplay adoption, and supplies projected hit coordinates
+separately to `input_blob_at`. Regions and dimensions come from the same
+Rust layout used by rendering. Moving outside a lane keeps the original
+contact owner. Physical coordinates and acquisition time remain in captures.
+
+Missing pointer-capture or contact-runtime capabilities fail explicitly.
+This bridge has source changes and deferred fixtures; generated bindings,
+browser/touch-device execution, visual contact feedback, WebHID and full
+native/contact record compatibility remain pending.

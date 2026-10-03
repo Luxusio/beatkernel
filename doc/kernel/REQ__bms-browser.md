@@ -849,3 +849,31 @@ separate finite hit coordinates, then uses the same StepGameplay/Runtime report
 and capture path. Keep original event coordinates, time and provenance.
 Window/Worker acquisition, layout projection and contact presentation feedback
 still require integration before playable browser touch is claimed.
+
+## Window touch acquisition and Worker bridge
+
+The live touch policy auto-enables on touch-capable PointerEvent browsers and
+may be selected before play; keyboard input remains available. This selects
+contact judging, not a physical device picker. Preserve the explicit mode in
+preparation, recording and competition identity. Different legacy/contact
+identities are not silently made compatible.
+
+Window collects actual touch pointer events on the canvas with acquisition
+timestamps, contact nonce, pointer ID provenance, original canvas-relative CSS
+coordinates/pressure and cached CSS extent. Do no rendering, region hit testing,
+canonical serialization or per-event DOM geometry query there. Capture the
+pointer until matching Up/Cancel; unexpected capture loss becomes contact Cancel
+at its actual event time. Browser focus/page loss still stops playback.
+
+Worker validates and serializes the entire bounded mixed keyboard/touch batch
+before the first gameplay call. Project hit coordinates separately using actual
+logical canvas dimensions and configure regions from the same lane partition
+used by rendering. Keep physical coordinates/contact/times unchanged in the
+canonical Touch packet and actual runtime/capture report. Never fabricate keys.
+
+Missing PointerEvent/capture support or missing contact binding capabilities
+must fail explicitly before consuming preparation or audio data where possible.
+Retain pre-origin filtering, monotonic watermarks, finite-end output and command
+ACK/stop/capture barriers. Source/compile checks are not browser/device acceptance.
+Contact pressed feedback, WebHID and cross-mode record/native competition
+integration remain separate pending work.

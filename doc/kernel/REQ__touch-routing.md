@@ -60,3 +60,10 @@ Fresh replace_state/replace_session clears held contacts and retains region
 configuration. Explicit replacements may install a paired routing checkpoint;
 normal replacement must never carry unrelated old contacts into a new timeline.
 Routing checkpoints do not synchronize native audio or authenticate a recording.
+
+Browser default touch regions reuse the renderer's exact integer lane partition
+and logical canvas dimensions. Each continuous lane slot includes its separator
+pixel and spans the lane background/label area. Worker projects from original
+canvas-relative CSS coordinates using the acquisition extent snapshot; it never
+replaces those physical coordinates or the acquisition timestamp. A layout
+projection failure rejects the whole batch before any gameplay adoption.
