@@ -484,3 +484,29 @@ multiplayer identity use the genuine resulting profile through existing shared
 logic; no new timing schema, rounding, judging implementation or clock source is
 introduced. Authored fixtures and source integration are not browser execution
 or timing acceptance.
+
+
+## Original-source live section preparation
+
+A fresh live section starts at a nonnegative original-song timestamp. Select
+chart objects and overlapping BGM from the original prepared chart and decoded
+PCM through the same section_start preparation as native play. Exclude earlier
+heads and whole holds crossing the boundary; preserve original absolute targets
+and timing markers. Crossing music selects the checked original-source frame
+using the existing Ceil policy, never a previously selected suffix. Fresh starts
+may reopen output and are not a gapless or acoustic synchronization guarantee.
+
+The stepped live owner accepts only already-selected section data. Its initial
+transport position is start minus preroll. Map original BGM onto output by
+subtracting start exactly once and adding the existing output origin/preroll
+exactly once; input keysounds still follow actual output scheduling. Clock
+activation and presentation discipline retain this section anchor. Capture and
+competition headers encode the immutable section start through the existing
+replay profile, and genuine reconstruction validates the same section identity.
+Natural completion requires original judge deadlines and real Mixer/presentation
+drain, never a duration timer. Zero-start callers preserve existing behavior.
+
+Portable section ownership is the first dependency. Browser preparation/binding
+and Window/Worker launch must subsequently forward and validate the same start
+before this flow is considered integrated. Compilation and authored fixtures do
+not establish browser or native timing acceptance.
