@@ -5,6 +5,7 @@ import { File as NodeFile } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
+import { encodeKeyboardEvent } from "./physical-input.mjs";
 
 const FileType = globalThis.File ?? NodeFile;
 const ORIGIN = 9007199254740993n;
@@ -55,6 +56,7 @@ async function workerHarness(options = {}) {
   const games = [];
   const replays = [];
   const sectionConstructions = [];
+  const physicalConstructions = [];
   const preparedOwners = [];
   const timers = new Map();
   const timerDelays = new Map();
@@ -134,6 +136,17 @@ async function workerHarness(options = {}) {
     needs_redraw() { return false; }
   }
   class BrowserGame {
+    static new_physical(prepared, ...args) {
+      physicalConstructions.push({ prepared, args });
+      if (options.physicalConstructError) {
+        assert.equal(prepared.moved, false);
+        prepared.moved = true;
+        throw new Error(options.physicalConstructError);
+      }
+      const owner = new BrowserGame(prepared, ...args.slice(0, 6));
+      owner.physical = true;
+      return owner;
+    }
     static new_section(prepared, ...args) {
       sectionConstructions.push({ prepared, args });
       if (options.sectionConstructError) {
@@ -215,8 +228,16 @@ async function workerHarness(options = {}) {
     activate(host) { this.live(); this.calls.push(["activate", host]); }
     input(...args) {
       this.live();
+      assert.notEqual(this.physical, true, "physical owners must not fall back to the legacy key method");
       this.calls.push(["input", ...args]);
       options.input?.(this, args);
+    }
+    input_blob(bytes, audioNs) {
+      this.live();
+      assert.equal(this.physical, true);
+      assert.ok(bytes instanceof Uint8Array);
+      this.calls.push(["blob", bytes.slice(), audioNs]);
+      options.inputBlob?.(this, bytes, audioNs);
     }
     advance(...args) { this.live(); this.calls.push(["advance", ...args]); options.advance?.(this, args); }
     observe_output(words, presentedNs) {
@@ -245,6 +266,8 @@ async function workerHarness(options = {}) {
     }
   }
   if (options.missingSectionConstructor) BrowserGame.new_section = undefined;
+  if (options.missingPhysicalConstructor) BrowserGame.new_physical = undefined;
+  if (options.missingInputBlob) BrowserGame.prototype.input_blob = undefined;
   class BrowserReplay extends BrowserGame {
     constructor(prepared, ...args) {
       super(prepared, ...args);
@@ -346,6 +369,7 @@ async function workerHarness(options = {}) {
   const helper = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
   const playHelper = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const opponentHelper = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
+  const physicalHelper = new SourceTextModule(await readFile(new URL("./physical-input.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
@@ -353,11 +377,12 @@ async function workerHarness(options = {}) {
     if (specifier === "./play-model.mjs") return playHelper;
     if (specifier === "./multiplayer-owner.mjs") return network;
     if (specifier === "./saved-opponents.mjs") return opponentHelper;
+    if (specifier === "./physical-input.mjs") return physicalHelper;
     throw new Error(`Unexpected import: ${specifier}`);
   });
   await worker.evaluate();
   return {
-    messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, timers, networks, networkSessions,
+    messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, timers, networks, networkSessions,
     setNetworkNow(value) { assert.ok(value >= networkNow); networkNow = value; },
     post(request) { receive({ data: request }); },
     async send(request) { receive({ data: request }); await flushJobs(); },
@@ -441,6 +466,118 @@ function assertReleased(h, score = SCORE) {
   assert.equal(last.combo, score.combo);
   assert.equal(h.libraries[0].frees, 0, "accepted library remains available after gameplay");
 }
+
+test("explicit physical keyboard ownership uses native bindings and canonical blobs with the original acquisition clock and finite setup", async () => {
+  for (const finite of [false, true]) {
+    const keyPairs = pairs();
+    const h = await active({ missingSectionConstructor: true,
+      startRequest: startRequest({ inputMode: "physical", keyPairs, recordReplay: true,
+        timing: { earlyNs: 7n, lateNs: 9n, offsetNs: -3n }, ...(finite ? { endNs: 1n } : {}) }),
+      gameEnd: finite ? 1n : undefined, gameEndFrame: finite ? 4801n : undefined,
+    });
+    const game = h.games[0], metadata = h.of("play-reply")[0].result;
+    assert.equal(metadata.inputMode, "physical");
+    assert.equal(h.physicalConstructions.length, 1);
+    assert.equal(h.sectionConstructions.length, 0);
+    const construction = h.physicalConstructions[0];
+    assert.equal(construction.prepared, h.preparedOwners[1]);
+    assert.deepEqual(construction.args.slice(0, 5), [0n, 100000000n, 7n, 9n, -3n]);
+    assert.deepEqual(Array.from(construction.args[5]), [
+      0x11, 0, 0, 0, 1, 0x574b4559, 2, 0x12, 0, 0, 0, 1, 0x574b4559, 3,
+    ]);
+    assert.deepEqual(construction.args.slice(6), [finite ? 1n : undefined, 4096, 1024]);
+    assert.equal(Object.hasOwn(metadata, "endFrame"), finite);
+    if (finite) assert.equal(metadata.endFrame, 4801n);
+    keyPairs[1] = 99;
+    assert.equal(construction.args[5][6], 2);
+    const down = { hostNs: ORIGIN, key: 2, down: true, sequence: 1n };
+    const up = { hostNs: ORIGIN + 1n, key: 2, down: false, sequence: 2n };
+    await h.send(step({ events: [{ hostNs: ORIGIN - 1n, key: 2, down: true, sequence: 0n }, down, up], watermark: ORIGIN + 1n }));
+    const blobs = game.calls.filter(row => row[0] === "blob");
+    assert.equal(blobs.length, 2, "fully validated pre-origin input remains ignored rather than retimestamped");
+    assert.deepEqual(blobs.map(row => Array.from(row[1])), [Array.from(encodeKeyboardEvent(down)), Array.from(encodeKeyboardEvent(up))]);
+    assert.deepEqual(blobs.map(row => row[2]), [100000000n, 100000000n]);
+    assert.equal(game.calls.filter(row => row[0] === "input").length, 0);
+    assert.deepEqual(game.calls.find(row => row[0] === "advance"), ["advance", ORIGIN + 1n, 100000000n]);
+    assert.equal(h.of("play-step-done")[0].preOriginInputs, 1);
+    await h.send({ kind: "play-stop", playId: 7 });
+    assertReleased(h);
+    assert.equal(h.of("play-stopped")[0].replayComplete, false);
+    assert.deepEqual(game.disposals, ["stop", "take", "free"]);
+    assert.equal(h.preparedOwners[1].frees, 0);
+  }
+  const empty = await active({ lanes: [], startRequest: startRequest({ inputMode: "physical", keyPairs: new Uint32Array() }) });
+  assert.equal(empty.physicalConstructions[0].args[5].length, 0, "an empty chart does not acquire invented keyboard bindings");
+  await empty.send(step());
+  assert.equal(empty.games[0].calls.filter(row => row[0] === "blob").length, 0);
+  await empty.send({ kind: "play-stop", playId: 7 });
+  assertReleased(empty);
+});
+
+test("physical capability and whole-batch admission fail before consumption while encoded batches and committed failures never retry", async () => {
+  for (const inputMode of [null, "", "legacy", "hid", 0]) {
+    const gate = deferred(), h = await workerHarness({ initGate: gate });
+    await h.send({ kind: "init", canvas: {} });
+    await h.send(startRequest({ inputMode }));
+    assert.equal(h.of("play-error").length, 1);
+    assert.equal(h.preparedOwners.length, 0);
+    assert.equal(h.games.length, 0);
+    gate.resolve(); await flushJobs();
+    assert.equal(h.games.length, 0);
+  }
+  for (const options of [{ missingPhysicalConstructor: true }, { missingInputBlob: true }]) {
+    const h = await catalogWorker(options);
+    await h.send(startRequest({ inputMode: "physical" }));
+    assert.equal(h.physicalConstructions.length, 0);
+    assert.equal(h.games.length, 0);
+    assert.equal(h.of("play-error").length, 1);
+    assert.ok(h.preparedOwners.slice(1).every(owner => !owner.moved && owner.frees === 1));
+  }
+  const selected = replayFile(), replay = await catalogWorker();
+  await replay.send(replayRequest(selected.file, { inputMode: "physical" }));
+  assert.equal(selected.reads, 0, "recorded playback refuses a live acquisition route before reading its recording");
+  assert.equal(replay.games.length + replay.replays.length, 0);
+  assert.equal(replay.of("play-error").length, 1);
+  const refused = await catalogWorker({ physicalConstructError: "consuming physical setup refused" });
+  await refused.send(startRequest({ inputMode: "physical" }));
+  assert.equal(refused.physicalConstructions.length, 1);
+  assert.equal(refused.games.length, 0);
+  assert.equal(refused.preparedOwners[1].moved, true);
+  assert.equal(refused.preparedOwners[1].frees, 0);
+  assert.match(refused.of("play-error")[0].message, /consuming physical setup refused/);
+  const malformed = await active({ startRequest: startRequest({ inputMode: "physical" }) });
+  await malformed.send(step({ events: [
+    { hostNs: ORIGIN, key: 2, down: true, sequence: 1n },
+    { hostNs: ORIGIN + 1n, key: 3, down: false, sequence: 18446744073709551616n },
+  ], watermark: ORIGIN + 1n }));
+  assert.equal(malformed.games[0].calls.filter(row => ["input", "blob", "advance"].includes(row[0])).length, 0);
+  assert.equal(malformed.of("play-step-done").length, 0);
+  assertReleased(malformed);
+  const staged = await active({ startRequest: startRequest({ inputMode: "physical" }) });
+  const owner = staged.games[0];
+  const second = { hostNs: ORIGIN + 1n, down: true, sequence: 2n,
+    get key() { return owner.calls.some(row => row[0] === "blob") ? 65536 : 3; } };
+  await staged.send(step({ events: [{ hostNs: ORIGIN, key: 2, down: true, sequence: 1n }, second], watermark: ORIGIN + 1n }));
+  assert.equal(staged.of("play-error").length, 0);
+  assert.equal(owner.calls.filter(row => row[0] === "blob").length, 2, "every packet is encoded before the first runtime call");
+  assert.deepEqual(Array.from(owner.calls.filter(row => row[0] === "blob")[1][1]),
+    Array.from(encodeKeyboardEvent({ hostNs: ORIGIN + 1n, key: 3, down: true, sequence: 2n })));
+  await staged.send({ kind: "play-stop", playId: 7 });
+  assertReleased(staged);
+  const partial = await active({ startRequest: startRequest({ inputMode: "physical" }), inputBlob(game) {
+    game.score.hits = 18n;
+    throw new Error("actual common input rejected after committed score");
+  } });
+  await partial.send(step({ events: [
+    { hostNs: ORIGIN, key: 2, down: true, sequence: 1n },
+    { hostNs: ORIGIN + 1n, key: 3, down: true, sequence: 2n },
+  ], watermark: ORIGIN + 1n }));
+  assert.equal(partial.games[0].calls.filter(row => row[0] === "blob").length, 1);
+  assert.equal(partial.games[0].calls.filter(row => row[0] === "advance").length, 0);
+  assertReleased(partial, { ...SCORE, hits: 18n });
+  await partial.send(step({ tickId: 2 }));
+  assert.equal(partial.games[0].calls.filter(row => row[0] === "blob").length, 1);
+});
 
 test("finite live ownership uses the consuming static constructor and snapshots actual endpoint metadata before capture and activation", async () => {
   const startNs = 604800000000001n, endNs = startNs + 1n;

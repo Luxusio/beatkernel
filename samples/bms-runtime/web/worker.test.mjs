@@ -193,6 +193,7 @@ async function workerHarness(options = {}) {
   const helpers = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
   const playHelpers = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const opponentHelpers = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
+  const physicalHelpers = new SourceTextModule(await readFile(new URL("./physical-input.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
@@ -200,6 +201,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./play-model.mjs") return playHelpers;
     if (specifier === "./multiplayer-owner.mjs") return network;
     if (specifier === "./saved-opponents.mjs") return opponentHelpers;
+    if (specifier === "./physical-input.mjs") return physicalHelpers;
     throw new Error(`Unexpected Worker import: ${specifier}`);
   });
   await worker.evaluate();

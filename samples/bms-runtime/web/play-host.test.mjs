@@ -384,8 +384,12 @@ async function harness(faults = {}) {
     target.emit("message", { data: structuredClone(value) });
     await flush();
   }
-  async function reply(request, result) {
+  async function reply(request, result, echoInputMode = true) {
     assert.ok(request, "expected an actual setup request");
+    // Normal controlled setup replies echo the admitted route. Negative route
+    // fixtures can explicitly retain missing metadata with echoInputMode=false.
+    if (echoInputMode && request.kind === "play-start" && request.inputMode === "physical"
+      && result?.kind === "prepared" && !Object.hasOwn(result, "inputMode")) result = { ...result, inputMode: "physical" };
     await receive({ kind: "play-reply", playId: request.playId, rpcId: request.rpcId, result });
   }
   async function preview() {
@@ -1049,6 +1053,94 @@ test("one retained replay survives a failed export and its URLs are replaced onl
   assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), Uint8Array.from([9, 10]));
   await h.close();
   assert.deepEqual(h.revoked, h.urls.map(entry => entry.url));
+});
+
+test("Window explicitly negotiates physical input before PCM and preserves native keyboard acquisition through setup and capture cleanup", async () => {
+  const h = await harness();
+  await h.preview();
+  h.get("binding-11").value = "KeyA";
+  h.get("record").checked = true;
+  const start = await h.begin(), worker = h.workers[0];
+  assert.equal(start.inputMode, "physical");
+  assert.equal(start.recordReplay, true);
+  assert.equal(h.opens[0].gesture, true);
+  assert.equal(worker.messages("play-sample").length, 0);
+  assert.deepEqual(Array.from(start.keyPairs).slice(0, 4), [0x16, 1, 0x11, 19]);
+  const initial = await h.prepared(start, 1);
+  assert.equal(h.audio.samples.length, 1);
+  await h.reply(initial, { sequence: 9007199254740993n, commands: [command(8n)] });
+  const acknowledged = worker.last("play-ack");
+  assert.equal(acknowledged.sequence, 9007199254740993n);
+  assert.equal(acknowledged.admitted, 1);
+  assert.equal(acknowledged.success, true);
+  await h.reply(acknowledged, null);
+  await h.reply(worker.last("play-commands"), null);
+  await h.reply(worker.last("play-activate"), null);
+  h.setNow(1300);
+  h.window.emit("keydown", { code: "KeyA", repeat: false, timeStamp: 1300 });
+  const down = worker.last("play-step");
+  assert.deepEqual(down.events, [{ hostNs: 1300000000n, key: 19, down: true, sequence: 1n }]);
+  h.window.emit("keyup", { code: "KeyA", repeat: false, timeStamp: 1300.125 });
+  assert.equal(worker.last("play-step").tickId, down.tickId);
+  const done = tick => h.receive({ kind: "play-step-done", playId: start.playId, tickId: tick.tickId,
+    songNs: 50000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
+  await done(down);
+  const up = worker.last("play-step");
+  assert.ok(up.tickId > down.tickId);
+  assert.deepEqual(up.events, [{ hostNs: 1300125000n, key: 19, down: false, sequence: 2n }]);
+  assert.equal(up.watermark, 1300125000n);
+  assert.ok(down.audioNs >= 0n && up.audioNs >= 0n);
+  await done(up);
+  assert.equal(worker.messages("play-stop").length, 0);
+  h.click("stop"); await flush();
+  assert.equal(worker.last("play-stop").completed, false);
+  await h.receive(finalScore(start.playId, { hits: 1n, misses: 0n, combo: 1n,
+    replay: Uint8Array.from([66, 75, 82, 1]), replayComplete: false, replayError: null }));
+  assert.match(h.get("export").textContent, /prefix/);
+  assert.match(h.get("status").textContent, /Hits 1.*Misses 0.*Combo 1/);
+  await h.close();
+});
+
+test("missing or changed physical-route metadata refuses all sample acquisition while retry and recorded replay keep separate ownership", async () => {
+  const h = await harness();
+  await h.preview();
+  const worker = h.workers[0];
+  for (const inputMode of [undefined, null, "legacy", "Physical", 1]) {
+    const start = await h.begin();
+    assert.equal(start.inputMode, "physical");
+    await h.reply(start, { kind: "prepared", title: "Unadmitted route", notes: 1, samples: 1,
+      lanes: [0x11], opponentCount: 0, startNs: 0n, ...(inputMode === undefined ? {} : { inputMode }) }, false);
+    assert.equal(worker.messages("play-sample").length, 0);
+    assert.equal(h.audio.samples.length, 0);
+    assert.deepEqual(h.audio.finishArgs, []);
+    assert.deepEqual(h.audio.arms, []);
+    assert.equal(worker.last("play-stop").playId, start.playId);
+    assert.equal(worker.last("play-stop").completed, false);
+    await h.receive(finalScore(start.playId));
+    assert.equal(h.get("status").dataset.error, "true");
+    assert.equal(h.get("play").disabled, false);
+  }
+  const retry = await h.launch();
+  assert.equal(retry.start.inputMode, "physical");
+  h.click("stop"); await flush(); await h.receive(finalScore(retry.id));
+  chooseRecording(h, [selectedRecording().file]);
+  h.get("live-start").value = "bad live start";
+  h.get("live-end").value = "bad live end";
+  h.get("binding-11").value = "unknown live code";
+  h.get("record").checked = true;
+  const replay = await h.launch(0, "replay");
+  assert.equal(replay.start.mode, "replay");
+  for (const field of ["inputMode", "keyPairs", "timing", "startNs", "endNs", "recordReplay"]) {
+    assert.equal(Object.hasOwn(replay.start, field), false);
+  }
+  assert.deepEqual(h.audio.finishArgs, [[]]);
+  const steps = worker.messages("play-step").length;
+  h.window.emit("keydown", { code: "KeyA", repeat: false, timeStamp: 1300 });
+  h.window.emit("keyup", { code: "KeyA", repeat: false, timeStamp: 1300 });
+  assert.equal(worker.messages("play-step").length, steps);
+  h.click("stop"); await flush(); await h.receive(finalScore(replay.id));
+  assert.equal(h.get("binding-11").value, "unknown live code");
+  await h.close();
 });
 
 test("user gesture opens real host boundary before awaits, then transfers source PCM and arms after setup", async () => {
@@ -1899,7 +1991,7 @@ test("finite live controls capture one pre-gesture section and join input, outpu
   let actualEnd = 1000000001n, actualFrame = 4411n;
   const reads = { end: 0, frame: 0 };
   worker.emit("message", { data: { kind: "play-reply", playId: start.playId, rpcId: start.rpcId, result: {
-    kind: "prepared", title: "Finite live section", notes: 1, samples: 1, lanes: [0x11], opponentCount: 0, startNs: 1000000000n,
+    kind: "prepared", inputMode: "physical", title: "Finite live section", notes: 1, samples: 1, lanes: [0x11], opponentCount: 0, startNs: 1000000000n,
     get endNs() { assert.equal(++reads.end, 1); return actualEnd; },
     get endFrame() { assert.equal(++reads.frame, 1); return actualFrame; },
   } } });

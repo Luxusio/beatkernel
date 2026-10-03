@@ -123,7 +123,16 @@ fn setup_refuses_ambiguous_rows_and_uncovered_lanes_without_losing_valid_fanout_
         row[index] = value;
         assert!(PhysicalInputSetup::new(&row, &[0x11], 4096, 1024).is_err());
     }
-    assert!(PhysicalInputSetup::new(&[], &[], 4096, 1024).is_err());
+    assert!(
+        PhysicalInputSetup::new(&[], &[], 4096, 1024)
+            .unwrap()
+            .bindings
+            .bindings()
+            .is_empty()
+    );
+    assert!(PhysicalInputSetup::new(&[], &[0x11], 4096, 1024).is_err());
+    assert!(PhysicalInputSetup::new(&[], &[], 5, 0).is_err());
+    assert!(PhysicalInputSetup::new(&[], &[], 4096, 4097).is_err());
     assert!(PhysicalInputSetup::new(&KEY[..6], &[0x11], 4096, 1024).is_err());
     let mut trailing = KEY.to_vec();
     trailing.push(0);
@@ -445,4 +454,52 @@ fn normalized_host_time_is_strict_while_original_clock_and_acquisition_identity_
             "admission follows the explicit configured domain without inventing a clock mapping"
         );
     }
+}
+
+#[test]
+fn browser_keyboard_javascript_golden_packet_decodes_to_native_acquisition_and_common_binding() {
+    // The independent physical-input.test.mjs golden uses these same 69 bytes.
+    let literal: [u8; 69] = [
+        66, 75, 80, 73, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1, 0x4e, 0x49, 0x57,
+        0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 1, 0x59, 0x45, 0x4b, 0x57, 1, 0x34,
+        0x12, 0, 0, 1, 0x4e, 0x49, 0x57, 0, 8, 7, 6, 5, 4, 3, 2, 1, 0, 1, 0x59, 0x45, 0x4b, 0x57,
+        0x34, 0x12, 0, 0, 0,
+    ];
+    let point = ClockPoint {
+        domain: HOST,
+        timestamp: Timestamp::from_nanos(0x0102_0304_0506_0708),
+    };
+    let expected = PhysicalInputEvent::Button(ButtonEvent {
+        meta: EventMeta {
+            source: DeviceId(1),
+            timestamp: point.timestamp,
+            clock_domain: HOST,
+            sequence: 0x8877_6655_4433_2211,
+            native: Some(NativeEventMeta {
+                backend: BackendId(0x574b_4559),
+                code: Some(0x1234),
+                timestamp: Some(point),
+            }),
+            original_clock_point: None,
+        },
+        control: PhysicalControlId::Native {
+            backend: BackendId(0x574b_4559),
+            code: 0x1234,
+        },
+        state: ButtonState::Down,
+    });
+    let setup = PhysicalInputSetup::new(
+        &[0x11, 0, 0, 0, 1, 0x574b_4559, 0x1234],
+        &[0x11],
+        4096,
+        1024,
+    )
+    .unwrap();
+    assert_eq!(encode_event(&expected, setup.limits).unwrap(), literal);
+    let decoded = decode_input(&literal, setup.limits, HOST).unwrap();
+    assert_eq!(decoded, expected);
+    let bound: Vec<_> = setup.bindings.map(&decoded).collect();
+    assert_eq!(bound.len(), 1);
+    assert_eq!(bound[0].game_control, GameControlId(0x11));
+    assert_eq!(bound[0].physical, expected);
 }
