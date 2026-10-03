@@ -102,7 +102,7 @@ pub(crate) fn section_end_frame(
     PracticeLoop::new(start, end)?.playback_end_frame(start, preroll, sample_rate)
 }
 
-fn before_endpoint(
+pub(crate) fn before_endpoint(
     at: Timestamp,
     output_origin: ClockPoint,
     sample_rate: u32,

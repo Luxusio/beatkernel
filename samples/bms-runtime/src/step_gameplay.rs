@@ -8,6 +8,7 @@ use crate::{
     completion::{CompletionError, SongCompletion},
     local_runtime::{GroupError, SoloRuntime},
     native_judge::NativeJudgeConfig,
+    replay_audio::{ReplayAudioError, before_endpoint, completed_render_cursor, section_end_frame},
     replay_capture::{CaptureError, LiveReplayCapture, setup_header},
 };
 use beatkernel::{
@@ -97,6 +98,17 @@ pub enum StepGameplayError {
         error: QueuePopError,
         commands: Vec<AudioCommand>,
     },
+    /// A popped command could not be mapped; its earlier eligible prefix remains exact.
+    CommandMapping {
+        error: ReplayAudioError,
+        command: AudioCommand,
+        commands: Vec<AudioCommand>,
+    },
+    /// The original full-success ACK was valid, but its cumulative count overflowed.
+    AudioCountOverflow {
+        sequence: u64,
+        admitted: usize,
+    },
     /// A valid remote rejection preserves the exact batch and admitted prefix.
     AudioRejected {
         batch: StepAudioBatch,
@@ -152,6 +164,19 @@ impl fmt::Display for StepGameplayError {
                 "audio queue {error:?} after {} consumed commands",
                 commands.len()
             ),
+            Self::CommandMapping {
+                error,
+                command,
+                commands,
+            } => write!(
+                f,
+                "audio command {command:?} mapping failed after {} eligible commands: {error}",
+                commands.len()
+            ),
+            Self::AudioCountOverflow { sequence, admitted } => write!(
+                f,
+                "audio acknowledgement {sequence} committed {admitted} commands beyond the count range"
+            ),
             Self::AudioRejected { batch, admitted } => write!(
                 f,
                 "audio batch {} rejected after {admitted}/{} commands",
@@ -181,7 +206,7 @@ pub struct StepGameplay {
     runtime: SoloRuntime,
     consumer: CommandConsumer,
     bgm: BgmFeeder,
-    completion: SongCompletion,
+    completion: Option<SongCompletion>,
     output_origin: ClockPoint,
     sample_rate: u32,
     last_render: Option<RenderReport>,
@@ -193,11 +218,14 @@ pub struct StepGameplay {
     song: Timestamp,
     host_domain: ClockDomainId,
     start: Timestamp,
+    end: Option<Timestamp>,
+    playback_end_frame: Option<u64>,
     preroll: Duration,
     activated: bool,
     started: bool,
     pending: Option<StepAudioBatch>,
     sequence: u64,
+    acknowledged_commands: u64,
     failed: bool,
 }
 
@@ -230,10 +258,23 @@ impl StepGameplay {
     /// original assets. Chart targets and PCM stay untouched; only BGM output
     /// scheduling subtracts this immutable original-song start.
     pub fn new_at(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        bindings: BindingMap,
+        start: Timestamp,
+    ) -> Result<(Self, SampleBank), StepGameplayError> {
+        Self::new_section(prepared, config, bindings, start, None)
+    }
+
+    /// Own an already selected section with an optional immutable original-song
+    /// end. The shared runtime caps logical processing; actual output must use
+    /// the returned playback endpoint on this configuration's output grid.
+    pub fn new_section(
         mut prepared: PreparedBms,
         config: StepGameplayConfig,
         bindings: BindingMap,
         start: Timestamp,
+        end: Option<Timestamp>,
     ) -> Result<(Self, SampleBank), StepGameplayError> {
         if config.host_origin.domain == config.output_origin.domain {
             return Err(StepGameplayError::InvalidConfiguration(
@@ -309,19 +350,64 @@ impl StepGameplay {
         }
         .profile()
         .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
-        let completion = SongCompletion::prepare(
-            &prepared,
-            config.late_ns,
-            config.offset_ns,
-            config.preroll.as_nanos(),
-            config.output_origin.domain,
-        )
-        .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
         let sample_rate = prepared.bank.format().sample_rate();
+        let playback_end_frame = end
+            .map(|end| section_end_frame(start, end, config.preroll, sample_rate))
+            .transpose()
+            .map_err(StepGameplayError::Setup)?;
+        if playback_end_frame.is_some() {
+            validate_section_output_evidence(
+                config.output_origin,
+                sample_rate,
+                None,
+                None,
+                None,
+                None,
+                playback_end_frame,
+            )
+            .map_err(|error| StepGameplayError::Completion {
+                error,
+                rendered: None,
+                presented: None,
+            })?;
+        }
+        let completion = if end.is_none() {
+            Some(
+                SongCompletion::prepare(
+                    &prepared,
+                    config.late_ns,
+                    config.offset_ns,
+                    config.preroll.as_nanos(),
+                    config.output_origin.domain,
+                )
+                .map_err(|error| StepGameplayError::Setup(error.to_string()))?,
+            )
+        } else {
+            None
+        };
         let rules = prepared.source.rules();
         let judge = JudgeEngine::new(prepared.compiled.chart, rules, profile)
             .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
         let bgm_count = prepared.bgm_commands.len();
+        if let Some(end) = end {
+            for command in &prepared.bgm_commands {
+                if !matches!(command, AudioCommand::Play { gain, .. } if gain.is_finite()) {
+                    return Err(StepGameplayError::Bgm {
+                        error: BgmFeedError::InvalidCommand(*command),
+                        report: BgmFeedReport {
+                            remaining: bgm_count,
+                            ..BgmFeedReport::default()
+                        },
+                    });
+                }
+            }
+            // Future full-chart cues cannot reach this section. Discard them
+            // before output conversion so an irrelevant distant cue cannot
+            // overflow the finite run's otherwise representable mapping.
+            prepared
+                .bgm_commands
+                .retain(|command| !matches!(command, AudioCommand::Play { at, .. } if *at >= end));
+        }
         if start != Timestamp::ZERO {
             for command in &mut prepared.bgm_commands {
                 if let AudioCommand::Play { at, .. } = command {
@@ -338,16 +424,64 @@ impl StepGameplay {
                 }
             }
         }
-        let bgm = BgmFeeder::new(
-            prepared.bgm_commands,
-            BgmConfig {
-                output_origin: config.output_origin,
-                sample_rate: prepared.bank.format().sample_rate(),
-                preroll: config.preroll,
-                lookahead: config.bgm_lookahead,
-                max_pending: config.bgm_pending,
-            },
-        )
+        let mut bgm_config = BgmConfig {
+            output_origin: config.output_origin,
+            sample_rate,
+            preroll: config.preroll,
+            lookahead: config.bgm_lookahead,
+            max_pending: config.bgm_pending,
+        };
+        let bgm = if playback_end_frame.is_some() {
+            let mut kept = 0;
+            for index in 0..prepared.bgm_commands.len() {
+                let mut command = prepared.bgm_commands[index];
+                if let AudioCommand::Play { at, .. } = &mut command {
+                    let mapped = i128::from(config.output_origin.timestamp.as_nanos())
+                        + i128::from(at.as_nanos())
+                        + i128::from(config.preroll.as_nanos());
+                    *at = Timestamp::from_nanos(i64::try_from(mapped).map_err(|_| {
+                        StepGameplayError::Bgm {
+                            error: BgmFeedError::Overflow,
+                            report: BgmFeedReport {
+                                remaining: bgm_count,
+                                ..BgmFeedReport::default()
+                            },
+                        }
+                    })?);
+                }
+                if command.at() < config.output_origin.timestamp {
+                    return Err(StepGameplayError::Bgm {
+                        error: BgmFeedError::InvalidCommand(command),
+                        report: BgmFeedReport {
+                            remaining: bgm_count,
+                            ..BgmFeedReport::default()
+                        },
+                    });
+                }
+                let keep = before_endpoint(
+                    command.at(),
+                    config.output_origin,
+                    sample_rate,
+                    playback_end_frame,
+                )
+                .map_err(|_| StepGameplayError::Bgm {
+                    error: BgmFeedError::Overflow,
+                    report: BgmFeedReport {
+                        remaining: bgm_count,
+                        ..BgmFeedReport::default()
+                    },
+                })?;
+                if keep {
+                    prepared.bgm_commands[kept] = command;
+                    kept += 1;
+                }
+            }
+            prepared.bgm_commands.truncate(kept);
+            bgm_config.preroll = Duration::ZERO;
+            BgmFeeder::from_output_commands(prepared.bgm_commands, bgm_config)
+        } else {
+            BgmFeeder::new(prepared.bgm_commands, bgm_config)
+        }
         .map_err(|error| StepGameplayError::Bgm {
             error,
             report: BgmFeedReport {
@@ -371,6 +505,11 @@ impl StepGameplay {
         // Profiling is not a clock source. In particular, no std::time::Instant
         // is sampled by core processing on browser or other nonblocking hosts.
         runtime.set_processing_clock(RuntimeProcessingClock::Disabled);
+        if let Some(end) = end {
+            runtime
+                .set_song_end(end)
+                .map_err(StepGameplayError::Setup)?;
+        }
         let mut owner = Self {
             runtime,
             consumer,
@@ -387,11 +526,14 @@ impl StepGameplay {
             song,
             host_domain: config.host_origin.domain,
             start,
+            end,
+            playback_end_frame,
             preroll: config.preroll,
             activated: false,
             started: false,
             pending: None,
             sequence: 0,
+            acknowledged_commands: 0,
             failed: false,
         };
         owner.feed_audio(0, config.bgm_pending)?;
@@ -403,6 +545,12 @@ impl StepGameplay {
             Err(StepGameplayError::Failed)
         } else {
             Ok(())
+        }
+    }
+
+    fn reset_drain(&mut self) {
+        if let Some(completion) = &mut self.completion {
+            completion.reset_drain();
         }
     }
 
@@ -441,8 +589,13 @@ impl StepGameplay {
         chart_seed: u64,
     ) -> Result<Vec<u8>, StepGameplayError> {
         let header = self.competition_header(limits, chart_seed)?;
-        crate::multiplayer::competition_identity(&header, env!("CARGO_PKG_VERSION"), limits)
-            .map_err(|error| StepGameplayError::Setup(error.to_string()))
+        crate::multiplayer::competition_identity_for_section(
+            &header,
+            env!("CARGO_PKG_VERSION"),
+            limits,
+            self.end,
+        )
+        .map_err(|error| StepGameplayError::Setup(error.to_string()))
     }
 
     /// Opt in while the original judge is pristine, using the resolved chart
@@ -460,12 +613,13 @@ impl StepGameplay {
                 "capture configuration requires an unprocessed, unconfigured runtime",
             ));
         }
-        let capture = LiveReplayCapture::new_at_with_chart_seed(
+        let capture = LiveReplayCapture::new_section(
             self.runtime.judge(),
             self.host_domain,
             limits,
             self.start,
             chart_seed,
+            self.end,
         )
         .map_err(|error| StepGameplayError::Capture {
             error,
@@ -648,7 +802,7 @@ impl StepGameplay {
         };
         self.song = report.song_time;
         if !report.audio_commands.is_empty() {
-            self.completion.reset_drain();
+            self.reset_drain();
         }
         let score_error = self.score.observe(&report.judge_events).err();
         let capture_error = self
@@ -697,7 +851,7 @@ impl StepGameplay {
         }) {
             Ok(report) => {
                 if report.admitted != 0 {
-                    self.completion.reset_drain();
+                    self.reset_drain();
                 }
                 Ok(report)
             }
@@ -720,23 +874,64 @@ impl StepGameplay {
         presented: Option<ClockPoint>,
     ) -> Result<bool, StepGameplayError> {
         let normalized = self.validate_completion_evidence(rendered, presented)?;
+        let actual = rendered
+            .filter(|report| report.frames != 0)
+            .or(self.last_render);
+        let bgm = self.bgm.report();
+        let commands_resolved = self.pending.is_none()
+            && self.consumer.available_up_to(1) == 0
+            && bgm.remaining == 0
+            && bgm.outstanding == 0;
+        if let (Some(end), Some(report)) = (self.playback_end_frame, actual) {
+            if commands_resolved
+                && report.playback_end_physical_frame == Some(end)
+                && (report.counters.commands_consumed != self.acknowledged_commands
+                    || report.counters.commands_applied != self.acknowledged_commands
+                    || report.pending_commands != 0)
+            {
+                self.failed = true;
+                return Err(StepGameplayError::Completion {
+                    error: CompletionError(
+                        "finite output did not execute the exact acknowledged command total",
+                    ),
+                    rendered: Some(report),
+                    presented,
+                });
+            }
+        }
         if let Some(report) = rendered.filter(|report| report.frames != 0) {
             self.last_render = Some(report);
         }
         if let Some(point) = normalized {
             self.last_presented = Some(point.timestamp);
         }
+        if let (Some(end), Some(frame)) = (self.end, self.playback_end_frame) {
+            // The configured endpoint's ceiling timestamp was checked during
+            // setup. Presentation remains the real uncapped output observation.
+            let nanos = (i128::from(frame) * 1_000_000_000 + i128::from(self.sample_rate) - 1)
+                / i128::from(self.sample_rate);
+            return Ok(commands_resolved
+                && actual.is_some_and(|report| report.playback_end_physical_frame == Some(frame))
+                && self.song == end
+                && self
+                    .last_presented
+                    .is_some_and(|at| i128::from(at.as_nanos()) >= nanos));
+        }
         if self.pending.is_some() || self.consumer.available_up_to(1) != 0 {
-            self.completion.reset_drain();
+            self.reset_drain();
             return Ok(false);
         }
-        match self.completion.observe(
-            self.runtime.judge(),
-            self.song,
-            self.bgm.report(),
-            rendered,
-            normalized,
-        ) {
+        match self
+            .completion
+            .as_mut()
+            .expect("unlimited completion prepared at setup")
+            .observe(
+                self.runtime.judge(),
+                self.song,
+                self.bgm.report(),
+                rendered,
+                normalized,
+            ) {
             Ok(complete) => Ok(complete),
             Err(error) => {
                 self.failed = true;
@@ -757,14 +952,37 @@ impl StepGameplay {
         presented: Option<ClockPoint>,
     ) -> Result<Option<ClockPoint>, StepGameplayError> {
         self.ensure_usable()?;
-        match validate_output_evidence(
-            self.output_origin,
-            self.sample_rate,
-            self.last_render,
-            self.last_presented,
-            rendered,
-            presented,
-        ) {
+        let validated = if self.playback_end_frame.is_some() {
+            validate_section_output_evidence(
+                self.output_origin,
+                self.sample_rate,
+                self.last_render,
+                self.last_presented,
+                rendered,
+                presented,
+                self.playback_end_frame,
+            )
+        } else {
+            validate_output_evidence(
+                self.output_origin,
+                self.sample_rate,
+                self.last_render,
+                self.last_presented,
+                rendered,
+                presented,
+            )
+        }
+        .and_then(|normalized| {
+            if self.playback_end_frame.is_some() {
+                if let Some(report) = rendered {
+                    completed_render_cursor(&report).map_err(|_| {
+                        CompletionError("finite output reports a late or rejected audio command")
+                    })?;
+                }
+            }
+            Ok(normalized)
+        });
+        match validated {
             Ok(normalized) => Ok(normalized),
             Err(error) => {
                 self.failed = true;
@@ -794,11 +1012,17 @@ impl StepGameplay {
                 sequence: batch.sequence,
             });
         }
-        let count = self.consumer.available_up_to(max);
+        let count = self
+            .consumer
+            .available_up_to(if self.playback_end_frame.is_some() {
+                self.consumer.capacity()
+            } else {
+                max
+            });
         if count == 0 {
             return Ok(None);
         }
-        self.completion.reset_drain();
+        self.reset_drain();
         let Some(sequence) = self.sequence.checked_add(1) else {
             self.failed = true;
             return Err(StepGameplayError::SequenceOverflow);
@@ -808,22 +1032,45 @@ impl StepGameplay {
         let mut commands = Vec::new();
         let mut retained = Vec::new();
         commands
-            .try_reserve_exact(count)
+            .try_reserve_exact(count.min(max))
             .map_err(|_| StepGameplayError::AllocationFailed)?;
         retained
-            .try_reserve_exact(count)
+            .try_reserve_exact(count.min(max))
             .map_err(|_| StepGameplayError::AllocationFailed)?;
         for _ in 0..count {
             match self.consumer.try_pop() {
                 Ok(command) => {
+                    match before_endpoint(
+                        command.at(),
+                        self.output_origin,
+                        self.sample_rate,
+                        self.playback_end_frame,
+                    ) {
+                        Ok(false) => continue,
+                        Ok(true) => {}
+                        Err(error) => {
+                            self.failed = true;
+                            return Err(StepGameplayError::CommandMapping {
+                                error,
+                                command,
+                                commands,
+                            });
+                        }
+                    }
                     commands.push(command);
                     retained.push(command);
+                    if commands.len() == max {
+                        break;
+                    }
                 }
                 Err(error) => {
                     self.failed = true;
                     return Err(StepGameplayError::Queue { error, commands });
                 }
             }
+        }
+        if commands.is_empty() {
+            return Ok(None);
         }
         self.sequence = sequence;
         self.pending = Some(StepAudioBatch {
@@ -844,7 +1091,18 @@ impl StepGameplay {
         acknowledge_batch(batch, sequence, admitted, success).map_err(|error| {
             self.failed = true;
             error
-        })
+        })?;
+        if self.playback_end_frame.is_some() {
+            let count = u64::try_from(admitted)
+                .ok()
+                .and_then(|count| self.acknowledged_commands.checked_add(count));
+            let Some(count) = count else {
+                self.failed = true;
+                return Err(StepGameplayError::AudioCountOverflow { sequence, admitted });
+            };
+            self.acknowledged_commands = count;
+        }
+        Ok(())
     }
 
     /// Fence without inventing completion, a replay operation or a remote ACK.
@@ -853,6 +1111,12 @@ impl StepGameplay {
     }
     pub fn song_time(&self) -> Timestamp {
         self.song
+    }
+    pub fn end_ns(&self) -> Option<i64> {
+        self.end.map(|end| end.as_nanos())
+    }
+    pub fn playback_end_frame(&self) -> Option<u64> {
+        self.playback_end_frame
     }
     pub fn score(&self) -> &ScoreSummary {
         &self.score
