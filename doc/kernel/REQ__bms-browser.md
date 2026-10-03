@@ -42,6 +42,28 @@ implementations. HID acquisition, profile launch and mixed report forwarding
 also have source implementations on Window/Worker. Source changes do not
 establish performance acceptance.
 
+## Worker-owned saved opponent presentation
+
+Continuously changing saved opponent counters belong to the graphics Worker.
+Reuse the common portable competition snapshot and scoreboard components;
+retain a bounded snapshot of actual SavedOpponents prefixes at the existing
+display cadence, independent of local judgement and audio callbacks. Rendering
+reads this retained snapshot and never advances a replay or song clock.
+
+Window receives no normal periodic saved-counter messages. A comparison failure
+has one explicit notification, hides invalid HUD data and leaves local play
+running. An independently failed comparison cannot become a successful final
+result. On stop or gameplay failure, capture one final comparison prefix before
+releasing the owner and carry it in the correlated stop/error receipt. Window
+may display that final result after joined cleanup, once for the current page
+and session. Preserve exact u64 counters, labels, kind and recorded prefix
+extent; never fill an unrecorded tail or change local capture completeness.
+
+The shared view retains actual admitted opponent identity and scores. Empty
+selection, replay, unavailable comparisons and stale final receipts have explicit
+behavior. Source fixtures and compilation do not establish rendering or
+main-thread performance acceptance.
+
 ## Finite live section controls
 
 Live start and optional end use original-song decimal seconds with at most nine

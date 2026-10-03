@@ -653,8 +653,11 @@ Gameplay canvas and local/replay score HUDs belong to the graphics Worker. The
 Window does not repeat score/status or song-position DOM updates on step/render
 responses; preview/menu controls and final summaries remain event-driven. Input
 acquisition is intended to support keyboard, touch/pointer and HID through common
-physical-event types, preserving acquisition time and source identity. The live keyboard route is connected; the touch bridge below is being added.
-WebHID adapters, opponent HUD migration and remaining host-bridge work are pending. Main-thread performance is unmeasured.
+physical-event types, preserving acquisition time and source identity. The live
+keyboard route is connected.
+Touch and profile-based WebHID launch also have source implementations. Saved
+opponent counters use the Worker HUD described below; network opponent HUD and
+remaining host-bridge work are pending. Main-thread performance is unmeasured.
 
 
 The physical browser API is authored beside the existing keyboard API.
@@ -769,6 +772,21 @@ for Worker setup, then queues reports from admitted devices. Permission,
 launch and disconnect handling have source implementations. JavaScript
 execution has not been verified.
 Compilation and authored fixtures do not establish browser/HID device acceptance.
+
+## Worker saved-opponent display
+
+Saved-opponent snapshots are retained on the Rust gameplay owner at the existing
+comparison display cadence. The graphics Worker reads those bounded snapshots
+through the common competition scoreboard. Rendering does not advance a replay,
+judge notes or score local input. Normal comparison updates no longer send
+periodic DOM counter work to Window. A failed comparison disables its HUD and
+notifies once while local gameplay remains independent.
+
+The stopped/error receipt carries one final actual saved prefix, captured before
+freeing the owner. Window may display that result once after joined cleanup for
+the current page/session. Preserve labels, Own/Other choice, full-width counters
+and recorded extent; never infer unrecorded-tail results. Source fixtures and
+compilation do not establish actual browser presentation or performance.
 
 ## Optional controller profiles
 
