@@ -122,3 +122,31 @@ These stateless custom policies retain unsupported default snapshot hooks, so
 the example does not claim checkpoint/replay support. Existing custom resolver
 and grading fixtures remain the behavior tests; execution of both fixtures and
 this example stays deferred.
+
+
+## Opt-in button/contact press interactions
+
+Offer explicit press instant/hold evaluators for genuine button and touch events.
+Existing button-only evaluators keep their behavior, eligibility tags and
+canonical snapshot bytes. A touch owner includes source, physical surface,
+logical destination and full contact identity. Only the owning contact may
+release a hold. Move does not create a fresh press; repeated Down cannot consume
+another note until the matching Up or Cancel. Cancel terminates an active hold
+as RejectedInput and cannot become a graded release.
+
+Fresh button/contact presses use the profile-window start index, not a scan of
+all pending objects. Touch held ownership belongs in deterministic snapshots,
+clones and restoration. New press interactions and contact-enabled judge states
+have explicit versioned identities; legacy-only engine bytes remain unchanged.
+Contact state serialization is deterministic regardless of hash-map insertion
+order. Shared live/replay processing retains unchanged physical metadata.
+
+These evaluators are opt-in primitives. BMS rule selection, versioned setup
+metadata, browser contact acquisition and application controls still require
+integration before playable touch support is complete.
+
+Mixed charts retain eligibility isolation: fresh touch input enters only
+contact-enabled profile-press candidates, while fresh buttons may enter both
+button-only and contact-enabled candidates. Evaluator-defined predicates retain
+their existing routing contract. This does not turn all pending interactions
+into a custom scan.
