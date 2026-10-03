@@ -4,6 +4,7 @@ import { PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateE
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { validateSelections, validateOpponentSnapshot } from "./saved-opponents.mjs";
 import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, projectTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
+import { snapshotHidDevices, hidSetupFromProfile } from "./hid-profile.mjs";
 const { BrowserGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
 let ready = null;
 let view = null;
@@ -532,13 +533,19 @@ async function preparePlay(state, request) {
       bindingsFor(lanes);
       if (state.physicalInput) bindingWords = keyboardBindingWords(pairs);
     }
-    const hid = hidConfiguration(request.hidSetup, state.mode, state.physicalInput, bindingWords);
-    if (hid !== null) {
-      const combined = new Uint32Array(bindingWords.length + hid.bindingWords.length);
-      combined.set(bindingWords);
-      combined.set(hid.bindingWords, bindingWords.length);
-      bindingWords = combined;
-      for (const lane of hid.lanes) if (!lanes.includes(lane)) lanes.push(lane);
+    let hid = hidConfiguration(request.hidSetup, state.mode, state.physicalInput, bindingWords);
+    let hidProfileFile = null;
+    let hidProfileSize = 0;
+    let hidDevices = null;
+    if (request.hidProfileFile !== undefined || request.hidDevices !== undefined) {
+      if (request.hidSetup !== undefined || state.mode !== "live" || !state.physicalInput
+        || !(request.hidProfileFile instanceof File)
+        || !integer(request.hidProfileFile.size, 1, 1024 * 1024)) {
+        throw new Error("HID profile files require exclusive live physical setup and a nonempty file no larger than 1 MiB.");
+      }
+      hidProfileFile = request.hidProfileFile;
+      hidProfileSize = hidProfileFile.size;
+      hidDevices = snapshotHidDevices(request.hidDevices);
     }
     const timing = state.mode === "live" ? validateTiming(request.timing) : null;
     const requestedStart = state.mode === "live" ? validateStart(request.startNs) : null;
@@ -563,6 +570,19 @@ async function preparePlay(state, request) {
     }
     state.rate = request.rate;
     if (request.recordReplay !== undefined && typeof request.recordReplay !== "boolean") throw new Error("Invalid replay recording choice.");
+    if (hidProfileFile !== null) {
+      const bytes = await hidProfileFile.arrayBuffer();
+      if (failed || play !== state) return;
+      if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== hidProfileSize) throw new Error("HID profile file size changed or returned an invalid buffer.");
+      hid = hidConfiguration(hidSetupFromProfile(new Uint8Array(bytes), hidDevices), state.mode, state.physicalInput, bindingWords);
+    }
+    if (hid !== null) {
+      const combined = new Uint32Array(bindingWords.length + hid.bindingWords.length);
+      combined.set(bindingWords);
+      combined.set(hid.bindingWords, bindingWords.length);
+      bindingWords = combined;
+      for (const lane of hid.lanes) if (!lanes.includes(lane)) lanes.push(lane);
+    }
     if (state.mode === "replay") {
       if (request.recordReplay === true) throw new Error("Replay playback cannot record live input.");
       const bytes = await replayFile.arrayBuffer();
@@ -638,6 +658,7 @@ async function preparePlay(state, request) {
       state.game.configure_hid_devices(hid.deviceWords, hid.fieldWords, hid.axisParams);
       state.hidSources = hid.sources;
       metadata.hidSourceCount = hid.sources.size;
+      metadata.hidSources = [...hid.sources];
     }
     const output = replayOutputFromMetadata(startNs, state.game.end_ns, state.game.playback_end_frame, request.rate);
     if (state.mode === "live" && output.endNs !== requestedEnd) throw new Error("Actual live section end differs from its request.");

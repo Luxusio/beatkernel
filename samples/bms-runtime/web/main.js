@@ -1,11 +1,13 @@
 import { snapshotFiles, nanoseconds, seconds } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
 import { RecordsStore } from "./record-store.mjs";
+import { HidInputOwner } from "./hid-input.mjs";
+import { snapshotHidDevices } from "./hid-profile.mjs";
 import { SavedOpponentSelection, opponentLabel, validateOpponentSnapshot } from "./saved-opponents.mjs";
 import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, frameNanos, startProjection, committedStartProjection, presentationPair } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
-const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input"].map(id => [id, byId(id)]));
+const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input", "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status"].map(id => [id, byId(id)]));
 let canvas = byId("canvas");
 let cssExtent = [0, 0];
 ui["touch-input"].checked = typeof window.PointerEvent === "function" && globalThis.navigator?.maxTouchPoints > 0;
@@ -31,6 +33,9 @@ let replayURLTimer = null;
 let selectedReplay = null;
 let recordsStore = null;
 let recordsOperation = null;
+let selectedHidProfile = null;
+let hidPermission = null;
+let hidOwnershipFailed = false;
 const opponents = new SavedOpponentSelection();
 let selectedReplayKey = null;
 let importedReplayKeys = new WeakMap();
@@ -62,9 +67,89 @@ function status(text, error = false) {
   ui.status.textContent = text;
   ui.status.dataset.error = String(error);
 }
+
+function hidCapable() {
+  const hid = globalThis.navigator?.hid;
+  return !!hid && ["getDevices", "requestDevice", "addEventListener", "removeEventListener"].every(name => typeof hid[name] === "function");
+}
+
+function cancelHidPermission() {
+  const operation = hidPermission;
+  if (!operation) return;
+  operation.cancelled = true;
+  // The authorization task below joins this same close, including late opens.
+  operation.input?.close().catch(() => {});
+}
+
+async function authorizeHid() {
+  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  const operation = { owner, input: null, cancelled: false, failure: null };
+  hidPermission = operation;
+  controls();
+  let count = 0;
+  let failure = null;
+  try {
+    if (!hidCapable()) throw new Error("WebHID is unavailable in this browser.");
+    operation.input = new HidInputOwner({ hid: navigator.hid, nextSequence: () => 0n,
+      onReport: () => {}, onDisconnect: () => {}, onError: error => { operation.failure ??= error; } });
+    // Native permission must be requested within this click's user gesture.
+    const selected = operation.input.requestDevices([]);
+    count = (await selected).length;
+  } catch (error) { failure = error; }
+  finally {
+    try { await operation.input?.close(); }
+    catch (error) {
+      hidOwnershipFailed = true;
+      fatal(new Error(`HID cleanup failed: ${String(error.message).slice(0, 4096)}`));
+    }
+    if (hidPermission === operation) {
+      hidPermission = null;
+      controls();
+      if (operation.owner === owner && !hidOwnershipFailed) {
+        const error = failure ?? operation.failure;
+        ui["hid-status"].textContent = operation.cancelled ? "HID authorization stopped."
+          : error ? `HID authorization failed: ${String(error.message).slice(0, 4096)}`
+            : `Browser permission ready for ${count} interface(s). Live play opens matching authorized devices automatically.`;
+      }
+    }
+  }
+}
+
+function createSessionHid(session) {
+  return new HidInputOwner({ hid: navigator.hid,
+    nextSequence: () => {
+      if (activePlay !== session || session.owner !== owner || session.phase !== "playing") return session.sequence;
+      const sequence = session.sequence + 1n;
+      if (sequence > 18446744073709551615n) throw new Error("HID acquisition sequence exhausted.");
+      session.sequence = sequence;
+      return sequence;
+    },
+    onReport: event => {
+      if (activePlay !== session || session.owner !== owner || session.phase !== "playing"
+        || !session.hidSources?.has(event.source)) return;
+      if (session.events.length >= 1024) throw new Error("Pending input capacity exceeded.");
+      if (event.hostNs < session.lastHost) throw new Error("HID input arrived behind the accepted gameplay watermark.");
+      session.events.push(event);
+      session.completionReady = false;
+      pumpInput(session);
+    },
+    onDisconnect: event => {
+      if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
+      if (session.hidSources === null || session.hidSources.has(event.source)) {
+        void stopPlay("Playback stopped after an HID interface disconnected.", true);
+      }
+    },
+    onError: error => {
+      if (activePlay === session && session.owner === owner && session.phase !== "closing") {
+        void stopPlay(`HID input failed: ${String(error.message).slice(0, 4096)}`, true);
+      }
+    },
+  });
+}
+
 function controls() {
   const playing = activePlay !== null;
-  const busy = recordsOperation !== null;
+  const busy = recordsOperation !== null || hidPermission !== null || hidOwnershipFailed;
   ui.folder.disabled = !initialized || preparing || playing || busy || !("webkitdirectory" in ui.folder);
   ui.files.disabled = !initialized || preparing || playing || busy;
   for (const field of [ui.chart, ui.rate, ui.seed, ui.prepare]) field.disabled = !initialized || !libraryId || importing || preparing || playing || busy;
@@ -80,6 +165,7 @@ function controls() {
   const recordsDisabled = !initialized || importing || preparing || playing || busy;
   ui["bindings-reset"].disabled = recordsDisabled;
   ui["touch-input"].disabled = recordsDisabled;
+  for (const id of ["hid-input", "hid-authorize", "hid-profile"]) ui[id].disabled = recordsDisabled || !hidCapable();
   for (const [, field] of bindingFields) field.disabled = recordsDisabled;
   for (const field of [ui["judge-early"], ui["judge-late"], ui["judge-offset"], ui["live-start"], ui["live-end"]]) field.disabled = recordsDisabled;
   ui["output-latency"].disabled = ui["output-rate"].disabled = recordsDisabled;
@@ -97,6 +183,7 @@ function controls() {
 function stop() {
   revokeReplayURL();
   closeRecords();
+  cancelHidPermission();
   if (activePlay?.phase !== "closing") void stopPlay("Playback stopped with the page.");
   ++owner;
   worker?.terminate();
@@ -107,6 +194,7 @@ function stop() {
   density?.removeEventListener("change", densityChanged);
   density = null;
   selectedReplay = selectedReplayKey = null;
+  selectedHidProfile = null;
   importedReplayKeys = new WeakMap();
   importedReplayId = 0;
   opponents.clear();
@@ -139,7 +227,7 @@ function densityChanged() {
 }
 
 function prepare() {
-  if (!worker || !libraryId || importing || preparing || activePlay || recordsOperation) return;
+  if (!worker || !libraryId || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   try {
     const rate = Number(ui.rate.value);
     const seed = ui.seed.value;
@@ -208,12 +296,17 @@ function received(data) {
 
 function start() {
   stop();
+  if (hidOwnershipFailed) { status("HID cleanup failed. Reload the page before playing again.", true); return; }
   libraryId = importId = selectId = selectedId = seekId = 0;
   importing = preparing = hasPreview = false;
   audioModule = null;
   selectedReplay = null;
   ui["replay-file"].value = "";
   ui["replay-name"].textContent = "Choose a recording and prepare its matching chart. Replay uses the recorded seed and section.";
+  ui["hid-input"].checked = false;
+  ui["hid-profile"].value = "";
+  ui["hid-profile-name"].textContent = "Choose a version 1 HID profile for live play.";
+  ui["hid-status"].textContent = hidCapable() ? "Authorize devices if needed; live play uses matching authorized interfaces automatically." : "WebHID is unavailable in this browser.";
   ui.records.replaceChildren(new Option("Refresh to browse saved records", ""));
   ui.keys.textContent = "";
   ui.folder.value = ui.files.value = "";
@@ -256,7 +349,7 @@ function start() {
 }
 
 function choose(event) {
-  if (!initialized || preparing || !worker || activePlay || recordsOperation) return;
+  if (!initialized || preparing || !worker || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   const files = event.target.files;
   if (!files?.length) return;
   if (files.length > 32768) return status("Select no more than 32,768 files.", true);
@@ -274,7 +367,7 @@ ui.files.addEventListener("change", choose);
 byId("prepare-form").addEventListener("submit", event => { event.preventDefault(); prepare(); });
 byId("seek-form").addEventListener("submit", event => {
   event.preventDefault();
-  if (!worker || !hasPreview || preparing || importing || activePlay || recordsOperation) return;
+  if (!worker || !hasPreview || preparing || importing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   try {
     const ns = nanoseconds(ui.position.value);
     seekId = ++serial;
@@ -294,7 +387,7 @@ ui.multiplayer.addEventListener("change", () => {
     : "Solo play selected.";
 });
 ui["replay-file"].addEventListener("change", event => {
-  if (!initialized || importing || preparing || activePlay || recordsOperation) return;
+  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   try {
     const files = event.target.files;
     if (!files?.length) return;
@@ -313,9 +406,27 @@ ui["replay-file"].addEventListener("change", event => {
   } catch (error) { status(String(error.message).slice(0, 4096), true); }
   finally { event.target.value = ""; }
 });
+ui["hid-authorize"].addEventListener("click", () => { void authorizeHid(); });
+ui["hid-profile"].addEventListener("change", event => {
+  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  try {
+    if (!hidCapable()) throw new Error("WebHID is unavailable in this browser.");
+    const files = event.target.files;
+    if (!files?.length) return;
+    const file = files[0];
+    if (files.length !== 1 || !(file instanceof File) || !Number.isSafeInteger(file.size)
+      || file.size < 1 || file.size > 1024 * 1024) throw new Error("Choose one nonempty HID profile no larger than 1 MiB.");
+    selectedHidProfile = file;
+    ui["hid-input"].checked = true;
+    ui["hid-profile-name"].textContent = `${file.name.slice(0, 256)} · ${file.size} bytes`;
+    ui["hid-status"].textContent = "Profile selected. Live play checks it against authorized interfaces on the Worker.";
+    controls();
+  } catch (error) { status(String(error.message).slice(0, 4096), true); }
+  finally { event.target.value = ""; }
+});
 ui.stop.addEventListener("click", () => { void stopPlay("Playback stopped."); });
 ui["bindings-reset"].addEventListener("click", () => {
-  if (!initialized || importing || preparing || activePlay || recordsOperation) return;
+  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   for (let index = 0; index < bindingFields.length; index++) bindingFields[index][1].value = KEY_BINDINGS[index][1];
   status("Keyboard bindings reset to defaults.");
 });
@@ -326,21 +437,22 @@ for (const [id, action] of [["records-refresh", "refresh"], ["records-save", "sa
   ui[id].addEventListener("click", () => { void recordAction(action); });
 }
 ui["opponents-add"].addEventListener("click", () => {
-  if (!initialized || importing || preparing || activePlay || recordsOperation || !selectedReplay) return;
+  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || !selectedReplay) return;
   try { addOpponent(selectedReplay, selectedReplayKey, opponentChoice()); }
   catch (error) { opponentStatus(String(error.message).slice(0, 4096), true); }
 });
 ui["opponents-clear"].addEventListener("click", () => {
-  if (!initialized || importing || preparing || activePlay || recordsOperation) return;
+  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   opponents.clear();
   showOpponentSelection();
   clearOpponentResults("No saved opponents selected.");
   controls();
 });
-window.addEventListener("blur", () => { void stopPlay("Playback stopped after losing focus."); });
+window.addEventListener("blur", () => { cancelHidPermission(); void stopPlay("Playback stopped after losing focus."); });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     void stopPlay("Playback stopped while the page is hidden.");
+    cancelHidPermission();
     const pending = recordsOperation !== null;
     closeRecords();
     controls();
@@ -409,11 +521,12 @@ function playRpc(session, kind, fields = {}) {
 }
 
 async function play(mode = "live") {
-  if (!initialized || !hasPreview || !audioModule || importing || preparing || activePlay || recordsOperation) return;
+  if (!initialized || !hasPreview || !audioModule || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   if (mode === "replay" && selectedReplay === null) return;
   const session = { id: ++serial, owner, mode, phase: "preparing", controller: new AbortController(), audio: null, opening: null,
     rpc: null, timer: null, events: [], pressed: new Set(), bindings: [], sequence: 0n,
     canvas, touchInput: false, contacts: new Map(), nextContact: 0n,
+    hidOwner: null, hidConnecting: null, hidDevices: null, hidSources: null, hidProfileFile: null,
     tickId: 0, tickPending: null, audioBusy: false, batch: null, startFrame: null,
     origin: null, lastHost: 0n, stopping: null, renderId: 0, renderPending: null,
     workerStarted: false, workerReleased: false, workerStop: null, finalScore: null,
@@ -434,6 +547,13 @@ async function play(mode = "live") {
     }
     session.inputMode = session.touchInput ? "physical-contact" : "physical";
     if (session.touchInput) session.canvas.dataset.touchInput = "true";
+    if (mode === "live" && ui["hid-input"].checked === true) {
+      if (!hidCapable() || !(selectedHidProfile instanceof File) || !Number.isSafeInteger(selectedHidProfile.size)
+        || selectedHidProfile.size < 1 || selectedHidProfile.size > 1024 * 1024) {
+        throw new Error("HID play requires WebHID and a selected nonempty profile no larger than 1 MiB.");
+      }
+      session.hidProfileFile = selectedHidProfile;
+    }
     session.contextOptions = audioOutputFromFields(ui["output-latency"].value, ui["output-latency-ms"].value, ui["output-rate"].value);
     session.audioLimits = audioLimitsFromFields({ queueCapacity: ui["audio-queue"].value, maxVoices: ui["audio-voices"].value,
       pendingCapacity: ui["audio-pending"].value, maxFrames: ui["audio-frames"].value, maxCommandsPerRender: ui["audio-commands"].value });
@@ -448,6 +568,7 @@ async function play(mode = "live") {
       : mode === "replay" ? "Local replay · no multiplayer connection." : "Solo play selected.";
     clearOpponentResults(session.opponentSelection ? "Preparing selected saved opponents…"
       : mode === "replay" ? "Saved comparisons are inactive during replay playback." : "No saved opponents selected.");
+    if (session.hidProfileFile !== null) session.hidOwner = createSessionHid(session);
     // open invokes resume synchronously here, inside the button's user gesture.
     const opening = AudioHost.open({ module: audioModule, generation: session.id, channels: 2,
       contextOptions: session.contextOptions,
@@ -455,19 +576,47 @@ async function play(mode = "live") {
       audioLimits: session.audioLimits,
       timeoutMs: 10000, signal: session.controller.signal });
     session.opening = opening;
+    if (session.hidOwner !== null) {
+      session.hidConnecting = session.hidOwner.connectAuthorized();
+      session.hidConnecting.catch(() => {});
+    }
     session.audio = await opening;
     if (activePlay !== session || session.phase === "closing") { await session.audio.stop(); return; }
+    if (session.hidOwner !== null) {
+      const devices = await session.hidConnecting;
+      if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
+      session.hidDevices = snapshotHidDevices(devices.map(({ source, device }) => ({ source, vendorId: device.vendorId, productId: device.productId })));
+    }
     session.workerStarted = true;
     const source = mode === "replay" ? { mode, replayFile: session.replayFile }
       : { mode, inputMode: session.inputMode, seed: ui.seed.value, recordReplay: session.recordReplay, timing: session.timing, startNs: session.startNs,
         ...(session.requestedEndNs === undefined ? {} : { endNs: session.requestedEndNs }),
         ...(session.multiplayer ? { multiplayer: session.multiplayer } : {}),
         ...(session.opponentSelection ? { opponents: session.opponentSelection } : {}),
+        ...(session.hidOwner ? { hidProfileFile: session.hidProfileFile, hidDevices: session.hidDevices } : {}),
         keyPairs: Uint32Array.from(session.bindingSelection.flatMap(row => [row[0], row[2]])) };
     const prepared = await playRpc(session, "play-start", { libraryId, path: ui.chart.value,
       rate: session.audio.sampleRate, commandBatchLimit: session.commandBatchLimit, ...source });
+    if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
     if (mode === "replay" ? prepared.mode !== "replay" : prepared.mode !== undefined && prepared.mode !== "live") throw new Error("Playback preparation mode changed.");
     if (mode === "live" && prepared.inputMode !== session.inputMode) throw new Error("Preparation did not admit the requested physical input route.");
+    if (session.hidOwner !== null) {
+      const count = prepared.hidSourceCount;
+      const sources = prepared.hidSources;
+      if (!Number.isInteger(count) || count < 1 || count > 16 || !Array.isArray(sources) || sources.length !== count) {
+        throw new Error("Preparation omitted the exact admitted HID sources.");
+      }
+      const admitted = new Set();
+      for (const source of sources) {
+        if (typeof source !== "bigint" || source < 3n || source > 18446744073709551615n || admitted.has(source)
+          || !session.hidDevices.some(device => device.source === source)) throw new Error("Preparation changed an owned HID source identity.");
+        admitted.add(source);
+      }
+      session.hidSources = admitted;
+      ui["hid-status"].textContent = `${admitted.size} matching HID interface(s) prepared automatically.`;
+    } else if (prepared.hidSourceCount !== undefined || prepared.hidSources !== undefined) {
+      throw new Error("Preparation admitted HID without an owned device session.");
+    }
     const preparedStart = prepared.startNs === undefined && mode === "live" && session.startNs === 0n ? 0n : prepared.startNs;
     if (typeof preparedStart !== "bigint") throw new Error("Preparation omitted its actual song start.");
     validateStart(preparedStart);
@@ -484,10 +633,14 @@ async function play(mode = "live") {
     ui.title.textContent = prepared.title || ui.chart.value;
     ui.details.textContent = `${prepared.artist || "Unknown artist"} · ${prepared.notes} notes · ${prepared.samples} sounds · ${session.audio.sampleRate} Hz output · start ${seconds(preparedStart.toString())} s`
       + (session.endNs === undefined ? "" : ` · ${mode === "replay" ? "recorded end" : "end"} ${seconds(session.endNs.toString())} s`);
-    session.bindings = mode === "replay" ? [] : bindingsFor(prepared.lanes, session.bindingSelection);
+    if (session.hidOwner !== null) {
+      bindingsFor(prepared.lanes); // Validate actual lane shape; Worker proved combined coverage.
+      session.bindings = bindingsFor(prepared.lanes.filter(lane => session.bindingSelection.some(row => row[0] === lane)), session.bindingSelection);
+    } else session.bindings = mode === "replay" ? [] : bindingsFor(prepared.lanes, session.bindingSelection);
     ui.keys.textContent = mode === "replay" ? "Recorded input playback · Escape stops the replay."
       : session.bindings.map(row => `${row[0].toString(16).toUpperCase()}: ${row[1]}`).join(" · ")
-        + (session.touchInput ? " · Touch lanes enabled" : "");
+        + (session.touchInput ? " · Touch lanes enabled" : "")
+        + (session.hidSources ? ` · ${session.hidSources.size} HID interface(s)` : "");
     for (let index = 0; index < prepared.samples; index++) {
       const sample = await playRpc(session, "play-sample");
       if (sample?.kind !== "sample") throw new Error("Prepared audio asset count changed.");
@@ -794,8 +947,15 @@ function stopPlay(reason, failed = false, completed = false) {
   const session = activePlay;
   if (!session) return Promise.resolve();
   if (session.stopping) return session.stopping;
+  const hadHid = session.hidOwner !== null;
   session.naturalFinishRequested = completed;
   session.phase = "closing";
+  // Detach acquisition synchronously; the returned promise also owns any late
+  // authorized open. Join it alongside audio and Worker release below.
+  let hidStopped;
+  try { hidStopped = session.hidOwner?.close() ?? Promise.resolve(); }
+  catch (error) { hidStopped = Promise.reject(error); }
+  hidStopped.catch(() => {});
   session.controller.abort();
   clearInterval(session.timer);
   if (session.tickPending) clearTimeout(session.tickPending.timer);
@@ -829,19 +989,31 @@ function stopPlay(reason, failed = false, completed = false) {
   status(reason, failed);
   session.stopping = (async () => {
     try {
-      const audio = session.audio ?? await session.opening?.catch(error => {
-        if (error?.cleanupError) throw error.cleanupError;
-        return null;
-      });
-      await audio?.stop();
-    }
-    catch (error) {
-      stop();
-      failed = true;
-      reason += ` Audio cleanup failed: ${String(error.message).slice(0, 4096)} Reload the page before playing again.`;
+      await Promise.all([
+        (async () => {
+          try {
+            const audio = session.audio ?? await session.opening?.catch(error => {
+              if (error?.cleanupError) throw error.cleanupError;
+              return null;
+            });
+            await audio?.stop();
+          } catch (error) {
+            stop();
+            failed = true;
+            reason += ` Audio cleanup failed: ${String(error.message).slice(0, 4096)} Reload the page before playing again.`;
+          }
+        })(),
+        hidStopped.catch(error => {
+          hidOwnershipFailed = true;
+          stop();
+          failed = true;
+          reason += ` HID cleanup failed: ${String(error.message).slice(0, 4096)} Reload the page before playing again.`;
+        }),
+      ]);
     }
     finally {
       await workerStopped;
+      session.hidOwner = session.hidConnecting = session.hidDevices = session.hidSources = session.hidProfileFile = null;
       if (session.cleanupError !== null) {
         failed = true;
         reason = `Gameplay cleanup failed: ${session.cleanupError} Reload the page before playing again.`;
@@ -852,6 +1024,7 @@ function stopPlay(reason, failed = false, completed = false) {
           ui.details.textContent = session.preview.details;
           ui.position.value = session.preview.position;
           ui.keys.textContent = "";
+          if (hadHid) ui["hid-status"].textContent = "HID session released. The selected profile is retained for live play.";
           clearOpponentResults(opponents.size ? "Saved comparison stopped; selections retained for the next live play." : "No saved opponents selected.");
         }
         const score = session.finalScore;
@@ -916,7 +1089,7 @@ function revokeReplayURL() {
   replayURL = null;
 }
 function downloadReplay() {
-  if (activePlay !== null || recordsOperation !== null || lastReplay === null) return;
+  if (activePlay !== null || recordsOperation !== null || hidPermission || hidOwnershipFailed || lastReplay === null) return;
   let link = null;
   try {
     revokeReplayURL();
@@ -964,7 +1137,7 @@ function showOpponentSelection() {
     button.type = "button";
     button.textContent = "Remove";
     button.addEventListener("click", () => {
-      if (!initialized || importing || preparing || activePlay || recordsOperation) return;
+      if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
       opponents.remove(entry.sourceKey);
       showOpponentSelection();
       clearOpponentResults(opponents.size ? `${opponents.size} saved opponent(s) selected.` : "No saved opponents selected.");
@@ -1032,7 +1205,7 @@ function showRecords(entries) {
   else if (entries.some(record => String(record.id) === previous)) ui.records.value = previous;
 }
 async function recordAction(action) {
-  if (!initialized || importing || preparing || activePlay || recordsOperation) return;
+  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   const captured = lastReplay;
   if (action === "save" && captured === null) return;
   const id = Number(ui.records.value);

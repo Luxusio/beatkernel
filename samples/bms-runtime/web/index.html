@@ -56,10 +56,16 @@
       <details class="binding-editor"><summary>Keyboard bindings</summary>
         <div id="bindings" aria-label="Live lane keyboard bindings"></div>
         <button id="bindings-reset" type="button" disabled>Reset keyboard defaults</button>
-        <p class="hint">Choose physical key positions for each lane. Unbound lanes must be absent from the prepared chart; one key can belong to only one lane. These page-local settings affect live play. Replay uses recorded inputs, and Escape always stops playback. Browser or system shortcuts may prevent some keys from reaching the game.</p>
+        <p class="hint">Choose physical key positions for each lane. Unbound lanes need a matching HID profile or must be absent from the chart; one key can belong to only one lane. These page-local settings affect live play. Replay uses recorded inputs, and Escape always stops playback. Browser or system shortcuts may prevent some keys from reaching the game.</p>
       </details>
       <label><input id="touch-input" type="checkbox" disabled> Touch lanes with keyboard controls</label>
       <p class="hint">Enabled automatically on touch-capable browsers. A contact keeps its first lane until release; leaving the page stops playback. Use the same input mode for multiplayer and saved comparisons. Replay uses recorded input.</p>
+      <div class="replay-controls"><label><input id="hid-input" type="checkbox" disabled> Use HID profile for live play</label>
+        <button id="hid-authorize" type="button" disabled>Authorize HID devices</button>
+        <label>HID profile <input id="hid-profile" type="file" accept=".json,application/json" disabled></label></div>
+      <p id="hid-profile-name" class="hint">Choose a version 1 HID profile for live play.</p>
+      <p class="hint">Authorization opens the browser permission chooser. Live play automatically uses matching authorized interfaces; no separate solo device selection is needed. Profiles stay local, are limited to 1 MiB and are interpreted on the Worker. Replay uses recorded input.</p>
+      <p id="hid-status" class="hint" role="status" aria-live="polite">Checking WebHID availability…</p>
       <p><button id="play" type="button" disabled>Play live</button> <button id="stop" type="button" disabled>Stop</button></p>
       <div class="replay-controls"><label><input id="multiplayer" type="checkbox" disabled> Multiplayer live play</label>
         <label>Server <input id="multiplayer-url" type="url" placeholder="https://server.example/room" maxlength="4096" disabled></label>
