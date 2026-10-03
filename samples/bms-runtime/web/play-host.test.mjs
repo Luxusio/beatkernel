@@ -34,6 +34,17 @@ function chooseRecording(h, files) {
   h.get("replay-file").files = files;
   h.get("replay-file").emit("change");
 }
+function watchPlayDisplay(h) {
+  const writes = [];
+  for (const [id, property] of [["status", "textContent"], ["position", "value"],
+    ["title", "textContent"], ["details", "textContent"], ["keys", "textContent"]]) {
+    const element = h.get(id);
+    let value = element[property];
+    Object.defineProperty(element, property, { configurable: true, get() { return value; },
+      set(next) { writes.push({ id, property, value: next }); value = next; } });
+  }
+  return writes;
+}
 function savedRecord(fields = {}) {
   return { id: 41, name: "saved-prefix.bkr", chartPath: "Songs/曲/chart.bms", complete: false,
     hits: 18446744073709551615n, misses: 2n, combo: null, createdAt: 1234567890, byteLength: 4, ...fields };
@@ -668,6 +679,7 @@ test("replay selection retains bounded File metadata, opens in the gesture and p
   await h.reply(activation, null);
   assert.equal(h.audio.samples[0].rate, 44100);
   assert.match(h.get("keys").textContent, /Recorded input playback/);
+  const retainedDisplay = { status: h.get("status").textContent, position: h.get("position").value };
   h.setNow(1300);
   const key = h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300 });
   h.window.emit("keyup", { code: "KeyZ", repeat: false, timeStamp: 1300 });
@@ -678,8 +690,8 @@ test("replay selection retains bounded File metadata, opens in the gesture and p
   assert.equal(render.presentedNs, 50000000n);
   await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
     completed: false, songNs: 2350000000n, hits: 23n, misses: 4n, combo: 11n, preOriginInputs: 0 });
-  assert.match(h.get("status").textContent, /Replay.*Hits 23.*Misses 4.*Combo 11/);
-  assert.match(h.get("position").value, /^2\.35(?:0*)$/);
+  assert.equal(h.get("status").textContent, retainedDisplay.status);
+  assert.equal(h.get("position").value, retainedDisplay.position);
   const escape = h.window.emit("keydown", { code: "Escape", repeat: false, timeStamp: 1308 });
   assert.equal(escape.defaultPrevented, true);
   await flush();
@@ -1245,6 +1257,111 @@ test("pagehide releases the Worker waiter and late audio cleanup cannot restore 
   assert.equal(h.get("play").disabled, true);
   assert.equal(h.timers.size, 0, "pagehide releases the stop deadline rather than waiting ten seconds");
   await h.close();
+});
+
+test("live progress acknowledgements leave Window display untouched while queued physical input and final completion still join", async () => {
+  const stopping = deferred();
+  const h = await harness({ stopGate: stopping });
+  const preview = await h.preview();
+  const session = await h.launch(), worker = h.workers[0];
+  const writes = watchPlayDisplay(h);
+  let lastTick = 0, lastRender = 0;
+  const acknowledge = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+    songNs: 604800000000001n + BigInt(request.tickId), hits: BigInt(request.tickId), misses: 2n, combo: 3n, preOriginInputs: 0 });
+  h.setNow(1300);
+  for (let index = 0; index < 8; index++) {
+    await h.advance(125); // Cross the old HUD cadence on every round.
+    const tick = worker.last("play-step"), render = worker.last("play-render");
+    assert.ok(tick.tickId > lastTick);
+    assert.ok(render.renderId > lastRender);
+    lastTick = tick.tickId; lastRender = render.renderId;
+    if (index === 0) {
+      h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1425 });
+      h.window.emit("keyup", { code: "KeyZ", repeat: false, timeStamp: 1425 });
+      assert.equal(worker.last("play-step").tickId, tick.tickId, "one in-flight watermark retains the captured native events");
+    }
+    await acknowledge(tick);
+    if (index === 0) {
+      const captured = worker.last("play-step");
+      assert.ok(captured.tickId > tick.tickId);
+      assert.deepEqual(captured.events, [
+        { hostNs: 1425000000n, key: 2, down: true, sequence: 1n },
+        { hostNs: 1425000000n, key: 2, down: false, sequence: 2n },
+      ]);
+      assert.equal(captured.watermark, 1425000000n);
+      lastTick = captured.tickId;
+      await acknowledge(captured);
+    }
+    await h.receive({ kind: "play-render-done", playId: session.id, renderId: render.renderId, completed: false });
+    assert.deepEqual(writes, [], "committed progress must not perform even redundant status, position or canvas-caption DOM writes");
+    assert.equal(worker.messages("play-stop").length, 0);
+  }
+  await h.advance(8);
+  const tick = worker.last("play-step"), render = worker.last("play-render");
+  await h.receive({ kind: "play-render-done", playId: session.id, renderId: render.renderId, completed: true });
+  assert.equal(worker.messages("play-stop").length, 0, "completion cannot erase the pending actual input response");
+  assert.deepEqual(writes, []);
+  await acknowledge(tick);
+  assert.equal(worker.messages("play-stop").length, 1);
+  assert.equal(worker.last("play-stop").completed, true);
+  assert.equal(h.audio.stopStarts, 1);
+  await h.receive(finalScore(session.id, { songNs: 604800000000017n, hits: 17n, misses: 2n, combo: 3n }));
+  assert.equal(h.get("play").disabled, true);
+  stopping.resolve(); await flush();
+  assert.match(h.get("status").textContent, /Song completed\..*Hits 17.*Misses 2.*Combo 3/);
+  assert.equal(h.get("title").textContent, preview.title);
+  assert.equal(h.get("details").textContent, preview.details);
+  assert.equal(h.get("position").value, preview.position);
+  assert.equal(h.get("play").disabled, false);
+  assert.ok(writes.some(write => write.id === "status"));
+  await h.close();
+});
+
+test("replay progress stays on the Worker HUD while correlated completion and malformed-response summaries retain cleanup ownership", async () => {
+  for (const outcome of ["complete", "uncorrelated"]) {
+    const stopping = deferred();
+    const h = await harness({ stopGate: stopping });
+    const preview = await h.preview();
+    chooseRecording(h, [selectedRecording().file]);
+    const session = await h.launch(0, "replay"), worker = h.workers[0];
+    const writes = watchPlayDisplay(h);
+    let lastRender = 0;
+    h.setNow(1300);
+    for (let index = 0; index < 8; index++) {
+      await h.advance(125);
+      const render = worker.last("play-render");
+      assert.ok(render.renderId > lastRender);
+      lastRender = render.renderId;
+      await h.receive({ kind: "play-render-done", playId: session.id, renderId: render.renderId, completed: false,
+        songNs: 604800000000001n + BigInt(index), hits: 9007199254740993n + BigInt(index), misses: 4n, combo: 11n, preOriginInputs: 0 });
+      assert.equal(worker.messages("play-step").length, 0);
+      assert.equal(worker.messages("play-stop").length, 0);
+      assert.deepEqual(writes, [], "replay score and original-song position stay out of continuous Window presentation");
+    }
+    await h.advance(8);
+    const render = worker.last("play-render");
+    await h.receive({ kind: "play-render-done", playId: session.id + 100, renderId: render.renderId, completed: true });
+    assert.equal(worker.messages("play-stop").length, 0, "a different playback owner cannot finish the current recording");
+    assert.deepEqual(writes, []);
+    await h.receive({ kind: "play-render-done", playId: session.id,
+      renderId: render.renderId + (outcome === "uncorrelated" ? 1 : 0), completed: true,
+      songNs: 604800000000008n, hits: 9007199254741000n, misses: 4n, combo: 11n, preOriginInputs: 0 });
+    assert.equal(worker.messages("play-stop").length, 1);
+    assert.equal(worker.last("play-stop").completed, outcome === "complete");
+    assert.equal(h.audio.stopStarts, 1);
+    await h.receive(finalScore(session.id, { hits: 23n, misses: 4n, combo: 11n }));
+    assert.equal(h.get("replay-play").disabled, true, "a Worker receipt is not the audio owner's release");
+    stopping.resolve(); await flush();
+    assert.match(h.get("status").textContent, outcome === "complete"
+      ? /Recorded replay ended\..*Hits 23.*Misses 4.*Combo 11/
+      : /Audio report response was not correlated\..*Hits 23.*Misses 4.*Combo 11/);
+    assert.equal(h.get("status").dataset.error, outcome === "complete" ? "false" : "true");
+    assert.equal(h.get("title").textContent, preview.title);
+    assert.equal(h.get("details").textContent, preview.details);
+    assert.equal(h.get("position").value, preview.position);
+    assert.equal(h.get("replay-play").disabled, false);
+    await h.close();
+  }
 });
 
 test("input and render reports each have one in-flight request and watermarks cannot cross unsent input", async () => {
