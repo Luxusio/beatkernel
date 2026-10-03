@@ -719,3 +719,21 @@ coordinates or depend on hit judgement.
 
 This source integration includes deferred portable fixtures. Rust compilation
 and authored fixtures do not establish actual browser presentation acceptance.
+
+## Optional WebHID boundary component
+
+`HidInputOwner` in `hid-input.mjs` manages already authorized devices or an
+explicit browser permission request, original `inputreport` samples and owned
+interface cleanup. Its injected sequence supplier lets the eventual host use
+one ordering with keyboard/touch. Exact payload snapshots preserve separate
+report IDs, original event timestamp and full source identity. Terminal close
+awaits pending opens and cannot revive a stopped owner.
+
+`encodeRawHidEvent` in `physical-input.mjs` supplies canonical BKPI raw report
+encoding for off-thread consumers. It never interprets a report as a key or
+logical lane. The owner does not serialize packets in native callbacks.
+
+This is a preparation/acquisition component, not yet connected to the live page
+or Worker. Descriptor/profile interpretation, playable bindings, page permission
+UI and session disconnect handling still need integration. Source fixtures and
+Rust compile checks do not establish real HID device/browser acceptance.

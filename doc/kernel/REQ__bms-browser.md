@@ -895,3 +895,12 @@ retain atomic capacity refusal, and clear releases all visual ownership while
 retaining reusable storage. Playback-prefix presentation follows only recorded
 operations and must match live ownership transitions. Compilation and authored
 fixtures do not establish actual browser/device acceptance.
+
+## Optional WebHID acquisition boundary
+
+The [browser HID contract](REQ__browser-hid.md) defines bounded permission,
+actual report snapshots, exact separate-ID payloads, source identity and
+asynchronous owner cleanup. Window only acquires; canonical raw packet
+encoding and report interpretation belong off the main thread. This component
+does not yet claim live page forwarding or playable lane bindings. Those
+integrations remain required work.
