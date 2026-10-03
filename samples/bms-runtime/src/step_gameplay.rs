@@ -16,7 +16,7 @@ use beatkernel::{
         AudioCommand, AudioCounters, AudioLimits, CommandConsumer, QueuePopError, RenderReport,
         SampleBank, command_queue,
     },
-    input::{BindingMap, PhysicalInputEvent},
+    input::{BindingMap, PhysicalInputEvent, Position2, TouchRouter},
     judge::JudgeEngine,
     replay::{ReplayHeader, codec::ReplayCodecLimits},
     runtime::{RuntimeProcessingClock, RuntimeReport},
@@ -791,10 +791,51 @@ impl StepGameplay {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<RuntimeReport, StepGameplayError> {
+        self.process_input_with_position(event, None, mapper, audio_at)
+    }
+
+    /// Installs spatial contact routing while this contact-mode owner is pristine.
+    /// Setup refusal leaves gameplay/capture unchanged and does not fence the owner.
+    pub fn configure_touch_router(&mut self, router: TouchRouter) -> Result<(), StepGameplayError> {
+        self.ensure_usable()?;
+        if self.started || self.activated || self.input_mode != BmsInputMode::ButtonOrContact {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "touch routing requires an unactivated, unprocessed contact-mode runtime",
+            ));
+        }
+        self.runtime
+            .configure_touch_router(router)
+            .map_err(StepGameplayError::Setup)
+    }
+
+    /// Uses a projected hit point while preserving original physical input in
+    /// the same runtime reports, score, keysounds and optional replay capture.
+    pub fn process_input_at(
+        &mut self,
+        event: PhysicalInputEvent,
+        position: Position2,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+    ) -> Result<RuntimeReport, StepGameplayError> {
+        self.process_input_with_position(event, Some(position), mapper, audio_at)
+    }
+
+    fn process_input_with_position(
+        &mut self,
+        event: PhysicalInputEvent,
+        position: Option<Position2>,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+    ) -> Result<RuntimeReport, StepGameplayError> {
         self.ensure_usable()?;
         self.started = true;
         self.correction_watermark = None;
-        let result = self.runtime.process_input(event, mapper, audio_at);
+        let result = match position {
+            Some(position) => self
+                .runtime
+                .process_input_at(event, position, mapper, audio_at),
+            None => self.runtime.process_input(event, mapper, audio_at),
+        };
         self.observe(result)
     }
 

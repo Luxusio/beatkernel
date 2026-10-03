@@ -3,7 +3,7 @@
 use beatkernel::{
     input::{
         BackendId, Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId,
-        PhysicalInputEvent, VendorNamespaceId,
+        PhysicalInputEvent, Position2, TouchRegion, TouchRouter, VendorNamespaceId,
         codec::{CodecLimits, decode_event},
     },
     time::ClockDomainId,
@@ -43,37 +43,8 @@ impl PhysicalInputSetup {
         .map_err(|error| error.to_string())?;
         let mut bindings = BindingMap::new();
         for row in words.chunks_exact(7) {
-            let game_control = GameControlId(row[0]);
-            if crate::pressed_keys::lane_bit(game_control).is_none() {
-                return Err("physical binding has an invalid BMS lane".into());
-            }
-            let device = match row[1] {
-                0 if row[2] == 0 && row[3] == 0 => DeviceSelector::Any,
-                0 => return Err("Any physical binding must have zero device words".into()),
-                1 => DeviceSelector::Exact(DeviceId(u64::from(row[2]) | (u64::from(row[3]) << 32))),
-                _ => return Err("physical binding has an invalid device selector".into()),
-            };
-            let physical = match row[4] {
-                0 => PhysicalControlId::HidUsage {
-                    usage_page: u16::try_from(row[5]).map_err(|_| "HID usage page exceeds u16")?,
-                    usage: u16::try_from(row[6]).map_err(|_| "HID usage exceeds u16")?,
-                },
-                1 => PhysicalControlId::Native {
-                    backend: BackendId(row[5]),
-                    code: row[6],
-                },
-                2 => PhysicalControlId::Vendor {
-                    namespace: VendorNamespaceId(row[5]),
-                    code: row[6],
-                },
-                _ => return Err("physical binding has an invalid control kind".into()),
-            };
             bindings
-                .add(Binding {
-                    device,
-                    physical,
-                    game_control,
-                })
+                .add(decode_binding(row)?)
                 .map_err(|error| error.to_string())?;
         }
         for &lane in lanes {
@@ -89,6 +60,103 @@ impl PhysicalInputSetup {
         }
         Ok(Self { bindings, limits })
     }
+}
+
+/// Setup-only spatial routing for actual prepared lanes, using core contact owners.
+#[derive(Debug)]
+pub struct TouchInputSetup {
+    pub router: TouchRouter,
+}
+
+impl TouchInputSetup {
+    /// Seven identity words per region use the physical binding row format.
+    /// Four parallel bounds are min-x/min-y/max-x/max-y in projected hit units.
+    /// A subset of lanes or no regions is valid alongside ordinary key bindings.
+    pub fn new(
+        words: &[u32],
+        bounds: &[f32],
+        lanes: &[u8],
+        max_contacts: u32,
+    ) -> Result<Self, String> {
+        if words.len() > 256 * 7 || words.len() % 7 != 0 {
+            return Err("touch regions require complete seven-word rows, at most 256".into());
+        }
+        let count = words.len() / 7;
+        if bounds.len() != count * 4 {
+            return Err("touch regions require exactly four bounds per row".into());
+        }
+        if lanes.len() > 18
+            || lanes.iter().any(|lane| {
+                crate::pressed_keys::lane_bit(GameControlId(u32::from(*lane))).is_none()
+            })
+        {
+            return Err("prepared browser chart requires at most eighteen valid lanes".into());
+        }
+        let mut regions = Vec::new();
+        regions
+            .try_reserve_exact(count)
+            .map_err(|_| "touch region allocation failed")?;
+        for (row, bounds) in words.chunks_exact(7).zip(bounds.chunks_exact(4)) {
+            let binding = decode_binding(row)?;
+            if !lanes
+                .iter()
+                .any(|lane| u32::from(*lane) == binding.game_control.0)
+            {
+                return Err("touch region destination is not a prepared lane".into());
+            }
+            regions.push(TouchRegion {
+                device: binding.device,
+                physical: binding.physical,
+                game_control: binding.game_control,
+                min: Position2 {
+                    x: bounds[0],
+                    y: bounds[1],
+                },
+                max: Position2 {
+                    x: bounds[2],
+                    y: bounds[3],
+                },
+            });
+        }
+        let max_contacts =
+            usize::try_from(max_contacts).map_err(|_| "touch contact limit is unrepresentable")?;
+        let router = TouchRouter::new(regions, max_contacts).map_err(|error| error.to_string())?;
+        Ok(Self { router })
+    }
+}
+
+// Callers admit complete seven-word rows before selecting each checked chunk.
+fn decode_binding(row: &[u32]) -> Result<Binding, String> {
+    let game_control = GameControlId(row[0]);
+    if crate::pressed_keys::lane_bit(game_control).is_none() {
+        return Err("physical binding has an invalid BMS lane".into());
+    }
+    let device = match row[1] {
+        0 if row[2] == 0 && row[3] == 0 => DeviceSelector::Any,
+        0 => return Err("Any physical binding must have zero device words".into()),
+        1 => DeviceSelector::Exact(DeviceId(u64::from(row[2]) | (u64::from(row[3]) << 32))),
+        _ => return Err("physical binding has an invalid device selector".into()),
+    };
+    let physical = match row[4] {
+        0 => PhysicalControlId::HidUsage {
+            usage_page: u16::try_from(row[5]).map_err(|_| "HID usage page exceeds u16")?,
+            usage: u16::try_from(row[6]).map_err(|_| "HID usage exceeds u16")?,
+        },
+        1 => PhysicalControlId::Native {
+            backend: BackendId(row[5]),
+            code: row[6],
+        },
+        2 => PhysicalControlId::Vendor {
+            namespace: VendorNamespaceId(row[5]),
+            code: row[6],
+        },
+        _ => return Err("physical binding has an invalid control kind".into()),
+    };
+    Ok(Binding {
+        device,
+        physical,
+        game_control,
+    })
 }
 
 /// Decode one original canonical event without adapting its meaning or metadata.

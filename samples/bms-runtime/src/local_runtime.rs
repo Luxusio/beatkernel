@@ -2,7 +2,7 @@
 use crate::local_players::{MAX_LOCAL_PLAYERS, PlayerId};
 use beatkernel::{
     audio::{AudioCommand, CommandProducer, CommandPushError, VoiceId, command_queue},
-    input::{BindingMap, DeviceId, DeviceSelector, PhysicalInputEvent},
+    input::{BindingMap, DeviceId, DeviceSelector, PhysicalInputEvent, Position2, TouchRouter},
     judge::JudgeEngine,
     runtime::{Runtime, RuntimeError, RuntimeProcessingClock, RuntimeReport, SoundBinding},
     telemetry::RuntimeTelemetry,
@@ -224,6 +224,36 @@ impl RuntimeGroup {
         self.song_end
     }
 
+    /// Installs one member's spatial routing before the shared owner starts.
+    /// Assigned devices must be exact in every region, as for static bindings.
+    pub fn configure_touch_router(
+        &mut self,
+        player: PlayerId,
+        router: TouchRouter,
+    ) -> Result<(), String> {
+        if self.poisoned || self.started {
+            return Err("shared touch routing configuration is locked".into());
+        }
+        let member = self
+            .members
+            .iter_mut()
+            .find(|member| member.player == player)
+            .ok_or_else(|| "touch routing player is not in this cohort".to_string())?;
+        if let Some(device) = member.device {
+            if router
+                .regions()
+                .iter()
+                .any(|region| region.device != DeviceSelector::Exact(device))
+            {
+                return Err("assigned player's touch regions must select its exact device".into());
+            }
+        }
+        member
+            .runtime
+            .configure_touch_router(router)
+            .map_err(|error| error.to_string())
+    }
+
     fn ensure_usable(&self) -> Result<(), GroupError> {
         if self.poisoned {
             Err(GroupError {
@@ -239,6 +269,26 @@ impl RuntimeGroup {
     pub fn process_input(
         &mut self,
         input: PhysicalInputEvent,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+    ) -> Result<InputResult, GroupError> {
+        self.process_input_with_position(input, None, mapper, audio_at)
+    }
+
+    pub fn process_input_at(
+        &mut self,
+        input: PhysicalInputEvent,
+        position: Position2,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+    ) -> Result<InputResult, GroupError> {
+        self.process_input_with_position(input, Some(position), mapper, audio_at)
+    }
+
+    fn process_input_with_position(
+        &mut self,
+        input: PhysicalInputEvent,
+        position: Option<Position2>,
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<InputResult, GroupError> {
@@ -260,7 +310,12 @@ impl RuntimeGroup {
                 &mut self.transport,
                 &mut self.producer,
             );
-            guard.runtime.process_input(input, mapper, audio_at)
+            match position {
+                Some(position) => guard
+                    .runtime
+                    .process_input_at(input, position, mapper, audio_at),
+                None => guard.runtime.process_input(input, mapper, audio_at),
+            }
         };
         let report = result.map_err(|error| GroupError {
             failed_player: Some(player),
@@ -360,6 +415,10 @@ impl RuntimeGroup {
 /// Production solo adapter uses exactly the same cohort execution path.
 pub struct SoloRuntime(RuntimeGroup);
 impl SoloRuntime {
+    pub fn configure_touch_router(&mut self, router: TouchRouter) -> Result<(), String> {
+        self.0.configure_touch_router(PlayerId(1), router)
+    }
+
     /// Uses the same member profiling configuration as a local cohort.
     pub fn set_processing_clock(&mut self, clock: RuntimeProcessingClock) {
         self.0.set_processing_clock(clock);
@@ -404,7 +463,19 @@ impl SoloRuntime {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<RuntimeReport, GroupError> {
-        match self.0.process_input(input, mapper, audio_at) {
+        Self::sole_input(self.0.process_input(input, mapper, audio_at))
+    }
+    pub fn process_input_at(
+        &mut self,
+        input: PhysicalInputEvent,
+        position: Position2,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+    ) -> Result<RuntimeReport, GroupError> {
+        Self::sole_input(self.0.process_input_at(input, position, mapper, audio_at))
+    }
+    fn sole_input(result: Result<InputResult, GroupError>) -> Result<RuntimeReport, GroupError> {
+        match result {
             Ok(InputResult::Processed(reports)) => Self::sole_report(Ok(reports)),
             Err(error) => Self::sole_report(Err(error)),
             Ok(InputResult::Ignored { .. }) => {

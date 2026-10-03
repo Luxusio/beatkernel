@@ -137,6 +137,28 @@ pub struct TouchRouter {
 }
 
 impl TouchRouter {
+    /// Fallibly copies configuration and held destinations, including unbound contacts.
+    /// The copy reserves the full contact limit, so routing never grows storage.
+    /// Callers must pair this routing checkpoint with the matching judge/transport
+    /// state; this method does not validate or restore another gameplay owner.
+    pub fn try_clone(&self) -> Result<Self, TouchRoutingError> {
+        let mut regions = Vec::new();
+        regions
+            .try_reserve_exact(self.regions.len())
+            .map_err(|_| TouchRoutingError::AllocationFailed)?;
+        regions.extend_from_slice(&self.regions);
+        let mut contacts = Vec::new();
+        contacts
+            .try_reserve_exact(self.max_contacts)
+            .map_err(|_| TouchRoutingError::AllocationFailed)?;
+        contacts.extend_from_slice(&self.contacts);
+        Ok(Self {
+            regions,
+            max_contacts: self.max_contacts,
+            contacts,
+        })
+    }
+
     /// Validates fixed regions and reserves all simultaneous contact slots.
     /// Empty regions are valid; overlapping `Any`/`Exact` regions are permitted.
     /// Same-selector/surface regions may touch edges but must not overlap.

@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     browser::BrowserPrepared,
-    browser_input::{PhysicalInputSetup, decode_input},
+    browser_input::{PhysicalInputSetup, TouchInputSetup, decode_input},
     competition::OpponentKind,
     image_assets::ImageAssets,
     note_progress::NoteProgress,
@@ -20,7 +20,7 @@ use beatkernel::{
     audio::{AudioCommand, PcmSample, SampleId},
     input::{
         Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector, EventMeta,
-        GameControlId, PhysicalControlId, PhysicalInputEvent, codec::CodecLimits,
+        GameControlId, PhysicalControlId, PhysicalInputEvent, Position2, codec::CodecLimits,
     },
     judge::JudgeEvent,
     replay::codec::ReplayCodecLimits,
@@ -501,6 +501,20 @@ impl BrowserGame {
             .configure_capture(limits, self.chart_seed)
             .map_err(error)
     }
+    /// Configure fixed projected hit regions before activating a contact-mode game.
+    /// The core router retains physical source/surface/contact ownership.
+    pub fn configure_touch_regions(
+        &mut self,
+        words: Vec<u32>,
+        bounds: Vec<f32>,
+        max_contacts: u32,
+    ) -> Result<(), JsValue> {
+        let setup = TouchInputSetup::new(&words, &bounds, &self.chart.lanes, max_contacts)
+            .map_err(error)?;
+        self.game
+            .configure_touch_router(setup.router)
+            .map_err(error)
+    }
     /// Called after stop/failure and before free; yields owned encoded bytes
     /// once. The binding does not create a file or infer a complete-song label.
     pub fn take_replay(&mut self) -> Result<Option<Vec<u8>>, JsValue> {
@@ -543,6 +557,29 @@ impl BrowserGame {
     pub fn input_blob(&mut self, bytes: Vec<u8>, audio_ns: i64) -> Result<(), JsValue> {
         let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
         self.process_physical(input, audio_ns)
+    }
+    /// Route a canonical touch using a separate projected point. Original payload
+    /// and acquisition provenance remain in the actual runtime/capture report.
+    pub fn input_blob_at(
+        &mut self,
+        bytes: Vec<u8>,
+        x: f32,
+        y: f32,
+        audio_ns: i64,
+    ) -> Result<(), JsValue> {
+        let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
+        if !matches!(&input, PhysicalInputEvent::Touch(_)) || !x.is_finite() || !y.is_finite() {
+            return Err(error(
+                "projected browser input requires a genuine touch and finite hit position",
+            ));
+        }
+        let result = self.game.process_input_at(
+            input,
+            Position2 { x, y },
+            &Explicit,
+            point(OUTPUT, audio_ns),
+        );
+        self.accept_report(result)
     }
     pub fn advance(&mut self, host_ns: i64, audio_ns: i64) -> Result<(), JsValue> {
         let result = self

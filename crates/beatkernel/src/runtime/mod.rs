@@ -6,7 +6,10 @@ pub mod restart;
 use crate::{
     audio::{AudioCommand, CommandProducer, CommandPushError, QueuePushError, SampleId, VoiceId},
     chart::ObjectId,
-    input::{BindingMap, DeviceId, GameInputEvent, PhysicalInputEvent},
+    input::{
+        BindingMap, DeviceId, GameInputEvent, PhysicalInputEvent, Position2, TouchRoute,
+        TouchRouter, TouchRoutingError,
+    },
     judge::{JudgeEngine, JudgeError, JudgeEvent, JudgeOutcome, JudgeStage},
     telemetry::{RuntimeCounters, RuntimeTelemetry},
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Timestamp},
@@ -77,6 +80,10 @@ pub enum RuntimeError {
     InvalidSongEnd,
     /// Endpoint setup is immutable after configuration or a committed operation.
     SongEndConfigurationLocked,
+    /// Touch-region routing rejected a sample before acquisition was committed.
+    TouchRouting(TouchRoutingError),
+    /// A touch router is already installed or the runtime has committed processing.
+    TouchRoutingConfigurationLocked,
 }
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -172,6 +179,7 @@ pub struct Runtime {
     audio_domain: ClockDomainId,
     transport: Transport,
     bindings: BindingMap,
+    touch_router: Option<TouchRouter>,
     judge: JudgeEngine,
     producer: CommandProducer,
     sounds: Vec<SoundBinding>,
@@ -204,6 +212,7 @@ impl Runtime {
             audio_domain,
             transport,
             bindings,
+            touch_router: None,
             judge,
             producer,
             sounds,
@@ -234,6 +243,21 @@ impl Runtime {
         self.song_end
     }
 
+    /// Installs spatial routing before any committed operation, at most once.
+    /// Unconfigured inputs still use the ordinary binding map.
+    pub fn configure_touch_router(&mut self, router: TouchRouter) -> Result<(), RuntimeError> {
+        if self.last_host.is_some() || self.touch_router.is_some() {
+            return Err(RuntimeError::TouchRoutingConfigurationLocked);
+        }
+        self.touch_router = Some(router);
+        Ok(())
+    }
+
+    /// Read-only routing state for an explicitly paired gameplay checkpoint.
+    pub fn touch_router(&self) -> Option<&TouchRouter> {
+        self.touch_router.as_ref()
+    }
+
     /// Normalizes, binds, judges and publishes at an independently supplied output time.
     /// Queue failures do not fail the operation or revert judge state. Binding fanout
     /// stops at its first judge error; inspect `judge_error` before continuing.
@@ -241,7 +265,31 @@ impl Runtime {
     /// binding is skipped and the actual judge advances only to that end.
     pub fn process_input(
         &mut self,
+        input: PhysicalInputEvent,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+    ) -> Result<RuntimeReport, RuntimeError> {
+        self.process_input_with_position(input, None, mapper, audio_at)
+    }
+
+    /// Processes genuine physical input with a separate touch hit-test position.
+    /// The projection never changes the physical payload or capture provenance.
+    /// Timing and acquisition checks precede routing; finite-end inputs never
+    /// adopt or release routing ownership after the logical boundary.
+    pub fn process_input_at(
+        &mut self,
+        input: PhysicalInputEvent,
+        position: Position2,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+    ) -> Result<RuntimeReport, RuntimeError> {
+        self.process_input_with_position(input, Some(position), mapper, audio_at)
+    }
+
+    fn process_input_with_position(
+        &mut self,
         mut input: PhysicalInputEvent,
+        position: Option<Position2>,
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<RuntimeReport, RuntimeError> {
@@ -269,6 +317,17 @@ impl Runtime {
                 meta.timestamp = host.timestamp;
                 meta.clock_domain = host.domain;
             }
+            let routed = if report.song_end_reached {
+                TouchRoute::Unconfigured
+            } else if let Some(router) = &mut self.touch_router {
+                match position {
+                    Some(position) => router.route_at(&input, position),
+                    None => router.route(&input),
+                }
+                .map_err(RuntimeError::TouchRouting)?
+            } else {
+                TouchRoute::Unconfigured
+            };
             self.sequences.insert(meta.source, meta.sequence);
             self.commit_time(host.timestamp, mapped_song);
             let counters = self.telemetry.counters_mut();
@@ -279,7 +338,17 @@ impl Runtime {
                     Err(error) => report.judge_error = Some(error),
                 }
             } else {
-                for bound in self.bindings.map(&input) {
+                let (single, use_bindings) = match routed {
+                    TouchRoute::Unconfigured => (None, true),
+                    TouchRoute::Ignored => (None, false),
+                    TouchRoute::Bound(bound) => (Some(bound), false),
+                };
+                let fallback = if use_bindings {
+                    Some(self.bindings.map(&input))
+                } else {
+                    None
+                };
+                for bound in single.into_iter().chain(fallback.into_iter().flatten()) {
                     match self.judge.push_input(&bound, report.song_time) {
                         Ok(events) => {
                             report.bound_inputs.push(bound);
@@ -472,8 +541,37 @@ impl Runtime {
     /// Replaces both gameplay owners after explicit replay reconstruction.
     /// Resets input chronology, acquisition sequences and song-end setup; leaves telemetry,
     /// bindings and already queued audio commands intact. The caller must
-    /// separately synchronize audio output when restoring a timeline.
+    /// separately synchronize audio output when restoring a timeline. Configured
+    /// touch regions remain, but held routes are cleared for a fresh contact start;
+    /// restoring active contacts requires `replace_state_with_touch_router` instead.
     pub fn replace_state(
+        &mut self,
+        judge: JudgeEngine,
+        transport: Transport,
+    ) -> (JudgeEngine, Transport) {
+        let previous = self.replace_gameplay_state(judge, transport);
+        if let Some(router) = &mut self.touch_router {
+            router.clear();
+        }
+        previous
+    }
+
+    /// Installs explicitly paired judge, transport and contact routing owners.
+    /// Returns all prior owners without clearing either router's held contacts.
+    /// The caller must supply a coherent checkpoint and synchronize audio;
+    /// chronology/sequences/song-end setup reset as in `replace_state`.
+    pub fn replace_state_with_touch_router(
+        &mut self,
+        judge: JudgeEngine,
+        transport: Transport,
+        touch_router: Option<TouchRouter>,
+    ) -> (JudgeEngine, Transport, Option<TouchRouter>) {
+        let (previous_judge, previous_transport) = self.replace_gameplay_state(judge, transport);
+        let previous_router = std::mem::replace(&mut self.touch_router, touch_router);
+        (previous_judge, previous_transport, previous_router)
+    }
+
+    fn replace_gameplay_state(
         &mut self,
         judge: JudgeEngine,
         transport: Transport,
