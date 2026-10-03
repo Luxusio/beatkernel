@@ -167,8 +167,8 @@ nonblocking shared SoloRuntime and bounded input/audio message ownership.
 Actual getOutputTimestamp pairs feed the existing native presentation
 discipline. Optional common capture exports canonical replay bytes. Local
 replay playback reuses the output host, with explicit saved-record selection.
-Live browser networking is source-integrated; its compatible service and ranked
-competition remain unfinished. Browser input timestamps use
+Live browser networking and the optional HTTP/3 relay are source-integrated;
+ranked competition remains unfinished. Browser input timestamps use
 the originating Window performance domain; Worker and Window origins are not
 implicitly equal. Physical keyboards cannot be distinguished by DOM key events.
 The full player Goal remains open, with generated bindings, processor execution,
@@ -254,8 +254,8 @@ handshake. A manual stop, cancellation or failure does not become a natural
 finish. A browser without usable output timestamp evidence keeps manual Stop
 available and cannot claim natural completion. Replay playback and explicit
 record storage use separate owners below. Live multiplayer uses the shared
-session, with compatible HTTP/3 service and ranked competition unfinished; this
-acceptance contract is not evidence that source was executed.
+session, with the optional HTTP/3 relay source-implemented and ranked competition
+unfinished; this acceptance contract is not evidence that source was executed.
 
 A gameplay disposal error during completion or manual stop is retained as a
 cleanup failure. The Window terminates that Worker and requires reload before

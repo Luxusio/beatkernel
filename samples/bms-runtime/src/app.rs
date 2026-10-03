@@ -44,6 +44,7 @@ render CHART NEW_OUTPUT SECONDS RATE [CHANNELS]         Offline synthetic render
 render-replay [recorded PCM output options]            Render recorded sounds\n\
 compete --chart PATH --local-replay PATH [--ghost-self PATH] [--ghost-other PATH] [--song-ns N]\n\
 serve-multiplayer [HTTP/3 relay options]                WebTransport room relay (--features webtransport)\n\
+Optional native relay client: --mp-webtransport HTTPS_ROOM_URL --mp-role host|join --mp-origin ORIGIN --mp-ca PATH (--features webtransport).\n\
 Use MODE --help for mode options. Primary play/player resolve omitted devices automatically; standalone native tools keep exact option requirements.\n\
 Saved opponents require the same compiled chart and judging profile. Multiplayer is two-peer casual progress exchange with a shared software start; scores are self-reported."
     );

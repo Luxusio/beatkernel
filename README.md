@@ -1019,3 +1019,18 @@ with `--allow-missing-origin`. Room, session, setup and timeout limits are expos
 in `serve-multiplayer --help`. See the
 [adapter contract](doc/changes/CHANGE__webtransport-relay.md). TLS/network/browser
 execution and authentication/ranked authority remain outside this source milestone.
+
+
+Native `play` or graphical `player` can select that relay with the optional
+`webtransport` feature:
+
+```sh
+cargo run -p beatkernel-bms-runtime --features webtransport -- player --chart path/to/chart.bms --mp-webtransport https://localhost:9001/rooms/example --mp-role host --mp-origin http://localhost:8080 --mp-ca trusted-ca.pem
+```
+
+The other native participant uses `--mp-role join`; a browser participant uses
+its matching Propose/Join start control and the same room URL. Origin must match
+the relay's configured origin and CA must trust its certificate. These are
+documented commands for later execution. Raw QUIC flags and WebTransport cannot
+be combined. Native networking uses the same worker and BKMP session across
+platforms. See the [native adapter contract](doc/changes/CHANGE__native-webtransport.md).

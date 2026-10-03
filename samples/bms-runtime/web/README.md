@@ -461,7 +461,7 @@ Repeated `--origin` flags admit additional explicit origins. HTTPS origins and
 HTTP loopback page origins are accepted; the endpoint itself always uses HTTPS.
 There is no self-signed certificate generation or verifier bypass. Missing
 Origin is rejected by default, with `--allow-missing-origin` an explicit native
-client opt-in. The current native gameplay path still uses raw QUIC.
+client opt-in. Native gameplay may select raw QUIC or the optional WebTransport relay client.
 
 The relay accepts one bidirectional stream per participant, validates bounded
 BKMP v6 frames and forwards them between the room's two participants. Shared
@@ -472,3 +472,13 @@ both participants. Ctrl+C closes the sessions and joins outstanding tasks.
 Server limits and configuration are listed by `serve-multiplayer --help`.
 These commands and browser/TLS/network interoperability remain unexecuted.
 See the [adapter contract](../../../doc/changes/CHANGE__webtransport-relay.md).
+
+
+A native participant can join the same room using the optional `webtransport`
+build and `play`/`player` flags `--mp-webtransport HTTPS_ROOM_URL --mp-role
+host|join --mp-origin ORIGIN --mp-ca PATH`. Both sides need matching canonical
+setup and opposite start roles. The native client supplies the exact configured
+Origin and verifies the HTTPS URL server identity against its explicit CA.
+These source paths share the existing BKMP session; actual native/browser
+interoperability remains unexecuted. See the
+[native adapter contract](../../../doc/changes/CHANGE__native-webtransport.md).

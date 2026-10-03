@@ -290,11 +290,12 @@ impl Game {
     }
     fn loop_controls_available(&self) -> bool {
         self.practice_position().is_some()
-            && !self
-                .launch
-                .args()
-                .chunks_exact(2)
-                .any(|pair| matches!(pair[0].as_str(), "--mp-host" | "--mp-join"))
+            && !self.launch.args().chunks_exact(2).any(|pair| {
+                matches!(
+                    pair[0].as_str(),
+                    "--mp-host" | "--mp-join" | "--mp-webtransport"
+                )
+            })
             && self.snapshot.as_ref().is_some_and(|snapshot| {
                 matches!(
                     snapshot.pause,

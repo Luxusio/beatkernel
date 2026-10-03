@@ -645,3 +645,21 @@ Author code stays MIT. The optional pinned HTTP/3 dependency shall use permissiv
 license options with required notices. Source implementation and compile-only
 fixtures do not establish actual TLS, server, browser or native interoperability;
 those checks and formal acceptance remain deferred.
+
+## Native WebTransport relay gameplay
+
+Native and browser multiplayer use the same BKMP session over their chosen byte
+transport. Native gameplay may explicitly select the optional WebTransport relay
+client with a canonical HTTPS room URL, explicit propose/join role, configured
+Origin and trust anchor. Both participants connect as clients; start role is
+independent of transport connection direction. Existing raw QUIC selection
+remains available. Networking stays on the common worker across operating
+systems, with bounded setup/cancellation/I/O/finish ownership. No verifier bypass
+or ranked authority is introduced. Feature-disabled builds refuse this mode
+explicitly. Physical timing and actual browser/native interoperability require
+subsequent execution evidence.
+
+An explicit native profile override that selects a multiplayer transport
+replaces the previous role/credential/Origin family together. Unrelated audio,
+gameplay and timing settings remain. Credentials come from the new override;
+incomplete settings stay drafts until final preparation.

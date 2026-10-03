@@ -35,10 +35,32 @@ pub fn overlay_native_args(
         SettingsHost::Macos => matches!(flag, "--keyboard-registry" | "--local-player"),
     };
     let replaces_input = overrides.chunks_exact(2).any(|pair| input_family(&pair[0]));
+    let network_family = |flag: &str| {
+        matches!(
+            flag,
+            "--mp-host"
+                | "--mp-join"
+                | "--mp-webtransport"
+                | "--mp-role"
+                | "--mp-origin"
+                | "--mp-cert"
+                | "--mp-key"
+                | "--mp-ca"
+                | "--mp-server-name"
+        )
+    };
+    let replaces_network = overrides.chunks_exact(2).any(|pair| {
+        matches!(
+            pair[0].as_str(),
+            "--mp-host" | "--mp-join" | "--mp-webtransport"
+        )
+    });
     let merged: Vec<_> = base
         .chunks_exact(2)
         .filter(|pair| {
-            !replaced.contains(pair[0].as_str()) && !(replaces_input && input_family(&pair[0]))
+            !replaced.contains(pair[0].as_str())
+                && !(replaces_input && input_family(&pair[0]))
+                && !(replaces_network && network_family(&pair[0]))
         })
         .chain(overrides.chunks_exact(2))
         .flat_map(|pair| pair.iter().cloned())
@@ -160,9 +182,24 @@ const COMMON: &[Spec] = &[
         "Optional numeric IP:port; choose host or join.",
     ),
     (
+        "--mp-webtransport",
+        "WEBTRANSPORT ROOM URL",
+        "Optional HTTPS /rooms/KEY relay URL; choose this or raw QUIC host/join. Requires the webtransport build feature.",
+    ),
+    (
+        "--mp-role",
+        "WEBTRANSPORT START ROLE",
+        "host proposes the start; join accepts it. Both connect to the relay as clients.",
+    ),
+    (
+        "--mp-origin",
+        "WEBTRANSPORT ORIGIN",
+        "Exact canonical HTTPS or HTTP loopback origin allowed by the relay.",
+    ),
+    (
         "--mp-timeout-ms",
         "NETWORK TIMEOUT (MS)",
-        "100..120000 milliseconds; requires host or join.",
+        "100..120000 milliseconds; requires a multiplayer transport.",
     ),
     (
         "--mp-cert",
@@ -176,8 +213,8 @@ const COMMON: &[Spec] = &[
     ),
     (
         "--mp-ca",
-        "QUIC JOIN TRUST ANCHOR",
-        "Join trust anchor path (PEM or DER); requires --mp-server-name.",
+        "NETWORK TRUST ANCHOR",
+        "Explicit trust anchor path (PEM or DER); raw QUIC join also requires --mp-server-name.",
     ),
     (
         "--mp-server-name",
