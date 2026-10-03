@@ -794,6 +794,11 @@ impl StepGameplay {
         self.process_input_with_position(event, None, mapper, audio_at)
     }
 
+    /// Reports whether input setup can still be admitted without altering gameplay.
+    pub fn input_setup_available(&self) -> bool {
+        !self.failed && !self.started && !self.activated
+    }
+
     /// Installs spatial contact routing while this contact-mode owner is pristine.
     /// Setup refusal leaves gameplay/capture unchanged and does not fence the owner.
     pub fn configure_touch_router(&mut self, router: TouchRouter) -> Result<(), StepGameplayError> {

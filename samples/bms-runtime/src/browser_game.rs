@@ -6,6 +6,7 @@ use std::{
 
 use crate::{
     browser::BrowserPrepared,
+    browser_hid_input::BrowserHidSetup,
     browser_input::{PhysicalInputSetup, TouchInputSetup, decode_input},
     competition::OpponentKind,
     image_assets::ImageAssets,
@@ -114,6 +115,9 @@ pub struct BrowserGame {
     pub(crate) pressed: u32,
     pressed_owners: PressedKeys,
     input_limits: CodecLimits,
+    input_bindings: Vec<Binding>,
+    hid_setup: Option<BrowserHidSetup>,
+    hid_events: Vec<PhysicalInputEvent>,
     keys: Vec<(u8, u16)>,
     samples: VecDeque<(SampleId, PcmSample)>,
     output_start: Option<u64>,
@@ -339,6 +343,14 @@ impl BrowserGame {
                 "live resources and a nonnegative browser host origin are required",
             ));
         }
+        if input.bindings.bindings().len() > 256 {
+            return Err(error("browser constructor exceeds 256 physical bindings"));
+        }
+        let mut input_bindings = Vec::new();
+        input_bindings
+            .try_reserve_exact(input.bindings.bindings().len())
+            .map_err(|_| error("browser binding snapshot allocation failed"))?;
+        input_bindings.extend_from_slice(input.bindings.bindings());
         let chart = Arc::new(prepared.chart);
         let progress = NoteProgress::new(chart.clone()).map_err(error)?;
         let config = StepGameplayConfig {
@@ -379,6 +391,9 @@ impl BrowserGame {
             pressed: 0,
             pressed_owners: PressedKeys::default(),
             input_limits: input.limits,
+            input_bindings,
+            hid_setup: None,
+            hid_events: Vec::new(),
             keys,
             samples: bank.into_samples().collect(),
             output_start: None,
@@ -515,6 +530,35 @@ impl BrowserGame {
             .configure_touch_router(setup.router)
             .map_err(error)
     }
+    /// Configure complete HID profiles once before activation or gameplay input.
+    /// Each physical field must match an existing constructor binding; all setup
+    /// validation and event storage reservation precede configuration adoption.
+    pub fn configure_hid_devices(
+        &mut self,
+        device_words: Vec<u32>,
+        field_words: Vec<u32>,
+        axis_params: Vec<f32>,
+    ) -> Result<(), JsValue> {
+        if !self.game.input_setup_available() || self.hid_setup.is_some() {
+            return Err(error(
+                "HID configuration requires a pristine, unconfigured gameplay owner",
+            ));
+        }
+        let setup = BrowserHidSetup::new(
+            &device_words,
+            &field_words,
+            &axis_params,
+            &self.input_bindings,
+        )
+        .map_err(error)?;
+        let mut events = Vec::new();
+        events
+            .try_reserve_exact(256)
+            .map_err(|_| error("HID event scratch allocation failed"))?;
+        self.hid_setup = Some(setup);
+        self.hid_events = events;
+        Ok(())
+    }
     /// Actual full-size rendered lane slots in prepared chart order.
     #[wasm_bindgen(getter)]
     pub fn touch_bounds(&self) -> Result<Vec<f32>, JsValue> {
@@ -572,6 +616,50 @@ impl BrowserGame {
     pub fn input_blob(&mut self, bytes: Vec<u8>, audio_ns: i64) -> Result<(), JsValue> {
         let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
         self.process_physical(input, audio_ns)
+    }
+    /// Decode a genuine raw report completely, then process its typed fanout
+    /// through ordinary runtime/capture/feedback paths with original metadata.
+    /// Zero-emission reports still enter Runtime as their original unbound raw
+    /// input. Gameplay failure preserves its committed prefix and prevents retry.
+    pub fn input_hid_blob(&mut self, bytes: Vec<u8>, audio_ns: i64) -> Result<(), JsValue> {
+        let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
+        let PhysicalInputEvent::RawHidReport(report) = input else {
+            return Err(error("HID profile input requires a genuine raw HID report"));
+        };
+        if self.game.failed() {
+            return Err(error(StepGameplayError::Failed));
+        }
+        if self.hid_setup.is_none() {
+            return Err(error("HID profile input requires configured device owners"));
+        }
+        let mut events = std::mem::take(&mut self.hid_events);
+        events.clear();
+        let result = (|| {
+            self.hid_setup
+                .as_mut()
+                .expect("HID setup checked before taking scratch")
+                .decode_report(&report, &mut events)
+                .map_err(error)?;
+            if events.is_empty() {
+                if let Err(failure) =
+                    self.process_physical(PhysicalInputEvent::RawHidReport(report), audio_ns)
+                {
+                    self.game.fail();
+                    return Err(failure);
+                }
+            } else {
+                for input in events.drain(..) {
+                    if let Err(failure) = self.process_physical(input, audio_ns) {
+                        self.game.fail();
+                        return Err(failure);
+                    }
+                }
+            }
+            Ok(())
+        })();
+        events.clear();
+        self.hid_events = events;
+        result
     }
     /// Route a canonical touch using a separate projected point. Original payload
     /// and acquisition provenance remain in the actual runtime/capture report.

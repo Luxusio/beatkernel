@@ -137,25 +137,35 @@ fn decode_binding(row: &[u32]) -> Result<Binding, String> {
         1 => DeviceSelector::Exact(DeviceId(u64::from(row[2]) | (u64::from(row[3]) << 32))),
         _ => return Err("physical binding has an invalid device selector".into()),
     };
-    let physical = match row[4] {
-        0 => PhysicalControlId::HidUsage {
-            usage_page: u16::try_from(row[5]).map_err(|_| "HID usage page exceeds u16")?,
-            usage: u16::try_from(row[6]).map_err(|_| "HID usage exceeds u16")?,
-        },
-        1 => PhysicalControlId::Native {
-            backend: BackendId(row[5]),
-            code: row[6],
-        },
-        2 => PhysicalControlId::Vendor {
-            namespace: VendorNamespaceId(row[5]),
-            code: row[6],
-        },
-        _ => return Err("physical binding has an invalid control kind".into()),
-    };
+    let physical = decode_physical_control(row[4], row[5], row[6])?;
     Ok(Binding {
         device,
         physical,
         game_control,
+    })
+}
+
+/// Decode one physical control using the shared numeric binding/profile identity.
+/// HID page/usage must fit u16; native and vendor words retain all 32 bits.
+pub fn decode_physical_control(
+    kind: u32,
+    namespace: u32,
+    code: u32,
+) -> Result<PhysicalControlId, String> {
+    Ok(match kind {
+        0 => PhysicalControlId::HidUsage {
+            usage_page: u16::try_from(namespace).map_err(|_| "HID usage page exceeds u16")?,
+            usage: u16::try_from(code).map_err(|_| "HID usage exceeds u16")?,
+        },
+        1 => PhysicalControlId::Native {
+            backend: BackendId(namespace),
+            code,
+        },
+        2 => PhysicalControlId::Vendor {
+            namespace: VendorNamespaceId(namespace),
+            code,
+        },
+        _ => return Err("physical binding has an invalid control kind".into()),
     })
 }
 

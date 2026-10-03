@@ -135,6 +135,27 @@ impl std::fmt::Display for AdapterRegistryError {
 }
 impl std::error::Error for AdapterRegistryError {}
 
+/// Validates source acquisition order without adopting the incoming metadata.
+/// Equal sequence numbers require identical full metadata, allowing packet fanout.
+/// Device ownership and payload validation remain the caller's responsibility.
+pub fn validate_report_order(
+    previous: Option<EventMeta>,
+    current: EventMeta,
+) -> Result<(), AdapterRegistryError> {
+    if let Some(last) = previous {
+        if current.sequence < last.sequence {
+            return Err(AdapterRegistryError::ReportSequence);
+        }
+        if current.sequence == last.sequence && current != last {
+            return Err(AdapterRegistryError::ReportAcquisitionMismatch);
+        }
+        if current.clock_domain != last.clock_domain || current.timestamp < last.timestamp {
+            return Err(AdapterRegistryError::ReportChronology);
+        }
+    }
+    Ok(())
+}
+
 /// Explicit raw-path selection or complete canonical report fanout.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AdapterRoute {
@@ -298,19 +319,7 @@ impl DeviceAdapterRegistry {
         if report.data.len() > self.limits.payload_bytes {
             return Err(AdapterRegistryError::ReportCapacity);
         }
-        if let Some(last) = connection.last_report {
-            if report.meta.sequence < last.sequence {
-                return Err(AdapterRegistryError::ReportSequence);
-            }
-            if report.meta.sequence == last.sequence && report.meta != last {
-                return Err(AdapterRegistryError::ReportAcquisitionMismatch);
-            }
-            if report.meta.clock_domain != last.clock_domain
-                || report.meta.timestamp < last.timestamp
-            {
-                return Err(AdapterRegistryError::ReportChronology);
-            }
-        }
+        validate_report_order(connection.last_report, report.meta)?;
         // Observe acquisition order before mutable decoding. Equal full metadata
         // permits native packet fanout; the core has no report subordinal to
         // distinguish fanout from a retransmitted report.

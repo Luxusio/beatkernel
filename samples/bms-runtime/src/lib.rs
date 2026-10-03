@@ -23,6 +23,8 @@ mod browser_canvas;
 pub mod browser_game;
 #[cfg(test)]
 mod browser_hid_fixtures;
+/// Portable bounded HID profile setup using the common platform decoder.
+pub mod browser_hid_input;
 /// Portable bounded preparation and decoding of canonical browser physical input.
 pub mod browser_input;
 #[cfg(test)]
