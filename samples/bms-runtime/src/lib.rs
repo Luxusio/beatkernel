@@ -158,6 +158,8 @@ pub mod practice;
 pub mod practice_loop;
 /// Portable display configuration shared by CLI, graphical drafts and profiles.
 pub mod presentation_settings;
+#[cfg(test)]
+mod pressed_contact_fixtures;
 /// Ownership of actual admitted BMS lane buttons.
 pub mod pressed_keys;
 /// Bounded saved-record discovery and chart/profile-compatible prefix previews.
