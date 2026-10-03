@@ -5,7 +5,7 @@ import { File as NodeFile } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
-import { encodeKeyboardEvent, encodeTouchEvent } from "./physical-input.mjs";
+import { encodeKeyboardEvent, encodeTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
 
 const FileType = globalThis.File ?? NodeFile;
 const ORIGIN = 9007199254740993n;
@@ -223,6 +223,11 @@ async function workerHarness(options = {}) {
       this.calls.push(["touch-setup", words.slice(), bounds.slice(), maximum]);
       if (options.touchSetupError) throw new Error(options.touchSetupError);
     }
+    configure_hid_devices(devices, fields, parameters) {
+      this.live(); assert.equal(this.physical, true);
+      this.calls.push(["hid-setup", devices.slice(), fields.slice(), parameters.slice()]);
+      if (options.hidSetupError) throw new Error(options.hidSetupError);
+    }
     competition_identity() {
       this.live(); this.calls.push(["identity"]);
       if (options.identityError) throw new Error(options.identityError);
@@ -264,6 +269,12 @@ async function workerHarness(options = {}) {
       this.calls.push(["touch", bytes.slice(), x, y, audioNs]);
       options.inputBlobAt?.(this, bytes, x, y, audioNs);
     }
+    input_hid_blob(bytes, audioNs) {
+      this.live(); assert.equal(this.physical, true);
+      assert.ok(bytes instanceof Uint8Array);
+      this.calls.push(["hid", bytes.slice(), audioNs]);
+      options.inputHidBlob?.(this, bytes, audioNs);
+    }
     advance(...args) { this.live(); this.calls.push(["advance", ...args]); options.advance?.(this, args); }
     observe_output(words, presentedNs) {
       this.live();
@@ -296,6 +307,8 @@ async function workerHarness(options = {}) {
   if (options.missingContactConstructor) BrowserGame.new_physical_contact = undefined;
   if (options.missingTouchSetup) BrowserGame.prototype.configure_touch_regions = undefined;
   if (options.missingInputBlobAt) BrowserGame.prototype.input_blob_at = undefined;
+  if (options.missingHidSetup) BrowserGame.prototype.configure_hid_devices = undefined;
+  if (options.missingInputHidBlob) BrowserGame.prototype.input_hid_blob = undefined;
   class BrowserReplay extends BrowserGame {
     constructor(prepared, ...args) {
       super(prepared, ...args);
@@ -499,6 +512,217 @@ function touchEvent(fields = {}) {
   return { kind: "touch", hostNs: ORIGIN, sequence: 1n, contact: 18446744073709551615n,
     phase: 0, code: 0xfffffffe, x: 120, y: 90, pressure: 0.5, width: 480, height: 360, ...fields };
 }
+
+const HID_SOURCE = 18446744073709551615n;
+function hidSetup(sources = [HID_SOURCE]) {
+  const bindingWords = [], deviceWords = [], fieldWords = [], axisParams = [];
+  for (const [device, source] of sources.entries()) {
+    const low = Number(source & 0xffffffffn), high = Number(source >> 32n);
+    deviceWords.push(low, high, 1, 65535, 1, 4660);
+    for (let index = 0; index < 2; index++) {
+      bindingWords.push(0x11 + index, 1, low, high, 1, 0xffffffff, 0xffffffff - index);
+      fieldWords.push(device, 1, 9, 1, 1, 0xffffffff, 0xffffffff - index, index, 1, 0, 0, 0, 0);
+      axisParams.push(0, 0);
+    }
+  }
+  return { bindingWords: new Uint32Array(bindingWords), deviceWords: new Uint32Array(deviceWords),
+    fieldWords: new Uint32Array(fieldWords), axisParams: new Float32Array(axisParams) };
+}
+function hidEvent(fields = {}) {
+  return { kind: "hid", hostNs: ORIGIN, source: HID_SOURCE, sequence: 1n,
+    reportId: 9, data: Uint8Array.from([9, 255, 0]), ...fields };
+}
+function inputCalls(game) {
+  return game.calls.filter(call => ["input", "blob", "touch", "hid", "advance"].includes(call[0]));
+}
+
+test("HID setup snapshots full-width constructor words before readiness and supports HID-only lanes beside keyboard and contact", async () => {
+  for (const inputMode of ["physical", "physical-contact"]) {
+    const h = await catalogWorker();
+    const setup = hidSetup([HID_SOURCE, 3n]);
+    const expected = Object.fromEntries(Object.entries(setup).map(([key, value]) => [key, Array.from(value)]));
+    const keys = inputMode === "physical" ? new Uint32Array() : pairs();
+    h.post(startRequest({ inputMode, keyPairs: keys, hidSetup: setup, recordReplay: true }));
+    for (const value of Object.values(setup)) value.fill(0);
+    keys.fill(0);
+    await flushJobs();
+    const result = h.of("play-reply").at(-1).result;
+    assert.equal(result.kind, "prepared"); assert.equal(result.hidSourceCount, 2);
+    assert.equal(result.inputMode, inputMode);
+    const game = h.games[0];
+    const construction = (inputMode === "physical" ? h.physicalConstructions : h.contactConstructions)[0];
+    const keyboard = inputMode === "physical" ? [] : [0x11, 0, 0, 0, 1, 0x574b4559, 2, 0x12, 0, 0, 0, 1, 0x574b4559, 3];
+    assert.deepEqual(Array.from(construction.args[5]), [...keyboard, ...expected.bindingWords]);
+    const configured = game.calls.find(call => call[0] === "hid-setup");
+    assert.deepEqual(configured.slice(1).map(value => Array.from(value)), [expected.deviceWords, expected.fieldWords, expected.axisParams]);
+    assert.equal(game.calls.filter(call => call[0] === "hid-setup").length, 1);
+    assert.ok(game.calls.indexOf(configured) < game.calls.findIndex(call => call[0] === "capture"));
+    if (inputMode === "physical-contact") assert.ok(game.calls.findIndex(call => call[0] === "touch-setup") < game.calls.indexOf(configured));
+    await h.send({ kind: "play-sample", playId: 7, rpcId: 2 });
+    assert.ok(game.calls.indexOf(configured) < game.calls.findIndex(call => call[0] === "sample"));
+    await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+  }
+  const ordinary = await started({ startRequest: startRequest({ inputMode: "physical" }) });
+  assert.equal(Object.hasOwn(ordinary.of("play-reply")[0].result, "hidSourceCount"), false);
+  assert.equal(ordinary.games[0].calls.some(call => call[0] === "hid-setup"), false);
+  await ordinary.send({ kind: "play-stop", playId: 7 });
+});
+
+test("HID mode, bounded typed setup and source admission fail before readiness while missing bindings free unconsumed preparation", async () => {
+  const badSetups = [null, [], {},
+    { ...hidSetup(), bindingWords: [] }, { ...hidSetup(), deviceWords: new Uint8Array(6) },
+    { ...hidSetup(), fieldWords: new Uint32Array(12) }, { ...hidSetup(), axisParams: new Float32Array(3) },
+    { ...hidSetup(), axisParams: new Float64Array(4) }, { ...hidSetup(), deviceWords: new Uint32Array() },
+    { ...hidSetup(), deviceWords: new Uint32Array(5) }, hidSetup(Array.from({ length: 17 }, (_, index) => BigInt(index + 3))),
+    hidSetup([3n, 3n]), hidSetup([2n]),
+    { ...hidSetup(), bindingWords: new Uint32Array(6) }, { ...hidSetup(), bindingWords: new Uint32Array(257 * 7) },
+    { ...hidSetup(), fieldWords: new Uint32Array((16 * 512 + 1) * 13), axisParams: new Float32Array((16 * 512 + 1) * 2) },
+  ];
+  const invalidLane = hidSetup(); invalidLane.bindingWords[0] = 0x20; badSetups.push(invalidLane);
+  const combined = hidSetup();
+  combined.bindingWords = new Uint32Array(Array.from({ length: 255 }, () => [0x11, 1, 0xffffffff, 0xffffffff, 1, 1, 1]).flat());
+  badSetups.push(combined); // Two actual keyboard rows exceed the combined 256-row limit.
+  const detached = hidSetup(); structuredClone(detached.fieldWords.buffer, { transfer: [detached.fieldWords.buffer] }); badSetups.push(detached);
+  for (const setup of badSetups) {
+    const gate = deferred(), h = await workerHarness({ initGate: gate });
+    await h.send({ kind: "init", canvas: {} });
+    await h.send(startRequest({ inputMode: "physical", hidSetup: setup }));
+    assert.equal(h.of("play-error").length, 1);
+    assert.ok(h.of("play-reply")[0].error);
+    assert.equal(h.preparedOwners.length, 0); assert.equal(h.games.length, 0);
+    gate.resolve(); await flushJobs(); assert.equal(h.games.length, 0);
+  }
+  for (const request of [startRequest({ hidSetup: hidSetup() }), replayRequest(replayFile().file, { hidSetup: hidSetup() })]) {
+    const h = await catalogWorker(); await h.send(request);
+    assert.equal(h.games.length + h.replays.length, 0);
+    assert.equal(h.libraries[0].preparations.length, 1); assert.equal(h.libraries[0].replayPreparations.length, 0);
+    assert.equal(h.of("play-error").length, 1);
+  }
+  for (const options of [{ missingHidSetup: true }, { missingInputHidBlob: true }]) {
+    const h = await catalogWorker(options);
+    await h.send(startRequest({ inputMode: "physical", hidSetup: hidSetup() }));
+    assert.equal(h.physicalConstructions.length, 0); assert.equal(h.games.length, 0);
+    assert.equal(h.preparedOwners[1].moved, false); assert.equal(h.preparedOwners[1].frees, 1);
+    assert.equal(h.of("play-error").length, 1);
+  }
+  const incomplete = hidSetup(); incomplete.bindingWords = incomplete.bindingWords.slice(0, 7);
+  const missingLane = await catalogWorker();
+  await missingLane.send(startRequest({ inputMode: "physical", keyPairs: new Uint32Array(), hidSetup: incomplete }));
+  assert.equal(missingLane.physicalConstructions.length, 0);
+  assert.equal(missingLane.preparedOwners[1].frees, 1);
+  assert.equal(missingLane.of("play-error").length, 1, "HID coverage cannot silently omit a prepared lane");
+});
+
+test("consuming HID construction and actual profile refusal release exactly one owner and never publish partial setup", async () => {
+  for (const [option, message] of [["physicalConstructError", "consuming HID constructor refused"], ["hidSetupError", "actual profile membership refused"]]) {
+    const h = await catalogWorker({ [option]: message });
+    await h.send(startRequest({ inputMode: "physical", hidSetup: hidSetup(), recordReplay: true }));
+    assert.equal(h.physicalConstructions.length, 1);
+    assert.equal(h.preparedOwners[1].moved, true); assert.equal(h.preparedOwners[1].frees, 0);
+    assert.equal(h.of("play-reply").some(reply => reply.result?.kind === "prepared"), false);
+    assert.match(h.of("play-error")[0].message, new RegExp(message));
+    if (option === "hidSetupError") {
+      assertReleased(h);
+      assert.deepEqual(h.games[0].calls.map(call => call[0]), ["hid-setup"]);
+      assert.equal(h.games[0].replayTakes, 0);
+    } else assert.equal(h.games.length, 0);
+  }
+  const gate = deferred(), cancelled = await workerHarness({ initGate: gate });
+  await cancelled.send({ kind: "init", canvas: {} });
+  cancelled.post(startRequest({ inputMode: "physical", hidSetup: hidSetup() }));
+  cancelled.post({ kind: "play-stop", playId: 7 }); await flushJobs();
+  gate.resolve(); await flushJobs();
+  assert.equal(cancelled.games.length, 0); assert.equal(cancelled.preparedOwners.length, 0);
+  assert.equal(cancelled.of("play-stopped").length, 1); assert.equal(cancelled.of("play-error").length, 0);
+});
+
+test("mixed keyboard contact and numbered or zero-ID HID inputs use the actual canonical encoders in original order", async () => {
+  const h = await active({ startRequest: startRequest({ inputMode: "physical-contact", hidSetup: hidSetup([HID_SOURCE, 3n]) }) });
+  const sequence = 9007199254740993n;
+  const backing = Uint8Array.from([99, 9, 255, 0, 88]);
+  const key = { hostNs: ORIGIN, key: 2, down: true, sequence };
+  const down = touchEvent({ hostNs: ORIGIN + 1n, sequence: sequence + 1n });
+  const numbered = hidEvent({ hostNs: ORIGIN + 2n, sequence: sequence + 2n, data: backing.subarray(1, 4) });
+  const zero = hidEvent({ hostNs: ORIGIN + 3n, sequence: sequence + 3n, source: 3n, reportId: 0, data: new Uint8Array() });
+  const up = touchEvent({ hostNs: ORIGIN + 4n, sequence: sequence + 4n, phase: 2, pressure: null });
+  await h.send(step({ events: [key, down, numbered, zero, up], watermark: ORIGIN + 5n, audioNs: 9007199254741222n }));
+  const calls = inputCalls(h.games[0]);
+  assert.deepEqual(calls.map(call => call[0]), ["blob", "touch", "hid", "hid", "touch", "advance"]);
+  for (const [index, encoded] of [[0, encodeKeyboardEvent(key)], [1, encodeTouchEvent(down)], [2, encodeRawHidEvent(numbered)], [3, encodeRawHidEvent(zero)], [4, encodeTouchEvent(up)]]) {
+    assert.deepEqual(Array.from(calls[index][1]), Array.from(encoded));
+    assert.equal(calls[index].at(-1), 9007199254741222n);
+  }
+  assert.deepEqual(calls[1].slice(2), [240, 180, 9007199254741222n]);
+  assert.equal(new DataView(calls[2][1].buffer).getBigUint64(7, true), HID_SOURCE);
+  assert.deepEqual(Array.from(calls[2][1].slice(65)), [9, 255, 0], "a payload byte equal to report ID remains payload");
+  assert.equal(calls[3][1].length, 64); assert.equal(calls[3][1][59], 0);
+  backing.fill(0); assert.deepEqual(Array.from(calls[2][1].slice(65)), [9, 255, 0]);
+  assert.deepEqual(calls[5], ["advance", ORIGIN + 5n, 9007199254741222n]);
+  assert.equal(h.of("play-step-done")[0].tickId, 1);
+  await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+});
+
+test("a late malformed HID event or unknown source refuses the entire mixed batch before any gameplay mutation", async () => {
+  const invalid = [hidEvent({ source: 4n }), hidEvent({ source: Number(HID_SOURCE) }), hidEvent({ reportId: 256 }),
+    hidEvent({ data: [1] }), hidEvent({ data: new Uint8Array(1025) }), hidEvent({ hostNs: -1n }),
+    hidEvent({ sequence: 18446744073709551616n }), hidEvent({ sequence: 0n }), hidEvent({ hostNs: ORIGIN - 1n })];
+  for (const bad of invalid) {
+    const h = await active({ startRequest: startRequest({ inputMode: "physical-contact", hidSetup: hidSetup() }) });
+    const key = { hostNs: ORIGIN, key: 2, down: true, sequence: 1n };
+    await h.send(step({ events: [key, bad], watermark: ORIGIN + 1n }));
+    assert.equal(inputCalls(h.games[0]).length, 0);
+    assert.equal(h.of("play-step-done").length, 0); assert.equal(h.of("play-error").length, 1);
+    assertReleased(h);
+  }
+  const unconfigured = await active({ startRequest: startRequest({ inputMode: "physical" }) });
+  await unconfigured.send(step({ events: [hidEvent()] }));
+  assert.equal(inputCalls(unconfigured.games[0]).length, 0); assertReleased(unconfigured);
+  const preroll = await active({ startRequest: startRequest({ inputMode: "physical", hidSetup: hidSetup() }) });
+  await preroll.send(step({ events: [hidEvent({ hostNs: ORIGIN - 1n, data: new Uint8Array(1025) })] }));
+  assert.equal(inputCalls(preroll.games[0]).length, 0);
+  assert.equal(preroll.of("play-step-done").length, 0, "pre-origin suppression never bypasses raw packet validation");
+  assertReleased(preroll);
+  const history = await active({ startRequest: startRequest({ inputMode: "physical", hidSetup: hidSetup() }) });
+  await history.send(step({ events: [hidEvent({ sequence: 9n })], watermark: ORIGIN + 10n }));
+  const accepted = inputCalls(history.games[0]).length;
+  await history.send(step({ tickId: 2, events: [hidEvent({ sequence: 10n, hostNs: ORIGIN + 9n })], watermark: ORIGIN + 10n }));
+  assert.equal(inputCalls(history.games[0]).length, accepted, "a prior watermark remains authoritative across raw-report batches");
+  assert.equal(history.of("play-step-done").length, 1); assertReleased(history);
+});
+
+test("pre-origin HID remains validated and zero-transition acquisitions advance while a failed typed prefix cannot retry or affect a newer owner", async () => {
+  const h = await active({ startRequest: startRequest({ inputMode: "physical", hidSetup: hidSetup() }) });
+  const before = hidEvent({ hostNs: ORIGIN - 1n, sequence: 0n });
+  const zeroTransition = hidEvent({ sequence: 1n, data: Uint8Array.from([0]) });
+  await h.send(step({ events: [before, zeroTransition], watermark: ORIGIN + 2n }));
+  const calls = inputCalls(h.games[0]);
+  assert.deepEqual(calls.map(call => call[0]), ["hid", "advance"]);
+  assert.deepEqual(Array.from(calls[0][1]), Array.from(encodeRawHidEvent(zeroTransition)));
+  assert.equal(h.of("play-step-done")[0].preOriginInputs, 1);
+  assert.equal(h.of("play-step-done")[0].hits, SCORE.hits, "the Worker never fabricates a key or a hit for a raw acquisition");
+  await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+
+  let acquired = 0;
+  const partial = await active({ startRequest: startRequest({ inputMode: "physical-contact", hidSetup: hidSetup(), recordReplay: true }),
+    inputHidBlob(game) {
+      acquired++; game.score.hits = SCORE.hits + BigInt(acquired);
+      if (acquired === 2) throw new Error("actual binding retained a partial HID report");
+    } });
+  const request = step({ events: [hidEvent(), hidEvent({ hostNs: ORIGIN + 1n, sequence: 2n }),
+    touchEvent({ hostNs: ORIGIN + 2n, sequence: 3n })], watermark: ORIGIN + 2n });
+  await partial.send(request);
+  assert.deepEqual(inputCalls(partial.games[0]).map(call => call[0]), ["hid", "hid"]);
+  assert.equal(partial.of("play-step-done").length, 0);
+  assert.match(partial.of("play-error")[0].message, /actual binding retained a partial HID report/);
+  assert.equal(partial.of("play-error")[0].replayComplete, false);
+  assertReleased(partial, { ...SCORE, hits: SCORE.hits + 2n });
+  const messages = partial.messages.length;
+  await partial.send(request); assert.equal(partial.messages.length, messages); assert.equal(acquired, 2);
+  await partial.send(startRequest({ playId: 8, inputMode: "physical", hidSetup: hidSetup() }));
+  const next = partial.games[1]; await partial.send(request);
+  assert.equal(inputCalls(next).length, 0); assert.equal(next.stops, 0); assert.equal(acquired, 2);
+  await partial.send({ kind: "play-stop", playId: 8 });
+});
 
 test("contact mode configures actual geometry before capture and forwards mixed canonical inputs with separate projection", async () => {
   for (const finite of [false, true]) {
