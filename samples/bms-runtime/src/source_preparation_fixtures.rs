@@ -8,7 +8,7 @@ use crate::{
     replay_capture::LiveReplayCapture,
 };
 use beatkernel::{
-    audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleId, VoiceId},
+    audio::{AudioCommand, AudioError, AudioFormat, PcmLimits, PcmSample, SampleId, VoiceId},
     input::CodecLimits,
     judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeStage, JudgeWindow},
     replay::codec::{ReplayCodecLimits, ReplayFile},
@@ -130,6 +130,202 @@ impl AssetSource for CountingSource<'_> {
     fn read<'a>(&'a self, key: &Path, max_bytes: usize) -> io::Result<Cow<'a, [u8]>> {
         self.reads.set(self.reads.get() + 1);
         self.inner.read(key, max_bytes)
+    }
+}
+
+#[test]
+fn resolved_audio_aliases_decode_once_but_keep_distinct_owned_expanded_pcm_and_sample_ids() {
+    let chart = "#BPM 120\n#WAV01 音.WAV\n#WAV02 音.WAV\n#WAV03 ./音.WAV\n#WAV04 音.ogg\n#00011:0102\n#00012:03\n#00001:04\n";
+    let mut files = selected(chart.as_bytes());
+    files
+        .insert("pack/音.WAV", wav(24_000, &[0, 16_384, -16_384]))
+        .unwrap();
+    let memory = files.scope("pack/chart.bms").unwrap();
+    let source = CountingSource::new(&memory);
+    let decoder = RecordingDecoder::default();
+    let prepared = prepare(
+        chart.as_bytes(),
+        &source,
+        ChannelPolicy::MonoToStereo,
+        2,
+        &decoder,
+    )
+    .unwrap();
+    assert_eq!(
+        source.counts(),
+        (4, 1),
+        "each original name still passes path admission"
+    );
+    assert_eq!(
+        decoder.0.borrow().as_slice(),
+        &[PathBuf::from("pack/音.WAV")]
+    );
+    assert_eq!((prepared.bank.len(), prepared.bank.total_bytes()), (4, 96));
+    let mut pointers = Vec::new();
+    for id in 1..=4 {
+        let sample = prepared.bank.get(SampleId(id)).unwrap();
+        assert_eq!(sample.format(), AudioFormat::new(24_000, 2).unwrap());
+        assert_eq!(sample.frames(), 3);
+        assert_eq!(sample.samples(), &[0.0, 0.0, 0.5, 0.5, -0.5, -0.5]);
+        assert!(!pointers.contains(&sample.samples().as_ptr()));
+        pointers.push(sample.samples().as_ptr());
+    }
+    let sounded: std::collections::BTreeSet<_> =
+        prepared.sounds.iter().map(|sound| sound.sample).collect();
+    assert_eq!(
+        sounded,
+        [SampleId(1), SampleId(2), SampleId(3)]
+            .into_iter()
+            .collect()
+    );
+    assert!(matches!(
+        prepared.bgm_commands.as_slice(),
+        [AudioCommand::Play {
+            sample: SampleId(4),
+            ..
+        }]
+    ));
+    let another = prepare(
+        chart.as_bytes(),
+        &source,
+        ChannelPolicy::MonoToStereo,
+        2,
+        &decoder,
+    )
+    .unwrap();
+    assert_eq!(
+        source.counts(),
+        (8, 2),
+        "decoded reuse ends with its preparation call"
+    );
+    assert_eq!(decoder.0.borrow().len(), 2);
+    assert_ne!(
+        another.bank.get(SampleId(1)).unwrap().samples().as_ptr(),
+        pointers[0]
+    );
+}
+
+#[test]
+fn audio_reuse_obeys_exact_resolved_keys_and_original_reference_failures() {
+    let chart = b"#BPM 120\n#WAV01 first.wav\n#WAV02 second.wav\n#00011:0102\n";
+    let mut files = selected(chart);
+    let encoded = wav(44_100, &[8192]);
+    files.insert("pack/first.wav", encoded.clone()).unwrap();
+    files.insert("pack/second.wav", encoded).unwrap();
+    let memory = files.scope("pack/chart.bms").unwrap();
+    let source = CountingSource::new(&memory);
+    let decoder = RecordingDecoder::default();
+    let prepared = prepare(chart, &source, ChannelPolicy::Exact, 1, &decoder).unwrap();
+    assert_eq!(
+        source.counts(),
+        (2, 2),
+        "identical content at distinct keys is not a cache hit"
+    );
+    assert_eq!(
+        decoder.0.borrow().as_slice(),
+        &[
+            PathBuf::from("pack/first.wav"),
+            PathBuf::from("pack/second.wav")
+        ]
+    );
+    assert_eq!(prepared.bank.total_bytes(), 8);
+
+    for (second, policy, expected_counts, expected_decodes) in [
+        ("first.ogg", AssetPathPolicy::Exact, (2, 1), 1),
+        ("../first.wav", AssetPathPolicy::AudioVariants, (2, 1), 1),
+        ("broken.wav", AssetPathPolicy::AudioVariants, (2, 2), 2),
+    ] {
+        let chart = format!("#BPM 120\n#WAV01 first.wav\n#WAV02 {second}\n#00011:0102\n");
+        let mut files = selected(chart.as_bytes());
+        files
+            .insert("pack/first.wav", wav(44_100, &[8192]))
+            .unwrap();
+        files
+            .insert("pack/broken.wav", b"bad literal".to_vec())
+            .unwrap();
+        files
+            .insert("pack/broken.FLAC", wav(44_100, &[8192]))
+            .unwrap();
+        let memory = files.scope("pack/chart.bms").unwrap();
+        let source = CountingSource::new(&memory);
+        let decoder = RecordingDecoder::default();
+        assert!(
+            prepare_from_source(
+                chart.as_bytes(),
+                &source,
+                AudioFormat::new(48_000, 1).unwrap(),
+                pcm_limits(),
+                ChannelPolicy::Exact,
+                &decoder,
+                policy,
+                0,
+                None
+            )
+            .is_err()
+        );
+        assert_eq!(source.counts(), expected_counts);
+        assert_eq!(decoder.0.borrow().len(), expected_decodes);
+        assert!(
+            !decoder
+                .0
+                .borrow()
+                .iter()
+                .any(|path| path == Path::new("pack/broken.FLAC")),
+            "a decode failure cannot reinterpret the selected literal as another resource"
+        );
+    }
+}
+
+#[test]
+fn aliased_assets_charge_full_pcm_bytes_and_count_after_expansion_without_redecoding() {
+    let chart = b"#BPM 120\n#WAV01 tap.wav\n#WAV02 ./tap.wav\n#00011:0102\n";
+    let mut files = selected(chart);
+    files
+        .insert("pack/tap.wav", wav(24_000, &[0, 16_384, -16_384]))
+        .unwrap();
+    let memory = files.scope("pack/chart.bms").unwrap();
+    for (asset, total, count, expected_counts, accepted) in [
+        (24, 48, 1, (0, 0), false),
+        (23, 48, 2, (1, 1), false),
+        (24, 47, 2, (2, 1), false),
+        (24, 48, 2, (2, 1), true),
+    ] {
+        let source = CountingSource::new(&memory);
+        let decoder = RecordingDecoder::default();
+        let result = prepare_from_source(
+            chart,
+            &source,
+            AudioFormat::new(48_000, 2).unwrap(),
+            PcmLimits::new(asset, total, count).unwrap(),
+            ChannelPolicy::MonoToStereo,
+            &decoder,
+            AssetPathPolicy::Exact,
+            0,
+            None,
+        );
+        assert_eq!(source.counts(), expected_counts);
+        assert_eq!(decoder.0.borrow().len(), expected_counts.1);
+        if accepted {
+            let prepared = result.unwrap();
+            assert_eq!((prepared.bank.len(), prepared.bank.total_bytes()), (2, 48));
+            assert_eq!(
+                prepared.bank.get(SampleId(2)).unwrap().samples(),
+                &[0.0, 0.0, 0.5, 0.5, -0.5, -0.5]
+            );
+        } else {
+            let error = result
+                .err()
+                .expect("alias admission must not bypass the full bank budget");
+            if total == 47 {
+                assert_eq!(
+                    error.downcast_ref::<AudioError>(),
+                    Some(&AudioError::PcmCapacity)
+                );
+            }
+            if asset == 23 {
+                assert!(error.to_string().contains("stereo expansion"));
+            }
+        }
     }
 }
 

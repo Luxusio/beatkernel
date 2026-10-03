@@ -2356,6 +2356,175 @@ fn prepared_long_type(kind: u8, rows: &str, seed: u64) -> PreparedBms {
 }
 
 #[test]
+fn resolved_pcm_aliases_keep_live_bgm_key_voices_and_canonical_replay_audio_identical() {
+    let text = b"#BPM 60\n#VOLWAV 50\n#WAV01 shared.wav\n#WAV02 ./shared.wav\n#WAV03 shared.ogg\n#00011:01\n#00012:00020000\n#00001:03\n";
+    let mut files = MemoryFiles::new(Default::default()).unwrap();
+    files.insert("pack/chart.bms", text.to_vec()).unwrap();
+    files
+        .insert("pack/shared.wav", wav(&[8192, -4096]))
+        .unwrap();
+    let source = files.scope("pack/chart.bms").unwrap();
+    let seed = u64::MAX;
+    let prepare = || {
+        prepare_from_source(
+            text,
+            &source,
+            AudioFormat::new(4, 1).unwrap(),
+            PcmLimits::new(256, 1024, 8).unwrap(),
+            ChannelPolicy::Exact,
+            &WavDecoder,
+            AssetPathPolicy::AudioVariants,
+            seed,
+            None,
+        )
+        .unwrap()
+    };
+    let prepared = prepare();
+    let original = prepared.source.clone();
+    assert_eq!((prepared.bank.len(), prepared.bank.total_bytes()), (3, 24));
+    assert_eq!(
+        prepared
+            .source
+            .notes
+            .iter()
+            .map(|note| note.sample)
+            .collect::<Vec<_>>(),
+        [SampleId(1), SampleId(2)]
+    );
+    let voices = prepared
+        .sounds
+        .iter()
+        .map(|sound| (sound.sample, sound.voice))
+        .collect::<Vec<_>>();
+    assert_ne!(voices[0].1, voices[1].1);
+    let AudioCommand::Play {
+        voice: bgm_voice,
+        sample: SampleId(3),
+        ..
+    } = prepared.bgm_commands[0]
+    else {
+        panic!("the background alias must retain its own sample and voice");
+    };
+    assert!(voices.iter().all(|(_, voice)| *voice != bgm_voice));
+    let chosen = StepGameplayConfig {
+        preroll: Duration::from_nanos(250_000_000),
+        ..config()
+    };
+    let mapper = clocks(chosen);
+    let limits = capture_limits(65536, 16);
+    let (mut game, bank) = StepGameplay::new(prepared, chosen, bindings(false)).unwrap();
+    let header = game.competition_header(limits, seed).unwrap();
+    let identity = game.competition_identity(limits, seed).unwrap();
+    game.configure_capture(limits, seed).unwrap();
+    let mut events = game
+        .advance_to(chosen.host_origin, &mapper, chosen.output_origin)
+        .unwrap()
+        .judge_events;
+    for (key, sequence, song) in [(4, 1, 0), (5, 2, 1_000_000_000)] {
+        let report = game
+            .process_input(
+                input(chosen, 44, key, sequence, song, ButtonState::Down),
+                &mapper,
+                host_at(chosen, song),
+            )
+            .unwrap();
+        assert_eq!(report.song_time, Timestamp::from_nanos(song));
+        assert_eq!(
+            report.audio_at.timestamp,
+            chosen
+                .output_origin
+                .timestamp
+                .checked_add(chosen.preroll)
+                .unwrap()
+                .checked_add(Duration::from_nanos(song))
+                .unwrap()
+        );
+        events.extend(report.judge_events);
+    }
+    events.extend(
+        game.advance_to(
+            host_at(chosen, 1_000_000_001),
+            &mapper,
+            host_at(chosen, 1_000_000_001),
+        )
+        .unwrap()
+        .judge_events,
+    );
+    assert_eq!((game.score().hits, game.score().misses), (2, 0));
+    let hash = game.judge().stable_hash().unwrap();
+    let (mut producer, mut mixer) = make_mixer(bank, chosen);
+    let commands = deliver(&mut game, &mut producer, 2);
+    assert_eq!(commands.len(), 3);
+    for (command, (sample, voice, song)) in commands.iter().zip([
+        (SampleId(3), bgm_voice, 0),
+        (voices[0].0, voices[0].1, 0),
+        (voices[1].0, voices[1].1, 1_000_000_000),
+    ]) {
+        assert_eq!(
+            *command,
+            AudioCommand::Play {
+                sample,
+                voice,
+                gain: 0.5,
+                at: chosen
+                    .output_origin
+                    .timestamp
+                    .checked_add(chosen.preroll)
+                    .unwrap()
+                    .checked_add(Duration::from_nanos(song))
+                    .unwrap()
+            }
+        );
+    }
+    let mut pcm = [0.0; 8];
+    let rendered = mixer.render(&mut pcm).unwrap();
+    assert_eq!(pcm, [0.0, 0.25, -0.125, 0.0, 0.0, 0.125, -0.0625, 0.0]);
+    assert_eq!(rendered.counters.commands_applied, 3);
+    assert_eq!(
+        (
+            rendered.counters.late_commands,
+            rendered.counters.unknown_samples
+        ),
+        (0, 0)
+    );
+    game.fail();
+    let bytes = game.take_replay().unwrap().unwrap();
+    let file = decode_replay(&bytes, limits).unwrap();
+    assert_eq!(file.header, header);
+    assert_eq!(decode_chart_setup(&file.header.options).unwrap().2, seed);
+    assert_eq!(
+        crate::multiplayer::competition_identity(&file.header, env!("CARGO_PKG_VERSION"), limits)
+            .unwrap(),
+        identity
+    );
+    assert_eq!(encode_replay(&file, limits).unwrap(), bytes);
+    let replay = reconstruct(&original, file, limits).unwrap();
+    assert_eq!(replay.results(), events);
+    assert_eq!(replay.engine().stable_hash().unwrap(), hash);
+    let prepared_replay = prepare();
+    let plan = crate::replay_audio::plan_audio(
+        &prepared_replay,
+        decode_replay(&bytes, limits).unwrap(),
+        limits,
+        chosen.output_origin,
+        chosen.preroll,
+    )
+    .unwrap();
+    assert_eq!(plan.commands, commands);
+    assert_eq!(plan.judge_events, events);
+    assert_eq!(plan.final_judge_hash, hash);
+    let (mut replay_producer, mut replay_mixer) = make_mixer(prepared_replay.bank, chosen);
+    for command in plan.commands {
+        replay_producer.try_push(command).unwrap();
+    }
+    let mut replay_pcm = [0.0; 8];
+    let replay_rendered = replay_mixer.render(&mut replay_pcm).unwrap();
+    assert_eq!(replay_pcm, pcm);
+    assert_eq!(replay_rendered.counters.commands_applied, 3);
+    assert_eq!(replay_rendered.counters.late_commands, 0);
+}
+
+#[test]
 fn lntype2_normalized_hold_shares_real_judging_pcm_and_canonical_capture_with_paired_holds() {
     let chosen = zero_preroll();
     let limits = capture_limits(65536, 16);
