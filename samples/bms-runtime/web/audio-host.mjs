@@ -40,6 +40,22 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+function contextConfiguration(value) {
+  if (value === undefined) value = {};
+  if (value === null || typeof value !== "object" || Array.isArray(value)
+    || Reflect.ownKeys(value).some(key => key !== "latencyHint" && key !== "sampleRate")) {
+    throw new AudioHostError("validation", "Invalid AudioContext output options.", { operation: "open" });
+  }
+  const { latencyHint: requestedLatency, sampleRate } = value;
+  const latencyHint = requestedLatency === undefined ? "interactive" : requestedLatency;
+  if ((!["interactive", "balanced", "playback"].includes(latencyHint)
+      && !(typeof latencyHint === "number" && Number.isFinite(latencyHint) && latencyHint >= 0 && latencyHint <= 60))
+    || (sampleRate !== undefined && !integer(sampleRate, 1, 0xffffffff))) {
+    throw new AudioHostError("validation", "Output latency must be a known category or 0 to 60 seconds; requested rate must be a positive unsigned 32-bit integer.", { operation: "open" });
+  }
+  return Object.freeze(sampleRate === undefined ? { latencyHint } : { latencyHint, sampleRate });
+}
+
 function configuration(options) {
   const pcm = options?.pcmLimits;
   const audio = options?.audioLimits;
@@ -48,6 +64,7 @@ function configuration(options) {
     module: options?.module,
     generation: options?.generation,
     channels: options?.channels,
+    contextOptions: contextConfiguration(options?.contextOptions),
     pcmLimits: {
       maxAssetBytes: pcm?.maxAssetBytes,
       maxTotalBytes: pcm?.maxTotalBytes,
@@ -186,7 +203,7 @@ export class AudioHost {
         config.signal.addEventListener("abort", host.#abort, { once: true });
       }
       if (config.signal?.aborted) throw host.#error("aborted", "open", "Audio setup was cancelled.");
-      host.#context = new AudioContext({ latencyHint: "interactive" });
+      host.#context = new AudioContext(config.contextOptions);
       host.#context.onstatechange = () => {
         if (!host.#stopPromise && ["setup", "allocated", "armed"].includes(host.#state)
           && host.#context.state !== "running") {

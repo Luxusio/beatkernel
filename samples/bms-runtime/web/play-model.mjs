@@ -41,6 +41,28 @@ export function timingFromMilliseconds(early, late, offset) {
     offsetNs: parseTimingMilliseconds(offset) });
 }
 
+export function audioOutputFromFields(latency, ms, rate) {
+  let latencyHint = latency;
+  if (latency === "custom") {
+    if (typeof ms !== "string" || ms.length > 21) throw new Error("Output latency must be unsigned decimal milliseconds, at most 21 characters.");
+    const match = /^\d+(?:\.\d{1,6})?$/.exec(ms);
+    if (!match || match[0] !== ms) throw new Error("Output latency needs unsigned decimal milliseconds with up to six fractional digits.");
+    const ns = parseTimingMilliseconds(ms);
+    if (ns > 60000000000n) throw new Error("Output latency must be between 0 and 60000 milliseconds.");
+    latencyHint = Number(ns) / 1000000000;
+  } else if (!["interactive", "balanced", "playback"].includes(latency)) {
+    throw new Error("Choose a known output latency category or Custom.");
+  }
+  if (typeof rate !== "string" || rate.length > 10) throw new Error("Requested output rate must be a positive decimal integer, or blank for automatic selection.");
+  if (rate === "") return Object.freeze({ latencyHint });
+  const match = /^\d+$/.exec(rate);
+  const sampleRate = Number(rate);
+  if (!match || match[0] !== rate || !Number.isInteger(sampleRate) || sampleRate < 1 || sampleRate > 0xffffffff) {
+    throw new Error("Requested output rate must be an unsigned integer from 1 to 4294967295 Hz.");
+  }
+  return Object.freeze({ latencyHint, sampleRate });
+}
+
 export function millisecondsToNanos(value) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error("Invalid Window performance timestamp.");
   const whole = Math.floor(value);

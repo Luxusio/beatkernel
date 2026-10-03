@@ -34,6 +34,10 @@
         <label>Preview time (seconds) <input id="position" type="text" inputmode="decimal" value="0" maxlength="32" required disabled></label>
         <button id="seek" type="submit" disabled>Show position</button>
       </form>
+      <div class="replay-controls"><label>Output latency <select id="output-latency" disabled><option value="interactive">Interactive</option><option value="balanced">Balanced</option><option value="playback">Playback</option><option value="custom">Custom</option></select></label>
+        <label>Custom latency (ms) <input id="output-latency-ms" type="text" inputmode="decimal" value="10" maxlength="21" disabled></label>
+        <label>Requested output rate (Hz) <input id="output-rate" type="text" inputmode="numeric" value="" placeholder="Automatic" maxlength="10" disabled></label></div>
+      <p class="hint">Output preferences apply to live play and replay. Custom latency accepts 0–60000 ms; leave the rate blank for automatic selection. The browser chooses supported settings. Latency is a hint, not a guaranteed buffer size; playback uses the actual opened rate.</p>
       <div class="replay-controls"><label>Live start (seconds) <input id="live-start" type="text" inputmode="decimal" value="0" maxlength="20" disabled></label></div>
       <p class="hint">Live play starts at this original song position, with a short preroll. Earlier notes and holds already in progress are excluded; overlapping music resumes from its original sound. Replay uses its recorded start.</p>
       <div class="replay-controls"><label>Early window (ms) <input id="judge-early" type="text" inputmode="decimal" value="50" maxlength="21" disabled></label>
