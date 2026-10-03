@@ -120,3 +120,33 @@ Reject inconsistent extents, unknown device indices, conflicting IDs, invalid
 unused values, unknown control kinds and profiles with unbound controls before
 configuration adoption. Original packet report IDs/payloads remain separate
 and are not modified by numeric setup.
+
+## Worker setup and mixed gameplay reports
+
+An optional live physical `play-start.hidSetup` contains `bindingWords`,
+`deviceWords`, `fieldWords` as Uint32Array and `axisParams` as Float32Array.
+Snapshot bounded arrays before asynchronous preparation. An enabled HID setup
+requires one to sixteen distinct sources; the combined keyboard/HID constructor
+bindings contain at most 256 seven-word rows. Use the numeric profile limits
+above. Preserve full-width source/control words and validate actual profiles
+with the Rust owner. HID bindings may cover lanes without keyboard bindings.
+Replay and legacy input modes refuse HID setup.
+
+Require both Rust HID APIs before consuming the prepared chart. Configure the
+actual owner before capture, sample publication or activation. Preparation
+reports `hidSourceCount` only when HID setup is supplied; absence omits it.
+Configuration failure uses existing terminal
+gameplay cleanup and publishes no successful preparation.
+
+Worker preflights the complete bounded mixed keyboard/touch/HID batch before
+the first Runtime call. HID events require an admitted source and retain their
+original time, shared acquisition sequence, separate report ID and exact
+payload in canonical raw packets. Call `input_hid_blob` for HID, `input_blob_at`
+for touch and `input_blob` for keyboard. Pre-origin reports are validated then
+ignored under the existing policy. Unknown sources or malformed events refuse
+the whole batch. Actual gameplay failure preserves only the committed prefix
+and terminates the owner without retry or fabricated compensation.
+
+This Worker integration still requires actual Window permission/profile setup,
+page launch forwarding and disconnect handling. Deferred fixtures and Rust
+compilation do not verify JavaScript execution or playable browser HID.

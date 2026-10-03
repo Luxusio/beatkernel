@@ -39,7 +39,8 @@ event-driven. Saved/network opponent DOM presentation and parts of the host
 bridge remain to be moved; touch/pointer/HID input routes also remain to be
 completed and verified. Keyboard and live touch forwarding have source
 implementations; HID acquisition and Rust gameplay APIs still require their
-Window/Worker bridge. Source changes do not establish performance acceptance.
+Window launch bridge. Worker HID setup and report forwarding have a source
+implementation. Source changes do not establish performance acceptance.
 
 ## Finite live section controls
 
@@ -913,3 +914,9 @@ Control bindings are supplied during construction, not changed during play.
 The common HID decoder and acquisition-order validator remain shared with
 native adapters. Window/Worker profile forwarding remains separate integration
 under the [HID contract](REQ__browser-hid.md).
+
+Worker accepts optional bounded HID setup alongside live physical keyboard or
+contact input, configures the actual Rust owner before publishing preparation,
+and forwards genuine HID reports through the same ordered mixed input batch.
+HID bindings can supply prepared lane coverage without keyboard mappings.
+Window permission/profile selection and launch forwarding remain required.

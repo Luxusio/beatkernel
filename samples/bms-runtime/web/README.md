@@ -753,6 +753,18 @@ then sends typed events through existing gameplay/report/capture ownership.
 Unchanged levels and unknown report IDs still admit their original unbound raw
 input for chronology. Reports do not become fabricated keyboard events.
 
-This Rust API is not yet invoked by the supplied Window/Worker page. Actual
-forwarding, profile controls and disconnect session handling remain required.
+The Worker accepts optional `play-start.hidSetup` with bounded `bindingWords`,
+`deviceWords`, `fieldWords` (Uint32Array) and `axisParams` (Float32Array), in live
+physical/contact mode. It combines keyboard/HID constructor bindings and
+configures actual profiles before publishing preparation. HID can cover lanes
+without keyboard mappings. Prepared metadata supplies `hidSourceCount`.
+
+Mixed step batches accept `kind: "hid"` reports from configured sources and
+serialize them using `encodeRawHidEvent` before calling `input_hid_blob`.
+The complete batch is checked before its first gameplay call. Original source,
+timestamp, sequence, separate report ID and payload remain unchanged.
+
+The supplied Window page does not yet send this setup or HID events. Actual
+permission/profile controls, launch forwarding and disconnect handling remain
+required. JavaScript execution has not been verified.
 Compilation and authored fixtures do not establish browser/HID device acceptance.
