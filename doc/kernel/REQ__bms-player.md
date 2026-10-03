@@ -1790,3 +1790,21 @@ Browser audio/presentation evidence, input clock mapping, actual judging,
 capture/replay and network adapters remain required work. Source compilation,
 generated bindings and browser execution have separate acceptance requirements;
 this phase does not close the player Goal.
+
+## Admitted contact pressed feedback
+
+Visible pressed lanes derive from actual admitted bound input, independently
+of hit or miss judgement. Preserve separate button and contact ownership using
+full source, physical surface/control, game control and contact ID. Touch Down
+adds one owner; duplicate Down is idempotent, Move does not acquire or relocate
+it, and matching Up/Cancel removes only that owner. Unknown releases do nothing.
+A button and contact, or two contacts, may share a lane; it stays pressed until
+the final matching owner releases. Never synthesize keyboard events or re-hit-test
+raw touch coordinates for presentation.
+
+The existing common bounded ownership component supplies browser live feedback,
+native member publication and recorded replay presentation. Whole input batches
+retain atomic capacity refusal, and clear releases all visual ownership while
+retaining reusable storage. Playback-prefix presentation follows only recorded
+operations and must match live ownership transitions. Compilation and authored
+fixtures do not establish actual browser/device acceptance.

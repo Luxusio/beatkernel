@@ -704,5 +704,18 @@ contact owner. Physical coordinates and acquisition time remain in captures.
 
 Missing pointer-capture or contact-runtime capabilities fail explicitly.
 This bridge has source changes and deferred fixtures; generated bindings,
-browser/touch-device execution, visual contact feedback, WebHID and full
-native/contact record compatibility remain pending.
+browser/touch-device execution, WebHID and full native/contact record
+compatibility remain pending.
+
+## Contact pressed-lane feedback
+
+Live browser feedback and recorded replay presentation use the same bounded
+`PressedKeys` ownership component. Genuine admitted Touch Down adds a separate
+contact owner; matching Up/Cancel releases it. Move and unknown releases do
+nothing. Contact ownership includes source, surface, game control and the full
+contact ID, independently of button ownership. A lane remains pressed while
+any button or contact owner holds it. Feedback does not select lanes from raw
+coordinates or depend on hit judgement.
+
+This source integration includes deferred portable fixtures. Rust compilation
+and authored fixtures do not establish actual browser presentation acceptance.
