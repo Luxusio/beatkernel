@@ -5,7 +5,10 @@ use std::{
 
 use crate::{
     chart::{CompiledChart, ObjectId},
-    input::{ButtonState, EventMeta, GameControlId, GameInputEvent, PhysicalInputEvent},
+    input::{
+        ButtonState, ContactId, EventMeta, GameControlId, GameInputEvent, PhysicalInputEvent,
+        TouchPhase,
+    },
     interaction::{
         ActiveInteraction, BeginContext, InputOwner, InteractionContext, InteractionOutput,
         InteractionState, StartEligibility,
@@ -38,6 +41,8 @@ pub struct JudgeEngine {
     active: BTreeSet<(ObjectId, usize)>,
     active_controls: HashMap<GameControlId, BTreeSet<(ObjectId, usize)>>,
     held: HashSet<InputOwner>,
+    held_contacts: HashSet<(InputOwner, ContactId)>,
+    contact_enabled: bool,
     effective_time: Option<Timestamp>,
     initial_configuration: Result<Vec<u8>, SnapshotError>,
 }
@@ -101,12 +106,16 @@ impl JudgeEngine {
             controls.push(rule.control);
             let start_eligibility = rule.evaluator.start_eligibility();
             eligibility.push(start_eligibility);
-            if start_eligibility == StartEligibility::ProfileButtonPress {
+            if matches!(
+                start_eligibility,
+                StartEligibility::ProfileButtonPress | StartEligibility::ProfilePress
+            ) {
                 starts.entry(rule.control).or_default().push(index);
             }
             identities.insert(object.id, index);
         }
         let count = interactions.len();
+        let contact_enabled = eligibility.contains(&StartEligibility::ProfilePress);
         let mut engine = Self {
             chart,
             profile,
@@ -123,6 +132,8 @@ impl JudgeEngine {
             active: BTreeSet::new(),
             active_controls: HashMap::new(),
             held: HashSet::new(),
+            held_contacts: HashSet::new(),
+            contact_enabled,
             effective_time: None,
             initial_configuration: Err(SnapshotError::ConfigurationMismatch),
         };
@@ -154,10 +165,27 @@ impl JudgeEngine {
             )),
             _ => None,
         };
-        let fresh_start = button.is_some_and(|(owner, state)| {
+        let contact = match &event.physical {
+            PhysicalInputEvent::Touch(touch) if self.contact_enabled => Some((
+                (
+                    InputOwner {
+                        source: touch.meta.source,
+                        physical: touch.control,
+                        game_control: event.game_control,
+                    },
+                    touch.contact,
+                ),
+                touch.phase,
+            )),
+            _ => None,
+        };
+        let fresh_button = button.is_some_and(|(owner, state)| {
             state == ButtonState::Down && !self.held.contains(&owner)
         });
-        let candidates = self.candidates(event, time, fresh_start);
+        let fresh_contact = contact.is_some_and(|(owner, phase)| {
+            phase == TouchPhase::Down && !self.held_contacts.contains(&owner)
+        });
+        let candidates = self.candidates(event, time, fresh_button, fresh_contact);
         let selected = if candidates.is_empty() {
             None
         } else {
@@ -188,6 +216,17 @@ impl JudgeEngine {
                     self.held.remove(&owner);
                 }
                 ButtonState::Repeat => {}
+            }
+        }
+        if let Some((owner, phase)) = contact {
+            match phase {
+                TouchPhase::Down => {
+                    self.held_contacts.insert(owner);
+                }
+                TouchPhase::Up | TouchPhase::Cancel => {
+                    self.held_contacts.remove(&owner);
+                }
+                TouchPhase::Move => {}
             }
         }
         let mut dispatch: BTreeSet<(ObjectId, usize)> = self
@@ -254,7 +293,7 @@ impl JudgeEngine {
         self.effective_time
     }
 
-    /// Reports physical ownership scoped to one bound logical destination.
+    /// Reports button ownership scoped to one bound logical destination.
     pub fn is_held(&self, owner: InputOwner) -> bool {
         self.held.contains(&owner)
     }
@@ -291,7 +330,8 @@ impl JudgeEngine {
         &self,
         event: &GameInputEvent,
         time: Timestamp,
-        fresh_start: bool,
+        fresh_button: bool,
+        fresh_contact: bool,
     ) -> Vec<Candidate> {
         let now = i128::from(time.as_nanos());
         let context = self.context(time);
@@ -312,7 +352,7 @@ impl JudgeEngine {
                 });
             }
         };
-        if fresh_start {
+        if fresh_button || fresh_contact {
             if let Some(starts) = self.starts.get(&event.game_control) {
                 let first_time = now - i128::from(self.profile.max_late().as_nanos());
                 let last_time = now + i128::from(self.profile.max_early().as_nanos());
@@ -323,7 +363,11 @@ impl JudgeEngine {
                     i128::from(self.chart.objects()[index].time.start.as_nanos()) <= last_time
                 });
                 for &index in &starts[first..last] {
-                    consider(index);
+                    // A contact start must not widen button-only declarations,
+                    // including caller-provided predicates in a mixed chart.
+                    if fresh_button || self.eligibility[index] == StartEligibility::ProfilePress {
+                        consider(index);
+                    }
                 }
             }
         }
@@ -556,6 +600,7 @@ impl JudgeEngine {
             bytes.u8(match self.eligibility[index] {
                 StartEligibility::ProfileButtonPress => 0,
                 StartEligibility::EvaluatorDefined => 1,
+                StartEligibility::ProfilePress => 2,
             });
             bytes.bytes(&interaction.snapshot_bytes().ok_or(
                 SnapshotError::UnsupportedInteraction {
@@ -579,6 +624,26 @@ impl JudgeEngine {
             bytes.bytes(&owner);
         }
         bytes.option(self.effective_time, |out, time| out.i64(time.as_nanos()));
+        if self.contact_enabled {
+            // Append only for opt-in engines: legacy canonical bytes stay exact.
+            let mut contacts: Vec<_> = self
+                .held_contacts
+                .iter()
+                .map(|(owner, contact)| {
+                    let mut entry = Encoder::new(b"contact-owner/v1");
+                    entry.owner(*owner);
+                    entry.u64(contact.0);
+                    entry.finish()
+                })
+                .collect();
+            contacts.sort();
+            let mut extension = Encoder::new(b"judge-held-contacts/v1");
+            extension.u64(contacts.len() as u64);
+            for contact in contacts {
+                extension.bytes(&contact);
+            }
+            bytes.bytes(&extension.finish());
+        }
         Ok(bytes.finish())
     }
 
@@ -624,6 +689,8 @@ impl JudgeEngine {
             active: self.active.clone(),
             active_controls: self.active_controls.clone(),
             held: self.held.clone(),
+            held_contacts: self.held_contacts.clone(),
+            contact_enabled: self.contact_enabled,
             effective_time: self.effective_time,
             initial_configuration: self.initial_configuration.clone(),
         };

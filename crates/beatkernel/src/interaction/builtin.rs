@@ -1,6 +1,8 @@
 use crate::{
     chart::TimedObject,
-    input::{ButtonState, GameControlId, GameInputEvent, PhysicalInputEvent},
+    input::{
+        ButtonState, ContactId, GameControlId, GameInputEvent, PhysicalInputEvent, TouchPhase,
+    },
     judge::{JudgeError, JudgeOutcome, JudgeProfile, JudgeStage, MissReason},
     time::{Duration, Timestamp},
 };
@@ -17,6 +19,14 @@ pub struct InstantEvaluator;
 /// A button interaction requiring a graded press and an owner release.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct HoldEvaluator;
+
+/// A point interaction completed by a fresh button or touch-contact press.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PressInstantEvaluator;
+
+/// A button/contact press followed by its owning release; cancellation misses.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PressHoldEvaluator;
 
 impl InteractionEvaluator for InstantEvaluator {
     fn start_eligibility(&self) -> StartEligibility {
@@ -39,6 +49,7 @@ impl InteractionEvaluator for InstantEvaluator {
             object.time.start,
             None,
             context.control,
+            false,
         ))
     }
 }
@@ -68,8 +79,72 @@ impl InteractionEvaluator for HoldEvaluator {
             object.time.start,
             Some(end),
             context.control,
+            false,
         ))
     }
+}
+
+impl InteractionEvaluator for PressInstantEvaluator {
+    fn start_eligibility(&self) -> StartEligibility {
+        StartEligibility::ProfilePress
+    }
+
+    fn validate(&self, object: &TimedObject, profile: &JudgeProfile) -> Result<(), JudgeError> {
+        InstantEvaluator.validate(object, profile)
+    }
+
+    fn begin(
+        &self,
+        object: &TimedObject,
+        context: &BeginContext<'_>,
+    ) -> Box<dyn ActiveInteraction> {
+        Box::new(ButtonInteraction::new(
+            object.time.start,
+            None,
+            context.control,
+            true,
+        ))
+    }
+}
+
+impl InteractionEvaluator for PressHoldEvaluator {
+    fn start_eligibility(&self) -> StartEligibility {
+        StartEligibility::ProfilePress
+    }
+
+    fn validate(&self, object: &TimedObject, profile: &JudgeProfile) -> Result<(), JudgeError> {
+        HoldEvaluator.validate(object, profile)
+    }
+
+    fn begin(
+        &self,
+        object: &TimedObject,
+        context: &BeginContext<'_>,
+    ) -> Box<dyn ActiveInteraction> {
+        let end = object
+            .time
+            .end
+            .expect("PressHoldEvaluator::begin requires validated range");
+        Box::new(ButtonInteraction::new(
+            object.time.start,
+            Some(end),
+            context.control,
+            true,
+        ))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PressOwner {
+    Button(InputOwner),
+    Contact(InputOwner, ContactId),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PressAction {
+    Down,
+    Up,
+    Cancel,
 }
 
 #[derive(Clone)]
@@ -78,18 +153,61 @@ struct ButtonInteraction {
     end: Option<Timestamp>,
     control: GameControlId,
     state: InteractionState,
-    owner: Option<InputOwner>,
+    owner: Option<PressOwner>,
+    accepts_contact: bool,
 }
 
 impl ButtonInteraction {
-    fn new(start: Timestamp, end: Option<Timestamp>, control: GameControlId) -> Self {
+    fn new(
+        start: Timestamp,
+        end: Option<Timestamp>,
+        control: GameControlId,
+        accepts_contact: bool,
+    ) -> Self {
         Self {
             start,
             end,
             control,
             state: InteractionState::Pending,
             owner: None,
+            accepts_contact,
         }
+    }
+
+    fn press_input(&self, event: &GameInputEvent) -> Option<(PressOwner, PressAction)> {
+        let (physical, contact, action) = match &event.physical {
+            PhysicalInputEvent::Button(button) => (
+                button.control,
+                None,
+                match button.state {
+                    ButtonState::Down => PressAction::Down,
+                    ButtonState::Up => PressAction::Up,
+                    ButtonState::Repeat => return None,
+                },
+            ),
+            PhysicalInputEvent::Touch(touch) if self.accepts_contact => (
+                touch.control,
+                Some(touch.contact),
+                match touch.phase {
+                    TouchPhase::Down => PressAction::Down,
+                    TouchPhase::Up => PressAction::Up,
+                    TouchPhase::Cancel => PressAction::Cancel,
+                    TouchPhase::Move => return None,
+                },
+            ),
+            _ => return None,
+        };
+        let owner = InputOwner {
+            source: event.physical.meta().source,
+            physical,
+            game_control: event.game_control,
+        };
+        Some((
+            contact.map_or(PressOwner::Button(owner), |contact| {
+                PressOwner::Contact(owner, contact)
+            }),
+            action,
+        ))
     }
 
     fn head_stage(&self) -> JudgeStage {
@@ -133,7 +251,12 @@ impl ActiveInteraction for ButtonInteraction {
     }
 
     fn snapshot_bytes(&self) -> Option<Vec<u8>> {
-        let mut bytes = crate::judge::snapshot::Encoder::new(b"button-interaction/v1");
+        let schema: &[u8] = if self.accepts_contact {
+            b"press-interaction/v1"
+        } else {
+            b"button-interaction/v1"
+        };
+        let mut bytes = crate::judge::snapshot::Encoder::new(schema);
         bytes.i64(self.start.as_nanos());
         bytes.option(self.end, |bytes, end| bytes.i64(end.as_nanos()));
         bytes.u32(self.control.0);
@@ -142,7 +265,28 @@ impl ActiveInteraction for ButtonInteraction {
             InteractionState::Active => 1,
             InteractionState::Completed => 2,
         });
-        bytes.option(self.owner, |bytes, owner| bytes.owner(owner));
+        if self.accepts_contact {
+            bytes.option(self.owner, |bytes, owner| match owner {
+                PressOwner::Button(owner) => {
+                    bytes.u8(0);
+                    bytes.owner(owner);
+                }
+                PressOwner::Contact(owner, contact) => {
+                    bytes.u8(1);
+                    bytes.owner(owner);
+                    bytes.u64(contact.0);
+                }
+            });
+        } else {
+            // Keep the original schema and owner bytes for button-only rules.
+            let owner = self.owner.map(|owner| match owner {
+                PressOwner::Button(owner) => owner,
+                PressOwner::Contact(..) => {
+                    unreachable!("button-only interactions cannot own contacts")
+                }
+            });
+            bytes.option(owner, |bytes, owner| bytes.owner(owner));
+        }
         Some(bytes.finish())
     }
 
@@ -154,12 +298,12 @@ impl ActiveInteraction for ButtonInteraction {
         if event.game_control != self.control {
             return false;
         }
-        let PhysicalInputEvent::Button(button) = &event.physical else {
+        let Some((owner, action)) = self.press_input(event) else {
             return false;
         };
         match self.state {
             InteractionState::Pending => {
-                button.state == ButtonState::Down
+                action == PressAction::Down
                     && Self::within(
                         i128::from(context.song_time.as_nanos())
                             - i128::from(self.start.as_nanos()),
@@ -167,13 +311,7 @@ impl ActiveInteraction for ButtonInteraction {
                     )
             }
             InteractionState::Active => {
-                button.state == ButtonState::Up
-                    && self.owner
-                        == Some(InputOwner {
-                            source: button.meta.source,
-                            physical: button.control,
-                            game_control: event.game_control,
-                        })
+                matches!(action, PressAction::Up | PressAction::Cancel) && self.owner == Some(owner)
             }
             InteractionState::Completed => false,
         }
@@ -187,7 +325,7 @@ impl ActiveInteraction for ButtonInteraction {
         if !self.accepts_input(event, context) {
             return InteractionOutput::default();
         }
-        let PhysicalInputEvent::Button(button) = &event.physical else {
+        let Some((owner, action)) = self.press_input(event) else {
             unreachable!()
         };
         if self.state == InteractionState::Pending {
@@ -199,11 +337,7 @@ impl ActiveInteraction for ButtonInteraction {
             let stage = self.head_stage();
             if self.end.is_some() {
                 self.state = InteractionState::Active;
-                self.owner = Some(InputOwner {
-                    source: button.meta.source,
-                    physical: button.control,
-                    game_control: event.game_control,
-                });
+                self.owner = Some(owner);
             } else {
                 self.finish();
             }
@@ -211,7 +345,11 @@ impl ActiveInteraction for ButtonInteraction {
         }
         let end = self.end.expect("only held interactions become active");
         let delta = i128::from(context.song_time.as_nanos()) - i128::from(end.as_nanos());
-        let outcome = if delta < -i128::from(context.profile.max_early().as_nanos()) {
+        let outcome = if action == PressAction::Cancel {
+            JudgeOutcome::Miss {
+                reason: MissReason::RejectedInput,
+            }
+        } else if delta < -i128::from(context.profile.max_early().as_nanos()) {
             JudgeOutcome::Miss {
                 reason: MissReason::EarlyRelease,
             }

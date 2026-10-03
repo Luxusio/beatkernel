@@ -7,7 +7,7 @@
 mod advanced;
 mod builtin;
 pub use advanced::{CompositeEvaluator, RepeatedEvaluator, TrackingEvaluator, TrackingInput};
-pub use builtin::{HoldEvaluator, InstantEvaluator};
+pub use builtin::{HoldEvaluator, InstantEvaluator, PressHoldEvaluator, PressInstantEvaluator};
 
 use crate::{
     chart::TimedObject,
@@ -84,7 +84,7 @@ pub trait InteractionEvaluator: Send + Sync {
 
     /// Begins an object already accepted by [`Self::validate`].
     fn begin(&self, object: &TimedObject, context: &BeginContext<'_>)
-        -> Box<dyn ActiveInteraction>;
+    -> Box<dyn ActiveInteraction>;
 }
 
 /// Eligibility used to build separate builtin and custom pending indexes.
@@ -94,6 +94,8 @@ pub enum StartEligibility {
     ProfileButtonPress,
     /// The evaluator predicate decides eligibility for unchanged typed input.
     EvaluatorDefined,
+    /// A fresh button or touch-contact Down inside the profile's start window.
+    ProfilePress,
 }
 
 /// Single-owner state transitions for one validated object.
