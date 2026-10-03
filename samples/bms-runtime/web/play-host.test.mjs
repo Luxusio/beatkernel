@@ -122,7 +122,8 @@ async function harness(faults = {}) {
     "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status",
     "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
     "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start",
-    "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate"]) {
+    "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate",
+    "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands"]) {
     elements.set(id, new Element(id === "chart" || id === "records" ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
@@ -137,6 +138,9 @@ async function harness(faults = {}) {
   elements.get("output-latency").value = "interactive";
   elements.get("output-latency-ms").value = "10";
   elements.get("output-rate").value = "";
+  for (const id of ["audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands"]) {
+    elements.get(id).value = "4096";
+  }
 
   const document = new Events();
   document.body = new Element("body");
@@ -1870,6 +1874,114 @@ test("missing actual lane coverage refuses setup and replay ignores invalid live
   await flush(); await h.receive(finalScore(replay.id));
   assert.equal(first.value, "KeyS");
   assert.equal(first.disabled, false);
+  await h.close();
+});
+
+test("audio capacity drafts snapshot before the live gesture await and retain exact setup and active batch acknowledgements", async () => {
+  const opening = deferred(), stopping = deferred();
+  const h = await harness({ openGate: opening, stopGate: stopping });
+  await h.preview();
+  const ids = ["audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands"];
+  const fields = ids.map(h.get);
+  assert.deepEqual(fields.map(field => field.value), ["4096", "4096", "4096", "4096", "4096"]);
+  ["3", "7", "11", "257", "2"].forEach((value, index) => { fields[index].value = value; });
+  h.click("play");
+  assert.equal(h.opens.length, 1);
+  assert.equal(h.opens[0].gesture, true);
+  const captured = h.opens[0].options.audioLimits;
+  assert.deepEqual(structuredClone(captured), { queueCapacity: 3, maxVoices: 7, pendingCapacity: 11, maxFrames: 257, maxCommandsPerRender: 2 });
+  assert.ok(Object.isFrozen(captured));
+  assert.ok(fields.every(field => field.disabled));
+  fields[0].value = "65536";
+  fields[3].value = "128";
+  opening.resolve(h.audio); await flush();
+  const worker = h.workers[0], start = worker.last("play-start");
+  assert.equal(start.commandBatchLimit, 3);
+  assert.equal(captured.queueCapacity, 3);
+  const first = { sequence: 9007199254740993n, commands: [command(1n), command(2n), command(3n)] };
+  await h.reply(await h.prepared(start), first);
+  assert.deepEqual(h.audio.commandsSeen, [first.commands]);
+  let acknowledgement = worker.last("play-ack");
+  assert.equal(acknowledgement.sequence, first.sequence);
+  assert.equal(acknowledgement.admitted, 3);
+  assert.equal(acknowledgement.success, true);
+  assert.equal(worker.messages("play-commands").length, 1, "the next pull waits for the correlated setup ACK");
+  await h.reply(acknowledgement, null);
+  await h.reply(worker.last("play-commands"), null);
+  await h.reply(worker.last("play-activate"), null);
+  const next = { sequence: first.sequence + 1n, commands: [command(4n)] };
+  await h.receive({ kind: "play-commands", playId: start.playId, batch: next });
+  acknowledgement = worker.last("play-ack");
+  assert.equal(acknowledgement.sequence, next.sequence);
+  assert.equal(acknowledgement.admitted, 1);
+  assert.equal(acknowledgement.success, true);
+  assert.deepEqual(h.audio.commandsSeen, [first.commands, next.commands]);
+  h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+  assert.ok(fields.every(field => field.disabled), "the audio cleanup owner still holds the draft controls");
+  stopping.resolve(); await flush();
+  assert.ok(fields.every(field => !field.disabled));
+  assert.deepEqual(fields.map(field => field.value), ["65536", "7", "11", "128", "2"]);
+  assert.deepEqual(ids.map(h.get), fields, "controls remain retained across the entire owner lifecycle");
+  delete h.faults.openGate;
+  const nextPlay = await h.launch();
+  assert.equal(nextPlay.start.commandBatchLimit, 256, "larger allocation preserves the bounded Worker transfer size");
+  assert.equal(h.opens[1].options.audioLimits.queueCapacity, 65536);
+  assert.equal(h.opens[1].options.audioLimits.maxFrames, 128);
+  assert.notEqual(h.opens[1].options.audioLimits, captured);
+  await h.close();
+});
+
+test("both modes refuse invalid capacity drafts before audio and a refused replay output can retry the same captured budgets", async () => {
+  const opening = deferred();
+  const h = await harness({ openGate: opening, replayStart: 123456789n });
+  await h.preview();
+  chooseRecording(h, [selectedRecording().file]);
+  const ids = ["audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands"];
+  const fields = ids.map(h.get);
+  for (const mode of ["play", "replay-play"]) {
+    for (const [index, invalid] of [[0, "65537"], [1, "4097"], [2, "0"], [3, "128.0"], [4, "+256"]]) {
+      fields[index].value = invalid;
+      h.click(mode); await flush();
+      assert.equal(h.opens.length, 0);
+      assert.equal(h.workers[0].messages("play-start").length, 0);
+      assert.equal(h.get("status").dataset.error, "true");
+      assert.equal(fields[index].value, invalid);
+      assert.ok(fields.every(field => !field.disabled));
+      fields[index].value = "4096";
+    }
+  }
+  ["1", "2", "3", "128", "1"].forEach((value, index) => { fields[index].value = value; });
+  h.get("judge-early").value = "invalid live judge";
+  h.get("live-start").value = "invalid live section";
+  h.get("binding-11").value = "KeyS";
+  h.click("replay-play");
+  assert.equal(h.opens[0].gesture, true);
+  assert.ok(fields.every(field => field.disabled));
+  opening.reject(new Error("chosen audio capacities were refused")); await flush();
+  assert.equal(h.workers[0].messages("play-start").length, 0);
+  assert.match(h.get("status").textContent, /chosen audio capacities were refused/);
+  assert.deepEqual(fields.map(field => field.value), ["1", "2", "3", "128", "1"]);
+  assert.ok(fields.every(field => !field.disabled));
+  const retry = deferred(); h.faults.openGate = retry;
+  h.click("replay-play");
+  const captured = h.opens[1].options.audioLimits;
+  assert.deepEqual(structuredClone(captured), { queueCapacity: 1, maxVoices: 2, pendingCapacity: 3, maxFrames: 128, maxCommandsPerRender: 1 });
+  assert.ok(Object.isFrozen(captured));
+  assert.equal(h.opens[1].gesture, true);
+  fields[0].value = "2";
+  retry.resolve(h.audio); await flush();
+  const worker = h.workers[0], start = worker.last("play-start");
+  assert.equal(start.mode, "replay");
+  assert.equal(start.commandBatchLimit, 1);
+  for (const field of ["timing", "startNs", "keyPairs"]) assert.equal(Object.hasOwn(start, field), false);
+  await h.reply(await h.prepared(start), null);
+  await h.reply(worker.last("play-activate"), null);
+  assert.equal(h.audio.arms.length, 1);
+  assert.match(h.get("details").textContent, /start 0\.123456789 s/);
+  assert.equal(worker.messages("play-step").length, 0);
+  h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+  assert.equal(fields[0].value, "2");
+  assert.equal(fields[0].disabled, false);
   await h.close();
 });
 

@@ -442,6 +442,89 @@ test("prepared ownership, original-rate PCM transfers and setup batches retain t
   assert.equal(h.views[0].current, h.preparedOwners[0], "accepted preview survives gameplay");
 });
 
+test("each playback owner retains its command batch limit across setup pulls, active pushes and exact acknowledgements", async () => {
+  for (const [mode, requested, limit] of [["live", undefined, 256], ["live", 1, 1], ["live", 256, 256], ["replay", 2, 2]]) {
+    const request = mode === "replay" ? replayRequest(replayFile().file, { commandBatchLimit: requested })
+      : startRequest(requested === undefined ? {} : { commandBatchLimit: requested });
+    const first = { sequence: 9007199254740993n, commands: Array.from({ length: Math.min(limit, 3) }, (_, index) => command(BigInt(index + 1))) };
+    const next = { sequence: first.sequence + 1n, commands: [command(4n)] };
+    const last = { sequence: first.sequence + 2n, commands: [command(5n)] };
+    const h = await started({ startRequest: request, batches: [first, null, next, last, null] });
+    const game = h.replays[0] ?? h.games[0];
+    request.commandBatchLimit = 17;
+    assert.deepEqual((await h.rpc("play-commands")).result, first);
+    assert.deepEqual(game.calls.filter(row => row[0] === "commands"), [["commands", limit]]);
+    await h.rpc("play-ack", { sequence: first.sequence, admitted: first.commands.length, success: true });
+    assert.equal(game.calls.filter(row => row[0] === "commands").length, 1);
+    assert.equal((await h.rpc("play-commands")).result, null);
+    await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START });
+    for (const id of [1, 2]) {
+      await h.send(mode === "replay"
+        ? { kind: "play-render", playId: 7, renderId: id, report: renderReport({ available: false }), presentedNs: null }
+        : step({ tickId: id }));
+    }
+    assert.deepEqual(h.of("play-commands").map(value => value.batch), [next]);
+    assert.equal(game.calls.filter(row => row[0] === "commands").length, 3, "the held batch blocks another pull while real steps continue");
+    await h.send({ kind: "play-ack", playId: 7, sequence: next.sequence, admitted: 1, success: true });
+    assert.deepEqual(h.of("play-commands").map(value => value.batch), [next, last]);
+    await h.send({ kind: "play-ack", playId: 7, sequence: last.sequence, admitted: 1, success: true });
+    assert.deepEqual(game.calls.filter(row => row[0] === "commands"), Array.from({ length: 5 }, () => ["commands", limit]));
+    assert.deepEqual(game.calls.filter(row => row[0] === "ack"), [
+      ["ack", first.sequence, first.commands.length, true], ["ack", next.sequence, 1, true], ["ack", last.sequence, 1, true],
+    ]);
+    await h.send({ kind: "play-stop", playId: 7 });
+    assertReleased(h);
+  }
+});
+
+test("batch limits reject before readiness and oversized binding results or rejected prefixes never split or retry", async () => {
+  for (const value of [null, 0, -1, 257, 1.5, "1", 1n, NaN, Infinity]) {
+    const gate = deferred();
+    const h = await workerHarness({ initGate: gate });
+    await h.send({ kind: "init", canvas: {} });
+    const file = replayFile();
+    await h.send(replayRequest(file.file, { commandBatchLimit: value }));
+    assert.equal(h.of("ready").length, 0);
+    assert.match(h.of("play-reply")[0].error, /batch limit/i, "invalid transport limits cannot wait on WASM readiness");
+    assert.equal(h.of("play-error").length, 1);
+    assert.equal(file.reads, 0);
+    assert.equal(h.preparedOwners.length, 0);
+    gate.resolve(); await flushJobs();
+    assert.equal(h.games.length + h.replays.length, 0);
+    assert.equal(h.preparedOwners.length, 0);
+  }
+  for (const setup of [true, false]) {
+    const tooLarge = { sequence: 91n, commands: [command(1n), command(2n), command(3n)] };
+    const h = await started({ startRequest: startRequest({ commandBatchLimit: 2 }), batches: [tooLarge] });
+    const game = h.games[0];
+    if (setup) assert.match((await h.rpc("play-commands")).error, /command batch/i);
+    else {
+      await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START });
+      await h.send(step());
+    }
+    assert.match(h.of("play-error")[0].message, /command batch/i);
+    assert.equal(h.of("play-commands").length, 0, "no accepted-looking truncated prefix is published");
+    assert.deepEqual(game.calls.filter(row => row[0] === "commands"), [["commands", 2]]);
+    assert.equal(game.calls.filter(row => row[0] === "ack").length, 0);
+    assert.equal(tooLarge.commands.length, 3);
+    await h.send(step({ tickId: 2 }));
+    assert.equal(game.calls.filter(row => row[0] === "commands").length, 1);
+    assertReleased(h);
+  }
+  const rejectedBatch = batch(9007199254741993n);
+  const rejected = await active({ startRequest: startRequest({ commandBatchLimit: 2 }), batches: [rejectedBatch, batch(92n)],
+    ack() { throw new Error("actual owner retained rejected prefix"); } });
+  await rejected.send(step());
+  await rejected.send({ kind: "play-ack", playId: 7, sequence: rejectedBatch.sequence, admitted: 1, success: false });
+  const game = rejected.games[0];
+  assert.deepEqual(game.calls.filter(row => row[0] === "ack"), [["ack", rejectedBatch.sequence, 1, false]]);
+  assert.deepEqual(game.calls.filter(row => row[0] === "commands"), [["commands", 2]]);
+  assert.deepEqual(rejected.of("play-commands")[0].batch, rejectedBatch);
+  assert.equal(game.batches.length, 1, "no later batch or rejected remainder is consumed");
+  assert.match(rejected.of("play-error")[0].message, /retained rejected prefix/);
+  assertReleased(rejected);
+});
+
 test("remapped physical IDs reach the existing constructor and input path while invalid or incomplete bindings fail before consumption", async () => {
   const remapped = new Uint32Array([0x11, 100, 0x12, 101]);
   const h = await active({ startRequest: startRequest({ keyPairs: remapped }) });

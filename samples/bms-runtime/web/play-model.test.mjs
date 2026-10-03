@@ -7,11 +7,50 @@ import {
   KEY_BINDINGS, KEY_CHOICES, snapshotBindings, bindingsFor,
   parseTimingMilliseconds, timingFromMilliseconds, validateTiming,
   PLAY_PCM_SAMPLES, startFromSeconds, validateStart,
-  audioOutputFromFields,
+  audioOutputFromFields, audioLimitsFromFields,
 } from "./play-model.mjs";
 
 const U64_MAX = 18446744073709551615n;
 const I64_MAX = 9223372036854775807n;
+
+test("audio capacities preserve independent bounded budgets in a fresh immutable snapshot", () => {
+  const defaults = { queueCapacity: "4096", maxVoices: "4096", pendingCapacity: "4096", maxFrames: "4096", maxCommandsPerRender: "4096" };
+  const captured = audioLimitsFromFields(defaults);
+  assert.deepEqual(captured, { queueCapacity: 4096, maxVoices: 4096, pendingCapacity: 4096, maxFrames: 4096, maxCommandsPerRender: 4096 });
+  assert.ok(Object.isFrozen(captured));
+  assert.notEqual(audioLimitsFromFields(defaults), captured);
+  defaults.queueCapacity = "1";
+  assert.equal(captured.queueCapacity, 4096);
+  assert.deepEqual(audioLimitsFromFields({ queueCapacity: "65536", maxVoices: "00001", pendingCapacity: "4096",
+    maxFrames: "00257", maxCommandsPerRender: "1" }), {
+    queueCapacity: 65536, maxVoices: 1, pendingCapacity: 4096, maxFrames: 257, maxCommandsPerRender: 1,
+  }, "a render budget is independent of queue allocation and frame capacity is not a fixed quantum");
+  assert.deepEqual(audioLimitsFromFields({ queueCapacity: "1", maxVoices: "4096", pendingCapacity: "1",
+    maxFrames: "1", maxCommandsPerRender: "65536" }), {
+    queueCapacity: 1, maxVoices: 4096, pendingCapacity: 1, maxFrames: 1, maxCommandsPerRender: 65536,
+  });
+});
+
+test("audio capacity text refuses malformed or unknown fields and each exact ceiling without clamping", () => {
+  const fields = { queueCapacity: "4096", maxVoices: "4096", pendingCapacity: "4096", maxFrames: "4096", maxCommandsPerRender: "4096" };
+  for (const [name, maximum] of [["queueCapacity", 65536], ["maxVoices", 4096], ["pendingCapacity", 4096],
+    ["maxFrames", 4096], ["maxCommandsPerRender", 65536]]) {
+    for (const value of [undefined, null, 1, 1n, "", "0", "-0", "+1", " 1", "1 ", "1\n", "1.0", "1e3",
+      "１２８", "000001", String(maximum + 1)]) {
+      assert.throws(() => audioLimitsFromFields({ ...fields, [name]: value }), `${name}: ${String(value)}`);
+    }
+    const missing = { ...fields };
+    delete missing[name];
+    assert.throws(() => audioLimitsFromFields(missing));
+  }
+  const hidden = { ...fields };
+  Object.defineProperty(hidden, "silentCapacity", { value: "1" });
+  for (const malformed of [undefined, null, [], Object.values(fields), Object.create(fields),
+    { ...fields, unknown: "1" }, { ...fields, [Symbol("extra")]: "1" }, hidden]) {
+    assert.throws(() => audioLimitsFromFields(malformed));
+  }
+  assert.equal(audioLimitsFromFields(fields).queueCapacity, 4096, "refusal cannot rewrite the caller's retained draft");
+});
 
 test("output fields preserve category defaults, exact admitted latency units and automatic versus requested rates", () => {
   const automatic = audioOutputFromFields("interactive", "", "");
