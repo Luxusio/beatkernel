@@ -2333,3 +2333,210 @@ fn section_completion_uses_original_judge_deadline_and_actual_relative_pcm_drain
     assert!(game.observe_completion(Some(idle), Some(end)).unwrap());
     assert_eq!((game.score().hits, game.score().misses), (1, 0));
 }
+
+fn prepared_long_type(kind: u8, rows: &str, seed: u64) -> PreparedBms {
+    let chart = format!("#BPM 60\n#VOLWAV 50\n#LNTYPE {kind}\n#WAV01 head.wav\n{rows}");
+    let mut files = MemoryFiles::new(Default::default()).unwrap();
+    files
+        .insert("chart.bms", chart.as_bytes().to_vec())
+        .unwrap();
+    files.insert("head.wav", wav(&[8192, -4096])).unwrap();
+    prepare_from_source(
+        chart.as_bytes(),
+        &files.scope("chart.bms").unwrap(),
+        AudioFormat::new(4, 1).unwrap(),
+        PcmLimits::new(256, 1024, 8).unwrap(),
+        ChannelPolicy::Exact,
+        &WavDecoder,
+        AssetPathPolicy::AudioVariants,
+        seed,
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn lntype2_normalized_hold_shares_real_judging_pcm_and_canonical_capture_with_paired_holds() {
+    let chosen = zero_preroll();
+    let limits = capture_limits(65536, 16);
+    let mut outcomes = Vec::new();
+    for (kind, rows) in [(1, "#00051:01000100\n"), (2, "#00051:01ZZ0000\n")] {
+        let prepared = prepared_long_type(kind, rows, 3);
+        assert_eq!(prepared.source.notes.len(), 1);
+        let note = &prepared.source.notes[0];
+        assert_eq!(note.sample, SampleId(1));
+        assert_eq!(
+            note.tail_sample.map(|sample| sample.0),
+            if kind == 1 { Some(1) } else { None }
+        );
+        assert_eq!(prepared.sounds.len(), 1);
+        assert_eq!(prepared.sounds[0].stage, JudgeStage::HoldHead);
+        assert!(!prepared.source.samples.contains_key(&1295));
+        assert_eq!(
+            prepared.compiled.chart.objects()[0].time.end,
+            Some(Timestamp::from_nanos(2_000_000_000))
+        );
+        let original = prepared.source.clone();
+        let object = note.object;
+        let (mut game, bank) = StepGameplay::new(prepared, chosen, bindings(false)).unwrap();
+        game.configure_capture(limits, 3).unwrap();
+        let physical = input(chosen, 44, 4, 1, 0, ButtonState::Down);
+        let head = game
+            .process_input(physical.clone(), &clocks(chosen), chosen.output_origin)
+            .unwrap();
+        assert_eq!(head.judge_events[0].stage, JudgeStage::HoldHead);
+        assert_eq!(game.judge().state(object), Some(InteractionState::Active));
+        let (mut producer, mut mixer) = make_mixer(bank, chosen);
+        assert_eq!(deliver(&mut game, &mut producer, 8), head.audio_commands);
+        let tail = game
+            .process_input(
+                input(chosen, 44, 4, 2, 2_000_000_000, ButtonState::Up),
+                &clocks(chosen),
+                output_at(chosen, 2_000_000_000),
+            )
+            .unwrap();
+        assert_eq!(tail.judge_events[0].stage, JudgeStage::HoldTail);
+        assert!(matches!(
+            tail.judge_events[0].outcome,
+            JudgeOutcome::Hit {
+                delta: Duration::ZERO,
+                ..
+            }
+        ));
+        assert!(tail.audio_commands.is_empty());
+        assert!(game.take_commands(8).unwrap().is_none());
+        let advance = game
+            .advance_to(
+                host_at(chosen, 2_000_000_001),
+                &clocks(chosen),
+                chosen.output_origin,
+            )
+            .unwrap();
+        assert!(advance.judge_events.is_empty());
+        assert_eq!(
+            game.judge().state(object),
+            Some(InteractionState::Completed)
+        );
+        assert_eq!((game.score().hits, game.score().misses), (2, 0));
+        let mut pcm = [0.0; 8];
+        let report = mixer.render(&mut pcm).unwrap();
+        assert_eq!(pcm, [0.125, -0.0625, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(report.counters.commands_applied, 1);
+        assert_eq!(report.counters.late_commands, 0);
+        let events = [head.judge_events, tail.judge_events].concat();
+        let hash = game.judge().stable_hash().unwrap();
+        let score = game.score().clone();
+        game.fail();
+        let bytes = game.take_replay().unwrap().unwrap();
+        let file = decode_replay(&bytes, limits).unwrap();
+        assert_eq!(encode_replay(&file, limits).unwrap(), bytes);
+        assert_eq!(decode_chart_setup(&file.header.options).unwrap().2, 3);
+        assert!(
+            matches!(&file.records[0].operation, ReplayOperation::Input(recorded) if recorded.physical == physical)
+        );
+        let replay = reconstruct(&original, file, limits).unwrap();
+        assert_eq!(replay.results(), events);
+        assert_eq!(replay.engine().stable_hash().unwrap(), hash);
+        outcomes.push((score, events, pcm));
+    }
+    assert_eq!(
+        outcomes[0], outcomes[1],
+        "both encodings use the same core Hold behavior and sounded head"
+    );
+}
+
+#[test]
+fn lntype2_section_excludes_crossing_cells_and_replays_actual_early_release_without_extra_sounds() {
+    let seed = 17;
+    let original = prepared_long_type(2, "#00051:01ZZ0001\n", seed);
+    let source = original.source.clone();
+    let start = Timestamp::from_nanos(1_000_000_000);
+    let (selected, selection) =
+        crate::section_start::prepare_at(original, start, PcmLimits::new(256, 1024, 8).unwrap())
+            .unwrap();
+    assert_eq!(
+        (
+            selection.excluded_objects,
+            selection.excluded_crossing_holds
+        ),
+        (1, 1)
+    );
+    assert_eq!(selected.source.notes.len(), 1);
+    assert_eq!(
+        selected.compiled.chart.objects()[0].time.start,
+        Timestamp::from_nanos(3_000_000_000)
+    );
+    assert_eq!(
+        selected.compiled.chart.objects()[0].time.end,
+        Some(Timestamp::from_nanos(4_000_000_000))
+    );
+    let chosen = config();
+    let limits = capture_limits(65536, 16);
+    let (mut game, bank) = StepGameplay::new_at(selected, chosen, bindings(false), start).unwrap();
+    game.configure_capture(limits, seed).unwrap();
+    let initial = game
+        .advance_to(chosen.host_origin, &clocks(chosen), chosen.output_origin)
+        .unwrap();
+    assert_eq!(initial.song_time, Timestamp::from_nanos(749_999_999));
+    assert!(initial.judge_events.is_empty());
+    let head = game
+        .process_input(
+            input(chosen, 77, 4, 1, 2_000_000_000, ButtonState::Down),
+            &clocks(chosen),
+            output_at(chosen, 2_000_000_000),
+        )
+        .unwrap();
+    let release = game
+        .process_input(
+            input(chosen, 77, 4, 2, 2_500_000_000, ButtonState::Up),
+            &clocks(chosen),
+            output_at(chosen, 2_500_000_000),
+        )
+        .unwrap();
+    assert_eq!(release.song_time, Timestamp::from_nanos(3_500_000_000));
+    assert!(matches!(
+        release.judge_events[0].outcome,
+        JudgeOutcome::Miss {
+            reason: MissReason::EarlyRelease
+        }
+    ));
+    assert!(release.audio_commands.is_empty());
+    let after = game
+        .advance_to(
+            host_at(chosen, 3_000_000_001),
+            &clocks(chosen),
+            chosen.output_origin,
+        )
+        .unwrap();
+    assert!(after.judge_events.is_empty());
+    assert_eq!((game.score().hits, game.score().misses), (1, 1));
+    let (mut producer, mut mixer) = make_mixer(bank, chosen);
+    assert_eq!(deliver(&mut game, &mut producer, 8), head.audio_commands);
+    let mut pcm = Vec::new();
+    for _ in 0..2 {
+        let mut block = [0.0; 8];
+        let report = mixer.render(&mut block).unwrap();
+        assert_eq!(report.counters.late_commands, 0);
+        pcm.extend(block);
+    }
+    let mut expected = vec![0.0; 16];
+    expected[10] = 0.125;
+    expected[11] = -0.0625;
+    assert_eq!(pcm, expected);
+    let events = [head.judge_events, release.judge_events].concat();
+    let hash = game.judge().stable_hash().unwrap();
+    game.fail();
+    let file = decode_replay(&game.take_replay().unwrap().unwrap(), limits).unwrap();
+    let (_, recorded_start, recorded_seed) = decode_chart_setup(&file.header.options).unwrap();
+    assert_eq!((recorded_start, recorded_seed), (start, seed));
+    assert_eq!(
+        file.records
+            .iter()
+            .map(|record| record.song_time.as_nanos())
+            .collect::<Vec<_>>(),
+        [749_999_999, 3_000_000_000, 3_500_000_000, 4_000_000_001]
+    );
+    let replay = reconstruct(&source, file, limits).unwrap();
+    assert_eq!(replay.results(), events);
+    assert_eq!(replay.engine().stable_hash().unwrap(), hash);
+}

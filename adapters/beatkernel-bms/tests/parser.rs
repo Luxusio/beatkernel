@@ -427,7 +427,7 @@ fn stops_ignore_measure_length_and_use_same_beat_new_tempo() {
 fn unsupported_and_missing_definitions_are_line_specific() {
     for command in [
         "#SCROLL 2",
-        "#LNTYPE 2",
+        "#LNTYPE 3",
         "#STP 001.0 100",
         "#00031:01",
         "#000SC:01",
