@@ -1,6 +1,32 @@
 // Shared numeric boundaries. No clock acquisition or gameplay simulation.
 const I64_MAX = 9223372036854775807n;
+const I64_MIN = -9223372036854775808n;
 const U64_MAX = 18446744073709551615n;
+const DEFAULT_TIMING = Object.freeze({ earlyNs: 50000000n, lateNs: 50000000n, offsetNs: 0n });
+
+// Decimal user settings use integer arithmetic, independently of host clocks.
+export function parseTimingMilliseconds(value) {
+  if (typeof value !== "string" || value.length > 21) throw new Error("Timing must be decimal milliseconds, at most 21 characters.");
+  const match = /^([+-]?)(\d+)(?:\.(\d{1,6}))?$/.exec(value);
+  if (!match || match[0] !== value) throw new Error("Timing needs integer milliseconds and at most six fractional digits, without spaces or exponents.");
+  const magnitude = BigInt(match[2]) * 1000000n + BigInt((match[3] ?? "").padEnd(6, "0"));
+  const ns = match[1] === "-" ? -magnitude : magnitude;
+  if (ns < I64_MIN || ns > I64_MAX) throw new Error("Timing exceeds signed 64-bit nanoseconds.");
+  return ns;
+}
+export function validateTiming(value = undefined) {
+  if (value === undefined) return DEFAULT_TIMING;
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid live judge timing settings.");
+  const { earlyNs, lateNs, offsetNs } = value;
+  if (typeof earlyNs !== "bigint" || typeof lateNs !== "bigint" || typeof offsetNs !== "bigint"
+    || earlyNs < 0n || earlyNs > I64_MAX || lateNs < 0n || lateNs > I64_MAX
+    || offsetNs < I64_MIN || offsetNs > I64_MAX) throw new Error("Judge windows must be nonnegative and all timing values must fit signed 64-bit nanoseconds.");
+  return Object.freeze({ earlyNs, lateNs, offsetNs });
+}
+export function timingFromMilliseconds(early, late, offset) {
+  return validateTiming({ earlyNs: parseTimingMilliseconds(early), lateNs: parseTimingMilliseconds(late),
+    offsetNs: parseTimingMilliseconds(offset) });
+}
 
 export function millisecondsToNanos(value) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error("Invalid Window performance timestamp.");

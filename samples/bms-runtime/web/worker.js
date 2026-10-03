@@ -1,6 +1,6 @@
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
-import { bindingsFor, millisecondsToNanos, renderedCursor } from "./play-model.mjs";
+import { bindingsFor, validateTiming, millisecondsToNanos, renderedCursor } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { validateSelections, validateOpponentSnapshot } from "./saved-opponents.mjs";
 const { BrowserGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
@@ -478,6 +478,7 @@ async function preparePlay(state, request) {
     rpc(state, request, true);
     if (request.mode !== undefined && request.mode !== "live" && request.mode !== "replay") throw new Error("Invalid playback mode.");
     state.mode = request.mode ?? "live";
+    const timing = state.mode === "live" ? validateTiming(request.timing) : null;
     state.network = multiplayerConfiguration(request.multiplayer, state.mode);
     const opponents = state.mode === "live" && request.opponents !== undefined
       ? validateSelections(request.opponents) : NO_OPPONENTS;
@@ -528,7 +529,7 @@ async function preparePlay(state, request) {
     prepared = null; // A consuming Rust constructor also owns the argument on Err.
     state.game = state.mode === "replay"
       ? new BrowserReplay(moved, 100000000n)
-      : new BrowserGame(moved, 0n, 100000000n, 50000000n, 50000000n, 0n, pairs);
+      : new BrowserGame(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs);
     for (const opponent of opponents) {
       const bytes = await opponent.file.arrayBuffer();
       // A stopped owner may have freed its game during this unabortable read.

@@ -2,10 +2,10 @@ import { snapshotFiles, nanoseconds, seconds } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
 import { RecordsStore } from "./record-store.mjs";
 import { SavedOpponentSelection, opponentLabel, validateOpponentSnapshot } from "./saved-opponents.mjs";
-import { KEY_BINDINGS, bindingsFor, millisecondsToNanos, frameNanos, startProjection, committedStartProjection, presentationPair } from "./play-model.mjs";
+import { KEY_BINDINGS, bindingsFor, timingFromMilliseconds, millisecondsToNanos, frameNanos, startProjection, committedStartProjection, presentationPair } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
-const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results"].map(id => [id, byId(id)]));
+const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset"].map(id => [id, byId(id)]));
 let canvas = byId("canvas");
 let worker = null;
 let observer = null;
@@ -56,6 +56,7 @@ function controls() {
   ui["replay-file"].disabled = !initialized || importing || preparing || playing || busy;
   ui["replay-play"].disabled = ui.play.disabled || selectedReplay === null;
   const recordsDisabled = !initialized || importing || preparing || playing || busy;
+  for (const field of [ui["judge-early"], ui["judge-late"], ui["judge-offset"]]) field.disabled = recordsDisabled;
   ui.records.disabled = ui["records-refresh"].disabled = recordsDisabled;
   ui["records-save"].disabled = recordsDisabled || lastReplay === null;
   ui["records-use"].disabled = ui["records-delete"].disabled = recordsDisabled || !ui.records.value;
@@ -385,6 +386,7 @@ async function play(mode = "live") {
   controls();
   status(mode === "replay" ? "Preparing recorded replay and audio…" : "Preparing playable chart and audio…");
   try {
+    session.timing = mode === "live" ? timingFromMilliseconds(ui["judge-early"].value, ui["judge-late"].value, ui["judge-offset"].value) : null;
     session.multiplayer = mode === "live" && ui.multiplayer.checked === true ? multiplayerConfiguration() : null;
     ui["multiplayer-status"].textContent = session.multiplayer ? "Preparing local audio before connecting…"
       : mode === "replay" ? "Local replay · no multiplayer connection." : "Solo play selected.";
@@ -400,7 +402,7 @@ async function play(mode = "live") {
     if (activePlay !== session || session.phase === "closing") { await session.audio.stop(); return; }
     session.workerStarted = true;
     const source = mode === "replay" ? { mode, replayFile: session.replayFile }
-      : { mode, seed: ui.seed.value, recordReplay: session.recordReplay,
+      : { mode, seed: ui.seed.value, recordReplay: session.recordReplay, timing: session.timing,
         ...(session.multiplayer ? { multiplayer: session.multiplayer } : {}),
         ...(session.opponentSelection ? { opponents: session.opponentSelection } : {}),
         keyPairs: Uint32Array.from(KEY_BINDINGS.flatMap(row => [row[0], row[2]])) };

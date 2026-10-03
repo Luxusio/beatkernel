@@ -34,6 +34,10 @@
         <label>Preview time (seconds) <input id="position" type="text" inputmode="decimal" value="0" maxlength="32" required disabled></label>
         <button id="seek" type="submit" disabled>Show position</button>
       </form>
+      <div class="replay-controls"><label>Early window (ms) <input id="judge-early" type="text" inputmode="decimal" value="50" maxlength="21" disabled></label>
+        <label>Late window (ms) <input id="judge-late" type="text" inputmode="decimal" value="50" maxlength="21" disabled></label>
+        <label>Input offset (ms) <input id="judge-offset" type="text" inputmode="decimal" value="0" maxlength="21" disabled></label></div>
+      <p class="hint">Live judge windows are nonnegative; input offset may be signed. Use up to six decimal places. Replay uses its recorded judge. Saved opponents and multiplayer require compatible timing settings.</p>
       <p><button id="play" type="button" disabled>Play from beginning</button> <button id="stop" type="button" disabled>Stop</button></p>
       <div class="replay-controls"><label><input id="multiplayer" type="checkbox" disabled> Multiplayer live play</label>
         <label>Server <input id="multiplayer-url" type="url" placeholder="https://server.example/room" maxlength="4096" disabled></label>
