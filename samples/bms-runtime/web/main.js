@@ -405,7 +405,7 @@ async function play(mode = "live") {
   const session = { id: ++serial, owner, mode, phase: "preparing", controller: new AbortController(), audio: null, opening: null,
     rpc: null, timer: null, events: [], pressed: new Set(), bindings: [], sequence: 0n,
     tickId: 0, tickPending: null, audioBusy: false, batch: null, startFrame: null,
-    origin: null, lastHost: 0n, lastStatus: 0, stopping: null, renderId: 0, renderPending: null,
+    origin: null, lastHost: 0n, stopping: null, renderId: 0, renderPending: null,
     workerStarted: false, workerReleased: false, workerStop: null, finalScore: null,
     completionReady: false, lastPresentation: null, cleanupError: null,
     recordReplay: mode === "live" && ui.record.checked === true, replay: null, replayError: null, naturalFinishRequested: false,
@@ -689,13 +689,6 @@ function receivePlay(data) {
     clearTimeout(session.renderPending.timer);
     session.renderPending = null;
     session.completionReady = data.completed;
-    if (session.mode === "replay") {
-      if (typeof data.songNs === "bigint") ui.position.value = seconds(data.songNs.toString());
-      if (performance.now() - session.lastStatus >= 100) {
-        session.lastStatus = performance.now();
-        status(`Replay · Hits ${data.hits ?? "unavailable"} · Misses ${data.misses ?? "unavailable"} · Combo ${data.combo ?? "unavailable"}`);
-      }
-    }
     finishPlay(session);
   } else if (data.kind === "play-step-done" && session.phase === "playing") {
     const pending = session.tickPending;
@@ -703,11 +696,6 @@ function receivePlay(data) {
     clearTimeout(pending.timer);
     session.tickPending = null;
     session.lastHost = pending.watermark ?? pending.lastInput;
-    ui.position.value = seconds(data.songNs.toString());
-    if (performance.now() - session.lastStatus >= 100) {
-      session.lastStatus = performance.now();
-      status(`Playing · Hits ${data.hits} · Misses ${data.misses} · Combo ${data.combo}`);
-    }
     if (session.events.length) pumpInput(session);
     finishPlay(session);
   }
