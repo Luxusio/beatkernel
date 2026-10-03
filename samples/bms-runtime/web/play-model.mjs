@@ -63,6 +63,26 @@ export function audioOutputFromFields(latency, ms, rate) {
   return Object.freeze({ latencyHint, sampleRate });
 }
 
+export function audioLimitsFromFields(fields) {
+  const maxima = { queueCapacity: 65536, maxVoices: 4096, pendingCapacity: 4096, maxFrames: 4096, maxCommandsPerRender: 65536 };
+  const names = Object.keys(maxima);
+  if (!fields || typeof fields !== "object" || Array.isArray(fields)) throw new Error("Audio capacities require all five named settings.");
+  const keys = Reflect.ownKeys(fields);
+  if (keys.length !== names.length || keys.some(key => !names.includes(key))) throw new Error("Audio capacities require exactly the five known settings.");
+  const limits = {};
+  for (const name of names) {
+    const value = fields[name];
+    if (typeof value !== "string" || value.length < 1 || value.length > 5) throw new Error(`${name} must be an unsigned decimal integer of at most five digits.`);
+    const match = /^\d+$/.exec(value);
+    const capacity = Number(value);
+    if (!match || match[0] !== value || !Number.isInteger(capacity) || capacity < 1 || capacity > maxima[name]) {
+      throw new Error(`${name} must be an unsigned integer from 1 to ${maxima[name]}.`);
+    }
+    limits[name] = capacity;
+  }
+  return Object.freeze(limits);
+}
+
 export function millisecondsToNanos(value) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error("Invalid Window performance timestamp.");
   const whole = Math.floor(value);

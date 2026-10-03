@@ -38,6 +38,14 @@
         <label>Custom latency (ms) <input id="output-latency-ms" type="text" inputmode="decimal" value="10" maxlength="21" disabled></label>
         <label>Requested output rate (Hz) <input id="output-rate" type="text" inputmode="numeric" value="" placeholder="Automatic" maxlength="10" disabled></label></div>
       <p class="hint">Output preferences apply to live play and replay. Custom latency accepts 0–60000 ms; leave the rate blank for automatic selection. The browser chooses supported settings. Latency is a hint, not a guaranteed buffer size; playback uses the actual opened rate.</p>
+      <details><summary>Advanced audio capacities</summary>
+        <div class="replay-controls"><label>Command queue (1–65536) <input id="audio-queue" type="text" inputmode="numeric" value="4096" maxlength="5" disabled></label>
+          <label>Simultaneous voices (1–4096) <input id="audio-voices" type="text" inputmode="numeric" value="4096" maxlength="5" disabled></label>
+          <label>Pending commands (1–4096) <input id="audio-pending" type="text" inputmode="numeric" value="4096" maxlength="5" disabled></label>
+          <label>Maximum render frames (1–4096) <input id="audio-frames" type="text" inputmode="numeric" value="4096" maxlength="5" disabled></label>
+          <label>Commands per render (1–65536) <input id="audio-commands" type="text" inputmode="numeric" value="4096" maxlength="5" disabled></label></div>
+        <p class="hint">Applies to live play and replay. These are application capacity limits; the browser chooses the callback size. Playback stops with an error if a chart or callback exceeds a limit. The command queue must also hold music prepared before playback starts.</p>
+      </details>
       <div class="replay-controls"><label>Live start (seconds) <input id="live-start" type="text" inputmode="decimal" value="0" maxlength="20" disabled></label></div>
       <p class="hint">Live play starts at this original song position, with a short preroll. Earlier notes and holds already in progress are excluded; overlapping music resumes from its original sound. Replay uses its recorded start.</p>
       <div class="replay-controls"><label>Early window (ms) <input id="judge-early" type="text" inputmode="decimal" value="50" maxlength="21" disabled></label>

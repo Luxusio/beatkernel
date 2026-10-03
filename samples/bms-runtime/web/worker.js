@@ -476,6 +476,9 @@ async function preparePlay(state, request) {
   let prepared = null;
   try {
     rpc(state, request, true);
+    const commandBatchLimit = request.commandBatchLimit === undefined ? 256 : request.commandBatchLimit;
+    if (!integer(commandBatchLimit, 1, 256)) throw new Error("Gameplay command batch limit must be an integer from 1 to 256.");
+    state.commandBatchLimit = commandBatchLimit;
     if (request.mode !== undefined && request.mode !== "live" && request.mode !== "replay") throw new Error("Invalid playback mode.");
     state.mode = request.mode ?? "live";
     const timing = state.mode === "live" ? validateTiming(request.timing) : null;
@@ -593,11 +596,11 @@ function samplePlay(state, request) {
 }
 
 function commandBatch(state) {
-  const batch = state.game.commands(256);
+  const batch = state.game.commands(state.commandBatchLimit);
   state.commandsDrained = batch === null;
   if (batch === null) return null;
   if (!batch || !unsigned(batch.sequence) || batch.sequence === 0n || !Array.isArray(batch.commands)
-    || !integer(batch.commands.length, 1, 256)) throw new Error("Invalid actual gameplay command batch.");
+    || !integer(batch.commands.length, 1, state.commandBatchLimit)) throw new Error("Invalid actual gameplay command batch.");
   for (const command of batch.commands) {
     if (!command || !integer(command.kind, 0, 3) || !unsigned(command.voice) || !unsigned(command.sample)
       || !signed(command.at) || typeof command.gain !== "number" || !Number.isFinite(command.gain)
