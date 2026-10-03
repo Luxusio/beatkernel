@@ -1,8 +1,21 @@
 // Shared numeric boundaries. No clock acquisition or gameplay simulation.
+import { nanoseconds } from "./host_model.mjs";
+
 const I64_MAX = 9223372036854775807n;
 const I64_MIN = -9223372036854775808n;
 const U64_MAX = 18446744073709551615n;
 const DEFAULT_TIMING = Object.freeze({ earlyNs: 50000000n, lateNs: 50000000n, offsetNs: 0n });
+// The original decoder admits 1296 assets; section preparation may add 4096 tails.
+export const PLAY_PCM_SAMPLES = 1296 + 4096;
+
+export function startFromSeconds(value) {
+  if (typeof value !== "string" || value.length > 20 || value.trim() !== value) throw new Error("Enter nonnegative start seconds with up to nine decimal places.");
+  return BigInt(nanoseconds(value));
+}
+export function validateStart(value = 0n) {
+  if (typeof value !== "bigint" || value < 0n || value > I64_MAX) throw new Error("Live section start must be nonnegative signed 64-bit nanoseconds.");
+  return value;
+}
 
 // Decimal user settings use integer arithmetic, independently of host clocks.
 export function parseTimingMilliseconds(value) {

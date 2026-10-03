@@ -1,6 +1,6 @@
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
-import { bindingsFor, validateTiming, millisecondsToNanos, renderedCursor } from "./play-model.mjs";
+import { PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, millisecondsToNanos, renderedCursor } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { validateSelections, validateOpponentSnapshot } from "./saved-opponents.mjs";
 const { BrowserGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
@@ -479,6 +479,7 @@ async function preparePlay(state, request) {
     if (request.mode !== undefined && request.mode !== "live" && request.mode !== "replay") throw new Error("Invalid playback mode.");
     state.mode = request.mode ?? "live";
     const timing = state.mode === "live" ? validateTiming(request.timing) : null;
+    const requestedStart = state.mode === "live" ? validateStart(request.startNs) : null;
     state.network = multiplayerConfiguration(request.multiplayer, state.mode);
     const opponents = state.mode === "live" && request.opponents !== undefined
       ? validateSelections(request.opponents) : NO_OPPONENTS;
@@ -519,12 +520,20 @@ async function preparePlay(state, request) {
         keys.add(pairs[index + 1]);
       }
       bindingsFor(lanes);
-      prepared = library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, 1296);
+      prepared = requestedStart === 0n
+        ? library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, 1296)
+        : library.prepare_chart_at(request.path, request.rate, 2, BigInt(request.seed), requestedStart,
+          64 * 1024 * 1024, 256 * 1024 * 1024, 1296);
     }
+    const actualStart = prepared.start_ns;
+    const startNs = actualStart === undefined && requestedStart === 0n ? 0n : actualStart;
+    if (typeof startNs !== "bigint") throw new Error("Prepared chart omitted its actual song start.");
+    validateStart(startNs);
+    if (state.mode === "live" && startNs !== requestedStart) throw new Error("Prepared live section start differs from its request.");
     const chartLanes = Array.from(prepared.lanes);
     bindingsFor(chartLanes);
     if (state.mode === "live" && chartLanes.some(lane => !lanes.includes(lane))) throw new Error("A prepared lane has no supplied key binding.");
-    const metadata = { title: prepared.title, artist: prepared.artist, notes: prepared.note_count, lanes: chartLanes };
+    const metadata = { title: prepared.title, artist: prepared.artist, notes: prepared.note_count, lanes: chartLanes, startNs };
     const moved = prepared;
     prepared = null; // A consuming Rust constructor also owns the argument on Err.
     state.game = state.mode === "replay"
@@ -550,7 +559,9 @@ async function preparePlay(state, request) {
     }
     state.keys = keys;
     state.prepared = true;
-    reply(state, request, { kind: "prepared", samples: state.game.sample_count(), opponentCount: state.opponentCount, ...metadata });
+    const samples = state.game.sample_count();
+    if (!integer(samples, 0, PLAY_PCM_SAMPLES)) throw new Error("Prepared PCM sample count exceeds the bounded section capacity.");
+    reply(state, request, { kind: "prepared", samples, opponentCount: state.opponentCount, ...metadata });
     state.startRpcId = null;
     scheduleDraw();
   } catch (error) {
