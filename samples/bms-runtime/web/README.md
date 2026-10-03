@@ -626,3 +626,9 @@ recorded section completion and Window/Worker end controls are dependent stages
 still to be connected. Output-component support alone does not make browser
 finite practice available. Genuine Mixer and host/Worklet fixtures are authored;
 execution, generated bindings and full finite-game/replay acceptance remain pending.
+
+
+The section-aware report decoder additionally compares finite telemetry against
+an explicit configured endpoint. It preserves the actual physical context cursor
+and admits the frozen Mixer state at and after the fence. The ordinary decoder
+still requires unlimited output; finite gameplay and page callers remain pending.

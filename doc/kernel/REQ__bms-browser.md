@@ -147,6 +147,26 @@ still require a strictly later logical end when their controls are connected.
 No UI clock authorizes a cutoff. Genuine Mixer and host-boundary fixtures are
 authored; runtime execution and full finite-game/replay acceptance remain pending.
 
+## Configured finite output evidence
+
+Finite output admission uses an immutable configured relative Mixer endpoint,
+never an endpoint inferred from a report. The ordinary decoder and shared
+validator retain unlimited behavior. Their section-aware counterparts accept
+only nonempty reports whose active prefix, frozen playback cursor, paused flag
+and retained physical marker exactly match that configured endpoint.
+For a physical block beginning at F with N frames and configured end E,
+playback begins at min(F,E) and advances min(N,max(E-F,0)) frames. At or after
+F+N reaches E, the report is paused and retains marker E. Zero is a valid
+component endpoint. Empty finite snapshots are not new playback evidence;
+callers use absent evidence instead. A zero sample rate is rejected.
+
+The context cursor continues on the physical grid after the fence. Actual live
+voices and pending commands may remain frozen at the fence; they are not a
+full-song drain barrier. Later reports cannot change that retained state or
+non-render counters. Clock, capacity, overflow and failure evidence checks still
+apply. This evidence component does not yet connect finite gameplay, recording
+metadata or page controls, and does not authorize completion by itself.
+
 ## Known ceiling
 
 Selected-file limits bound retained encoded data, not the entire process.
