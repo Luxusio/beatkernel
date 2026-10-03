@@ -647,3 +647,12 @@ unlimited retry. Live end drafts are optional original-song decimal seconds;
 a blank end keeps ordinary playback. Finite completion captures retain their
 section endpoint. Protocol fixtures are authored but not executed; browser
 output is not yet verified.
+
+
+Gameplay canvas and local/replay score HUDs belong to the graphics Worker. The
+Window does not repeat score/status or song-position DOM updates on step/render
+responses; preview/menu controls and final summaries remain event-driven. Input
+acquisition is intended to support keyboard, touch/pointer and HID through common
+physical-event types, preserving acquisition time and source identity. Browser
+input is currently keyboard-only; touch/HID adapters, opponent HUD migration
+and remaining host-bridge work are pending. Main-thread performance is unmeasured.

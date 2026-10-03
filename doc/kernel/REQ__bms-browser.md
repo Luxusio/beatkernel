@@ -17,6 +17,12 @@ must have explicit lifecycle behavior. An unavailable source is not silently
 replaced with keyboard input. Keyboard-only implementation does not satisfy this
 input scope.
 
+The kernel already defines physical touch, pointer and raw-HID events with
+device/contact metadata. Browser adapters must preserve those semantics and
+enter the common binding/device routing; they must not disguise touch/HID
+reports as keyboard events. The current BrowserGame keyboard entry point with
+a fixed device identity is a compatibility path, not the full input contract.
+
 Only browser-required host work stays on Window: event registration, permission
 and user-gesture activation, minimal lifecycle control and resize/surface handoff.
 Idle/setup/accessibility DOM updates are retained and event-driven. Continuous
@@ -26,9 +32,12 @@ cleanup. This rule concerns application work; browser-internal DOM paint is not
 claimed absent. Measure input delay and main-thread workload before claiming
 performance acceptance.
 
-Current canvas drawing already runs in Worker. Continuous score/status DOM
-updates and parts of the host bridge remain to be moved; touch/HID input routes
-also remain to be implemented and verified.
+Canvas drawing and local/replay score HUD presentation run in Worker. Window
+no longer duplicates their continuous score/status and song-position DOM writes
+on step/render responses; final summaries and preview/menu updates remain
+event-driven. Saved/network opponent DOM presentation and parts of the host
+bridge remain to be moved; touch/pointer/HID input routes also remain to be
+implemented and verified. Source changes do not establish performance acceptance.
 
 ## Finite live section controls
 
