@@ -65,5 +65,6 @@ so an end cannot be silently dropped by an unlimited consumer. Native/offline pa
 record catalogs and multiplayer callers still use those legacy entrypoints
 until their explicit finite owner integration is connected. Portable stepped
 replay and its Rust browser binding use the explicit section-aware APIs;
-Window/Worker endpoint forwarding remains pending. Logical section
-reconstruction alone does not implement finite audio/gameplay or page controls.
+Window/Worker forward the recorded endpoint into finite audio setup after
+independent validation against the actual output rate. Finite live gameplay
+and end controls remain pending; actual browser acceptance remains unverified.

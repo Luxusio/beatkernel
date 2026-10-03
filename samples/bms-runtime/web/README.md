@@ -621,21 +621,25 @@ frame and fills the rest of the callback with silence; context callbacks still
 advance. The relative endpoint starts after Worklet prestart silence, so its
 absolute context position adds the armed start once. Arm refuses overflow.
 
-The supplied page currently uses ordinary finish. Finite live gameplay and
-Window/Worker end controls remain to be connected; the Rust stepped replay
-owner has a section-aware completion path. Output-component support alone does not make browser
-finite practice available. Genuine Mixer and host/Worklet fixtures are authored;
+The supplied page forwards recorded finite replay endpoints into finish(endFrame)
+and uses ordinary finish for unlimited playback. Finite live gameplay and
+end controls remain to be connected; the Rust stepped replay
+owner has a section-aware completion path. Genuine Mixer and host/Worklet fixtures are authored;
 execution, generated bindings and full finite-game/replay acceptance remain pending.
 
 
 The section-aware report decoder additionally compares finite telemetry against
 an explicit configured endpoint. It preserves the actual physical context cursor
 and admits the frozen Mixer state at and after the fence. The ordinary decoder
-still requires unlimited output; finite gameplay and page callers remain pending.
+still requires unlimited output; finite live gameplay remains pending.
 
 
 Finite stepped replay preparation and the Rust browser replay binding now retain
 the recorded endpoint and validate actual finite output reports. Completion
 requires the actual fence, presentation crossing and finished recorded/command
-work. Window/Worker endpoint forwarding and finite live play remain pending;
-the supplied page does not yet offer finite practice.
+work. Window/Worker read and independently validate recorded end/frame metadata
+against the prepared original start and actual output rate, then pass the frozen
+endpoint into AudioHost setup. Unlimited metadata remains omitted and finish()
+retains its argument-free call. Invalid finite metadata fails setup without an
+unlimited retry. Protocol fixtures are authored but not executed. Finite live
+play and end controls remain pending; browser output is not yet verified.

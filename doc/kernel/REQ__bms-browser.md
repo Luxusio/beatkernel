@@ -1,5 +1,23 @@
 # Browser host and shared selected-file preparation
 
+## Recorded finite endpoint forwarding
+
+For finite replay playback, the Worker must read the actual replay owner's
+`end_ns` and `playback_end_frame` getter properties once and forward both in
+preparation metadata. Unlimited replay omits both fields. Worker and Window
+independently validate the paired BigInt values against the original prepared
+start, actual output rate and 100 ms preroll: the frame fence equals
+`ceil((end - start + 100000000) * rate / 1000000000)` and its rounded output
+timestamp fits signed 64-bit nanoseconds. Missing pairs, nulls, invalid types,
+overflow and mismatched fences are refused before audio sample transfer.
+
+The Window retains that setup snapshot and calls `AudioHost.finish(endFrame)`
+for finite replay; unlimited playback retains the argument-free `finish()`.
+Finite setup failures use existing session cleanup without an unlimited retry.
+Live playback must refuse finite preparation metadata until its own finite
+owner is integrated. Finite live controls remain pending. Protocol fixtures
+are authored for later execution; forwarding does not prove browser output.
+
 The browser host belongs to the existing `beatkernel-bms-runtime` application
 crate. The BMS adapter and kernel remain independent of DOM and browser APIs.
 React is not used. Native and browser preparation must call the same chart,
@@ -651,8 +669,9 @@ checks do not prove browser/input/audio acceptance.
 
 Finite replay setup now has a section-aware logical API preserving original
 start/end and branch seed. Browser replay preparation and ownership use the section-aware APIs;
-finite live ownership and Window/Worker endpoint forwarding remain pending.
-This does not enable a finite page recording or playback control by itself.
+Window/Worker forward recorded finite endpoints into AudioHost setup. Finite
+live ownership and end controls remain pending; the page cannot record finite
+live sections yet.
 
 
 ## Finite stepped replay owner
@@ -671,5 +690,6 @@ a late ACK cannot prove execution after the fence. Frozen live voices are
 allowed at the fence. A missing or late
 command still fails; silence alone cannot authorize completion. Browser replay
 bindings retain and expose the endpoint and admit finite report telemetry.
-Window/Worker endpoint forwarding and finite live play remain pending, so this
-owner integration alone does not enable finite practice on the supplied page.
+Window/Worker forward and independently validate that recorded endpoint before
+sample transfer, then configure the actual finite output component. Finite live
+play and end controls remain pending. Browser execution remains unverified.
