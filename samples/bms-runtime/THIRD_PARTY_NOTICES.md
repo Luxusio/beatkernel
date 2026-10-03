@@ -149,3 +149,95 @@ redistributed here; any separately supplied system MIME data retains its own
 terms. arboard's text write selects an explicit text MIME type. Petgraph artwork
 is not distributed by this application. Project-authored code remains MIT and
 the separate optional ASIO SDK distribution policy is unchanged.
+
+## Optional HTTP/3 WebTransport relay
+
+The native `webtransport` feature adds wtransport 0.7.2 with default features
+disabled and explicit `ring` and `quinn` support, plus url 2.5.8 for canonical
+origin parsing. Project-authored adapter code remains MIT. The following
+inventory covers newly resolved lockfile packages, including optional and
+target-specific packages; it does not assert that every package is linked into
+every executable. Distribution inventories must reflect the selected build.
+
+For dual MIT/Apache packages the MIT option is selected. Unicode and BSD terms
+remain applicable to their respective dependencies. Texts are copied verbatim
+from the published archives, except the four upstream revision sources below.
+
+| Dependency | Selected license | Retained text |
+| --- | --- | --- |
+| asn1-rs 0.7.2 | MIT | [license](third-party/asn1-rs-0.7.2-LICENSE-MIT.txt) |
+| asn1-rs-derive 0.6.0 | MIT | [license](third-party/asn1-rs-derive-0.6.0-LICENSE-MIT.txt) |
+| asn1-rs-impl 0.2.0 | MIT | [license](third-party/asn1-rs-impl-0.2.0-LICENSE-MIT.txt) |
+| base64 0.22.1 | MIT | [license](third-party/base64-0.22.1-LICENSE-MIT.txt) |
+| bit-vec 0.9.1 | MIT | [license](third-party/bit-vec-0.9.1-LICENSE-MIT.txt) |
+| block-buffer 0.12.1 | MIT | [license](third-party/block-buffer-0.12.1-LICENSE-MIT.txt) |
+| const-oid 0.10.2 | MIT | [license](third-party/const-oid-0.10.2-LICENSE-MIT.txt) |
+| crypto-common 0.2.2 | MIT | [license](third-party/crypto-common-0.2.2-LICENSE-MIT.txt) |
+| data-encoding 2.11.1 | MIT | [license](third-party/data-encoding-2.11.1-LICENSE.txt) |
+| der-parser 10.0.0 | MIT | [license](third-party/der-parser-10.0.0-LICENSE-MIT.txt) |
+| deranged 0.5.8 | MIT | [license](third-party/deranged-0.5.8-LICENSE-MIT.txt) |
+| digest 0.11.3 | MIT | [license](third-party/digest-0.11.3-LICENSE-MIT.txt) |
+| displaydoc 0.2.7 | MIT | [license](third-party/displaydoc-0.2.7-LICENSE-MIT.txt) |
+| form_urlencoded 1.2.2 | MIT | [license](third-party/form_urlencoded-1.2.2-LICENSE-MIT.txt) |
+| httlib-huffman 0.3.4 | MIT | [license](third-party/httlib-huffman-0.3.4-LICENSE.txt) |
+| hybrid-array 0.4.15 | MIT | [license](third-party/hybrid-array-0.4.15-LICENSE-MIT.txt) |
+| icu_collections 2.3.0 | Unicode-3.0 | [license](third-party/icu_collections-2.3.0-LICENSE.txt) |
+| icu_locale_core 2.3.0 | Unicode-3.0 | [license](third-party/icu_locale_core-2.3.0-LICENSE.txt) |
+| icu_normalizer 2.3.0 | Unicode-3.0 | [license](third-party/icu_normalizer-2.3.0-LICENSE.txt) |
+| icu_normalizer_data 2.3.0 | Unicode-3.0 | [license](third-party/icu_normalizer_data-2.3.0-LICENSE.txt) |
+| icu_properties 2.3.0 | Unicode-3.0 | [license](third-party/icu_properties-2.3.0-LICENSE.txt) |
+| icu_properties_data 2.3.0 | Unicode-3.0 | [license](third-party/icu_properties_data-2.3.0-LICENSE.txt) |
+| icu_provider 2.3.1 | Unicode-3.0 | [license](third-party/icu_provider-2.3.1-LICENSE.txt) |
+| idna 1.1.0 | MIT | [license](third-party/idna-1.1.0-LICENSE-MIT.txt) |
+| idna_adapter 1.2.2 | MIT | [license](third-party/idna_adapter-1.2.2-LICENSE-MIT.txt) |
+| lazy_static 1.5.1 | MIT | [license](third-party/lazy_static-1.5.1-LICENSE-MIT.txt) |
+| litemap 0.8.3 | Unicode-3.0 | [license](third-party/litemap-0.8.3-LICENSE.txt) |
+| minimal-lexical 0.2.1 | MIT | [license](third-party/minimal-lexical-0.2.1-LICENSE-MIT.txt) |
+| nom 7.1.3 | MIT | [license](third-party/nom-7.1.3-LICENSE.txt) |
+| num-bigint 0.4.8 | MIT | [license](third-party/num-bigint-0.4.8-LICENSE-MIT.txt) |
+| num-conv 0.2.2 | MIT | [license](third-party/num-conv-0.2.2-LICENSE-MIT.txt) |
+| num-integer 0.1.47 | MIT | [license](third-party/num-integer-0.1.47-LICENSE-MIT.txt) |
+| octets 0.3.7 | BSD-2-Clause | [license](third-party/octets-0.3.7-COPYING.txt) |
+| oid-registry 0.8.1 | MIT | [license](third-party/oid-registry-0.8.1-LICENSE-MIT.txt) |
+| openssl-probe 0.2.1 | MIT | [license](third-party/openssl-probe-0.2.1-LICENSE-MIT.txt) |
+| pem 3.0.6 | MIT | [license](third-party/pem-3.0.6-LICENSE.md.txt) |
+| potential_utf 0.1.6 | Unicode-3.0 | [license](third-party/potential_utf-0.1.6-LICENSE.txt) |
+| powerfmt 0.2.0 | MIT | [license](third-party/powerfmt-0.2.0-LICENSE-MIT.txt) |
+| rcgen 0.14.10 | MIT | [license](third-party/rcgen-0.14.10-LICENSE.txt) |
+| rusticata-macros 4.1.0 | MIT | [license](third-party/rusticata-macros-4.1.0-LICENSE-MIT.txt) |
+| rustls-native-certs 0.8.4 | MIT | [license](third-party/rustls-native-certs-0.8.4-LICENSE-MIT.txt) |
+| schannel 0.1.29 | MIT | [license](third-party/schannel-0.1.29-LICENSE.md.txt) |
+| security-framework 3.7.0 | MIT | [license](third-party/security-framework-3.7.0-LICENSE-MIT.txt) |
+| security-framework-sys 2.17.0 | MIT | [license](third-party/security-framework-sys-2.17.0-LICENSE-MIT.txt) |
+| sha2 0.11.0 | MIT | [license](third-party/sha2-0.11.0-LICENSE-MIT.txt) |
+| signal-hook-registry 1.4.8 | MIT | [license](third-party/signal-hook-registry-1.4.8-LICENSE-MIT.txt) |
+| stable_deref_trait 1.2.1 | MIT | [license](third-party/stable_deref_trait-1.2.1-LICENSE-MIT.txt) |
+| synstructure 0.13.2 | MIT | [license](third-party/synstructure-0.13.2-LICENSE.txt) |
+| synstructure 0.14.0 | MIT | [license](third-party/synstructure-0.14.0-LICENSE.txt) |
+| time 0.3.55 | MIT | [license](third-party/time-0.3.55-LICENSE-MIT.txt) |
+| time-core 0.1.9 | MIT | [license](third-party/time-core-0.1.9-LICENSE-MIT.txt) |
+| time-macros 0.2.32 | MIT | [license](third-party/time-macros-0.2.32-LICENSE-MIT.txt) |
+| tinystr 0.8.4 | Unicode-3.0 | [license](third-party/tinystr-0.8.4-LICENSE.txt) |
+| tokio-macros 2.7.2 | MIT | [license](third-party/tokio-macros-2.7.2-LICENSE.txt) |
+| tracing-attributes 0.1.31 | MIT | [license](third-party/tracing-attributes-0.1.31-LICENSE.txt) |
+| typenum 1.20.1 | MIT | [license](third-party/typenum-1.20.1-LICENSE-MIT.txt) |
+| url 2.5.8 | MIT | [license](third-party/url-2.5.8-LICENSE-MIT.txt) |
+| utf8_iter 1.0.4 | MIT | [license](third-party/utf8_iter-1.0.4-LICENSE-MIT.txt) |
+| writeable 0.6.4 | Unicode-3.0 | [license](third-party/writeable-0.6.4-LICENSE.txt) |
+| wtransport 0.7.2 | MIT | [license](third-party/wtransport-0.7.2-LICENSE-MIT.txt) |
+| wtransport-proto 0.7.2 | MIT | [license](third-party/wtransport-proto-0.7.2-LICENSE-MIT.txt) |
+| x509-parser 0.18.1 | MIT | [license](third-party/x509-parser-0.18.1-LICENSE-MIT.txt) |
+| yasna 0.6.0 | MIT | [license](third-party/yasna-0.6.0-LICENSE-MIT.txt) |
+| yoke 0.8.3 | Unicode-3.0 | [license](third-party/yoke-0.8.3-LICENSE.txt) |
+| yoke-derive 0.8.4 | Unicode-3.0 | [license](third-party/yoke-derive-0.8.4-LICENSE.txt) |
+| zerofrom 0.1.8 | Unicode-3.0 | [license](third-party/zerofrom-0.1.8-LICENSE.txt) |
+| zerofrom-derive 0.1.8 | Unicode-3.0 | [license](third-party/zerofrom-derive-0.1.8-LICENSE.txt) |
+| zerotrie 0.2.5 | Unicode-3.0 | [license](third-party/zerotrie-0.2.5-LICENSE.txt) |
+| zerovec 0.11.8 | Unicode-3.0 | [license](third-party/zerovec-0.11.8-LICENSE.txt) |
+| zerovec-derive 0.11.6 | Unicode-3.0 | [license](third-party/zerovec-derive-0.11.6-LICENSE.txt) |
+
+The omitted archive license texts come from the packages' published VCS
+revisions: [asn1-rs-impl](https://github.com/rusticata/asn1-rs/blob/a20e5f7319c896737ad0f2557037817b91ad854f/LICENSE-MIT),
+[httlib-huffman](https://github.com/xpepermint/httlib-rs/blob/b7e958aa0f7e0a9a10d8b31f1a782863e85542f8/LICENSE),
+[wtransport and wtransport-proto](https://github.com/BiagioFesta/wtransport/blob/d022a6ad5f6260cb526e06d8ca42d09516ce6440/LICENSE-MIT).
+The optional ASIO SDK licensing and distribution split remains unchanged.

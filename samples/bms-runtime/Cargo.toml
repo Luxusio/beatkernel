@@ -16,6 +16,7 @@ desktop = ["graphics", "dep:winit", "dep:pollster", "dep:arboard"]
 graphics = ["dep:wgpu", "dep:bytemuck", "dep:floem_reactive", "dep:ab_glyph"]
 browser = ["graphics", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
 browser-audio = ["dep:wasm-bindgen", "dep:js-sys"]
+webtransport = ["dep:wtransport", "dep:url", "tokio/sync", "tokio/macros", "tokio/signal", "tokio/io-util"]
 asio-sdk = ["beatkernel-platform/asio-sdk"]
 
 [dependencies]
@@ -48,3 +49,5 @@ windows-sys = { version = "=0.59.0", features = ["Win32_Foundation", "Win32_Grap
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 quinn = { version = "=0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 tokio = { version = "=1.53.1", default-features = false, features = ["rt", "net", "time"] }
+wtransport = { version = "=0.7.2", default-features = false, features = ["ring", "quinn"], optional = true }
+url = { version = "=2.5.8", optional = true }
