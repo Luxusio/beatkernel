@@ -650,6 +650,26 @@ checks do not prove browser/input/audio acceptance.
 
 
 Finite replay setup now has a section-aware logical API preserving original
-start/end and branch seed. Existing browser owners still use the legacy APIs;
-they refuse finite metadata until finite game/replay ownership is integrated.
+start/end and branch seed. Browser replay preparation and ownership use the section-aware APIs;
+finite live ownership and Window/Worker endpoint forwarding remain pending.
 This does not enable a finite page recording or playback control by itself.
+
+
+## Finite stepped replay owner
+
+The portable stepped replay owner accepts recorded finite sections through
+explicit section-aware preparation, visual reconstruction and audio planning.
+Its immutable output endpoint uses the shared start/preroll/ceil-frame mapping.
+Finite output is validated against that configured endpoint. Presentation
+advances only recorded operations and clamps visual song position to the
+original-song end; no terminal operation is synthesized.
+
+Completion requires a retained actual Mixer fence, actual presentation crossing
+the rounded endpoint, finished records, acknowledged command batches and retired
+feeder credits. Actual consumed/applied counts must equal the admitted plan;
+a late ACK cannot prove execution after the fence. Frozen live voices are
+allowed at the fence. A missing or late
+command still fails; silence alone cannot authorize completion. Browser replay
+bindings retain and expose the endpoint and admit finite report telemetry.
+Window/Worker endpoint forwarding and finite live play remain pending, so this
+owner integration alone does not enable finite practice on the supplied page.

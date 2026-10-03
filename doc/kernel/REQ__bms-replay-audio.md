@@ -52,3 +52,22 @@ is added to the recording, and original live wall-pause history is not reproduce
 Assets are preloaded and
 the finite command plan is allocated off-thread; source/log limits do not bound
 all process memory. Tests, examples, native execution, reviews and QA stay deferred.
+
+
+## Explicit finite section planning
+
+`prepare_section_replay`, `ReplayVisual::new_section` and `plan_section_audio`
+accept validated finite metadata. Their legacy counterparts remain strict
+unlimited consumers. Section preparation selects PCM directly from original
+assets; scheduling subtracts original start and adds preroll once. Finite audio
+planning excludes any command whose rounded output target is at or beyond the
+exclusive configured frame fence, including a hit just before the logical end
+that rounds onto that frame. Recorded judge results, input provenance and final
+hash remain unchanged. Finite visual playback never adds a terminal advance.
+
+The stepped owner requires actual render and presentation evidence at the fence,
+finished records, complete command acknowledgements/feeder retirement and
+actual consumed/applied counts equal to the admitted plan. Commands queued after
+the retained fence cannot count as executed; accounting mismatch fails. This
+is a finite fence rather than an idle-voice drain. Native/offline callers remain
+strict until explicitly integrated; runtime acceptance is still pending.

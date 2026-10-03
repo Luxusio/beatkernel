@@ -621,9 +621,9 @@ frame and fills the rest of the callback with silence; context callbacks still
 advance. The relative endpoint starts after Worklet prestart silence, so its
 absolute context position adds the armed start once. Arm refuses overflow.
 
-The supplied page currently uses ordinary finish. Stepped finite gameplay,
-recorded section completion and Window/Worker end controls are dependent stages
-still to be connected. Output-component support alone does not make browser
+The supplied page currently uses ordinary finish. Finite live gameplay and
+Window/Worker end controls remain to be connected; the Rust stepped replay
+owner has a section-aware completion path. Output-component support alone does not make browser
 finite practice available. Genuine Mixer and host/Worklet fixtures are authored;
 execution, generated bindings and full finite-game/replay acceptance remain pending.
 
@@ -632,3 +632,10 @@ The section-aware report decoder additionally compares finite telemetry against
 an explicit configured endpoint. It preserves the actual physical context cursor
 and admits the frozen Mixer state at and after the fence. The ordinary decoder
 still requires unlimited output; finite gameplay and page callers remain pending.
+
+
+Finite stepped replay preparation and the Rust browser replay binding now retain
+the recorded endpoint and validate actual finite output reports. Completion
+requires the actual fence, presentation crossing and finished recorded/command
+work. Window/Worker endpoint forwarding and finite live play remain pending;
+the supplied page does not yet offer finite practice.

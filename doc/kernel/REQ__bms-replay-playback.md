@@ -61,7 +61,9 @@ beyond the end and input records at the end reject; advances at the end and
 valid prefixes remain supported. Original times and input offset apply once.
 
 Legacy tuple decoders and reconstruction entrypoints refuse finite metadata,
-so an end cannot be silently dropped by an unlimited consumer. Native/browser,
+so an end cannot be silently dropped by an unlimited consumer. Native/offline paths,
 record catalogs and multiplayer callers still use those legacy entrypoints
-until their explicit finite owner integration is connected. Logical section
+until their explicit finite owner integration is connected. Portable stepped
+replay and its Rust browser binding use the explicit section-aware APIs;
+Window/Worker endpoint forwarding remains pending. Logical section
 reconstruction alone does not implement finite audio/gameplay or page controls.
