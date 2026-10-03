@@ -54,6 +54,7 @@ async function workerHarness(options = {}) {
   const views = [];
   const games = [];
   const replays = [];
+  const sectionConstructions = [];
   const preparedOwners = [];
   const timers = new Map();
   const timerDelays = new Map();
@@ -86,6 +87,14 @@ async function workerHarness(options = {}) {
       assert.ok(this.files.includes(path));
       this.preparations.push({ path, args });
       return makePrepared(path);
+    }
+    prepare_chart_at(path, rate, channels, seed, startNs, ...limits) {
+      assert.equal(this.frees, 0);
+      assert.ok(this.files.includes(path));
+      this.preparations.push({ path, args: [rate, channels, seed, startNs, ...limits] });
+      const prepared = makePrepared(path);
+      prepared.start_ns = startNs;
+      return prepared;
     }
     prepare_replay_chart(path, bytes, ...args) {
       assert.equal(this.frees, 0);
@@ -125,6 +134,17 @@ async function workerHarness(options = {}) {
     needs_redraw() { return false; }
   }
   class BrowserGame {
+    static new_section(prepared, ...args) {
+      sectionConstructions.push({ prepared, args });
+      if (options.sectionConstructError) {
+        assert.equal(prepared.moved, false);
+        prepared.moved = true;
+        throw new Error(options.sectionConstructError);
+      }
+      const owner = new BrowserGame(prepared, ...args.slice(0, -1));
+      owner.constructedEnd = args.at(-1);
+      return owner;
+    }
     constructor(prepared, ...args) {
       assert.equal(prepared.moved, false);
       prepared.moved = true; // The generated consuming constructor owns even its Err argument.
@@ -133,6 +153,7 @@ async function workerHarness(options = {}) {
       this.args = args;
       this.score = { ...SCORE };
       this.calls = [];
+      this.endpointReads = { end: 0, frame: 0 };
       this.frees = 0;
       this.stops = 0;
       this.disposals = [];
@@ -155,6 +176,14 @@ async function workerHarness(options = {}) {
       games.push(this);
     }
     live() { assert.equal(this.frees, 0, "binding must not be read after free"); }
+    get end_ns() {
+      this.live(); this.endpointReads.end++;
+      return options.gameEndGetter ? options.gameEndGetter(this) : options.gameEnd;
+    }
+    get playback_end_frame() {
+      this.live(); this.endpointReads.frame++;
+      return options.gameFrameGetter ? options.gameFrameGetter(this) : options.gameEndFrame;
+    }
     get song_ns() { this.live(); return this.score.song_ns; }
     get hits() { this.live(); return this.score.hits; }
     get misses() { this.live(); return this.score.misses; }
@@ -215,6 +244,7 @@ async function workerHarness(options = {}) {
       if (options.freeError) throw new Error(options.freeError);
     }
   }
+  if (options.missingSectionConstructor) BrowserGame.new_section = undefined;
   class BrowserReplay extends BrowserGame {
     constructor(prepared, ...args) {
       super(prepared, ...args);
@@ -327,7 +357,7 @@ async function workerHarness(options = {}) {
   });
   await worker.evaluate();
   return {
-    messages, transfers, libraries, preparedOwners, views, games, replays, timers, networks, networkSessions,
+    messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, timers, networks, networkSessions,
     setNetworkNow(value) { assert.ok(value >= networkNow); networkNow = value; },
     post(request) { receive({ data: request }); },
     async send(request) { receive({ data: request }); await flushJobs(); },
@@ -411,6 +441,106 @@ function assertReleased(h, score = SCORE) {
   assert.equal(last.combo, score.combo);
   assert.equal(h.libraries[0].frees, 0, "accepted library remains available after gameplay");
 }
+
+test("finite live ownership uses the consuming static constructor and snapshots actual endpoint metadata before capture and activation", async () => {
+  const startNs = 604800000000001n, endNs = startNs + 1n;
+  const timing = { earlyNs: 7000001n, lateNs: 9000002n, offsetNs: -3n };
+  for (const finite of [false, true]) {
+    const h = await started({
+      startRequest: startRequest({ startNs, rate: 44100, timing, recordReplay: true, ...(finite ? { endNs } : {}) }),
+      gameEndGetter(owner) { assert.equal(owner.endpointReads.end, 1); return finite ? endNs : undefined; },
+      gameFrameGetter(owner) { assert.equal(owner.endpointReads.frame, 1); return finite ? 4411n : undefined; },
+      observeOutput(owner) { owner.score.song_ns = endNs; return true; },
+    });
+    const game = h.games[0], metadata = h.of("play-reply")[0].result;
+    assert.equal(h.sectionConstructions.length, finite ? 1 : 0);
+    assert.deepEqual(h.libraries[0].preparations[1].args,
+      [44100, 2, 18446744073709551615n, startNs, 64 * 1024 * 1024, 256 * 1024 * 1024, 1296]);
+    assert.deepEqual(game.args.slice(0, 5), [0n, 100000000n, 7000001n, 9000002n, -3n]);
+    assert.deepEqual(Array.from(game.args[5]), Array.from(pairs()));
+    if (finite) {
+      const construction = h.sectionConstructions[0];
+      assert.equal(construction.prepared, h.preparedOwners[1]);
+      assert.equal(construction.args.length, 7);
+      assert.equal(construction.args[6], endNs, "end is the final static binding argument, not an input offset");
+      assert.equal(game.constructedEnd, endNs);
+      assert.equal(metadata.endNs, endNs);
+      assert.equal(metadata.endFrame, 4411n);
+    } else {
+      assert.equal(Object.hasOwn(metadata, "endNs"), false);
+      assert.equal(Object.hasOwn(metadata, "endFrame"), false);
+    }
+    assert.equal(metadata.startNs, startNs);
+    assert.deepEqual(game.calls, [["capture", 64 * 1024 * 1024, 1000000]]);
+    await h.rpc("play-sample"); await h.rpc("play-sample");
+    assert.equal((await h.rpc("play-sample")).result.kind, "samples-end");
+    assert.equal((await h.rpc("play-commands")).result, null);
+    await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START });
+    await h.send(step({ events: [{ hostNs: ORIGIN, key: 2, down: true, sequence: 1n }] }));
+    assert.deepEqual(game.calls.find(row => row[0] === "input"), ["input", ORIGIN, 2, true, 1n, 100000000n]);
+    await h.send({ kind: "play-render", playId: 7, renderId: 1, report: renderReport(), presentedNs: 100022676n, presentedHostNs: ORIGIN });
+    assert.equal(h.of("play-render-done").at(-1).completed, true);
+    assert.equal(game.stops, 0, "the returned completion proof still waits for the explicit owner stop");
+    await h.send({ kind: "play-stop", playId: 7, completed: true });
+    assertReleased(h, { ...SCORE, song_ns: endNs });
+    assert.equal(h.of("play-stopped")[0].replayComplete, true);
+    assert.deepEqual(game.disposals, ["stop", "take", "free"]);
+    assert.deepEqual(game.endpointReads, { end: 1, frame: 1 });
+    assert.equal(h.preparedOwners[1].frees, 0);
+  }
+  const replay = await started({ startRequest: replayRequest(replayFile().file, { endNs: "invalid live end", startNs: null }) });
+  assert.equal(replay.sectionConstructions.length, 0);
+  assert.equal(replay.games.length, 0);
+  assert.equal(Object.hasOwn(replay.of("play-reply")[0].result, "endNs"), false);
+  await replay.send({ kind: "play-stop", playId: 7 });
+  assertReleased(replay);
+});
+
+test("live end preflight, consuming-constructor failures and contradictory actual getters cannot retry an unlimited owner", async () => {
+  for (const endNs of [null, 10n, 9n, -1n, 11, "11", 9223372036854775808n]) {
+    const initGate = deferred();
+    const h = await workerHarness({ initGate });
+    await h.send({ kind: "init", canvas: {} });
+    await h.send(startRequest({ startNs: 10n, endNs }));
+    assert.match(h.of("play-reply")[0].error, /section end/i);
+    assert.equal(h.of("ready").length, 0);
+    assert.equal(h.preparedOwners.length, 0);
+    initGate.resolve(); await flushJobs();
+    assert.equal(h.games.length, 0);
+    assert.equal(h.sectionConstructions.length, 0);
+  }
+  for (const options of [
+    {}, { gameEnd: 1n }, { gameEnd: 2n, gameEndFrame: 4801n },
+    { gameEnd: 1n, gameEndFrame: 4800n }, { gameEnd: 1n, gameEndFrame: 4801 },
+    { gameEndGetter() { throw new Error("actual live end getter failed"); } },
+    { gameEnd: 1n, gameFrameGetter() { throw new Error("actual live frame getter failed"); } },
+  ]) {
+    const h = await catalogWorker(options);
+    await h.send(startRequest({ endNs: 1n, recordReplay: true }));
+    assert.equal(h.sectionConstructions.length, 1);
+    assert.equal(h.games.length, 1);
+    const game = h.games[0];
+    assert.equal(game.calls.length, 0, "metadata admission precedes capture, samples and runtime operations");
+    assert.equal(h.of("play-reply").filter(row => row.result?.kind === "prepared").length, 0);
+    assert.equal(h.of("play-error").length, 1);
+    assertReleased(h);
+    assert.deepEqual(game.disposals, ["stop", "free"]);
+    assert.equal(h.preparedOwners[1].frees, 0);
+    assert.ok(game.endpointReads.end <= 1 && game.endpointReads.frame <= 1);
+  }
+  for (const missing of [false, true]) {
+    const h = await catalogWorker(missing ? { missingSectionConstructor: true } : { sectionConstructError: "section constructor refused" });
+    await h.send(startRequest({ endNs: 1n }));
+    assert.equal(h.games.length, 0);
+    assert.equal(h.sectionConstructions.length, missing ? 0 : 1);
+    assert.equal(h.preparedOwners[1].moved, !missing);
+    assert.equal(h.preparedOwners[1].frees, missing ? 1 : 0,
+      "only preparation not passed to a consuming constructor remains a JS-owned resource");
+    assert.equal(h.of("play-error").length, 1);
+    assert.match(h.of("play-error")[0].message, missing ? /finite section ownership/ : /section constructor refused/);
+    assert.equal(h.libraries[0].preparations.length, 2, "no second gameplay preparation or unlimited fallback");
+  }
+});
 
 test("prepared ownership, original-rate PCM transfers and setup batches retain their exact identities", async () => {
   const first = batch(9007199254740993n);

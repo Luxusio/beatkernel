@@ -121,7 +121,7 @@ async function harness(faults = {}) {
     "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete",
     "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status",
     "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
-    "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start",
+    "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end",
     "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate",
     "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands"]) {
     elements.set(id, new Element(id === "chart" || id === "records" ? "select" : id, id));
@@ -135,6 +135,7 @@ async function harness(faults = {}) {
   elements.get("judge-late").value = "50";
   elements.get("judge-offset").value = "0";
   elements.get("live-start").value = "0";
+  elements.get("live-end").value = "";
   elements.get("output-latency").value = "interactive";
   elements.get("output-latency-ms").value = "10";
   elements.get("output-rate").value = "";
@@ -741,7 +742,8 @@ test("finite replay admission and finish failures clean up without transferring 
   for (const fields of [
     { mode: "replay", endNs: 1n }, { mode: "replay", endFrame: 4801n },
     { mode: "replay", endNs: null, endFrame: null }, { mode: "replay", endNs: 1n, endFrame: 4800n },
-    { mode: "replay", endNs: 1n, endFrame: 4801 }, { mode: "live", endNs: 1n, endFrame: 4801n },
+    { mode: "replay", endNs: 1n, endFrame: 4801 },
+    { mode: "live", endNs: 1n, endFrame: 4801n }, // An unlimited live request cannot gain an unrequested endpoint.
   ]) {
     const h = await harness();
     await h.preview();
@@ -1748,6 +1750,158 @@ test("invalid timing never opens audio, setup refusal preserves drafts for retry
   h.click("stop"); await flush(); await h.receive(finalScore(replay.id));
   assert.deepEqual(fields.map(field => field.value), ["bad draft", "-1", "1e100"]);
   assert.ok(fields.every(field => !field.disabled));
+  await h.close();
+});
+
+test("finite live controls capture one pre-gesture section and join input, output and recording before publishing Section completed", async () => {
+  const html = await readFile(new URL("index.html", import.meta.url), "utf8");
+  assert.match(html, /<input\b(?=[^>]*\bid="live-end")(?=[^>]*\btype="text")(?=[^>]*\bvalue="")(?=[^>]*\bmaxlength="20")[^>]*>/);
+  assert.match(html, /original song positions with a short preroll/);
+  assert.match(html, /Leave the end blank[^<]*Replay uses its recorded section/);
+  const opening = deferred(), stopping = deferred(), commands = deferred();
+  const h = await harness({ openGate: opening, stopGate: stopping, commandGate: commands, actualRate: 44100,
+    outputEvidence: { contextTime: 1.4, performanceTime: 1400 } });
+  await h.preview();
+  const startField = h.get("live-start"), endField = h.get("live-end"), worker = h.workers[0];
+  assert.equal(endField.value, "");
+  startField.value = "1"; endField.value = "1.000000001";
+  h.get("output-rate").value = "96000";
+  h.get("record").checked = true;
+  h.click("play");
+  assert.equal(h.opens.length, 1);
+  assert.equal(h.opens[0].gesture, true);
+  assert.equal(h.opens[0].options.contextOptions.sampleRate, 96000);
+  assert.ok(startField.disabled && endField.disabled);
+  startField.value = "2"; endField.value = "3";
+  opening.resolve(h.audio); await flush();
+  const start = worker.last("play-start");
+  assert.equal(start.startNs, 1000000000n);
+  assert.equal(start.endNs, 1000000001n);
+  assert.equal(start.rate, 44100);
+  assert.equal(start.recordReplay, true);
+  let actualEnd = 1000000001n, actualFrame = 4411n;
+  const reads = { end: 0, frame: 0 };
+  worker.emit("message", { data: { kind: "play-reply", playId: start.playId, rpcId: start.rpcId, result: {
+    kind: "prepared", title: "Finite live section", notes: 1, samples: 1, lanes: [0x11], opponentCount: 0, startNs: 1000000000n,
+    get endNs() { assert.equal(++reads.end, 1); return actualEnd; },
+    get endFrame() { assert.equal(++reads.frame, 1); return actualFrame; },
+  } } });
+  await flush();
+  assert.deepEqual(reads, { end: 1, frame: 1 });
+  actualEnd = undefined; actualFrame = undefined;
+  await h.reply(worker.last("play-sample"), { kind: "sample", id: 1n, rate: 96000, channels: 2,
+    pcm: new Float32Array([0.25, -0.25]) });
+  await h.reply(worker.last("play-sample"), { kind: "samples-end" });
+  assert.deepEqual(h.audio.finishArgs, [[4411n]], "the endpoint uses actual output rate while PCM retains its source rate");
+  await h.reply(worker.last("play-commands"), null);
+  assert.equal(worker.last("play-activate").startFrame, 55125n);
+  assert.equal(worker.last("play-activate").hostNs, 1250000000n);
+  await h.reply(worker.last("play-activate"), null);
+  assert.match(h.get("details").textContent, /start 1 s · end 1\.000000001 s/);
+  assert.ok(startField.disabled && endField.disabled);
+  h.setNow(1400); await h.advance(8);
+  const firstTick = worker.last("play-step"), firstReport = worker.last("play-render");
+  h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1408 });
+  h.window.emit("keyup", { code: "KeyZ", repeat: false, timeStamp: 1408 });
+  await h.receive({ kind: "play-render-done", playId: start.playId, renderId: firstReport.renderId, completed: true });
+  assert.equal(worker.messages("play-stop").length, 0);
+  const stepDone = request => h.receive({ kind: "play-step-done", playId: start.playId, tickId: request.tickId,
+    songNs: 1000000001n, hits: 4n, misses: 1n, combo: 3n, preOriginInputs: 0 });
+  await stepDone(firstTick);
+  const captured = worker.last("play-step");
+  assert.deepEqual(captured.events, [
+    { hostNs: 1408000000n, key: 2, down: true, sequence: 1n },
+    { hostNs: 1408000000n, key: 2, down: false, sequence: 2n },
+  ]);
+  await h.receive({ kind: "play-commands", playId: start.playId, batch: { sequence: 9n, commands: [command(3n)] } });
+  await stepDone(captured);
+  assert.equal(worker.messages("play-stop").length, 0);
+  assert.equal(worker.messages("play-ack").length, 0);
+  commands.resolve(); await flush();
+  assert.equal(worker.last("play-ack").sequence, 9n);
+  assert.equal(worker.last("play-ack").admitted, 1);
+  assert.equal(worker.messages("play-stop").length, 0, "new input and commands invalidate the earlier completion receipt");
+  await h.advance(8);
+  await h.receive({ kind: "play-render-done", playId: start.playId, renderId: worker.last("play-render").renderId, completed: true });
+  assert.equal(worker.messages("play-stop").length, 0, "the final actual input watermark must still join");
+  await stepDone(worker.last("play-step"));
+  assert.equal(worker.last("play-stop").completed, true);
+  await h.receive(finalScore(start.playId, { songNs: 1000000001n, hits: 4n, combo: 3n,
+    replay: Uint8Array.from([1, 2, 3]), replayComplete: true, replayError: null }));
+  assert.equal(h.get("export").disabled, true);
+  assert.equal(endField.disabled, true);
+  stopping.resolve(); await flush();
+  assert.match(h.get("status").textContent, /Section completed\..*Hits 4/);
+  assert.equal(h.get("export").disabled, false);
+  assert.match(h.get("export").textContent, /complete/);
+  assert.ok(!startField.disabled && !endField.disabled);
+  assert.equal(endField.value, "3");
+  assert.deepEqual(reads, { end: 1, frame: 1 });
+  await h.close();
+});
+
+test("invalid or mismatched live ends preserve drafts for retry and manual prefixes while replay uses its recorded section", async () => {
+  const h = await harness();
+  await h.preview();
+  const startField = h.get("live-start"), endField = h.get("live-end"), worker = h.workers[0];
+  startField.value = "1";
+  for (const end of [" ", "1", "0.999999999", "-1", "2.0000000001", "9223372034.854775808"]) {
+    endField.value = end;
+    h.click("play"); await flush();
+    assert.equal(h.opens.length, 0);
+    assert.equal(worker.messages("play-start").length, 0);
+    assert.equal(endField.value, end);
+    assert.equal(endField.disabled, false);
+    assert.equal(h.get("status").dataset.error, "true");
+  }
+  endField.value = "2";
+  for (const endpoint of [{}, { endNs: 2000000001n, endFrame: 52801n }, { endNs: 2000000000n, endFrame: 52801n }]) {
+    const start = await h.begin();
+    await h.reply(start, { kind: "prepared", title: "Wrong finite metadata", samples: 1, notes: 1,
+      lanes: [0x11], opponentCount: 0, startNs: 1000000000n, ...endpoint });
+    assert.equal(worker.messages("play-sample").length, 0);
+    assert.deepEqual(h.audio.finishArgs, []);
+    assert.deepEqual(h.audio.arms, []);
+    assert.equal(worker.last("play-stop").completed, false);
+    await h.receive(finalScore(start.playId));
+    assert.equal(endField.value, "2");
+    assert.equal(endField.disabled, false);
+  }
+  h.get("record").checked = true;
+  const start = await h.begin();
+  assert.equal(start.endNs, 2000000000n);
+  await h.reply(start, { kind: "prepared", title: "Retried finite section", samples: 0, notes: 1,
+    lanes: [0x11], opponentCount: 0, startNs: 1000000000n, endNs: 2000000000n, endFrame: 52800n });
+  await h.reply(worker.last("play-sample"), { kind: "samples-end" });
+  assert.deepEqual(h.audio.finishArgs, [[52800n]]);
+  await h.reply(worker.last("play-commands"), null);
+  await h.reply(worker.last("play-activate"), null);
+  h.click("stop"); await flush();
+  assert.equal(worker.last("play-stop").completed, false);
+  await h.receive(finalScore(start.playId, { replay: Uint8Array.from([4, 5]), replayComplete: false, replayError: null }));
+  assert.match(h.get("export").textContent, /prefix/);
+  assert.doesNotMatch(h.get("status").textContent, /Section completed/);
+  assert.equal(endField.value, "2");
+  const file = selectedRecording();
+  chooseRecording(h, [file.file]);
+  startField.value = "bad live start"; endField.value = "bad live end";
+  h.get("judge-early").value = "bad live judge";
+  const replay = await h.begin("replay");
+  assert.equal(Object.hasOwn(replay, "startNs"), false);
+  assert.equal(Object.hasOwn(replay, "endNs"), false);
+  assert.equal(Object.hasOwn(replay, "timing"), false);
+  assert.equal(h.opens.at(-1).gesture, true);
+  assert.equal(file.reads, 0);
+  await h.reply(replay, { kind: "prepared", mode: "replay", title: "Recorded finite section", samples: 0, notes: 1,
+    lanes: [0x11], opponentCount: 0, startNs: 9000000000n, endNs: 9000000001n, endFrame: 4801n });
+  await h.reply(worker.last("play-sample"), { kind: "samples-end" });
+  assert.deepEqual(h.audio.finishArgs, [[4801n]]);
+  await h.reply(worker.last("play-commands"), null);
+  await h.reply(worker.last("play-activate"), null);
+  assert.match(h.get("details").textContent, /start 9 s · recorded end 9\.000000001 s/);
+  h.click("stop"); await flush(); await h.receive(finalScore(replay.playId));
+  assert.equal(endField.value, "bad live end");
+  assert.equal(endField.disabled, false);
   await h.close();
 });
 

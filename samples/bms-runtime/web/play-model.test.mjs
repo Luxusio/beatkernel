@@ -6,12 +6,51 @@ import {
   presentationPoint, presentationPair, reportWord, renderedCursor,
   KEY_BINDINGS, KEY_CHOICES, snapshotBindings, bindingsFor,
   parseTimingMilliseconds, timingFromMilliseconds, validateTiming,
-  PLAY_PCM_SAMPLES, startFromSeconds, validateStart,
+  PLAY_PCM_SAMPLES, startFromSeconds, validateStart, validateEnd, sectionFromSeconds,
   audioOutputFromFields, audioLimitsFromFields, replayOutputFromMetadata,
 } from "./play-model.mjs";
 
 const U64_MAX = 18446744073709551615n;
 const I64_MAX = 9223372036854775807n;
+
+test("live section snapshots preserve exact original-song decimal endpoints and optional unlimited bounds", () => {
+  for (const [start, end, expected] of [
+    ["0", "", { startNs: 0n, endNs: undefined }],
+    ["1", "1.000000001", { startNs: 1000000000n, endNs: 1000000001n }],
+    ["604800.000000001", "604800.000000002", { startNs: 604800000000001n, endNs: 604800000000002n }],
+    ["9223372034.854775806", "9223372034.854775807",
+      { startNs: I64_MAX - 2000000001n, endNs: I64_MAX - 2000000000n }],
+  ]) {
+    const section = sectionFromSeconds(start, end);
+    assert.deepEqual(section, expected);
+    assert.ok(Object.isFrozen(section));
+    assert.notEqual(sectionFromSeconds(start, end), section);
+    assert.throws(() => { section.endNs = 0n; }, TypeError);
+    assert.deepEqual(section, expected);
+  }
+  assert.equal(validateEnd(I64_MAX), undefined);
+  assert.equal(validateEnd(I64_MAX - 1n, I64_MAX), I64_MAX,
+    "binding metadata can use the full i64 range independently of the text field's existing reserve");
+  assert.equal(validateEnd(0n, 1n), 1n);
+});
+
+test("live end admission rejects lossy types, reversed or empty sections and malformed text without an unlimited fallback", () => {
+  for (const start of [undefined, null, 0, "0", -1n, I64_MAX + 1n]) {
+    assert.throws(() => validateEnd(start));
+    assert.throws(() => validateEnd(start, 1n));
+  }
+  for (const end of [null, 1, "1", 1.5, NaN, Infinity, false, -1n, 0n, 1n, I64_MAX + 1n]) {
+    assert.throws(() => validateEnd(1n, end));
+  }
+  for (const end of [undefined, null, 1, " ", "\n", "0", "1", "0.999999999", "+2", "-2", "2 ",
+    "2\n", "2.", ".2", "2e0", "２", "2.0000000001", "9223372034.854775808", "0".repeat(21)]) {
+    assert.throws(() => sectionFromSeconds("1", end), String(end));
+  }
+  for (const start of [undefined, null, "", " 0", "0\n", "-0", "+0", "0.0000000001"]) {
+    assert.throws(() => sectionFromSeconds(start, ""));
+  }
+  assert.deepEqual(sectionFromSeconds("1", ""), { startNs: 1000000000n, endNs: undefined });
+});
 
 test("recorded replay endpoints preserve exact original starts and upward frame boundaries in immutable snapshots", () => {
   const unlimited = replayOutputFromMetadata(0n, undefined, undefined, 48000);
