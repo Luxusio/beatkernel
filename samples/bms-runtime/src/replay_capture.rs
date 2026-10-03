@@ -17,6 +17,10 @@ use std::{fs::OpenOptions, io::Write, path::Path};
 pub enum CaptureError {
     /// Practice start must be a nonnegative original-song timestamp.
     InvalidStart,
+    /// A finite practice end must be strictly later than its start.
+    InvalidEnd,
+    /// An accepted operation lies beyond the immutable section boundary.
+    OutsideSection,
     /// The existing logical replay validator rejected the operation/setup.
     Replay(ReplayError),
     /// The existing bounded durable codec rejected data or capacity.
@@ -43,6 +47,10 @@ impl std::fmt::Display for CaptureError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidStart => write!(f, "BMS replay practice start must be nonnegative"),
+            Self::InvalidEnd => write!(f, "BMS replay practice end must be later than its start"),
+            Self::OutsideSection => {
+                write!(f, "BMS replay operation lies outside its finite section")
+            }
             Self::Replay(error) => write!(f, "BMS replay capture: {error}"),
             Self::Codec(error) => write!(f, "BMS replay capture: {error}"),
             Self::Io(error) => write!(f, "BMS replay output: {error}"),
@@ -61,8 +69,24 @@ pub fn setup_header(
     start: Timestamp,
     chart_seed: u64,
 ) -> Result<ReplayHeader, CaptureError> {
+    setup_section_header(judge, domain, limits, start, chart_seed, None)
+}
+
+/// Canonical pristine setup with an optional exclusive original-song input end.
+/// Finite sections use v4; unlimited sections retain their exact legacy bytes.
+pub fn setup_section_header(
+    judge: &JudgeEngine,
+    domain: ClockDomainId,
+    limits: ReplayCodecLimits,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+) -> Result<ReplayHeader, CaptureError> {
     if start.as_nanos() < 0 {
         return Err(CaptureError::InvalidStart);
+    }
+    if end.is_some_and(|end| end <= start) {
+        return Err(CaptureError::InvalidEnd);
     }
     if judge.effective_song_time().is_some() {
         return Err(ReplayError::AlreadyStarted.into());
@@ -71,7 +95,9 @@ pub fn setup_header(
     let mut identity = b"bms-judge-setup/v1:".to_vec();
     identity.extend_from_slice(&hash.to_le_bytes());
     let profile = judge.profile();
-    let (prefix, start_bytes): (&[u8], usize) = if chart_seed != 0 {
+    let (prefix, start_bytes): (&[u8], usize) = if end.is_some() {
+        (b"bms-judge-profile/v4:", 24)
+    } else if chart_seed != 0 {
         (b"bms-judge-profile/v3:", 16)
     } else if start == Timestamp::ZERO {
         (b"bms-judge-profile/v1:", 0)
@@ -96,11 +122,14 @@ pub fn setup_header(
     options
         .try_reserve_exact(options_size - options.len())
         .map_err(|_| ReplayCodecError::AllocationFailed)?;
-    if chart_seed != 0 {
+    if end.is_some() || chart_seed != 0 {
         options.extend_from_slice(&chart_seed.to_le_bytes());
     }
-    if chart_seed != 0 || start != Timestamp::ZERO {
+    if end.is_some() || chart_seed != 0 || start != Timestamp::ZERO {
         options.extend_from_slice(&start.as_nanos().to_le_bytes());
+    }
+    if let Some(end) = end {
+        options.extend_from_slice(&end.as_nanos().to_le_bytes());
     }
     options.extend_from_slice(&profile.input_offset().as_nanos().to_le_bytes());
     options.extend_from_slice(
@@ -132,6 +161,7 @@ pub struct LiveReplayCapture {
     limits: ReplayCodecLimits,
     header_bytes: usize,
     encoded_bytes: usize,
+    end: Option<Timestamp>,
 }
 impl LiveReplayCapture {
     /// Fingerprints a pristine compiled judge setup, including its profile.
@@ -167,7 +197,20 @@ impl LiveReplayCapture {
         start: Timestamp,
         chart_seed: u64,
     ) -> Result<Self, CaptureError> {
-        let header = setup_header(judge, domain, limits, start, chart_seed)?;
+        Self::new_section(judge, domain, limits, start, chart_seed, None)
+    }
+
+    /// Capture accepted operations through a fixed section end without adding
+    /// a final advance. Bound input excludes the end; an advance may equal it.
+    pub fn new_section(
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        limits: ReplayCodecLimits,
+        start: Timestamp,
+        chart_seed: u64,
+        end: Option<Timestamp>,
+    ) -> Result<Self, CaptureError> {
+        let header = setup_section_header(judge, domain, limits, start, chart_seed, end)?;
         let header_bytes =
             encode_replay(&ReplayFile::new(header.clone(), Vec::new()), limits)?.len();
         Ok(Self {
@@ -175,6 +218,7 @@ impl LiveReplayCapture {
             limits,
             header_bytes,
             encoded_bytes: header_bytes,
+            end,
         })
     }
 
@@ -192,6 +236,11 @@ impl LiveReplayCapture {
             .ok_or(ReplayCodecError::LengthOverflow)?;
         if count == 0 {
             return Ok(());
+        }
+        if self.end.is_some_and(|end| {
+            report.song_time > end || (report.song_time == end && !report.bound_inputs.is_empty())
+        }) {
+            return Err(CaptureError::OutsideSection);
         }
         let total = self
             .records()

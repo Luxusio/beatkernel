@@ -1,10 +1,12 @@
 //! Application identity checks and logical reconstruction of captured BMS play.
 
-use crate::replay_capture::{CaptureError, LiveReplayCapture};
+use crate::replay_capture::{CaptureError, setup_section_header};
+#[cfg(test)]
+use crate::replay_capture::LiveReplayCapture;
 use beatkernel::{
     judge::{JudgeEngine, JudgeError, JudgeGrade, JudgeProfile, JudgeWindow},
     replay::{
-        ReplayError, ReplaySession,
+        ReplayError, ReplayOperation, ReplaySession,
         codec::{ReplayCodecError, ReplayCodecLimits, ReplayFile, decode_replay, encode_replay},
     },
     time::{Duration, Timestamp},
@@ -108,7 +110,16 @@ pub fn read_replay(
     Ok(decode_replay(&bytes, limits)?)
 }
 
-/// Decodes the exact versioned profile captured by the BMS runtime.
+/// Explicit recorded setup, including the finite end that legacy consumers lack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordedSetup {
+    pub profile: JudgeProfile,
+    pub start: Timestamp,
+    pub chart_seed: u64,
+    pub end: Option<Timestamp>,
+}
+
+/// Decodes the exact unlimited versioned profile captured by the BMS runtime.
 ///
 /// Extent checks precede window allocation. The resulting profile applies its
 /// signed offset once through JudgeEngine, never by editing recorded times.
@@ -125,34 +136,72 @@ pub fn decode_setup(options: &[u8]) -> Result<(JudgeProfile, Timestamp), Playbac
 
 /// Decodes canonical profile, original-song start and BMS branch seed.
 /// Legacy v1/v2 imply seed zero; v3 requires a nonzero seed and nonnegative start.
+/// Finite v4 is refused because this tuple cannot preserve its endpoint.
 pub fn decode_chart_setup(options: &[u8]) -> Result<(JudgeProfile, Timestamp, u64), PlaybackError> {
-    let (bytes, start, chart_seed) =
-        if let Some(bytes) = options.strip_prefix(b"bms-judge-profile/v1:") {
-            (bytes, Timestamp::ZERO, 0)
-        } else if let Some(bytes) = options.strip_prefix(b"bms-judge-profile/v2:") {
-            let encoded = bytes
-                .get(..8)
-                .ok_or(PlaybackError::Metadata("truncated section start"))?;
-            let start = i64::from_le_bytes(encoded.try_into().expect("checked section start"));
-            if start <= 0 {
-                return Err(PlaybackError::Metadata("v2 section start must be positive"));
-            }
-            (&bytes[8..], Timestamp::from_nanos(start), 0)
-        } else if let Some(bytes) = options.strip_prefix(b"bms-judge-profile/v3:") {
-            let encoded = bytes
-                .get(..16)
-                .ok_or(PlaybackError::Metadata("truncated chart seed/start"))?;
-            let seed = u64::from_le_bytes(encoded[..8].try_into().expect("checked chart seed"));
-            let start = i64::from_le_bytes(encoded[8..].try_into().expect("checked section start"));
-            if seed == 0 || start < 0 {
-                return Err(PlaybackError::Metadata(
-                    "v3 requires nonzero chart seed and nonnegative start",
-                ));
-            }
-            (&bytes[16..], Timestamp::from_nanos(start), seed)
-        } else {
-            return Err(PlaybackError::Metadata("unsupported profile schema"));
-        };
+    let setup = decode_recorded_setup(options, false)?;
+    Ok((setup.profile, setup.start, setup.chart_seed))
+}
+
+/// Decodes canonical legacy or finite v4 metadata without dropping section bounds.
+pub fn decode_section_setup(options: &[u8]) -> Result<RecordedSetup, PlaybackError> {
+    decode_recorded_setup(options, true)
+}
+
+fn decode_recorded_setup(
+    options: &[u8],
+    allow_finite: bool,
+) -> Result<RecordedSetup, PlaybackError> {
+    let (bytes, start, chart_seed, end) = if let Some(bytes) =
+        options.strip_prefix(b"bms-judge-profile/v1:")
+    {
+        (bytes, Timestamp::ZERO, 0, None)
+    } else if let Some(bytes) = options.strip_prefix(b"bms-judge-profile/v2:") {
+        let encoded = bytes
+            .get(..8)
+            .ok_or(PlaybackError::Metadata("truncated section start"))?;
+        let start = i64::from_le_bytes(encoded.try_into().expect("checked section start"));
+        if start <= 0 {
+            return Err(PlaybackError::Metadata("v2 section start must be positive"));
+        }
+        (&bytes[8..], Timestamp::from_nanos(start), 0, None)
+    } else if let Some(bytes) = options.strip_prefix(b"bms-judge-profile/v3:") {
+        let encoded = bytes
+            .get(..16)
+            .ok_or(PlaybackError::Metadata("truncated chart seed/start"))?;
+        let seed = u64::from_le_bytes(encoded[..8].try_into().expect("checked chart seed"));
+        let start = i64::from_le_bytes(encoded[8..].try_into().expect("checked section start"));
+        if seed == 0 || start < 0 {
+            return Err(PlaybackError::Metadata(
+                "v3 requires nonzero chart seed and nonnegative start",
+            ));
+        }
+        (&bytes[16..], Timestamp::from_nanos(start), seed, None)
+    } else if let Some(bytes) = options.strip_prefix(b"bms-judge-profile/v4:") {
+        if !allow_finite {
+            return Err(PlaybackError::Metadata(
+                "finite replay requires a section-aware consumer",
+            ));
+        }
+        let encoded = bytes
+            .get(..24)
+            .ok_or(PlaybackError::Metadata("truncated chart seed/start/end"))?;
+        let seed = u64::from_le_bytes(encoded[..8].try_into().expect("checked chart seed"));
+        let start = i64::from_le_bytes(encoded[8..16].try_into().expect("checked section start"));
+        let end = i64::from_le_bytes(encoded[16..].try_into().expect("checked section end"));
+        if start < 0 || end <= start {
+            return Err(PlaybackError::Metadata(
+                "v4 requires nonnegative start and a later end",
+            ));
+        }
+        (
+            &bytes[24..],
+            Timestamp::from_nanos(start),
+            seed,
+            Some(Timestamp::from_nanos(end)),
+        )
+    } else {
+        return Err(PlaybackError::Metadata("unsupported profile schema"));
+    };
     let fixed = bytes
         .get(..16)
         .ok_or(PlaybackError::Metadata("truncated profile header"))?;
@@ -195,11 +244,12 @@ pub fn decode_chart_setup(options: &[u8]) -> Result<(JudgeProfile, Timestamp, u6
             )),
         });
     }
-    Ok((
-        JudgeProfile::new(windows, Duration::from_nanos(offset))?,
+    Ok(RecordedSetup {
+        profile: JudgeProfile::new(windows, Duration::from_nanos(offset))?,
         start,
         chart_seed,
-    ))
+        end,
+    })
 }
 
 /// Checks the entire log and application setup before executing any operation.
@@ -214,7 +264,26 @@ pub fn reconstruct(
     file: ReplayFile,
     limits: ReplayCodecLimits,
 ) -> Result<ReplaySession, PlaybackError> {
-    let judge = validate_setup(source, &file, limits)?;
+    reconstruct_with_section(source, file, limits, false)
+}
+
+/// Reconstruct a validated finite or unlimited accepted prefix using the core judge.
+/// No operation is synthesized at the configured end or at the end of the log.
+pub fn reconstruct_section(
+    source: &BmsChart,
+    file: ReplayFile,
+    limits: ReplayCodecLimits,
+) -> Result<ReplaySession, PlaybackError> {
+    reconstruct_with_section(source, file, limits, true)
+}
+
+fn reconstruct_with_section(
+    source: &BmsChart,
+    file: ReplayFile,
+    limits: ReplayCodecLimits,
+    allow_finite: bool,
+) -> Result<ReplaySession, PlaybackError> {
+    let judge = validate_recorded_setup(source, &file, limits, allow_finite)?;
     Ok(ReplaySession::from_records(
         file.header,
         judge,
@@ -229,6 +298,26 @@ pub fn validate_setup(
     file: &ReplayFile,
     limits: ReplayCodecLimits,
 ) -> Result<JudgeEngine, PlaybackError> {
+    validate_recorded_setup(source, file, limits, false)
+}
+
+/// Validate an entire canonical section log and rebuild its pristine judge.
+/// Selects original heads from the recorded start; the end bounds operations,
+/// without manufacturing misses for unplayed chart objects after that boundary.
+pub fn validate_section_setup(
+    source: &BmsChart,
+    file: &ReplayFile,
+    limits: ReplayCodecLimits,
+) -> Result<JudgeEngine, PlaybackError> {
+    validate_recorded_setup(source, file, limits, true)
+}
+
+fn validate_recorded_setup(
+    source: &BmsChart,
+    file: &ReplayFile,
+    limits: ReplayCodecLimits,
+    allow_finite: bool,
+) -> Result<JudgeEngine, PlaybackError> {
     // Also validates files assembled directly by callers, not only decoded logs.
     encode_replay(file, limits)?;
     if file.runtime_version != env!("CARGO_PKG_VERSION") {
@@ -240,18 +329,35 @@ pub fn validate_setup(
     if file.header.seed != 0 {
         return Err(PlaybackError::IdentityMismatch("BMS rule seed"));
     }
-    let (profile, start, chart_seed) = decode_chart_setup(&file.header.options)?;
+    let RecordedSetup {
+        profile,
+        start,
+        chart_seed,
+        end,
+    } = decode_recorded_setup(&file.header.options, allow_finite)?;
+    if end.is_some_and(|end| {
+        file.records.iter().any(|record| {
+            record.song_time > end
+                || (record.song_time == end
+                    && matches!(&record.operation, ReplayOperation::Input(_)))
+        })
+    }) {
+        return Err(PlaybackError::Metadata(
+            "recorded operation lies outside its finite section",
+        ));
+    }
     let selected = crate::section_start::source_at(source, start)?;
     let compiled = selected.compile()?;
     let judge = JudgeEngine::new(compiled.chart, selected.rules(), profile)?;
-    let expected = LiveReplayCapture::new_at_with_chart_seed(
+    let expected = setup_section_header(
         &judge,
         file.header.normalized_clock,
         limits,
         start,
         chart_seed,
+        end,
     )?;
-    if expected.header() != &file.header {
+    if expected != file.header {
         return Err(PlaybackError::IdentityMismatch(
             "compiled judge setup/profile",
         ));
