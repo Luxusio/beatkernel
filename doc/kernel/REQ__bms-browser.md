@@ -1,5 +1,55 @@
 # Browser host and shared selected-file preparation
 
+## Performance-first browser thread ownership
+
+The Window main thread must do as little application rendering as possible.
+Continuous gameplay rendering, including HUD and score presentation, belongs to
+the graphics/game Worker through OffscreenCanvas. Do not assemble scenes, draw
+gameplay canvases, update a DOM gameplay HUD each frame, judge inputs, decode
+assets or serialize gameplay/network data on the input acquisition thread.
+
+The Window collects supported keyboard, touch/pointer, HID and other physical
+input events and forwards a bounded, ordered prefix through the common input
+abstraction. Preserve acquisition timestamps, source/device/contact identities
+and original clock provenance; Worker arrival time cannot replace event time.
+Permission refusal, cancellation, disconnect, focus loss and released contacts
+must have explicit lifecycle behavior. An unavailable source is not silently
+replaced with keyboard input. Keyboard-only implementation does not satisfy this
+input scope.
+
+Only browser-required host work stays on Window: event registration, permission
+and user-gesture activation, minimal lifecycle control and resize/surface handoff.
+Idle/setup/accessibility DOM updates are retained and event-driven. Continuous
+game/audio message orchestration should remain with Worker/Worklet wherever the
+browser permits, preserving actual output evidence, command ACKs and joined
+cleanup. This rule concerns application work; browser-internal DOM paint is not
+claimed absent. Measure input delay and main-thread workload before claiming
+performance acceptance.
+
+Current canvas drawing already runs in Worker. Continuous score/status DOM
+updates and parts of the host bridge remain to be moved; touch/HID input routes
+also remain to be implemented and verified.
+
+## Finite live section controls
+
+Live start and optional end use original-song decimal seconds with at most nine
+fractional digits. A blank end retains full-song playback; a configured end must
+strictly follow the start and fit signed 64-bit nanoseconds. Snapshot both before
+opening audio, retain drafts after Stop/failure, and lock edits with existing
+preparation/playback/import/record operation gates. Replay uses recorded section
+metadata and ignores live section drafts.
+
+Finite live setup must call the explicit BrowserGame section constructor backed
+by StepGameplay. Worker and Window validate actual end/frame getters against
+the requested section, prepared start, actual output rate and 100 ms preroll
+before transferring samples. Missing/mismatched finite metadata fails setup with
+no unlimited retry. Actual section completion uses the common logical/render/
+presentation/command evidence and existing lifecycle barriers, then displays
+Section completed. A capture marked complete means its configured section
+finished; Stop/failure remains a prefix. Its canonical bytes retain the end.
+Pressed-lane display stops adopting input suppressed by the actual endpoint
+report. These source contracts still need real browser/audio acceptance.
+
 ## Recorded finite endpoint forwarding
 
 For finite replay playback, the Worker must read the actual replay owner's
@@ -14,8 +64,8 @@ overflow and mismatched fences are refused before audio sample transfer.
 The Window retains that setup snapshot and calls `AudioHost.finish(endFrame)`
 for finite replay; unlimited playback retains the argument-free `finish()`.
 Finite setup failures use existing session cleanup without an unlimited retry.
-Live playback must refuse finite preparation metadata until its own finite
-owner is integrated. Finite live controls remain pending. Protocol fixtures
+Live playback requires actual finite preparation metadata to agree with its
+requested endpoint; unlimited requests refuse unexpected finite metadata. Protocol fixtures
 are authored for later execution; forwarding does not prove browser output.
 
 The browser host belongs to the existing `beatkernel-bms-runtime` application
@@ -669,9 +719,9 @@ checks do not prove browser/input/audio acceptance.
 
 Finite replay setup now has a section-aware logical API preserving original
 start/end and branch seed. Browser replay preparation and ownership use the section-aware APIs;
-Window/Worker forward recorded finite endpoints into AudioHost setup. Finite
-live ownership and end controls remain pending; the page cannot record finite
-live sections yet.
+Window/Worker forward recorded finite endpoints into AudioHost setup. Live
+start/end controls now use the common finite owner and record section metadata;
+actual browser acceptance remains pending.
 
 
 ## Finite stepped replay owner
@@ -691,5 +741,6 @@ allowed at the fence. A missing or late
 command still fails; silence alone cannot authorize completion. Browser replay
 bindings retain and expose the endpoint and admit finite report telemetry.
 Window/Worker forward and independently validate that recorded endpoint before
-sample transfer, then configure the actual finite output component. Finite live
-play and end controls remain pending. Browser execution remains unverified.
+sample transfer, then configure the actual finite output component. Live
+start/end controls use the same configured output contract. Browser execution
+remains unverified.

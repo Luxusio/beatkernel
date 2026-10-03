@@ -24,8 +24,9 @@ snapshot extraction stays bounded by the queue's actual capacity.
 
 Unlimited setup retains existing full-song completion and recording bytes.
 Finite competition identity includes the end through the existing section
-identity envelope. Browser finite live bindings/controls and native finite
-capture integration still require separate work and actual verification.
+identity envelope. Browser finite live bindings/controls must use this same
+owner and actual output metadata. Native finite capture integration and actual
+cross-host verification remain separate work.
 
 Records displays the selected record's own/other opponent occurrence counts.
 Remove Own and Remove Other clear exactly the first matching kind and literal

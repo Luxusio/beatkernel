@@ -357,9 +357,9 @@ After game and audio cleanup finish, **Download last replay** exports the last
 recorded result. It is labeled complete only after genuine natural completion
 and successful cleanup; manual stop, cancellation and failure produce a prefix.
 That label is in the UI/filename, not a new trusted field in the canonical file.
-Native replay tools can decode the existing format using the matching chart
-setup; the setup fingerprint is noncryptographic and excludes device/audio-file
-identity. A renamed file does not prove complete playback.
+Native replay tools decode ordinary legacy captures using matching chart
+setup; finite v4 captures still require native consumer integration. The setup
+fingerprint is noncryptographic and excludes device/audio-file identity. A renamed file does not prove complete playback.
 
 Only one result is retained. Downloads are explicit; no file is automatically
 written or uploaded. Blob URLs are created only on a download click, revoked on
@@ -622,16 +622,18 @@ advance. The relative endpoint starts after Worklet prestart silence, so its
 absolute context position adds the armed start once. Arm refuses overflow.
 
 The supplied page forwards recorded finite replay endpoints into finish(endFrame)
-and uses ordinary finish for unlimited playback. Finite live gameplay and
-end controls remain to be connected; the Rust stepped replay
-owner has a section-aware completion path. Genuine Mixer and host/Worklet fixtures are authored;
+and uses ordinary finish for unlimited playback. Live start/end controls use
+the common finite gameplay owner and forward its actual end/frame metadata
+through the same validation and output setup. Both stepped owners have
+section-aware completion paths. Genuine Mixer and host/Worklet fixtures are authored;
 execution, generated bindings and full finite-game/replay acceptance remain pending.
 
 
 The section-aware report decoder additionally compares finite telemetry against
 an explicit configured endpoint. It preserves the actual physical context cursor
 and admits the frozen Mixer state at and after the fence. The ordinary decoder
-still requires unlimited output; finite live gameplay remains pending.
+still requires unlimited output; configured finite live and replay owners use
+the section-aware decoder.
 
 
 Finite stepped replay preparation and the Rust browser replay binding now retain
@@ -641,5 +643,7 @@ work. Window/Worker read and independently validate recorded end/frame metadata
 against the prepared original start and actual output rate, then pass the frozen
 endpoint into AudioHost setup. Unlimited metadata remains omitted and finish()
 retains its argument-free call. Invalid finite metadata fails setup without an
-unlimited retry. Protocol fixtures are authored but not executed. Finite live
-play and end controls remain pending; browser output is not yet verified.
+unlimited retry. Live end drafts are optional original-song decimal seconds;
+a blank end keeps ordinary playback. Finite completion captures retain their
+section endpoint. Protocol fixtures are authored but not executed; browser
+output is not yet verified.
