@@ -2,6 +2,7 @@ import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
 import { bindingsFor, millisecondsToNanos, renderedCursor } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
+import { validateSelections, validateOpponentSnapshot } from "./saved-opponents.mjs";
 const { BrowserGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
 let ready = null;
 let view = null;
@@ -22,6 +23,7 @@ let lastPlayId = 0;
 const I64_MAX = 9223372036854775807n;
 const U64_MAX = 18446744073709551615n;
 const PROGRESS_INTERVAL_NS = 250000000n;
+const NO_OPPONENTS = Object.freeze([]);
 
 function report(kind, fields = {}, transfer = []) { self.postMessage({ kind, ...fields }, transfer); }
 function message(error) { return String(error?.message ?? error).slice(0, 4096); }
@@ -477,6 +479,8 @@ async function preparePlay(state, request) {
     if (request.mode !== undefined && request.mode !== "live" && request.mode !== "replay") throw new Error("Invalid playback mode.");
     state.mode = request.mode ?? "live";
     state.network = multiplayerConfiguration(request.multiplayer, state.mode);
+    const opponents = state.mode === "live" && request.opponents !== undefined
+      ? validateSelections(request.opponents) : NO_OPPONENTS;
     let replayFile = null;
     let replaySize = 0;
     if (state.mode === "replay") {
@@ -525,6 +529,15 @@ async function preparePlay(state, request) {
     state.game = state.mode === "replay"
       ? new BrowserReplay(moved, 100000000n)
       : new BrowserGame(moved, 0n, 100000000n, 50000000n, 50000000n, 0n, pairs);
+    for (const opponent of opponents) {
+      const bytes = await opponent.file.arrayBuffer();
+      // A stopped owner may have freed its game during this unabortable read.
+      if (failed || play !== state) return;
+      if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== opponent.file.size) throw new Error("Opponent recording returned an invalid buffer or changed size.");
+      const index = state.game.add_saved_opponent(new Uint8Array(bytes), opponent.own, opponent.label);
+      if (index !== state.opponentCount) throw new Error("Actual saved opponent admission count changed.");
+      state.opponentCount++;
+    }
     if (state.mode === "replay") {
       const recordedUntilNs = state.game.recorded_until_ns ?? null;
       if (recordedUntilNs !== null && !signed(recordedUntilNs)) throw new Error("Invalid actual replay prefix extent.");
@@ -535,7 +548,8 @@ async function preparePlay(state, request) {
       state.recordReplay = true;
     }
     state.keys = keys;
-    reply(state, request, { kind: "prepared", samples: state.game.sample_count(), ...metadata });
+    state.prepared = true;
+    reply(state, request, { kind: "prepared", samples: state.game.sample_count(), opponentCount: state.opponentCount, ...metadata });
     state.startRpcId = null;
     scheduleDraw();
   } catch (error) {
@@ -590,6 +604,22 @@ function pumpCommands(state) {
   if (batch !== null) report("play-commands", { playId: state.id, batch });
 }
 
+function publishOpponents(state) {
+  if (state.opponentCount === 0 || state.opponentsFailed) return;
+  try {
+    // Display cadence only; the Rust owner advances from actual gameplay time.
+    const now = millisecondsToNanos(self.performance.now());
+    if (state.lastOpponents !== null && now < state.lastOpponents) throw new Error("Saved comparison display clock regressed.");
+    if (state.lastOpponents !== null && now - state.lastOpponents < PROGRESS_INTERVAL_NS) return;
+    state.lastOpponents = now;
+    const opponents = validateOpponentSnapshot(state.game.saved_opponents(), state.opponentCount);
+    report("play-opponents", { playId: state.id, opponents, error: null });
+  } catch (error) {
+    state.opponentsFailed = true;
+    report("play-opponents", { playId: state.id, opponents: null, error: message(error) });
+  }
+}
+
 function stepPlay(state, request) {
   if (state.mode !== "live") throw new Error("Replay playback cannot accept live gameplay steps.");
   if (!state.active || !identity(request.tickId) || request.tickId <= state.lastTick
@@ -628,6 +658,7 @@ function stepPlay(state, request) {
   scheduleDraw();
   pumpCommands(state);
   sendProgress(state, score);
+  publishOpponents(state);
 }
 
 function handlePlay(request) {
@@ -644,6 +675,7 @@ function handlePlay(request) {
       lastHost: null, lastSequence: null, preOriginInputs: 0,
       recordReplay: false, completed: false,
       mode: "live", rate: null, network: null, samplesEnded: false, commandsDrained: false,
+      prepared: false, opponentCount: 0, opponentsFailed: false, lastOpponents: null,
     };
     play = state; // Reserve before the ready await so stop cannot race a late owner.
     lastPlayId = state.id;
@@ -658,7 +690,7 @@ function handlePlay(request) {
     const requiresRpc = ["play-sample", "play-commands", "play-activate", "play-network-ready"].includes(request.kind);
     if (request.rpcId !== undefined && !requiresRpc && request.kind !== "play-ack") throw new Error("Unexpected gameplay RPC identity.");
     rpc(state, request, requiresRpc);
-    if (!state.game) throw new Error("Wait for actual gameplay preparation.");
+    if (!state.game || !state.prepared) throw new Error("Wait for actual gameplay preparation.");
     if (request.kind === "play-sample") samplePlay(state, request);
     else if (request.kind === "play-network-ready") {
       if (!state.network || state.network.requested || state.active || !state.samplesEnded

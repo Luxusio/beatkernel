@@ -1,10 +1,11 @@
 import { snapshotFiles, nanoseconds, seconds } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
 import { RecordsStore } from "./record-store.mjs";
+import { SavedOpponentSelection, opponentLabel, validateOpponentSnapshot } from "./saved-opponents.mjs";
 import { KEY_BINDINGS, bindingsFor, millisecondsToNanos, frameNanos, startProjection, committedStartProjection, presentationPair } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
-const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status"].map(id => [id, byId(id)]));
+const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results"].map(id => [id, byId(id)]));
 let canvas = byId("canvas");
 let worker = null;
 let observer = null;
@@ -28,6 +29,12 @@ let replayURLTimer = null;
 let selectedReplay = null;
 let recordsStore = null;
 let recordsOperation = null;
+const opponents = new SavedOpponentSelection();
+let selectedReplayKey = null;
+let importedReplayKeys = new WeakMap();
+let importedReplayId = 0;
+let opponentButtons = [];
+let opponentResultRows = [];
 
 function status(text, error = false) {
   ui.status.textContent = text;
@@ -52,6 +59,11 @@ function controls() {
   ui.records.disabled = ui["records-refresh"].disabled = recordsDisabled;
   ui["records-save"].disabled = recordsDisabled || lastReplay === null;
   ui["records-use"].disabled = ui["records-delete"].disabled = recordsDisabled || !ui.records.value;
+  ui["opponents-kind"].disabled = ui["opponents-label"].disabled = recordsDisabled;
+  ui["opponents-add"].disabled = recordsDisabled || !selectedReplay || opponents.size >= 8;
+  ui["records-opponent"].disabled = recordsDisabled || !ui.records.value || opponents.size >= 8;
+  ui["opponents-clear"].disabled = recordsDisabled || opponents.size === 0;
+  for (const button of opponentButtons) button.disabled = recordsDisabled;
 }
 function stop() {
   revokeReplayURL();
@@ -65,6 +77,12 @@ function stop() {
   observer = null;
   density?.removeEventListener("change", densityChanged);
   density = null;
+  selectedReplay = selectedReplayKey = null;
+  importedReplayKeys = new WeakMap();
+  importedReplayId = 0;
+  opponents.clear();
+  showOpponentSelection();
+  clearOpponentResults("No saved opponents selected.");
   initialized = false;
   controls();
 }
@@ -248,7 +266,12 @@ ui["replay-file"].addEventListener("change", event => {
     const file = files[0];
     if (files.length !== 1 || !(file instanceof File) || !Number.isSafeInteger(file.size)
       || file.size < 1 || file.size > 64 * 1024 * 1024) throw new Error("Choose one nonempty replay no larger than 64 MiB.");
+    if (!importedReplayKeys.has(file)) {
+      if (!Number.isSafeInteger(importedReplayId + 1)) throw new Error("Imported replay selection identity exhausted.");
+      importedReplayKeys.set(file, `file:${++importedReplayId}`);
+    }
     selectedReplay = file;
+    selectedReplayKey = importedReplayKeys.get(file);
     ui["replay-name"].textContent = `${file.name.slice(0, 256)} · ${file.size} bytes · uses recorded seed and section`;
     controls();
     status("Replay selected. Prepare its matching chart, then choose Play replay.");
@@ -258,9 +281,21 @@ ui["replay-file"].addEventListener("change", event => {
 ui.stop.addEventListener("click", () => { void stopPlay("Playback stopped."); });
 ui.export.addEventListener("click", downloadReplay);
 ui.records.addEventListener("change", controls);
-for (const [id, action] of [["records-refresh", "refresh"], ["records-save", "save"], ["records-use", "use"], ["records-delete", "delete"]]) {
+for (const [id, action] of [["records-refresh", "refresh"], ["records-save", "save"], ["records-use", "use"], ["records-delete", "delete"], ["records-opponent", "opponent"]]) {
   ui[id].addEventListener("click", () => { void recordAction(action); });
 }
+ui["opponents-add"].addEventListener("click", () => {
+  if (!initialized || importing || preparing || activePlay || recordsOperation || !selectedReplay) return;
+  try { addOpponent(selectedReplay, selectedReplayKey, opponentChoice()); }
+  catch (error) { opponentStatus(String(error.message).slice(0, 4096), true); }
+});
+ui["opponents-clear"].addEventListener("click", () => {
+  if (!initialized || importing || preparing || activePlay || recordsOperation) return;
+  opponents.clear();
+  showOpponentSelection();
+  clearOpponentResults("No saved opponents selected.");
+  controls();
+});
 window.addEventListener("blur", () => { void stopPlay("Playback stopped after losing focus."); });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
@@ -343,6 +378,7 @@ async function play(mode = "live") {
     completionReady: false, lastPresentation: null, cleanupError: null,
     recordReplay: mode === "live" && ui.record.checked === true, replay: null, replayError: null, naturalFinishRequested: false,
     replayFile: mode === "replay" ? selectedReplay : null,
+    opponentSelection: mode === "live" && opponents.size ? opponents.snapshot() : null, opponentsFailed: false,
     chartPath: ui.chart.value,
     preview: { title: ui.title.textContent, details: ui.details.textContent, position: ui.position.value } };
   activePlay = session;
@@ -352,6 +388,8 @@ async function play(mode = "live") {
     session.multiplayer = mode === "live" && ui.multiplayer.checked === true ? multiplayerConfiguration() : null;
     ui["multiplayer-status"].textContent = session.multiplayer ? "Preparing local audio before connecting…"
       : mode === "replay" ? "Local replay · no multiplayer connection." : "Solo play selected.";
+    clearOpponentResults(session.opponentSelection ? "Preparing selected saved opponents…"
+      : mode === "replay" ? "Saved comparisons are inactive during replay playback." : "No saved opponents selected.");
     // open invokes resume synchronously here, inside the button's user gesture.
     const opening = AudioHost.open({ module: audioModule, generation: session.id, channels: 2,
       pcmLimits: { maxAssetBytes: 64 * 1024 * 1024, maxTotalBytes: 256 * 1024 * 1024, maxSamples: 1296 },
@@ -364,10 +402,15 @@ async function play(mode = "live") {
     const source = mode === "replay" ? { mode, replayFile: session.replayFile }
       : { mode, seed: ui.seed.value, recordReplay: session.recordReplay,
         ...(session.multiplayer ? { multiplayer: session.multiplayer } : {}),
+        ...(session.opponentSelection ? { opponents: session.opponentSelection } : {}),
         keyPairs: Uint32Array.from(KEY_BINDINGS.flatMap(row => [row[0], row[2]])) };
     const prepared = await playRpc(session, "play-start", { libraryId, path: ui.chart.value,
       rate: session.audio.sampleRate, ...source });
     if (mode === "replay" ? prepared.mode !== "replay" : prepared.mode !== undefined && prepared.mode !== "live") throw new Error("Playback preparation mode changed.");
+    const opponentCount = prepared.opponentCount === undefined ? 0 : prepared.opponentCount;
+    if (!Number.isInteger(opponentCount) || opponentCount !== (session.opponentSelection?.length ?? 0)) throw new Error("Prepared saved opponent count changed.");
+    session.opponentCount = opponentCount;
+    session.opponentSelection = null;
     ui.title.textContent = prepared.title || ui.chart.value;
     ui.details.textContent = `${prepared.artist || "Unknown artist"} · ${prepared.notes} notes · ${prepared.samples} sounds · ${session.audio.sampleRate} Hz output`;
     session.bindings = mode === "replay" ? [] : bindingsFor(prepared.lanes);
@@ -556,7 +599,9 @@ function receiveMultiplayer(session, event) {
 function receivePlay(data) {
   const session = activePlay;
   if (!session || data.playId !== session.id) return;
-  if (data.kind === "play-multiplayer") {
+  if (data.kind === "play-opponents") {
+    receiveOpponents(session, data);
+  } else if (data.kind === "play-multiplayer") {
     receiveMultiplayer(session, data.event);
   } else if (data.kind === "play-reply") {
     const request = session.rpc;
@@ -683,6 +728,7 @@ function stopPlay(reason, failed = false, completed = false) {
           ui.details.textContent = session.preview.details;
           ui.position.value = session.preview.position;
           ui.keys.textContent = "";
+          clearOpponentResults(opponents.size ? "Saved comparison stopped; selections retained for the next live play." : "No saved opponents selected.");
         }
         const score = session.finalScore;
         if (session.multiplayer && session.owner === owner) {
@@ -705,6 +751,7 @@ function stopPlay(reason, failed = false, completed = false) {
           ui.export.textContent = `Download last replay (${lastReplay.complete ? "complete" : "prefix"})`;
         }
         activePlay = null;
+        session.opponentSelection = null;
         controls();
         if (session.owner === owner || failed) status(reason + result, failed);
       }
@@ -762,6 +809,74 @@ function downloadReplay() {
   } finally { link?.remove(); }
 }
 
+function opponentStatus(text, error = false) {
+  ui["opponents-status"].textContent = text;
+  ui["opponents-status"].dataset.error = String(error);
+}
+function clearOpponentResults(text) {
+  opponentResultRows = [];
+  ui["opponents-results"].replaceChildren();
+  opponentStatus(text);
+}
+function opponentChoice() {
+  const kind = ui["opponents-kind"].value;
+  if (kind !== "own" && kind !== "other") throw new Error("Choose Own or Other for the selected recording.");
+  return { own: kind === "own", label: ui["opponents-label"].value };
+}
+function addOpponent(file, sourceKey, choice) {
+  opponents.add({ file, sourceKey, own: choice.own, label: choice.label || opponentLabel(file.name) });
+  showOpponentSelection();
+  opponentStatus(`${opponents.size} saved opponent(s) selected · ${opponents.byteLength} bytes. Compatibility is checked on Live Play.`);
+  controls();
+}
+function showOpponentSelection() {
+  opponentButtons = [];
+  const rows = document.createDocumentFragment();
+  for (const entry of opponents.snapshot()) {
+    const row = document.createElement("li");
+    const label = document.createElement("span");
+    label.textContent = `${entry.own ? "Own" : "Other"} · ${entry.label} · ${entry.file.size} bytes `;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "Remove";
+    button.addEventListener("click", () => {
+      if (!initialized || importing || preparing || activePlay || recordsOperation) return;
+      opponents.remove(entry.sourceKey);
+      showOpponentSelection();
+      clearOpponentResults(opponents.size ? `${opponents.size} saved opponent(s) selected.` : "No saved opponents selected.");
+      controls();
+    });
+    opponentButtons.push(button);
+    row.append(label, button);
+    rows.append(row);
+  }
+  ui["opponents-list"].replaceChildren(rows);
+}
+function receiveOpponents(session, data) {
+  if (session.mode !== "live" || session.phase !== "playing" || session.owner !== owner
+    || !session.opponentCount || session.opponentsFailed) return;
+  try {
+    if (data.error !== null) {
+      if (typeof data.error !== "string" || data.error.length === 0 || data.error.length > 4096 || data.opponents !== null) throw new Error("Invalid saved comparison failure message.");
+      throw new Error(data.error);
+    }
+    const rows = validateOpponentSnapshot(data.opponents, session.opponentCount);
+    if (opponentResultRows.length !== rows.length) {
+      opponentResultRows = rows.map(() => document.createElement("li"));
+      ui["opponents-results"].replaceChildren(...opponentResultRows);
+    }
+    for (let index = 0; index < rows.length; index++) {
+      const row = rows[index];
+      const prefix = row.recordedUntilNs === null ? "empty recording" : `recorded through ${seconds(row.recordedUntilNs.toString())} s`;
+      opponentResultRows[index].textContent = `${row.kind === "own" ? "Own" : "Other"} · ${row.label} · Hits ${row.hits} · Misses ${row.misses} · Combo ${row.combo} · Best ${row.maxCombo} · ${prefix}`;
+    }
+    opponentStatus("Saved comparisons at the current song position. Own/Other labels are your choices, not verified identities.");
+  } catch (error) {
+    session.opponentsFailed = true;
+    opponentStatus(`Saved comparisons stopped: ${String(error.message).slice(0, 4096)} Local play continues.`, true);
+  }
+}
+
 function closeRecords() {
   recordsOperation?.controller.abort();
   recordsOperation = null;
@@ -797,23 +912,30 @@ async function recordAction(action) {
   const captured = lastReplay;
   if (action === "save" && captured === null) return;
   const id = Number(ui.records.value);
-  if ((action === "use" || action === "delete") && (!Number.isSafeInteger(id) || id < 1)) return;
+  if ((action === "use" || action === "delete" || action === "opponent") && (!Number.isSafeInteger(id) || id < 1)) return;
   const operation = { owner, controller: new AbortController() };
   recordsOperation = operation;
   controls();
   status(action === "save" ? "Saving the captured recording…" : "Opening saved records…");
   let committed = "";
   try {
+    const choice = action === "opponent" ? opponentChoice() : null;
     const store = await openRecords(operation);
     if (!recordCurrent(operation)) return;
-    if (action === "use") {
+    if (action === "use" || action === "opponent") {
       const loaded = await store.load(id);
       if (!recordCurrent(operation)) return;
       const file = new File([loaded.bytes], loaded.metadata.name, { type: "application/octet-stream" });
-      selectedReplay = file;
-      ui["replay-file"].value = "";
-      ui["replay-name"].textContent = `${file.name} · ${file.size} bytes · matching chart: ${loaded.metadata.chartPath}`;
-      status("Saved replay selected. Prepare its matching chart, then choose Play replay.");
+      if (action === "opponent") {
+        addOpponent(file, `record:${id}`, choice);
+        status("Saved opponent selected. Live Play checks it against the prepared chart.");
+      } else {
+        selectedReplay = file;
+        selectedReplayKey = `record:${id}`;
+        ui["replay-file"].value = "";
+        ui["replay-name"].textContent = `${file.name} · ${file.size} bytes · matching chart: ${loaded.metadata.chartPath}`;
+        status("Saved replay selected. Prepare its matching chart, then choose Play replay.");
+      }
     } else {
       if (action === "save") {
         await store.save({ bytes: captured.bytes, name: `beatkernel-${captured.id}-${captured.complete ? "complete" : "prefix"}.bkr`,

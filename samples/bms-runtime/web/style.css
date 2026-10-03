@@ -21,6 +21,9 @@ button:hover:enabled { background: #326c99; }
 :focus-visible { outline: 2px solid #85d4ff; outline-offset: 3px; }
 :disabled { opacity: .5; cursor: default; }
 .hint, #details { color: #afc0d3; font-size: .85rem; overflow-wrap: anywhere; }
+.opponent-list { padding-left: 20px; font-size: .85rem; overflow-wrap: anywhere; }
+.opponent-list li { margin: 8px 0; }
+#opponents-status[data-error="true"] { color: #ffb4a8; }
 #viewport { width: 100%; aspect-ratio: 4 / 3; margin-top: 16px; background: #0a0d12; overflow: hidden; }
 canvas { display: block; width: 100%; height: 100%; }
 canvas[hidden] { display: none; }

@@ -50,8 +50,17 @@
         <button id="records-refresh" type="button" disabled>Refresh saved records</button>
         <button id="records-save" type="button" disabled>Save last recording</button>
         <button id="records-use" type="button" disabled>Use saved replay</button>
+        <button id="records-opponent" type="button" disabled>Add saved opponent</button>
         <button id="records-delete" type="button" disabled>Delete selected record</button></div>
       <p class="hint">Saving is explicit and stays in this browser. Loading a saved replay does not start audio. Keep downloads for records you want to preserve outside browser storage.</p>
+      <div class="replay-controls"><label>Recording owner <select id="opponents-kind" disabled><option value="own">Own</option><option value="other">Other</option></select></label>
+        <label>Opponent label <input id="opponents-label" type="text" maxlength="256" placeholder="Recording filename" disabled></label>
+        <button id="opponents-add" type="button" disabled>Add current replay as opponent</button>
+        <button id="opponents-clear" type="button" disabled>Clear opponents</button></div>
+      <p class="hint">Compare up to eight saved recordings during live play (64 MiB total). Select Own or Other and an optional label before adding. These labels are not verified identities. Replay playback ignores this list; saved prefixes stop where their recording ends.</p>
+      <ul id="opponents-list" class="opponent-list" aria-label="Selected saved opponents"></ul>
+      <p id="opponents-status" class="hint" role="status" aria-live="polite">No saved opponents selected.</p>
+      <ul id="opponents-results" class="opponent-list" aria-label="Saved recording comparison results"></ul>
       <p id="keys" class="hint" aria-label="Keyboard controls"></p>
       <p class="hint">Playback ends after the final sound when output timing is available. Escape, switching away from this page, or losing focus stops playback. Stop remains available.</p>
       <div id="viewport"><canvas id="canvas" width="960" height="720" aria-label="Chart lanes and background at the selected song time"></canvas></div>
