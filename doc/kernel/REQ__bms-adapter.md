@@ -2,7 +2,7 @@
 
 `beatkernel-bms` is a separate MIT crate depending only on the core `beatkernel` crate. It reads already-decoded UTF-8 BMS text, returns SourceChart plus adapter-owned lane/sample/audio mappings and BGM events, and creates existing builtin Instant/Hold rules. Platform acquisition, sample decoding, sound devices and judging remain outside parsing. The file-loading example bounds file reads and compiles actual parsed content; the parser performs no asset IO. Legacy Shift-JIS conversion belongs before this text boundary; the application shared decoder has an explicit UTF-8-first/strict-Shift-JIS fallback policy and explicit mode API.
 
-Supported syntax is case-insensitive: base BPM (default 130), WAVxx base36 IDs/paths, direct hexadecimal BPM channel03, extended base36 BPMxx/channel08, STOPxx/channel09, decimal measure-length channel02, layered BGM01, visible player channels11..19/21..29, paired LNTYPE1 channels51..59/61..69, and LNOBJ endpoints on visible channels. Channel16/26 are scratch lanes; other channels keep their numeric lane identity rather than assuming a fixed key layout. LNTYPE1 holds pair successive nonzero markers per lane, including across measures; only the head sample is sounded, and the tail token is retained as metadata. Dangling/overlapping/malformed holds are rejected. LNTYPE2, mines, invisible notes, unsupported timing/scroll/warp extensions, and unrecognized commands/channels fail with line diagnostics. Listed descriptive headers are preserved. BMPxx resource definitions and Base04/Poor06/Layer07 selections are retained and compiled separately; unsupported BGA crop directives remain explicit visual warnings.
+Supported syntax is case-insensitive: base BPM (default 130), WAVxx base36 IDs/paths, direct hexadecimal BPM channel03, extended base36 BPMxx/channel08, STOPxx/channel09, decimal measure-length channel02, layered BGM01, visible player channels11..19/21..29, paired LNTYPE1 and cell-span LNTYPE2 channels51..59/61..69, and LNOBJ endpoints on visible channels. Channel16/26 are scratch lanes; other channels keep their numeric lane identity rather than assuming a fixed key layout. LNTYPE1 holds pair successive nonzero markers per lane, including across measures; only the head sample is sounded, and the tail token is retained as metadata. Dangling/overlapping/malformed holds are rejected. Mines, invisible notes, unsupported timing/scroll/warp extensions, and unrecognized commands/channels fail with line diagnostics. Listed descriptive headers are preserved. BMPxx resource definitions and Base04/Poor06/Layer07 selections are retained and compiled separately; unsupported BGA crop directives remain explicit visual warnings.
 
 Measure duration is exactly four quarter beats times its rational length. Tokens divide that measure into equal rational positions; global quarter-beat positions use checked i128 arithmetic. The minimum integer beat-grid resolution is the LCM of reduced rational denominators, with an explicit caller cap and checked conversion to core u32/i64 ticks. Decimal values never pass through floats. STOP units are 1/48 of one quarter beat, independent of measure length; duration uses the tempo active at that beat, after a same-beat BPM change. STOP durations quantize to integer nanoseconds once. Notes/BGM at a STOP use its pre-STOP timestamp, matching the core chart compiler.
 
@@ -105,3 +105,31 @@ and rejects malformed fabricated metadata. No additional percentage ceiling;
 the existing decimal precision bounds admission. Gameplay timing and replay
 setup identity remain unchanged for unchanged gameplay lines. Dynamic channels
 97/98 remain unsupported. Fixtures are authored for later execution.
+
+
+## LNTYPE2 cell-span normalization
+
+Selected case-insensitive LNTYPE 2/02 selects MGQ cell spans on existing
+channels51..59/61..69; absent or 1/01 preserves paired endpoints. Duplicate
+header and seeded active-branch policies remain. Each nonzero cell occupies its
+exact rational measure subdivision. Merge overlapping/touching accepted cells
+per lane into one Hold, across adjacent measures when their occupied cells
+meet. Zero cells and omitted measures leave gaps; a final occupied cell ends at
+its actual measure boundary. Include exact cell endpoints in the checked
+resolution, preserving STOP/BPM and unequal measure lengths.
+
+Same-position nonzero cells follow existing Reject/LastWins policy before span
+union; LastWins replaces that cell's extent. The first accepted chronological
+cell supplies the head keysound. Continuation values and synthesized zero
+endpoints are unsounded and need no WAV definition; an implicit endpoint has
+no tail_sample. Visible LNOBJ handling remains independent. Existing same-lane
+Hold/visible overlap refusal and physical input/object/resolution limits remain;
+zero-filled rows do not allocate a new gameplay event for every zero.
+
+This normalizes to the existing SourceObject/Hold rules and common Runtime and
+replay judge. No new timing or judging model is added. The policy follows the
+[original RDM/ruv-it developer documentation](https://nvyu.net/rdm/rby_ex.php)
+and the [format memo](https://saxxonpike.github.io/bms-command-memo/index.html#LNTYPE2).
+It does not claim conformity with every legacy implementation, extended
+MGQ keyboard channels, video, mines or invisible notes. Authored fixtures and
+compiler checks are not executed format/native/browser acceptance.
