@@ -36,6 +36,8 @@ pub mod competition_live;
 pub mod completion;
 /// Portable bounded audio device metadata and explicit draft selection.
 pub mod device_catalog;
+#[cfg(test)]
+mod finite_replay_fixtures;
 /// Native FLAC asset decoding during bounded preparation.
 pub mod flac_decode;
 #[cfg(test)]
