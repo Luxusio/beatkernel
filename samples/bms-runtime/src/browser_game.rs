@@ -6,10 +6,12 @@ use std::{
 
 use crate::{
     browser::BrowserPrepared,
+    browser_input::{PhysicalInputSetup, decode_input},
     competition::OpponentKind,
     image_assets::ImageAssets,
     note_progress::NoteProgress,
     player_chart::PlayerChart,
+    pressed_keys::PressedKeys,
     saved_opponents::SavedOpponents,
     step_gameplay::{StepAudioBatch, StepGameplay, StepGameplayConfig, StepGameplayError},
     worklet_audio::{decode_output, decode_section_output},
@@ -109,6 +111,8 @@ pub struct BrowserGame {
     pub(crate) progress: NoteProgress,
     pub(crate) recent: Vec<JudgeEvent>,
     pub(crate) pressed: u32,
+    pressed_owners: PressedKeys,
+    input_limits: CodecLimits,
     keys: Vec<(u8, u16)>,
     samples: VecDeque<(SampleId, PcmSample)>,
     output_start: Option<u64>,
@@ -162,6 +166,38 @@ impl BrowserGame {
             Some(Timestamp::from_nanos(end_ns)),
         )
     }
+    /// Prepare device-aware bindings for canonical physical event blobs.
+    pub fn new_physical(
+        prepared: BrowserPrepared,
+        host_origin_ns: i64,
+        preroll_ns: i64,
+        early_ns: i64,
+        late_ns: i64,
+        offset_ns: i64,
+        binding_words: Vec<u32>,
+        end_ns: Option<i64>,
+        max_encoded_input: u32,
+        max_payload_input: u32,
+    ) -> Result<Self, JsValue> {
+        let input = PhysicalInputSetup::new(
+            &binding_words,
+            &prepared.chart.lanes,
+            max_encoded_input,
+            max_payload_input,
+        )
+        .map_err(error)?;
+        Self::construct_bound(
+            prepared,
+            host_origin_ns,
+            preroll_ns,
+            early_ns,
+            late_ns,
+            offset_ns,
+            Vec::new(),
+            input,
+            end_ns.map(Timestamp::from_nanos),
+        )
+    }
 }
 
 impl BrowserGame {
@@ -210,6 +246,38 @@ impl BrowserGame {
             game_control: GameControlId(u32::from(lane)),
         }))
         .map_err(error)?;
+        Self::construct_bound(
+            prepared,
+            host_origin_ns,
+            preroll_ns,
+            early_ns,
+            late_ns,
+            offset_ns,
+            keys,
+            PhysicalInputSetup {
+                bindings,
+                limits: CodecLimits::new(4096, 1024).map_err(error)?,
+            },
+            end,
+        )
+    }
+
+    fn construct_bound(
+        prepared: BrowserPrepared,
+        host_origin_ns: i64,
+        preroll_ns: i64,
+        early_ns: i64,
+        late_ns: i64,
+        offset_ns: i64,
+        keys: Vec<(u8, u16)>,
+        input: PhysicalInputSetup,
+        end: Option<Timestamp>,
+    ) -> Result<Self, JsValue> {
+        if prepared.replay.is_some() || host_origin_ns < 0 {
+            return Err(error(
+                "live resources and a nonnegative browser host origin are required",
+            ));
+        }
         let chart = Arc::new(prepared.chart);
         let progress = NoteProgress::new(chart.clone()).map_err(error)?;
         let config = StepGameplayConfig {
@@ -227,9 +295,14 @@ impl BrowserGame {
         // Comparison admission reconstructs genuine records from this source.
         // Clone only during preparation and release it after activation.
         let opponent_source = prepared.prepared.source.clone();
-        let (mut game, bank) =
-            StepGameplay::new_section(prepared.prepared, config, bindings, prepared.start, end)
-                .map_err(error)?;
+        let (mut game, bank) = StepGameplay::new_section(
+            prepared.prepared,
+            config,
+            input.bindings,
+            prepared.start,
+            end,
+        )
+        .map_err(error)?;
         game.configure_output_clock(DisciplineConfig {
             max_observation_age: Duration::from_nanos(1_000_000_000),
             ..DisciplineConfig::default()
@@ -242,6 +315,8 @@ impl BrowserGame {
             progress,
             recent: Vec::with_capacity(128),
             pressed: 0,
+            pressed_owners: PressedKeys::default(),
+            input_limits: input.limits,
             keys,
             samples: bank.into_samples().collect(),
             output_start: None,
@@ -387,12 +462,9 @@ impl BrowserGame {
         sequence: u64,
         audio_ns: i64,
     ) -> Result<(), JsValue> {
-        let lane = self
-            .keys
-            .iter()
-            .find(|entry| entry.1 == key)
-            .map(|entry| entry.0)
-            .ok_or_else(|| error("browser input key is not bound"))?;
+        if !self.keys.iter().any(|entry| entry.1 == key) {
+            return Err(error("browser input key is not bound"));
+        }
         let input = PhysicalInputEvent::Button(ButtonEvent {
             meta: EventMeta::new(DeviceId(1), point(HOST, host_ns), sequence),
             control: PhysicalControlId::keyboard(key),
@@ -402,22 +474,13 @@ impl BrowserGame {
                 ButtonState::Up
             },
         });
-        let result = self
-            .game
-            .process_input(input, &Explicit, point(OUTPUT, audio_ns));
-        let ended = result.as_ref().is_ok_and(|report| report.song_end_reached);
-        self.accept_report(result)?;
-        if ended {
-            return Ok(());
-        }
-        if let Some(mask) = crate::pressed_keys::lane_bit(GameControlId(u32::from(lane))) {
-            if down {
-                self.pressed |= mask;
-            } else {
-                self.pressed &= !mask;
-            }
-        }
-        Ok(())
+        self.process_physical(input, audio_ns)
+    }
+    /// Admit a canonical physical event with its original variant and provenance.
+    /// Decoding refusal happens before runtime mutation or chronology adoption.
+    pub fn input_blob(&mut self, bytes: Vec<u8>, audio_ns: i64) -> Result<(), JsValue> {
+        let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
+        self.process_physical(input, audio_ns)
     }
     pub fn advance(&mut self, host_ns: i64, audio_ns: i64) -> Result<(), JsValue> {
         let result = self
@@ -527,6 +590,7 @@ impl BrowserGame {
         self.game.fail();
         self.opponent_source = None;
         self.samples.clear();
+        self.pressed_owners.clear();
         self.pressed = 0;
     }
     #[wasm_bindgen(getter)]
@@ -564,32 +628,41 @@ impl BrowserGame {
 }
 
 impl BrowserGame {
+    fn process_physical(
+        &mut self,
+        input: PhysicalInputEvent,
+        audio_ns: i64,
+    ) -> Result<(), JsValue> {
+        let result = self
+            .game
+            .process_input(input, &Explicit, point(OUTPUT, audio_ns));
+        self.accept_report(result)
+    }
+
     fn accept_report(
         &mut self,
         result: Result<RuntimeReport, StepGameplayError>,
     ) -> Result<(), JsValue> {
         match result {
-            Ok(report) => {
-                self.observe(&report);
-                Ok(())
-            }
+            Ok(report) => self.observe(&report).map_err(error),
             Err(failure) => {
                 match &failure {
                     StepGameplayError::Report { report, .. }
                     | StepGameplayError::Capture {
                         report: Some(report),
                         ..
-                    } => self.observe(report),
+                    } => {
+                        // Preserve the original committed runtime/capture failure
+                        // even if its presentation ownership also refuses the batch.
+                        let _ = self.observe(report);
+                    }
                     _ => {}
                 }
                 Err(error(failure))
             }
         }
     }
-    fn observe(&mut self, report: &RuntimeReport) {
-        if report.song_end_reached {
-            self.pressed = 0;
-        }
+    fn observe(&mut self, report: &RuntimeReport) -> Result<(), String> {
         self.progress.apply(&report.judge_events);
         for event in &report.judge_events {
             if self.recent.len() == 128 {
@@ -597,6 +670,17 @@ impl BrowserGame {
             }
             self.recent.push(*event);
         }
+        if report.song_end_reached {
+            self.pressed_owners.clear();
+            self.pressed = 0;
+            return Ok(());
+        }
+        if let Err(error) = self.pressed_owners.apply(&report.bound_inputs) {
+            self.game.fail();
+            return Err(error);
+        }
+        self.pressed = self.pressed_owners.mask();
+        Ok(())
     }
 }
 

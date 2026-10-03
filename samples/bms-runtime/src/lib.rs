@@ -21,6 +21,10 @@ pub mod browser_audio;
 mod browser_canvas;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_game;
+/// Portable bounded preparation and decoding of canonical browser physical input.
+pub mod browser_input;
+#[cfg(test)]
+mod browser_input_fixtures;
 /// Browser bindings for the common multiplayer session and bounded framing.
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_multiplayer;
