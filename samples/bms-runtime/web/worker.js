@@ -3,7 +3,7 @@ import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
 import { PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, renderedCursor } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { validateSelections, validateOpponentSnapshot } from "./saved-opponents.mjs";
-import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, projectTouchEvent } from "./physical-input.mjs";
+import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, projectTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
 const { BrowserGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
 let ready = null;
 let view = null;
@@ -473,6 +473,36 @@ function reply(state, request, result, transfer = []) {
   report("play-reply", { playId: state.id, rpcId: request.rpcId, result }, transfer);
 }
 
+function hidConfiguration(value, mode, physicalInput, keyboardWords) {
+  if (value === undefined) return null;
+  if (mode !== "live" || !physicalInput || !value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("HID setup requires live canonical physical input ownership.");
+  }
+  const { bindingWords, deviceWords, fieldWords, axisParams } = value;
+  if (!(bindingWords instanceof Uint32Array) || bindingWords.length > 256 * 7 || bindingWords.length % 7 !== 0
+    || !(deviceWords instanceof Uint32Array) || deviceWords.length < 6 || deviceWords.length > 16 * 6 || deviceWords.length % 6 !== 0
+    || !(fieldWords instanceof Uint32Array) || fieldWords.length > 16 * 512 * 13 || fieldWords.length % 13 !== 0
+    || !(axisParams instanceof Float32Array) || axisParams.length !== fieldWords.length / 13 * 2
+    || keyboardWords.length + bindingWords.length > 256 * 7) {
+    throw new Error("HID setup requires bounded complete numeric device, field, parameter and binding rows.");
+  }
+  // Snapshot all bounded arrays before setup can await readiness or file reads.
+  // The actual Rust owner validates field syntax and physical binding membership.
+  const snapshot = { bindingWords: bindingWords.slice(), deviceWords: deviceWords.slice(),
+    fieldWords: fieldWords.slice(), axisParams: axisParams.slice(), sources: new Set(), lanes: new Set() };
+  for (let index = 0; index < snapshot.deviceWords.length; index += 6) {
+    const source = BigInt(snapshot.deviceWords[index]) | (BigInt(snapshot.deviceWords[index + 1]) << 32n);
+    if (source < 3n || snapshot.sources.has(source)) throw new Error("HID sources must be distinct full-width identities at least three.");
+    snapshot.sources.add(source);
+  }
+  for (let index = 0; index < snapshot.bindingWords.length; index += 7) {
+    const lane = snapshot.bindingWords[index];
+    if (!integer(lane, 0x11, 0x19) && !integer(lane, 0x21, 0x29)) throw new Error("HID constructor binding has an invalid BMS lane.");
+    snapshot.lanes.add(lane);
+  }
+  return snapshot;
+}
+
 async function preparePlay(state, request) {
   let prepared = null;
   try {
@@ -487,6 +517,29 @@ async function preparePlay(state, request) {
     }
     state.touchInput = request.inputMode === "physical-contact";
     state.physicalInput = request.inputMode === "physical" || state.touchInput;
+    let pairs = null;
+    let bindingWords = null;
+    const lanes = [];
+    const keys = new Set();
+    if (state.mode === "live") {
+      if (!(request.keyPairs instanceof Uint32Array) || request.keyPairs.length > 36 || request.keyPairs.length % 2 !== 0) throw new Error("Invalid bounded gameplay key bindings.");
+      pairs = request.keyPairs.slice();
+      for (let index = 0; index < pairs.length; index += 2) {
+        lanes.push(pairs[index]);
+        if (!integer(pairs[index + 1], 1, 65535) || keys.has(pairs[index + 1])) throw new Error("Gameplay keys must be valid and unique.");
+        keys.add(pairs[index + 1]);
+      }
+      bindingsFor(lanes);
+      if (state.physicalInput) bindingWords = keyboardBindingWords(pairs);
+    }
+    const hid = hidConfiguration(request.hidSetup, state.mode, state.physicalInput, bindingWords);
+    if (hid !== null) {
+      const combined = new Uint32Array(bindingWords.length + hid.bindingWords.length);
+      combined.set(bindingWords);
+      combined.set(hid.bindingWords, bindingWords.length);
+      bindingWords = combined;
+      for (const lane of hid.lanes) if (!lanes.includes(lane)) lanes.push(lane);
+    }
     const timing = state.mode === "live" ? validateTiming(request.timing) : null;
     const requestedStart = state.mode === "live" ? validateStart(request.startNs) : null;
     const requestedEnd = state.mode === "live" ? validateEnd(requestedStart, request.endNs) : undefined;
@@ -510,10 +563,6 @@ async function preparePlay(state, request) {
     }
     state.rate = request.rate;
     if (request.recordReplay !== undefined && typeof request.recordReplay !== "boolean") throw new Error("Invalid replay recording choice.");
-    let pairs = null;
-    let bindingWords = null;
-    const lanes = [];
-    const keys = new Set();
     if (state.mode === "replay") {
       if (request.recordReplay === true) throw new Error("Replay playback cannot record live input.");
       const bytes = await replayFile.arrayBuffer();
@@ -523,15 +572,6 @@ async function preparePlay(state, request) {
         64 * 1024 * 1024, 256 * 1024 * 1024, 1296);
     } else {
       if (typeof request.seed !== "string" || !/^\d{1,20}$/.test(request.seed) || BigInt(request.seed) > U64_MAX) throw new Error("Invalid gameplay chart seed.");
-      if (!(request.keyPairs instanceof Uint32Array) || request.keyPairs.length > 36 || request.keyPairs.length % 2 !== 0) throw new Error("Invalid bounded gameplay key bindings.");
-      pairs = request.keyPairs.slice();
-      for (let index = 0; index < pairs.length; index += 2) {
-        lanes.push(pairs[index]);
-        if (!integer(pairs[index + 1], 1, 65535) || keys.has(pairs[index + 1])) throw new Error("Gameplay keys must be valid and unique.");
-        keys.add(pairs[index + 1]);
-      }
-      bindingsFor(lanes);
-      if (state.physicalInput) bindingWords = keyboardBindingWords(pairs);
       prepared = requestedStart === 0n
         ? library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, 1296)
         : library.prepare_chart_at(request.path, request.rate, 2, BigInt(request.seed), requestedStart,
@@ -544,7 +584,9 @@ async function preparePlay(state, request) {
     if (state.mode === "live" && startNs !== requestedStart) throw new Error("Prepared live section start differs from its request.");
     const chartLanes = Array.from(prepared.lanes);
     bindingsFor(chartLanes);
-    if (state.mode === "live" && chartLanes.some(lane => !lanes.includes(lane))) throw new Error("A prepared lane has no supplied key binding.");
+    if (state.mode === "live" && chartLanes.some(lane => !lanes.includes(lane))) {
+      throw new Error(hid === null ? "A prepared lane has no supplied key binding." : "A prepared lane has no supplied physical binding.");
+    }
     const metadata = { title: prepared.title, artist: prepared.artist, notes: prepared.note_count, lanes: chartLanes, startNs };
     if (state.physicalInput && (typeof (state.touchInput ? BrowserGame?.new_physical_contact : BrowserGame?.new_physical) !== "function"
       || typeof BrowserGame?.prototype?.input_blob !== "function")) {
@@ -553,6 +595,10 @@ async function preparePlay(state, request) {
     if (state.touchInput && (typeof BrowserGame?.prototype?.configure_touch_regions !== "function"
       || typeof BrowserGame?.prototype?.input_blob_at !== "function")) {
       throw new Error("The gameplay binding does not provide contact routing ownership.");
+    }
+    if (hid !== null && (typeof BrowserGame?.prototype?.configure_hid_devices !== "function"
+      || typeof BrowserGame?.prototype?.input_hid_blob !== "function")) {
+      throw new Error("The gameplay binding does not provide HID profile ownership.");
     }
     if (state.mode === "live" && !state.physicalInput && requestedEnd !== undefined && typeof BrowserGame.new_section !== "function") {
       throw new Error("The gameplay binding does not provide finite section ownership.");
@@ -587,6 +633,11 @@ async function preparePlay(state, request) {
       state.game.configure_touch_regions(touchBindingWords(chartLanes), bounds, 256);
       state.touchWidth = width;
       state.touchHeight = height;
+    }
+    if (hid !== null) {
+      state.game.configure_hid_devices(hid.deviceWords, hid.fieldWords, hid.axisParams);
+      state.hidSources = hid.sources;
+      metadata.hidSourceCount = hid.sources.size;
     }
     const output = replayOutputFromMetadata(startNs, state.game.end_ns, state.game.playback_end_frame, request.rate);
     if (state.mode === "live" && output.endNs !== requestedEnd) throw new Error("Actual live section end differs from its request.");
@@ -702,14 +753,17 @@ function stepPlay(state, request) {
       || (host !== null && event.hostNs < host) || (sequence !== null && event.sequence < sequence)) {
       throw new Error("Invalid gameplay input or source chronology.");
     }
-    if (event.kind === "touch") {
+    if (event.kind === "hid") {
+      if (state.hidSources === null || !state.hidSources.has(event.source)) throw new Error("HID input requires an admitted source profile.");
+      encoded.push({ kind: "hid", bytes: encodeRawHidEvent(event) });
+    } else if (event.kind === "touch") {
       if (!state.touchInput) throw new Error("Touch input requires the prepared contact mode.");
       const position = projectTouchEvent(event, state.touchWidth, state.touchHeight);
-      encoded.push({ bytes: encodeTouchEvent(event), position });
+      encoded.push({ kind: "touch", bytes: encodeTouchEvent(event), position });
     } else {
       if (event.kind !== undefined || !integer(event.key, 1, 65535) || !state.keys.has(event.key)
         || typeof event.down !== "boolean") throw new Error("Invalid gameplay keyboard input.");
-      if (encoded !== null) encoded.push({ bytes: encodeKeyboardEvent(event), position: null });
+      if (encoded !== null) encoded.push({ kind: "keyboard", bytes: encodeKeyboardEvent(event) });
     }
     host = event.hostNs;
     sequence = event.sequence;
@@ -724,8 +778,9 @@ function stepPlay(state, request) {
     if (event.hostNs < state.origin) state.preOriginInputs++;
     else if (encoded !== null) {
       const entry = encoded[index];
-      if (entry.position === null) state.game.input_blob(entry.bytes, request.audioNs);
-      else state.game.input_blob_at(entry.bytes, entry.position.x, entry.position.y, request.audioNs);
+      if (entry.kind === "hid") state.game.input_hid_blob(entry.bytes, request.audioNs);
+      else if (entry.kind === "touch") state.game.input_blob_at(entry.bytes, entry.position.x, entry.position.y, request.audioNs);
+      else state.game.input_blob(entry.bytes, request.audioNs);
     } else state.game.input(event.hostNs, event.key, event.down, event.sequence, request.audioNs);
     state.lastHost = event.hostNs;
     state.lastSequence = event.sequence;
@@ -756,6 +811,7 @@ function handlePlay(request) {
       lastHost: null, lastSequence: null, preOriginInputs: 0,
       recordReplay: false, completed: false,
       mode: "live", physicalInput: false, touchInput: false, touchWidth: null, touchHeight: null,
+      hidSources: null,
       rate: null, network: null, samplesEnded: false, commandsDrained: false,
       prepared: false, opponentCount: 0, opponentsFailed: false, lastOpponents: null,
     };
