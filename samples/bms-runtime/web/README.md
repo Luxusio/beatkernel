@@ -482,3 +482,18 @@ Origin and verifies the HTTPS URL server identity against its explicit CA.
 These source paths share the existing BKMP session; actual native/browser
 interoperability remains unexecuted. See the
 [native adapter contract](../../../doc/changes/CHANGE__native-webtransport.md).
+
+
+## Saved-opponent component boundary
+
+`BrowserGame.add_saved_opponent(bytes, own, label)` admits a compatible saved
+record before activation. `saved_opponents()` returns the bounded actual
+comparison snapshots. The browser gameplay bindings expose a component for compatible saved
+Own/Other records before activation. Its counters come from the common replay
+judge and actual recorded operations, with an explicit recorded_until frontier.
+Local scores remain separate; a truncated record never gains invented misses
+when live play passes its final operation. Admission and comparison failures
+do not become ranked proof or change capture completion. Window/Worker selection
+controls are follow-on source work, so this is not a launchable browser feature
+yet. See the
+[component contract](../../../doc/changes/CHANGE__browser-saved-opponents.md).

@@ -1034,3 +1034,11 @@ the relay's configured origin and CA must trust its certificate. These are
 documented commands for later execution. Raw QUIC flags and WebTransport cannot
 be combined. Native networking uses the same worker and BKMP session across
 platforms. See the [native adapter contract](doc/changes/CHANGE__native-webtransport.md).
+
+
+Browser saved-opponent competition is being composed from the common replay
+judge and a bounded portable owner. The gameplay bindings admit compatible
+Own/Other recordings before activation and expose genuine recorded prefixes
+without changing local scores. Window/Worker record selection remains separate
+source work. See the
+[component contract](doc/changes/CHANGE__browser-saved-opponents.md).

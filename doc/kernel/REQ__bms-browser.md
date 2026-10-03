@@ -428,3 +428,17 @@ shall not abort that independent network drain. Missing ACK or network loss shal
 be labelled explicitly; a local write is not a peer receipt. All stale callbacks
 and timers shall remain fenced from later sessions. Browser/network/audio QA and
 fixture execution remain deferred; the persistent player task stays open.
+
+## Saved-opponent component and gameplay binding
+
+Browser saved-record competition reuses the actual common Competition/replay
+judge with the pristine local chart/rules/profile/branch identity. Admission is
+bounded to eight recordings and a 64 MiB aggregate encoded budget, charged only
+after successful validation; display labels are bounded plain metadata. Prefix
+files show only their recorded operation results and recorded_until frontier.
+Advancing beyond that frontier never invents misses or implies completion.
+Local gameplay score remains independent and is aggregated once. Comparison
+errors must stay separate from local play/capture completion. A fresh owner and
+explicit reset govern restart; post-activation admission is refused. Source
+components and WASM bindings do not establish host selection availability or
+actual browser execution; Window/Worker integration follows separately.
