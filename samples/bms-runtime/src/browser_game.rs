@@ -6,9 +6,11 @@ use std::{
 
 use crate::{
     browser::BrowserPrepared,
+    competition::OpponentKind,
     image_assets::ImageAssets,
     note_progress::NoteProgress,
     player_chart::PlayerChart,
+    saved_opponents::SavedOpponents,
     step_gameplay::{StepAudioBatch, StepGameplay, StepGameplayConfig, StepGameplayError},
     worklet_audio::decode_output,
 };
@@ -112,6 +114,8 @@ pub struct BrowserGame {
     output_start: Option<u64>,
     output_context: Option<u64>,
     chart_seed: u64,
+    opponent_source: Option<beatkernel_bms::BmsChart>,
+    opponents: Option<SavedOpponents>,
 }
 #[wasm_bindgen]
 impl BrowserGame {
@@ -174,6 +178,9 @@ impl BrowserGame {
             bgm_lookahead: Duration::from_nanos(500_000_000),
             telemetry_capacity: 256,
         };
+        // Comparison admission reconstructs genuine records from this source.
+        // Clone only during preparation and release it after activation.
+        let opponent_source = prepared.prepared.source.clone();
         let (mut game, bank) =
             StepGameplay::new(prepared.prepared, config, bindings).map_err(error)?;
         game.configure_output_clock(DisciplineConfig {
@@ -193,6 +200,8 @@ impl BrowserGame {
             output_start: None,
             output_context: None,
             chart_seed: prepared.chart_seed,
+            opponent_source: Some(opponent_source),
+            opponents: None,
         })
     }
     pub fn sample_count(&self) -> usize {
@@ -207,6 +216,88 @@ impl BrowserGame {
         self.game
             .competition_identity(limits, self.chart_seed)
             .map_err(error)
+    }
+    /// Setup-only saved prefix admission. Failure belongs to this comparison;
+    /// it neither fails the local game nor changes its optional recording.
+    pub fn add_saved_opponent(
+        &mut self,
+        encoded: Vec<u8>,
+        own: bool,
+        label: String,
+    ) -> Result<usize, JsValue> {
+        let source = self
+            .opponent_source
+            .as_ref()
+            .ok_or_else(|| error("saved opponents must be admitted before activation"))?;
+        let limits = crate::competition_live::replay_limits().map_err(error)?;
+        let header = self
+            .game
+            .competition_header(limits, self.chart_seed)
+            .map_err(error)?;
+        let kind = if own {
+            OpponentKind::Own
+        } else {
+            OpponentKind::Other
+        };
+        if let Some(opponents) = &mut self.opponents {
+            opponents.add(source, &encoded, kind, &label).map_err(error)
+        } else {
+            let mut opponents =
+                SavedOpponents::new(header, limits, 8, 64 * 1024 * 1024).map_err(error)?;
+            let index = opponents
+                .add(source, &encoded, kind, &label)
+                .map_err(error)?;
+            self.opponents = Some(opponents);
+            Ok(index)
+        }
+    }
+    /// Control-side snapshot at the actual local song frontier. Comparison
+    /// errors are returned independently; input/audio paths never call this.
+    pub fn saved_opponents(&mut self) -> Result<JsValue, JsValue> {
+        let array = js_sys::Array::new();
+        let Some(opponents) = &mut self.opponents else {
+            return Ok(array.into());
+        };
+        opponents.advance_to(self.game.song_time()).map_err(error)?;
+        for opponent in opponents.opponents() {
+            let object = js_sys::Object::new();
+            field(
+                &object,
+                "kind",
+                JsValue::from_str(match opponent.kind() {
+                    OpponentKind::Own => "own",
+                    OpponentKind::Other => "other",
+                }),
+            )?;
+            field(&object, "label", JsValue::from_str(opponent.label()))?;
+            field(
+                &object,
+                "songNs",
+                opponent
+                    .song_time()
+                    .map(|time| signed(time.as_nanos()))
+                    .unwrap_or(JsValue::NULL),
+            )?;
+            field(
+                &object,
+                "recordedUntilNs",
+                opponent
+                    .recorded_until()
+                    .map(|time| signed(time.as_nanos()))
+                    .unwrap_or(JsValue::NULL),
+            )?;
+            let score = opponent.score();
+            for (name, value) in [
+                ("hits", score.hits),
+                ("misses", score.misses),
+                ("combo", score.combo),
+                ("maxCombo", score.max_combo),
+            ] {
+                field(&object, name, unsigned(value))?;
+            }
+            array.push(&object);
+        }
+        Ok(array.into())
     }
     /// Optional bounded canonical replay capture; must precede gameplay input
     /// or advancement. The seed comes from the actual prepared chart owner.
@@ -228,7 +319,9 @@ impl BrowserGame {
         self.game.take_replay().map_err(error)
     }
     pub fn activate(&mut self, host_ns: i64) -> Result<(), JsValue> {
-        self.game.activate(point(HOST, host_ns)).map_err(error)
+        self.game.activate(point(HOST, host_ns)).map_err(error)?;
+        self.opponent_source = None;
+        Ok(())
     }
     pub fn next_sample(&mut self) -> Option<BrowserSample> {
         self.samples
@@ -373,6 +466,7 @@ impl BrowserGame {
     }
     pub fn stop(&mut self) {
         self.game.fail();
+        self.opponent_source = None;
         self.samples.clear();
         self.pressed = 0;
     }

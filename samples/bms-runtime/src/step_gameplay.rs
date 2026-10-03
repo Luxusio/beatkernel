@@ -17,7 +17,7 @@ use beatkernel::{
     },
     input::{BindingMap, PhysicalInputEvent},
     judge::JudgeEngine,
-    replay::codec::ReplayCodecLimits,
+    replay::{ReplayHeader, codec::ReplayCodecLimits},
     runtime::{RuntimeProcessingClock, RuntimeReport},
     time::{ClockDomainId, ClockMapper, ClockPair, ClockPoint, Duration, Timestamp},
     transport::{Rate, Transport},
@@ -349,21 +349,20 @@ impl StepGameplay {
         }
     }
 
-    /// Exact native-compatible setup identity without enabling capture or
-    /// changing the pristine judge. Original-song start is zero for this owner;
-    /// host/output origins, preroll and capture choice do not change identity.
-    pub fn competition_identity(
+    /// Actual pristine setup for replay comparisons, without enabling capture.
+    /// Original-song start is zero for this owner.
+    pub fn competition_header(
         &self,
         limits: ReplayCodecLimits,
         chart_seed: u64,
-    ) -> Result<Vec<u8>, StepGameplayError> {
+    ) -> Result<ReplayHeader, StepGameplayError> {
         self.ensure_usable()?;
         if self.started {
             return Err(StepGameplayError::InvalidConfiguration(
                 "competition identity requires an unprocessed runtime",
             ));
         }
-        let header = setup_header(
+        setup_header(
             self.runtime.judge(),
             self.host_domain,
             limits,
@@ -373,7 +372,18 @@ impl StepGameplay {
         .map_err(|error| StepGameplayError::Capture {
             error,
             report: None,
-        })?;
+        })
+    }
+
+    /// Exact native-compatible setup identity without enabling capture or
+    /// changing the pristine judge. Host/output origins, preroll and capture
+    /// choice do not change identity.
+    pub fn competition_identity(
+        &self,
+        limits: ReplayCodecLimits,
+        chart_seed: u64,
+    ) -> Result<Vec<u8>, StepGameplayError> {
+        let header = self.competition_header(limits, chart_seed)?;
         crate::multiplayer::competition_identity(&header, env!("CARGO_PKG_VERSION"), limits)
             .map_err(|error| StepGameplayError::Setup(error.to_string()))
     }
