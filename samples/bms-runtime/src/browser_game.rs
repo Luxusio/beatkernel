@@ -520,6 +520,13 @@ impl BrowserGame {
     pub fn disable_saved_opponent_hud(&mut self) {
         self.saved_hud.mark_failed();
     }
+    /// Explicit actual peer evidence, with no local clock or scoring authority.
+    pub fn update_peer_hud(&mut self, status: u32, words: Vec<u32>) -> Result<(), JsValue> {
+        self.saved_hud.update_peer(status, &words).map_err(error)
+    }
+    pub fn disable_peer_hud(&mut self) {
+        self.saved_hud.mark_peer_failed();
+    }
     /// Optional bounded canonical replay capture; must precede gameplay input
     /// or advancement. The seed comes from the actual prepared chart owner.
     pub fn configure_capture(&mut self, max_bytes: u32, max_records: u32) -> Result<(), JsValue> {
