@@ -191,11 +191,14 @@ async function harness(faults = {}) {
     OffscreenCanvas: class {}, ResizeObserver, matchMedia: () => new Events() });
 
   function createAudio() { return {
-    sampleRate: 48000,
-    samples: [], commandsSeen: [], arms: [], polls: 0, finishes: 0, outputReads: 0,
+    sampleRate: faults.actualRate ?? 48000,
+    samples: [], commandsSeen: [], arms: [], polls: 0, finishes: 0, finishArgs: [], outputReads: 0,
     stopCalls: 0, stopStarts: 0, stopping: null,
-    get currentFrame() { return BigInt(Math.floor(now * 48)); },
-    controlClock() { return faults.controlClock ?? { beforeMs: now, afterMs: now, contextTime: now / 1000, sampleRate: 48000 }; },
+    get currentFrame() {
+      const frames = faults.actualRate === undefined ? now * 48 : now * faults.actualRate / 1000;
+      return BigInt(Math.floor(frames));
+    },
+    controlClock() { return faults.controlClock ?? { beforeMs: now, afterMs: now, contextTime: now / 1000, sampleRate: faults.actualRate ?? 48000 }; },
     outputTimestamp() {
       this.outputReads++;
       traces.push(["output-timestamp"]);
@@ -208,7 +211,10 @@ async function harness(faults = {}) {
       traces.push(["sample", value.id]);
       return { admitted: 0 };
     },
-    async finish() { this.finishes++; traces.push(["finish"]); },
+    async finish(...args) {
+      this.finishes++; this.finishArgs.push(args); traces.push(["finish", ...args]);
+      if (faults.finishFailure) throw faults.finishFailure;
+    },
     async arm(frame) { this.arms.push(frame); traces.push(["arm", frame]); },
     async commands(commands) {
       this.commandsSeen.push(structuredClone(commands));
@@ -685,6 +691,91 @@ test("replay selection retains bounded File metadata, opens in the gesture and p
   assert.equal(h.get("export").disabled, true, "a played file does not become a newly captured export");
   assert.equal(file.reads, 0);
   assert.ok(invalidFiles.every(value => value.reads === 0));
+  await h.close();
+});
+
+test("finite replay metadata snapshots the actual output grid before samples and unlimited replay keeps zero-argument finish", async () => {
+  const h = await harness({ actualRate: 44100 });
+  await h.preview();
+  chooseRecording(h, [selectedRecording().file]);
+  h.get("output-rate").value = "96000";
+  h.get("live-start").value = "invalid live draft";
+  const start = await h.begin("replay"), worker = h.workers[0];
+  assert.equal(h.opens[0].gesture, true);
+  assert.equal(h.opens[0].options.contextOptions.sampleRate, 96000);
+  assert.equal(start.rate, 44100, "the applied AudioHost rate, not the requested preference, validates the recorded endpoint");
+  let endNs = 1000000001n, endFrame = 4411n;
+  const reads = { end: 0, frame: 0 };
+  const metadata = { kind: "prepared", mode: "replay", title: "Finite recording", artist: "Fixture",
+    notes: 1, samples: 1, lanes: [0x11], opponentCount: 0, startNs: 1000000000n, recordedUntilNs: 1000000000n,
+    get endNs() { assert.equal(++reads.end, 1); return endNs; },
+    get endFrame() { assert.equal(++reads.frame, 1); return endFrame; },
+  };
+  // Deliver the controlled endpoint object directly so a later property reread is observable.
+  worker.emit("message", { data: { kind: "play-reply", playId: start.playId, rpcId: start.rpcId, result: metadata } });
+  await flush();
+  assert.deepEqual(reads, { end: 1, frame: 1 });
+  assert.equal(h.audio.samples.length, 0);
+  assert.equal(h.audio.finishes, 0);
+  const sampleRequest = worker.last("play-sample");
+  assert.ok(sampleRequest);
+  endNs = null; endFrame = 0n;
+  await h.reply(sampleRequest, { kind: "sample", id: 1n, rate: 96000, channels: 2, pcm: new Float32Array([0.25, -0.25]) });
+  await h.reply(worker.last("play-sample"), { kind: "samples-end" });
+  assert.deepEqual(h.audio.finishArgs, [[4411n]]);
+  assert.equal(h.audio.samples[0].rate, 96000, "sample source rate does not change the output endpoint grid");
+  await h.reply(worker.last("play-commands"), null);
+  await h.reply(worker.last("play-activate"), null);
+  assert.deepEqual(reads, { end: 1, frame: 1 });
+  assert.match(h.get("details").textContent, /recorded end 1\.000000001 s/);
+  assert.equal(h.audio.arms.length, 1);
+  h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+  const unlimited = await h.launch(0, "replay");
+  assert.deepEqual(h.audio.finishArgs, [[]], "unlimited replay uses the original finish payload without an undefined argument");
+  assert.equal(unlimited.start.rate, 44100);
+  h.click("stop"); await flush(); await h.receive(finalScore(unlimited.id));
+  await h.close();
+});
+
+test("finite replay admission and finish failures clean up without transferring invalid setup or retrying unlimited output", async () => {
+  for (const fields of [
+    { mode: "replay", endNs: 1n }, { mode: "replay", endFrame: 4801n },
+    { mode: "replay", endNs: null, endFrame: null }, { mode: "replay", endNs: 1n, endFrame: 4800n },
+    { mode: "replay", endNs: 1n, endFrame: 4801 }, { mode: "live", endNs: 1n, endFrame: 4801n },
+  ]) {
+    const h = await harness();
+    await h.preview();
+    chooseRecording(h, [selectedRecording().file]);
+    const start = await h.begin(fields.mode), worker = h.workers[0];
+    await h.reply(start, { kind: "prepared", title: "Invalid endpoint", notes: 1, samples: 1,
+      lanes: [0x11], opponentCount: 0, startNs: 0n, ...fields });
+    assert.equal(worker.messages("play-sample").length, 0);
+    assert.equal(h.audio.samples.length, 0);
+    assert.deepEqual(h.audio.finishArgs, []);
+    assert.deepEqual(h.audio.arms, []);
+    assert.equal(h.audio.stopStarts, 1);
+    assert.equal(worker.last("play-stop").playId, start.playId);
+    await h.receive(finalScore(start.playId));
+    assert.equal(h.get("status").dataset.error, "true");
+    await h.close();
+  }
+  const failure = new Error("actual finite finish rejected");
+  const h = await harness({ finishFailure: failure });
+  await h.preview();
+  chooseRecording(h, [selectedRecording().file]);
+  const start = await h.begin("replay"), worker = h.workers[0];
+  await h.reply(start, { kind: "prepared", mode: "replay", title: "Finite endpoint", notes: 1, samples: 0,
+    lanes: [0x11], opponentCount: 0, startNs: 0n, endNs: 1000000000n, endFrame: 52800n });
+  await h.reply(worker.last("play-sample"), { kind: "samples-end" });
+  assert.deepEqual(h.audio.finishArgs, [[52800n]]);
+  assert.equal(h.audio.finishes, 1);
+  assert.equal(worker.messages("play-commands").length, 0);
+  assert.equal(worker.messages("play-activate").length, 0);
+  assert.deepEqual(h.audio.arms, []);
+  assert.equal(h.audio.stopStarts, 1);
+  await h.receive(finalScore(start.playId));
+  assert.match(h.get("status").textContent, /actual finite finish rejected/);
+  assert.equal(h.get("replay-play").disabled, false);
   await h.close();
 });
 

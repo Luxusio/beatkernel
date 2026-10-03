@@ -7,11 +7,51 @@ import {
   KEY_BINDINGS, KEY_CHOICES, snapshotBindings, bindingsFor,
   parseTimingMilliseconds, timingFromMilliseconds, validateTiming,
   PLAY_PCM_SAMPLES, startFromSeconds, validateStart,
-  audioOutputFromFields, audioLimitsFromFields,
+  audioOutputFromFields, audioLimitsFromFields, replayOutputFromMetadata,
 } from "./play-model.mjs";
 
 const U64_MAX = 18446744073709551615n;
 const I64_MAX = 9223372036854775807n;
+
+test("recorded replay endpoints preserve exact original starts and upward frame boundaries in immutable snapshots", () => {
+  const unlimited = replayOutputFromMetadata(0n, undefined, undefined, 48000);
+  assert.deepEqual(unlimited, { endNs: undefined, endFrame: undefined });
+  assert.ok(Object.isFrozen(unlimited));
+  assert.notEqual(replayOutputFromMetadata(0n, undefined, undefined, 48000), unlimited);
+  for (const [start, end, frame, rate] of [
+    [0n, 1n, 1n, 1],
+    [604800000000001n, 604800000000002n, 4411n, 44100],
+    [0n, 1n, 429496734n, 4294967295],
+    [1n, 9007199154740994n, 9007199254740993n, 1000000000],
+    [100000000n, I64_MAX, I64_MAX, 1000000000],
+    [0n, 4294967296900000000n, U64_MAX, 4294967295],
+  ]) {
+    const endpoint = replayOutputFromMetadata(start, end, frame, rate);
+    assert.deepEqual(endpoint, { endNs: end, endFrame: frame });
+    assert.ok(Object.isFrozen(endpoint));
+    assert.throws(() => { endpoint.endFrame = 1n; }, TypeError);
+    assert.equal(endpoint.endFrame, frame);
+  }
+});
+
+test("replay metadata refuses half-pairs, lossy scalar types, mismatched grids and unrepresentable physical endpoints", () => {
+  for (const start of [undefined, null, 0, "0", -1n, I64_MAX + 1n]) {
+    assert.throws(() => replayOutputFromMetadata(start, undefined, undefined, 48000));
+  }
+  for (const rate of [undefined, null, 0, -1, 1.5, NaN, Infinity, "48000", 48000n, 4294967296]) {
+    assert.throws(() => replayOutputFromMetadata(0n, undefined, undefined, rate));
+  }
+  for (const [end, frame] of [[1n, undefined], [undefined, 4801n], [null, null], [1, 4801n],
+    ["1", 4801n], [1n, 4801], [1n, "4801"], [0n, 4800n], [-1n, 4800n],
+    [I64_MAX + 1n, 1n], [1n, 0n], [1n, -1n], [1n, U64_MAX + 1n], [1n, 4800n], [1n, 4802n]]) {
+    assert.throws(() => replayOutputFromMetadata(0n, end, frame, 48000));
+  }
+  assert.throws(() => replayOutputFromMetadata(0n, I64_MAX, I64_MAX + 100000000n, 1000000000),
+    "a representable logical end can overflow after preroll");
+  assert.throws(() => replayOutputFromMetadata(0n, I64_MAX - 100000000n, 9223372037n, 1),
+    "upward frame rounding itself can exceed the signed timestamp boundary");
+  assert.deepEqual(replayOutputFromMetadata(I64_MAX, undefined, undefined, 1), { endNs: undefined, endFrame: undefined });
+});
 
 test("audio capacities preserve independent bounded budgets in a fresh immutable snapshot", () => {
   const defaults = { queueCapacity: "4096", maxVoices: "4096", pendingCapacity: "4096", maxFrames: "4096", maxCommandsPerRender: "4096" };

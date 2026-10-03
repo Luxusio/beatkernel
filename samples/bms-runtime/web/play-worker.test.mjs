@@ -93,7 +93,9 @@ async function workerHarness(options = {}) {
       assert.ok(bytes instanceof Uint8Array);
       this.replayPreparations.push({ path, bytes: bytes.slice(), args });
       if (options.prepareReplayError) throw new Error(options.prepareReplayError);
-      return makePrepared(path);
+      const prepared = makePrepared(path);
+      if (Object.hasOwn(options, "replayStart")) prepared.start_ns = options.replayStart;
+      return prepared;
     }
     free() { assert.equal(++this.frees, 1); }
   }
@@ -217,7 +219,16 @@ async function workerHarness(options = {}) {
     constructor(prepared, ...args) {
       super(prepared, ...args);
       assert.equal(games.pop(), this);
+      this.endpointReads = { end: 0, frame: 0 };
       replays.push(this);
+    }
+    get end_ns() {
+      this.live(); this.endpointReads.end++;
+      return options.replayEndGetter ? options.replayEndGetter(this) : options.replayEnd;
+    }
+    get playback_end_frame() {
+      this.live(); this.endpointReads.frame++;
+      return options.replayFrameGetter ? options.replayFrameGetter(this) : options.replayEndFrame;
     }
     get recorded_until_ns() { this.live(); return options.recordedUntil === undefined ? SCORE.song_ns : options.recordedUntil; }
     activate() { assert.fail("replay must not activate a live transport"); }
@@ -1029,6 +1040,62 @@ test("replay reads once through canonical preparation and shares original PCM, A
   assert.equal(stopped.replayComplete, false);
   assert.equal(stopped.replayError, null);
   assert.equal(file.reads, 1);
+});
+
+test("actual replay endpoint getters are read once and finite metadata crosses setup without changing the PCM or replay owner", async () => {
+  for (const finite of [false, true]) {
+    const selected = replayFile();
+    const startNs = 604800000000001n, endNs = startNs + 1n;
+    const h = await started({ replayStart: startNs,
+      startRequest: replayRequest(selected.file, { rate: 44100 }),
+      replayEndGetter(owner) { assert.equal(owner.endpointReads.end, 1); return finite ? endNs : undefined; },
+      replayFrameGetter(owner) { assert.equal(owner.endpointReads.frame, 1); return finite ? 4411n : undefined; },
+    });
+    const owner = h.replays[0], result = h.of("play-reply")[0].result;
+    assert.equal(result.startNs, startNs);
+    assert.equal(Object.hasOwn(result, "endNs"), finite);
+    assert.equal(Object.hasOwn(result, "endFrame"), finite);
+    if (finite) {
+      assert.equal(result.endNs, endNs);
+      assert.equal(result.endFrame, 4411n);
+    }
+    assert.equal(h.libraries[0].replayPreparations[0].args[0], 44100);
+    assert.equal((await h.rpc("play-sample")).result.rate, 44100);
+    assert.equal((await h.rpc("play-sample")).result.rate, 96000);
+    assert.equal((await h.rpc("play-sample")).result.kind, "samples-end");
+    assert.equal((await h.rpc("play-commands")).result, null);
+    await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START });
+    await h.send({ kind: "play-stop", playId: 7 });
+    assertReleased(h);
+    assert.deepEqual(owner.endpointReads, { end: 1, frame: 1 });
+    assert.deepEqual(owner.disposals, ["stop", "free"]);
+    assert.equal(selected.reads, 1);
+  }
+});
+
+test("malformed or throwing replay endpoint getters fail the consumed owner before samples and never fall back to unlimited setup", async () => {
+  for (const options of [
+    { replayEnd: 1n }, { replayEndFrame: 4801n }, { replayEnd: null, replayEndFrame: null },
+    { replayEnd: 0n, replayEndFrame: 4800n }, { replayEnd: 1n, replayEndFrame: 4800n },
+    { replayEnd: 1n, replayEndFrame: 4801 },
+    { replayEndGetter() { throw new Error("actual end getter failed"); } },
+    { replayEnd: 1n, replayFrameGetter() { throw new Error("actual frame getter failed"); } },
+  ]) {
+    const h = await catalogWorker(options);
+    await h.send(replayRequest(replayFile().file));
+    assert.equal(h.replays.length, 1);
+    const owner = h.replays[0];
+    assert.equal(owner.calls.filter(row => ["sample", "commands", "output"].includes(row[0])).length, 0);
+    assert.equal(h.of("play-reply").filter(reply => reply.result?.kind === "prepared").length, 0);
+    assert.equal(h.of("play-error").length, 1);
+    assert.equal(h.of("play-error")[0].released, true);
+    assertReleased(h);
+    assert.equal(h.preparedOwners[1].moved, true);
+    assert.equal(h.preparedOwners[1].frees, 0, "the consuming replay constructor already owns preparation");
+    assert.ok(owner.endpointReads.end <= 1 && owner.endpointReads.frame <= 1);
+    await h.send({ kind: "play-stop", playId: 7 });
+    assert.deepEqual(owner.disposals, ["stop", "free"]);
+  }
 });
 
 test("replay metadata is bounded before acquisition and invalid or changed reads never reach WASM preparation", async () => {
