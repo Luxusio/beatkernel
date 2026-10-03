@@ -613,3 +613,35 @@ interoperability remain unfinished. More than two network participants requires
 a deliberate multi-party protocol design; existing local-player collections
 remain independently extensible. Registry fixtures are authored and compiled
 for later execution; runtime checks and formal acceptance remain deferred.
+
+
+## HTTP/3 WebTransport relay
+
+The existing executable shall provide an optional serve-multiplayer mode using
+a real HTTP/3 WebTransport endpoint. It shall reuse the common RoomRegistry and
+forward bounded valid BKMP frames between two peers with genuine transport
+backpressure. Compatibility, software start, judging and final ACK remain
+end-to-end peer Session responsibilities. The relay shall not authenticate scores
+or silently extend the bilateral protocol to more participants.
+
+The server shall require explicit bind address, bounded certificate/key files,
+exact allowed browser origin and bounded room/setup/I/O limits. Configured origins
+shall use HTTPS, or explicit HTTP loopback for the existing local browser host;
+the WebTransport endpoint itself shall always use HTTPS. Requests shall
+use /rooms/KEY with the common bounded ASCII key policy. Native requests without
+Origin shall require explicit opt-in. No certificate bypass, automatic secret
+generation or private-key printing shall occur. Concurrent sessions and setup
+tasks shall be bounded; admission requires one actual bidirectional stream.
+
+Waiting expiry and session failures shall close exact owned resource leases.
+End of one relay direction shall half-close the opposite output and give the
+other direction at most two seconds to finish genuine final ACK traffic. Stop
+and Ctrl+C shall invalidate ownership, close all sessions and join bounded
+tasks. Late setup completion shall never resurrect a stopped server or room.
+Native adapters shall be shared across operating systems; browser WebTransport
+shall not be represented as a raw-QUIC connection.
+
+Author code stays MIT. The optional pinned HTTP/3 dependency shall use permissive
+license options with required notices. Source implementation and compile-only
+fixtures do not establish actual TLS, server, browser or native interoperability;
+those checks and formal acceptance remain deferred.

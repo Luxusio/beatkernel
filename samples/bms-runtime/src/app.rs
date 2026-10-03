@@ -25,6 +25,7 @@ pub(super) fn run(args: &[String]) -> Result<()> {
         "render-replay" => crate::replay_renderer::run_args(rest),
         "render" => crate::render_offline_args(rest),
         "compete" => compare(rest),
+        "serve-multiplayer" => serve_multiplayer(rest),
         // Keep the old positional renderer available, including charts with
         // arbitrary names; explicit modes use their own strict option parsers.
         _ if args.len() >= 4 && !command.starts_with('-') => crate::render_offline_args(args),
@@ -42,9 +43,28 @@ play-replay [native replay output options]             Play recorded sounds\n\
 render CHART NEW_OUTPUT SECONDS RATE [CHANNELS]         Offline synthetic render\n\
 render-replay [recorded PCM output options]            Render recorded sounds\n\
 compete --chart PATH --local-replay PATH [--ghost-self PATH] [--ghost-other PATH] [--song-ns N]\n\
+serve-multiplayer [HTTP/3 relay options]                WebTransport room relay (--features webtransport)\n\
 Use MODE --help for mode options. Primary play/player resolve omitted devices automatically; standalone native tools keep exact option requirements.\n\
-Saved opponents require the same compiled chart and judging profile. Multiplayer is two-peer casual progress exchange; song starts are local and scores are self-reported."
+Saved opponents require the same compiled chart and judging profile. Multiplayer is two-peer casual progress exchange with a shared software start; scores are self-reported."
     );
+}
+
+fn serve_multiplayer(args: &[String]) -> Result<()> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
+    {
+        use beatkernel_bms_runtime::multiplayer_webtransport::{HELP, ServerOptions, run};
+        if args == ["--help"] {
+            println!("{HELP}");
+            return Ok(());
+        }
+        run(ServerOptions::parse(args)?)?;
+        Ok(())
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "webtransport")))]
+    {
+        let _ = args;
+        Err("HTTP/3 multiplayer relay requires the native webtransport Cargo feature; build with --features webtransport".into())
+    }
 }
 
 fn desktop(args: &[String]) -> Result<()> {

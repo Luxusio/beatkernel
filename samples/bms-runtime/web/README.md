@@ -8,7 +8,7 @@ prepared PCM to an AudioWorklet and feeds originating Window keyboard timestamps
 into the same SoloRuntime used by native gameplay. The natural-completion source
 path joins terminal judging, Mixer drain and reported output timestamps.
 Optional capture/download and local canonical replay playback are source-wired
-to this host. Browser multiplayer remains unfinished. The shared Rust
+to this host. Browser multiplayer execution remains unverified. The shared Rust
 `multiplayer_protocol` module provides bounded BKMP v6 framing and the same
 progress, readiness, clock-probe and final-acknowledgement state used by native
 QUIC. Its common session owner composes setup matching and software start
@@ -17,8 +17,8 @@ QUIC already delegates those transitions to the common owner. Callable
 `BrowserMultiplayer` WASM bindings and `multiplayer-transport.mjs` provide the
 session and WebTransport stream boundaries. The Window/Worker live Play source path now creates those owners after
 local audio preparation, maps the committed start onto the actual output grid
-and publishes genuine score summaries. A compatible HTTP/3 service remains
-unfinished; this path has not been executed.
+and publishes genuine score summaries. The optional native HTTP/3 relay is source-implemented in the same app; this
+path has not been executed.
 
 The DOM owns file selection, controls and layout. A dedicated module Worker owns
 the imported bytes, preparation and wgpu rendering on a transferred
@@ -170,7 +170,7 @@ The separate `browser-audio` feature exports the existing Rust Mixer through a
 numeric ABI for `audio-worklet.js`. It belongs to the same application crate
 and excludes graphics. The Play controls connect the component to common gameplay and keyboard input.
 Optional capture/download and replay use the same host. Explicit live multiplayer
-uses its committed output start; the compatible HTTP/3 service remains separate work.
+uses its committed output start; the optional HTTP/3 relay is source-implemented.
 
 When execution is scheduled, build and generate this artifact separately from
 the graphics bindings above. Each Cargo build replaces the common output WASM,
@@ -265,8 +265,8 @@ or an accuracy guarantee. Optional shared capture and replay download are
 source-integrated. Portable stepped replay and WASM preparation/render bindings
 reuse canonical recorded work and existing audio planning. Window/Worker replay
 launch reuses the same audio host. Explicit saved-record storage/browsing feeds
-the replay path. Live WebTransport Play is source-integrated; its compatible
-service and ranked browser competition remain unfinished.
+the replay path. Live WebTransport Play and the optional HTTP/3 relay are source-integrated;
+ranked browser competition remains unfinished.
 
 Natural completion uses the existing shared SongCompletion owner. Every original
 object must finish judging; BGM and outgoing/local command work must finish;
@@ -410,8 +410,9 @@ source integration, enable it and supply a compatible HTTPS WebTransport URL.
 Select **Propose start** for one participant and **Join start** for the other.
 Prepare the same chart/seed and matching gameplay/output setup on both sides.
 The URL needs a trusted certificate and an HTTP/3 service that pairs two BKMP v6
-streams; the native raw QUIC listener is not a WebTransport server. That service
-and actual interoperability are still unfinished. Selecting multiplayer never
+streams. The optional `serve-multiplayer` mode supplies that HTTP/3 adapter;
+the native raw QUIC listener remains a separate transport. Actual
+interoperability is unverified. Selecting multiplayer never
 uploads chart assets or raw keyboard events. Replay remains local even while
 this option is selected.
 
@@ -437,9 +438,37 @@ not evidence of browser playback or multiplayer execution.
 
 
 The common application crate also provides a bounded room/participant ownership
-foundation for the future HTTP/3 service. It returns precise closure leases,
+foundation used by the optional HTTP/3 service. It returns precise closure leases,
 expires only waiters and fences stale disconnects from newer same-key rooms.
-It performs no socket/TLS/HTTP/3 work and does not make the browser server
-available. Current BKMP remains bilateral; local-player extensibility does not
+The registry performs no socket/TLS/HTTP/3 work; the optional adapter owns
+actual sessions and applies those closure leases. Current BKMP remains bilateral; local-player extensibility does not
 by itself provide a multi-party network protocol. See the
 [room ownership component](../../../doc/changes/CHANGE__multiplayer-room-ownership.md).
+
+
+## Optional HTTP/3 relay
+
+From the repository root, build the same application with `webtransport` and
+run its server mode when execution is scheduled:
+
+```sh
+cargo run -p beatkernel-bms-runtime --no-default-features --features webtransport -- serve-multiplayer --bind 127.0.0.1:9001 --cert server.pem --key server-key.pem --origin http://localhost:8080
+```
+
+Both players use the same `https://localhost:9001/rooms/example` URL. Supply a
+certificate trusted by the browser and the exact page origin, including port.
+Repeated `--origin` flags admit additional explicit origins. HTTPS origins and
+HTTP loopback page origins are accepted; the endpoint itself always uses HTTPS.
+There is no self-signed certificate generation or verifier bypass. Missing
+Origin is rejected by default, with `--allow-missing-origin` an explicit native
+client opt-in. The current native gameplay path still uses raw QUIC.
+
+The relay accepts one bidirectional stream per participant, validates bounded
+BKMP v6 frames and forwards them between the room's two participants. Shared
+session code retains compatibility, readiness, software start and peer ACK
+semantics. Admission, setup, waiter and I/O deadlines are bounded. On EOF the
+opposite direction has at most two seconds to drain; abnormal failure closes
+both participants. Ctrl+C closes the sessions and joins outstanding tasks.
+Server limits and configuration are listed by `serve-multiplayer --help`.
+These commands and browser/TLS/network interoperability remain unexecuted.
+See the [adapter contract](../../../doc/changes/CHANGE__webtransport-relay.md).

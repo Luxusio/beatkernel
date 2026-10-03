@@ -114,13 +114,13 @@ delegates these transitions to it; connection and timeout ownership stay in the
 transport adapter.
 Callable browser WASM session bindings and a bounded WebTransport stream adapter
 are also provided as source components and used by explicit live browser Play.
-The compatible HTTP/3 service remains unfinished.
+An optional native HTTP/3 relay is source-implemented in the same application.
 Browser gameplay can derive the same canonical identity without recording,
 and a controller composes the shared WASM session with the byte channel. It
 retains one pending submission and distinguishes local writes from final peer
 ACKs. Play controls now map the committed target onto one output frame and
-activate gameplay on that frame's host projection. WebTransport still requires
-a compatible HTTP/3 service; network/browser execution remains deferred.
+activate gameplay on that frame's host projection. The `serve-multiplayer` mode
+pairs these streams; network/browser execution remains deferred.
 QUIC socket/TLS execution is still deferred.
 Use an explicit reachable IP for another machine. Network loss leaves local
 play running; remote progress is self-reported. A committed software start does
@@ -300,8 +300,8 @@ observer. Optional canonical replay export uses the common capture owner.
 Portable stepped replay and WASM preparation/render bindings are source-integrated;
 browser replay launch now reuses the audio host. Explicit saved-record storage
 and selection are source-integrated. Explicit live multiplayer uses the shared
-session and WebTransport in the Play host; the compatible HTTP/3 service and
-ranked competition remain follow-on work. See the
+session and WebTransport in the Play host; the optional HTTP/3 relay is
+source-implemented. Ranked competition remains follow-on work. See the
 [browser build and usage instructions](samples/bms-runtime/web/README.md) and
 [browser contract](doc/kernel/REQ__bms-browser.md). Generated bindings and actual
 browser/GPU execution remain unverified. Check the reusable graphics library with:
@@ -991,14 +991,31 @@ The browser player also has an explicit live multiplayer source path using
 WebTransport and the shared BKMP v6 session. It waits for actual local audio
 preparation, applies one committed output start to audio and gameplay, and keeps
 peer-reported scores separate from local judgment. Solo and replay remain local.
-A compatible HTTP/3 pairing service, generated browser bindings and actual
-network/audio execution remain unfinished or unverified; see the
+The optional `webtransport` feature supplies a paired HTTP/3 relay. Generated
+browser bindings and actual network/audio execution remain unverified; see the
 [browser host](samples/bms-runtime/web/README.md#multiplayer-live-play).
 
 
 A std-only room ownership component in the existing application crate prepares
 the HTTP/3 service boundary: bounded pairs, checked waiter expiry, precise
-closure leases and stale-disconnect fencing. It does not implement the server
-or extend the bilateral network protocol to more players. The
+closure leases and stale-disconnect fencing. The optional HTTP/3 adapter owns
+and closes actual sessions using those leases. BKMP remains bilateral. The
 [component contract](doc/changes/CHANGE__multiplayer-room-ownership.md) records
 its limits and deferred execution.
+
+
+The same application executable provides the optional HTTP/3 relay:
+
+```sh
+cargo run -p beatkernel-bms-runtime --no-default-features --features webtransport -- serve-multiplayer --bind 127.0.0.1:9001 --cert server.pem --key server-key.pem --origin http://localhost:8080
+```
+
+This is a documented command for later execution. Use a browser-trusted TLS
+certificate and supply the exact page origin; each participant selects the same
+`https://localhost:9001/rooms/example` URL. `--origin` may be repeated for explicit
+origins. HTTP origins are accepted only for loopback pages; the WebTransport
+endpoint always uses HTTPS. Missing Origin is rejected unless explicitly enabled
+with `--allow-missing-origin`. Room, session, setup and timeout limits are exposed
+in `serve-multiplayer --help`. See the
+[adapter contract](doc/changes/CHANGE__webtransport-relay.md). TLS/network/browser
+execution and authentication/ranked authority remain outside this source milestone.
