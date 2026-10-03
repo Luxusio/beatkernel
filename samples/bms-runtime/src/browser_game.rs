@@ -12,7 +12,7 @@ use crate::{
     player_chart::PlayerChart,
     saved_opponents::SavedOpponents,
     step_gameplay::{StepAudioBatch, StepGameplay, StepGameplayConfig, StepGameplayError},
-    worklet_audio::decode_output,
+    worklet_audio::{decode_output, decode_section_output},
 };
 use beatkernel::{
     audio::{AudioCommand, PcmSample, SampleId},
@@ -129,6 +129,52 @@ impl BrowserGame {
         offset_ns: i64,
         key_pairs: Vec<u32>,
     ) -> Result<Self, JsValue> {
+        Self::construct(
+            prepared,
+            host_origin_ns,
+            preroll_ns,
+            early_ns,
+            late_ns,
+            offset_ns,
+            key_pairs,
+            None,
+        )
+    }
+    /// Use the same live owner with an immutable original-song endpoint.
+    pub fn new_section(
+        prepared: BrowserPrepared,
+        host_origin_ns: i64,
+        preroll_ns: i64,
+        early_ns: i64,
+        late_ns: i64,
+        offset_ns: i64,
+        key_pairs: Vec<u32>,
+        end_ns: i64,
+    ) -> Result<Self, JsValue> {
+        Self::construct(
+            prepared,
+            host_origin_ns,
+            preroll_ns,
+            early_ns,
+            late_ns,
+            offset_ns,
+            key_pairs,
+            Some(Timestamp::from_nanos(end_ns)),
+        )
+    }
+}
+
+impl BrowserGame {
+    fn construct(
+        prepared: BrowserPrepared,
+        host_origin_ns: i64,
+        preroll_ns: i64,
+        early_ns: i64,
+        late_ns: i64,
+        offset_ns: i64,
+        key_pairs: Vec<u32>,
+        end: Option<Timestamp>,
+    ) -> Result<Self, JsValue> {
         if prepared.replay.is_some() {
             return Err(error("replay resources require the replay owner"));
         }
@@ -182,7 +228,7 @@ impl BrowserGame {
         // Clone only during preparation and release it after activation.
         let opponent_source = prepared.prepared.source.clone();
         let (mut game, bank) =
-            StepGameplay::new_at(prepared.prepared, config, bindings, prepared.start)
+            StepGameplay::new_section(prepared.prepared, config, bindings, prepared.start, end)
                 .map_err(error)?;
         game.configure_output_clock(DisciplineConfig {
             max_observation_age: Duration::from_nanos(1_000_000_000),
@@ -205,6 +251,10 @@ impl BrowserGame {
             opponents: None,
         })
     }
+}
+
+#[wasm_bindgen]
+impl BrowserGame {
     pub fn sample_count(&self) -> usize {
         self.samples.len()
     }
@@ -355,7 +405,11 @@ impl BrowserGame {
         let result = self
             .game
             .process_input(input, &Explicit, point(OUTPUT, audio_ns));
+        let ended = result.as_ref().is_ok_and(|report| report.song_end_reached);
         self.accept_report(result)?;
+        if ended {
+            return Ok(());
+        }
         if let Some(mask) = crate::pressed_keys::lane_bit(GameControlId(u32::from(lane))) {
             if down {
                 self.pressed |= mask;
@@ -407,7 +461,11 @@ impl BrowserGame {
         if self.game.failed() {
             return Err(error(StepGameplayError::Failed));
         }
-        let evidence = match decode_output(&words) {
+        let decoded = match self.game.playback_end_frame() {
+            Some(end) => decode_section_output(&words, Some(end)),
+            None => decode_output(&words),
+        };
+        let evidence = match decoded {
             Ok(evidence) => evidence,
             Err(reason) => {
                 self.game.fail();
@@ -476,6 +534,14 @@ impl BrowserGame {
         self.game.song_time().as_nanos()
     }
     #[wasm_bindgen(getter)]
+    pub fn end_ns(&self) -> Option<i64> {
+        self.game.end_ns()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn playback_end_frame(&self) -> Option<u64> {
+        self.game.playback_end_frame()
+    }
+    #[wasm_bindgen(getter)]
     pub fn hits(&self) -> u64 {
         self.game.score().hits
     }
@@ -521,6 +587,9 @@ impl BrowserGame {
         }
     }
     fn observe(&mut self, report: &RuntimeReport) {
+        if report.song_end_reached {
+            self.pressed = 0;
+        }
         self.progress.apply(&report.judge_events);
         for event in &report.judge_events {
             if self.recent.len() == 128 {

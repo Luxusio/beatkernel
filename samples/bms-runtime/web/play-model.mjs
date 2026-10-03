@@ -16,6 +16,19 @@ export function validateStart(value = 0n) {
   if (typeof value !== "bigint" || value < 0n || value > I64_MAX) throw new Error("Live section start must be nonnegative signed 64-bit nanoseconds.");
   return value;
 }
+export function validateEnd(startNs, endNs = undefined) {
+  if (typeof startNs !== "bigint") throw new Error("A live section requires its actual start in nanoseconds.");
+  validateStart(startNs);
+  if (endNs !== undefined && (typeof endNs !== "bigint" || endNs <= startNs || endNs > I64_MAX)) {
+    throw new Error("Live section end must follow its start and fit signed 64-bit nanoseconds.");
+  }
+  return endNs;
+}
+export function sectionFromSeconds(startValue, endValue) {
+  const startNs = startFromSeconds(startValue);
+  const endNs = validateEnd(startNs, endValue === "" ? undefined : startFromSeconds(endValue));
+  return Object.freeze({ startNs, endNs });
+}
 
 export function replayOutputFromMetadata(startNs, endNs, endFrame, rate) {
   if (typeof startNs !== "bigint") throw new Error("Replay output requires its actual original-song start.");

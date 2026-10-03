@@ -2,10 +2,10 @@ import { snapshotFiles, nanoseconds, seconds } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
 import { RecordsStore } from "./record-store.mjs";
 import { SavedOpponentSelection, opponentLabel, validateOpponentSnapshot } from "./saved-opponents.mjs";
-import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, startFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, frameNanos, startProjection, committedStartProjection, presentationPair } from "./play-model.mjs";
+import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, frameNanos, startProjection, committedStartProjection, presentationPair } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
-const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands"].map(id => [id, byId(id)]));
+const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands"].map(id => [id, byId(id)]));
 let canvas = byId("canvas");
 let worker = null;
 let observer = null;
@@ -78,7 +78,7 @@ function controls() {
   const recordsDisabled = !initialized || importing || preparing || playing || busy;
   ui["bindings-reset"].disabled = recordsDisabled;
   for (const [, field] of bindingFields) field.disabled = recordsDisabled;
-  for (const field of [ui["judge-early"], ui["judge-late"], ui["judge-offset"], ui["live-start"]]) field.disabled = recordsDisabled;
+  for (const field of [ui["judge-early"], ui["judge-late"], ui["judge-offset"], ui["live-start"], ui["live-end"]]) field.disabled = recordsDisabled;
   ui["output-latency"].disabled = ui["output-rate"].disabled = recordsDisabled;
   ui["output-latency-ms"].disabled = recordsDisabled || ui["output-latency"].value !== "custom";
   for (const id of ["audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands"]) ui[id].disabled = recordsDisabled;
@@ -422,7 +422,9 @@ async function play(mode = "live") {
       pendingCapacity: ui["audio-pending"].value, maxFrames: ui["audio-frames"].value, maxCommandsPerRender: ui["audio-commands"].value });
     session.commandBatchLimit = Math.min(256, session.audioLimits.queueCapacity);
     session.timing = mode === "live" ? timingFromMilliseconds(ui["judge-early"].value, ui["judge-late"].value, ui["judge-offset"].value) : null;
-    session.startNs = mode === "live" ? startFromSeconds(ui["live-start"].value) : null;
+    const section = mode === "live" ? sectionFromSeconds(ui["live-start"].value, ui["live-end"].value) : null;
+    session.startNs = section?.startNs ?? null;
+    session.requestedEndNs = section?.endNs;
     session.bindingSelection = mode === "live" ? snapshotBindings(bindingFields.map(([lane, field]) => [lane, field.value])) : null;
     session.multiplayer = mode === "live" && ui.multiplayer.checked === true ? multiplayerConfiguration() : null;
     ui["multiplayer-status"].textContent = session.multiplayer ? "Preparing local audio before connecting…"
@@ -441,6 +443,7 @@ async function play(mode = "live") {
     session.workerStarted = true;
     const source = mode === "replay" ? { mode, replayFile: session.replayFile }
       : { mode, seed: ui.seed.value, recordReplay: session.recordReplay, timing: session.timing, startNs: session.startNs,
+        ...(session.requestedEndNs === undefined ? {} : { endNs: session.requestedEndNs }),
         ...(session.multiplayer ? { multiplayer: session.multiplayer } : {}),
         ...(session.opponentSelection ? { opponents: session.opponentSelection } : {}),
         keyPairs: Uint32Array.from(session.bindingSelection.flatMap(row => [row[0], row[2]])) };
@@ -453,7 +456,7 @@ async function play(mode = "live") {
     if (mode === "live" && preparedStart !== session.startNs) throw new Error("Prepared live section start changed.");
     if (mode === "replay") session.startNs = preparedStart;
     const output = replayOutputFromMetadata(preparedStart, prepared.endNs, prepared.endFrame, session.audio.sampleRate);
-    if (mode !== "replay" && output.endFrame !== undefined) throw new Error("Finite live playback is not available.");
+    if (mode === "live" && output.endNs !== session.requestedEndNs) throw new Error("Prepared live section end changed.");
     session.endNs = output.endNs;
     session.endFrame = output.endFrame;
     const opponentCount = prepared.opponentCount === undefined ? 0 : prepared.opponentCount;
@@ -462,7 +465,7 @@ async function play(mode = "live") {
     session.opponentSelection = null;
     ui.title.textContent = prepared.title || ui.chart.value;
     ui.details.textContent = `${prepared.artist || "Unknown artist"} · ${prepared.notes} notes · ${prepared.samples} sounds · ${session.audio.sampleRate} Hz output · start ${seconds(preparedStart.toString())} s`
-      + (session.endNs === undefined ? "" : ` · recorded end ${seconds(session.endNs.toString())} s`);
+      + (session.endNs === undefined ? "" : ` · ${mode === "replay" ? "recorded end" : "end"} ${seconds(session.endNs.toString())} s`);
     session.bindings = mode === "replay" ? [] : bindingsFor(prepared.lanes, session.bindingSelection);
     ui.keys.textContent = mode === "replay" ? "Recorded input playback · Escape stops the replay."
       : session.bindings.map(row => `${row[0].toString(16).toUpperCase()}: ${row[1]}`).join(" · ");
@@ -568,7 +571,8 @@ function finishPlay(session) {
   if (activePlay === session && session.phase === "playing" && session.completionReady
     && session.events.length === 0 && session.tickPending === null && session.renderPending === null
     && session.batch === null && !session.audioBusy) {
-    void stopPlay(session.mode === "replay" ? "Recorded replay ended." : "Song completed.", false, true);
+    void stopPlay(session.mode === "replay" ? "Recorded replay ended."
+      : session.endNs === undefined ? "Song completed." : "Section completed.", false, true);
   }
 }
 function pumpInput(session) {

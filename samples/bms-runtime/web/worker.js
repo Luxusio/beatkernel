@@ -1,6 +1,6 @@
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
-import { PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, replayOutputFromMetadata, millisecondsToNanos, renderedCursor } from "./play-model.mjs";
+import { PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, renderedCursor } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { validateSelections, validateOpponentSnapshot } from "./saved-opponents.mjs";
 const { BrowserGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
@@ -483,6 +483,7 @@ async function preparePlay(state, request) {
     state.mode = request.mode ?? "live";
     const timing = state.mode === "live" ? validateTiming(request.timing) : null;
     const requestedStart = state.mode === "live" ? validateStart(request.startNs) : null;
+    const requestedEnd = state.mode === "live" ? validateEnd(requestedStart, request.endNs) : undefined;
     state.network = multiplayerConfiguration(request.multiplayer, state.mode);
     const opponents = state.mode === "live" && request.opponents !== undefined
       ? validateSelections(request.opponents) : NO_OPPONENTS;
@@ -537,17 +538,21 @@ async function preparePlay(state, request) {
     bindingsFor(chartLanes);
     if (state.mode === "live" && chartLanes.some(lane => !lanes.includes(lane))) throw new Error("A prepared lane has no supplied key binding.");
     const metadata = { title: prepared.title, artist: prepared.artist, notes: prepared.note_count, lanes: chartLanes, startNs };
+    if (state.mode === "live" && requestedEnd !== undefined && typeof BrowserGame.new_section !== "function") {
+      throw new Error("The gameplay binding does not provide finite section ownership.");
+    }
     const moved = prepared;
     prepared = null; // A consuming Rust constructor also owns the argument on Err.
     state.game = state.mode === "replay"
       ? new BrowserReplay(moved, 100000000n)
-      : new BrowserGame(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs);
-    if (state.mode === "replay") {
-      const output = replayOutputFromMetadata(startNs, state.game.end_ns, state.game.playback_end_frame, request.rate);
-      if (output.endFrame !== undefined) {
-        metadata.endNs = output.endNs;
-        metadata.endFrame = output.endFrame;
-      }
+      : requestedEnd === undefined
+        ? new BrowserGame(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs)
+        : BrowserGame.new_section(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs, requestedEnd);
+    const output = replayOutputFromMetadata(startNs, state.game.end_ns, state.game.playback_end_frame, request.rate);
+    if (state.mode === "live" && output.endNs !== requestedEnd) throw new Error("Actual live section end differs from its request.");
+    if (output.endFrame !== undefined) {
+      metadata.endNs = output.endNs;
+      metadata.endFrame = output.endFrame;
     }
     for (const opponent of opponents) {
       const bytes = await opponent.file.arrayBuffer();
