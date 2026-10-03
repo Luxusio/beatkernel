@@ -113,6 +113,11 @@ async function workerHarness(options = {}) {
       constructor() { throw new Error("Preview fixtures must not create gameplay owners"); }
     });
   }, { context });
+  const network = new SyntheticModule(["BrowserMultiplayerOwner"], function () {
+    this.setExport("BrowserMultiplayerOwner", class {
+      static open() { throw new Error("Preview fixtures must not open multiplayer connections"); }
+    });
+  }, { context });
   const helpers = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
   const playHelpers = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
@@ -120,6 +125,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./host_model.mjs") return helpers;
     if (specifier === "./play-model.mjs") return playHelpers;
+    if (specifier === "./multiplayer-owner.mjs") return network;
     throw new Error(`Unexpected Worker import: ${specifier}`);
   });
   await worker.evaluate();

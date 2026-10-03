@@ -393,6 +393,10 @@ impl BrowserGame {
         self.game.score().combo
     }
     #[wasm_bindgen(getter)]
+    pub fn max_combo(&self) -> u64 {
+        self.game.score().max_combo
+    }
+    #[wasm_bindgen(getter)]
     pub fn failed(&self) -> bool {
         self.game.failed()
     }

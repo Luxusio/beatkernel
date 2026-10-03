@@ -1,7 +1,8 @@
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
-import { bindingsFor, renderedCursor } from "./play-model.mjs";
-const { BrowserGame, BrowserLibrary, BrowserReplay, BrowserView } = runtime;
+import { bindingsFor, millisecondsToNanos, renderedCursor } from "./play-model.mjs";
+import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
+const { BrowserGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
 let ready = null;
 let view = null;
 let library = null;
@@ -20,6 +21,7 @@ let play = null;
 let lastPlayId = 0;
 const I64_MAX = 9223372036854775807n;
 const U64_MAX = 18446744073709551615n;
+const PROGRESS_INTERVAL_NS = 250000000n;
 
 function report(kind, fields = {}, transfer = []) { self.postMessage({ kind, ...fields }, transfer); }
 function message(error) { return String(error?.message ?? error).slice(0, 4096); }
@@ -185,9 +187,9 @@ function hostTime(value) { return typeof value === "bigint" && value >= 0n && va
 function signed(value) { return typeof value === "bigint" && value >= -I64_MAX - 1n && value <= I64_MAX; }
 
 function statistics(state) {
-  const result = { songNs: null, hits: null, misses: null, combo: null, preOriginInputs: state.preOriginInputs };
+  const result = { songNs: null, hits: null, misses: null, combo: null, maxCombo: null, preOriginInputs: state.preOriginInputs };
   if (state.game) {
-    for (const [field, getter] of [["songNs", "song_ns"], ["hits", "hits"], ["misses", "misses"], ["combo", "combo"]]) {
+    for (const [field, getter] of [["songNs", "song_ns"], ["hits", "hits"], ["misses", "misses"], ["combo", "combo"], ["maxCombo", "max_combo"]]) {
       // Preserve every readable actual field even if a terminal binding fault
       // makes another getter unavailable. Null never pretends to be a zero score.
       try {
@@ -197,6 +199,195 @@ function statistics(state) {
     }
   }
   return result;
+}
+
+function networkNow() {
+  return millisecondsToNanos(self.performance.timeOrigin) + millisecondsToNanos(self.performance.now());
+}
+
+function multiplayerConfiguration(value, mode) {
+  if (value === undefined) return null;
+  if (mode !== "live" || !value || typeof value !== "object" || typeof value.host !== "boolean"
+    || typeof value.url !== "string" || value.url.length === 0 || value.url.length > 4096
+    || !hostTime(value.windowOriginNs)) throw new Error("Invalid live multiplayer configuration.");
+  const url = new URL(value.url);
+  if (url.protocol !== "https:" || url.username || url.password || url.hash || url.href.length > 4096) throw new Error("Multiplayer requires a bounded HTTPS WebTransport URL without credentials or a fragment.");
+  return { url: url.href, host: value.host, windowOriginNs: value.windowOriginNs,
+    owner: null, controller: null, requested: false, rpcId: null, start: null,
+    disposed: false, stopping: false, failure: null, pending: null, lastProgress: null,
+    remote: null, remoteTimer: null, lastRemote: null, finalWritten: false, finalAcknowledged: false };
+}
+
+function clearRemoteProgress(network) {
+  clearTimeout(network.remoteTimer);
+  network.remoteTimer = null;
+  network.remote = null;
+}
+
+function closeNetwork(network) {
+  if (!network || network.disposed) return;
+  network.disposed = true;
+  clearRemoteProgress(network);
+  const owner = network.owner;
+  network.owner = null;
+  try { network.controller?.abort(); } catch {}
+  try { owner?.close(); } catch {}
+}
+
+function networkFailure(state, error) {
+  const network = state.network;
+  if (!network || network.disposed) return;
+  network.failure ??= error;
+  closeNetwork(network);
+  if (play !== state) return;
+  if (!state.active) failPlay(state, error);
+  else report("play-multiplayer", { playId: state.id, event: { kind: "disconnected", error: message(error) } });
+}
+
+function progressSnapshot(score) {
+  if (!signed(score.songNs) || ![score.hits, score.misses, score.combo, score.maxCombo].every(unsigned)) {
+    throw new Error("Actual multiplayer score is unavailable.");
+  }
+  return { songNs: score.songNs, hits: score.hits, misses: score.misses, combo: score.combo, maxCombo: score.maxCombo };
+}
+
+function publishRemoteProgress(state) {
+  const network = state.network;
+  if (network.disposed || network.stopping || play !== state || network.remote === null) return;
+  const now = networkNow();
+  const remaining = network.lastRemote === null ? 0n : PROGRESS_INTERVAL_NS - (now - network.lastRemote);
+  if (remaining > 0n) {
+    if (network.remoteTimer === null) network.remoteTimer = setTimeout(() => {
+      network.remoteTimer = null;
+      try { publishRemoteProgress(state); } catch (error) { networkFailure(state, error); }
+    }, Number((remaining + 999999n) / 1000000n));
+    return;
+  }
+  const event = network.remote;
+  network.remote = null;
+  network.lastRemote = now;
+  report("play-multiplayer", { playId: state.id, event });
+}
+
+function networkEvent(state, event) {
+  const network = state.network;
+  if (network.disposed || (play !== state && !network.stopping)) return;
+  if (!event || typeof event.kind !== "string") throw new Error("Invalid actual multiplayer event.");
+  let forwarded;
+  if (event.kind === "progress" || event.kind === "final-progress") {
+    forwarded = { kind: event.kind, ...progressSnapshot(event) };
+    if (event.kind === "progress") {
+      if (!network.stopping) { network.remote = forwarded; publishRemoteProgress(state); }
+      return;
+    }
+    clearRemoteProgress(network);
+  } else if (event.kind === "start") {
+    if (network.stopping) return;
+    if (!network.owner || network.start !== null || !hostTime(event.targetNs)
+      || !hostTime(event.songTargetNs) || !hostTime(event.uncertaintyNs)) throw new Error("Invalid committed multiplayer start.");
+    const offset = network.owner.origin - network.windowOriginNs;
+    const targetHostNs = offset + event.targetNs;
+    const songTargetHostNs = offset + event.songTargetNs;
+    if (!hostTime(targetHostNs) || !hostTime(songTargetHostNs) || songTargetHostNs - targetHostNs !== 100000000n) {
+      throw new Error("Committed multiplayer start cannot map to the Window clock.");
+    }
+    network.start = { kind: "multiplayer-start", targetHostNs, songTargetHostNs, uncertaintyNs: event.uncertaintyNs };
+    const rpcId = network.rpcId;
+    network.rpcId = null;
+    if (!identity(rpcId)) throw new Error("Multiplayer start has no pending readiness request.");
+    report("play-reply", { playId: state.id, rpcId, result: network.start });
+    return;
+  } else if (event.kind === "final-acknowledged") {
+    network.finalAcknowledged = true;
+    forwarded = { kind: event.kind };
+  } else if (event.kind === "connected" || event.kind === "ready") forwarded = { kind: event.kind };
+  else if (event.kind === "clock") {
+    const fields = ["lowerNs", "upperNs", "midpointNs", "roundTripNs", "observedLocalNs"];
+    if (!fields.every(field => signed(event[field]))) throw new Error("Invalid actual multiplayer clock estimate.");
+    forwarded = { kind: event.kind };
+    for (const field of fields) forwarded[field] = event[field];
+  } else if (event.kind === "disconnected") {
+    networkFailure(state, new Error(message(event.error)));
+    return;
+  } else throw new Error("Unknown actual multiplayer event.");
+  report("play-multiplayer", { playId: state.id, event: forwarded });
+}
+
+async function networkReady(state, request) {
+  const network = state.network;
+  // A readiness request owns its RPC until committed start, failure or stop.
+  network.requested = true;
+  network.rpcId = request.rpcId;
+  let session = null;
+  try {
+    network.controller = new AbortController();
+    session = new BrowserMultiplayer(state.game.competition_identity(), network.host, 100000000n);
+    const opening = BrowserMultiplayerOwner.open(network.url, { session, now: networkNow,
+      signal: network.controller.signal,
+      onEvent: event => networkEvent(state, event),
+      onClose: error => networkFailure(state, error) });
+    // Owner.open consumes a valid session/configuration, including setup errors.
+    session = null;
+    const owner = await opening;
+    if (network.disposed || play !== state || failed) { owner.close(); return; }
+    network.owner = owner;
+    if (owner.closed) throw new Error("Multiplayer closed before readiness.");
+    owner.request_ready();
+  } catch (error) {
+    // Only a failure before transferring into Owner.open leaves a local session.
+    try { session?.close(); } catch {}
+    try { session?.free(); } catch {}
+    networkFailure(state, error);
+  }
+}
+
+function sendProgress(state, score) {
+  const network = state.network;
+  if (!network || network.disposed || !network.owner || network.pending !== null) return;
+  try {
+    const now = networkNow();
+    if (network.lastProgress !== null && now - network.lastProgress < PROGRESS_INTERVAL_NS) return;
+    const pending = Promise.resolve(network.owner.submit(progressSnapshot(score), false));
+    network.pending = pending;
+    network.lastProgress = now;
+    pending.then(() => { if (network.pending === pending) network.pending = null; }, error => {
+      if (network.pending === pending) network.pending = null;
+      networkFailure(state, error);
+    });
+  } catch (error) { networkFailure(state, error); }
+}
+
+async function drainNetwork(state, score) {
+  const network = state.network;
+  let timer = null;
+  try {
+    if (network.failure) throw network.failure;
+    if (!state.active || !network.start || !network.owner || network.disposed) throw new Error("Multiplayer stopped before activation.");
+    const owner = network.owner;
+    const ensureOpen = () => {
+      if (network.disposed || owner.closed) throw network.failure ?? new Error("Multiplayer closed during final drain.");
+    };
+    const drain = (async () => {
+      if (network.pending !== null) await network.pending;
+      ensureOpen();
+      await owner.submit(progressSnapshot(score), true);
+      network.finalWritten = true; // Local full-write completion, separately from peer ACK.
+      ensureOpen();
+      await owner.wait_final_ack();
+      network.finalAcknowledged = true;
+    })();
+    await Promise.race([drain, new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new Error("Multiplayer final drain timed out after 2 seconds.");
+        network.failure ??= error;
+        closeNetwork(network);
+        reject(error);
+      }, 2000);
+    })]);
+  } catch (error) { network.failure ??= error; }
+  finally { clearTimeout(timer); closeNetwork(network); }
+  return { finalWritten: network.finalWritten, finalAcknowledged: network.finalAcknowledged,
+    error: network.failure === null ? null : message(network.failure) };
 }
 
 function disposeGame(state) {
@@ -224,13 +415,13 @@ function failPlay(state, error, request = null) {
   const score = statistics(state);
   play = null; // Invalidates a still-awaiting preparation before releasing owners.
   stopRedraw();
+  closeNetwork(state.network);
   const { cleanupError, replay, replayError } = disposeGame(state);
   const text = message(cleanupError ? `${message(error)}; cleanup: ${message(cleanupError)}` : error);
-  const rpcId = request?.rpcId;
-  if (identity(rpcId)) report("play-reply", { playId: state.id, rpcId, error: text });
-  if (identity(state.startRpcId) && state.startRpcId !== rpcId) {
-    report("play-reply", { playId: state.id, rpcId: state.startRpcId, error: text });
-  }
+  const pending = new Set([request?.rpcId, state.startRpcId, state.network?.rpcId]);
+  state.startRpcId = null;
+  if (state.network) state.network.rpcId = null;
+  for (const rpcId of pending) if (identity(rpcId)) report("play-reply", { playId: state.id, rpcId, error: text });
   report("play-error", { playId: state.id, message: text, released: cleanupError === null,
     replay, replayComplete: false, replayError, ...score }, replay ? [replay.buffer] : []);
   scheduleDraw();
@@ -243,15 +434,29 @@ function stopPlay(state, request) {
   const score = statistics(state);
   play = null;
   stopRedraw();
-  const { cleanupError, replay, replayError } = disposeGame(state);
-  if (state.startRpcId !== null) {
-    report("play-reply", { playId: state.id, rpcId: state.startRpcId, error: "Gameplay setup was stopped." });
+  if (state.network) {
+    state.network.stopping = true;
+    clearRemoteProgress(state.network);
   }
-  if (cleanupError) report("play-error", { playId: state.id, message: message(cleanupError), released: false,
-    replay, replayComplete: false, replayError, ...score }, replay ? [replay.buffer] : []);
-  else report("play-stopped", { playId: state.id, replay, replayComplete: completed && replay !== null,
-    replayError, ...score }, replay ? [replay.buffer] : []);
+  const { cleanupError, replay, replayError } = disposeGame(state);
+  const pending = new Set([state.startRpcId, state.network?.rpcId]);
+  state.startRpcId = null;
+  if (state.network) state.network.rpcId = null;
+  for (const rpcId of pending) if (identity(rpcId)) {
+    report("play-reply", { playId: state.id, rpcId, error: "Gameplay setup was stopped." });
+  }
+  const stopped = multiplayer => {
+    const result = { replay, replayError, ...score, ...(multiplayer ? { multiplayer } : {}) };
+    if (cleanupError) report("play-error", { playId: state.id, message: message(cleanupError), released: false,
+      ...result, replayComplete: false }, replay ? [replay.buffer] : []);
+    else report("play-stopped", { playId: state.id, ...result,
+      replayComplete: completed && replay !== null }, replay ? [replay.buffer] : []);
+  };
   scheduleDraw();
+  // The game and samples are already released. Network disposal cannot delay
+  // local ownership release or turn its failure into an incomplete replay.
+  if (state.network) void drainNetwork(state, score).then(stopped).catch(fatal);
+  else stopped(null);
 }
 
 function rpc(state, request, required) {
@@ -271,6 +476,7 @@ async function preparePlay(state, request) {
     rpc(state, request, true);
     if (request.mode !== undefined && request.mode !== "live" && request.mode !== "replay") throw new Error("Invalid playback mode.");
     state.mode = request.mode ?? "live";
+    state.network = multiplayerConfiguration(request.multiplayer, state.mode);
     let replayFile = null;
     let replaySize = 0;
     if (state.mode === "replay") {
@@ -286,6 +492,7 @@ async function preparePlay(state, request) {
     if (typeof request.path !== "string" || !request.path.length || !integer(request.rate, 1, 0xffffffff)) {
       throw new Error("Invalid gameplay chart or sample rate.");
     }
+    state.rate = request.rate;
     if (request.recordReplay !== undefined && typeof request.recordReplay !== "boolean") throw new Error("Invalid replay recording choice.");
     let pairs = null;
     const lanes = [];
@@ -339,7 +546,7 @@ async function preparePlay(state, request) {
 function samplePlay(state, request) {
   if (state.active) throw new Error("Samples are setup-only resources.");
   const sample = state.game.next_sample();
-  if (sample == null) { reply(state, request, { kind: "samples-end" }); return; }
+  if (sample == null) { state.samplesEnded = true; reply(state, request, { kind: "samples-end" }); return; }
   let result = null;
   let failure = null;
   try {
@@ -361,6 +568,7 @@ function samplePlay(state, request) {
 
 function commandBatch(state) {
   const batch = state.game.commands(256);
+  state.commandsDrained = batch === null;
   if (batch === null) return null;
   if (!batch || !unsigned(batch.sequence) || batch.sequence === 0n || !Array.isArray(batch.commands)
     || !integer(batch.commands.length, 1, 256)) throw new Error("Invalid actual gameplay command batch.");
@@ -415,9 +623,11 @@ function stepPlay(state, request) {
     if (request.watermark >= state.origin) state.game.advance(request.watermark, request.audioNs);
     state.lastHost = request.watermark;
   }
-  report("play-step-done", { playId: state.id, tickId: request.tickId, ...statistics(state) });
+  const score = statistics(state);
+  report("play-step-done", { playId: state.id, tickId: request.tickId, ...score });
   scheduleDraw();
   pumpCommands(state);
+  sendProgress(state, score);
 }
 
 function handlePlay(request) {
@@ -433,7 +643,7 @@ function handlePlay(request) {
       batch: null, lastRpc: 0, lastTick: 0, lastRender: 0,
       lastHost: null, lastSequence: null, preOriginInputs: 0,
       recordReplay: false, completed: false,
-      mode: "live",
+      mode: "live", rate: null, network: null, samplesEnded: false, commandsDrained: false,
     };
     play = state; // Reserve before the ready await so stop cannot race a late owner.
     lastPlayId = state.id;
@@ -445,12 +655,16 @@ function handlePlay(request) {
   try {
     if (request.kind === "play-stop") { stopPlay(state, request); return; }
     if (request.kind === "play-start") throw new Error("Gameplay setup is already owned by this identity.");
-    const requiresRpc = ["play-sample", "play-commands", "play-activate"].includes(request.kind);
+    const requiresRpc = ["play-sample", "play-commands", "play-activate", "play-network-ready"].includes(request.kind);
     if (request.rpcId !== undefined && !requiresRpc && request.kind !== "play-ack") throw new Error("Unexpected gameplay RPC identity.");
     rpc(state, request, requiresRpc);
     if (!state.game) throw new Error("Wait for actual gameplay preparation.");
     if (request.kind === "play-sample") samplePlay(state, request);
-    else if (request.kind === "play-commands") {
+    else if (request.kind === "play-network-ready") {
+      if (!state.network || state.network.requested || state.active || !state.samplesEnded
+        || !state.commandsDrained || state.batch !== null) throw new Error("Multiplayer readiness requires completed sample and command preparation.");
+      void networkReady(state, request);
+    } else if (request.kind === "play-commands") {
       if (state.batch !== null) throw new Error("An actual audio batch is still awaiting acknowledgement.");
       reply(state, request, commandBatch(state));
     } else if (request.kind === "play-ack") {
@@ -463,6 +677,15 @@ function handlePlay(request) {
       pumpCommands(state);
     } else if (request.kind === "play-activate") {
       if (state.active || !hostTime(request.hostNs) || !unsigned(request.startFrame)) throw new Error("Invalid or repeated gameplay activation.");
+      if (state.network) {
+        const network = state.network;
+        const target = network.start?.targetHostNs;
+        const now = networkNow() - network.windowOriginNs;
+        const rounding = (1000000000n + BigInt(state.rate) - 1n) / BigInt(state.rate) + 1n;
+        if (network.disposed || !network.owner || network.owner.closed || !hostTime(target)
+          || request.targetHostNs !== target || request.hostNs < target || request.hostNs - target > rounding
+          || !hostTime(now) || now >= request.hostNs) throw new Error("Multiplayer activation has no live, future committed start within one output frame.");
+      }
       if (state.mode === "live") state.game.activate(request.hostNs);
       state.origin = request.hostNs;
       state.startFrame = request.startFrame;

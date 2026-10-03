@@ -9,15 +9,16 @@ import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
 const FileType = globalThis.File ?? NodeFile;
 const ORIGIN = 9007199254740993n;
 const START = 9007199254741999n;
-const SCORE = { song_ns: 123456789012345n, hits: 17n, misses: 3n, combo: 9n };
+const SCORE = { song_ns: 123456789012345n, hits: 17n, misses: 3n, combo: 9n, max_combo: 15n };
 const pairs = () => new Uint32Array([0x11, 2, 0x12, 3]);
 const command = (voice = 7n) => ({ kind: 0, voice, sample: 19n, at: 100000001n, gain: 0.5, value: 0n, denominator: 1n });
 const batch = sequence => ({ sequence, commands: [command(sequence), command(sequence + 1n)] });
 
 function deferred() {
   let resolve;
-  const promise = new Promise(yes => { resolve = yes; });
-  return { promise, resolve };
+  let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
 }
 
 async function flushJobs() {
@@ -55,6 +56,10 @@ async function workerHarness(options = {}) {
   const replays = [];
   const preparedOwners = [];
   const timers = new Map();
+  const timerDelays = new Map();
+  const networks = [];
+  const networkSessions = [];
+  let networkNow = 1000;
   let timerId = 0;
   let receive;
   function makePrepared(path) {
@@ -151,7 +156,13 @@ async function workerHarness(options = {}) {
     get hits() { this.live(); return this.score.hits; }
     get misses() { this.live(); return this.score.misses; }
     get combo() { this.live(); return this.score.combo; }
+    get max_combo() { this.live(); return this.score.max_combo; }
     get failed() { this.live(); return false; }
+    competition_identity() {
+      this.live(); this.calls.push(["identity"]);
+      if (options.identityError) throw new Error(options.identityError);
+      return options.identityBytes ?? Uint8Array.from([66, 75, 82, 0, 255]);
+    }
     sample_count() { this.live(); return this.samples.length; }
     configure_capture(...limits) {
       this.live();
@@ -214,6 +225,50 @@ async function workerHarness(options = {}) {
     observe_presentation() { assert.fail("replay must not discipline a live input clock"); }
     configure_capture() { assert.fail("replay must not recapture a recording"); }
     take_replay() { assert.fail("replay playback must not re-export its input bytes"); }
+    competition_identity() { assert.fail("replay playback must stay local"); }
+  }
+  class BrowserMultiplayer {
+    constructor(identity, host, preroll) {
+      this.identity = [...identity]; this.host = host; this.preroll = preroll;
+      this.closes = 0; this.frees = 0; networkSessions.push(this);
+      if (options.networkConstructError) throw new Error(options.networkConstructError);
+    }
+    close() { assert.equal(++this.closes, 1); }
+    free() { assert.equal(++this.frees, 1); }
+  }
+  class BrowserMultiplayerOwner {
+    static async open(url, config) {
+      const owner = {
+        url, config, origin: config.now(), closed: false, closes: 0, readyCalls: 0,
+        submissions: [], ack: deferred(), ackCalls: 0,
+        request_ready() { assert.equal(this.closed, false); this.readyCalls++; },
+        submit(value, final) {
+          assert.equal(this.closed, false);
+          const gate = deferred();
+          this.submissions.push({ value: structuredClone(value), final, gate });
+          return gate.promise;
+        },
+        wait_final_ack() { this.ackCalls++; return this.ack.promise; },
+        emit(event) { config.onEvent(event); },
+        disconnect(error = new Error("peer disconnected")) {
+          if (!this.closed) {
+            this.closed = true; this.closes++;
+            config.session.close(); config.session.free();
+          }
+          config.onClose(error);
+        },
+        close() {
+          if (this.closed) return;
+          this.disconnect(Object.assign(new Error("owner closed"), { code: "closed" }));
+        },
+      };
+      networks.push(owner);
+      try {
+        if (options.networkOpenGate) await options.networkOpenGate.promise;
+        if (options.networkOpenError) throw new Error(options.networkOpenError);
+        return owner;
+      } catch (error) { owner.disconnect(error); throw error; }
+    }
   }
   const self = {
     isSecureContext: true, navigator: { gpu: {} },
@@ -224,17 +279,27 @@ async function workerHarness(options = {}) {
     addEventListener(name, callback) { assert.equal(name, "message"); receive = callback; },
   };
   const context = createContext({
-    self, File: FileType, TextEncoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer,
-    performance: { now() { throw new Error("Worker timestamps cannot replace Window provenance"); } },
-    setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },
-    clearTimeout(id) { timers.delete(id); },
+    self, File: FileType, TextEncoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
+    performance: { timeOrigin: 10000, now() {
+      if (!options.allowNetworkClock) throw new Error("Solo Worker timestamps cannot replace Window provenance");
+      return networkNow;
+    } },
+    setTimeout(callback, delay = 0) {
+      const id = ++timerId; timers.set(id, callback); timerDelays.set(id, delay); return id;
+    },
+    clearTimeout(id) { timers.delete(id); timerDelays.delete(id); },
   });
-  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView", "BrowserGame", "BrowserReplay"], function () {
+  self.performance = context.performance;
+  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView", "BrowserGame", "BrowserReplay", "BrowserMultiplayer"], function () {
     this.setExport("default", async () => { if (options.initGate) await options.initGate.promise; });
     this.setExport("BrowserLibrary", BrowserLibrary);
     this.setExport("BrowserView", BrowserView);
     this.setExport("BrowserGame", BrowserGame);
     this.setExport("BrowserReplay", BrowserReplay);
+    this.setExport("BrowserMultiplayer", BrowserMultiplayer);
+  }, { context });
+  const network = new SyntheticModule(["BrowserMultiplayerOwner"], function () {
+    this.setExport("BrowserMultiplayerOwner", BrowserMultiplayerOwner);
   }, { context });
   const helper = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
   const playHelper = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
@@ -243,17 +308,24 @@ async function workerHarness(options = {}) {
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./host_model.mjs") return helper;
     if (specifier === "./play-model.mjs") return playHelper;
+    if (specifier === "./multiplayer-owner.mjs") return network;
     throw new Error(`Unexpected import: ${specifier}`);
   });
   await worker.evaluate();
   return {
-    messages, transfers, libraries, preparedOwners, views, games, replays, timers,
+    messages, transfers, libraries, preparedOwners, views, games, replays, timers, networks, networkSessions,
+    setNetworkNow(value) { assert.ok(value >= networkNow); networkNow = value; },
     post(request) { receive({ data: request }); },
     async send(request) { receive({ data: request }); await flushJobs(); },
     async tick() {
       const entry = timers.entries().next().value;
       assert.ok(entry, "expected presentation callback");
       timers.delete(entry[0]); entry[1](); await flushJobs();
+    },
+    async expireNetwork() {
+      const entry = [...timers].find(([id]) => timerDelays.get(id) === 2000);
+      assert.ok(entry, "expected finite final drain deadline");
+      timers.delete(entry[0]); timerDelays.delete(entry[0]); entry[1](); await flushJobs();
     },
     of(kind) { return messages.filter(value => value.kind === kind); },
   };
@@ -924,4 +996,189 @@ test("replay rejects live steps and preserves output/ACK failures without invent
   assert.match(rejected.of("play-error")[0].message, /after one command/);
   assert.equal(rejected.of("play-error")[0].replay, null);
   assertReleased(rejected);
+});
+
+const multiplayer = () => ({ url: "https://example.test:4433/competition", host: true, windowOriginNs: 9000000000n });
+
+async function preparedNetwork(options = {}) {
+  const h = await started({ ...options, allowNetworkClock: true,
+    startRequest: startRequest({ multiplayer: multiplayer() }) });
+  while ((await h.rpc("play-sample")).result.kind !== "samples-end") {}
+  for (;;) {
+    const value = (await h.rpc("play-commands")).result;
+    if (value === null) break;
+    await h.rpc("play-ack", { sequence: value.sequence, admitted: value.commands.length, success: true });
+  }
+  return h;
+}
+
+async function requestNetwork(h) {
+  const rpcId = ++h.rpcId;
+  await h.send({ kind: "play-network-ready", playId: 7, rpcId });
+  return rpcId;
+}
+
+async function activeNetwork(options = {}) {
+  const h = await preparedNetwork(options);
+  const rpcId = await requestNetwork(h);
+  const owner = h.networks[0];
+  owner.emit({ kind: "start", targetNs: 500000000n, songTargetNs: 600000000n, uncertaintyNs: 4n });
+  await flushJobs();
+  const reply = h.of("play-reply").find(value => value.rpcId === rpcId);
+  assert.equal(reply.result.targetHostNs, 2500000000n);
+  h.networkOrigin = 2500000100n;
+  const activated = await h.rpc("play-activate", { hostNs: h.networkOrigin,
+    startFrame: 123456n, targetHostNs: reply.result.targetHostNs });
+  assert.equal(activated.result, null);
+  return h;
+}
+
+test("multiplayer identity and readiness follow sample exhaustion and actual initial command acknowledgements", async () => {
+  const early = await started({ allowNetworkClock: true, startRequest: startRequest({ multiplayer: multiplayer() }) });
+  assert.equal(early.networks.length, 0);
+  assert.equal(early.games[0].calls.filter(call => call[0] === "identity").length, 0);
+  const refused = await early.rpc("play-network-ready");
+  assert.match(refused.error, /preparation|sample|readiness/i);
+  assert.equal(early.networkSessions.length, 0);
+  assertReleased(early);
+
+  const opening = deferred();
+  const h = await preparedNetwork({ batches: [batch(31n)], networkOpenGate: opening });
+  assert.equal(h.networks.length, 0);
+  const game = h.games[0];
+  const rpcId = await requestNetwork(h);
+  const owner = h.networks[0];
+  assert.deepEqual(h.networkSessions[0].identity, [66, 75, 82, 0, 255]);
+  assert.equal(h.networkSessions[0].host, true);
+  assert.equal(h.networkSessions[0].preroll, 100000000n);
+  assert.equal(owner.origin, 11000000000n, "Worker timeOrigin and performance.now retain their independent epoch");
+  assert.equal(owner.readyCalls, 0, "pending transport open is not local readiness");
+  assert.equal(h.of("play-reply").filter(value => value.rpcId === rpcId).length, 0);
+  assert.ok(game.calls.findIndex(call => call[0] === "identity") > game.calls.findIndex(call => call[0] === "ack"));
+  opening.resolve(); await flushJobs();
+  assert.equal(owner.readyCalls, 1);
+  owner.emit({ kind: "connected" }); owner.emit({ kind: "ready" });
+  assert.equal(h.of("play-reply").filter(value => value.rpcId === rpcId).length, 0);
+  owner.emit({ kind: "start", targetNs: 500000000n, songTargetNs: 600000000n, uncertaintyNs: 7n });
+  await flushJobs();
+  assert.deepEqual(h.of("play-reply").find(value => value.rpcId === rpcId).result,
+    { kind: "multiplayer-start", targetHostNs: 2500000000n, songTargetHostNs: 2600000000n, uncertaintyNs: 7n });
+  const badActivation = await h.rpc("play-activate", { hostNs: 2500000000n,
+    startFrame: 123456n, targetHostNs: 2500000001n });
+  assert.ok(badActivation.error);
+  assert.equal(game.calls.filter(call => call[0] === "activate").length, 0);
+  assert.equal(owner.closes, 1);
+  assert.equal(h.networkSessions[0].frees, 1);
+  assertReleased(h);
+});
+
+test("actual score cadence stays bounded and remote or disconnected state never replaces local gameplay", async () => {
+  const h = await activeNetwork();
+  const game = h.games[0]; const owner = h.networks[0];
+  h.setNetworkNow(1600);
+  await h.send(step({ watermark: 2600000000n }));
+  assert.equal(owner.submissions.length, 1);
+  assert.deepEqual(owner.submissions[0].value, { songNs: SCORE.song_ns, hits: SCORE.hits,
+    misses: SCORE.misses, combo: SCORE.combo, maxCombo: SCORE.max_combo });
+  assert.equal(owner.submissions[0].final, false);
+  h.setNetworkNow(1850);
+  await h.send(step({ tickId: 2, watermark: 2850000000n }));
+  assert.equal(owner.submissions.length, 1, "one pending write prevents an application queue from growing");
+  owner.submissions[0].gate.resolve(); await flushJobs();
+  game.score.hits = 18n; game.score.combo = 10n;
+  h.setNetworkNow(1851);
+  await h.send(step({ tickId: 3, watermark: 2851000000n }));
+  assert.equal(owner.submissions.length, 2);
+  assert.equal(owner.submissions[1].value.hits, 18n);
+  owner.submissions[1].gate.resolve(); await flushJobs();
+  h.setNetworkNow(2100);
+  await h.send(step({ tickId: 4, watermark: 3100000000n }));
+  assert.equal(owner.submissions.length, 2, "249 ms does not satisfy the score cadence");
+  const peer = { songNs: -1n, hits: 18446744073709551615n, misses: 0n, combo: 0n, maxCombo: 1n };
+  owner.emit({ kind: "progress", ...peer });
+  owner.emit({ kind: "progress", ...peer, songNs: 0n });
+  assert.equal(h.of("play-multiplayer").filter(value => value.event.kind === "progress").length, 1);
+  owner.emit({ kind: "final-progress", ...peer, songNs: 1n });
+  assert.equal(h.of("play-multiplayer").at(-1).event.kind, "final-progress");
+  assert.equal(game.score.hits, 18n);
+  owner.disconnect(new Error("actual transport lost"));
+  assert.match(h.of("play-multiplayer").at(-1).event.error, /transport lost/);
+  assert.equal(game.stops, 0);
+  await h.send(step({ tickId: 5, watermark: 3100000001n }));
+  assert.equal(h.of("play-step-done").at(-1).tickId, 5);
+  await h.send({ kind: "play-stop", playId: 7 });
+  assert.equal(h.of("play-stopped").at(-1).multiplayer.finalWritten, false);
+  assertReleased(h, game.score);
+});
+
+test("stop frees gameplay immediately but reports final write and peer ACK as separate bounded receipts", async () => {
+  const h = await activeNetwork(); const owner = h.networks[0];
+  h.setNetworkNow(1600);
+  await h.send(step({ watermark: 2600000000n }));
+  await h.send({ kind: "play-stop", playId: 7 });
+  assert.equal(h.games[0].stops, 1); assert.equal(h.games[0].frees, 1);
+  assert.equal(owner.submissions.length, 1);
+  assert.equal(owner.config.signal.aborted, false, "network final drain owns a separate lifetime after local game release");
+  assert.equal(h.of("play-stopped").length, 0);
+  owner.submissions[0].gate.resolve(); await flushJobs();
+  assert.equal(owner.submissions.length, 2);
+  assert.equal(owner.submissions[1].final, true);
+  assert.equal(owner.submissions[1].value.maxCombo, SCORE.max_combo);
+  owner.submissions[1].gate.resolve(); await flushJobs();
+  assert.equal(owner.ackCalls, 1);
+  assert.equal(h.of("play-stopped").length, 0, "local write alone cannot claim final application ACK");
+  owner.emit({ kind: "final-acknowledged" }); owner.ack.resolve(); await flushJobs();
+  assert.deepEqual(h.of("play-stopped")[0].multiplayer, { finalWritten: true, finalAcknowledged: true, error: null });
+  assert.equal(owner.config.signal.aborted, true);
+  assert.equal(owner.closes, 1); assert.equal(h.networkSessions[0].frees, 1);
+  assertReleased(h);
+
+  for (const wrote of [false, true]) {
+    const stalled = await activeNetwork(); const old = stalled.networks[0];
+    await stalled.send({ kind: "play-stop", playId: 7 });
+    if (wrote) { old.submissions[0].gate.resolve(); await flushJobs(); }
+    await stalled.expireNetwork();
+    const receipt = stalled.of("play-stopped")[0];
+    assert.equal(receipt.multiplayer.finalWritten, wrote);
+    assert.equal(receipt.multiplayer.finalAcknowledged, false);
+    assert.match(receipt.multiplayer.error, /2 seconds|timed out/i);
+    await stalled.send(startRequest({ playId: 8 }));
+    const newer = stalled.games[1];
+    const messageCount = stalled.messages.length;
+    old.submissions[0].gate.resolve(); old.ack.resolve();
+    old.emit({ kind: "final-acknowledged" }); await flushJobs();
+    assert.equal(stalled.messages.length, messageCount, "late final evidence cannot publish a second old-session receipt");
+    assert.equal(newer.stops, 0);
+    assert.equal(old.closes, 1); assert.equal(stalled.networkSessions[0].frees, 1);
+    await stalled.send({ kind: "play-stop", playId: 8 });
+  }
+});
+
+test("pre-activation failure and cancelled late network opens release identity and gameplay exactly once", async () => {
+  for (const options of [{ identityError: "identity refused" }, { networkOpenError: "server refused" }]) {
+    const h = await preparedNetwork(options);
+    const rpcId = await requestNetwork(h);
+    assert.ok(h.of("play-reply").find(value => value.rpcId === rpcId).error);
+    assert.equal(h.of("play-error").length, 1);
+    assertReleased(h);
+    if (h.networkSessions.length) assert.equal(h.networkSessions[0].frees, 1);
+  }
+  const opening = deferred();
+  const h = await preparedNetwork({ networkOpenGate: opening });
+  const rpcId = await requestNetwork(h); const owner = h.networks[0];
+  await h.send({ kind: "play-stop", playId: 7 });
+  assert.equal(owner.config.signal.aborted, true);
+  assert.ok(h.of("play-reply").find(value => value.rpcId === rpcId).error);
+  assertReleased(h);
+  await h.send(startRequest({ playId: 8 }));
+  opening.resolve(); await flushJobs();
+  assert.equal(owner.readyCalls, 0);
+  assert.equal(owner.closes, 1);
+  assert.equal(h.networkSessions[0].closes, 1);
+  assert.equal(h.networkSessions[0].frees, 1);
+  const messages = h.messages.length;
+  owner.emit({ kind: "start", targetNs: 500000000n, songTargetNs: 600000000n, uncertaintyNs: 4n });
+  assert.equal(h.messages.length, messages);
+  assert.equal(h.games[1].stops, 0);
+  await h.send({ kind: "play-stop", playId: 8 });
 });
