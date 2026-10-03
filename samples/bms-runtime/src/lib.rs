@@ -95,6 +95,11 @@ pub mod multiplayer_rooms;
 mod multiplayer_session_fixtures;
 /// Checked bilateral commitment to a future software start.
 pub mod multiplayer_start;
+/// Actual optional HTTP/3 WebTransport relay with bounded stream ownership.
+#[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
+pub mod multiplayer_webtransport;
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "webtransport"))]
+mod multiplayer_webtransport_fixtures;
 /// Common queue, rolling BGM and mixer construction/replenishment.
 pub mod native_audio;
 /// Shared native chart loading, section slicing and retained-lane coverage.
