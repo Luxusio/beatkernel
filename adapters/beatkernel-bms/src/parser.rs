@@ -13,6 +13,7 @@ struct Row {
 #[derive(Clone)]
 struct Event {
     beat: Ratio,
+    cell_end: Option<Ratio>,
     channel: u8,
     value: u16,
     line: usize,
@@ -21,6 +22,7 @@ struct Event {
 #[derive(Clone)]
 struct TimedEvent {
     tick: i64,
+    cell_end: Option<i64>,
     channel: u8,
     value: u16,
     line: usize,
@@ -386,7 +388,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 options.duplicates,
             )?;
         } else if command == "LNTYPE" {
-            if value != "1" && value != "01" {
+            if !matches!(value, "1" | "01" | "2" | "02") {
                 return Err(fail(
                     line,
                     BmsErrorKind::Unsupported(format!("LNTYPE {value}")),
@@ -478,6 +480,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
         }
     }
     conditional.finish()?;
+    let cell_long_notes = matches!(metadata.get("LNTYPE").map(String::as_str), Some("2" | "02"));
     let mut origins = Vec::with_capacity(max_measure + 2);
     let mut durations = Vec::with_capacity(max_measure + 1);
     let mut position = Ratio::ZERO;
@@ -512,8 +515,23 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
             )?;
             let beat = arithmetic(row.line, origins[row.measure].add(offset))?;
             update_resolution(&mut resolution, beat.d, options.max_resolution, row.line)?;
+            let cell_end = if cell_long_notes && long(row.channel) {
+                let end_offset = arithmetic(
+                    row.line,
+                    durations[row.measure].mul(Ratio {
+                        n: (index + 1) as i128,
+                        d: row.tokens.len() as i128,
+                    }),
+                )?;
+                let end = arithmetic(row.line, origins[row.measure].add(end_offset))?;
+                update_resolution(&mut resolution, end.d, options.max_resolution, row.line)?;
+                Some(end)
+            } else {
+                None
+            };
             events.push(Event {
                 beat,
+                cell_end,
                 channel: row.channel,
                 value,
                 line: row.line,
@@ -549,6 +567,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
             )?;
             visual_events.push(Event {
                 beat,
+                cell_end: None,
                 channel: row.channel,
                 value,
                 line: row.line,
@@ -642,6 +661,10 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
         }
         let timed = TimedEvent {
             tick,
+            cell_end: event
+                .cell_end
+                .map(|end| arithmetic(event.line, end.ticks(resolution)))
+                .transpose()?,
             channel: event.channel,
             value: event.value,
             line: event.line,
@@ -754,6 +777,43 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
     }
     for (lane, mut markers) in long_events {
         markers.sort_by_key(|event| (event.tick, event.ordinal));
+        if cell_long_notes {
+            // Exact-position duplicate policy has already selected complete
+            // cells above. Union only the retained extents, preserving the
+            // first chronological head and never sounding continuation values.
+            let mut held: Option<(TimedEvent, TimedEvent)> = None;
+            for head in markers {
+                let end = TimedEvent {
+                    tick: head.cell_end.expect("LNTYPE2 long cell has an exact end"),
+                    cell_end: None,
+                    value: 0,
+                    ..head.clone()
+                };
+                if let Some((_, previous_end)) = &mut held {
+                    if head.tick <= previous_end.tick {
+                        if end.tick > previous_end.tick {
+                            *previous_end = end;
+                        }
+                        continue;
+                    }
+                }
+                if let Some((head, end)) = held.replace((head, end)) {
+                    notes.push(Note {
+                        head,
+                        end: Some(end),
+                        lane,
+                    });
+                }
+            }
+            if let Some((head, end)) = held {
+                notes.push(Note {
+                    head,
+                    end: Some(end),
+                    lane,
+                });
+            }
+            continue;
+        }
         if markers.len() % 2 != 0 {
             return Err(fail(
                 markers.last().expect("odd count").line,
@@ -865,6 +925,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
         let tail_sample = note
             .end
             .as_ref()
+            .filter(|event| event.value != 0)
             .map(|event| SampleId(u64::from(event.value)));
         let mut bytes = vec![1, note.lane.channel()];
         bytes.extend(note.head.value.to_le_bytes());

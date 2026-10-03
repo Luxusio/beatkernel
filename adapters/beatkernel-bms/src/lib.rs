@@ -1,5 +1,5 @@
 //! Bounded deterministic BMS text/profile adapter with no native dependencies.
-//! Supports documented timing, lane, keysound, paired LNTYPE1 and LNOBJ features.
+//! Supports timing, lanes, keysounds, paired LNTYPE1, cell-span LNTYPE2 and LNOBJ.
 //! Seeded RANDOM/SETRANDOM and SWITCH flow resolve before payload interpretation.
 //! Long-note tail tokens are metadata only and never automatic sounds.
 //! BMP image selections compile separately without changing the gameplay grid.
@@ -93,6 +93,7 @@ pub struct BmsNote {
     /// Head/instant keysound identity, equal to the base36 WAV index.
     pub sample: SampleId,
     /// Unsounded LNTYPE1 or LNOBJ endpoint token, even if WAV is undefined.
+    /// LNTYPE2 uses a synthesized cell boundary and has no tail sample.
     pub tail_sample: Option<SampleId>,
     /// Source line of the head/instant token, for diagnostics.
     pub line: usize,
