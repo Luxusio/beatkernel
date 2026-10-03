@@ -121,6 +121,53 @@ impl BrowserLibrary {
             chart,
             images,
             chart_seed: seed,
+            start: Timestamp::ZERO,
+            replay: None,
+        })
+    }
+
+    /// Select from freshly decoded originals once. Gameplay and visual targets
+    /// retain original song times; only overlapping BGM receives bounded suffixes.
+    pub fn prepare_chart_at(
+        &self,
+        path: &str,
+        sample_rate: u32,
+        channels: u16,
+        seed: u64,
+        start_ns: i64,
+        max_pcm_asset_bytes: u32,
+        max_pcm_total_bytes: u32,
+        max_samples: u32,
+    ) -> Result<BrowserPrepared, JsValue> {
+        if start_ns < 0 {
+            return Err(js_error("live section start must be nonnegative"));
+        }
+        let start = Timestamp::from_nanos(start_ns);
+        let pcm_limits = PcmLimits::new(
+            max_pcm_asset_bytes as usize,
+            max_pcm_total_bytes as usize,
+            max_samples as usize,
+        )
+        .map_err(js_error)?;
+        let original = self.prepare_chart(
+            path,
+            sample_rate,
+            channels,
+            seed,
+            max_pcm_asset_bytes,
+            max_pcm_total_bytes,
+            max_samples,
+        )?;
+        let (prepared, _) = crate::section_start::prepare_at(original.prepared, start, pcm_limits)
+            .map_err(js_error)?;
+        let chart = PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart)
+            .map_err(js_error)?;
+        Ok(BrowserPrepared {
+            prepared,
+            chart,
+            images: original.images,
+            chart_seed: seed,
+            start,
             replay: None,
         })
     }
@@ -139,7 +186,7 @@ impl BrowserLibrary {
     ) -> Result<BrowserPrepared, JsValue> {
         let limits = crate::competition_live::replay_limits().map_err(js_error)?;
         let file = decode_replay(&bytes, limits).map_err(js_error)?;
-        let (_, _, seed) =
+        let (_, start, seed) =
             crate::replay_playback::decode_chart_setup(&file.header.options).map_err(js_error)?;
         let original = self.prepare_chart(
             path,
@@ -166,6 +213,7 @@ impl BrowserLibrary {
             chart,
             images: original.images,
             chart_seed: seed,
+            start,
             replay: Some(file),
         })
     }
@@ -178,11 +226,16 @@ pub struct BrowserPrepared {
     pub(crate) chart: PlayerChart,
     pub(crate) images: Arc<ImageAssets>,
     pub(crate) chart_seed: u64,
+    pub(crate) start: Timestamp,
     pub(crate) replay: Option<ReplayFile>,
 }
 
 #[wasm_bindgen]
 impl BrowserPrepared {
+    #[wasm_bindgen(getter)]
+    pub fn start_ns(&self) -> i64 {
+        self.start.as_nanos()
+    }
     #[wasm_bindgen(getter)]
     pub fn title(&self) -> String {
         self.chart.title.clone()
@@ -208,6 +261,7 @@ impl BrowserPrepared {
         self.images.len()
     }
 
+    #[wasm_bindgen(getter)]
     pub fn lanes(&self) -> Vec<u8> {
         self.chart.lanes.clone()
     }

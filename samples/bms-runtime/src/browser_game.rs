@@ -182,7 +182,8 @@ impl BrowserGame {
         // Clone only during preparation and release it after activation.
         let opponent_source = prepared.prepared.source.clone();
         let (mut game, bank) =
-            StepGameplay::new(prepared.prepared, config, bindings).map_err(error)?;
+            StepGameplay::new_at(prepared.prepared, config, bindings, prepared.start)
+                .map_err(error)?;
         game.configure_output_clock(DisciplineConfig {
             max_observation_age: Duration::from_nanos(1_000_000_000),
             ..DisciplineConfig::default()
