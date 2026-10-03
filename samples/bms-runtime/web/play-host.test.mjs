@@ -121,7 +121,7 @@ async function harness(faults = {}) {
     "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete",
     "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status",
     "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
-    "opponents-list", "opponents-status", "opponents-results"]) {
+    "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset"]) {
     elements.set(id, new Element(id === "chart" || id === "records" ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
@@ -129,6 +129,9 @@ async function harness(faults = {}) {
   elements.get("seed").value = "7";
   elements.get("multiplayer-role").value = "join";
   elements.get("opponents-kind").value = "own";
+  elements.get("judge-early").value = "50";
+  elements.get("judge-late").value = "50";
+  elements.get("judge-offset").value = "0";
 
   const document = new Events();
   document.body = new Element("body");
@@ -1558,6 +1561,90 @@ test("opponent preparation mismatches stop setup while malformed or failed live 
     assert.equal(h.get("opponents-status").textContent, ended);
     await h.close();
   }
+});
+
+test("live timing is captured before synchronous audio open and drafts stay locked until all owners join", async () => {
+  const opening = deferred(), loading = deferred(), stopping = deferred();
+  const h = await harness({ openGate: opening, recordsList: [savedRecord()], recordsLoadGate: loading, stopGate: stopping });
+  await h.preview();
+  const fields = ["judge-early", "judge-late", "judge-offset"].map(id => h.get(id));
+  assert.deepEqual(fields.map(field => field.value), ["50", "50", "0"]);
+  h.click("records-refresh"); await flush();
+  h.click("records-use"); await flush();
+  assert.equal(h.recordCalls.at(-1).method, "load");
+  assert.ok(fields.every(field => field.disabled), "record acquisition locks session drafts");
+  assert.equal(h.opens.length, 0);
+  loading.resolve(); await flush();
+  assert.ok(fields.every(field => !field.disabled));
+  fields[0].value = "12.345678";
+  fields[1].value = "87.654321";
+  fields[2].value = "-12.500001";
+  h.click("play");
+  assert.equal(h.opens.length, 1, "opening begins in the original click stack");
+  assert.equal(h.opens[0].gesture, true);
+  assert.ok(fields.every(field => field.disabled));
+  const worker = h.workers[0];
+  assert.equal(worker.messages("play-start").length, 0);
+  // Disabled DOM values remain script-mutable; the admitted session owns a
+  // separate snapshot before any asynchronous audio or chart preparation.
+  fields[0].value = "1"; fields[1].value = "2"; fields[2].value = "3";
+  opening.resolve(h.audio); await flush();
+  const start = worker.last("play-start");
+  assert.deepEqual(start.timing, { earlyNs: 12345678n, lateNs: 87654321n, offsetNs: -12500001n });
+  await h.reply(await h.prepared(start), null);
+  await h.reply(worker.last("play-activate"), null);
+  assert.ok(fields.every(field => field.disabled));
+  h.click("stop"); await flush();
+  await h.receive(finalScore(start.playId));
+  assert.ok(fields.every(field => field.disabled), "Worker completion cannot unlock pending audio cleanup");
+  stopping.resolve(); await flush();
+  assert.ok(fields.every(field => !field.disabled));
+  assert.deepEqual(fields.map(field => field.value), ["1", "2", "3"]);
+  await h.close();
+});
+
+test("invalid timing never opens audio, setup refusal preserves drafts for retry, and replay ignores live drafts", async () => {
+  const h = await harness();
+  await h.preview();
+  const fields = ["judge-early", "judge-late", "judge-offset"].map(id => h.get(id));
+  const worker = h.workers[0];
+  for (const values of [["-0.000001", "50", "0"], ["50", "50", "0.0000001"],
+    ["50", "50", "9223372036854.775808"]]) {
+    fields.forEach((field, index) => { field.value = values[index]; });
+    h.click("play"); await flush();
+    assert.equal(h.opens.length, 0);
+    assert.equal(worker.messages("play-start").length, 0);
+    assert.equal(worker.messages("play-stop").length, 0);
+    assert.equal(h.get("status").dataset.error, "true");
+    assert.deepEqual(fields.map(field => field.value), values);
+    assert.ok(fields.every(field => !field.disabled));
+  }
+  fields[0].value = "0"; fields[1].value = "25.000001"; fields[2].value = "-0.000001";
+  const refused = await h.begin();
+  assert.equal(h.opens[0].gesture, true);
+  await h.receive({ kind: "play-reply", playId: refused.playId, rpcId: refused.rpcId,
+    error: "recorded opponent uses a different judge profile" });
+  assert.equal(worker.last("play-stop").playId, refused.playId);
+  await h.receive(finalScore(refused.playId));
+  assert.deepEqual(fields.map(field => field.value), ["0", "25.000001", "-0.000001"]);
+  const retry = await h.launch();
+  assert.notEqual(retry.id, refused.playId);
+  assert.deepEqual(retry.start.timing, { earlyNs: 0n, lateNs: 25000001n, offsetNs: -1n });
+  assert.equal(h.opens[1].gesture, true);
+  h.click("stop"); await flush(); await h.receive(finalScore(retry.id));
+  const recorded = selectedRecording();
+  chooseRecording(h, [recorded.file]);
+  fields[0].value = "bad draft"; fields[1].value = "-1"; fields[2].value = "1e100";
+  const replay = await h.launch(0, "replay");
+  assert.equal(replay.start.mode, "replay");
+  assert.equal(Object.hasOwn(replay.start, "timing"), false);
+  assert.equal(h.opens[2].gesture, true);
+  assert.equal(recorded.reads, 0, "Window still leaves replay bytes to the actual Worker owner");
+  assert.ok(fields.every(field => field.disabled));
+  h.click("stop"); await flush(); await h.receive(finalScore(replay.id));
+  assert.deepEqual(fields.map(field => field.value), ["bad draft", "-1", "1e100"]);
+  assert.ok(fields.every(field => !field.disabled));
+  await h.close();
 });
 
 test("multiplayer readiness follows real audio setup and one committed grid arms both game and output", async () => {

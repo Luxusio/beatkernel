@@ -5,10 +5,53 @@ import {
   millisecondsToNanos, secondsToNanos, frameNanos, startProjection, committedStartProjection,
   presentationPoint, presentationPair, reportWord, renderedCursor,
   KEY_BINDINGS, bindingsFor,
+  parseTimingMilliseconds, timingFromMilliseconds, validateTiming,
 } from "./play-model.mjs";
 
 const U64_MAX = 18446744073709551615n;
 const I64_MAX = 9223372036854775807n;
+
+test("judge timing text preserves exact nanoseconds across signed decimal milliseconds and the full i64 range", () => {
+  for (const [text, expected] of [
+    ["0", 0n], ["-0", 0n], ["+0.000000", 0n], ["0.000001", 1n], ["-0.000001", -1n],
+    ["+1.000001", 1000001n], ["-1.234567", -1234567n], ["000050.000001", 50000001n],
+    ["0.1", 100000n], ["0.00001", 10n], ["604800000", 604800000000000n],
+    ["9223372036854.775807", I64_MAX], ["+9223372036854.775807", I64_MAX],
+    ["-9223372036854.775808", -I64_MAX - 1n],
+  ]) assert.equal(parseTimingMilliseconds(text), expected, text);
+  for (const text of [undefined, null, 50, 1n, "", " 1", "1 ", "1\n", "+", "-", ".1", "1.",
+    "1e3", "0x10", "NaN", "Infinity", "--1", "1.0000000", "0".repeat(22),
+    "9223372036854.775808", "-9223372036854.775809"]) {
+    assert.throws(() => parseTimingMilliseconds(text), String(text));
+  }
+});
+
+test("timing profiles keep signed offset separate from nonnegative windows and snapshot validated BigInts immutably", () => {
+  const defaults = validateTiming();
+  assert.deepEqual(defaults, { earlyNs: 50000000n, lateNs: 50000000n, offsetNs: 0n });
+  assert.ok(Object.isFrozen(defaults));
+  assert.deepEqual(timingFromMilliseconds("1.000001", "2.000002", "-0.000003"), {
+    earlyNs: 1000001n, lateNs: 2000002n, offsetNs: -3n,
+  });
+  assert.deepEqual(timingFromMilliseconds("9223372036854.775807", "0", "-9223372036854.775808"), {
+    earlyNs: I64_MAX, lateNs: 0n, offsetNs: -I64_MAX - 1n,
+  });
+  for (const values of [["-0.000001", "50", "0"], ["50", "-1", "0"], ["50", "50", "0.0000001"]]) {
+    assert.throws(() => timingFromMilliseconds(...values));
+  }
+  const supplied = { earlyNs: 0n, lateNs: I64_MAX, offsetNs: I64_MAX };
+  const captured = validateTiming(supplied);
+  supplied.earlyNs = 99n;
+  assert.equal(captured.earlyNs, 0n);
+  assert.notEqual(captured, supplied);
+  assert.ok(Object.isFrozen(captured));
+  for (const bad of [null, {}, [], { ...defaults, earlyNs: 50 }, { ...defaults, lateNs: "50" },
+    { ...defaults, offsetNs: undefined }, { ...defaults, earlyNs: -1n }, { ...defaults, lateNs: -1n },
+    { ...defaults, earlyNs: I64_MAX + 1n }, { ...defaults, lateNs: I64_MAX + 1n },
+    { ...defaults, offsetNs: I64_MAX + 1n }, { ...defaults, offsetNs: -I64_MAX - 2n }]) {
+    assert.throws(() => validateTiming(bad));
+  }
+});
 function setWord(words, index, value) {
   words[index * 2] = Number(value & 0xffffffffn);
   words[index * 2 + 1] = Number(value >> 32n);

@@ -99,10 +99,11 @@ async function workerHarness(options = {}) {
     needs_redraw() { return options.needsRedraw ?? false; }
   }
   class BrowserGame {
-    constructor(prepared) {
+    constructor(prepared, ...constructorArgs) {
       if (!options.gameplay) throw new Error("Preview fixtures must not create gameplay owners");
       assert.equal(prepared.moved, false);
       prepared.moved = true;
+      this.constructorArgs = constructorArgs;
       this.frees = 0;
       this.stops = 0;
       this.added = [];
@@ -230,6 +231,50 @@ function startGame(worker, opponents, extra = {}) {
     path: "song/chart.bms", rate: 48000, seed: "0", keyPairs: new Uint32Array([0x11, 4]),
     opponents, ...extra });
 }
+
+test("live judge timing forwards exact validated constructor values while omitted timing preserves defaults", async () => {
+  const defaults = await gameWorker();
+  await startGame(defaults, []);
+  assert.deepEqual(defaults.games[0].constructorArgs.slice(0, 5), [0n, 100000000n, 50000000n, 50000000n, 0n]);
+  await defaults.send({ kind: "play-stop", playId: 1 });
+  const configured = await gameWorker();
+  const timing = { earlyNs: 12345678n, lateNs: 87654321n, offsetNs: -12500001n };
+  const preparing = startGame(configured, [], { timing, recordReplay: true });
+  timing.earlyNs = 0n;
+  timing.offsetNs = 900n;
+  await preparing;
+  assert.deepEqual(configured.games[0].constructorArgs.slice(0, 5), [0n, 100000000n, 12345678n, 87654321n, -12500001n]);
+  assert.deepEqual(Array.from(configured.games[0].constructorArgs[5]), [0x11, 4]);
+  assert.equal(configured.of("play-error").length, 0);
+  assert.ok(configured.calls.findIndex(call => call[0] === "new-game") < configured.calls.findIndex(call => call[0] === "capture"));
+  await configured.send({ kind: "play-stop", playId: 1 });
+});
+
+test("bad live timing fails before chart or opponent acquisition and replay uses only its recorded constructor", async () => {
+  const baseline = { earlyNs: 50000000n, lateNs: 50000000n, offsetNs: 0n };
+  for (const timing of [null, {}, { ...baseline, earlyNs: -1n }, { ...baseline, lateNs: -1n },
+    { ...baseline, earlyNs: 50 }, { ...baseline, offsetNs: "0" },
+    { ...baseline, offsetNs: 9223372036854775808n }, { ...baseline, offsetNs: -9223372036854775809n }]) {
+    const worker = await gameWorker();
+    const unread = opponentFile("must-not-read.bkr", [1], () => { throw new Error("timing preflight must precede acquisition"); });
+    await startGame(worker, [opponentChoice(unread, "file:1")], { timing });
+    assert.equal(unread.reads, 0);
+    assert.equal(worker.libraries[0].preparations.length, 0);
+    assert.equal(worker.games.length, 0);
+    assert.equal(worker.of("play-error").length, 1);
+    assert.equal(worker.of("play-reply").some(reply => reply.result?.kind === "prepared"), false);
+  }
+  const worker = await gameWorker();
+  const replay = opponentFile("recorded-profile.bkr");
+  await startGame(worker, undefined, { mode: "replay", replayFile: replay.file,
+    timing: { earlyNs: "invalid live draft", lateNs: -1n, offsetNs: null } });
+  assert.equal(replay.reads, 1);
+  assert.equal(worker.of("play-error").length, 0);
+  assert.deepEqual(worker.games[0].constructorArgs, [100000000n]);
+  assert.equal(worker.of("play-reply").at(-1).result.mode, "replay");
+  assert.equal(worker.calls.some(call => call[0] === "capture"), false);
+  await worker.send({ kind: "play-stop", playId: 1 });
+});
 
 test("live preparation reads selected immutable Files sequentially and admits actual bindings before capture or activation", async () => {
   const firstRead = deferred();
