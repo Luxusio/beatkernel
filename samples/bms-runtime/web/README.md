@@ -737,3 +737,22 @@ This is a preparation/acquisition component, not yet connected to the live page
 or Worker. Descriptor/profile interpretation, playable bindings, page permission
 UI and session disconnect handling still need integration. Source fixtures and
 Rust compile checks do not establish real HID device/browser acceptance.
+
+## Rust HID gameplay API
+
+`BrowserGame.configure_hid_devices(deviceWords, fieldWords, axisParams)` installs
+one complete bounded source/profile set before activation or gameplay processing.
+Every declared physical control must already have an Any or matching exact-source
+constructor binding. Complete setup and reusable typed-event scratch allocation
+precede adoption. The numeric representation is documented in
+`doc/kernel/REQ__browser-hid.md`.
+
+`input_hid_blob(bytes, audioNs)` accepts genuine canonical raw-HID input in the
+original Window host domain. The common profile decoder validates the report
+then sends typed events through existing gameplay/report/capture ownership.
+Unchanged levels and unknown report IDs still admit their original unbound raw
+input for chronology. Reports do not become fabricated keyboard events.
+
+This Rust API is not yet invoked by the supplied Window/Worker page. Actual
+forwarding, profile controls and disconnect session handling remain required.
+Compilation and authored fixtures do not establish browser/HID device acceptance.

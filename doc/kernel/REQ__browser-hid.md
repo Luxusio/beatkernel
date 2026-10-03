@@ -53,3 +53,70 @@ The [common report-profile contract](REQ__hid-profiles.md) supplies bounded
 explicit button/axis interpretation through the shared DeviceAdapter/Registry.
 Browser interpretation belongs on Worker using this same implementation.
 Report profiles do not replace page forwarding or logical gameplay bindings.
+
+## Browser runtime profile setup and input
+
+Prepare at most sixteen distinct full-width HID sources (IDs at least 3) in
+one configuration before activation or any gameplay processing. Every profile
+physical control must match an existing Any or exact-source constructor binding;
+setup never silently changes logical lane bindings. Complete device/profile
+validation and typed-event storage reservation precede adoption. Setup is once
+per gameplay owner, while keyboard/touch defaults remain unchanged.
+
+An entirely empty setup is valid and installs zero sources without a synthetic
+profile. Field or parameter rows without declared devices are invalid. Every
+listed device must have a valid common profile with at least one real field.
+The eventual host must check actual configured sources before enabling an HID
+play session; the runtime setup API does not impose that page policy.
+
+The portable browser setup uses the same common HidProfileAdapter as native
+configuration. Both paths reuse the same acquisition-order check: reject sequence
+regression, conflicting equal-sequence metadata, clock-domain change and time
+regression. Invalid report decoding preserves prior levels and metadata order.
+All events from one report retain the same original acquisition provenance.
+
+The WASM binding accepts canonical genuine raw-HID packets using original Window
+clock/input budgets. Decode the complete selected report before the first
+Runtime call, then send typed events through the existing StepGameplay report,
+pressed feedback, keysound and capture path in field order. A valid report with
+no emitted transitions still sends its original unbound raw input through Runtime
+so acquisition chronology and song advancement remain observed. Never fabricate
+keyboard input. Capture retains actual bound typed inputs or advance operations
+under existing semantics; it does not claim an additional raw-report archive.
+
+A gameplay failure keeps the committed report prefix, fences the owner and
+discards the unprocessed suffix without retry. Reusable bounded event scratch
+is restored on success and refusal. API/compiled fixtures do not prove playable
+HID: actual Window/Worker forwarding, device/profile UI and session disconnect
+handling remain required integration.
+
+## Numeric setup representation
+
+Device rows contain six unsigned words: source low/high, vendor tag/value and
+product tag/value. Tags are zero/one, absent values are zero and present hardware
+IDs fit u16. Up to sixteen unique sources are allowed.
+
+Field rows contain thirteen unsigned words in order: device index, report tag,
+report ID, payload bytes, control kind, namespace/page, code/usage, bit offset,
+width, bit order, field kind, flags and axis mode. Each row has two parallel
+f32 parameters, scale and offset. The extent must be exact and at most sixteen
+times 512 rows. Report tag zero requires ID zero; tag one requires nonzero u8.
+Repeated field rows for one report must agree on exact payload length.
+
+Controls reuse the seven-word physical-binding decoder: kind zero is HID usage
+with u16 page/usage, one is native backend/code, two is vendor namespace/code.
+Bit order zero/one selects least/most significant first. Field kind zero is a
+button with zero/one inversion, axis mode zero and zero parameters. Kind one
+is an axis with zero/one signedness, mode zero absolute or one relative, and
+finite scale/offset. Kind two denotes an empty report and requires unused
+control/bit/flags/mode/parameter values to be zero. Empty report rows are
+exclusive and cannot duplicate or mix with real fields for that report.
+
+Unused floating-point parameters use canonical positive-zero bits. Axis
+parameters may retain either finite signed zero.
+
+The shared profile validator enforces report/field capacities and bit extents.
+Reject inconsistent extents, unknown device indices, conflicting IDs, invalid
+unused values, unknown control kinds and profiles with unbound controls before
+configuration adoption. Original packet report IDs/payloads remain separate
+and are not modified by numeric setup.

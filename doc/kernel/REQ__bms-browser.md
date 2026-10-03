@@ -37,7 +37,9 @@ no longer duplicates their continuous score/status and song-position DOM writes
 on step/render responses; final summaries and preview/menu updates remain
 event-driven. Saved/network opponent DOM presentation and parts of the host
 bridge remain to be moved; touch/pointer/HID input routes also remain to be
-implemented and verified. Source changes do not establish performance acceptance.
+completed and verified. Keyboard and live touch forwarding have source
+implementations; HID acquisition and Rust gameplay APIs still require their
+Window/Worker bridge. Source changes do not establish performance acceptance.
 
 ## Finite live section controls
 
@@ -904,3 +906,10 @@ asynchronous owner cleanup. Window only acquires; canonical raw packet
 encoding and report interpretation belong off the main thread. This component
 does not yet claim live page forwarding or playable lane bindings. Those
 integrations remain required work.
+
+The Rust live binding configures complete HID source profiles before activation
+and ingests canonical raw packets into the existing gameplay/report pipeline.
+Control bindings are supplied during construction, not changed during play.
+The common HID decoder and acquisition-order validator remain shared with
+native adapters. Window/Worker profile forwarding remains separate integration
+under the [HID contract](REQ__browser-hid.md).
