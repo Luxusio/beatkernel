@@ -183,6 +183,8 @@ pub mod replay_render;
 pub mod replay_visual;
 /// Retained bounded summaries for the common competition scoreboard.
 pub mod saved_opponent_hud;
+#[cfg(test)]
+mod saved_opponent_hud_fixtures;
 /// Bounded canonical saved-record opponents using the actual comparison engine.
 pub mod saved_opponents;
 #[cfg(test)]

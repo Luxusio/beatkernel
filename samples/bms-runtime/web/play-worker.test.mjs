@@ -180,6 +180,9 @@ async function workerHarness(options = {}) {
       this.disposals = [];
       this.replayTakes = 0;
       this.replayBytes = null;
+      this.saved = [];
+      this.savedReads = 0;
+      this.hudDisables = 0;
       this.samples = [
         { id: 19n, rate: 44100, pcm: new Float32Array([0.25, -0.25, 0.5, -0.5]) },
         { id: 18446744073709551615n, rate: 96000, pcm: new Float32Array([1, -1]) },
@@ -232,6 +235,21 @@ async function workerHarness(options = {}) {
       this.live(); this.calls.push(["identity"]);
       if (options.identityError) throw new Error(options.identityError);
       return options.identityBytes ?? Uint8Array.from([66, 75, 82, 0, 255]);
+    }
+    add_saved_opponent(bytes, own, label) {
+      this.live(); this.calls.push(["add-opponent", bytes.slice(), own, label]);
+      this.saved.push({ own, label }); return this.saved.length - 1;
+    }
+    saved_opponents() {
+      this.live(); assert.equal(this.stops, 0, "final comparisons must be captured before disposal");
+      this.savedReads++; this.calls.push(["saved-opponents"]); this.disposals.push("opponents");
+      if (options.savedError) throw new Error(options.savedError);
+      return options.savedSnapshot?.(this) ?? this.saved.map(value => ({ kind: value.own ? "own" : "other", label: value.label,
+        songNs: this.score.song_ns, recordedUntilNs: -1n, hits: 1n, misses: 0n, combo: 1n, maxCombo: 1n }));
+    }
+    disable_saved_opponent_hud() {
+      this.live(); this.hudDisables++; this.calls.push(["disable-opponent-hud"]);
+      if (options.disableSavedError) throw new Error(options.disableSavedError);
     }
     sample_count() { this.live(); return this.samples.length; }
     configure_capture(...limits) {
@@ -302,6 +320,7 @@ async function workerHarness(options = {}) {
     }
   }
   if (options.missingSectionConstructor) BrowserGame.new_section = undefined;
+  if (options.missingDisableSavedHud) BrowserGame.prototype.disable_saved_opponent_hud = undefined;
   if (options.missingPhysicalConstructor) BrowserGame.new_physical = undefined;
   if (options.missingInputBlob) BrowserGame.prototype.input_blob = undefined;
   if (options.missingContactConstructor) BrowserGame.new_physical_contact = undefined;
@@ -514,6 +533,104 @@ function touchEvent(fields = {}) {
   return { kind: "touch", hostNs: ORIGIN, sequence: 1n, contact: 18446744073709551615n,
     phase: 0, code: 0xfffffffe, x: 120, y: 90, pressure: 0.5, width: 480, height: 360, ...fields };
 }
+
+test("saved prefixes refresh the Worker HUD at most four times per second and export one final full-width snapshot before disposal", async () => {
+  const first = replayFile(), second = replayFile();
+  const opponents = [{ file: first.file, sourceKey: "file:own", own: true, label: "Own 曲" },
+    { file: second.file, sourceKey: "file:other", own: false, label: "<other>" }];
+  const maximum = 18446744073709551615n;
+  const h = await active({ allowNetworkClock: true, startRequest: startRequest({ opponents, recordReplay: true }),
+    savedSnapshot: game => game.saved.map((value, index) => ({ kind: value.own ? "own" : "other", label: value.label,
+      songNs: game.score.song_ns, recordedUntilNs: index === 0 ? -1n : null,
+      hits: maximum, misses: maximum, combo: maximum, maxCombo: maximum })) });
+  const game = h.games[0];
+  await h.send(step()); assert.equal(game.savedReads, 1);
+  h.setNetworkNow(1249); await h.send(step({ tickId: 2, watermark: ORIGIN + 1n }));
+  assert.equal(game.savedReads, 1);
+  h.setNetworkNow(1250); await h.send(step({ tickId: 3, watermark: ORIGIN + 2n }));
+  assert.equal(game.savedReads, 2);
+  assert.equal(h.of("play-opponents").length, 0);
+  assert.equal(h.of("play-step-done").length, 3);
+  game.score.song_ns = SCORE.song_ns + 123n;
+  await h.send({ kind: "play-stop", playId: 7 });
+  const stopped = h.of("play-stopped").at(-1);
+  assert.equal(game.savedReads, 3, "final prefix is freshly captured once, even inside the cadence interval");
+  assert.deepEqual(game.disposals.slice(-4), ["opponents", "stop", "take", "free"]);
+  assert.equal(stopped.savedOpponents.error, null);
+  assert.deepEqual(Array.from(stopped.savedOpponents.opponents, row => [row.kind, row.label, row.songNs,
+    row.recordedUntilNs, row.hits, row.misses, row.combo, row.maxCombo]), [
+    ["own", "Own 曲", SCORE.song_ns + 123n, -1n, maximum, maximum, maximum, maximum],
+    ["other", "<other>", SCORE.song_ns + 123n, null, maximum, maximum, maximum, maximum],
+  ]);
+  assert.equal(stopped.replayError, null); assert.equal(stopped.replayComplete, false);
+  assert.ok(stopped.replay instanceof Uint8Array);
+  assertReleased(h, { ...SCORE, song_ns: SCORE.song_ns + 123n });
+  const messageCount = h.messages.length;
+  await h.send({ kind: "play-stop", playId: 7 }); await h.send(step({ tickId: 4 }));
+  assert.equal(h.messages.length, messageCount); assert.equal(game.savedReads, 3);
+
+  const unavailable = await catalogWorker({ missingDisableSavedHud: true });
+  await unavailable.send(startRequest({ opponents }));
+  assert.ok(unavailable.of("play-reply").at(-1).error);
+  assert.equal(unavailable.games.length, 0);
+  assert.equal(unavailable.preparedOwners.at(-1).frees, 1, "capability refusal leaves prepared ownership unconsumed");
+  await unavailable.send(startRequest({ playId: 8 }));
+  assert.equal(unavailable.of("play-reply").at(-1).result.opponentCount, 0);
+  await unavailable.send({ kind: "play-stop", playId: 8 });
+  assert.equal(unavailable.games[0].savedReads, 0);
+  assert.equal(Object.hasOwn(unavailable.of("play-stopped").at(-1), "savedOpponents"), false);
+  const replay = await started({ startRequest: replayRequest(replayFile().file) });
+  await replay.send({ kind: "play-stop", playId: 7 });
+  assert.equal(replay.replays[0].savedReads, 0);
+  assert.equal(Object.hasOwn(replay.of("play-stopped").at(-1), "savedOpponents"), false);
+});
+
+test("comparison errors hide the HUD once and remain separate from actual local failure, capture and final cleanup", async () => {
+  for (const failure of ["getter", "validation", "final"]) {
+    const selected = replayFile();
+    const options = { allowNetworkClock: true, startRequest: startRequest({ recordReplay: true,
+      opponents: [{ file: selected.file, sourceKey: "file:1", own: true, label: "own" }] }) };
+    if (failure !== "validation") options.savedError = "actual comparison prefix failure";
+    else options.savedSnapshot = () => [{ kind: "own", label: "own", songNs: 0n, recordedUntilNs: null,
+      hits: 0n, misses: 0n, combo: 1n, maxCombo: 1n }];
+    if (failure === "getter") options.disableSavedError = "HUD disable failed";
+    const h = await active(options), game = h.games[0];
+    if (failure !== "final") {
+      await h.send(step());
+      assert.equal(h.of("play-opponents").length, 1);
+      assert.equal(h.of("play-opponents")[0].opponents, null);
+      assert.equal(game.hudDisables, 1); assert.equal(game.savedReads, 1);
+      // A later successful binding cannot resurrect an already failed comparison owner.
+      delete options.savedError; options.savedSnapshot = undefined;
+      h.setNetworkNow(1500); await h.send(step({ tickId: 2, watermark: ORIGIN + 1n }));
+      assert.equal(game.savedReads, 1); assert.equal(h.of("play-opponents").length, 1);
+      assert.equal(h.of("play-error").length, 0); assert.equal(game.stops, 0);
+    }
+    await h.send({ kind: "play-stop", playId: 7 });
+    const stopped = h.of("play-stopped").at(-1);
+    assert.equal(stopped.savedOpponents.opponents, null);
+    assert.ok(stopped.savedOpponents.error.length > 0);
+    if (failure === "getter") assert.match(stopped.savedOpponents.error, /actual comparison prefix failure.*HUD disable failed/);
+    assert.equal(game.savedReads, 1); assert.equal(game.hudDisables, 1);
+    assert.equal(stopped.replayError, null); assert.ok(stopped.replay instanceof Uint8Array);
+    assert.equal(stopped.replayComplete, false); assertReleased(h);
+  }
+  const selected = replayFile();
+  const h = await active({ allowNetworkClock: true, freeError: "actual free failure",
+    input() { throw new Error("actual committed local input failure"); },
+    startRequest: startRequest({ recordReplay: true,
+      opponents: [{ file: selected.file, sourceKey: "file:1", own: false, label: "prefix" }] }) });
+  await h.send(step({ events: [{ hostNs: ORIGIN, key: 2, down: true, sequence: 1n, audioNs: 100000000n }] }));
+  const failed = h.of("play-error").at(-1), game = h.games[0];
+  assert.match(failed.message, /actual committed local input failure/);
+  assert.equal(failed.released, false); assert.equal(failed.savedOpponents.error, null);
+  assert.equal(failed.savedOpponents.opponents[0].label, "prefix");
+  assert.deepEqual(game.disposals, ["opponents", "stop", "take", "free"]);
+  assert.equal(game.savedReads, 1); assert.equal(failed.replayComplete, false);
+  assert.equal(failed.replayError, null); assertReleased(h);
+  await h.send(step({ tickId: 2 }));
+  assert.equal(game.savedReads, 1); assert.equal(h.of("play-error").length, 1);
+});
 
 const HID_SOURCE = 18446744073709551615n;
 function hidSetup(sources = [HID_SOURCE]) {

@@ -147,6 +147,10 @@ async function workerHarness(options = {}) {
       if (options.snapshotError) throw new Error(options.snapshotError);
       return options.snapshot?.(this) ?? [];
     }
+    disable_saved_opponent_hud() {
+      assert.equal(this.frees, 0);
+      calls.push(["disable-opponent-hud"]);
+    }
     configure_capture(...limits) { calls.push(["capture", ...limits]); }
     sample_count() { return options.sampleCount ?? 0; }
     next_sample() { return undefined; }
@@ -477,8 +481,8 @@ test("actual comparison snapshots are throttled independently and comparison fau
     events: [], watermark: BigInt(time), audioNs: BigInt(time) });
   await step(1, 1000000000);
   assert.equal(worker.games[0].snapshots, 1);
-  assert.equal(worker.of("play-opponents")[0].opponents[0].songNs, 999999990n);
-  assert.equal(worker.of("play-opponents")[0].opponents[0].recordedUntilNs, 500000000n);
+  assert.equal(worker.of("play-opponents").length, 0, "successful comparison prefixes stay in the Worker HUD");
+  assert.ok(worker.calls.some(call => call[0] === "snapshot" && call[1] === 999999990n));
   worker.setNow(249);
   await step(2, 1000000001);
   assert.equal(worker.games[0].snapshots, 1);
@@ -499,6 +503,9 @@ test("actual comparison snapshots are throttled independently and comparison fau
   assert.equal(worker.of("play-opponents").filter(value => value.error !== null).length, 1);
   await worker.send({ kind: "play-stop", playId: 1 });
   assert.equal(worker.of("play-stopped").at(-1).replayError, null);
+  assert.equal(worker.of("play-stopped").at(-1).savedOpponents.opponents, null);
+  assert.match(worker.of("play-stopped").at(-1).savedOpponents.error, /comparison prefix failure/);
+  assert.equal(worker.calls.filter(call => call[0] === "disable-opponent-hud").length, 1);
   const publicationCount = worker.of("play-opponents").length;
   await startGame(worker, [], { playId: 2 });
   await worker.send({ kind: "play-activate", playId: 2, rpcId: 2, hostNs: 2000000000n, startFrame: 96000n });

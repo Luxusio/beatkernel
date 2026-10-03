@@ -2064,6 +2064,111 @@ function comparison(playId, fields = {}) {
   }] };
 }
 
+test("Window ignores periodic comparison counters and displays the exact final prefix only after both owners join", async () => {
+  const stopping = deferred();
+  const h = await harness({ stopGate: stopping }); const preview = await h.preview();
+  selectOpponent(h, selectedRecording(), { own: false, label: "<img src=x>" });
+  const session = await h.launch(), worker = h.workers[0];
+  const rows = h.get("opponents-results"), status = h.get("opponents-status");
+  const writes = [];
+  for (const element of [rows, status]) {
+    let value = element.textContent;
+    Object.defineProperty(element, "textContent", { configurable: true, get: () => value,
+      set(next) { writes.push([element.id, next]); value = next; } });
+  }
+  const replace = rows.replaceChildren.bind(rows);
+  rows.replaceChildren = (...children) => { writes.push(["rows", children.length]); return replace(...children); };
+  const maximum = 18446744073709551615n;
+  for (let index = 0; index < 20; index++) {
+    await h.receive(comparison(session.id, { hits: BigInt(index), combo: 0n, maxCombo: 0n }));
+    await h.receive(comparison(session.id - 1, { hits: maximum }));
+  }
+  assert.deepEqual(writes, []); assert.equal(rows.children.length, 0);
+  h.setNow(1300);
+  h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300 });
+  const down = worker.last("play-step");
+  h.window.emit("keyup", { code: "KeyZ", repeat: false, timeStamp: 1300.125 });
+  const acknowledge = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+    songNs: 50000000n, hits: 3n, misses: 1n, combo: 2n, preOriginInputs: 0 });
+  await acknowledge(down);
+  const up = worker.last("play-step");
+  assert.ok(up.tickId > down.tickId); assert.equal(up.events[0].down, false);
+  await acknowledge(up);
+  assert.deepEqual(writes, [], "input response correlation must not introduce a second DOM scoreboard");
+  h.click("stop"); await flush();
+  const final = finalScore(session.id, { savedOpponents: { error: null, opponents: comparison(session.id, {
+    hits: maximum, misses: maximum, combo: maximum, maxCombo: maximum,
+  }).opponents } });
+  await h.receive(final);
+  assert.equal(h.audio.stopStarts, 1); assert.equal(rows.children.length, 0);
+  assert.deepEqual(writes, [], "a Worker result alone does not finish the outstanding audio cleanup");
+  assert.equal(h.get("play").disabled, true);
+  stopping.resolve(); await flush();
+  assert.equal(rows.children.length, 1);
+  assert.match(rows.children[0].textContent, /Other.*<img src=x>.*Hits 18446744073709551615.*Best 18446744073709551615.*recorded through -0\.000000001/);
+  assert.equal(rows.children[0].children.length, 0, "labels remain text rather than markup");
+  assert.match(status.textContent, /Final saved comparison prefixes/);
+  assert.equal(h.get("title").textContent, preview.title);
+  assert.equal(h.get("position").value, preview.position);
+  assert.match(h.get("status").textContent, /Hits 3.*Misses 1/);
+  const written = writes.length, retained = rows.children[0];
+  await h.receive(final); await h.receive(comparison(session.id));
+  assert.equal(writes.length, written); assert.equal(rows.children[0], retained);
+  const replay = await h.launch(0, "replay");
+  assert.equal(replay.start.opponents?.length ?? 0, 0);
+  const replayDisplay = status.textContent;
+  await h.receive(comparison(replay.id)); assert.equal(status.textContent, replayDisplay);
+  h.click("stop"); await flush(); await h.receive(finalScore(replay.id));
+  assert.equal(rows.children.length, 0);
+  await h.close();
+});
+
+test("unavailable or stale final comparisons cannot alter local recording results or a later page owner", async () => {
+  for (const fault of ["missing", "malformed", "previously-failed"]) {
+    const h = await harness(); await h.preview(); selectOpponent(h, selectedRecording());
+    h.get("record").checked = true;
+    const session = await h.launch();
+    if (fault === "previously-failed") {
+      await h.receive({ kind: "play-opponents", playId: session.id, opponents: null, error: "first comparison failure" });
+      await h.receive({ kind: "play-opponents", playId: session.id, opponents: null, error: "replacement failure" });
+      assert.match(h.get("opponents-status").textContent, /first comparison failure/);
+    }
+    h.click("stop"); await flush();
+    const rows = comparison(session.id, fault === "malformed" ? { hits: "9007199254740993" } : {}).opponents;
+    await h.receive(finalScore(session.id, { replay: Uint8Array.from([66, 75, 82, 255]), replayComplete: false, replayError: null,
+      ...(fault === "missing" ? {} : { savedOpponents: { opponents: rows, error: null } }) }));
+    assert.match(h.get("opponents-status").textContent, /Final saved comparisons unavailable.*Local result unchanged/);
+    if (fault === "previously-failed") assert.match(h.get("opponents-status").textContent, /first comparison failure/);
+    assert.equal(h.get("opponents-results").children.length, 0);
+    assert.match(h.get("status").textContent, /Hits 3.*Misses 1/);
+    assert.equal(h.get("export").disabled, false); assert.match(h.get("export").textContent, /prefix/);
+    assert.doesNotMatch(h.get("status").textContent, /Replay export failed|Gameplay cleanup failed/);
+    const finalStatus = h.get("opponents-status").textContent;
+    await h.receive(finalScore(session.id, { savedOpponents: { opponents: comparison(session.id).opponents, error: null } }));
+    assert.equal(h.get("opponents-status").textContent, finalStatus);
+    await h.close();
+  }
+  const stopping = deferred(), h = await harness({ stopGate: stopping });
+  await h.preview(); selectOpponent(h, selectedRecording());
+  const prior = await h.launch(); h.click("stop"); await flush();
+  await h.receive(finalScore(prior.id, { savedOpponents: { opponents: comparison(prior.id).opponents, error: null } }));
+  h.window.emit("pagehide"); await flush();
+  h.window.emit("pageshow", { persisted: true }); await flush();
+  const resetStatus = h.get("opponents-status").textContent;
+  stopping.resolve(); await flush();
+  assert.equal(h.get("opponents-status").textContent, resetStatus);
+  assert.equal(h.get("opponents-results").children.length, 0);
+  await h.preview();
+  delete h.faults.stopGate;
+  const current = await h.launch(); assert.equal(current.start.opponents?.length ?? 0, 0);
+  await h.receive(finalScore(prior.id, { savedOpponents: { opponents: comparison(prior.id).opponents, error: null } }));
+  assert.equal(h.get("opponents-results").children.length, 0);
+  assert.equal(h.get("stop").disabled, false);
+  h.click("stop"); await flush(); await h.receive(finalScore(current.id));
+  assert.equal(h.get("opponents-results").children.length, 0);
+  await h.close();
+});
+
 test("live opponent selection retains immutable Files through retry, opens audio in the gesture and stays inactive for replay", async () => {
   const h = await harness(); await h.preview();
   const selected = selectedRecording();
@@ -2090,15 +2195,14 @@ test("live opponent selection retains immutable Files through retry, opens audio
   const local = { title: h.get("title").textContent, details: h.get("details").textContent,
     status: h.get("status").textContent, network: h.get("multiplayer-status").textContent };
   await h.receive(comparison(session.id));
-  const retainedRow = h.get("opponents-results").children[0];
-  assert.match(retainedRow.textContent, /Other.*<img src=x>.*Hits 7.*recorded through -0\.000000001/);
+  assert.equal(h.get("opponents-results").children.length, 0);
   assert.deepEqual({ title: h.get("title").textContent, details: h.get("details").textContent,
     status: h.get("status").textContent, network: h.get("multiplayer-status").textContent }, local);
   await h.receive(comparison(session.id, { hits: 8n, combo: 4n, maxCombo: 5n, recordedUntilNs: null }));
-  assert.equal(h.get("opponents-results").children[0], retainedRow);
-  assert.match(retainedRow.textContent, /Hits 8.*empty recording/);
+  assert.equal(h.get("opponents-results").children.length, 0, "normal counters have no Window display path");
   h.click("stop"); await flush();
-  await h.receive(finalScore(session.id));
+  await h.receive(finalScore(session.id, { savedOpponents: { opponents: comparison(session.id).opponents, error: null } }));
+  assert.match(h.get("opponents-results").children[0].textContent, /Other.*<img src=x>.*Hits 7.*recorded through -0\.000000001/);
   assert.equal(h.get("opponents-list").children.length, 1);
   const retry = await h.launch();
   assert.equal(retry.start.opponents[0].file, selected.file);
@@ -2188,8 +2292,10 @@ test("opponent preparation mismatches stop setup while malformed or failed live 
     const session = await h.launch(); const worker = h.workers[0];
     const data = failure === "binding" ? { kind: "play-opponents", playId: session.id,
       opponents: null, error: "actual comparison failure" } : comparison(session.id, { hits: "7" });
+    const beforeMessage = h.get("opponents-status").textContent;
     await h.receive(data);
-    assert.match(h.get("opponents-status").textContent, /stopped.*Local play continues/i);
+    if (failure === "binding") assert.match(h.get("opponents-status").textContent, /stopped.*Local play continues/i);
+    else assert.equal(h.get("opponents-status").textContent, beforeMessage, "unsolicited normal counters are ignored even when malformed");
     assert.equal(worker.messages("play-stop").length, 0);
     assert.equal(h.audio.stopStarts, 0);
     const comparisonFailure = h.get("opponents-status").textContent;
@@ -2201,10 +2307,13 @@ test("opponent preparation mismatches stop setup while malformed or failed live 
     await h.receive({ kind: "play-step-done", playId: session.id, tickId: worker.last("play-step").tickId,
       songNs: 50000000n, hits: 3n, misses: 1n, combo: 2n, preOriginInputs: 0 });
     assert.equal(worker.last("play-stop").completed, true);
-    await h.receive(finalScore(session.id, { replay: Uint8Array.from([66, 75, 82]), replayComplete: true, replayError: null }));
+    await h.receive(finalScore(session.id, { replay: Uint8Array.from([66, 75, 82]), replayComplete: true, replayError: null,
+      savedOpponents: failure === "binding" ? { opponents: null, error: "actual comparison failure" }
+        : { opponents: comparison(session.id, { hits: "7" }).opponents, error: null } }));
     assert.match(h.get("status").textContent, /Song completed/);
     assert.match(h.get("export").textContent, /complete/);
     assert.equal(h.get("export").disabled, false);
+    assert.match(h.get("opponents-status").textContent, /Final saved comparisons unavailable.*Local result unchanged/);
     const ended = h.get("opponents-status").textContent;
     await h.receive(comparison(session.id));
     assert.equal(h.get("opponents-status").textContent, ended);
