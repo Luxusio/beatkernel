@@ -119,13 +119,16 @@ async function harness(faults = {}) {
   for (const id of ["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek",
     "title", "details", "status", "viewport", "play", "stop", "record", "export", "keys", "canvas", "prepare-form", "seek-form",
     "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete",
-    "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status"]) {
+    "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status",
+    "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
+    "opponents-list", "opponents-status", "opponents-results"]) {
     elements.set(id, new Element(id === "chart" || id === "records" ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
   elements.get("rate").value = "44100";
   elements.get("seed").value = "7";
   elements.get("multiplayer-role").value = "join";
+  elements.get("opponents-kind").value = "own";
 
   const document = new Events();
   document.body = new Element("body");
@@ -154,6 +157,9 @@ async function harness(faults = {}) {
       // Node versions may clone File as Blob. Preserve the selected immutable
       // File endpoint here; this fake Worker never acquires its bytes.
       if (value.replayFile instanceof File) posted.replayFile = value.replayFile;
+      if (Array.isArray(value.opponents)) posted.opponents = value.opponents.map((entry, index) => ({
+        ...posted.opponents[index], file: entry.file,
+      }));
       this.posts.push({ value: posted, transferCount: transfer.length });
     }
     terminate() { this.terminations++; traces.push(["terminate"]); }
@@ -319,7 +325,7 @@ async function harness(faults = {}) {
     this.setExport("RecordsStore", RecordsStore);
   }, { context });
   const modules = new Map();
-  for (const name of ["host_model.mjs", "play-model.mjs", "main.js"]) {
+  for (const name of ["host_model.mjs", "play-model.mjs", "saved-opponents.mjs", "main.js"]) {
     const url = new URL(name, import.meta.url);
     modules.set(name, new SourceTextModule(await readFile(url, "utf8"), {
       context, identifier: url.href, initializeImportMeta(meta) { meta.url = url.href; },
@@ -376,7 +382,7 @@ async function harness(faults = {}) {
   async function prepared(start, sampleCount = 0) {
     const worker = workers.at(-1);
     await reply(start, { kind: "prepared", title: "Actual runtime", artist: "Runtime artist",
-      notes: 6, samples: sampleCount, lanes: [0x11],
+      notes: 6, samples: sampleCount, lanes: [0x11], opponentCount: start.opponents?.length ?? 0,
       ...(start.mode === "replay" ? { mode: "replay", recordedUntilNs: 2350000000n } : {}) });
     for (let index = 0; index < sampleCount; index++) {
       await reply(worker.last("play-sample"), { kind: "sample", id: BigInt(index + 1), rate: 44100,
@@ -1389,6 +1395,170 @@ function chooseMultiplayer(h, host = true) {
   h.get("multiplayer-role").value = host ? "host" : "join";
   h.get("multiplayer").emit("change");
 }
+
+function content(element) {
+  return [element.textContent, ...element.children.map(content)].join(" ");
+}
+function selectOpponent(h, selected, { own = true, label = "" } = {}) {
+  chooseRecording(h, [selected.file]);
+  h.get("opponents-kind").value = own ? "own" : "other";
+  h.get("opponents-label").value = label;
+  h.click("opponents-add");
+}
+function comparison(playId, fields = {}) {
+  return { kind: "play-opponents", playId, error: null, opponents: [{
+    kind: "other", label: "<img src=x>", songNs: 999999990n, recordedUntilNs: -1n,
+    hits: 7n, misses: 2n, combo: 3n, maxCombo: 5n, ...fields,
+  }] };
+}
+
+test("live opponent selection retains immutable Files through retry, opens audio in the gesture and stays inactive for replay", async () => {
+  const h = await harness(); await h.preview();
+  const selected = selectedRecording();
+  selectOpponent(h, selected, { own: false, label: "<img src=x>" });
+  assert.equal(h.get("opponents-list").children.length, 1);
+  assert.match(content(h.get("opponents-list")), /Other.*<img src=x>/);
+  h.click("opponents-add");
+  assert.equal(h.get("opponents-list").children.length, 1);
+  assert.match(h.get("opponents-status").textContent, /already selected/i);
+  assert.equal(selected.reads, 0);
+  assert.equal(h.recordCalls.length, 0);
+  assert.equal(h.opens.length, 0);
+  const session = await h.launch();
+  const worker = h.workers[0];
+  assert.equal(h.opens[0].gesture, true);
+  assert.equal(session.start.opponents.length, 1);
+  assert.equal(session.start.opponents[0].file, selected.file);
+  assert.equal(session.start.opponents[0].own, false);
+  assert.equal(session.start.opponents[0].label, "<img src=x>");
+  assert.equal(worker.posts.find(post => post.value === session.start).transferCount, 0);
+  for (const id of ["opponents-add", "opponents-clear", "opponents-kind", "opponents-label", "records-opponent"]) {
+    assert.equal(h.get(id).disabled, true);
+  }
+  const local = { title: h.get("title").textContent, details: h.get("details").textContent,
+    status: h.get("status").textContent, network: h.get("multiplayer-status").textContent };
+  await h.receive(comparison(session.id));
+  const retainedRow = h.get("opponents-results").children[0];
+  assert.match(retainedRow.textContent, /Other.*<img src=x>.*Hits 7.*recorded through -0\.000000001/);
+  assert.deepEqual({ title: h.get("title").textContent, details: h.get("details").textContent,
+    status: h.get("status").textContent, network: h.get("multiplayer-status").textContent }, local);
+  await h.receive(comparison(session.id, { hits: 8n, combo: 4n, maxCombo: 5n, recordedUntilNs: null }));
+  assert.equal(h.get("opponents-results").children[0], retainedRow);
+  assert.match(retainedRow.textContent, /Hits 8.*empty recording/);
+  h.click("stop"); await flush();
+  await h.receive(finalScore(session.id));
+  assert.equal(h.get("opponents-list").children.length, 1);
+  const retry = await h.launch();
+  assert.equal(retry.start.opponents[0].file, selected.file);
+  assert.equal(retry.start.opponents[0].sourceKey, session.start.opponents[0].sourceKey);
+  assert.equal(selected.reads, 0);
+  h.click("stop"); await flush(); await h.receive(finalScore(retry.id));
+  const replay = await h.launch(0, "replay");
+  assert.equal(replay.start.opponents?.length ?? 0, 0);
+  assert.equal(replay.start.replayFile, selected.file);
+  const inactive = h.get("opponents-status").textContent;
+  await h.receive(comparison(session.id));
+  await h.receive(comparison(replay.id));
+  assert.equal(h.get("opponents-status").textContent, inactive);
+  assert.equal(h.get("opponents-results").children.length, 0);
+  await h.close();
+  assert.equal(h.get("opponents-list").children.length, 0);
+});
+
+test("stored opponent admission is explicit and cancellable, with stable record identity and selection quota preserved on refusal", async () => {
+  const gate = deferred();
+  const h = await harness({ recordsList: [savedRecord()], recordsLoadGate: gate });
+  await h.preview();
+  const original = selectedRecording();
+  selectOpponent(h, original);
+  h.click("records-refresh"); await flush();
+  assert.equal(h.recordCalls.filter(call => call.method === "load").length, 0);
+  h.get("opponents-kind").value = "other";
+  h.click("records-opponent"); await flush();
+  assert.equal(h.recordCalls.filter(call => call.method === "load").length, 1);
+  assert.equal(h.get("play").disabled, true);
+  assert.equal(h.get("opponents-clear").disabled, true);
+  h.document.hidden = true; h.document.emit("visibilitychange"); await flush();
+  assert.equal(h.recordOwners[0].closed, true);
+  gate.resolve(); await flush();
+  assert.equal(h.get("opponents-list").children.length, 1);
+  assert.equal(h.opens.length, 0);
+  h.document.hidden = false; h.document.emit("visibilitychange");
+  delete h.faults.recordsLoadGate;
+  h.click("records-refresh"); await flush();
+  h.click("records-opponent"); await flush();
+  assert.equal(h.get("opponents-list").children.length, 2);
+  assert.match(content(h.get("opponents-list")), /Other.*saved-prefix\.bkr/);
+  assert.equal(h.opens.length, 0);
+  h.click("records-use"); await flush();
+  h.click("opponents-add");
+  assert.equal(h.get("opponents-list").children.length, 2, "same record loaded through Use remains the same selection identity");
+  assert.match(h.get("opponents-status").textContent, /already selected/i);
+  const tooLargeForRemaining = selectedRecording(64 * 1024 * 1024);
+  selectOpponent(h, tooLargeForRemaining);
+  assert.equal(h.get("opponents-list").children.length, 2);
+  assert.match(h.get("opponents-status").textContent, /64 MiB/);
+  assert.equal(tooLargeForRemaining.reads, 0);
+  const firstRemove = h.get("opponents-list").children[0].children.find(child => child.tagName === "button");
+  firstRemove.emit("click");
+  assert.equal(h.get("opponents-list").children.length, 1);
+  h.click("opponents-clear");
+  assert.equal(h.get("opponents-list").children.length, 0);
+  assert.equal(h.get("opponents-clear").disabled, true);
+  assert.equal(h.recordCalls.filter(call => call.method === "remove" || call.method === "save").length, 0);
+
+  const late = deferred(); h.faults.recordsLoadGate = late;
+  h.click("records-opponent"); await flush();
+  h.window.emit("pagehide"); await flush();
+  h.window.emit("pageshow", { persisted: true }); await h.preview();
+  late.resolve(); await flush();
+  assert.equal(h.get("opponents-list").children.length, 0);
+  assert.equal(h.opens.length, 0);
+  await h.close();
+});
+
+test("opponent preparation mismatches stop setup while malformed or failed live comparisons preserve capture and natural completion", async () => {
+  const mismatch = await harness(); await mismatch.preview();
+  selectOpponent(mismatch, selectedRecording());
+  const start = await mismatch.begin();
+  await mismatch.reply(start, { kind: "prepared", title: "Mismatch", artist: "Fixture", notes: 1,
+    samples: 0, lanes: [0x11], opponentCount: 0 });
+  assert.equal(mismatch.audio.arms.length, 0);
+  assert.equal(mismatch.workers[0].messages("play-activate").length, 0);
+  assert.equal(mismatch.workers[0].last("play-stop").playId, start.playId);
+  await mismatch.receive(finalScore(start.playId));
+  assert.equal(mismatch.get("opponents-list").children.length, 1);
+  await mismatch.close();
+
+  for (const failure of ["binding", "malformed"]) {
+    const h = await harness({ outputEvidence: { contextTime: 1.3, performanceTime: 1300 } });
+    await h.preview(); selectOpponent(h, selectedRecording()); h.get("record").checked = true;
+    const session = await h.launch(); const worker = h.workers[0];
+    const data = failure === "binding" ? { kind: "play-opponents", playId: session.id,
+      opponents: null, error: "actual comparison failure" } : comparison(session.id, { hits: "7" });
+    await h.receive(data);
+    assert.match(h.get("opponents-status").textContent, /stopped.*Local play continues/i);
+    assert.equal(worker.messages("play-stop").length, 0);
+    assert.equal(h.audio.stopStarts, 0);
+    const comparisonFailure = h.get("opponents-status").textContent;
+    await h.receive(comparison(session.id));
+    assert.equal(h.get("opponents-status").textContent, comparisonFailure);
+    h.setNow(1300); await h.advance(8);
+    await h.receive({ kind: "play-render-done", playId: session.id,
+      renderId: worker.last("play-render").renderId, completed: true });
+    await h.receive({ kind: "play-step-done", playId: session.id, tickId: worker.last("play-step").tickId,
+      songNs: 50000000n, hits: 3n, misses: 1n, combo: 2n, preOriginInputs: 0 });
+    assert.equal(worker.last("play-stop").completed, true);
+    await h.receive(finalScore(session.id, { replay: Uint8Array.from([66, 75, 82]), replayComplete: true, replayError: null }));
+    assert.match(h.get("status").textContent, /Song completed/);
+    assert.match(h.get("export").textContent, /complete/);
+    assert.equal(h.get("export").disabled, false);
+    const ended = h.get("opponents-status").textContent;
+    await h.receive(comparison(session.id));
+    assert.equal(h.get("opponents-status").textContent, ended);
+    await h.close();
+  }
+});
 
 test("multiplayer readiness follows real audio setup and one committed grid arms both game and output", async () => {
   const commandGate = deferred();

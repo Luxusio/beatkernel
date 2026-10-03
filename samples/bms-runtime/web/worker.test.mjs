@@ -31,7 +31,10 @@ async function workerHarness(options = {}) {
   const messages = [];
   const libraries = [];
   const views = [];
+  const games = [];
+  const calls = [];
   const timers = new Map();
+  let now = 0;
   let timerId = 0;
   let receive;
   class BrowserLibrary {
@@ -56,10 +59,14 @@ async function workerHarness(options = {}) {
       if (path === options.rejectPreparation) throw new Error("sample rate mismatch");
       const prepared = {
         title: `Prepared ${path}`, artist: "Fixture", duration_ns: 604800000000000n,
-        note_count: 3, sample_count: 2, image_count: 1, path, moved: false, frees: 0,
+        note_count: 3, sample_count: 2, image_count: 1, lanes: [0x11], path, moved: false, frees: 0,
         free() { assert.equal(this.moved, false); this.frees++; },
       };
       return prepared;
+    }
+    prepare_replay_chart(path, bytes, rate) {
+      calls.push(["prepare-replay", Array.from(bytes)]);
+      return this.prepare_chart(path, rate);
     }
     free() { this.frees++; assert.equal(this.frees, 1); }
   }
@@ -87,11 +94,59 @@ async function workerHarness(options = {}) {
     }
     seek(ns) { this.positions.push(ns); }
     draw() { this.draws++; }
+    draw_game(game) { assert.equal(game.frees, 0); this.draws++; }
+    draw_replay(game) { assert.equal(game.frees, 0); this.draws++; }
     needs_redraw() { return options.needsRedraw ?? false; }
+  }
+  class BrowserGame {
+    constructor(prepared) {
+      if (!options.gameplay) throw new Error("Preview fixtures must not create gameplay owners");
+      assert.equal(prepared.moved, false);
+      prepared.moved = true;
+      this.frees = 0;
+      this.stops = 0;
+      this.added = [];
+      this.snapshots = 0;
+      this.song_ns = -100000000n;
+      this.hits = 17n;
+      this.misses = 3n;
+      this.combo = 4n;
+      this.max_combo = 9n;
+      this.recorded_until_ns = 1000000000n;
+      games.push(this);
+      calls.push(["new-game"]);
+    }
+    add_saved_opponent(bytes, own, label) {
+      assert.equal(this.frees, 0);
+      calls.push(["add-opponent", Array.from(bytes), own, label]);
+      if (options.addError) throw new Error(options.addError);
+      this.added.push({ bytes: Array.from(bytes), own, label });
+      return this.added.length - 1;
+    }
+    saved_opponents() {
+      assert.equal(this.frees, 0);
+      this.snapshots++;
+      calls.push(["snapshot", this.song_ns]);
+      if (options.snapshotError) throw new Error(options.snapshotError);
+      return options.snapshot?.(this) ?? [];
+    }
+    configure_capture(...limits) { calls.push(["capture", ...limits]); }
+    sample_count() { return 0; }
+    next_sample() { return undefined; }
+    commands() { return null; }
+    activate(at) { calls.push(["activate", at]); }
+    input(...values) { calls.push(["input", ...values]); }
+    advance(host, audio) { calls.push(["advance", host, audio]); this.song_ns = options.songNs ?? host; }
+    observe_output() { return false; }
+    observe_presentation() {}
+    stop() { this.stops++; calls.push(["stop"]); }
+    take_replay() { calls.push(["take-replay"]); return Uint8Array.from([66, 75, 82]); }
+    free() { this.frees++; assert.equal(this.frees, 1); calls.push(["free"]); }
   }
   const self = {
     isSecureContext: true,
     navigator: { gpu: {} },
+    performance: { timeOrigin: 0, now: () => now },
     postMessage(value) { messages.push(value); },
     addEventListener(name, callback) {
       assert.equal(name, "message");
@@ -99,19 +154,19 @@ async function workerHarness(options = {}) {
     },
   };
   const context = createContext({
-    self, File: FileType, TextEncoder, Uint8Array, ArrayBuffer,
+    self, File: FileType, TextEncoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer,
+    performance: self.performance,
     setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); },
   });
-  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView", "BrowserGame"], function () {
+  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView", "BrowserGame", "BrowserReplay"], function () {
     this.setExport("default", async () => {
       if (options.initError) throw new Error(options.initError);
     });
     this.setExport("BrowserLibrary", BrowserLibrary);
     this.setExport("BrowserView", BrowserView);
-    this.setExport("BrowserGame", class {
-      constructor() { throw new Error("Preview fixtures must not create gameplay owners"); }
-    });
+    this.setExport("BrowserGame", BrowserGame);
+    this.setExport("BrowserReplay", BrowserGame);
   }, { context });
   const network = new SyntheticModule(["BrowserMultiplayerOwner"], function () {
     this.setExport("BrowserMultiplayerOwner", class {
@@ -120,17 +175,20 @@ async function workerHarness(options = {}) {
   }, { context });
   const helpers = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
   const playHelpers = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
+  const opponentHelpers = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./host_model.mjs") return helpers;
     if (specifier === "./play-model.mjs") return playHelpers;
     if (specifier === "./multiplayer-owner.mjs") return network;
+    if (specifier === "./saved-opponents.mjs") return opponentHelpers;
     throw new Error(`Unexpected Worker import: ${specifier}`);
   });
   await worker.evaluate();
   return {
-    messages, libraries, views, timers,
+    messages, libraries, views, timers, games, calls,
+    setNow(value) { assert.ok(value >= now); now = value; },
     async send(request) { receive({ data: request }); await flushJobs(); },
     async tick() {
       const next = timers.entries().next().value;
@@ -150,6 +208,158 @@ async function readyWorker(options) {
   assert.equal(worker.of("fatal").length, 0);
   return worker;
 }
+
+function opponentFile(name, values = [66, 75, 82, 1], read) {
+  const bytes = Uint8Array.from(values);
+  const file = new FileType([bytes], name);
+  let reads = 0;
+  file.arrayBuffer = () => { reads++; return read ? read() : Promise.resolve(bytes.slice().buffer); };
+  return { file, bytes, get reads() { return reads; } };
+}
+function opponentChoice(selected, sourceKey, own = true) {
+  return { file: selected.file, sourceKey, own, label: selected.file.name };
+}
+async function gameWorker(options = {}) {
+  const worker = await readyWorker({ ...options, gameplay: true });
+  await worker.send({ kind: "import", id: 1, files: [selectedFile("song/chart.bms")] });
+  await worker.send({ kind: "accept-library", id: 1 });
+  return worker;
+}
+function startGame(worker, opponents, extra = {}) {
+  return worker.send({ kind: "play-start", playId: 1, rpcId: 1, libraryId: 1,
+    path: "song/chart.bms", rate: 48000, seed: "0", keyPairs: new Uint32Array([0x11, 4]),
+    opponents, ...extra });
+}
+
+test("live preparation reads selected immutable Files sequentially and admits actual bindings before capture or activation", async () => {
+  const firstRead = deferred();
+  const secondRead = deferred();
+  const first = opponentFile("own.bkr", [66, 75, 82, 1], () => firstRead.promise);
+  const second = opponentFile("other.bkr", [66, 75, 82, 2], () => secondRead.promise);
+  const worker = await gameWorker();
+  await startGame(worker, [opponentChoice(first, "file:1"), opponentChoice(second, "record:2", false)], { recordReplay: true });
+  assert.equal(first.reads, 1);
+  assert.equal(second.reads, 0);
+  assert.equal(worker.games[0].added.length, 0);
+  assert.equal(worker.calls.some(call => call[0] === "capture"), false);
+  assert.equal(worker.of("play-reply").length, 0);
+  firstRead.resolve(first.bytes.slice().buffer); await flushJobs();
+  assert.equal(second.reads, 1);
+  assert.deepEqual(worker.games[0].added, [{ bytes: [66, 75, 82, 1], own: true, label: "own.bkr" }]);
+  secondRead.resolve(second.bytes.slice().buffer); await flushJobs();
+  const prepared = worker.of("play-reply").at(-1).result;
+  assert.equal(prepared.kind, "prepared");
+  assert.equal(prepared.opponentCount, 2);
+  assert.deepEqual(worker.games[0].added[1], { bytes: [66, 75, 82, 2], own: false, label: "other.bkr" });
+  const operations = worker.calls.map(call => call[0]);
+  assert.ok(operations.lastIndexOf("add-opponent") < operations.indexOf("capture"));
+  assert.equal(first.bytes.byteLength, 4);
+  assert.equal(second.bytes.byteLength, 4);
+  await worker.send({ kind: "play-activate", playId: 1, rpcId: 2, hostNs: 1000000000n, startFrame: 48000n });
+  assert.ok(worker.calls.findIndex(call => call[0] === "capture") < worker.calls.findIndex(call => call[0] === "activate"));
+  await worker.send({ kind: "play-stop", playId: 1 });
+  assert.equal(worker.games[0].stops, 1);
+  assert.equal(worker.games[0].frees, 1);
+  assert.equal(worker.of("play-stopped")[0].replayError, null);
+});
+
+test("invalid selection, changed read extent and incompatible bytes fail explicitly while cancelled reads cannot admit into a newer game", async () => {
+  const invalid = await gameWorker();
+  let forbiddenReads = 0;
+  await startGame(invalid, [{ file: { size: 4, arrayBuffer() { forbiddenReads++; } }, sourceKey: "fake", own: true, label: "fake" }]);
+  assert.equal(forbiddenReads, 0);
+  assert.equal(invalid.games.length, 0);
+  assert.equal(invalid.libraries[0].preparations.length, 0);
+  assert.equal(invalid.of("play-error").length, 1);
+
+  for (const failure of ["extent", "layout", "incompatible"]) {
+    const worker = await gameWorker(failure === "incompatible" ? { addError: "actual binding rejected incompatible chart" } : {});
+    const selected = opponentFile("bad.bkr", [1, 2, 3, 4], failure === "extent"
+      ? () => Promise.resolve(new ArrayBuffer(3))
+      : failure === "layout" ? () => Promise.resolve(new Uint8Array(4)) : undefined);
+    await startGame(worker, [opponentChoice(selected, "file:1")], { recordReplay: true });
+    assert.equal(selected.reads, 1);
+    assert.equal(worker.of("play-error").length, 1);
+    assert.equal(worker.of("play-reply").some(reply => reply.result?.kind === "prepared"), false);
+    assert.equal(worker.calls.some(call => call[0] === "capture" || call[0] === "activate"), false);
+    assert.equal(worker.games[0].stops, 1);
+    assert.equal(worker.games[0].frees, 1);
+  }
+  const pendingRead = deferred();
+  const pending = await gameWorker();
+  const unread = opponentFile("pending.bkr", [1, 2, 3, 4], () => pendingRead.promise);
+  await startGame(pending, [opponentChoice(unread, "pending")]);
+  await pending.send({ kind: "play-activate", playId: 1, rpcId: 2, hostNs: 1000000000n, startFrame: 48000n });
+  assert.equal(pending.calls.some(call => call[0] === "activate"), false);
+  assert.equal(pending.of("play-error").length, 1);
+  pendingRead.resolve(unread.bytes.slice().buffer); await flushJobs();
+  assert.deepEqual(pending.games[0].added, []);
+  assert.equal(pending.games[0].frees, 1);
+  const gate = deferred();
+  const oldFile = opponentFile("old.bkr", [1, 2, 3, 4], () => gate.promise);
+  const worker = await gameWorker();
+  await startGame(worker, [opponentChoice(oldFile, "old")], { recordReplay: true });
+  const previous = worker.games[0];
+  await worker.send({ kind: "play-stop", playId: 1 });
+  assert.equal(previous.frees, 1);
+  await startGame(worker, [], { playId: 2 });
+  const current = worker.games[1];
+  gate.resolve(oldFile.bytes.slice().buffer); await flushJobs();
+  assert.deepEqual(previous.added, []);
+  assert.deepEqual(current.added, []);
+  assert.equal(current.frees, 0);
+  assert.equal(worker.of("play-reply").filter(reply => reply.playId === 1 && reply.result?.kind === "prepared").length, 0);
+  assert.equal(worker.of("play-reply").find(reply => reply.playId === 2).result.opponentCount, 0);
+  await worker.send({ kind: "play-stop", playId: 2 });
+});
+
+test("actual comparison snapshots are throttled independently and comparison faults do not stop local capture or solo and replay paths", async () => {
+  const controls = { songNs: 999999990n, snapshot: game => [{ kind: "own", label: "own.bkr",
+    songNs: game.song_ns, recordedUntilNs: 500000000n, hits: 1n, misses: 0n, combo: 1n, maxCombo: 1n }] };
+  const worker = await gameWorker(controls);
+  const selected = opponentFile("own.bkr");
+  await startGame(worker, [opponentChoice(selected, "file:1")], { recordReplay: true });
+  await worker.send({ kind: "play-activate", playId: 1, rpcId: 2, hostNs: 1000000000n, startFrame: 48000n });
+  const step = (tickId, time) => worker.send({ kind: "play-step", playId: 1, tickId,
+    events: [], watermark: BigInt(time), audioNs: BigInt(time) });
+  await step(1, 1000000000);
+  assert.equal(worker.games[0].snapshots, 1);
+  assert.equal(worker.of("play-opponents")[0].opponents[0].songNs, 999999990n);
+  assert.equal(worker.of("play-opponents")[0].opponents[0].recordedUntilNs, 500000000n);
+  worker.setNow(249);
+  await step(2, 1000000001);
+  assert.equal(worker.games[0].snapshots, 1);
+  worker.setNow(250);
+  await step(3, 1000000002);
+  assert.equal(worker.games[0].snapshots, 2);
+  worker.games[0].saved_opponents = () => { throw new Error("comparison prefix failure"); };
+  worker.setNow(500);
+  await step(4, 1000000003);
+  assert.match(worker.of("play-opponents").at(-1).error, /comparison prefix failure/);
+  assert.equal(worker.of("play-opponents").at(-1).opponents, null);
+  worker.setNow(750);
+  await step(5, 1000000004);
+  assert.equal(worker.of("play-error").length, 0);
+  assert.equal(worker.games[0].frees, 0);
+  assert.equal(worker.of("play-step-done").length, 5);
+  assert.equal(worker.of("play-step-done").at(-1).hits, 17n);
+  assert.equal(worker.of("play-opponents").filter(value => value.error !== null).length, 1);
+  await worker.send({ kind: "play-stop", playId: 1 });
+  assert.equal(worker.of("play-stopped").at(-1).replayError, null);
+  const publicationCount = worker.of("play-opponents").length;
+  await startGame(worker, [], { playId: 2 });
+  await worker.send({ kind: "play-activate", playId: 2, rpcId: 2, hostNs: 2000000000n, startFrame: 96000n });
+  await worker.send({ kind: "play-step", playId: 1, tickId: 6, events: [], watermark: 2000000000n, audioNs: 2000000000n });
+  await worker.send({ kind: "play-step", playId: 2, tickId: 1, events: [], watermark: 2000000000n, audioNs: 2000000000n });
+  assert.equal(worker.games[1].snapshots, 0);
+  assert.equal(worker.of("play-opponents").length, publicationCount);
+  await worker.send({ kind: "play-stop", playId: 2 });
+  const replay = opponentFile("replay.bkr");
+  await startGame(worker, undefined, { playId: 3, mode: "replay", replayFile: replay.file });
+  assert.equal(worker.games[2].added.length, 0);
+  assert.equal(worker.games[2].snapshots, 0);
+  await worker.send({ kind: "play-stop", playId: 3 });
+});
 
 test("overlapping imports retain only the latest pending request and free the stale candidate", async () => {
   const worker = await readyWorker();
