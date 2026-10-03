@@ -656,3 +656,19 @@ acquisition is intended to support keyboard, touch/pointer and HID through commo
 physical-event types, preserving acquisition time and source identity. Browser
 input is currently keyboard-only; touch/HID adapters, opponent HUD migration
 and remaining host-bridge work are pending. Main-thread performance is unmeasured.
+
+
+The physical browser API is authored beside the existing keyboard API.
+Its explicit binding setup retains Any/exact device selectors and HID, native
+or vendor controls. Canonical BKPI input blobs preserve core physical variants
+and acquisition provenance; configured byte budgets bound decoding. Unsupported
+clock domains are refused rather than retimestamped. This API alone does not
+provide WebHID acquisition, raw-report decoding or a playable touch interaction.
+Those adapters and application controls remain separate integration work.
+
+`BrowserGame.new_physical` accepts seven-word physical binding rows, optional
+original-song end and encoded/payload byte budgets. `input_blob(bytes, audioNs)`
+accepts exactly one canonical BKPI event in the original Window host clock
+domain `0x57494e`, preserving its acquisition timestamp and sequence. The page
+still uses the compatible keyboard path; application routing to this new API
+and generated-binding/runtime acceptance remain pending.

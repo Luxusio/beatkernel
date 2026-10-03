@@ -753,3 +753,44 @@ Window/Worker forward and independently validate that recorded endpoint before
 sample transfer, then configure the actual finite output component. Live
 start/end controls use the same configured output contract. Browser execution
 remains unverified.
+
+
+## Common physical browser input API
+
+Provide an explicit physical-binding constructor beside the compatible keyboard
+constructors. Binding rows retain an exact 64-bit device selector or Any and
+HID/native/vendor control namespaces; cover every prepared lane and reject
+malformed, duplicate or over-capacity setup before creating gameplay ownership.
+Canonical bounded BKPI event blobs retain the actual physical variant, source,
+sequence, acquisition clock and native provenance. Reject malformed input and
+unsupported clock domains before entering the shared gameplay path. Configurable
+encoded/payload budgets must remain bounded; no Worker-arrival retimestamping.
+
+Raw HID requires a device report adapter, and touch requires deliberate
+interaction mapping. Merely accepting these events does not prove playable
+hardware support. Pressed-lane presentation must follow actual admitted binding
+reports and finite-end suppression. Browser permissions, hardware acquisition,
+touch contact policy and application setup UI remain further integration work.
+
+Physical setup rows contain seven unsigned 32-bit words: BMS lane, selector
+(0 Any or 1 Exact), device low word, device high word, control kind (0 HID usage,
+1 native, 2 vendor), page/namespace, and usage/code. Any requires zero device
+words. HID page/usage fit unsigned 16-bit values; native/vendor namespace and
+code retain all 32 bits. Exact device IDs combine both words without floating
+point conversion. Setup admits at most 256 rules, permits ordered fanout, and
+uses common exact-over-Any selection. Encoded input budgets are configurable up
+to 1 MiB, with independent payload budgets no larger than the encoded budget.
+
+Button highlights use existing bounded PressedKeys ownership and actual
+bound-input reports, including committed partial reports. Releasing one source
+cannot erase another source holding the same lane. The finite endpoint clears
+all highlight ownership. Any presentation observation failure after a committed
+report preserves judgment progress and explicitly fails the owner; it cannot
+roll back judgment or replace the primary runtime/capture failure.
+
+Input admission and replay capture have independent byte budgets. A blob
+admitted by a larger configured input budget can still exceed capture limits;
+that failure must retain the committed runtime report and fail explicitly.
+Existing capture stores admitted bound GameInputEvent values, including
+physical metadata and control identity, rather than rerunning device binding.
+Unbound raw reports are not automatically captured as judged gameplay input.
