@@ -821,3 +821,17 @@ No-note charts with no prepared lanes may use an empty physical binding set,
 preserving the existing all-Unbound page configuration. Empty bindings must
 still validate input budgets and must fail when any prepared lane needs binding.
 Do not invent a control or fall back to legacy ownership to admit such charts.
+
+## Input acquisition ownership and contact mode
+
+Window collects keyboard, touch/pointer and HID input with original timestamps,
+sequence and source/contact identity. Worker owns continuous judging, gameplay
+state and rendering; Worklet owns audio. Window also handles browser-required
+permissions, user gestures, lifecycle and surface setup. Device support remains
+subject to browser capabilities; acquisition does not itself imply playable
+bindings. Touch must retain real contact events, never fake keyboard events.
+
+An explicit physical contact constructor selects the BMS button/contact rules.
+Existing physical keyboard and legacy constructors keep button-only semantics.
+The selected mode must survive capture and typed replay reconstruction. Browser
+touch acquisition/lane routing and HID permission/report adapters remain pending.

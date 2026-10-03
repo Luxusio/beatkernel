@@ -62,3 +62,13 @@ the exclusive end before recording mutation. An explicit advance at the end is
 valid. Preroll operations and valid failed-session prefixes remain recordable;
 no synthetic terminal advance is added. Existing capture entrypoints still
 produce unlimited metadata until their finite owner integration is connected.
+
+## Button/contact setup metadata
+
+Explicit contact capture uses bms-judge-profile/v5: followed by mode byte 1,
+little-endian u64 chart seed, nonnegative i64 section start, end tag 0 or 1,
+optional exclusive i64 end greater than start, then the existing profile body.
+Its rules identity is beatkernel-bms/press-judge/v1. Unknown modes/tags fail.
+ButtonOnly keeps exact v1-v4 bytes and builtin rule identity. Header/file budgets
+include all new bytes before allocation. Record actual bound physical variants,
+original times and provenance; never translate contacts to keyboard events.

@@ -68,3 +68,13 @@ replay and its Rust browser binding use the explicit section-aware APIs;
 Window/Worker forward the recorded endpoint into finite audio setup after
 independent validation against the actual output rate. Finite live gameplay
 and end controls remain pending; actual browser acceptance remains unverified.
+
+## Lossless contact replay reconstruction
+
+Typed RecordedSetup carries BmsInputMode. Section-aware decoding, validation and
+reconstruction restore contact mode and construct actual matching BMS rules.
+Validation checks mode-specific rule identity and original setup/hash metadata.
+Legacy tuple decoders refuse v5 even without an end because they cannot retain
+its mode. Reject noncanonical mode 0, unknown mode/end tags, invalid extents and
+profile windows. Finite competition identity retains mode in the base header
+and an external endpoint; a header already carrying an end is refused there.

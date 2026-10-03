@@ -133,3 +133,12 @@ and the [format memo](https://saxxonpike.github.io/bms-command-memo/index.html#L
 It does not claim conformity with every legacy implementation, extended
 MGQ keyboard channels, video, mines or invisible notes. Authored fixtures and
 compiler checks are not executed format/native/browser acceptance.
+
+## Explicit physical input judging mode
+
+BmsInputMode defaults to ButtonOnly, preserving existing rules and hashes.
+ButtonOrContact selects common PressInstant/PressHold evaluators for genuine
+buttons and contacts. Rules share the same compiled chart and timing profiles;
+contact holds retain exact source/surface/contact ownership and cancellation.
+Selecting contact rules is explicit and must remain distinguishable in replay
+and competition identity. Legacy rules() remains button-only.
