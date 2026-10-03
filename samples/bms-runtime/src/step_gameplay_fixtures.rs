@@ -1852,3 +1852,484 @@ fn capture_is_optional_atomic_during_setup_and_exported_only_once_after_stop() {
     assert!(disabled.take_replay().unwrap().is_none());
     assert!(disabled.take_replay().unwrap().is_none());
 }
+
+fn section_selected(lines: &str, start: Timestamp, seed: u64) -> PreparedBms {
+    crate::section_start::prepare_at(
+        prepared_seed(lines, seed),
+        start,
+        PcmLimits::new(256, 1024, 8).unwrap(),
+    )
+    .unwrap()
+    .0
+}
+
+#[test]
+fn section_original_pcm_and_heads_map_once_onto_the_prerolled_output_grid() {
+    let chart = "#BPM 60\n#VOLWAV 50\n#LNTYPE 1\n#WAV01 key.wav\n#WAV02 bgm.wav\n\
+        #00012:01\n#00053:0101\n#00011:0000000100000000\n#00001:02\n";
+    let mut files = MemoryFiles::new(Default::default()).unwrap();
+    files
+        .insert("chart.bms", chart.as_bytes().to_vec())
+        .unwrap();
+    files.insert("key.wav", wav(&[8192, -4096])).unwrap();
+    files
+        .insert(
+            "bgm.wav",
+            wav(&[4096, 8192, 12288, 16384, 20480, 24576, 28672, 32767]),
+        )
+        .unwrap();
+    let original = prepare_from_source(
+        chart.as_bytes(),
+        &files.scope("chart.bms").unwrap(),
+        AudioFormat::new(4, 1).unwrap(),
+        PcmLimits::new(256, 1024, 8).unwrap(),
+        ChannelPolicy::Exact,
+        &WavDecoder,
+        AssetPathPolicy::AudioVariants,
+        0,
+        None,
+    )
+    .unwrap();
+    let original_source = original.source.clone();
+    let original_pcm = original.bank.get(SampleId(2)).unwrap().samples().to_vec();
+    let start = Timestamp::from_nanos(1_125_000_000);
+    let (selected, selection) =
+        crate::section_start::prepare_at(original, start, PcmLimits::new(256, 1024, 8).unwrap())
+            .unwrap();
+    assert_eq!(
+        (
+            selection.excluded_objects,
+            selection.excluded_crossing_holds
+        ),
+        (2, 1)
+    );
+    assert_eq!(selection.tails.len(), 1);
+    let tail = &selection.tails[0];
+    assert_eq!(tail.frame, 5);
+    assert_eq!(tail.applied_song_time, Timestamp::from_nanos(1_250_000_000));
+    assert_eq!(tail.correction_ns, 125_000_000);
+    assert_eq!(
+        selected.bank.get(tail.source).unwrap().samples(),
+        original_pcm
+    );
+    assert_eq!(
+        selected.bank.get(tail.suffix).unwrap().samples(),
+        &original_pcm[5..]
+    );
+    assert_eq!(original_source.notes.len(), 3);
+    assert_eq!(selected.source.notes.len(), 1);
+    assert_eq!(
+        selected.compiled.chart.objects()[0].time.start,
+        Timestamp::from_nanos(1_500_000_000)
+    );
+    let chosen = config();
+    let (mut game, bank) = StepGameplay::new_at(selected, chosen, bindings(false), start).unwrap();
+    assert_eq!(game.song_time(), Timestamp::from_nanos(874_999_999));
+    let (mut producer, mut mixer) = make_mixer(bank, chosen);
+    let background = deliver(&mut game, &mut producer, 8);
+    assert!(
+        matches!(background.as_slice(), [AudioCommand::Play { sample, at, gain: 0.5, .. }]
+        if *sample == tail.suffix && *at == Timestamp::from_nanos(375_000_101))
+    );
+    let hit = game
+        .process_input(
+            input(chosen, 9, 4, 1, 375_000_000, ButtonState::Down),
+            &clocks(chosen),
+            point(22, 625_000_101),
+        )
+        .unwrap();
+    assert_eq!(hit.song_time, Timestamp::from_nanos(1_500_000_000));
+    assert!(matches!(
+        hit.judge_events[0].outcome,
+        JudgeOutcome::Hit {
+            delta: Duration::ZERO,
+            ..
+        }
+    ));
+    deliver(&mut game, &mut producer, 8);
+    let mut pcm = [0.0; 8];
+    let rendered = mixer.render(&mut pcm).unwrap();
+    assert_eq!(
+        pcm,
+        [
+            0.0,
+            0.0,
+            0.375,
+            0.5625,
+            32767.0 / 65536.0 - 0.0625,
+            0.0,
+            0.0,
+            0.0
+        ]
+    );
+    assert_eq!(rendered.counters.late_commands, 0);
+    game.advance_to(
+        host_at(chosen, 975_000_000),
+        &clocks(chosen),
+        chosen.output_origin,
+    )
+    .unwrap();
+    assert_eq!((game.score().hits, game.score().misses), (1, 0));
+}
+
+#[test]
+fn section_capture_preserves_seed_original_song_times_and_canonical_reconstruction() {
+    let seed = u64::MAX;
+    let lines = "#00011:0101\n#RANDOM 2\n#IF 1\n#00112:01\n#ELSE\n#00113:01\n#ENDIF\n#ENDRANDOM\n";
+    let source = prepared_seed(lines, seed).source;
+    let start = Timestamp::from_nanos(2_000_000_000);
+    let chosen = config();
+    let limits = capture_limits(65536, 16);
+    let (mut game, _) = StepGameplay::new_at(
+        section_selected(lines, start, seed),
+        chosen,
+        bindings(false),
+        start,
+    )
+    .unwrap();
+    let header = game.competition_header(limits, seed).unwrap();
+    let identity = game.competition_identity(limits, seed).unwrap();
+    assert_eq!(
+        identity,
+        crate::multiplayer::competition_identity(&header, env!("CARGO_PKG_VERSION"), limits)
+            .unwrap()
+    );
+    assert_eq!(
+        (
+            decode_chart_setup(&header.options).unwrap().1,
+            decode_chart_setup(&header.options).unwrap().2
+        ),
+        (start, seed)
+    );
+    game.activate(chosen.host_origin).unwrap();
+    game.configure_capture(limits, seed).unwrap();
+    let mut events = game
+        .advance_to(chosen.host_origin, &clocks(chosen), chosen.output_origin)
+        .unwrap()
+        .judge_events;
+    let physical = input(chosen, 44, 4, 1, 0, ButtonState::Down);
+    events.extend(
+        game.process_input(physical.clone(), &clocks(chosen), output_at(chosen, 0))
+            .unwrap()
+            .judge_events,
+    );
+    events.extend(
+        game.process_input(
+            input(chosen, 44, 4, 2, 100_000_000, ButtonState::Up),
+            &clocks(chosen),
+            output_at(chosen, 100_000_000),
+        )
+        .unwrap()
+        .judge_events,
+    );
+    events.extend(
+        game.advance_to(
+            host_at(chosen, 2_000_000_001),
+            &clocks(chosen),
+            chosen.output_origin,
+        )
+        .unwrap()
+        .judge_events,
+    );
+    assert_eq!((game.score().hits, game.score().misses), (1, 1));
+    let hash = game.judge().stable_hash().unwrap();
+    game.fail();
+    let encoded = game.take_replay().unwrap().unwrap();
+    let file = decode_replay(&encoded, limits).unwrap();
+    assert_eq!(file.header, header);
+    assert_eq!(encode_replay(&file, limits).unwrap(), encoded);
+    assert_eq!(
+        file.records
+            .iter()
+            .map(|record| record.song_time.as_nanos())
+            .collect::<Vec<_>>(),
+        [1_749_999_999, 2_000_000_000, 2_100_000_000, 4_000_000_001]
+    );
+    assert!(
+        matches!(&file.records[1].operation, ReplayOperation::Input(bound) if bound.physical == physical)
+    );
+    let replay = reconstruct(&source, file, limits).unwrap();
+    assert_eq!(replay.results(), events);
+    assert_eq!(replay.engine().stable_hash().unwrap(), hash);
+    assert!(game.take_replay().unwrap().is_none());
+}
+
+#[test]
+fn section_activation_and_output_drift_keep_original_song_anchor_and_committed_history() {
+    let start = Timestamp::from_nanos(4_000_000_000);
+    let chosen = StepGameplayConfig {
+        early_ns: 1_000_000,
+        late_ns: 1_000_000,
+        ..config()
+    };
+    let (mut game, _) = StepGameplay::new_at(
+        section_selected("#00013:01\n#00111:01\n#00212:01\n", start, 0),
+        chosen,
+        bindings(false),
+        start,
+    )
+    .unwrap();
+    let initial = game.song_time();
+    game.configure_output_clock(clock_policy()).unwrap();
+    let activated = StepGameplayConfig {
+        host_origin: point(11, 15_000_000_000),
+        ..chosen
+    };
+    game.activate(activated.host_origin).unwrap();
+    assert_eq!(game.song_time(), initial);
+    let first = game
+        .advance_to(
+            activated.host_origin,
+            &clocks(activated),
+            chosen.output_origin,
+        )
+        .unwrap();
+    assert_eq!(first.song_time, Timestamp::from_nanos(3_749_999_999));
+    game.process_input(
+        input(activated, 1, 4, 1, 0, ButtonState::Down),
+        &clocks(activated),
+        chosen.output_origin,
+    )
+    .unwrap();
+    for (host, output) in [
+        (1_000_000_000, 1_000_100_000),
+        (2_000_000_000, 2_000_200_000),
+    ] {
+        game.observe_output_clock(observed(activated, output, host))
+            .unwrap();
+        let at = point(11, activated.host_origin.timestamp.as_nanos() + host);
+        let boundary = game
+            .advance_to(at, &clocks(activated), chosen.output_origin)
+            .unwrap();
+        let update = game.update_output_clock(at).unwrap();
+        assert_eq!(game.song_time(), boundary.song_time);
+        if host == 2_000_000_000 {
+            assert!(matches!(
+                update,
+                Some(DisciplineUpdate::Applied {
+                    base_rate_ppm: 100,
+                    correction_ppm: 20,
+                    applied_rate_ppm: 120,
+                    phase_error_ns: 200_000,
+                    ..
+                })
+            ));
+        }
+    }
+    let later = game
+        .advance_to(
+            point(11, 18_000_000_000),
+            &clocks(activated),
+            chosen.output_origin,
+        )
+        .unwrap();
+    assert_eq!(later.song_time, Timestamp::from_nanos(6_750_119_999));
+    let hit = game
+        .process_input(
+            input(activated, 1, 5, 2, 4_000_000_000, ButtonState::Down),
+            &clocks(activated),
+            output_at(activated, 4_000_000_000),
+        )
+        .unwrap();
+    assert!(matches!(
+        hit.judge_events[0].outcome,
+        JudgeOutcome::Hit { .. }
+    ));
+    assert_eq!((game.score().hits, game.score().misses), (2, 0));
+    assert_eq!(first.song_time, initial);
+    assert!(!game.failed());
+}
+
+#[test]
+fn section_constructor_refuses_unselected_material_and_invalid_clock_extents_before_ownership() {
+    let start = Timestamp::from_nanos(2_000_000_000);
+    for material in [
+        prepared("#00011:01\n#00111:01\n"),
+        prepared("#00001:02\n#00111:01\n"),
+    ] {
+        assert!(matches!(
+            StepGameplay::new_at(material, config(), bindings(false), start),
+            Err(StepGameplayError::InvalidConfiguration(_))
+        ));
+    }
+    assert!(matches!(
+        StepGameplay::new_at(
+            prepared("#00111:01\n"),
+            config(),
+            bindings(false),
+            Timestamp::from_nanos(-1)
+        ),
+        Err(StepGameplayError::InvalidConfiguration(_))
+    ));
+    let original = prepared("#00011:01\n#00112:01\n");
+    let stale = original.sounds[0].clone();
+    let (mut selected, _) =
+        crate::section_start::prepare_at(original, start, PcmLimits::new(256, 1024, 8).unwrap())
+            .unwrap();
+    selected.sounds.push(stale);
+    assert!(matches!(
+        StepGameplay::new_at(selected, config(), bindings(false), start),
+        Err(StepGameplayError::Setup(_))
+    ));
+    for chosen in [
+        StepGameplayConfig {
+            host_origin: point(11, i64::MAX),
+            ..config()
+        },
+        StepGameplayConfig {
+            output_origin: point(22, i64::MAX),
+            ..config()
+        },
+        StepGameplayConfig {
+            preroll: Duration::from_nanos(-1),
+            ..config()
+        },
+    ] {
+        assert!(matches!(
+            StepGameplay::new_at(
+                section_selected("#00111:01\n", start, 0),
+                chosen,
+                bindings(false),
+                start
+            ),
+            Err(StepGameplayError::InvalidConfiguration(_))
+        ));
+    }
+    let (mut fresh, _) = StepGameplay::new_at(
+        section_selected("#00111:01\n", start, 0),
+        config(),
+        bindings(false),
+        start,
+    )
+    .unwrap();
+    let initial = fresh.song_time();
+    assert!(matches!(
+        fresh.activate(point(11, i64::MAX)),
+        Err(StepGameplayError::InvalidConfiguration(_))
+    ));
+    assert_eq!(fresh.song_time(), initial);
+    assert!(!fresh.failed());
+    fresh.activate(config().host_origin).unwrap();
+    assert_eq!(
+        fresh
+            .advance_to(
+                config().host_origin,
+                &clocks(config()),
+                config().output_origin
+            )
+            .unwrap()
+            .song_time,
+        initial
+    );
+}
+
+#[test]
+fn zero_section_constructor_preserves_legacy_judging_pcm_headers_and_capture_bytes() {
+    let chosen = config();
+    let lines = "#00011:01\n#00001:02\n";
+    let limits = capture_limits(65536, 16);
+    let (mut legacy, legacy_bank) =
+        StepGameplay::new(prepared(lines), chosen, bindings(false)).unwrap();
+    let (mut explicit, explicit_bank) = StepGameplay::new_at(
+        section_selected(lines, Timestamp::ZERO, 0),
+        chosen,
+        bindings(false),
+        Timestamp::ZERO,
+    )
+    .unwrap();
+    assert_eq!(
+        legacy.competition_header(limits, 0).unwrap(),
+        explicit.competition_header(limits, 0).unwrap()
+    );
+    let (mut legacy_producer, mut legacy_mixer) = make_mixer(legacy_bank, chosen);
+    let (mut explicit_producer, mut explicit_mixer) = make_mixer(explicit_bank, chosen);
+    for game in [&mut legacy, &mut explicit] {
+        game.configure_capture(limits, 0).unwrap();
+        game.advance_to(chosen.host_origin, &clocks(chosen), chosen.output_origin)
+            .unwrap();
+        game.process_input(
+            input(chosen, 8, 4, 1, 0, ButtonState::Down),
+            &clocks(chosen),
+            output_at(chosen, 0),
+        )
+        .unwrap();
+        game.advance_to(host_at(chosen, 1), &clocks(chosen), chosen.output_origin)
+            .unwrap();
+    }
+    assert_eq!(legacy.score(), explicit.score());
+    assert_eq!(
+        legacy.judge().stable_hash().unwrap(),
+        explicit.judge().stable_hash().unwrap()
+    );
+    assert_eq!(
+        deliver(&mut legacy, &mut legacy_producer, 8),
+        deliver(&mut explicit, &mut explicit_producer, 8)
+    );
+    let mut legacy_pcm = [0.0; 8];
+    let mut explicit_pcm = [0.0; 8];
+    legacy_mixer.render(&mut legacy_pcm).unwrap();
+    explicit_mixer.render(&mut explicit_pcm).unwrap();
+    assert_eq!(legacy_pcm, explicit_pcm);
+    assert!(legacy_pcm.iter().any(|value| *value != 0.0));
+    legacy.fail();
+    explicit.fail();
+    assert_eq!(
+        legacy.take_replay().unwrap(),
+        explicit.take_replay().unwrap()
+    );
+}
+
+#[test]
+fn section_completion_uses_original_judge_deadline_and_actual_relative_pcm_drain() {
+    let start = Timestamp::from_nanos(4_000_000_000);
+    let chosen = StepGameplayConfig {
+        output_origin: point(22, 604_800_000_000_000),
+        ..zero_preroll()
+    };
+    let (mut game, bank) = StepGameplay::new_at(
+        section_selected("#00012:01\n#00111:01\n", start, 0),
+        chosen,
+        bindings(false),
+        start,
+    )
+    .unwrap();
+    game.process_input(
+        input(chosen, 1, 4, 1, 0, ButtonState::Down),
+        &clocks(chosen),
+        chosen.output_origin,
+    )
+    .unwrap();
+    assert_eq!(game.song_time(), start);
+    let (mut producer, mut mixer) = make_mixer(bank, chosen);
+    deliver(&mut game, &mut producer, 8);
+    let mut pcm = [0.0];
+    let head = mixer.render(&mut pcm).unwrap();
+    assert_eq!(pcm, [0.125]);
+    let end = point(22, chosen.output_origin.timestamp.as_nanos() + 750_000_000);
+    let before_end = point(22, end.timestamp.as_nanos() - 1);
+    assert!(
+        !game
+            .observe_completion(Some(head), Some(before_end))
+            .unwrap()
+    );
+    game.advance_to(host_at(chosen, 1), &clocks(chosen), chosen.output_origin)
+        .unwrap();
+    assert_eq!(game.song_time(), Timestamp::from_nanos(4_000_000_001));
+    let tail = mixer.render(&mut pcm).unwrap();
+    assert_eq!(pcm, [-0.0625]);
+    assert!(!game.observe_completion(Some(tail), None).unwrap());
+    assert!(
+        !game
+            .observe_completion(Some(tail), Some(before_end))
+            .unwrap()
+    );
+    let idle = mixer.render(&mut pcm).unwrap();
+    assert_eq!(pcm, [0.0]);
+    assert!(
+        !game
+            .observe_completion(Some(idle), Some(before_end))
+            .unwrap()
+    );
+    assert!(game.observe_completion(Some(idle), Some(end)).unwrap());
+    assert_eq!((game.score().hits, game.score().misses), (1, 0));
+}
