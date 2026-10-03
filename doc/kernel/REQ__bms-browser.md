@@ -506,7 +506,29 @@ replay profile, and genuine reconstruction validates the same section identity.
 Natural completion requires original judge deadlines and real Mixer/presentation
 drain, never a duration timer. Zero-start callers preserve existing behavior.
 
-Portable section ownership is the first dependency. Browser preparation/binding
-and Window/Worker launch must subsequently forward and validate the same start
-before this flow is considered integrated. Compilation and authored fixtures do
-not establish browser or native timing acceptance.
+Browser preparation/binding and Window/Worker launch forward and validate the
+same immutable start through the portable section owner. This flow is source-
+integrated; compilation and authored fixtures do not establish browser or native
+timing acceptance.
+
+
+### Window/Worker live section launch
+
+Expose retained Start time in seconds, default zero. Use the existing exact
+seconds parser (at most nine decimal places and its signed timestamp range with
+reserved lookahead), then snapshot a nonnegative BigInt start before audio
+preparation awaits. Busy controls lock the draft; retry keeps it. The Worker
+validates independently and prepares nonzero sections from fresh original
+assets through BrowserLibrary.prepare_chart_at and section_start::prepare_at.
+Zero uses existing preparation. Validate the actual prepared start against the
+requested live snapshot before admission/activation, and verify it again in the
+Window prepared response. A recorded replay ignores the live draft and uses
+its decoded section start.
+
+Original decoding retains the existing 1296-sample cap. Section preparation can
+add at most 4096 overlapping BGM suffixes, so the output host admits a bounded
+5392 samples while retaining its existing 64 MiB asset and 256 MiB aggregate
+PCM budgets. No full-buffer copy is added at launch. Original-song graphics,
+actual section-aware capture/competition identity and existing cleanup/drain
+remain authoritative. Browser source integration still requires later generated
+bindings and actual execution to prove acceptance.

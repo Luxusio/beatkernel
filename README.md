@@ -82,7 +82,8 @@ Window/Worker replay launch uses the same audio host and recorded seed/section.
 Explicit saved-record browsing/storage feeds that replay path. Competition
 against browser records and live WebTransport Play are source-integrated.
 Browser live judge windows and signed input offset are configurable with exact
-integer parsing; replay retains its recorded profile.
+integer parsing; live section preparation reuses original-source PCM selection,
+and replay retains its recorded profile and section.
 See the [browser host instructions](samples/bms-runtime/web/README.md).
 Browser source compilation does not establish playable browser behavior.
 

@@ -549,3 +549,25 @@ multiplayer use the genuine resulting profile for compatibility.
 Six focused fixture groups were authored for exact boundaries, Worker routing
 and Window lifecycle. They have not been parsed or executed; browser, audio,
 formal review and QA acceptance remain deferred.
+
+
+## Live section start
+
+Set Live start (seconds) before Play live to begin at an original-song position.
+Zero plays from the beginning. Enter nonnegative decimal seconds with at most
+nine fractional digits; the existing exact parser reserves timestamp headroom
+for lookahead. The draft remains available for retry and is locked while the
+page's preparation/play/record-store owner is busy. Replay ignores this field
+and uses its recorded section.
+
+Each live start prepares fresh original chart/audio assets. Earlier note heads
+and whole crossing holds are excluded by the same native section policy.
+Overlapping background music selects frames from original PCM once; judging
+and graphics keep original song coordinates. Selected saved recordings and
+multiplayer peers must match the genuine resulting section identity.
+
+The output host's bounded sample capacity is 5392: 1296 original samples plus
+at most 4096 crossing music suffixes. The 64 MiB asset and 256 MiB aggregate PCM
+limits remain. This does not prove acoustic synchronization or gapless restart.
+Browser execution, generated bindings, test execution, formal review and QA
+remain deferred.
