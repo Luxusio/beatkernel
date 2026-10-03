@@ -26,7 +26,16 @@ native playback has passed verification. Native device control belongs to
   Channel counts must match the mix configuration unless explicitly converted
   before loading. Source/output rate differences use linear interpolation.
 
+## Explicit setup-time PCM copies
+
+PcmSample::try_clone accepts explicit PCM limits and returns an independent
+owned buffer, preserving source rate, channels, frame count and exact finite
+sample values. Storage bounds precede fallible allocation. Empty samples remain
+valid. This is preparation work; rendering does not clone or release assets.
+SampleBank still counts every identity's complete PCM bytes and owned buffer.
+
 ## Scheduling and deterministic mixing
+
 
 - Construct a mixer with an explicit scheduling domain, nanosecond origin,
   fixed output sample rate and bounded capacities. It owns an absolute output

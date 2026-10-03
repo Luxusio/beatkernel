@@ -41,6 +41,22 @@ queue, scheduling and active-voice capacities independently. BGM command `at`
 values are compiled song timestamps and require explicit playback clock mapping
 before native audio admission.
 
+Within one preparation call, equal resolved asset keys reuse the first
+successfully decoded and channel-prepared PCM through a fallible owned copy.
+Each original reference still resolves through the existing path policy;
+reused keys skip another encoded read, decode and channel conversion. The
+bounded key-to-first-SampleId map retains no encoded buffers and ends with the
+call. Distinct resolved keys decode separately even when their contents match.
+This assumes stable resource bytes and decoder behavior during preparation,
+consistent with the trusted static filesystem policy; it is not a freshness
+check or cross-run cache.
+
+Every SampleId still owns a separate PCM buffer and charges full bank bytes and
+sample count. Sound, BGM, voice, judgment and replay identities remain intact.
+Only repeated acquisition and conversion work is reduced; PCM storage and
+browser transfers are not deduplicated. Source fixtures and compiler checks do
+not establish measured preparation speed or actual playback behavior.
+
 Fixtures author real temporary WAV assets, exact BPM/STOP/BGM/hold timing,
 explicit mono expansion, reference-only loading, custom decoding, bounded PCM,
 path rejection and more than 4096 chart notes. They are compiled but remain

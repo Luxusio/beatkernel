@@ -944,7 +944,10 @@ continuous transport rate corrections. Stale observations or excessive clock
 disagreement fail explicitly; this does not establish a physical timing bound.
 [Shared preparation](doc/kernel/REQ__bms-preparation.md) provides bounded asset
 loading with a native FLAC/Ogg Vorbis/MP3/strict WAV default and an injected off-thread decoder
-boundary. FLAC decoding preserves source rate/channels, checks decoded storage
+boundary. References resolving to the same asset key reuse decoding and channel
+preparation within one call, through fallible owned PCM copies. Every sample ID
+still charges its full PCM storage; no cross-run cache or shared buffers are introduced.
+FLAC decoding preserves source rate/channels, checks decoded storage
 and surfaces corrupt/unsupported streams before playback. Complete single-stream Ogg/Vorbis is decoded to bounded finite source-rate PCM;
 MP3 preparation validates full Layer III frames and applies declared Xing/LAME delay/padding;
 untagged files retain raw decoded frames. Chained/multiplexed Ogg and other codecs remain unfinished. Missing literal references may resolve to bounded contained same-stem WAV/FLAC/OGG/MP3
