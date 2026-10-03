@@ -5,7 +5,7 @@ import { File as NodeFile } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
-import { encodeKeyboardEvent } from "./physical-input.mjs";
+import { encodeKeyboardEvent, encodeTouchEvent } from "./physical-input.mjs";
 
 const FileType = globalThis.File ?? NodeFile;
 const ORIGIN = 9007199254740993n;
@@ -57,6 +57,7 @@ async function workerHarness(options = {}) {
   const replays = [];
   const sectionConstructions = [];
   const physicalConstructions = [];
+  const contactConstructions = [];
   const preparedOwners = [];
   const timers = new Map();
   const timerDelays = new Map();
@@ -136,6 +137,13 @@ async function workerHarness(options = {}) {
     needs_redraw() { return false; }
   }
   class BrowserGame {
+    static new_physical_contact(prepared, ...args) {
+      contactConstructions.push({ prepared, args });
+      if (options.contactConstructError) { prepared.moved = true; throw new Error(options.contactConstructError); }
+      const owner = new BrowserGame(prepared, ...args.slice(0, 6));
+      owner.physical = true; owner.contact = true;
+      return owner;
+    }
     static new_physical(prepared, ...args) {
       physicalConstructions.push({ prepared, args });
       if (options.physicalConstructError) {
@@ -203,6 +211,18 @@ async function workerHarness(options = {}) {
     get combo() { this.live(); return this.score.combo; }
     get max_combo() { this.live(); return this.score.max_combo; }
     get failed() { this.live(); return false; }
+    get touch_bounds() {
+      this.live();
+      if (options.touchBoundsError) throw new Error(options.touchBoundsError);
+      return Object.hasOwn(options, "touchBounds") ? options.touchBounds : new Float32Array([80, 110, 400, 634, 400, 110, 720, 634]);
+    }
+    get touch_width() { this.live(); return options.touchWidth ?? 960; }
+    get touch_height() { this.live(); return options.touchHeight ?? 720; }
+    configure_touch_regions(words, bounds, maximum) {
+      this.live(); assert.equal(this.contact, true);
+      this.calls.push(["touch-setup", words.slice(), bounds.slice(), maximum]);
+      if (options.touchSetupError) throw new Error(options.touchSetupError);
+    }
     competition_identity() {
       this.live(); this.calls.push(["identity"]);
       if (options.identityError) throw new Error(options.identityError);
@@ -239,6 +259,11 @@ async function workerHarness(options = {}) {
       this.calls.push(["blob", bytes.slice(), audioNs]);
       options.inputBlob?.(this, bytes, audioNs);
     }
+    input_blob_at(bytes, x, y, audioNs) {
+      this.live(); assert.equal(this.contact, true);
+      this.calls.push(["touch", bytes.slice(), x, y, audioNs]);
+      options.inputBlobAt?.(this, bytes, x, y, audioNs);
+    }
     advance(...args) { this.live(); this.calls.push(["advance", ...args]); options.advance?.(this, args); }
     observe_output(words, presentedNs) {
       this.live();
@@ -268,6 +293,9 @@ async function workerHarness(options = {}) {
   if (options.missingSectionConstructor) BrowserGame.new_section = undefined;
   if (options.missingPhysicalConstructor) BrowserGame.new_physical = undefined;
   if (options.missingInputBlob) BrowserGame.prototype.input_blob = undefined;
+  if (options.missingContactConstructor) BrowserGame.new_physical_contact = undefined;
+  if (options.missingTouchSetup) BrowserGame.prototype.configure_touch_regions = undefined;
+  if (options.missingInputBlobAt) BrowserGame.prototype.input_blob_at = undefined;
   class BrowserReplay extends BrowserGame {
     constructor(prepared, ...args) {
       super(prepared, ...args);
@@ -382,7 +410,7 @@ async function workerHarness(options = {}) {
   });
   await worker.evaluate();
   return {
-    messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, timers, networks, networkSessions,
+    messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, contactConstructions, timers, networks, networkSessions,
     setNetworkNow(value) { assert.ok(value >= networkNow); networkNow = value; },
     post(request) { receive({ data: request }); },
     async send(request) { receive({ data: request }); await flushJobs(); },
@@ -466,6 +494,92 @@ function assertReleased(h, score = SCORE) {
   assert.equal(last.combo, score.combo);
   assert.equal(h.libraries[0].frees, 0, "accepted library remains available after gameplay");
 }
+
+function touchEvent(fields = {}) {
+  return { kind: "touch", hostNs: ORIGIN, sequence: 1n, contact: 18446744073709551615n,
+    phase: 0, code: 0xfffffffe, x: 120, y: 90, pressure: 0.5, width: 480, height: 360, ...fields };
+}
+
+test("contact mode configures actual geometry before capture and forwards mixed canonical inputs with separate projection", async () => {
+  for (const finite of [false, true]) {
+    const h = await active({ startRequest: startRequest({ inputMode: "physical-contact", recordReplay: true, ...(finite ? { endNs: 1n } : {}) }),
+      gameEnd: finite ? 1n : undefined, gameEndFrame: finite ? 4801n : undefined });
+    const game = h.games[0], constructed = h.contactConstructions[0];
+    assert.equal(h.physicalConstructions.length, 0);
+    assert.equal(h.contactConstructions.length, 1);
+    assert.deepEqual(constructed.args.slice(6), [finite ? 1n : undefined, 4096, 1024]);
+    assert.equal(h.of("play-reply")[0].result.inputMode, "physical-contact");
+    const setup = game.calls.find(call => call[0] === "touch-setup");
+    assert.deepEqual(Array.from(setup[1]), [0x11, 0, 0, 0, 1, 0x57544f55, 0, 0x12, 0, 0, 0, 1, 0x57544f55, 0]);
+    assert.deepEqual(Array.from(setup[2]), [80, 110, 400, 634, 400, 110, 720, 634]);
+    assert.equal(setup[3], 256);
+    assert.ok(game.calls.indexOf(setup) < game.calls.findIndex(call => call[0] === "capture"));
+    const key = { hostNs: ORIGIN, key: 2, down: true, sequence: 1n };
+    const down = touchEvent({ hostNs: ORIGIN + 1n, sequence: 2n });
+    const up = touchEvent({ hostNs: ORIGIN + 2n, sequence: 3n, phase: 2, x: 500, pressure: null });
+    await h.send(step({ events: [key, down, up], watermark: ORIGIN + 2n }));
+    assert.deepEqual(Array.from(game.calls.find(call => call[0] === "blob")[1]), Array.from(encodeKeyboardEvent(key)));
+    const contacts = game.calls.filter(call => call[0] === "touch");
+    assert.equal(contacts.length, 2);
+    assert.deepEqual(contacts.map(call => Array.from(call[1])), [down, up].map(event => Array.from(encodeTouchEvent(event))));
+    assert.deepEqual(contacts.map(call => call.slice(2)), [[240, 180, 100000000n], [1000, 180, 100000000n]]);
+    assert.equal(game.calls.filter(call => call[0] === "input").length, 0);
+    assert.equal(h.of("play-step-done").at(-1).tickId, 1);
+    await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+  }
+});
+
+test("contact capability geometry and consuming constructor failures preserve explicit ownership without fallback", async () => {
+  for (const options of [{ missingContactConstructor: true }, { missingTouchSetup: true }, { missingInputBlobAt: true }, { missingInputBlob: true }]) {
+    const h = await catalogWorker(options);
+    await h.send(startRequest({ inputMode: "physical-contact" }));
+    assert.equal(h.contactConstructions.length, 0);
+    assert.equal(h.games.length, 0);
+    assert.equal(h.of("play-error").length, 1);
+    assert.ok(h.preparedOwners.slice(1).every(owner => !owner.moved && owner.frees === 1));
+  }
+  for (const options of [{ touchBounds: [] }, { touchBounds: new Float32Array(4) }, { touchWidth: 0 },
+    { touchHeight: 1.5 }, { touchBoundsError: "geometry getter refused" }, { touchSetupError: "actual router refused" }]) {
+    const h = await catalogWorker(options);
+    await h.send(startRequest({ inputMode: "physical-contact", recordReplay: true }));
+    assert.equal(h.contactConstructions.length, 1);
+    assert.equal(h.games[0].calls.filter(call => ["capture", "sample", "activate"].includes(call[0])).length, 0);
+    assertReleased(h);
+    assert.equal(h.preparedOwners[1].frees, 0);
+  }
+  const failed = await catalogWorker({ contactConstructError: "consuming contact construction refused" });
+  await failed.send(startRequest({ inputMode: "physical-contact" }));
+  assert.equal(failed.preparedOwners[1].moved, true);
+  assert.equal(failed.preparedOwners[1].frees, 0);
+  assert.equal(failed.physicalConstructions.length, 0);
+  const selected = replayFile(), replay = await catalogWorker();
+  await replay.send(replayRequest(selected.file, { inputMode: "physical-contact" }));
+  assert.equal(selected.reads, 0);
+  assert.equal(replay.replays.length, 0);
+});
+
+test("mixed touch batches preflight all packets and preserve a committed binding prefix on later failure", async () => {
+  for (const bad of [touchEvent({ x: Infinity }), touchEvent({ hostNs: ORIGIN - 1n, pressure: NaN }), touchEvent({ contact: 18446744073709551616n })]) {
+    const h = await active({ startRequest: startRequest({ inputMode: "physical-contact" }) });
+    const key = { hostNs: ORIGIN - 1n, key: 2, down: true, sequence: 0n };
+    await h.send(step({ events: [key, bad] }));
+    assert.equal(h.games[0].calls.filter(call => ["blob", "touch", "input", "advance"].includes(call[0])).length, 0);
+    assert.equal(h.of("play-step-done").length, 0);
+    assertReleased(h);
+  }
+  const plain = await active({ startRequest: startRequest({ inputMode: "physical" }) });
+  await plain.send(step({ events: [touchEvent()] }));
+  assert.equal(plain.games[0].calls.filter(call => ["blob", "touch", "advance"].includes(call[0])).length, 0);
+  assertReleased(plain);
+  const h = await active({ startRequest: startRequest({ inputMode: "physical-contact" }),
+    inputBlobAt(game, bytes) { if (bytes[76] === 1) throw new Error("actual contact binding rejected later input"); } });
+  await h.send(step({ events: [touchEvent(), touchEvent({ hostNs: ORIGIN + 1n, sequence: 2n, phase: 1 })], watermark: ORIGIN + 1n }));
+  assert.equal(h.games[0].calls.filter(call => call[0] === "touch").length, 2);
+  assert.equal(h.games[0].calls.filter(call => call[0] === "advance").length, 0);
+  assert.equal(h.of("play-step-done").length, 0);
+  assert.match(h.of("play-error")[0].message, /actual contact binding rejected/);
+  assertReleased(h);
+});
 
 test("explicit physical keyboard ownership uses native bindings and canonical blobs with the original acquisition clock and finite setup", async () => {
   for (const finite of [false, true]) {

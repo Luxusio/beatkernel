@@ -63,6 +63,11 @@ async function harness(faults = {}) {
   const recordOpens = [];
   const recordCalls = [];
   const recordOwners = [];
+  const resizeObservers = [];
+  const captures = [];
+  const releases = [];
+  let viewport = { width: 960, height: 720 };
+  let layoutReads = 0;
   let now = 1000;
   let nextTimer = 0;
   let gesture = false;
@@ -98,6 +103,9 @@ async function harness(faults = {}) {
       this.children = [];
       this.files = [];
       this.focuses = 0;
+      this.capturedPointers = new Set();
+      if (faults.missingPointerCapture) this.setPointerCapture = undefined;
+      if (faults.missingPointerRelease) this.releasePointerCapture = undefined;
     }
     append(...children) {
       for (const child of children) {
@@ -120,7 +128,21 @@ async function harness(faults = {}) {
     replaceChildren(...children) { this.children = []; this.value = ""; this.append(...children); }
     replaceWith(fresh) { elements.set(this.id, fresh); }
     setAttribute(name, value) { this[name] = value; }
-    getBoundingClientRect() { return { width: 960, height: 720 }; }
+    getBoundingClientRect() { layoutReads++; return { ...viewport }; }
+    setPointerCapture(id) {
+      if (faults.captureFailure) throw faults.captureFailure;
+      this.capturedPointers.add(id);
+      captures.push({ surface: this, id });
+      traces.push(["capture", id]);
+    }
+    releasePointerCapture(id) {
+      this.capturedPointers.delete(id);
+      releases.push({ surface: this, id });
+      traces.push(["release", id]);
+      // Exercise synchronous native notification too: ownership must be gone
+      // before this can attempt to create another cancellation.
+      this.emit("lostpointercapture", { pointerId: id, timeStamp: now });
+    }
     transferControlToOffscreen() { return { surface: this.id }; }
     focus() { this.focuses++; }
   }
@@ -134,7 +156,7 @@ async function harness(faults = {}) {
     "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
     "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end",
     "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate",
-    "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands"]) {
+    "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input"]) {
     elements.set(id, new Element(id === "chart" || id === "records" ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
@@ -194,13 +216,14 @@ async function harness(faults = {}) {
     last(kind) { return this.messages(kind).at(-1); }
   }
   class ResizeObserver {
-    constructor(callback) { this.callback = callback; }
+    constructor(callback) { this.callback = callback; resizeObservers.push(this); }
     observe() {}
     disconnect() { traces.push(["observer-disconnect"]); }
   }
   const window = new Events();
   Object.assign(window, { isSecureContext: true, devicePixelRatio: 1, Worker,
     OffscreenCanvas: class {}, ResizeObserver, matchMedia: () => new Events() });
+  if (faults.touchSupported) window.PointerEvent = class {};
 
   function createAudio() { return {
     sampleRate: faults.actualRate ?? 48000,
@@ -282,6 +305,7 @@ async function harness(faults = {}) {
   }
   const context = createContext({
     document, window, Worker, ResizeObserver, Option,
+    navigator: { maxTouchPoints: faults.touchPoints ?? (faults.touchSupported ? 2 : 0) },
     AbortController, AbortSignal, URL: ControlledURL, Blob, TextEncoder, File, Uint8Array, Uint32Array, Float32Array,
     ArrayBuffer, structuredClone, performance: { timeOrigin: 9000, now: () => now },
     WebAssembly: { compile: async binary => {
@@ -388,8 +412,8 @@ async function harness(faults = {}) {
     assert.ok(request, "expected an actual setup request");
     // Normal controlled setup replies echo the admitted route. Negative route
     // fixtures can explicitly retain missing metadata with echoInputMode=false.
-    if (echoInputMode && request.kind === "play-start" && request.inputMode === "physical"
-      && result?.kind === "prepared" && !Object.hasOwn(result, "inputMode")) result = { ...result, inputMode: "physical" };
+    if (echoInputMode && request.kind === "play-start" && ["physical", "physical-contact"].includes(request.inputMode)
+      && result?.kind === "prepared" && !Object.hasOwn(result, "inputMode")) result = { ...result, inputMode: request.inputMode };
     await receive({ kind: "play-reply", playId: request.playId, rpcId: request.rpcId, result });
   }
   async function preview() {
@@ -458,7 +482,8 @@ async function harness(faults = {}) {
     await flush();
   }
   return { get, workers, get audio() { return audio; }, opens, traces, faults, timers, moduleToken, window, document, urls, revoked, downloads,
-    recordOpens, recordCalls, recordOwners,
+    recordOpens, recordCalls, recordOwners, captures, releases, get layoutReads() { return layoutReads; },
+    resize(width, height) { viewport = { width, height }; resizeObservers.at(-1).callback(); },
     click, receive, reply, preview, begin, prepared, launch, advance,
     setNow(value) { assert.ok(value >= now); now = value; },
     async close() {
@@ -1053,6 +1078,140 @@ test("one retained replay survives a failed export and its URLs are replaced onl
   assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), Uint8Array.from([9, 10]));
   await h.close();
   assert.deepEqual(h.revoked, h.urls.map(entry => entry.url));
+});
+
+test("touch capture preserves original samples and shared keyboard order without pointer-time layout or duplicate cancellation", async () => {
+  const h = await harness({ touchSupported: true });
+  const preview = await h.preview();
+  assert.equal(h.get("touch-input").checked, true);
+  const session = await h.launch(), worker = h.workers[0], surface = h.get("canvas");
+  assert.equal(session.start.inputMode, "physical-contact");
+  assert.equal(h.opens[0].gesture, true);
+  assert.equal(h.get("touch-input").disabled, true);
+  assert.equal(surface.dataset.touchInput, "true");
+  h.get("touch-input").checked = false; // A programmatic draft change cannot change this owner.
+  h.resize(480, 360);
+  const layoutReads = h.layoutReads, display = watchPlayDisplay(h);
+  h.setNow(1300);
+  const pointer = (type, overrides = {}) => surface.emit(type, { pointerType: "touch", pointerId: -2,
+    offsetX: 120, offsetY: 90, pressure: 0.5, timeStamp: 1300, ...overrides });
+  const done = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+    songNs: 50000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
+  assert.equal(pointer("pointerdown", { pointerType: "mouse" }).defaultPrevented, false);
+  assert.equal(pointer("pointerdown", { pointerType: "pen" }).defaultPrevented, false);
+  assert.equal(pointer("pointermove").defaultPrevented, false);
+  assert.equal(worker.messages("play-step").length, 0);
+  assert.equal(pointer("pointerdown").defaultPrevented, true);
+  const down = worker.last("play-step");
+  assert.deepEqual(down.events, [{ kind: "touch", hostNs: 1300000000n, sequence: 1n, contact: 1n,
+    phase: 0, code: 4294967294, x: 120, y: 90, pressure: 0.5, width: 480, height: 360 }]);
+  assert.equal(h.captures.length, 1);
+  assert.ok(h.traces.findIndex(row => row[0] === "capture") < h.traces.findIndex(row => row[1] === "play-step"));
+  assert.equal(pointer("pointerdown", { offsetX: 400 }).defaultPrevented, false);
+  pointer("pointermove", { offsetX: 400, offsetY: -10, pressure: 1.25, timeStamp: 1300.125 });
+  h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300.25 });
+  pointer("pointerup", { offsetX: 500, timeStamp: 1300.5 });
+  assert.equal(h.releases.length, 1);
+  assert.equal(worker.last("play-step").tickId, down.tickId);
+  assert.equal(h.layoutReads, layoutReads);
+  await done(down);
+  const mixed = worker.last("play-step");
+  assert.deepEqual(mixed.events.map(event => event.sequence), [2n, 3n, 4n]);
+  assert.deepEqual(mixed.events.map(event => event.hostNs), [1300125000n, 1300250000n, 1300500000n]);
+  assert.deepEqual(mixed.events[0], { kind: "touch", hostNs: 1300125000n, sequence: 2n, contact: 1n,
+    phase: 1, code: 4294967294, x: 400, y: -10, pressure: 1.25, width: 480, height: 360 });
+  assert.deepEqual(mixed.events[1], { hostNs: 1300250000n, key: 2, down: true, sequence: 3n });
+  assert.equal(mixed.events[2].phase, 2);
+  assert.equal(mixed.events[2].contact, 1n);
+  assert.equal(mixed.events.length, 3, "release-triggered lost capture must not append a second terminal event");
+  await done(mixed);
+  h.resize(960, 720);
+  const resizedReads = h.layoutReads;
+  h.setNow(1301);
+  pointer("pointerdown", { timeStamp: 1301 });
+  const reused = worker.last("play-step");
+  assert.equal(reused.events[0].contact, 2n);
+  assert.equal(reused.events[0].sequence, 5n);
+  assert.equal(reused.events[0].width, 960);
+  pointer("lostpointercapture", { timeStamp: 1301.125, offsetX: NaN, offsetY: undefined, pressure: undefined });
+  pointer("lostpointercapture", { timeStamp: 1301.25 });
+  await done(reused);
+  const canceled = worker.last("play-step");
+  assert.deepEqual(canceled.events, [{ kind: "touch", hostNs: 1301125000n, sequence: 6n, contact: 2n,
+    phase: 3, code: 4294967294, x: 120, y: 90, pressure: 0.5, width: 960, height: 720 }]);
+  await done(canceled);
+  assert.equal(h.layoutReads, resizedReads);
+  assert.deepEqual(display, [], "pointer acquisition and accepted input receipts leave the Worker-owned HUD alone");
+  h.setNow(1302);
+  pointer("pointerdown", { pointerId: 7, timeStamp: 1302 });
+  const held = worker.last("play-step"), beforeStop = worker.messages("play-step").length;
+  assert.equal(held.events[0].contact, 3n);
+  h.click("stop"); await flush();
+  assert.equal(surface.dataset.touchInput, undefined);
+  assert.ok(h.releases.some(entry => entry.id === 7));
+  pointer("pointermove", { pointerId: 7, timeStamp: 1303 });
+  assert.equal(worker.messages("play-step").length, beforeStop, "cleanup releases capture without inventing a judged Cancel");
+  await h.receive(finalScore(session.id));
+  assert.equal(h.get("touch-input").disabled, false);
+  assert.equal(h.get("touch-input").checked, false);
+  assert.equal(h.get("position").value, preview.position);
+  assert.match(h.get("status").textContent, /Hits 3.*Misses 1/);
+  await h.close();
+});
+
+test("touch capability and preparation refusals precede PCM while bounded capture failure and replay keep separate owners", async () => {
+  for (const faults of [{}, { touchSupported: true, missingPointerCapture: true }, { touchSupported: true, missingPointerRelease: true }]) {
+    const h = await harness(faults); await h.preview();
+    h.get("touch-input").checked = true;
+    h.click("play"); await flush();
+    assert.equal(h.opens.length, 0);
+    assert.equal(h.workers[0].messages("play-start").length, 0);
+    assert.match(h.get("status").textContent, /Pointer Events.*pointer capture/);
+    assert.equal(h.get("touch-input").disabled, false);
+    assert.equal(h.get("touch-input").checked, true);
+    // Recorded playback needs neither live pointer capabilities nor this draft.
+    chooseRecording(h, [selectedRecording().file]);
+    const replay = await h.launch(0, "replay");
+    assert.equal(Object.hasOwn(replay.start, "inputMode"), false);
+    h.get("canvas").emit("pointerdown", { pointerType: "touch", pointerId: 1, timeStamp: 1300 });
+    assert.equal(h.workers[0].messages("play-step").length, 0);
+    assert.equal(h.captures.length, 0);
+    h.click("stop"); await flush(); await h.receive(finalScore(replay.id));
+    await h.close();
+  }
+  const h = await harness({ touchSupported: true }); await h.preview();
+  const worker = h.workers[0];
+  for (const inputMode of [undefined, "physical", "legacy", null]) {
+    const start = await h.begin();
+    assert.equal(start.inputMode, "physical-contact");
+    await h.reply(start, { kind: "prepared", startNs: 0n, opponentCount: 0,
+      title: "Wrong route", notes: 1, samples: 1, lanes: [0x11], inputMode }, false);
+    assert.equal(worker.messages("play-sample").length, 0);
+    assert.equal(h.audio.samples.length, 0);
+    assert.deepEqual(h.audio.finishArgs, []);
+    assert.deepEqual(h.audio.arms, []);
+    await h.receive(finalScore(start.playId));
+    assert.equal(h.get("touch-input").checked, true);
+  }
+  const session = await h.launch(), surface = h.get("canvas");
+  h.setNow(1300);
+  const reads = h.layoutReads;
+  for (let pointerId = 0; pointerId < 256; pointerId++) surface.emit("pointerdown", {
+    pointerType: "touch", pointerId, timeStamp: 1300, offsetX: 100, offsetY: 200, pressure: 0,
+  });
+  assert.equal(h.captures.length, 256);
+  assert.equal(worker.messages("play-step").length, 1, "one pending receipt retains the bounded queued suffix");
+  surface.emit("pointerdown", { pointerType: "touch", pointerId: 256, timeStamp: 1300, offsetX: 100, offsetY: 200, pressure: 0 });
+  await flush();
+  assert.equal(h.captures.length, 256);
+  assert.equal(h.releases.length, 256);
+  assert.equal(h.layoutReads, reads);
+  assert.equal(worker.last("play-stop").completed, false);
+  await h.receive(finalScore(session.id));
+  assert.match(h.get("status").textContent, /Touch contact capacity exceeded/);
+  assert.equal(h.audio.stopStarts, 1);
+  assert.equal(surface.dataset.touchInput, undefined);
+  await h.close();
 });
 
 test("Window explicitly negotiates physical input before PCM and preserves native keyboard acquisition through setup and capture cleanup", async () => {
