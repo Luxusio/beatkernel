@@ -118,12 +118,14 @@ async function harness(faults = {}) {
   }
   for (const id of ["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek",
     "title", "details", "status", "viewport", "play", "stop", "record", "export", "keys", "canvas", "prepare-form", "seek-form",
-    "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete"]) {
+    "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete",
+    "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status"]) {
     elements.set(id, new Element(id === "chart" || id === "records" ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
   elements.get("rate").value = "44100";
   elements.get("seed").value = "7";
+  elements.get("multiplayer-role").value = "join";
 
   const document = new Events();
   document.body = new Element("body");
@@ -172,7 +174,7 @@ async function harness(faults = {}) {
     samples: [], commandsSeen: [], arms: [], polls: 0, finishes: 0, outputReads: 0,
     stopCalls: 0, stopStarts: 0, stopping: null,
     get currentFrame() { return BigInt(Math.floor(now * 48)); },
-    controlClock() { return { beforeMs: now, afterMs: now, contextTime: now / 1000, sampleRate: 48000 }; },
+    controlClock() { return faults.controlClock ?? { beforeMs: now, afterMs: now, contextTime: now / 1000, sampleRate: 48000 }; },
     outputTimestamp() {
       this.outputReads++;
       traces.push(["output-timestamp"]);
@@ -242,7 +244,7 @@ async function harness(faults = {}) {
   const context = createContext({
     document, window, Worker, ResizeObserver, Option,
     AbortController, AbortSignal, URL: ControlledURL, Blob, TextEncoder, File, Uint8Array, Uint32Array, Float32Array,
-    ArrayBuffer, structuredClone, performance: { now: () => now },
+    ArrayBuffer, structuredClone, performance: { timeOrigin: 9000, now: () => now },
     WebAssembly: { compile: async binary => {
       assert.deepEqual(Array.from(binary), [0, 97, 115, 109, 1, 0, 0, 0]);
       return moduleToken;
@@ -612,6 +614,8 @@ test("replay selection retains bounded File metadata, opens in the gesture and p
   }
   h.get("seed").value = "not a live seed";
   h.get("record").checked = true;
+  h.get("multiplayer").checked = true;
+  h.get("multiplayer-url").value = "invalid for live multiplayer";
   h.click("replay-play");
   assert.equal(h.opens.length, 1);
   assert.equal(h.opens[0].gesture, true);
@@ -620,6 +624,8 @@ test("replay selection retains bounded File metadata, opens in the gesture and p
   const worker = h.workers[0];
   const start = worker.last("play-start");
   assert.equal(start.mode, "replay");
+  assert.equal(start.multiplayer, undefined);
+  assert.equal(worker.messages("play-network-ready").length, 0);
   assert.equal(start.replayFile, file.file);
   assert.equal(start.rate, 48000);
   for (const field of ["seed", "keyPairs", "recordReplay"]) assert.equal(Object.hasOwn(start, field), false);
@@ -931,6 +937,8 @@ test("user gesture opens real host boundary before awaits, then transfers source
   assert.equal(start.rate, 48000, "preparation follows actual AudioContext rate");
   assert.equal(start.seed, "7");
   assert.equal(start.recordReplay, false, "recording remains disabled unless explicitly selected");
+  assert.equal(start.multiplayer, undefined, "solo remains the default automatic audio path");
+  assert.equal(worker.messages("play-network-ready").length, 0);
   assert.ok(start.keyPairs instanceof Uint32Array);
   const commands = await h.prepared(start, 1);
   assert.equal(h.audio.samples[0].rate, 44100, "original source rate survives transfer");
@@ -1372,5 +1380,125 @@ test("Window retains only progressing clock pairs and defers coarse or regressin
   }
   assert.equal(worker.messages("play-stop").length, 0);
   assert.equal(h.audio.stopStarts, 0);
+  await h.close();
+});
+
+function chooseMultiplayer(h, host = true) {
+  h.get("multiplayer").checked = true;
+  h.get("multiplayer-url").value = "https://example.test:4433/competition";
+  h.get("multiplayer-role").value = host ? "host" : "join";
+  h.get("multiplayer").emit("change");
+}
+
+test("multiplayer readiness follows real audio setup and one committed grid arms both game and output", async () => {
+  const commandGate = deferred();
+  const h = await harness({ commandGate });
+  await h.preview();
+  assert.equal(h.get("multiplayer").checked, false);
+  chooseMultiplayer(h);
+  const start = await h.begin();
+  const worker = h.workers[0];
+  assert.equal(h.opens[0].gesture, true);
+  assert.deepEqual(start.multiplayer, { url: "https://example.test:4433/competition", host: true,
+    windowOriginNs: 9000000000n });
+  assert.equal(h.get("multiplayer").disabled, true);
+  const commands = await h.prepared(start, 1);
+  assert.equal(h.audio.finishes, 1);
+  assert.equal(worker.messages("play-network-ready").length, 0);
+  await h.reply(commands, { sequence: 41n, commands: [command()] });
+  assert.equal(worker.messages("play-network-ready").length, 0, "pending actual PCM command write is not readiness");
+  commandGate.resolve(); await flush();
+  await h.reply(worker.last("play-ack"), null);
+  await h.reply(worker.last("play-commands"), null);
+  const ready = worker.last("play-network-ready");
+  assert.ok(ready);
+  assert.equal(worker.messages("play-network-ready").length, 1);
+  assert.deepEqual(h.audio.arms, []);
+  await h.reply(ready, { kind: "multiplayer-start", targetHostNs: 1500000001n,
+    songTargetHostNs: 1600000001n, uncertaintyNs: 0n });
+  assert.deepEqual(h.audio.arms, [72001n]);
+  const activation = worker.last("play-activate");
+  assert.equal(activation.startFrame, 72001n);
+  assert.equal(activation.hostNs, 1500020833n);
+  assert.equal(activation.targetHostNs, 1500000001n);
+  assert.ok(activation.hostNs >= activation.targetHostNs);
+  assert.ok(activation.hostNs - activation.targetHostNs <= 20834n);
+  await h.reply(activation, null);
+  assert.equal(h.get("stop").disabled, false);
+  await h.close();
+});
+
+test("remote summaries stay separate and active disconnect does not stop local play or fake final ACK", async () => {
+  const stopGate = deferred();
+  const h = await harness({ stopGate });
+  await h.preview(); chooseMultiplayer(h, false);
+  const start = await h.begin();
+  const worker = h.workers[0];
+  await h.reply(await h.prepared(start), null);
+  await h.reply(worker.last("play-network-ready"), { kind: "multiplayer-start", targetHostNs: 1500000000n,
+    songTargetHostNs: 1600000000n, uncertaintyNs: 0n });
+  await h.reply(worker.last("play-activate"), null);
+  const before = { title: h.get("title").textContent, details: h.get("details").textContent,
+    status: h.get("status").textContent };
+  await h.receive({ kind: "play-multiplayer", playId: start.playId, event: { kind: "progress",
+    songNs: -1n, hits: 18446744073709551615n, misses: 0n, combo: 7n, maxCombo: 99n } });
+  assert.match(h.get("multiplayer-status").textContent, /self-reported.*-0\.000000001.*18446744073709551615/);
+  assert.deepEqual({ title: h.get("title").textContent, details: h.get("details").textContent,
+    status: h.get("status").textContent }, before);
+  await h.receive({ kind: "play-multiplayer", playId: start.playId, event: { kind: "progress",
+    songNs: 0n, hits: "4", misses: 0n, combo: 0n, maxCombo: 0n } });
+  assert.match(h.get("multiplayer-status").textContent, /malformed.*continues/i);
+  await h.receive({ kind: "play-multiplayer", playId: start.playId, event: { kind: "disconnected", error: "peer left" } });
+  assert.match(h.get("multiplayer-status").textContent, /peer left.*local play continues/i);
+  assert.equal(h.audio.stopStarts, 0);
+  assert.equal(worker.messages("play-stop").length, 0);
+  await h.advance(8);
+  assert.ok(worker.messages("play-step").length > 0);
+  h.click("stop"); await flush();
+  await h.receive(finalScore(start.playId, { multiplayer: { finalWritten: true, finalAcknowledged: false, error: "peer ACK timed out" } }));
+  assert.equal(h.get("play").disabled, true, "network receipt does not release outstanding audio cleanup");
+  stopGate.resolve(); await flush();
+  assert.match(h.get("multiplayer-status").textContent, /written.*ACK unavailable.*timed out/);
+  const ended = h.get("multiplayer-status").textContent;
+  await h.receive({ kind: "play-multiplayer", playId: start.playId, event: { kind: "final-acknowledged" } });
+  assert.equal(h.get("multiplayer-status").textContent, ended);
+  h.get("multiplayer").checked = false;
+  const solo = await h.launch();
+  assert.equal(solo.start.multiplayer, undefined);
+  const soloStatus = h.get("multiplayer-status").textContent;
+  await h.receive({ kind: "play-multiplayer", playId: start.playId, event: { kind: "disconnected", error: "late owner" } });
+  assert.equal(h.get("multiplayer-status").textContent, soloStatus);
+  await h.close();
+});
+
+test("invalid committed schedules and cancelled readiness never arm or revive a later play owner", async () => {
+  for (const schedule of [
+    { kind: "multiplayer-start", targetHostNs: 1500000000n, songTargetHostNs: 1500000000n, uncertaintyNs: 0n },
+    { kind: "multiplayer-start", targetHostNs: 1000000000n, songTargetHostNs: 1100000000n, uncertaintyNs: 0n },
+    { kind: "multiplayer-start", targetHostNs: 1500000000n, songTargetHostNs: 1600000000n, uncertaintyNs: 100000001n },
+    { kind: "multiplayer-start", targetHostNs: 1500000000, songTargetHostNs: 1600000000n, uncertaintyNs: 0n },
+  ]) {
+    const h = await harness(); await h.preview(); chooseMultiplayer(h);
+    const start = await h.begin(); const worker = h.workers[0];
+    await h.reply(await h.prepared(start), null);
+    await h.reply(worker.last("play-network-ready"), schedule);
+    assert.deepEqual(h.audio.arms, []);
+    assert.equal(worker.messages("play-activate").length, 0);
+    assert.equal(worker.last("play-stop").playId, start.playId);
+    await h.receive(finalScore(start.playId, { multiplayer: { finalWritten: false, finalAcknowledged: false, error: "setup refused" } }));
+    await h.close();
+  }
+  const h = await harness(); await h.preview(); chooseMultiplayer(h);
+  const start = await h.begin(); const worker = h.workers[0];
+  await h.reply(await h.prepared(start), null);
+  const pending = worker.last("play-network-ready");
+  const escape = h.window.emit("keydown", { code: "Escape", repeat: false, timeStamp: 1000 });
+  assert.equal(escape.defaultPrevented, true);
+  await flush();
+  await h.reply(pending, { kind: "multiplayer-start", targetHostNs: 1500000000n,
+    songTargetHostNs: 1600000000n, uncertaintyNs: 0n });
+  assert.deepEqual(h.audio.arms, []);
+  await h.receive(finalScore(start.playId, { multiplayer: { finalWritten: false, finalAcknowledged: false, error: "cancelled" } }));
+  assert.equal(h.get("play").disabled, false);
   await h.close();
 });

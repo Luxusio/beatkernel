@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self'; connect-src 'self' https:; img-src 'self' data:; object-src 'none'; base-uri 'none'">
   <title>BeatKernel · BMS player</title>
   <link rel="stylesheet" href="./style.css">
   <script type="module" src="./main.js"></script>
@@ -35,6 +35,11 @@
         <button id="seek" type="submit" disabled>Show position</button>
       </form>
       <p><button id="play" type="button" disabled>Play from beginning</button> <button id="stop" type="button" disabled>Stop</button></p>
+      <div class="replay-controls"><label><input id="multiplayer" type="checkbox" disabled> Multiplayer live play</label>
+        <label>Server <input id="multiplayer-url" type="url" placeholder="https://server.example/room" maxlength="4096" disabled></label>
+        <label>Start role <select id="multiplayer-role" disabled><option value="host">Propose start</option><option value="join">Join start</option></select></label></div>
+      <p class="hint">Both players need the same chart, seed and output setup, and a compatible WebTransport server. Replay stays local.</p>
+      <p id="multiplayer-status" class="hint" role="status" aria-live="polite">Solo play selected.</p>
       <div class="replay-controls"><label><input id="record" type="checkbox" disabled> Record replay</label>
         <button id="export" type="button" disabled>Download last replay</button></div>
       <p class="hint">Recording is optional. Interrupted plays export a replay prefix. The last captured record stays here until it is replaced or you close the page.</p>

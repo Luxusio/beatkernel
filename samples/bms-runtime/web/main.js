@@ -1,10 +1,10 @@
 import { snapshotFiles, nanoseconds, seconds } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
 import { RecordsStore } from "./record-store.mjs";
-import { KEY_BINDINGS, bindingsFor, millisecondsToNanos, frameNanos, startProjection, presentationPair } from "./play-model.mjs";
+import { KEY_BINDINGS, bindingsFor, millisecondsToNanos, frameNanos, startProjection, committedStartProjection, presentationPair } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
-const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete"].map(id => [id, byId(id)]));
+const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status"].map(id => [id, byId(id)]));
 let canvas = byId("canvas");
 let worker = null;
 let observer = null;
@@ -43,6 +43,8 @@ function controls() {
   ui.play.disabled = !initialized || !hasPreview || importing || preparing || playing || busy || !audioModule;
   ui.stop.disabled = !playing || activePlay.phase === "closing";
   ui.record.disabled = ui.play.disabled;
+  ui.multiplayer.disabled = ui.play.disabled;
+  ui["multiplayer-url"].disabled = ui["multiplayer-role"].disabled = ui.play.disabled || !ui.multiplayer.checked;
   ui.export.disabled = playing || busy || lastReplay === null;
   ui["replay-file"].disabled = !initialized || importing || preparing || playing || busy;
   ui["replay-play"].disabled = ui.play.disabled || selectedReplay === null;
@@ -231,6 +233,13 @@ window.addEventListener("pageshow", event => { if (event.persisted) start(); });
 window.addEventListener("resize", resize);
 ui.play.addEventListener("click", () => { void play("live"); });
 ui["replay-play"].addEventListener("click", () => { void play("replay"); });
+ui.multiplayer.addEventListener("change", () => {
+  if (activePlay) return;
+  controls();
+  ui["multiplayer-status"].textContent = ui.multiplayer.checked
+    ? "Live Play will wait for the peer's compatible setup and committed start. Replay stays local."
+    : "Solo play selected.";
+});
 ui["replay-file"].addEventListener("change", event => {
   if (!initialized || importing || preparing || activePlay || recordsOperation) return;
   try {
@@ -294,6 +303,18 @@ async function loadAudio(generation) {
   }
 }
 
+function multiplayerConfiguration() {
+  const raw = ui["multiplayer-url"].value;
+  const role = ui["multiplayer-role"].value;
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > 4096
+    || !["host", "join"].includes(role)) throw new Error("Choose a multiplayer HTTPS server and start role.");
+  const url = new URL(raw);
+  if (url.protocol !== "https:" || url.username || url.password || url.hash || url.href.length > 4096) {
+    throw new Error("Multiplayer requires an HTTPS URL without credentials or a fragment.");
+  }
+  return { url: url.href, host: role === "host", windowOriginNs: millisecondsToNanos(performance.timeOrigin) };
+}
+
 function playRpc(session, kind, fields = {}) {
   if (activePlay !== session || session.phase === "closing" || !worker) return Promise.reject(new Error("Playback owner is closed."));
   if (session.rpc) return Promise.reject(new Error("A playback setup operation is already pending."));
@@ -328,6 +349,9 @@ async function play(mode = "live") {
   controls();
   status(mode === "replay" ? "Preparing recorded replay and audio…" : "Preparing playable chart and audio…");
   try {
+    session.multiplayer = mode === "live" && ui.multiplayer.checked === true ? multiplayerConfiguration() : null;
+    ui["multiplayer-status"].textContent = session.multiplayer ? "Preparing local audio before connecting…"
+      : mode === "replay" ? "Local replay · no multiplayer connection." : "Solo play selected.";
     // open invokes resume synchronously here, inside the button's user gesture.
     const opening = AudioHost.open({ module: audioModule, generation: session.id, channels: 2,
       pcmLimits: { maxAssetBytes: 64 * 1024 * 1024, maxTotalBytes: 256 * 1024 * 1024, maxSamples: 1296 },
@@ -339,6 +363,7 @@ async function play(mode = "live") {
     session.workerStarted = true;
     const source = mode === "replay" ? { mode, replayFile: session.replayFile }
       : { mode, seed: ui.seed.value, recordReplay: session.recordReplay,
+        ...(session.multiplayer ? { multiplayer: session.multiplayer } : {}),
         keyPairs: Uint32Array.from(KEY_BINDINGS.flatMap(row => [row[0], row[2]])) };
     const prepared = await playRpc(session, "play-start", { libraryId, path: ui.chart.value,
       rate: session.audio.sampleRate, ...source });
@@ -370,11 +395,28 @@ async function play(mode = "live") {
       }
       await playRpc(session, "play-ack", { sequence: batch.sequence, admitted: ack.admitted, success: true });
     }
-    const clock = session.audio.controlClock();
-    session.startFrame = session.audio.currentFrame + BigInt(Math.ceil(session.audio.sampleRate / 4));
-    session.origin = startProjection(clock, session.startFrame);
+    if (session.multiplayer) {
+      ui["multiplayer-status"].textContent = "Audio ready · waiting for the peer and committed start…";
+      const schedule = await playRpc(session, "play-network-ready");
+      if (schedule?.kind !== "multiplayer-start" || typeof schedule.targetHostNs !== "bigint"
+        || typeof schedule.uncertaintyNs !== "bigint"
+        || typeof schedule.songTargetHostNs !== "bigint" || schedule.songTargetHostNs > 9223372036854775807n
+        || schedule.songTargetHostNs - schedule.targetHostNs !== 100000000n) throw new Error("Invalid committed multiplayer preroll schedule.");
+      const clock = session.audio.controlClock();
+      if (clock.sampleRate !== session.audio.sampleRate) throw new Error("Multiplayer audio clock changed its sample rate.");
+      const projected = committedStartProjection(clock, schedule.targetHostNs, performance.now(), schedule.uncertaintyNs);
+      session.targetHostNs = schedule.targetHostNs;
+      session.startFrame = projected.startFrame;
+      session.origin = projected.origin;
+      if (session.startFrame <= session.audio.currentFrame) throw new Error("Committed multiplayer output frame was already rendered.");
+    } else {
+      const clock = session.audio.controlClock();
+      session.startFrame = session.audio.currentFrame + BigInt(Math.ceil(session.audio.sampleRate / 4));
+      session.origin = startProjection(clock, session.startFrame);
+    }
     await session.audio.arm(session.startFrame);
-    await playRpc(session, "play-activate", { hostNs: session.origin, startFrame: session.startFrame });
+    await playRpc(session, "play-activate", { hostNs: session.origin, startFrame: session.startFrame,
+      ...(session.multiplayer ? { targetHostNs: session.targetHostNs } : {}) });
     if (millisecondsToNanos(performance.now()) >= session.origin) throw new Error("Playback activation missed its chosen start. Start a fresh session.");
     session.phase = "playing";
     ui.rate.value = String(session.audio.sampleRate);
@@ -389,8 +431,9 @@ async function play(mode = "live") {
 
 function key(event, down) {
   const session = activePlay;
-  if (!session || session.phase !== "playing") return;
+  if (!session || session.phase === "closing") return;
   if (event.code === "Escape" && down) { event.preventDefault(); void stopPlay("Playback stopped."); return; }
+  if (session.phase !== "playing") return;
   const binding = session.bindings.find(row => row[1] === event.code);
   if (!binding) return;
   event.preventDefault();
@@ -492,10 +535,30 @@ async function pumpAudio(session) {
   }
 }
 
+function receiveMultiplayer(session, event) {
+  if (!session.multiplayer || session.phase === "closing" || session.owner !== owner || !event) return;
+  const field = ui["multiplayer-status"];
+  if (event.kind === "progress" || event.kind === "final-progress") {
+    if (typeof event.songNs !== "bigint" || event.songNs < -9223372036854775808n || event.songNs > 9223372036854775807n
+      || [event.hits, event.misses, event.combo, event.maxCombo].some(value => typeof value !== "bigint" || value < 0n || value > 18446744073709551615n)) {
+      field.textContent = "Multiplayer peer summary was malformed. Local play continues.";
+      return;
+    }
+    field.textContent = `Peer self-reported${event.kind === "final-progress" ? " final prefix" : ""} · ${seconds(event.songNs.toString())} s · Hits ${event.hits} · Misses ${event.misses} · Combo ${event.combo} · Max combo ${event.maxCombo}`;
+  } else if (event.kind === "disconnected") {
+    field.textContent = `Multiplayer disconnected: ${String(event.error ?? "Connection lost").slice(0, 4096)}${session.phase === "playing" ? " · local play continues." : "."}`;
+  } else if (event.kind === "connected") field.textContent = "Connected · checking compatible setup and readiness…";
+  else if (event.kind === "ready") field.textContent = "Peer ready · agreeing on the start…";
+  else if (event.kind === "start") field.textContent = "Shared software start committed · preparing output…";
+  else if (event.kind === "final-acknowledged") field.textContent = "Peer acknowledged the final score prefix.";
+}
+
 function receivePlay(data) {
   const session = activePlay;
   if (!session || data.playId !== session.id) return;
-  if (data.kind === "play-reply") {
+  if (data.kind === "play-multiplayer") {
+    receiveMultiplayer(session, data.event);
+  } else if (data.kind === "play-reply") {
     const request = session.rpc;
     if (!request || data.rpcId !== request.rpcId) return;
     session.rpc = null;
@@ -622,6 +685,13 @@ function stopPlay(reason, failed = false, completed = false) {
           ui.keys.textContent = "";
         }
         const score = session.finalScore;
+        if (session.multiplayer && session.owner === owner) {
+          const outcome = score?.multiplayer;
+          ui["multiplayer-status"].textContent = outcome?.finalAcknowledged === true && outcome?.finalWritten === true
+            ? "Final score prefix written and acknowledged by the peer."
+            : outcome?.finalWritten === true ? `Final score prefix written · peer ACK unavailable${outcome.error ? `: ${String(outcome.error).slice(0, 4096)}` : "."}`
+              : `Multiplayer ended without a confirmed final score write${outcome?.error ? `: ${String(outcome.error).slice(0, 4096)}` : "."}`;
+        }
         const result = score && typeof score.hits === "bigint" && typeof score.misses === "bigint"
           ? ` Hits ${score.hits} · Misses ${score.misses} · Combo ${score.combo ?? "unavailable"}.` : "";
         if (session.replayError !== null) {

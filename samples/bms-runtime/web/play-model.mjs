@@ -25,16 +25,46 @@ export function secondsToNanos(value) {
   if (ns > I64_MAX) throw new Error("Context timestamp exceeds signed nanoseconds.");
   return ns;
 }
-export function startProjection(clock, frame) {
+function bracketedClock(clock) {
   if (!clock || ![clock.beforeMs, clock.contextTime, clock.afterMs].every(value => typeof value === "number" && Number.isFinite(value) && value >= 0)
     || clock.afterMs < clock.beforeMs) throw new Error("Invalid bracketed audio clock.");
   const contextNs = secondsToNanos(clock.contextTime);
-  const targetNs = frameNanos(frame, clock.sampleRate);
+  frameNanos(0n, clock.sampleRate);
   const before = millisecondsToNanos(clock.beforeMs);
   const after = millisecondsToNanos(clock.afterMs);
-  const origin = before + (after - before) / 2n + targetNs - contextNs;
+  return { contextNs, before, after, midpoint: before + (after - before) / 2n };
+}
+export function startProjection(clock, frame) {
+  const { midpoint, contextNs } = bracketedClock(clock);
+  const origin = midpoint + frameNanos(frame, clock.sampleRate) - contextNs;
   if (origin < 0n || origin > I64_MAX) throw new Error("Audio start projection exceeds Window time.");
   return origin;
+}
+// Translate a committed Window-clock target once to the actual output grid.
+// The returned origin is shared by the audio arm and game activation.
+export function committedStartProjection(clock, targetHostNs, nowMs, peerUncertaintyNs = 0n,
+  minLeadNs = 100000000n, maxUncertaintyNs = 100000000n) {
+  if (typeof targetHostNs !== "bigint" || targetHostNs < 0n || targetHostNs > I64_MAX
+    || typeof peerUncertaintyNs !== "bigint" || peerUncertaintyNs < 0n || peerUncertaintyNs > U64_MAX
+    || typeof minLeadNs !== "bigint" || minLeadNs < 1n || minLeadNs > I64_MAX
+    || typeof maxUncertaintyNs !== "bigint" || maxUncertaintyNs < 1n || maxUncertaintyNs > I64_MAX) {
+    throw new Error("Invalid committed multiplayer start bounds.");
+  }
+  const { contextNs, before, after, midpoint } = bracketedClock(clock);
+  const now = millisecondsToNanos(nowMs);
+  if (after > now || now - after > 100000000n) throw new Error("Multiplayer audio clock bracket is stale or in the future.");
+  const uncertaintyNs = peerUncertaintyNs + (after - before + 1n) / 2n;
+  if (uncertaintyNs > maxUncertaintyNs) throw new Error("Multiplayer start uncertainty exceeds policy.");
+  if (targetHostNs - now - uncertaintyNs < minLeadNs) throw new Error("Committed multiplayer start has insufficient preparation lead.");
+  const audioTarget = contextNs + targetHostNs - midpoint;
+  if (audioTarget < 0n) throw new Error("Committed multiplayer start precedes the audio context.");
+  const startFrame = (audioTarget * BigInt(clock.sampleRate) + 999999999n) / 1000000000n;
+  const origin = startProjection(clock, startFrame);
+  const roundingNs = origin - targetHostNs;
+  if (roundingNs < 0n || roundingNs > (1000000000n + BigInt(clock.sampleRate) - 1n) / BigInt(clock.sampleRate)) {
+    throw new Error("Multiplayer start projection escaped its output frame.");
+  }
+  return { startFrame, origin, uncertaintyNs, roundingNs };
 }
 // Actual reported presentation only; never extrapolate it to UI "now".
 export function presentationPoint(timestamp, start, rate, nowMs, maxAgeMs = 1000) {

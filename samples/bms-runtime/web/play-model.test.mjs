@@ -2,7 +2,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  millisecondsToNanos, secondsToNanos, frameNanos, startProjection, presentationPoint, presentationPair, reportWord, renderedCursor,
+  millisecondsToNanos, secondsToNanos, frameNanos, startProjection, committedStartProjection,
+  presentationPoint, presentationPair, reportWord, renderedCursor,
   KEY_BINDINGS, bindingsFor,
 } from "./play-model.mjs";
 
@@ -28,7 +29,7 @@ test("Window timestamps retain fractional milliseconds and long lifetimes within
     [0, 0n], [0.125, 125000n], [1.5, 1500000n],
     [72000000, 72000000000000n], [604800000, 604800000000000n],
     [9007199254.75, 9007199254750000n],
-    [9223372036854.5, 9223372036854500000n],
+    [9223372036854.5, 9_223_372_036_854_500_000n],
   ]) assert.equal(millisecondsToNanos(input), expected);
   for (const invalid of [-1, NaN, Infinity, "1", null, 1n, Number.MAX_SAFE_INTEGER + 1,
     9223372036854.875, 9223372036855]) assert.throws(() => millisecondsToNanos(invalid));
@@ -193,4 +194,63 @@ test("presentation pairs preserve original fractional Window time separately fro
   }
   assert.throws(() => presentationPair({ contextTime: 1, performanceTime: 9223372036855 },
     0n, 48000, 9223372036855), "original host time must fit signed nanoseconds");
+});
+
+test("committed starts round upward onto the exact shared frame without retiming the accepted target", () => {
+  const clock = { beforeMs: 1000, afterMs: 1002, contextTime: 2, sampleRate: 48000 };
+  assert.deepEqual(committedStartProjection(clock, 1501000000n, 1002), {
+    startFrame: 120000n, origin: 1501000000n, uncertaintyNs: 1000000n, roundingNs: 0n,
+  });
+  assert.deepEqual(committedStartProjection(clock, 1501000001n, 1002), {
+    startFrame: 120001n, origin: 1501020833n, uncertaintyNs: 1000000n, roundingNs: 20832n,
+  });
+  const grid441 = { beforeMs: 1000, afterMs: 1000, contextTime: 2, sampleRate: 44100 };
+  assert.deepEqual(committedStartProjection(grid441, 1100000001n, 1000), {
+    startFrame: 92611n, origin: 1100022675n, uncertaintyNs: 0n, roundingNs: 22674n,
+  });
+  for (const [snapshot, target, now] of [
+    [clock, 1501000001n, 1002],
+    [grid441, 1100000001n, 1000],
+    [{ beforeMs: 604800000, afterMs: 604800000, contextTime: 2 ** 33 + 2 ** -18,
+      sampleRate: 1000000000 }, 604800500000001n, 604800000],
+  ]) {
+    const chosen = committedStartProjection(snapshot, target, now);
+    assert.equal(chosen.origin, startProjection(snapshot, chosen.startFrame));
+    assert.equal(chosen.roundingNs, chosen.origin - target);
+    assert.ok(chosen.origin >= target);
+    assert.ok(startProjection(snapshot, chosen.startFrame - 1n) < target);
+    assert.ok(chosen.roundingNs <= (1000000000n + BigInt(snapshot.sampleRate) - 1n) / BigInt(snapshot.sampleRate));
+  }
+});
+
+test("committed starts enforce conservative lead and combined uncertainty at exact boundaries", () => {
+  const clock = { beforeMs: 1000, afterMs: 1002, contextTime: 2, sampleRate: 48000 };
+  const peer = 99_000_000n;
+  const boundary = committedStartProjection(clock, 1202000000n, 1002, peer);
+  assert.equal(boundary.uncertaintyNs, 100000000n);
+  assert.throws(() => committedStartProjection(clock, 1201999999n, 1002, peer), "one ns too little conservative lead");
+  assert.throws(() => committedStartProjection(clock, 1500000000n, 1002, peer + 1n), "peer plus bracket exceeds cap");
+  const fresh = { beforeMs: 1000, afterMs: 1000, contextTime: 1, sampleRate: 48000 };
+  assert.doesNotThrow(() => committedStartProjection(fresh, 1500000000n, 1100));
+  assert.throws(() => committedStartProjection(fresh, 1500000000n, 1100.125));
+  assert.throws(() => committedStartProjection(fresh, 1500000000n, 999.875), "future bracket cannot be used");
+  const oddBracket = { beforeMs: 0, afterMs: 0.000001, contextTime: 0, sampleRate: 1000000000 };
+  assert.equal(committedStartProjection(oddBracket, 100000002n, 0.000001).uncertaintyNs, 1n);
+});
+
+test("malformed or overflowing committed clocks cannot arm an earlier or unrepresentable frame", () => {
+  const clock = { beforeMs: 1000, afterMs: 1000, contextTime: 2, sampleRate: 48000 };
+  for (const target of [-1n, I64_MAX + 1n, 1500000000, null]) {
+    assert.throws(() => committedStartProjection(clock, target, 1000));
+  }
+  for (const [peer, lead, cap] of [[-1n, 1n, 1n], [U64_MAX + 1n, 1n, I64_MAX],
+    [0, 1n, 1n], [0n, 0n, 1n], [0n, I64_MAX + 1n, 1n], [0n, 1n, 0n], [0n, 1n, I64_MAX + 1n]]) {
+    assert.throws(() => committedStartProjection(clock, 1500000000n, 1000, peer, lead, cap));
+  }
+  for (const snapshot of [null, { ...clock, beforeMs: 1001 }, { ...clock, afterMs: NaN },
+    { ...clock, contextTime: -1 }, { ...clock, sampleRate: 0 },
+    { ...clock, contextTime: 2 ** 33, sampleRate: 0xffffffff },
+    { ...clock, contextTime: 9223372036.75, sampleRate: 48000 }]) {
+    assert.throws(() => committedStartProjection(snapshot, 2000000000n, 1000));
+  }
 });
