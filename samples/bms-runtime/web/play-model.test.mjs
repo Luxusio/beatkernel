@@ -4,7 +4,7 @@ import test from "node:test";
 import {
   millisecondsToNanos, secondsToNanos, frameNanos, startProjection, committedStartProjection,
   presentationPoint, presentationPair, reportWord, renderedCursor,
-  KEY_BINDINGS, bindingsFor,
+  KEY_BINDINGS, KEY_CHOICES, snapshotBindings, bindingsFor,
   parseTimingMilliseconds, timingFromMilliseconds, validateTiming,
   PLAY_PCM_SAMPLES, startFromSeconds, validateStart,
 } from "./play-model.mjs";
@@ -197,6 +197,54 @@ test("explicit keyboard bindings preserve both sides and reject unknown or dupli
   for (const invalid of [null, new Uint32Array([0x11]), [0x11, 0x11], [0x10], [0x2a], ["17"], Array(19).fill(0x11)]) {
     assert.throws(() => bindingsFor(invalid));
   }
+});
+
+test("keyboard choices preserve all original physical IDs and snapshots own frozen mappings including explicit unbound lanes", () => {
+  const defaults = [
+    [0x16, "ShiftLeft", 1], [0x11, "KeyZ", 2], [0x12, "KeyS", 3], [0x13, "KeyX", 4],
+    [0x14, "KeyD", 5], [0x15, "KeyC", 6], [0x18, "KeyF", 7], [0x19, "KeyV", 8], [0x17, "Space", 9],
+    [0x26, "ShiftRight", 10], [0x21, "KeyN", 11], [0x22, "KeyJ", 12], [0x23, "KeyM", 13],
+    [0x24, "KeyK", 14], [0x25, "Comma", 15], [0x28, "KeyL", 16], [0x29, "Period", 17], [0x27, "Slash", 18],
+  ];
+  assert.deepEqual(KEY_BINDINGS, defaults);
+  assert.deepEqual(KEY_CHOICES.slice(0, 18), defaults.map(([, code, id]) => [code, id]));
+  assert.equal(new Set(KEY_CHOICES.map(([code]) => code)).size, KEY_CHOICES.length);
+  assert.equal(new Set(KEY_CHOICES.map(([, id]) => id)).size, KEY_CHOICES.length);
+  assert.ok(KEY_CHOICES.every(([code, id]) => typeof code === "string" && code !== "Escape" && Number.isInteger(id) && id > 0 && id <= 65535));
+  assert.ok(Object.isFrozen(KEY_CHOICES) && KEY_CHOICES.every(Object.isFrozen));
+  for (const code of ["KeyA", "Digit0", "Semicolon", "ArrowLeft", "Numpad0"]) {
+    assert.ok(KEY_CHOICES.some(([name, id]) => name === code && id > 18), code);
+  }
+  assert.deepEqual(snapshotBindings(defaults.map(([lane, code]) => [lane, code])), defaults);
+  const draft = [[0x16, "KeyA"], [0x11, ""], [0x12, "KeyB"]];
+  const snapshot = snapshotBindings(draft);
+  assert.deepEqual(snapshot, [[0x16, "KeyA", 19], [0x12, "KeyB", 20]]);
+  assert.ok(Object.isFrozen(snapshot) && snapshot.every(Object.isFrozen));
+  draft[0][1] = "ShiftLeft";
+  draft.push([0x13, "KeyQ"]);
+  assert.deepEqual(bindingsFor(new Uint8Array([0x12, 0x16]), snapshot), [[0x12, "KeyB", 20], [0x16, "KeyA", 19]]);
+  assert.throws(() => bindingsFor([0x11], snapshot), "unbound actual lane must not fall back to its default");
+  assert.deepEqual(snapshotBindings([]), []);
+  assert.deepEqual(snapshotBindings(defaults.map(([lane]) => [lane, ""])), []);
+  assert.deepEqual(bindingsFor([], []), []);
+});
+
+test("binding snapshots reject ambiguous malformed or sparse drafts and custom triples cannot forge physical IDs", () => {
+  const sparse = Array(1);
+  const missingCode = [0x11, "KeyA"]; delete missingCode[1];
+  for (const value of [null, {}, new Uint8Array([0x11]), Array(19).fill([0x11, "KeyA"]), sparse,
+    [missingCode], [[0x11]], [[0x11, "KeyA", 19]], [["17", "KeyA"]], [[0x10, "KeyA"]],
+    [[0x11, "KeyA"], [0x11, ""]], [[0x11, ""], [0x11, ""]], [[0x11, "KeyA"], [0x12, "KeyA"]],
+    [[0x11, "Escape"]], [[0x11, "KeyUnrecognized"]], [[0x11, "KeyA\n"]], [[0x11, null]]]) {
+    assert.throws(() => snapshotBindings(value));
+  }
+  for (const custom of [[[0x11, "KeyA", 2]], [[0x11, "KeyZ", 19]], [[0x11, "KeyA", "19"]],
+    [[0x11, "KeyA", 19], [0x12, "KeyA", 19]], [[0x11, "", 0]], Array(1)]) {
+    assert.throws(() => bindingsFor([0x11], custom));
+  }
+  assert.throws(() => bindingsFor([0x11, 0x11], snapshotBindings([[0x11, "KeyA"]])));
+  assert.throws(() => bindingsFor([0x11], snapshotBindings([[0x12, "KeyA"]])));
+  assert.deepEqual(bindingsFor([0x11]), [[0x11, "KeyZ", 2]], "failed custom snapshots cannot alter stable defaults");
 });
 
 test("presentation uses only fresh reported output and rounds a fractional start conservatively", () => {

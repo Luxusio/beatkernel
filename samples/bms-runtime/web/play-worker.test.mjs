@@ -442,6 +442,46 @@ test("prepared ownership, original-rate PCM transfers and setup batches retain t
   assert.equal(h.views[0].current, h.preparedOwners[0], "accepted preview survives gameplay");
 });
 
+test("remapped physical IDs reach the existing constructor and input path while invalid or incomplete bindings fail before consumption", async () => {
+  const remapped = new Uint32Array([0x11, 100, 0x12, 101]);
+  const h = await active({ startRequest: startRequest({ keyPairs: remapped }) });
+  const game = h.games[0];
+  remapped[1] = 2;
+  assert.deepEqual(Array.from(game.args[5]), [0x11, 100, 0x12, 101]);
+  await h.send(step({ events: [
+    { hostNs: ORIGIN, key: 100, down: true, sequence: 1n },
+    { hostNs: ORIGIN + 1n, key: 100, down: false, sequence: 2n },
+    { hostNs: ORIGIN + 2n, key: 101, down: true, sequence: 3n },
+  ], watermark: ORIGIN + 2n }));
+  assert.deepEqual(game.calls.filter(call => call[0] === "input"), [
+    ["input", ORIGIN, 100, true, 1n, 100000000n],
+    ["input", ORIGIN + 1n, 100, false, 2n, 100000000n],
+    ["input", ORIGIN + 2n, 101, true, 3n, 100000000n],
+  ]);
+  await h.send(step({ tickId: 2, events: [
+    { hostNs: ORIGIN + 3n, key: 2, down: true, sequence: 4n },
+  ], watermark: ORIGIN + 3n }));
+  assert.equal(game.calls.filter(call => call[0] === "input").length, 3, "old default key cannot enter the remapped owner");
+  assertReleased(h);
+  for (const keyPairs of [new Uint32Array([0x11, 100, 0x12, 100]), new Uint32Array([0x11, 0]),
+    new Uint32Array([0x11, 65536]), new Uint32Array([0x11]), new Uint32Array([0x10, 100]), new Uint32Array(38)]) {
+    const invalid = await catalogWorker();
+    await invalid.send(startRequest({ keyPairs }));
+    assert.equal(invalid.games.length, 0);
+    assert.equal(invalid.libraries[0].preparations.length, 1, "invalid pairs fail before a second chart preparation");
+    assert.equal(invalid.of("play-error").length, 1);
+  }
+  const uncovered = await catalogWorker();
+  await uncovered.send(startRequest({ keyPairs: new Uint32Array([0x11, 100]) }));
+  assert.equal(uncovered.games.length, 0);
+  assert.equal(uncovered.preparedOwners[1].moved, false);
+  assert.equal(uncovered.preparedOwners[1].frees, 1);
+  const empty = await active({ lanes: [], startRequest: startRequest({ keyPairs: new Uint32Array() }) });
+  assert.deepEqual(Array.from(empty.games[0].args[5]), []);
+  await empty.send({ kind: "play-stop", playId: 7 });
+  assertReleased(empty);
+});
+
 test("Window input provenance, pre-origin count and actual rendered cursor survive an outstanding audio batch", async () => {
   const h = await active({ batches: [batch(11n), batch(12n)] });
   const game = h.games[0];

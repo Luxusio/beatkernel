@@ -121,7 +121,8 @@ async function harness(faults = {}) {
     "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete",
     "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status",
     "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
-    "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start"]) {
+    "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start",
+    "bindings", "bindings-reset"]) {
     elements.set(id, new Element(id === "chart" || id === "records" ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
@@ -137,7 +138,10 @@ async function harness(faults = {}) {
   const document = new Events();
   document.body = new Element("body");
   document.hidden = false;
-  document.getElementById = id => elements.get(id);
+  document.getElementById = id => {
+    const find = node => node.id === id ? node : node.children?.map(find).find(Boolean);
+    return elements.get(id) ?? [...elements.values()].map(find).find(Boolean);
+  };
   document.createElement = tag => new Element(tag);
   document.createDocumentFragment = () => new Element("#fragment");
 
@@ -344,7 +348,7 @@ async function harness(faults = {}) {
     return linked;
   });
   await main.evaluate();
-  const get = id => elements.get(id);
+  const get = id => document.getElementById(id);
   function click(id) {
     const element = get(id);
     if (element.disabled) return;
@@ -1735,6 +1739,134 @@ test("section draft and preparation errors stay recoverable while replay uses on
   h.click("stop"); await flush(); await h.receive(finalScore(replay.id));
   assert.equal(draft.value, "invalid live start");
   assert.equal(draft.disabled, false);
+  await h.close();
+});
+
+test("one pre-audio binding snapshot supplies Worker pairs, displayed keys and physical Down Up events", async () => {
+  const opening = deferred();
+  const h = await harness({ openGate: opening });
+  await h.preview();
+  const select = h.get("binding-11");
+  assert.equal(select.value, "KeyZ");
+  select.value = "KeyA"; select.emit("change");
+  h.click("play");
+  assert.equal(h.opens.length, 1);
+  assert.equal(h.opens[0].gesture, true);
+  assert.equal(select.disabled, true);
+  assert.equal(h.get("bindings-reset").disabled, true);
+  select.value = "KeyB"; // A script can mutate a disabled element; the owner cannot.
+  opening.resolve(h.audio); await flush();
+  const worker = h.workers[0], start = worker.last("play-start");
+  const index = Array.from(start.keyPairs).findIndex((value, index) => index % 2 === 0 && value === 0x11);
+  assert.equal(start.keyPairs[index + 1], 19);
+  await h.reply(await h.prepared(start), null);
+  await h.reply(worker.last("play-activate"), null);
+  assert.match(h.get("keys").textContent, /11: KeyA/);
+  assert.doesNotMatch(h.get("keys").textContent, /KeyB|KeyZ/);
+  h.setNow(1300);
+  const before = worker.messages("play-step").length;
+  assert.equal(h.window.emit("keydown", { code: "KeyZ", key: "a", repeat: false, timeStamp: 1300 }).defaultPrevented, false);
+  assert.equal(h.window.emit("keydown", { code: "KeyB", repeat: false, timeStamp: 1300 }).defaultPrevented, false);
+  assert.equal(worker.messages("play-step").length, before);
+  assert.equal(h.window.emit("keydown", { code: "KeyA", key: "z", repeat: false, timeStamp: 1300 }).defaultPrevented, true);
+  const down = worker.last("play-step");
+  assert.deepEqual(down.events, [{ hostNs: 1300000000n, key: 19, down: true, sequence: 1n }]);
+  h.window.emit("keydown", { code: "KeyA", repeat: true, timeStamp: 1300 });
+  h.window.emit("keyup", { code: "KeyA", key: "z", timeStamp: 1300 });
+  await h.receive({ kind: "play-step-done", playId: start.playId, tickId: down.tickId,
+    songNs: 50000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
+  const up = worker.last("play-step");
+  assert.deepEqual(up.events, [{ hostNs: 1300000000n, key: 19, down: false, sequence: 2n }]);
+  h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+  assert.equal(select.disabled, false);
+  assert.equal(select.value, "KeyB");
+  delete h.faults.openGate;
+  const fresh = await h.launch();
+  assert.equal(fresh.start.keyPairs[index + 1], 20);
+  assert.match(h.get("keys").textContent, /11: KeyB/);
+  assert.equal(h.get("binding-11"), select, "retained controls are not rebuilt for another session");
+  await h.close();
+});
+
+test("retained binding drafts and reset obey busy ownership and invalid drafts can be corrected and retried", async () => {
+  const loading = deferred();
+  const h = await harness({ recordsList: [savedRecord()], recordsLoadGate: loading });
+  await h.preview();
+  const first = h.get("binding-11"), second = h.get("binding-12"), reset = h.get("bindings-reset");
+  assert.equal(first.children[0].value, "");
+  assert.ok(first.children.some(option => option.value === "KeyA"));
+  assert.ok(first.children.every(option => option.value !== "Escape"));
+  first.value = "KeyA"; first.emit("change");
+  h.click("bindings-reset");
+  assert.equal(first.value, "KeyZ");
+  first.value = "KeyA"; first.emit("change");
+  h.click("records-refresh"); await flush(); h.click("records-use"); await flush();
+  assert.equal(first.disabled, true);
+  assert.equal(second.disabled, true);
+  assert.equal(reset.disabled, true);
+  h.click("bindings-reset");
+  assert.equal(first.value, "KeyA");
+  loading.resolve(); await flush();
+  assert.equal(first.disabled, false);
+  first.value = "KeyS"; first.emit("change");
+  h.click("play"); await flush();
+  assert.equal(h.opens.length, 0);
+  assert.equal(h.workers[0].messages("play-start").length, 0);
+  assert.equal(first.value, "KeyS");
+  assert.equal(second.value, "KeyS");
+  assert.equal(h.get("status").dataset.error, "true");
+  second.value = ""; second.emit("change");
+  const failed = await h.begin();
+  assert.equal(h.opens[0].gesture, true);
+  assert.equal(Array.from(failed.keyPairs).filter((_, index) => index % 2 === 0).includes(0x12), false);
+  assert.equal(reset.disabled, true);
+  await h.receive({ kind: "play-reply", playId: failed.playId, rpcId: failed.rpcId, error: "actual preparation refused" });
+  await h.receive(finalScore(failed.playId));
+  assert.equal(first.value, "KeyS");
+  assert.equal(second.value, "");
+  assert.equal(reset.disabled, false);
+  const retry = await h.launch();
+  assert.match(h.get("keys").textContent, /11: KeyS/);
+  h.click("stop"); await flush(); await h.receive(finalScore(retry.id));
+  h.click("bindings-reset");
+  assert.equal(first.value, "KeyZ");
+  assert.equal(second.value, "KeyS");
+  assert.equal(h.get("binding-11"), first);
+  await h.close();
+});
+
+test("missing actual lane coverage refuses setup and replay ignores invalid live binding drafts", async () => {
+  const h = await harness();
+  await h.preview();
+  const first = h.get("binding-11");
+  first.value = ""; first.emit("change");
+  const start = await h.begin();
+  const worker = h.workers[0];
+  await h.reply(start, { kind: "prepared", title: "Actual lane", notes: 1, samples: 1,
+    lanes: [0x11], opponentCount: 0, startNs: 0n });
+  assert.equal(worker.messages("play-sample").length, 0);
+  assert.deepEqual(h.audio.arms, []);
+  assert.equal(worker.last("play-stop").playId, start.playId);
+  await h.receive(finalScore(start.playId));
+  assert.equal(first.value, "");
+  const recording = selectedRecording();
+  chooseRecording(h, [recording.file]);
+  first.value = "KeyS"; first.emit("change"); // Duplicate the next lane intentionally.
+  const replay = await h.launch(0, "replay");
+  assert.equal(Object.hasOwn(replay.start, "keyPairs"), false);
+  assert.equal(recording.reads, 0);
+  assert.match(h.get("keys").textContent, /Recorded input playback/);
+  assert.equal(first.disabled, true);
+  assert.equal(h.get("bindings-reset").disabled, true);
+  h.setNow(1300);
+  const steps = worker.messages("play-step").length;
+  h.window.emit("keydown", { code: "KeyS", repeat: false, timeStamp: 1300 });
+  h.window.emit("keyup", { code: "KeyS", timeStamp: 1300 });
+  assert.equal(worker.messages("play-step").length, steps);
+  assert.equal(h.window.emit("keydown", { code: "Escape", repeat: false, timeStamp: 1300 }).defaultPrevented, true);
+  await flush(); await h.receive(finalScore(replay.id));
+  assert.equal(first.value, "KeyS");
+  assert.equal(first.disabled, false);
   await h.close();
 });
 
