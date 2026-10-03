@@ -264,6 +264,18 @@ Settings last for this page only. Browser and system shortcuts can prevent key
 delivery. The IDs belong to this browser host, not native OS scan codes.
 These source paths and authored fixtures have not been executed in a browser.
 
+Output preferences apply to live and replay playback. Choose **Interactive**
+(default), **Balanced**, **Playback**, or **Custom** latency. Custom accepts
+0–60000 milliseconds with up to six decimal places and no signs, spaces or
+exponents; category modes ignore the
+inactive custom field. Leave the requested output rate blank for automatic
+selection, or enter a positive integer fitting u32. An unsupported browser
+request fails without retrying default settings. Each launch captures one
+selection before audio setup; busy operations lock these page-local drafts.
+The actual opened context rate still controls chart/audio preparation. Replay
+keeps its recorded judge settings and section. Latency hints are browser
+preferences, not guaranteed callback sizes or measured acoustic latency.
+
 Input uses original Window event timestamps and bounded FIFO steps. Graphics
 animation timestamps never advance the song. Runtime processing and audio
 command admission continue independently against bounded queues. Actual Mixer

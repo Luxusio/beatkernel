@@ -87,6 +87,8 @@ and replay retains its recorded profile and section.
 Retained browser lane selectors support custom physical key bindings, Unbound
 and idle reset. Live launch freezes one map for Worker admission and Window
 input; replay uses recorded input. Drafts last for the page lifetime.
+Browser output latency hints and optional requested context rates are configurable
+for live and replay, with actual context rate governing audio preparation.
 See the [browser host instructions](samples/bms-runtime/web/README.md).
 Browser source compilation does not establish playable browser behavior.
 

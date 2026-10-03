@@ -76,7 +76,29 @@ Runtime and separate AudioWorklet Mixer. The bounded native presentation
 observer is reused for continuous input-transport correction. Optional shared
 capture/export, local replay viewing and explicit saved-record catalog are
 source-integrated. Explicit live WebTransport Play is source-integrated;
-the compatible HTTP/3 service and ranked browser competition remain follow-on work. Source integration does not complete or validate the requested player.
+the compatible HTTP/3 relay is also source-integrated. Ranked browser competition
+remains follow-on work. Source integration does not complete or validate the requested player.
+
+## Output context preferences
+
+Live and replay output share retained controls for an interactive (default),
+balanced, playback or custom latency hint and an optional requested context
+sample rate. Custom latency accepts 0–60000 milliseconds with up to six decimal
+places, without signs, spaces or exponents; category modes ignore inactive custom
+text. The rate is automatic when
+blank, otherwise a positive decimal integer fitting u32. One immutable snapshot
+is admitted before asynchronous audio setup; AudioHost independently validates
+and clones its optional context options before constructing AudioContext.
+Unsupported requests fail explicitly without silently retrying defaults.
+
+Both modes prepare PCM and run against the actual opened context rate. Output
+preferences do not rewrite recorded judge timing, section or input. Busy owners
+lock the controls, and failure or Stop retains page-local drafts. The
+[Web Audio context options](https://www.w3.org/TR/webaudio/#dictdef-audiocontextoptions)
+provide browser preferences: a latency hint is not a promised callback buffer
+size or measured acoustic latency. Native backend/device selection remains in
+the native adapter. Authored fixtures and source integration alone do not prove
+browser support or playback behavior.
 
 ## Known ceiling
 
