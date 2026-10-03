@@ -147,6 +147,60 @@ ignored under the existing policy. Unknown sources or malformed events refuse
 the whole batch. Actual gameplay failure preserves only the committed prefix
 and terminates the owner without retry or fabricated compensation.
 
-This Worker integration still requires actual Window permission/profile setup,
-page launch forwarding and disconnect handling. Deferred fixtures and Rust
+Window permission/profile setup, page launch forwarding and disconnect handling
+follow the page contract below. Deferred fixtures and Rust
 compilation do not verify JavaScript execution or playable browser HID.
+
+## Page permission, profile launch and cleanup
+
+Provide an optional controller profile file, HID enable control and explicit
+browser authorization button. Unsupported browsers disable HID controls.
+Selecting a profile enables HID; live HID play discovers already authorized
+interfaces automatically without an application device chooser. Replay omits
+HID. Permission requests begin synchronously in the explicit button gesture;
+the temporary authorization owner joins late opens and closes its own handles.
+Only one permission operation may run, and page-generation changes cannot
+publish its stale result or revive an owner.
+
+Window only inspects file metadata and actual acquired device metadata. Profile
+file reading, UTF-8/JSON parsing, matching and numeric setup belong on Worker.
+Profiles select eligible authorized devices automatically. Worker preparation
+publishes full-width `hidSources` and their exact count; Window validates them
+against the acquired interfaces. A matching device disconnect stops gameplay;
+unmatched devices do not supply gameplay reports. Never manufacture releases.
+Before admitted-source metadata exists, any acquired interface disconnection
+cancels preparation because its passed device inventory may be stale.
+
+HID reports share the existing bounded keyboard/touch acquisition sequence and
+pending queue, preserve original timestamps and payloads, and use the existing
+input pump. No callback rendering, DOM geometry, serialization or decoding.
+Ignore reports outside the playing phase or from stale sessions. Stop detaches
+HID listeners immediately and joins pending opens/owned closes, audio and Worker
+cleanup. Surface cleanup failures and require reload when ownership is uncertain.
+
+### Controller profile file version 1
+
+A nonempty file is at most 1 MiB and contains strict UTF-8 JSON:
+`{version: 1, profiles: [...]}`. There are one to sixteen profiles. Each profile
+has optional u16 `vendorId`/`productId`, `bindingWords`, `fieldWords` and
+`axisParams`; unknown properties and versions are refused. Matching no profile
+ignores that acquired device; matching several refuses ambiguity. At least one
+actual device must match. Unused profiles are allowed.
+
+Binding rows have four u32 words: lane, control kind, namespace and code. Field
+rows have twelve u32 words: report tag, report ID, payload bytes, control kind,
+namespace, code, bit offset, width, bit order, field kind, flags and axis mode.
+Each field row has two finite f32 parameters. Limit each profile to 256 binding
+rows and 512 field rows. Validate numbers before typed conversion; never wrap
+invalid integers or silently accept nonfinite float narrowing.
+
+Worker prefixes fields with actual device indices and builds exact-source
+bindings from acquired u64 identities. Combined bindings contain at most 256
+rows and fields at most 8192 rows. Use the numeric runtime representation above
+and actual Rust profile validation; do not invent a second report decoder.
+File acquisition is single-read and validates actual returned extent. Check
+session ownership after asynchronous acquisition before constructing gameplay.
+Numeric setup and profile-file setup are mutually exclusive.
+
+Source fixtures do not prove actual browser permission, device input, audio or
+performance acceptance. Those remain deferred until execution is authorized.

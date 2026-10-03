@@ -733,9 +733,9 @@ awaits pending opens and cannot revive a stopped owner.
 encoding for off-thread consumers. It never interprets a report as a key or
 logical lane. The owner does not serialize packets in native callbacks.
 
-This is a preparation/acquisition component, not yet connected to the live page
-or Worker. Descriptor/profile interpretation, playable bindings, page permission
-UI and session disconnect handling still need integration. Source fixtures and
+The live page now uses this acquisition owner with Worker profile setup and
+canonical packet forwarding. Explicit controller profiles supply bindings;
+permission and disconnect lifecycle use the same owner. Source fixtures and
 Rust compile checks do not establish real HID device/browser acceptance.
 
 ## Rust HID gameplay API
@@ -764,7 +764,47 @@ serialize them using `encodeRawHidEvent` before calling `input_hid_blob`.
 The complete batch is checked before its first gameplay call. Original source,
 timestamp, sequence, separate report ID and payload remain unchanged.
 
-The supplied Window page does not yet send this setup or HID events. Actual
-permission/profile controls, launch forwarding and disconnect handling remain
-required. JavaScript execution has not been verified.
+The supplied Window page forwards profile files and acquired device metadata
+for Worker setup, then queues reports from admitted devices. Permission,
+launch and disconnect handling have source implementations. JavaScript
+execution has not been verified.
 Compilation and authored fixtures do not establish browser/HID device acceptance.
+
+## Optional controller profiles
+
+Choose a controller profile file to enable HID for live play. Authorize new
+devices using the explicit controller permission button; live play discovers
+already authorized interfaces automatically. The browser permission chooser is
+separate from player assignment. Replay uses recorded input and opens no HID
+interfaces.
+
+Window forwards the profile File and acquired device identities. Worker reads
+and parses the profile, matches eligible devices, creates exact-source numeric
+bindings and configures the common Rust owner. Unmatched interfaces are ignored;
+ambiguous profiles are refused. A matching disconnect stops play. Cleanup joins
+pending opens and closes owned interfaces before another session can start.
+
+Profile version 1 is strict UTF-8 JSON, nonempty and at most 1 MiB. Its numeric
+rows are described in `doc/kernel/REQ__browser-hid.md`. For example, this profile
+maps two one-bit button fields in numbered report 1 to lanes 0x11 and 0x12:
+
+```json
+{
+  "version": 1,
+  "profiles": [{
+    "vendorId": 4660,
+    "productId": 22136,
+    "bindingWords": [17, 0, 9, 1, 18, 0, 9, 2],
+    "fieldWords": [
+      1, 1, 1, 0, 9, 1, 0, 1, 0, 0, 0, 0,
+      1, 1, 1, 0, 9, 2, 1, 1, 0, 0, 0, 0
+    ],
+    "axisParams": [0, 0, 0, 0]
+  }]
+}
+```
+
+Use the actual controller's vendor/product IDs and documented report layout;
+the example does not infer a device descriptor or claim a controller mapping.
+The page does no profile parsing or input rendering. These changes and deferred
+fixtures have not been exercised with a browser or physical HID device.
