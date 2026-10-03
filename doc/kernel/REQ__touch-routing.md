@@ -39,3 +39,24 @@ Actual Runtime/StepGameplay/browser integration must validate acquisition clocks
 chronology and finite endpoints before adopting routes, retain partial failure
 reports, and explicitly restore routing ownership for any resumed live contact.
 This component alone does not establish playable browser touch support.
+
+## Runtime admission and restoration
+
+Opt-in Runtime routing runs after input/output clock mapping, acquisition
+sequence and host/song chronology checks, before committing acquisition time.
+A router refusal preserves judge, routing, sequence and input-counter state.
+Configured touches select one destination or stay unbound; other inputs retain
+ordinary BindingMap behavior. At a finite endpoint, skip routing and preserve
+the same capped judge advancement and output/report semantics.
+
+Judging or audio publication failures after admission retain the actual bound
+input and routing state. Report the committed prefix; never roll it back or
+retry automatically. Cohort member selection and solo execution share this path.
+
+A fallible routing clone includes outside contacts and original destinations,
+with full configured capacity. Restoring a live contact requires a coherent
+judge, transport and routing checkpoint supplied explicitly by the caller.
+Fresh replace_state/replace_session clears held contacts and retains region
+configuration. Explicit replacements may install a paired routing checkpoint;
+normal replacement must never carry unrelated old contacts into a new timeline.
+Routing checkpoints do not synchronize native audio or authenticate a recording.

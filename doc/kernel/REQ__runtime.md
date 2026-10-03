@@ -144,3 +144,16 @@ Known ceiling: callers still own native audio end-frame mapping, presentation
 crossing, input backlog/frontier draining and cleanup. This logical component
 alone does not implement complete native/gapless looping. Pure fixture source
 and compilation are not execution proof; runtime/native acceptance remains deferred.
+
+## Optional spatial touch routing
+
+Runtime may install an immutable bounded touch router before processing.
+Physical acquisition timing and finite-end validation precede routing mutation.
+A configured touch produces one logical destination without altering its variant,
+coordinates or provenance. Unconfigured input keeps existing binding fanout.
+Projected hit coordinates are separate from original acquisition coordinates.
+
+Fresh state/session replacement clears contact ownership; explicit paired
+replacement accepts a routing checkpoint alongside the restored judge and
+transport. The caller synchronizes output and supplies a coherent checkpoint.
+Partial judging/audio failures keep actual admitted input/report evidence.

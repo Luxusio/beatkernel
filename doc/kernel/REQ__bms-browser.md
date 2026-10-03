@@ -835,3 +835,17 @@ An explicit physical contact constructor selects the BMS button/contact rules.
 Existing physical keyboard and legacy constructors keep button-only semantics.
 The selected mode must survive capture and typed replay reconstruction. Browser
 touch acquisition/lane routing and HID permission/report adapters remain pending.
+
+## Prepared physical touch regions
+
+Contact-mode BrowserGame can configure bounded seven-word physical identity
+rows plus four finite rectangle bounds per row before activation. Regions may
+cover a subset of prepared lanes alongside keyboard controls; empty regions
+are valid. Reject destinations outside the prepared chart and inconsistent
+row/bounds extents. Reuse the common physical identity decoder and TouchRouter.
+
+A projected touch packet entrypoint accepts genuine canonical Touch events and
+separate finite hit coordinates, then uses the same StepGameplay/Runtime report
+and capture path. Keep original event coordinates, time and provenance.
+Window/Worker acquisition, layout projection and contact presentation feedback
+still require integration before playable browser touch is claimed.
