@@ -89,6 +89,8 @@ and idle reset. Live launch freezes one map for Worker admission and Window
 input; replay uses recorded input. Drafts last for the page lifetime.
 Browser output latency hints and optional requested context rates are configurable
 for live and replay, with actual context rate governing audio preparation.
+Retained browser output capacities configure queue, voices, pending commands,
+render storage and command processing budgets; Worker batches follow the queue bound.
 See the [browser host instructions](samples/bms-runtime/web/README.md).
 Browser source compilation does not establish playable browser behavior.
 

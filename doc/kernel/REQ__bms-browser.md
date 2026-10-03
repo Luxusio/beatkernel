@@ -100,6 +100,30 @@ size or measured acoustic latency. Native backend/device selection remains in
 the native adapter. Authored fixtures and source integration alone do not prove
 browser support or playback behavior.
 
+## Bounded output capacity settings
+
+Live and replay launches admit one immutable set of output limits before audio
+setup: command queue 1–65536, active voices 1–4096, pending commands 1–4096,
+maximum render frames 1–4096 and command drain budget per render 1–65536.
+All defaults are 4096. Values use unsigned decimal integers without signs,
+spaces, exponents or fractions. Busy owners lock the retained controls;
+failure or Stop retains page-local drafts. These are allocation and processing
+limits, not a requested hardware buffer or guaranteed browser callback size.
+The frame and pending ceilings match the existing Rust browser report contract.
+
+The same snapshot reaches AudioHost. Its queue capacity also bounds the genuine
+Worker command batch: min(256, queue capacity). Worker independently admits
+that optional per-owner limit before chart preparation and applies it to both
+setup replies and active command pushes; omitted limits retain 256. Actual
+batch length must fit the admitted limit. Existing sequence and successful or
+rejected-prefix acknowledgements retain their meaning. No retry, dropped prefix,
+new clock or independent judgment logic is introduced.
+
+A limit too small for an actual chart or browser callback can fail explicitly.
+The Worklet does not drain commands before the armed start, so initial queued
+BGM must also fit the chosen queue. Smaller batches do not prove that every
+workload fits every capacity. Source fixtures remain authored and unexecuted.
+
 ## Known ceiling
 
 Selected-file limits bound retained encoded data, not the entire process.

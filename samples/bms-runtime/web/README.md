@@ -276,6 +276,22 @@ The actual opened context rate still controls chart/audio preparation. Replay
 keeps its recorded judge settings and section. Latency hints are browser
 preferences, not guaranteed callback sizes or measured acoustic latency.
 
+Advanced output capacities let both live and replay choose the command queue
+(1–65536), simultaneous voices (1–4096), pending commands (1–4096), maximum
+render frames (1–4096) and command processing budget per render (1–65536).
+All default to 4096. Enter unsigned decimal integers, without signs, spaces,
+exponents or fractions. Each launch freezes one selection for AudioHost; Worker
+command batches are independently bounded to min(256, selected queue capacity).
+Controls lock while busy, and failure or Stop retains the page draft.
+
+These are application allocation and processing limits. They do not select
+hardware buffer sizes. A browser callback larger than the chosen frame capacity
+fails, and queue, voice or pending limits must fit the chart's workload. Initial
+BGM must fit the queue before the armed start, when commands are not drained.
+Smaller batches preserve acknowledgement sequences and rejected prefixes;
+they do not retry commands or guarantee every workload fits a small queue.
+Frame and pending ceilings retain the existing Rust browser report contract.
+
 Input uses original Window event timestamps and bounded FIFO steps. Graphics
 animation timestamps never advance the song. Runtime processing and audio
 command admission continue independently against bounded queues. Actual Mixer
