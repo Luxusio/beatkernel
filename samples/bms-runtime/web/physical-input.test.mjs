@@ -1,7 +1,67 @@
 // Deferred canonical acquisition encoding; no browser, WASM or device execution.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { encodeKeyboardEvent, keyboardBindingWords, encodeTouchEvent, touchBindingWords, projectTouchEvent } from "./physical-input.mjs";
+import { encodeKeyboardEvent, keyboardBindingWords, encodeTouchEvent, touchBindingWords, projectTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
+
+const hid = fields => ({ kind: "hid", hostNs: 0x0102030405060708n, source: 0xfedcba9876543210n,
+  sequence: 0x8877665544332211n, reportId: 0x7f, data: Uint8Array.from([0x7f, 0, 0xff, 0x80]), ...fields });
+
+test("raw WebHID packets preserve separate report IDs and exact payload in the shared Rust golden", () => {
+  // Independent literal repeated in browser_hid_fixtures.rs, decoded by core BKPI.
+  const literal = Uint8Array.from([
+    66, 75, 80, 73, 1, 0, 5,
+    0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+    8, 7, 6, 5, 4, 3, 2, 1, 0x4e, 0x49, 0x57, 0,
+    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    1, 0x44, 0x49, 0x48, 0x57, 1, 0x7f, 0, 0, 0,
+    1, 0x4e, 0x49, 0x57, 0, 8, 7, 6, 5, 4, 3, 2, 1,
+    0, 1, 0x7f, 4, 0, 0, 0, 0x7f, 0, 0xff, 0x80,
+  ]);
+  const backing = Uint8Array.from([99, 0x7f, 0, 0xff, 0x80, 99]);
+  const record = hid({ data: backing.subarray(1, 5) });
+  const encoded = encodeRawHidEvent(record);
+  assert.deepEqual(encoded, literal);
+  assert.equal(encoded.length, 69);
+  assert.notEqual(encoded.buffer, backing.buffer);
+  backing.fill(0);
+  record.reportId = 0; record.source = 3n;
+  assert.deepEqual(encoded, literal);
+  for (const reportId of [0, 1, 255]) for (const size of [0, 1, 1024]) {
+    const data = new Uint8Array(size).fill(reportId);
+    const bytes = encodeRawHidEvent(hid({ reportId, data, source: 18446744073709551615n,
+      sequence: 18446744073709551615n, hostNs: 9223372036854775807n }));
+    const view = new DataView(bytes.buffer);
+    assert.equal(bytes.length, (reportId === 0 ? 64 : 65) + size);
+    assert.equal(bytes[59], reportId === 0 ? 0 : 1);
+    if (reportId !== 0) assert.equal(bytes[60], reportId);
+    assert.equal(view.getUint32(reportId === 0 ? 60 : 61, true), size);
+    assert.deepEqual(bytes.subarray(reportId === 0 ? 64 : 65), data, "a leading payload byte equal to the separate ID is never stripped");
+    assert.equal(view.getUint32(41, true), reportId);
+    assert.equal(view.getBigUint64(7, true), 18446744073709551615n);
+    assert.equal(view.getBigUint64(27, true), 18446744073709551615n);
+    assert.equal(view.getBigInt64(15, true), 9223372036854775807n);
+    assert.equal(view.getBigInt64(50, true), 9223372036854775807n);
+  }
+});
+
+test("raw HID encoding rejects malformed acquisition identity or payload instead of coercing or truncating", () => {
+  for (const [field, values] of [
+    ["kind", [undefined, "touch", null]], ["hostNs", [1, "1", -1n, 9223372036854775808n]],
+    ["source", [undefined, 3, 0n, 2n, -1n, 18446744073709551616n]],
+    ["sequence", [1, "1", -1n, 18446744073709551616n]],
+    ["reportId", [undefined, -1, 256, 1.5, "1", 1n, NaN, Infinity]],
+    ["data", [undefined, null, [], new DataView(new ArrayBuffer(1)), new Uint16Array(1), new Uint8Array(1025)]],
+  ]) for (const value of values) assert.throws(() => encodeRawHidEvent(hid({ [field]: value })));
+  for (const value of [undefined, null, [], "report"]) assert.throws(() => encodeRawHidEvent(value));
+  const minimum = encodeRawHidEvent(hid({ hostNs: 0n, source: 3n, sequence: 0n, reportId: 0, data: new Uint8Array() }));
+  assert.equal(minimum.length, 64);
+  assert.deepEqual(Array.from(minimum.subarray(59)), [0, 0, 0, 0, 0]);
+  for (const length of [0, 1]) {
+    const data = new Uint8Array(length);
+    structuredClone(data.buffer, { transfer: [data.buffer] });
+    assert.throws(() => encodeRawHidEvent(hid({ data })), "a detached view must not become an invented empty report");
+  }
+});
 
 const touch = fields => ({ kind: "touch", hostNs: 0x0102030405060708n, sequence: 0x8877665544332211n,
   contact: 0xfedcba9876543210n, phase: 0, code: 0xfffffffe, x: 1.5, y: -2.25, pressure: 0.5, width: 480, height: 360, ...fields });

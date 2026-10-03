@@ -21,6 +21,8 @@ pub mod browser_audio;
 mod browser_canvas;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_game;
+#[cfg(test)]
+mod browser_hid_fixtures;
 /// Portable bounded preparation and decoding of canonical browser physical input.
 pub mod browser_input;
 #[cfg(test)]
