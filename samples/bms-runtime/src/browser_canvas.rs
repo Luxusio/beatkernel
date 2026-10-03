@@ -13,7 +13,7 @@ use crate::{
     playfield_layout::LOGICAL_EXTENT,
     poor_background::PoorBackgroundPolicy,
     scene::Scene,
-    ui::organisms,
+    ui::{atoms, organisms},
 };
 
 pub(crate) struct BrowserCanvas {
@@ -64,7 +64,7 @@ impl BrowserCanvas {
         song: Timestamp,
         lookahead: i64,
     ) -> Result<(), String> {
-        self.present(chart, images, song, lookahead, &[], 0, None, None)
+        self.present(chart, images, song, lookahead, &[], 0, None, None, None)
     }
 
     pub(crate) fn present_game(
@@ -81,6 +81,7 @@ impl BrowserCanvas {
             game.pressed,
             Some(&game.progress),
             Some(game.game.score()),
+            Some(&game.saved_hud),
         )
     }
 
@@ -98,6 +99,7 @@ impl BrowserCanvas {
             replay.replay.pressed_lanes(),
             Some(&replay.progress),
             Some(replay.replay.score()),
+            None,
         )
     }
 
@@ -112,6 +114,7 @@ impl BrowserCanvas {
         pressed: u32,
         progress: Option<&crate::note_progress::NoteProgress>,
         score: Option<&crate::competition::ScoreSummary>,
+        saved_hud: Option<&crate::saved_opponent_hud::SavedOpponentHud>,
     ) -> Result<(), String> {
         if lookahead <= 0 {
             return Err("playfield lookahead must be positive".into());
@@ -144,7 +147,15 @@ impl BrowserCanvas {
             frames[0],
         )?;
         if let Some(score) = score {
-            organisms::scoreboard(&mut self.scene, score, recent);
+            if let Some(snapshot) = saved_hud.and_then(|hud| hud.snapshot()) {
+                organisms::competition_scoreboard(&mut self.scene, score, snapshot)?;
+            } else {
+                organisms::scoreboard(&mut self.scene, score, recent);
+            }
+            if saved_hud.is_some_and(|hud| hud.failed()) {
+                atoms::text(&mut self.scene, 750, 650, "SAVED COMPARISONS", 1, 0xff8e8e);
+                atoms::text(&mut self.scene, 750, 660, "UNAVAILABLE", 1, 0xff8e8e);
+            }
         }
         self.renderer.render(&self.scene)
     }

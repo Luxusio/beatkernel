@@ -181,6 +181,8 @@ pub mod replay_playback;
 pub mod replay_render;
 /// Incremental presentation of validated recorded judging operations.
 pub mod replay_visual;
+/// Retained bounded summaries for the common competition scoreboard.
+pub mod saved_opponent_hud;
 /// Bounded canonical saved-record opponents using the actual comparison engine.
 pub mod saved_opponents;
 #[cfg(test)]

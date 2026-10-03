@@ -14,6 +14,7 @@ use crate::{
     player_chart::PlayerChart,
     pressed_keys::PressedKeys,
     saved_opponents::SavedOpponents,
+    saved_opponent_hud::SavedOpponentHud,
     step_gameplay::{StepAudioBatch, StepGameplay, StepGameplayConfig, StepGameplayError},
     worklet_audio::{decode_output, decode_section_output},
 };
@@ -125,6 +126,7 @@ pub struct BrowserGame {
     chart_seed: u64,
     opponent_source: Option<beatkernel_bms::BmsChart>,
     opponents: Option<SavedOpponents>,
+    pub(crate) saved_hud: SavedOpponentHud,
 }
 #[wasm_bindgen]
 impl BrowserGame {
@@ -401,6 +403,7 @@ impl BrowserGame {
             chart_seed: prepared.chart_seed,
             opponent_source: Some(opponent_source),
             opponents: None,
+            saved_hud: SavedOpponentHud::default(),
         })
     }
 }
@@ -457,50 +460,65 @@ impl BrowserGame {
     /// Control-side snapshot at the actual local song frontier. Comparison
     /// errors are returned independently; input/audio paths never call this.
     pub fn saved_opponents(&mut self) -> Result<JsValue, JsValue> {
-        let array = js_sys::Array::new();
-        let Some(opponents) = &mut self.opponents else {
-            return Ok(array.into());
-        };
-        opponents.advance_to(self.game.song_time()).map_err(error)?;
-        for opponent in opponents.opponents() {
-            let object = js_sys::Object::new();
-            field(
-                &object,
-                "kind",
-                JsValue::from_str(match opponent.kind() {
-                    OpponentKind::Own => "own",
-                    OpponentKind::Other => "other",
-                }),
-            )?;
-            field(&object, "label", JsValue::from_str(opponent.label()))?;
-            field(
-                &object,
-                "songNs",
-                opponent
-                    .song_time()
-                    .map(|time| signed(time.as_nanos()))
-                    .unwrap_or(JsValue::NULL),
-            )?;
-            field(
-                &object,
-                "recordedUntilNs",
-                opponent
-                    .recorded_until()
-                    .map(|time| signed(time.as_nanos()))
-                    .unwrap_or(JsValue::NULL),
-            )?;
-            let score = opponent.score();
-            for (name, value) in [
-                ("hits", score.hits),
-                ("misses", score.misses),
-                ("combo", score.combo),
-                ("maxCombo", score.max_combo),
-            ] {
-                field(&object, name, unsigned(value))?;
-            }
-            array.push(&object);
+        if self.saved_hud.failed() {
+            return Err(error("saved opponent presentation is disabled"));
         }
-        Ok(array.into())
+        let result = (|| {
+            let array = js_sys::Array::new();
+            let Some(opponents) = &mut self.opponents else {
+                return Ok(array.into());
+            };
+            opponents.advance_to(self.game.song_time()).map_err(error)?;
+            self.saved_hud.update(opponents).map_err(error)?;
+            for opponent in opponents.opponents() {
+                let object = js_sys::Object::new();
+                field(
+                    &object,
+                    "kind",
+                    JsValue::from_str(match opponent.kind() {
+                        OpponentKind::Own => "own",
+                        OpponentKind::Other => "other",
+                    }),
+                )?;
+                field(&object, "label", JsValue::from_str(opponent.label()))?;
+                field(
+                    &object,
+                    "songNs",
+                    opponent
+                        .song_time()
+                        .map(|time| signed(time.as_nanos()))
+                        .unwrap_or(JsValue::NULL),
+                )?;
+                field(
+                    &object,
+                    "recordedUntilNs",
+                    opponent
+                        .recorded_until()
+                        .map(|time| signed(time.as_nanos()))
+                        .unwrap_or(JsValue::NULL),
+                )?;
+                let score = opponent.score();
+                for (name, value) in [
+                    ("hits", score.hits),
+                    ("misses", score.misses),
+                    ("combo", score.combo),
+                    ("maxCombo", score.max_combo),
+                ] {
+                    field(&object, name, unsigned(value))?;
+                }
+                array.push(&object);
+            }
+            Ok(array.into())
+        })();
+        if result.is_err() {
+            self.saved_hud.mark_failed();
+        }
+        result
+    }
+
+    /// Invalid host-side comparison metadata must not remain visible on canvas.
+    pub fn disable_saved_opponent_hud(&mut self) {
+        self.saved_hud.mark_failed();
     }
     /// Optional bounded canonical replay capture; must precede gameplay input
     /// or advancement. The seed comes from the actual prepared chart owner.

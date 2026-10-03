@@ -417,6 +417,7 @@ function disposeGame(state) {
 function failPlay(state, error, request = null) {
   if (play !== state) return;
   const score = statistics(state);
+  const savedOpponents = finalOpponents(state);
   play = null; // Invalidates a still-awaiting preparation before releasing owners.
   stopRedraw();
   closeNetwork(state.network);
@@ -427,7 +428,8 @@ function failPlay(state, error, request = null) {
   if (state.network) state.network.rpcId = null;
   for (const rpcId of pending) if (identity(rpcId)) report("play-reply", { playId: state.id, rpcId, error: text });
   report("play-error", { playId: state.id, message: text, released: cleanupError === null,
-    replay, replayComplete: false, replayError, ...score }, replay ? [replay.buffer] : []);
+    replay, replayComplete: false, replayError, ...score,
+    ...(savedOpponents ? { savedOpponents } : {}) }, replay ? [replay.buffer] : []);
   scheduleDraw();
 }
 
@@ -436,6 +438,7 @@ function stopPlay(state, request) {
   const completed = request.completed === true;
   if (completed && (!state.completed || state.batch !== null)) throw new Error("Natural stop has no current completion evidence.");
   const score = statistics(state);
+  const savedOpponents = finalOpponents(state);
   play = null;
   stopRedraw();
   if (state.network) {
@@ -450,7 +453,8 @@ function stopPlay(state, request) {
     report("play-reply", { playId: state.id, rpcId, error: "Gameplay setup was stopped." });
   }
   const stopped = multiplayer => {
-    const result = { replay, replayError, ...score, ...(multiplayer ? { multiplayer } : {}) };
+    const result = { replay, replayError, ...score, ...(multiplayer ? { multiplayer } : {}),
+      ...(savedOpponents ? { savedOpponents } : {}) };
     if (cleanupError) report("play-error", { playId: state.id, message: message(cleanupError), released: false,
       ...result, replayComplete: false }, replay ? [replay.buffer] : []);
     else report("play-stopped", { playId: state.id, ...result,
@@ -620,6 +624,11 @@ async function preparePlay(state, request) {
       || typeof BrowserGame?.prototype?.input_hid_blob !== "function")) {
       throw new Error("The gameplay binding does not provide HID profile ownership.");
     }
+    if (opponents.length && (typeof BrowserGame?.prototype?.add_saved_opponent !== "function"
+      || typeof BrowserGame?.prototype?.saved_opponents !== "function"
+      || typeof BrowserGame?.prototype?.disable_saved_opponent_hud !== "function")) {
+      throw new Error("The gameplay binding does not provide retained saved comparison presentation.");
+    }
     if (state.mode === "live" && !state.physicalInput && requestedEnd !== undefined && typeof BrowserGame.new_section !== "function") {
       throw new Error("The gameplay binding does not provide finite section ownership.");
     }
@@ -743,6 +752,26 @@ function pumpCommands(state) {
   if (batch !== null) report("play-commands", { playId: state.id, batch });
 }
 
+function disableOpponents(state, error) {
+  if (state.opponentsFailed) return state.opponentError;
+  state.opponentsFailed = true;
+  state.opponentError = message(error) || "Saved comparison failed.";
+  try { state.game.disable_saved_opponent_hud(); }
+  catch (cause) { state.opponentError = message(`${state.opponentError}; disable saved HUD: ${message(cause)}`); }
+  return state.opponentError;
+}
+
+function finalOpponents(state) {
+  if (state.opponentCount === 0) return null;
+  if (state.opponentsFailed) return { opponents: null, error: state.opponentError };
+  try {
+    // Read once before stop/free. The binding uses only the actual local frontier.
+    return { opponents: validateOpponentSnapshot(state.game.saved_opponents(), state.opponentCount), error: null };
+  } catch (error) {
+    return { opponents: null, error: disableOpponents(state, error) };
+  }
+}
+
 function publishOpponents(state) {
   if (state.opponentCount === 0 || state.opponentsFailed) return;
   try {
@@ -751,11 +780,10 @@ function publishOpponents(state) {
     if (state.lastOpponents !== null && now < state.lastOpponents) throw new Error("Saved comparison display clock regressed.");
     if (state.lastOpponents !== null && now - state.lastOpponents < PROGRESS_INTERVAL_NS) return;
     state.lastOpponents = now;
-    const opponents = validateOpponentSnapshot(state.game.saved_opponents(), state.opponentCount);
-    report("play-opponents", { playId: state.id, opponents, error: null });
+    // The getter refreshes the retained Rust HUD. Normal counters stay here.
+    validateOpponentSnapshot(state.game.saved_opponents(), state.opponentCount);
   } catch (error) {
-    state.opponentsFailed = true;
-    report("play-opponents", { playId: state.id, opponents: null, error: message(error) });
+    report("play-opponents", { playId: state.id, opponents: null, error: disableOpponents(state, error) });
   }
 }
 
@@ -834,7 +862,7 @@ function handlePlay(request) {
       mode: "live", physicalInput: false, touchInput: false, touchWidth: null, touchHeight: null,
       hidSources: null,
       rate: null, network: null, samplesEnded: false, commandsDrained: false,
-      prepared: false, opponentCount: 0, opponentsFailed: false, lastOpponents: null,
+      prepared: false, opponentCount: 0, opponentsFailed: false, opponentError: null, lastOpponents: null,
     };
     play = state; // Reserve before the ready await so stop cannot race a late owner.
     lastPlayId = state.id;

@@ -533,7 +533,8 @@ async function play(mode = "live") {
     completionReady: false, lastPresentation: null, cleanupError: null,
     recordReplay: mode === "live" && ui.record.checked === true, replay: null, replayError: null, naturalFinishRequested: false,
     replayFile: mode === "replay" ? selectedReplay : null,
-    opponentSelection: mode === "live" && opponents.size ? opponents.snapshot() : null, opponentsFailed: false,
+    opponentSelection: mode === "live" && opponents.size ? opponents.snapshot() : null,
+    opponentCount: mode === "live" ? opponents.size : 0, opponentsFailed: false, opponentError: null,
     chartPath: ui.chart.value,
     preview: { title: ui.title.textContent, details: ui.details.textContent, position: ui.position.value } };
   activePlay = session;
@@ -1028,6 +1029,7 @@ function stopPlay(reason, failed = false, completed = false) {
           clearOpponentResults(opponents.size ? "Saved comparison stopped; selections retained for the next live play." : "No saved opponents selected.");
         }
         const score = session.finalScore;
+        if (session.owner === owner) finalOpponentResults(session, score?.savedOpponents);
         if (session.multiplayer && session.owner === owner) {
           const outcome = score?.multiplayer;
           ui["multiplayer-status"].textContent = outcome?.finalAcknowledged === true && outcome?.finalWritten === true
@@ -1152,12 +1154,28 @@ function showOpponentSelection() {
 function receiveOpponents(session, data) {
   if (session.mode !== "live" || session.phase !== "playing" || session.owner !== owner
     || !session.opponentCount || session.opponentsFailed) return;
+  // Actual periodic counters are rendered by the Worker-owned common HUD.
+  if (data.error === null) return;
   try {
-    if (data.error !== null) {
-      if (typeof data.error !== "string" || data.error.length === 0 || data.error.length > 4096 || data.opponents !== null) throw new Error("Invalid saved comparison failure message.");
-      throw new Error(data.error);
+    if (typeof data.error !== "string" || data.error.length === 0 || data.error.length > 4096 || data.opponents !== null) throw new Error("Invalid saved comparison failure message.");
+    throw new Error(data.error);
+  } catch (error) {
+    session.opponentsFailed = true;
+    session.opponentError = String(error.message).slice(0, 4096);
+    opponentStatus(`Saved comparisons stopped: ${session.opponentError} Local play continues.`, true);
+  }
+}
+
+function finalOpponentResults(session, result) {
+  if (session.mode !== "live" || !session.opponentCount) return;
+  try {
+    if (session.opponentsFailed) throw new Error(session.opponentError || "Saved comparisons were disabled.");
+    if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Final saved comparison results are unavailable.");
+    if (result.error !== null) {
+      if (typeof result.error !== "string" || result.error.length === 0 || result.error.length > 4096 || result.opponents !== null) throw new Error("Invalid final saved comparison failure.");
+      throw new Error(result.error);
     }
-    const rows = validateOpponentSnapshot(data.opponents, session.opponentCount);
+    const rows = validateOpponentSnapshot(result.opponents, session.opponentCount);
     if (opponentResultRows.length !== rows.length) {
       opponentResultRows = rows.map(() => document.createElement("li"));
       ui["opponents-results"].replaceChildren(...opponentResultRows);
@@ -1167,10 +1185,10 @@ function receiveOpponents(session, data) {
       const prefix = row.recordedUntilNs === null ? "empty recording" : `recorded through ${seconds(row.recordedUntilNs.toString())} s`;
       opponentResultRows[index].textContent = `${row.kind === "own" ? "Own" : "Other"} · ${row.label} · Hits ${row.hits} · Misses ${row.misses} · Combo ${row.combo} · Best ${row.maxCombo} · ${prefix}`;
     }
-    opponentStatus("Saved comparisons at the current song position. Own/Other labels are your choices, not verified identities.");
+    opponentStatus("Final saved comparison prefixes. Own/Other labels are your choices, not verified identities.");
   } catch (error) {
-    session.opponentsFailed = true;
-    opponentStatus(`Saved comparisons stopped: ${String(error.message).slice(0, 4096)} Local play continues.`, true);
+    clearOpponentResults(`Final saved comparisons unavailable: ${String(error.message).slice(0, 4096)}`);
+    opponentStatus(`Final saved comparisons unavailable: ${String(error.message).slice(0, 4096)} Local result unchanged.`, true);
   }
 }
 
