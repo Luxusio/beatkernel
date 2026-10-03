@@ -31,7 +31,7 @@ use std::{error::Error, fmt};
 /// Explicit mapping and bounded control-side resources for a fresh solo run.
 #[derive(Clone, Copy, Debug)]
 pub struct StepGameplayConfig {
-    /// Host instant at which the song position is exactly negative preroll.
+    /// Host instant at which song position is section start minus preroll.
     pub host_origin: ClockPoint,
     /// Frame zero of the separate output grid; browser mixers use timestamp zero.
     pub output_origin: ClockPoint,
@@ -192,6 +192,7 @@ pub struct StepGameplay {
     score: ScoreSummary,
     song: Timestamp,
     host_domain: ClockDomainId,
+    start: Timestamp,
     preroll: Duration,
     activated: bool,
     started: bool,
@@ -222,6 +223,18 @@ impl StepGameplay {
         config: StepGameplayConfig,
         bindings: BindingMap,
     ) -> Result<(Self, SampleBank), StepGameplayError> {
+        Self::new_at(prepared, config, bindings, Timestamp::ZERO)
+    }
+
+    /// Own a fresh section already selected by `section_start::prepare_at` from
+    /// original assets. Chart targets and PCM stay untouched; only BGM output
+    /// scheduling subtracts this immutable original-song start.
+    pub fn new_at(
+        mut prepared: PreparedBms,
+        config: StepGameplayConfig,
+        bindings: BindingMap,
+        start: Timestamp,
+    ) -> Result<(Self, SampleBank), StepGameplayError> {
         if config.host_origin.domain == config.output_origin.domain {
             return Err(StepGameplayError::InvalidConfiguration(
                 "host and output domains must be distinct",
@@ -241,9 +254,36 @@ impl StepGameplay {
                 "invalid command, BGM or telemetry capacity",
             ));
         }
-        let song = Timestamp::ZERO.checked_sub(config.preroll).ok_or(
-            StepGameplayError::InvalidConfiguration("preroll cannot be represented"),
-        )?;
+        if start.as_nanos() < 0 {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "section start must be nonnegative",
+            ));
+        }
+        // The zero-start entry point preserves its existing preparation policy.
+        // A positive section must have removed earlier heads (including entire
+        // crossing holds), and selected any overlapping BGM PCM before arrival.
+        if start != Timestamp::ZERO
+            && (prepared
+                .compiled
+                .chart
+                .objects()
+                .iter()
+                .any(|object| object.time.start < start)
+                || prepared
+                    .bgm_commands
+                    .iter()
+                    .any(|command| command.at() < start))
+        {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "section contains an earlier object or unselected BGM target",
+            ));
+        }
+        let song =
+            start
+                .checked_sub(config.preroll)
+                .ok_or(StepGameplayError::InvalidConfiguration(
+                    "section start minus preroll cannot be represented",
+                ))?;
         if config
             .host_origin
             .timestamp
@@ -256,7 +296,7 @@ impl StepGameplay {
                 .is_none()
         {
             return Err(StepGameplayError::InvalidConfiguration(
-                "song zero exceeds the host or output clock range",
+                "section start exceeds the host or output clock range",
             ));
         }
         let profile = NativeJudgeConfig {
@@ -282,6 +322,22 @@ impl StepGameplay {
         let judge = JudgeEngine::new(prepared.compiled.chart, rules, profile)
             .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
         let bgm_count = prepared.bgm_commands.len();
+        if start != Timestamp::ZERO {
+            for command in &mut prepared.bgm_commands {
+                if let AudioCommand::Play { at, .. } = command {
+                    let relative = i128::from(at.as_nanos()) - i128::from(start.as_nanos());
+                    *at = Timestamp::from_nanos(i64::try_from(relative).map_err(|_| {
+                        StepGameplayError::Bgm {
+                            error: BgmFeedError::Overflow,
+                            report: BgmFeedReport {
+                                remaining: bgm_count,
+                                ..BgmFeedReport::default()
+                            },
+                        }
+                    })?);
+                }
+            }
+        }
         let bgm = BgmFeeder::new(
             prepared.bgm_commands,
             BgmConfig {
@@ -330,6 +386,7 @@ impl StepGameplay {
             score: ScoreSummary::default(),
             song,
             host_domain: config.host_origin.domain,
+            start,
             preroll: config.preroll,
             activated: false,
             started: false,
@@ -350,7 +407,7 @@ impl StepGameplay {
     }
 
     /// Actual pristine setup for replay comparisons, without enabling capture.
-    /// Original-song start is zero for this owner.
+    /// Retains the same immutable original-song section start used by capture.
     pub fn competition_header(
         &self,
         limits: ReplayCodecLimits,
@@ -366,7 +423,7 @@ impl StepGameplay {
             self.runtime.judge(),
             self.host_domain,
             limits,
-            Timestamp::ZERO,
+            self.start,
             chart_seed,
         )
         .map_err(|error| StepGameplayError::Capture {
@@ -390,8 +447,8 @@ impl StepGameplay {
 
     /// Opt in while the original judge is pristine, using the resolved chart
     /// branch seed. Setup refusal is atomic and leaves this owner usable.
-    /// Preroll reports retain their actual negative song times; the chart's
-    /// original-song section start remains zero in the existing replay header.
+    /// Preroll reports retain their actual song times before the section start;
+    /// the existing replay header retains that original-song start unchanged.
     pub fn configure_capture(
         &mut self,
         limits: ReplayCodecLimits,
@@ -407,7 +464,7 @@ impl StepGameplay {
             self.runtime.judge(),
             self.host_domain,
             limits,
-            Timestamp::ZERO,
+            self.start,
             chart_seed,
         )
         .map_err(|error| StepGameplayError::Capture {
@@ -537,7 +594,7 @@ impl StepGameplay {
             || host_origin.timestamp.checked_add(self.preroll).is_none()
         {
             return Err(StepGameplayError::InvalidConfiguration(
-                "activation requires the original host domain and representable song zero",
+                "activation requires the original host domain and representable section start",
             ));
         }
         *self.runtime.transport_mut() =
