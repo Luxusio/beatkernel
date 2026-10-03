@@ -7,10 +7,44 @@ import {
   KEY_BINDINGS, KEY_CHOICES, snapshotBindings, bindingsFor,
   parseTimingMilliseconds, timingFromMilliseconds, validateTiming,
   PLAY_PCM_SAMPLES, startFromSeconds, validateStart,
+  audioOutputFromFields,
 } from "./play-model.mjs";
 
 const U64_MAX = 18446744073709551615n;
 const I64_MAX = 9223372036854775807n;
+
+test("output fields preserve category defaults, exact admitted latency units and automatic versus requested rates", () => {
+  const automatic = audioOutputFromFields("interactive", "", "");
+  assert.deepEqual(automatic, { latencyHint: "interactive" });
+  assert.equal(Object.hasOwn(automatic, "sampleRate"), false);
+  assert.ok(Object.isFrozen(automatic));
+  for (const latency of ["interactive", "balanced", "playback"]) {
+    assert.deepEqual(audioOutputFromFields(latency, "invalid inactive draft", "48000"), { latencyHint: latency, sampleRate: 48000 });
+  }
+  for (const [text, seconds] of [["0", 0], ["0.000001", 0.000000001], ["0.5", 0.0005],
+    ["12.345678", 0.012345678], ["60000", 60], ["00000000000000.000001", 0.000000001]]) {
+    const options = audioOutputFromFields("custom", text, "0000048000");
+    assert.deepEqual(options, { latencyHint: seconds, sampleRate: 48000 });
+    assert.ok(Object.isFrozen(options));
+  }
+  assert.deepEqual(audioOutputFromFields("playback", "-broken", "1"), { latencyHint: "playback", sampleRate: 1 });
+  assert.deepEqual(audioOutputFromFields("balanced", "60001", "4294967295"), { latencyHint: "balanced", sampleRate: 4294967295 });
+});
+
+test("output field admission rejects malformed values without clamping rates or falling back from custom latency", () => {
+  for (const latency of [undefined, null, "", "low", "Interactive", "interactive\n", 0]) {
+    assert.throws(() => audioOutputFromFields(latency, "10", "48000"));
+  }
+  for (const milliseconds of [undefined, null, 1, "", "+0", "-0", "-1", " 1", "1\n", "1.", ".1",
+    "1e3", "Infinity", "1.0000001", "60000.000001", "0".repeat(22)]) {
+    assert.throws(() => audioOutputFromFields("custom", milliseconds, "48000"), String(milliseconds));
+  }
+  for (const rate of [undefined, null, 48000, "0", "-1", "+48000", " 48000", "48000\n", "48000.0",
+    "48e3", "４８０００", "4294967296", "00000048000"]) {
+    assert.throws(() => audioOutputFromFields("interactive", "ignored", rate), String(rate));
+  }
+  assert.deepEqual(audioOutputFromFields("custom", "1", ""), { latencyHint: 0.001 });
+});
 
 test("section seconds preserve exact original-song nanoseconds and bounded playback PCM capacity", () => {
   for (const [text, expected] of [["0", 0n], ["0.000000001", 1n], ["1.125000001", 1125000001n],

@@ -122,7 +122,7 @@ async function harness(faults = {}) {
     "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status",
     "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
     "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start",
-    "bindings", "bindings-reset"]) {
+    "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate"]) {
     elements.set(id, new Element(id === "chart" || id === "records" ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
@@ -134,6 +134,9 @@ async function harness(faults = {}) {
   elements.get("judge-late").value = "50";
   elements.get("judge-offset").value = "0";
   elements.get("live-start").value = "0";
+  elements.get("output-latency").value = "interactive";
+  elements.get("output-latency-ms").value = "10";
+  elements.get("output-rate").value = "";
 
   const document = new Events();
   document.body = new Element("body");
@@ -1867,6 +1870,98 @@ test("missing actual lane coverage refuses setup and replay ignores invalid live
   await flush(); await h.receive(finalScore(replay.id));
   assert.equal(first.value, "KeyS");
   assert.equal(first.disabled, false);
+  await h.close();
+});
+
+test("output preferences are captured inside the live gesture while busy controls retain drafts and actual rate drives preparation", async () => {
+  const opening = deferred(), loading = deferred(), stopping = deferred();
+  const h = await harness({ openGate: opening, recordsList: [savedRecord()], recordsLoadGate: loading, stopGate: stopping });
+  await h.preview();
+  const latency = h.get("output-latency"), ms = h.get("output-latency-ms"), rate = h.get("output-rate");
+  assert.deepEqual([latency.value, ms.value, rate.value], ["interactive", "10", ""]);
+  assert.equal(ms.disabled, true);
+  latency.value = "custom"; latency.emit("change");
+  assert.equal(ms.disabled, false);
+  ms.value = "10.125001"; rate.value = "96000";
+  h.click("records-refresh"); await flush(); h.click("records-use"); await flush();
+  assert.ok([latency, ms, rate].every(field => field.disabled));
+  assert.equal(h.opens.length, 0);
+  loading.resolve(); await flush();
+  assert.ok([latency, ms, rate].every(field => !field.disabled));
+  h.click("play");
+  assert.equal(h.opens.length, 1);
+  assert.equal(h.opens[0].gesture, true);
+  const captured = h.opens[0].options.contextOptions;
+  assert.deepEqual(structuredClone(captured), { latencyHint: 0.010125001, sampleRate: 96000 });
+  assert.ok(Object.isFrozen(captured));
+  assert.ok([latency, ms, rate].every(field => field.disabled));
+  ms.value = "90000"; rate.value = "22050";
+  opening.resolve(h.audio); await flush();
+  const worker = h.workers[0], start = worker.last("play-start");
+  assert.equal(start.rate, 48000, "request preferences cannot replace actual output format");
+  assert.deepEqual(structuredClone(captured), { latencyHint: 0.010125001, sampleRate: 96000 });
+  await h.reply(await h.prepared(start, 1), null);
+  await h.reply(worker.last("play-activate"), null);
+  assert.equal(h.audio.samples[0].rate, 44100, "asset sample rates remain independent too");
+  h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+  assert.ok([latency, ms, rate].every(field => field.disabled));
+  stopping.resolve(); await flush();
+  assert.deepEqual([latency.value, ms.value, rate.value], ["custom", "90000", "22050"]);
+  assert.ok([latency, ms, rate].every(field => !field.disabled));
+  ms.value = "2.5";
+  delete h.faults.openGate;
+  const next = await h.launch();
+  assert.deepEqual(structuredClone(h.opens[1].options.contextOptions), { latencyHint: 0.0025, sampleRate: 22050 });
+  assert.equal(h.opens[1].gesture, true);
+  assert.equal(next.start.rate, 48000);
+  await h.close();
+});
+
+test("both playback modes refuse invalid output drafts before opening and replay retry preserves recorded gameplay settings", async () => {
+  const opening = deferred();
+  const h = await harness({ openGate: opening, replayStart: 123456789n });
+  await h.preview();
+  chooseRecording(h, [selectedRecording().file]);
+  const latency = h.get("output-latency"), ms = h.get("output-latency-ms"), rate = h.get("output-rate");
+  for (const mode of ["play", "replay-play"]) {
+    for (const [category, milliseconds, requested] of [["custom", "-0", "48000"], ["custom", "60000.000001", ""],
+      ["balanced", "ignored", "0"], ["interactive", "ignored", "48e3"], ["playback", "ignored", "4294967296"]]) {
+      latency.value = category; latency.emit("change"); ms.value = milliseconds; rate.value = requested;
+      h.click(mode); await flush();
+      assert.equal(h.opens.length, 0);
+      assert.equal(h.workers[0].messages("play-start").length, 0);
+      assert.equal(h.get("status").dataset.error, "true");
+      assert.deepEqual([latency.value, ms.value, rate.value], [category, milliseconds, requested]);
+      assert.equal(latency.disabled, false);
+      assert.equal(ms.disabled, category !== "custom");
+    }
+  }
+  latency.value = "balanced"; latency.emit("change"); ms.value = "invalid inactive custom value"; rate.value = "96000";
+  h.get("live-start").value = "invalid live start";
+  h.get("judge-early").value = "invalid live judge";
+  h.get("binding-11").value = "KeyS"; // Invalid live duplicate is irrelevant to replay.
+  h.click("replay-play");
+  assert.equal(h.opens[0].gesture, true);
+  assert.deepEqual(structuredClone(h.opens[0].options.contextOptions), { latencyHint: "balanced", sampleRate: 96000 });
+  opening.reject(new Error("requested output context was refused")); await flush();
+  assert.equal(h.workers[0].messages("play-start").length, 0);
+  assert.match(h.get("status").textContent, /requested output context was refused/);
+  assert.deepEqual([latency.value, ms.value, rate.value], ["balanced", "invalid inactive custom value", "96000"]);
+  assert.equal(latency.disabled, false);
+  assert.equal(ms.disabled, true);
+  delete h.faults.openGate;
+  const replay = await h.launch(0, "replay");
+  assert.equal(h.opens[1].gesture, true);
+  assert.deepEqual(structuredClone(h.opens[1].options.contextOptions), { latencyHint: "balanced", sampleRate: 96000 });
+  assert.equal(replay.start.rate, 48000);
+  for (const field of ["timing", "startNs", "keyPairs"]) assert.equal(Object.hasOwn(replay.start, field), false);
+  assert.ok([latency, ms, rate].every(field => field.disabled));
+  h.click("stop"); await flush(); await h.receive(finalScore(replay.id));
+  assert.equal(h.get("live-start").value, "invalid live start");
+  assert.equal(h.get("judge-early").value, "invalid live judge");
+  assert.equal(rate.value, "96000");
+  assert.equal(latency.disabled, false);
+  assert.equal(ms.disabled, true);
   await h.close();
 });
 

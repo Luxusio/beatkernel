@@ -328,6 +328,72 @@ test("open resumes during the gesture, snapshots configuration, and requires exa
   await stop(h, owner);
 });
 
+test("context preferences are snapshotted before synchronous resume and actual sample rate remains authoritative", async () => {
+  const defaults = await harness();
+  const defaultOwner = await open(defaults);
+  assert.deepEqual(structuredClone(defaults.trace.find(entry => entry[0] === "context")[1]), { latencyHint: "interactive" });
+  await stop(defaults, defaultOwner);
+  for (const contextOptions of [{}, { sampleRate: 48000 }, { latencyHint: undefined, sampleRate: undefined }]) {
+    const compatible = await harness();
+    const owner = await open(compatible, options({ contextOptions }));
+    assert.deepEqual(structuredClone(compatible.trace.find(entry => entry[0] === "context")[1]), {
+      latencyHint: "interactive", ...(contextOptions.sampleRate === undefined ? {} : { sampleRate: contextOptions.sampleRate }),
+    });
+    await stop(compatible, owner);
+  }
+  const resumed = deferred();
+  const h = await harness({ resumeGate: resumed, sampleRate: 44100 });
+  const request = { latencyHint: 0.012345678, sampleRate: 96000 };
+  const opening = observe(() => h.AudioHost.open(options({ contextOptions: request })));
+  assert.deepEqual(h.trace.slice(0, 2).map(entry => entry[0]), ["context", "resume"]);
+  const passed = h.trace.find(entry => entry[0] === "context")[1];
+  assert.notEqual(passed, request);
+  assert.ok(Object.isFrozen(passed));
+  request.latencyHint = "playback"; request.sampleRate = 8000;
+  assert.deepEqual(structuredClone(passed), { latencyHint: 0.012345678, sampleRate: 96000 });
+  await flush();
+  h.ready();
+  await flush();
+  assert.equal(opening.settled, false, "ready does not substitute for the still-pending real resume");
+  resumed.resolve();
+  const result = await opening.result;
+  assert.equal(result.ok, true, result.error?.message);
+  assert.equal(result.value.sampleRate, 44100, "requested rate is not evidence of the context's actual output grid");
+  assert.equal(h.contexts.length, 1);
+  await stop(h, result.value);
+  for (const contextOptions of [{ latencyHint: "balanced" }, { latencyHint: "playback", sampleRate: 1 },
+    { latencyHint: 0 }, { latencyHint: 60, sampleRate: 4294967295 }]) {
+    const accepted = await harness();
+    const owner = await open(accepted, options({ contextOptions }));
+    assert.deepEqual(structuredClone(accepted.trace.find(entry => entry[0] === "context")[1]), contextOptions);
+    await stop(accepted, owner);
+  }
+});
+
+test("AudioHost independently rejects invalid context options before acquisition and never retries a refused constructor", async () => {
+  for (const contextOptions of [null, [], "interactive", { renderSizeHint: 128 }, { latencyHint: "custom" }, { latencyHint: "interactive\n" },
+    { latencyHint: null }, { latencyHint: "0.01" }, { latencyHint: NaN }, { latencyHint: Infinity },
+    { latencyHint: -0.000001 }, { latencyHint: 60.000001 }, { latencyHint: "balanced", sampleRate: 0 },
+    { latencyHint: "interactive", sampleRate: "48000" }, { latencyHint: 0, sampleRate: 1.5 },
+    { latencyHint: 0, sampleRate: 4294967296 }, { latencyHint: 0, sampleRate: null }]) {
+    const h = await harness();
+    const error = failure(await observe(() => h.AudioHost.open(options({ contextOptions }))).result, "validation");
+    assert.ok(error instanceof h.AudioHostError);
+    assert.equal(error.operation, "open");
+    assert.equal(h.trace.some(entry => entry[0] === "context"), false);
+    assert.equal(h.nodes.length, 0);
+    assertClean(h);
+  }
+  const refused = await harness({ contextThrows: true });
+  const result = await observe(() => refused.AudioHost.open(options({ contextOptions: { latencyHint: 0.001, sampleRate: 12345 } }))).result;
+  failure(result, "transport");
+  const attempts = refused.trace.filter(entry => entry[0] === "context");
+  assert.equal(attempts.length, 1);
+  assert.deepEqual(structuredClone(attempts[0][1]), { latencyHint: 0.001, sampleRate: 12345 });
+  assert.equal(refused.trace.some(entry => ["resume", "add-module", "node"].includes(entry[0])), false);
+  assertClean(refused);
+});
+
 test("successful setup transfers exact PCM ownership and preserves command widths and genuine reports", async () => {
   const h = await harness();
   const owner = await open(h);
