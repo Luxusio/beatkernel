@@ -245,13 +245,24 @@ from beginning**. Playback re-prepares the selected chart at the actual context
 rate; the preview position does not act as a playback seek. PCM transfer and
 initial BGM queue admission complete before selecting a future one-shot start.
 
-The page shows the actual lane bindings. The first keyboard side uses left
+The page shows the actual lane bindings. By default, the first keyboard side uses left
 Shift for scratch and Z/S/X/D/C/F/V for seven-key lanes; Space covers the
 additional lane. The second uses right Shift and N/J/M/K/Comma/L/Period, with
 Slash for its additional lane. DOM keyboard events provide one logical device.
 Stop, Escape, focus loss and page hiding cancel the session. Controls remain
 locked until audio and Worker ownership are released; ordinary stop restores
 the accepted preview and reports the available actual score.
+
+Expand **Keyboard bindings** to change the retained lane selectors before live
+play, or choose **Reset keyboard defaults** while idle. The catalog offers 80
+physical key codes; Escape remains Stop. Choose **Unbound** only for lanes absent
+from the prepared chart. Duplicate assigned keys and missing required mappings
+are refused. One immutable selection supplies both Worker key pairs and Window
+input handling and captions. Import, preparation, playback and record operations
+lock the editor; failure or Stop retains the draft. Replay ignores the live draft.
+Settings last for this page only. Browser and system shortcuts can prevent key
+delivery. The IDs belong to this browser host, not native OS scan codes.
+These source paths and authored fixtures have not been executed in a browser.
 
 Input uses original Window event timestamps and bounded FIFO steps. Graphics
 animation timestamps never advance the song. Runtime processing and audio

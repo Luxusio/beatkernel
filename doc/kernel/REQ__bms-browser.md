@@ -532,3 +532,29 @@ PCM budgets. No full-buffer copy is added at launch. Original-song graphics,
 actual section-aware capture/competition identity and existing cleanup/drain
 remain authoritative. Browser source integration still requires later generated
 bindings and actual execution to prove acceptance.
+
+
+## Retained keyboard bindings
+
+Expose one retained key-choice draft per supported lane with Unbound and Reset
+defaults. The catalog uses known physical KeyboardEvent.code names, as defined
+by the [W3C code vocabulary](https://www.w3.org/TR/uievents-code/). Keep the
+existing default code/physical-ID pairs stable; additional choices have explicit
+application-specific source IDs, independent of native OS scancodes. Escape
+remains Stop. Browser and OS shortcuts may prevent event delivery.
+
+Snapshot and validate at most 18 unique lane rows before any live audio resume
+or preparation await. Unknown codes, duplicate bound keys/lanes and malformed
+rows refuse atomically; Unbound rows produce no key pair. Every actual prepared
+lane must be bound. One immutable selection drives both the Worker request and
+the Window event.code Down/Up lookup and displayed mapping. The existing actual
+Worker and BrowserGame remain authoritative for binding admission.
+
+Controls are created once and locked during import, preparation, playback and
+record-store operations. Drafts, including editable invalid selections, remain
+after setup failure or Stop; Reset is idle-only. Replay ignores live binding
+drafts and uses recorded input. Single-keyboard play does not require a device
+choice. Recording, comparison and network identity reuse the existing common
+logic; no extra per-frame update, input clock or judging path is added. Drafts
+are page-local, with no saved-profile claim. Authored fixtures and whitespace
+checks do not prove browser/input/audio acceptance.

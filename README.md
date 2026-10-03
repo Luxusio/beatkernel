@@ -84,6 +84,9 @@ against browser records and live WebTransport Play are source-integrated.
 Browser live judge windows and signed input offset are configurable with exact
 integer parsing; live section preparation reuses original-source PCM selection,
 and replay retains its recorded profile and section.
+Retained browser lane selectors support custom physical key bindings, Unbound
+and idle reset. Live launch freezes one map for Worker admission and Window
+input; replay uses recorded input. Drafts last for the page lifetime.
 See the [browser host instructions](samples/bms-runtime/web/README.md).
 Browser source compilation does not establish playable browser behavior.
 
