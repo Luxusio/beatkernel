@@ -328,7 +328,7 @@ replacement/page hiding and after at most 60 seconds. Stopped capture extraction
 is a single encoding attempt; serialization failure remains explicit and does
 not hide game cleanup failure. Local replay import/playback is source-integrated;
 Explicit saved-record storage/browsing feeds that replay path; browser
-record competition remains follow-on work; live network summaries are source-integrated.
+record competition and live network summaries are source-integrated.
 Source checks and authored fixtures
 do not establish that a browser download or replay ran.
 
@@ -399,7 +399,7 @@ the connection; a later explicit action can open a fresh owner. Browser-managed
 storage is best effort and may be removed by the browser/user, so explicit
 downloads remain useful. Stored complete/prefix labels are display metadata and
 do not authenticate a recording or prove it matches selected assets. Browser
-competition against saved records remains separate work. Storage/host fixtures
+competition against saved records is source-integrated. Storage/host fixtures
 are authored but unexecuted, and no IndexedDB/browser/audio behavior is verified.
 
 
@@ -494,6 +494,36 @@ judge and actual recorded operations, with an explicit recorded_until frontier.
 Local scores remain separate; a truncated record never gains invented misses
 when live play passes its final operation. Admission and comparison failures
 do not become ranked proof or change capture completion. Window/Worker selection
-controls are follow-on source work, so this is not a launchable browser feature
-yet. See the
+controls now compose these bindings as described below. Browser execution is
+unverified. See the
 [component contract](../../../doc/changes/CHANGE__browser-saved-opponents.md).
+
+
+## Live saved-record competition
+
+Select an Own/Other display kind, then add the current imported replay or a
+record from the local Saved records list. An optional plain label overrides the
+filename display. The selection holds at most eight Files totalling 64 MiB;
+Remove and Clear release selected slots and bytes. Selection changes are disabled
+while loading a saved record or playing. Repeated selection of the same source
+is refused. This metadata does not authenticate whose record it is.
+
+Prepare the matching chart/seed and choose Play. The Worker reads selected Files,
+validates their actual bytes and canonical setup, then admits them to the real
+BrowserGame before activation. Incompatible selected recordings fail preparation
+explicitly. Files stay selected for retry and are not detached by Play. The
+original audio resume gesture is preserved. Play replay ignores comparisons;
+normal live play can use them together with multiplayer. Recording bytes and
+chart assets are never uploaded to the relay.
+
+A separate comparison readout shows actual recorded-prefix counters at most four
+times per second. It identifies the last recorded operation, including an empty
+prefix. Passing that frontier never invents misses or establishes completion.
+Local score and peer-reported network data remain separate. Comparison failure
+stops comparison updates while local play, audio and capture continue. Old or
+closing play owners cannot replace another session's readout.
+
+JavaScript boundary fixtures are authored but unparsed/unexecuted. Generated
+bindings, actual browser/audio behavior, interoperability and formal acceptance
+remain deferred. See the
+[host contract](../../../doc/changes/CHANGE__browser-saved-opponents-play.md).

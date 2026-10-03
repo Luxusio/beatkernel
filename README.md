@@ -80,7 +80,7 @@ canonical replay bytes after cleanup. Portable stepped replay and WASM
 preparation/render bindings reuse the existing replay audio and visual owners.
 Window/Worker replay launch uses the same audio host and recorded seed/section.
 Explicit saved-record browsing/storage feeds that replay path. Competition
-against browser records remains unfinished; live WebTransport Play is source-integrated.
+against browser records and live WebTransport Play are source-integrated.
 See the [browser host instructions](samples/bms-runtime/web/README.md).
 Browser source compilation does not establish playable browser behavior.
 
@@ -1036,9 +1036,10 @@ be combined. Native networking uses the same worker and BKMP session across
 platforms. See the [native adapter contract](doc/changes/CHANGE__native-webtransport.md).
 
 
-Browser saved-opponent competition is being composed from the common replay
-judge and a bounded portable owner. The gameplay bindings admit compatible
-Own/Other recordings before activation and expose genuine recorded prefixes
-without changing local scores. Window/Worker record selection remains separate
-source work. See the
-[component contract](doc/changes/CHANGE__browser-saved-opponents.md).
+Browser saved-opponent competition uses the common replay judge and a bounded
+portable owner. The page selects local stored or imported recordings as Own/Other
+opponents, admits them before activation and displays genuine recorded prefixes
+without changing local scores. Files remain selected for retry; replay playback
+ignores comparisons. See the
+[host contract](doc/changes/CHANGE__browser-saved-opponents-play.md).
+Actual browser/audio execution remains unverified.

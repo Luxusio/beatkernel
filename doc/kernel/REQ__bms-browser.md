@@ -442,3 +442,21 @@ errors must stay separate from local play/capture completion. A fresh owner and
 explicit reset govern restart; post-activation admission is refused. Source
 components and WASM bindings do not establish host selection availability or
 actual browser execution; Window/Worker integration follows separately.
+
+## Live saved-opponent host flow
+
+The existing browser page supports explicit Own/Other comparison selection from
+local stored records and imported replay files, with at most eight recordings
+and a 64 MiB aggregate budget. Individual removal and clearing release the
+selection budget. Selections retain immutable Files for retry; live preparation
+checks each actual byte extent and canonical compatibility before activation.
+Bad selected records fail preparation explicitly. Owner stamps fence stale
+loads/read results. Replay playback ignores comparisons and remains local.
+
+Actual BrowserGame snapshots publish saved-prefix counters at most four times
+per second, correlated to the live play owner and actual game song frontier.
+Comparison errors stop only comparison publication, preserving local judging,
+audio, capture completion and optional multiplayer. Saved counters are distinct
+from peer-reported network data and do not authenticate a result. No recording
+bytes or chart assets are uploaded to the relay. Source integration still
+requires later browser/bindings/audio execution evidence.
