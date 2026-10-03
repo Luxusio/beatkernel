@@ -40,12 +40,11 @@ pub mod codec;
 mod control;
 mod device;
 mod event;
+mod touch;
 
 pub use adapters::{DeviceAdapter, PhysicalInputSink};
 pub use backend::{VirtualInputBackend, VirtualInputError};
-pub use binding::{
-    Binding, BindingError, BindingMap, DeviceSelector, GameControlId, GameInputEvent,
-};
+pub use binding::{Binding, BindingError, BindingMap, DeviceSelector, GameControlId, GameInputEvent};
 pub use codec::{decode_event, encode_event, CodecLimits, InputCodecError, INPUT_CODEC_VERSION};
 pub use control::{BackendId, PhysicalControlId, VendorNamespaceId, KEYBOARD_USAGE_PAGE};
 pub use device::{DeviceCapabilities, DeviceDescriptor, DeviceId, DeviceTransport};
@@ -54,3 +53,4 @@ pub use event::{
     NativeEventMeta, PhysicalInputEvent, PointerEvent, PointerMode, PoseEvent, Position2,
     Position3, Quaternion, RawHidReportEvent, TouchEvent, TouchPhase,
 };
+pub use touch::{TouchRegion, TouchRoute, TouchRouter, TouchRoutingError};
