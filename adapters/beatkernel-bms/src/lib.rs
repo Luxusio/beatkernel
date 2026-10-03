@@ -13,12 +13,23 @@ use beatkernel::{
     audio::SampleId,
     chart::*,
     input::GameControlId,
-    interaction::{HoldEvaluator, InstantEvaluator},
+    interaction::{HoldEvaluator, InstantEvaluator, PressHoldEvaluator, PressInstantEvaluator},
     judge::Rule,
     time::Timestamp,
 };
 pub use parser::{parse, parse_seeded};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Explicit input semantics for the BMS adapter's builtin judge rules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BmsInputMode {
+    /// Preserve the legacy button-only evaluators and their snapshot identity.
+    #[default]
+    ButtonOnly,
+    /// Accept buttons and individually owned touch contacts through press rules.
+    /// Bindings still determine lanes; this does not route contact coordinates.
+    ButtonOrContact,
+}
 
 /// Policy for overlapping nonzero positions/definitions; zeros never delete.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -492,6 +503,12 @@ impl BmsChart {
     /// Creates lane-specific registrations using existing builtin evaluators.
     /// Timing windows/offsets stay caller-controlled; RANK is not guessed.
     pub fn rules(&self) -> Vec<Rule> {
+        self.rules_with_input_mode(BmsInputMode::ButtonOnly)
+    }
+
+    /// Creates the same lane registrations with explicit button/contact semantics.
+    /// Contact mode uses the core press evaluators; timing and lanes are unchanged.
+    pub fn rules_with_input_mode(&self, mode: BmsInputMode) -> Vec<Rule> {
         let controls: BTreeMap<_, _> = self
             .notes
             .iter()
@@ -508,10 +525,11 @@ impl BmsChart {
                 rules.push(Rule {
                     interaction: object.interaction,
                     control,
-                    evaluator: if hold {
-                        Box::new(HoldEvaluator)
-                    } else {
-                        Box::new(InstantEvaluator)
+                    evaluator: match (mode, hold) {
+                        (BmsInputMode::ButtonOnly, true) => Box::new(HoldEvaluator),
+                        (BmsInputMode::ButtonOnly, false) => Box::new(InstantEvaluator),
+                        (BmsInputMode::ButtonOrContact, true) => Box::new(PressHoldEvaluator),
+                        (BmsInputMode::ButtonOrContact, false) => Box::new(PressInstantEvaluator),
                     },
                 });
             }

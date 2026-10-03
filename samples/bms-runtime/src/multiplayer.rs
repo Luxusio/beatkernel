@@ -142,8 +142,14 @@ pub fn competition_identity_for_section(
     // Bound caller-assembled metadata through the canonical codec before the
     // profile decoder allocates its window vector.
     let legacy = competition_identity(header, runtime_version, limits)?;
-    let (_, start, _) = crate::replay_playback::decode_chart_setup(&header.options)
+    let setup = crate::replay_playback::decode_section_setup(&header.options)
         .map_err(|error| MultiplayerError::Protocol(error.to_string()))?;
+    if setup.end.is_some() {
+        return Err(MultiplayerError::Protocol(
+            "section endpoint must be carried only by the competition envelope".into(),
+        ));
+    }
+    let start = setup.start;
     if start.as_nanos() < 0 || end.as_nanos() < 0 || end <= start {
         return Err(MultiplayerError::Protocol(
             "section endpoint must be nonnegative and after start".into(),

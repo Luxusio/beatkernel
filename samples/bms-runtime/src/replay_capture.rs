@@ -10,6 +10,7 @@ use beatkernel::{
     runtime::RuntimeReport,
     time::{ClockDomainId, Timestamp},
 };
+use beatkernel_bms::BmsInputMode;
 use std::{fs::OpenOptions, io::Write, path::Path};
 
 /// Capture, serialization or exclusive output creation failure.
@@ -82,6 +83,28 @@ pub fn setup_section_header(
     chart_seed: u64,
     end: Option<Timestamp>,
 ) -> Result<ReplayHeader, CaptureError> {
+    setup_input_header(
+        judge,
+        domain,
+        limits,
+        start,
+        chart_seed,
+        end,
+        BmsInputMode::ButtonOnly,
+    )
+}
+
+/// Canonical setup retaining the selected input rules as well as section bounds.
+/// Button-only modes preserve v1–v4; contact rules use an explicit v5 mode tag.
+pub fn setup_input_header(
+    judge: &JudgeEngine,
+    domain: ClockDomainId,
+    limits: ReplayCodecLimits,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+    input_mode: BmsInputMode,
+) -> Result<ReplayHeader, CaptureError> {
     if start.as_nanos() < 0 {
         return Err(CaptureError::InvalidStart);
     }
@@ -91,11 +114,19 @@ pub fn setup_section_header(
     if judge.effective_song_time().is_some() {
         return Err(ReplayError::AlreadyStarted.into());
     }
-    let hash = judge.stable_hash().map_err(ReplayError::from)?;
-    let mut identity = b"bms-judge-setup/v1:".to_vec();
-    identity.extend_from_slice(&hash.to_le_bytes());
     let profile = judge.profile();
-    let (prefix, start_bytes): (&[u8], usize) = if end.is_some() {
+    let contact = input_mode == BmsInputMode::ButtonOrContact;
+    let rules_identity: &[u8] = if contact {
+        b"beatkernel-bms/press-judge/v1"
+    } else {
+        b"beatkernel-bms/builtin-judge/v1"
+    };
+    let (prefix, start_bytes): (&[u8], usize) = if contact {
+        (
+            b"bms-judge-profile/v5:",
+            18 + usize::from(end.is_some()) * 8,
+        )
+    } else if end.is_some() {
         (b"bms-judge-profile/v4:", 24)
     } else if chart_seed != 0 {
         (b"bms-judge-profile/v3:", 16)
@@ -111,22 +142,41 @@ pub fn setup_section_header(
         .and_then(|bytes| bytes.checked_add(prefix.len() + start_bytes + 16))
         .ok_or(ReplayCodecError::LengthOverflow)?;
     let header_size = options_size
-        .checked_add(identity.len())
-        .and_then(|bytes| bytes.checked_add(b"beatkernel-bms/builtin-judge/v1".len()))
+        .checked_add(b"bms-judge-setup/v1:".len() + 8)
+        .and_then(|bytes| bytes.checked_add(rules_identity.len()))
         .and_then(|bytes| bytes.checked_add(env!("CARGO_PKG_VERSION").len()))
         .ok_or(ReplayCodecError::LengthOverflow)?;
     if header_size > limits.max_header_bytes() {
         return Err(ReplayCodecError::HeaderTooLarge.into());
     }
-    let mut options = prefix.to_vec();
-    options
-        .try_reserve_exact(options_size - options.len())
+    let hash = judge.stable_hash().map_err(ReplayError::from)?;
+    let mut identity = Vec::new();
+    identity
+        .try_reserve_exact(b"bms-judge-setup/v1:".len() + 8)
         .map_err(|_| ReplayCodecError::AllocationFailed)?;
-    if end.is_some() || chart_seed != 0 {
+    identity.extend_from_slice(b"bms-judge-setup/v1:");
+    identity.extend_from_slice(&hash.to_le_bytes());
+    let mut rules = Vec::new();
+    rules
+        .try_reserve_exact(rules_identity.len())
+        .map_err(|_| ReplayCodecError::AllocationFailed)?;
+    rules.extend_from_slice(rules_identity);
+    let mut options = Vec::new();
+    options
+        .try_reserve_exact(options_size)
+        .map_err(|_| ReplayCodecError::AllocationFailed)?;
+    options.extend_from_slice(prefix);
+    if contact {
+        options.push(1);
+    }
+    if contact || end.is_some() || chart_seed != 0 {
         options.extend_from_slice(&chart_seed.to_le_bytes());
     }
-    if end.is_some() || chart_seed != 0 || start != Timestamp::ZERO {
+    if contact || end.is_some() || chart_seed != 0 || start != Timestamp::ZERO {
         options.extend_from_slice(&start.as_nanos().to_le_bytes());
+    }
+    if contact {
+        options.push(u8::from(end.is_some()));
     }
     if let Some(end) = end {
         options.extend_from_slice(&end.as_nanos().to_le_bytes());
@@ -145,7 +195,7 @@ pub fn setup_section_header(
     Ok(ReplayHeader {
         version: REPLAY_VERSION,
         chart_identity: identity,
-        rules_identity: b"beatkernel-bms/builtin-judge/v1".to_vec(),
+        rules_identity: rules,
         options,
         seed: 0,
         normalized_clock: domain,
@@ -210,7 +260,28 @@ impl LiveReplayCapture {
         chart_seed: u64,
         end: Option<Timestamp>,
     ) -> Result<Self, CaptureError> {
-        let header = setup_section_header(judge, domain, limits, start, chart_seed, end)?;
+        Self::new_with_input_mode(
+            judge,
+            domain,
+            limits,
+            start,
+            chart_seed,
+            end,
+            BmsInputMode::ButtonOnly,
+        )
+    }
+
+    /// Capture the pristine judge with an explicit input mode and section bounds.
+    pub fn new_with_input_mode(
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        limits: ReplayCodecLimits,
+        start: Timestamp,
+        chart_seed: u64,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+    ) -> Result<Self, CaptureError> {
+        let header = setup_input_header(judge, domain, limits, start, chart_seed, end, input_mode)?;
         let header_bytes =
             encode_replay(&ReplayFile::new(header.clone(), Vec::new()), limits)?.len();
         Ok(Self {

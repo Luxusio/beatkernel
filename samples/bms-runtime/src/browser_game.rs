@@ -29,6 +29,7 @@ use beatkernel::{
         ClockDomainId, ClockMapper, ClockMappingQuality, ClockPair, ClockPoint, Duration, Timestamp,
     },
 };
+use beatkernel_bms::BmsInputMode;
 use beatkernel_platform::audio::presentation::discipline::DisciplineConfig;
 use wasm_bindgen::prelude::*;
 
@@ -179,6 +180,65 @@ impl BrowserGame {
         max_encoded_input: u32,
         max_payload_input: u32,
     ) -> Result<Self, JsValue> {
+        Self::construct_physical(
+            prepared,
+            host_origin_ns,
+            preroll_ns,
+            early_ns,
+            late_ns,
+            offset_ns,
+            binding_words,
+            end_ns,
+            max_encoded_input,
+            max_payload_input,
+            BmsInputMode::ButtonOnly,
+        )
+    }
+
+    /// Opt in to actual button/contact rules while retaining physical provenance.
+    /// Acquisition, permissions and coordinate-to-lane routing belong to the host.
+    pub fn new_physical_contact(
+        prepared: BrowserPrepared,
+        host_origin_ns: i64,
+        preroll_ns: i64,
+        early_ns: i64,
+        late_ns: i64,
+        offset_ns: i64,
+        binding_words: Vec<u32>,
+        end_ns: Option<i64>,
+        max_encoded_input: u32,
+        max_payload_input: u32,
+    ) -> Result<Self, JsValue> {
+        Self::construct_physical(
+            prepared,
+            host_origin_ns,
+            preroll_ns,
+            early_ns,
+            late_ns,
+            offset_ns,
+            binding_words,
+            end_ns,
+            max_encoded_input,
+            max_payload_input,
+            BmsInputMode::ButtonOrContact,
+        )
+    }
+}
+
+impl BrowserGame {
+    fn construct_physical(
+        prepared: BrowserPrepared,
+        host_origin_ns: i64,
+        preroll_ns: i64,
+        early_ns: i64,
+        late_ns: i64,
+        offset_ns: i64,
+        binding_words: Vec<u32>,
+        end_ns: Option<i64>,
+        max_encoded_input: u32,
+        max_payload_input: u32,
+        input_mode: BmsInputMode,
+    ) -> Result<Self, JsValue> {
         let input = PhysicalInputSetup::new(
             &binding_words,
             &prepared.chart.lanes,
@@ -196,11 +256,10 @@ impl BrowserGame {
             Vec::new(),
             input,
             end_ns.map(Timestamp::from_nanos),
+            input_mode,
         )
     }
-}
 
-impl BrowserGame {
     fn construct(
         prepared: BrowserPrepared,
         host_origin_ns: i64,
@@ -259,6 +318,7 @@ impl BrowserGame {
                 limits: CodecLimits::new(4096, 1024).map_err(error)?,
             },
             end,
+            BmsInputMode::ButtonOnly,
         )
     }
 
@@ -272,6 +332,7 @@ impl BrowserGame {
         keys: Vec<(u8, u16)>,
         input: PhysicalInputSetup,
         end: Option<Timestamp>,
+        input_mode: BmsInputMode,
     ) -> Result<Self, JsValue> {
         if prepared.replay.is_some() || host_origin_ns < 0 {
             return Err(error(
@@ -295,12 +356,13 @@ impl BrowserGame {
         // Comparison admission reconstructs genuine records from this source.
         // Clone only during preparation and release it after activation.
         let opponent_source = prepared.prepared.source.clone();
-        let (mut game, bank) = StepGameplay::new_section(
+        let (mut game, bank) = StepGameplay::new_section_with_input_mode(
             prepared.prepared,
             config,
             input.bindings,
             prepared.start,
             end,
+            input_mode,
         )
         .map_err(error)?;
         game.configure_output_clock(DisciplineConfig {

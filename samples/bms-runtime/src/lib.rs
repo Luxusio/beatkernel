@@ -38,6 +38,8 @@ pub mod competition;
 pub mod competition_live;
 /// Actual judge completion and native output drain for full-song play.
 pub mod completion;
+#[cfg(test)]
+mod contact_input_mode_fixtures;
 /// Portable bounded audio device metadata and explicit draft selection.
 pub mod device_catalog;
 #[cfg(test)]

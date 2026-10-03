@@ -9,7 +9,7 @@ use crate::{
     local_runtime::{GroupError, SoloRuntime},
     native_judge::NativeJudgeConfig,
     replay_audio::{ReplayAudioError, before_endpoint, completed_render_cursor, section_end_frame},
-    replay_capture::{CaptureError, LiveReplayCapture, setup_header},
+    replay_capture::{CaptureError, LiveReplayCapture, setup_input_header},
 };
 use beatkernel::{
     audio::{
@@ -23,6 +23,7 @@ use beatkernel::{
     time::{ClockDomainId, ClockMapper, ClockPair, ClockPoint, Duration, Timestamp},
     transport::{Rate, Transport},
 };
+use beatkernel_bms::BmsInputMode;
 use beatkernel_platform::audio::presentation::discipline::{
     DisciplineConfig, DisciplineError, DisciplineUpdate, ObservationAdmission,
     PresentationDiscipline,
@@ -219,6 +220,7 @@ pub struct StepGameplay {
     host_domain: ClockDomainId,
     start: Timestamp,
     end: Option<Timestamp>,
+    input_mode: BmsInputMode,
     playback_end_frame: Option<u64>,
     preroll: Duration,
     activated: bool,
@@ -270,11 +272,31 @@ impl StepGameplay {
     /// end. The shared runtime caps logical processing; actual output must use
     /// the returned playback endpoint on this configuration's output grid.
     pub fn new_section(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        bindings: BindingMap,
+        start: Timestamp,
+        end: Option<Timestamp>,
+    ) -> Result<(Self, SampleBank), StepGameplayError> {
+        Self::new_section_with_input_mode(
+            prepared,
+            config,
+            bindings,
+            start,
+            end,
+            BmsInputMode::ButtonOnly,
+        )
+    }
+
+    /// Own the actual section runtime with an explicit, replayable input mode.
+    /// Bindings retain original physical events; the selected core rules judge them.
+    pub fn new_section_with_input_mode(
         mut prepared: PreparedBms,
         config: StepGameplayConfig,
         bindings: BindingMap,
         start: Timestamp,
         end: Option<Timestamp>,
+        input_mode: BmsInputMode,
     ) -> Result<(Self, SampleBank), StepGameplayError> {
         if config.host_origin.domain == config.output_origin.domain {
             return Err(StepGameplayError::InvalidConfiguration(
@@ -385,7 +407,7 @@ impl StepGameplay {
         } else {
             None
         };
-        let rules = prepared.source.rules();
+        let rules = prepared.source.rules_with_input_mode(input_mode);
         let judge = JudgeEngine::new(prepared.compiled.chart, rules, profile)
             .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
         let bgm_count = prepared.bgm_commands.len();
@@ -527,6 +549,7 @@ impl StepGameplay {
             host_domain: config.host_origin.domain,
             start,
             end,
+            input_mode,
             playback_end_frame,
             preroll: config.preroll,
             activated: false,
@@ -567,12 +590,14 @@ impl StepGameplay {
                 "competition identity requires an unprocessed runtime",
             ));
         }
-        setup_header(
+        setup_input_header(
             self.runtime.judge(),
             self.host_domain,
             limits,
             self.start,
             chart_seed,
+            None,
+            self.input_mode,
         )
         .map_err(|error| StepGameplayError::Capture {
             error,
@@ -613,13 +638,14 @@ impl StepGameplay {
                 "capture configuration requires an unprocessed, unconfigured runtime",
             ));
         }
-        let capture = LiveReplayCapture::new_section(
+        let capture = LiveReplayCapture::new_with_input_mode(
             self.runtime.judge(),
             self.host_domain,
             limits,
             self.start,
             chart_seed,
             self.end,
+            self.input_mode,
         )
         .map_err(|error| StepGameplayError::Capture {
             error,

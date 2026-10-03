@@ -1,6 +1,6 @@
 //! Application identity checks and logical reconstruction of captured BMS play.
 
-use crate::replay_capture::{CaptureError, setup_section_header};
+use crate::replay_capture::{CaptureError, setup_input_header};
 #[cfg(test)]
 use crate::replay_capture::LiveReplayCapture;
 use beatkernel::{
@@ -11,7 +11,7 @@ use beatkernel::{
     },
     time::{Duration, Timestamp},
 };
-use beatkernel_bms::{BmsChart, BmsError};
+use beatkernel_bms::{BmsChart, BmsError, BmsInputMode};
 use std::io::{ErrorKind, Read};
 
 /// Invalid replay metadata, compatibility, bounded data or logical reconstruction.
@@ -110,13 +110,14 @@ pub fn read_replay(
     Ok(decode_replay(&bytes, limits)?)
 }
 
-/// Explicit recorded setup, including the finite end that legacy consumers lack.
+/// Explicit recorded setup retaining section bounds and input interaction mode.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordedSetup {
     pub profile: JudgeProfile,
     pub start: Timestamp,
     pub chart_seed: u64,
     pub end: Option<Timestamp>,
+    pub input_mode: BmsInputMode,
 }
 
 /// Decodes the exact unlimited versioned profile captured by the BMS runtime.
@@ -136,25 +137,25 @@ pub fn decode_setup(options: &[u8]) -> Result<(JudgeProfile, Timestamp), Playbac
 
 /// Decodes canonical profile, original-song start and BMS branch seed.
 /// Legacy v1/v2 imply seed zero; v3 requires a nonzero seed and nonnegative start.
-/// Finite v4 is refused because this tuple cannot preserve its endpoint.
+/// V4 and v5 are refused because this tuple cannot preserve endpoints/input mode.
 pub fn decode_chart_setup(options: &[u8]) -> Result<(JudgeProfile, Timestamp, u64), PlaybackError> {
     let setup = decode_recorded_setup(options, false)?;
     Ok((setup.profile, setup.start, setup.chart_seed))
 }
 
-/// Decodes canonical legacy or finite v4 metadata without dropping section bounds.
+/// Decodes canonical v1–v5 metadata without dropping section bounds/input mode.
 pub fn decode_section_setup(options: &[u8]) -> Result<RecordedSetup, PlaybackError> {
     decode_recorded_setup(options, true)
 }
 
 fn decode_recorded_setup(
     options: &[u8],
-    allow_finite: bool,
+    allow_extended: bool,
 ) -> Result<RecordedSetup, PlaybackError> {
-    let (bytes, start, chart_seed, end) = if let Some(bytes) =
+    let (bytes, start, chart_seed, end, input_mode) = if let Some(bytes) =
         options.strip_prefix(b"bms-judge-profile/v1:")
     {
-        (bytes, Timestamp::ZERO, 0, None)
+        (bytes, Timestamp::ZERO, 0, None, BmsInputMode::ButtonOnly)
     } else if let Some(bytes) = options.strip_prefix(b"bms-judge-profile/v2:") {
         let encoded = bytes
             .get(..8)
@@ -163,7 +164,13 @@ fn decode_recorded_setup(
         if start <= 0 {
             return Err(PlaybackError::Metadata("v2 section start must be positive"));
         }
-        (&bytes[8..], Timestamp::from_nanos(start), 0, None)
+        (
+            &bytes[8..],
+            Timestamp::from_nanos(start),
+            0,
+            None,
+            BmsInputMode::ButtonOnly,
+        )
     } else if let Some(bytes) = options.strip_prefix(b"bms-judge-profile/v3:") {
         let encoded = bytes
             .get(..16)
@@ -175,9 +182,15 @@ fn decode_recorded_setup(
                 "v3 requires nonzero chart seed and nonnegative start",
             ));
         }
-        (&bytes[16..], Timestamp::from_nanos(start), seed, None)
+        (
+            &bytes[16..],
+            Timestamp::from_nanos(start),
+            seed,
+            None,
+            BmsInputMode::ButtonOnly,
+        )
     } else if let Some(bytes) = options.strip_prefix(b"bms-judge-profile/v4:") {
-        if !allow_finite {
+        if !allow_extended {
             return Err(PlaybackError::Metadata(
                 "finite replay requires a section-aware consumer",
             ));
@@ -198,6 +211,45 @@ fn decode_recorded_setup(
             Timestamp::from_nanos(start),
             seed,
             Some(Timestamp::from_nanos(end)),
+            BmsInputMode::ButtonOnly,
+        )
+    } else if let Some(bytes) = options.strip_prefix(b"bms-judge-profile/v5:") {
+        if !allow_extended {
+            return Err(PlaybackError::Metadata(
+                "contact replay requires an input-mode-aware consumer",
+            ));
+        }
+        let encoded = bytes.get(..18).ok_or(PlaybackError::Metadata(
+            "truncated input mode/seed/start/end tag",
+        ))?;
+        if encoded[0] != 1 {
+            return Err(PlaybackError::Metadata("v5 requires contact input mode 1"));
+        }
+        let seed = u64::from_le_bytes(encoded[1..9].try_into().expect("checked chart seed"));
+        let start = i64::from_le_bytes(encoded[9..17].try_into().expect("checked section start"));
+        if start < 0 {
+            return Err(PlaybackError::Metadata("v5 requires nonnegative start"));
+        }
+        let (body, end) = match encoded[17] {
+            0 => (&bytes[18..], None),
+            1 => {
+                let encoded_end = bytes
+                    .get(18..26)
+                    .ok_or(PlaybackError::Metadata("truncated section end"))?;
+                let end = i64::from_le_bytes(encoded_end.try_into().expect("checked section end"));
+                if end <= start {
+                    return Err(PlaybackError::Metadata("v5 end must be later than start"));
+                }
+                (&bytes[26..], Some(Timestamp::from_nanos(end)))
+            }
+            _ => return Err(PlaybackError::Metadata("invalid v5 end tag")),
+        };
+        (
+            body,
+            Timestamp::from_nanos(start),
+            seed,
+            end,
+            BmsInputMode::ButtonOrContact,
         )
     } else {
         return Err(PlaybackError::Metadata("unsupported profile schema"));
@@ -249,6 +301,7 @@ fn decode_recorded_setup(
         start,
         chart_seed,
         end,
+        input_mode,
     })
 }
 
@@ -281,9 +334,9 @@ fn reconstruct_with_section(
     source: &BmsChart,
     file: ReplayFile,
     limits: ReplayCodecLimits,
-    allow_finite: bool,
+    allow_extended: bool,
 ) -> Result<ReplaySession, PlaybackError> {
-    let judge = validate_recorded_setup(source, &file, limits, allow_finite)?;
+    let judge = validate_recorded_setup(source, &file, limits, allow_extended)?;
     Ok(ReplaySession::from_records(
         file.header,
         judge,
@@ -316,15 +369,12 @@ fn validate_recorded_setup(
     source: &BmsChart,
     file: &ReplayFile,
     limits: ReplayCodecLimits,
-    allow_finite: bool,
+    allow_extended: bool,
 ) -> Result<JudgeEngine, PlaybackError> {
     // Also validates files assembled directly by callers, not only decoded logs.
     encode_replay(file, limits)?;
     if file.runtime_version != env!("CARGO_PKG_VERSION") {
         return Err(PlaybackError::IdentityMismatch("runtime version"));
-    }
-    if file.header.rules_identity != b"beatkernel-bms/builtin-judge/v1" {
-        return Err(PlaybackError::IdentityMismatch("BMS rule schema"));
     }
     if file.header.seed != 0 {
         return Err(PlaybackError::IdentityMismatch("BMS rule seed"));
@@ -334,7 +384,15 @@ fn validate_recorded_setup(
         start,
         chart_seed,
         end,
-    } = decode_recorded_setup(&file.header.options, allow_finite)?;
+        input_mode,
+    } = decode_recorded_setup(&file.header.options, allow_extended)?;
+    let rules_identity: &[u8] = match input_mode {
+        BmsInputMode::ButtonOnly => b"beatkernel-bms/builtin-judge/v1",
+        BmsInputMode::ButtonOrContact => b"beatkernel-bms/press-judge/v1",
+    };
+    if file.header.rules_identity != rules_identity {
+        return Err(PlaybackError::IdentityMismatch("BMS rule schema"));
+    }
     if end.is_some_and(|end| {
         file.records.iter().any(|record| {
             record.song_time > end
@@ -348,14 +406,19 @@ fn validate_recorded_setup(
     }
     let selected = crate::section_start::source_at(source, start)?;
     let compiled = selected.compile()?;
-    let judge = JudgeEngine::new(compiled.chart, selected.rules(), profile)?;
-    let expected = setup_section_header(
+    let judge = JudgeEngine::new(
+        compiled.chart,
+        selected.rules_with_input_mode(input_mode),
+        profile,
+    )?;
+    let expected = setup_input_header(
         &judge,
         file.header.normalized_clock,
         limits,
         start,
         chart_seed,
         end,
+        input_mode,
     )?;
     if expected != file.header {
         return Err(PlaybackError::IdentityMismatch(
