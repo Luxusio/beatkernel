@@ -17,6 +17,23 @@ export function validateStart(value = 0n) {
   return value;
 }
 
+export function replayOutputFromMetadata(startNs, endNs, endFrame, rate) {
+  if (typeof startNs !== "bigint") throw new Error("Replay output requires its actual original-song start.");
+  validateStart(startNs);
+  if (!Number.isInteger(rate) || rate < 1 || rate > 0xffffffff) throw new Error("Replay output requires a positive unsigned 32-bit sample rate.");
+  if (endNs === undefined && endFrame === undefined) return Object.freeze({ endNs: undefined, endFrame: undefined });
+  if (typeof endNs !== "bigint" || endNs <= startNs || endNs > I64_MAX
+    || typeof endFrame !== "bigint" || endFrame <= 0n || endFrame > U64_MAX) {
+    throw new Error("Finite replay requires paired original-song end and output-frame metadata.");
+  }
+  const sampleRate = BigInt(rate);
+  const expected = ((endNs - startNs + 100000000n) * sampleRate + 999999999n) / 1000000000n;
+  if (endFrame !== expected || (endFrame * 1000000000n + sampleRate - 1n) / sampleRate > I64_MAX) {
+    throw new Error("Finite replay endpoint differs from its output grid or exceeds signed nanoseconds.");
+  }
+  return Object.freeze({ endNs, endFrame });
+}
+
 // Decimal user settings use integer arithmetic, independently of host clocks.
 export function parseTimingMilliseconds(value) {
   if (typeof value !== "string" || value.length > 21) throw new Error("Timing must be decimal milliseconds, at most 21 characters.");

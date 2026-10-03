@@ -2,7 +2,7 @@ import { snapshotFiles, nanoseconds, seconds } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
 import { RecordsStore } from "./record-store.mjs";
 import { SavedOpponentSelection, opponentLabel, validateOpponentSnapshot } from "./saved-opponents.mjs";
-import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, startFromSeconds, validateStart, millisecondsToNanos, frameNanos, startProjection, committedStartProjection, presentationPair } from "./play-model.mjs";
+import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, startFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, frameNanos, startProjection, committedStartProjection, presentationPair } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
 const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands"].map(id => [id, byId(id)]));
@@ -452,12 +452,17 @@ async function play(mode = "live") {
     validateStart(preparedStart);
     if (mode === "live" && preparedStart !== session.startNs) throw new Error("Prepared live section start changed.");
     if (mode === "replay") session.startNs = preparedStart;
+    const output = replayOutputFromMetadata(preparedStart, prepared.endNs, prepared.endFrame, session.audio.sampleRate);
+    if (mode !== "replay" && output.endFrame !== undefined) throw new Error("Finite live playback is not available.");
+    session.endNs = output.endNs;
+    session.endFrame = output.endFrame;
     const opponentCount = prepared.opponentCount === undefined ? 0 : prepared.opponentCount;
     if (!Number.isInteger(opponentCount) || opponentCount !== (session.opponentSelection?.length ?? 0)) throw new Error("Prepared saved opponent count changed.");
     session.opponentCount = opponentCount;
     session.opponentSelection = null;
     ui.title.textContent = prepared.title || ui.chart.value;
-    ui.details.textContent = `${prepared.artist || "Unknown artist"} · ${prepared.notes} notes · ${prepared.samples} sounds · ${session.audio.sampleRate} Hz output · start ${seconds(preparedStart.toString())} s`;
+    ui.details.textContent = `${prepared.artist || "Unknown artist"} · ${prepared.notes} notes · ${prepared.samples} sounds · ${session.audio.sampleRate} Hz output · start ${seconds(preparedStart.toString())} s`
+      + (session.endNs === undefined ? "" : ` · recorded end ${seconds(session.endNs.toString())} s`);
     session.bindings = mode === "replay" ? [] : bindingsFor(prepared.lanes, session.bindingSelection);
     ui.keys.textContent = mode === "replay" ? "Recorded input playback · Escape stops the replay."
       : session.bindings.map(row => `${row[0].toString(16).toUpperCase()}: ${row[1]}`).join(" · ");
@@ -468,7 +473,8 @@ async function play(mode = "live") {
     }
     const end = await playRpc(session, "play-sample");
     if (end?.kind !== "samples-end") throw new Error("Prepared audio assets exceeded their declared count.");
-    await session.audio.finish();
+    if (session.endFrame === undefined) await session.audio.finish();
+    else await session.audio.finish(session.endFrame);
     for (;;) {
       const batch = await playRpc(session, "play-commands");
       if (batch === null) break;

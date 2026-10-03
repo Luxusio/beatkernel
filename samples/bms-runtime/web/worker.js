@@ -1,6 +1,6 @@
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
-import { PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, millisecondsToNanos, renderedCursor } from "./play-model.mjs";
+import { PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, replayOutputFromMetadata, millisecondsToNanos, renderedCursor } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { validateSelections, validateOpponentSnapshot } from "./saved-opponents.mjs";
 const { BrowserGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
@@ -542,6 +542,13 @@ async function preparePlay(state, request) {
     state.game = state.mode === "replay"
       ? new BrowserReplay(moved, 100000000n)
       : new BrowserGame(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs);
+    if (state.mode === "replay") {
+      const output = replayOutputFromMetadata(startNs, state.game.end_ns, state.game.playback_end_frame, request.rate);
+      if (output.endFrame !== undefined) {
+        metadata.endNs = output.endNs;
+        metadata.endFrame = output.endFrame;
+      }
+    }
     for (const opponent of opponents) {
       const bytes = await opponent.file.arrayBuffer();
       // A stopped owner may have freed its game during this unabortable read.
