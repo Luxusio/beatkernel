@@ -3024,14 +3024,15 @@ test("remote summaries stay separate and active disconnect does not stop local p
   await h.reply(worker.last("play-activate"), null);
   const before = { title: h.get("title").textContent, details: h.get("details").textContent,
     status: h.get("status").textContent };
+  const peerBefore = h.get("multiplayer-status").textContent;
   await h.receive({ kind: "play-multiplayer", playId: start.playId, event: { kind: "progress",
     songNs: -1n, hits: 18446744073709551615n, misses: 0n, combo: 7n, maxCombo: 99n } });
-  assert.match(h.get("multiplayer-status").textContent, /self-reported.*-0\.000000001.*18446744073709551615/);
+  assert.equal(h.get("multiplayer-status").textContent, peerBefore, "live peer counters stay in the Worker HUD");
   assert.deepEqual({ title: h.get("title").textContent, details: h.get("details").textContent,
     status: h.get("status").textContent }, before);
   await h.receive({ kind: "play-multiplayer", playId: start.playId, event: { kind: "progress",
     songNs: 0n, hits: "4", misses: 0n, combo: 0n, maxCombo: 0n } });
-  assert.match(h.get("multiplayer-status").textContent, /malformed.*continues/i);
+  assert.equal(h.get("multiplayer-status").textContent, peerBefore, "Window has no periodic counter parser or rendering path");
   await h.receive({ kind: "play-multiplayer", playId: start.playId, event: { kind: "disconnected", error: "peer left" } });
   assert.match(h.get("multiplayer-status").textContent, /peer left.*local play continues/i);
   assert.equal(h.audio.stopStarts, 0);
@@ -3053,6 +3054,106 @@ test("remote summaries stay separate and active disconnect does not stop local p
   await h.receive({ kind: "play-multiplayer", playId: start.playId, event: { kind: "disconnected", error: "late owner" } });
   assert.equal(h.get("multiplayer-status").textContent, soloStatus);
   await h.close();
+});
+
+async function launchPeerSession(h) {
+  chooseMultiplayer(h, false);
+  const start = await h.begin(), worker = h.workers.at(-1);
+  await h.reply(await h.prepared(start), null);
+  await h.reply(worker.last("play-network-ready"), { kind: "multiplayer-start", targetHostNs: 1500000000n,
+    songTargetHostNs: 1600000000n, uncertaintyNs: 0n });
+  await h.reply(worker.last("play-activate"), null);
+  return start;
+}
+
+test("Window leaves all periodic and final peer counters to the Worker and shows one actual prefix after joined cleanup", async () => {
+  const stopping = deferred(), h = await harness({ stopGate: stopping });
+  const preview = await h.preview(), start = await launchPeerSession(h);
+  const field = h.get("multiplayer-status"), writes = [];
+  let currentText = field.textContent;
+  Object.defineProperty(field, "textContent", { configurable: true, get: () => currentText,
+    set(value) { writes.push(value); currentText = value; } });
+  const peer = { songNs: -1n, hits: 18446744073709551615n, misses: 0n, combo: 7n, maxCombo: 99n };
+  for (let index = 0; index < 20; index++) {
+    await h.receive({ kind: "play-multiplayer", playId: start.playId,
+      event: { kind: index % 2 ? "progress" : "final-progress", ...peer } });
+  }
+  await h.receive({ kind: "play-multiplayer", playId: start.playId, event: { kind: "progress", hits: "bad" } });
+  assert.deepEqual(writes, []); assert.equal(h.audio.stopStarts, 0);
+  h.click("stop"); await flush();
+  const final = finalScore(start.playId, { multiplayer: { finalWritten: true, finalAcknowledged: false,
+    error: "actual ACK timeout", peer: { status: "disconnected", progress: peer, final: true, error: null } } });
+  await h.receive(final);
+  assert.deepEqual(writes, []); assert.equal(h.get("play").disabled, true);
+  stopping.resolve(); await flush();
+  assert.match(field.textContent, /18446744073709551615/); assert.match(field.textContent, /-0\.000000001/);
+  assert.match(field.textContent, /ACK.*unavailable.*actual ACK timeout/i);
+  assert.match(field.textContent, /reported/i); assert.match(field.textContent, /final/i);
+  assert.equal(h.get("title").textContent, preview.title); assert.equal(h.get("position").value, preview.position);
+  assert.match(h.get("status").textContent, /Hits 3.*Misses 1/);
+  const count = writes.length;
+  await h.receive(final); await h.receive({ kind: "play-multiplayer", playId: start.playId,
+    event: { kind: "final-progress", ...peer, songNs: 604800000000001n } });
+  assert.equal(writes.length, count);
+  h.get("multiplayer").checked = false;
+  const solo = await h.launch(); assert.equal(solo.start.multiplayer, undefined);
+  const soloText = field.textContent;
+  await h.receive(final); assert.equal(field.textContent, soloText);
+  h.click("stop"); await flush(); await h.receive(finalScore(solo.id));
+  chooseRecording(h, [selectedRecording().file]); h.get("multiplayer").checked = true;
+  const replay = await h.launch(0, "replay"); assert.equal(replay.start.multiplayer, undefined);
+  const replayText = field.textContent;
+  await h.receive({ kind: "play-multiplayer", playId: replay.id, event: { kind: "progress", ...peer } });
+  assert.equal(field.textContent, replayText);
+  h.click("stop"); await flush(); await h.receive(finalScore(replay.id));
+  await h.close();
+});
+
+test("peer display errors and malformed or absent final prefixes never change local capture or a later page", async () => {
+  const valid = { songNs: 604800000000001n, hits: 9007199254740993n, misses: 2n, combo: 3n, maxCombo: 4n };
+  const cases = [
+    { status: "stopped", progress: valid, final: true, error: "actual HUD unavailable" },
+    { status: "stopped", progress: null, final: false, error: null },
+    { status: "stopped", progress: { ...valid, hits: "9007199254740993" }, final: true, error: null },
+    { status: "stopped", progress: { ...valid, hits: 18446744073709551615n, misses: 1n }, final: true, error: null },
+    { status: "revived", progress: valid, final: true, error: null },
+  ];
+  for (const [index, peer] of cases.entries()) {
+    const h = await harness(); await h.preview(); h.get("record").checked = true;
+    const start = await launchPeerSession(h);
+    if (index === 0) {
+      await h.receive({ kind: "play-multiplayer", playId: start.playId,
+        event: { kind: "peer-display-unavailable", error: "actual HUD unavailable" } });
+      assert.match(h.get("multiplayer-status").textContent, /actual HUD unavailable/);
+      assert.equal(h.audio.stopStarts, 0); assert.equal(h.workers[0].messages("play-stop").length, 0);
+    }
+    h.click("stop"); await flush();
+    await h.receive(finalScore(start.playId, { replay: Uint8Array.from([66, 75, 82]), replayComplete: false, replayError: null,
+      multiplayer: { finalWritten: true, finalAcknowledged: true, error: null, peer } }));
+    assert.match(h.get("status").textContent, /Hits 3.*Misses 1/);
+    assert.equal(h.get("export").disabled, false); assert.match(h.get("export").textContent, /prefix/);
+    assert.doesNotMatch(h.get("status").textContent, /Replay export failed|Gameplay cleanup failed/);
+    const display = h.get("multiplayer-status").textContent;
+    assert.match(display, /acknowledged/i);
+    if (index === 0) { assert.match(display, /9007199254740993/); assert.match(display, /actual HUD unavailable/); }
+    else if (index === 1) assert.doesNotMatch(display, /Hits\s+0|9007199254740993/);
+    else { assert.match(display, /malformed|unavailable/i); assert.doesNotMatch(display, /Hits\s+9007199254740993/); }
+    await h.close();
+  }
+  const stopping = deferred(), h = await harness({ stopGate: stopping });
+  await h.preview(); const prior = await launchPeerSession(h);
+  h.click("stop"); await flush();
+  const receipt = finalScore(prior.playId, { multiplayer: { finalWritten: true, finalAcknowledged: true, error: null,
+    peer: { status: "stopped", progress: valid, final: true, error: null } } });
+  await h.receive(receipt);
+  h.window.emit("pagehide"); await flush(); h.window.emit("pageshow", { persisted: true }); await flush();
+  const resetText = h.get("multiplayer-status").textContent;
+  stopping.resolve(); await flush(); assert.equal(h.get("multiplayer-status").textContent, resetText);
+  await h.preview(); h.get("multiplayer").checked = false; delete h.faults.stopGate;
+  const current = await h.launch(), text = h.get("multiplayer-status").textContent;
+  await h.receive(receipt); assert.equal(h.get("multiplayer-status").textContent, text);
+  assert.equal(h.get("stop").disabled, false);
+  h.click("stop"); await flush(); await h.receive(finalScore(current.id)); await h.close();
 });
 
 test("invalid committed schedules and cancelled readiness never arm or revive a later play owner", async () => {

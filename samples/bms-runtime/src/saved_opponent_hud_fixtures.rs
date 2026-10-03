@@ -18,6 +18,10 @@ use beatkernel::{
     time::{ClockDomainId, ClockPoint, Duration, Timestamp},
 };
 use beatkernel_bms::{BmsChart, parse_seeded};
+use crate::{
+    multiplayer_protocol::{Progress, validate_progress},
+    player::NetworkStatus,
+};
 
 const HIT: i64 = 999_999_990;
 fn ts(value: i64) -> Timestamp {
@@ -87,6 +91,219 @@ fn recording(complete: bool) -> (BmsChart, ReplayHeader, Vec<u8>) {
 }
 fn saved(header: ReplayHeader) -> SavedOpponents {
     SavedOpponents::new(header, limits(), 8, 64 << 20).unwrap()
+}
+
+fn peer_words(progress: Progress) -> [u32; 10] {
+    let values = [
+        progress.song_ns as u64,
+        progress.hits,
+        progress.misses,
+        progress.combo,
+        progress.max_combo,
+    ];
+    let mut words = [0; 10];
+    for (index, value) in values.into_iter().enumerate() {
+        words[index * 2] = value as u32;
+        words[index * 2 + 1] = (value >> 32) as u32;
+    }
+    words
+}
+
+#[test]
+fn peer_hud_preserves_signed_song_and_full_width_counts_without_advancing_any_clock() {
+    let mut hud = SavedOpponentHud::default();
+    hud.update_peer(0, &[]).unwrap();
+    let waiting = hud.snapshot().unwrap().network.as_ref().unwrap();
+    assert_eq!(waiting.status, NetworkStatus::Waiting);
+    assert!(waiting.progress.is_none());
+    let first = Progress {
+        song_ns: i64::MIN,
+        hits: u64::MAX,
+        misses: 0,
+        combo: 0,
+        max_combo: 1,
+    };
+    validate_progress(None, first).unwrap();
+    // Independent numeric boundary: ten low/high words, no Number-sized intermediate.
+    hud.update_peer(1, &[0, 0x8000_0000, u32::MAX, u32::MAX, 0, 0, 0, 0, 1, 0])
+        .unwrap();
+    assert_eq!(
+        hud.snapshot().unwrap().network.as_ref().unwrap().progress,
+        Some(first)
+    );
+    let week = Progress {
+        song_ns: 604_800_000_000_001,
+        ..first
+    };
+    validate_progress(Some(first), week).unwrap();
+    hud.update_peer(1, &peer_words(week)).unwrap();
+    let retained = hud.snapshot().unwrap().clone();
+    for _ in 0..4 {
+        assert_eq!(hud.snapshot(), Some(&retained));
+    }
+    hud.update_peer(2, &[]).unwrap();
+    let disconnected = hud.snapshot().unwrap().network.as_ref().unwrap();
+    assert_eq!(disconnected.status, NetworkStatus::Disconnected);
+    assert_eq!(disconnected.progress, Some(week));
+    hud.update_peer(3, &[]).unwrap();
+    assert_eq!(
+        hud.snapshot().unwrap().network.as_ref().unwrap().status,
+        NetworkStatus::Stopped
+    );
+    assert_eq!(
+        hud.snapshot().unwrap().network.as_ref().unwrap().progress,
+        Some(week)
+    );
+    let mut maximum_misses = SavedOpponentHud::default();
+    let missed = Progress {
+        song_ns: -1,
+        hits: 0,
+        misses: u64::MAX,
+        combo: 0,
+        max_combo: 0,
+    };
+    maximum_misses.update_peer(1, &peer_words(missed)).unwrap();
+    assert_eq!(
+        maximum_misses
+            .snapshot()
+            .unwrap()
+            .network
+            .as_ref()
+            .unwrap()
+            .progress,
+        Some(missed)
+    );
+}
+
+#[test]
+fn peer_hud_refusals_preserve_prefix_and_lifecycle_until_explicit_presentation_failure() {
+    let first = Progress {
+        song_ns: -10,
+        hits: 5,
+        misses: 1,
+        combo: 3,
+        max_combo: 4,
+    };
+    let mut hud = SavedOpponentHud::default();
+    assert!(hud.update_peer(0, &peer_words(first)).is_err());
+    assert!(hud.snapshot().is_none());
+    hud.update_peer(1, &peer_words(first)).unwrap();
+    let retained = hud.snapshot().unwrap().clone();
+    for candidate in [
+        Progress {
+            song_ns: -11,
+            ..first
+        },
+        Progress { hits: 4, ..first },
+        Progress { misses: 0, ..first },
+        Progress {
+            max_combo: 3,
+            ..first
+        },
+        Progress { combo: 4, ..first },
+        Progress {
+            hits: u64::MAX,
+            ..first
+        },
+        Progress { combo: 5, ..first },
+    ] {
+        assert!(validate_progress(Some(first), candidate).is_err());
+        assert!(hud.update_peer(2, &peer_words(candidate)).is_err());
+        assert_eq!(hud.snapshot(), Some(&retained));
+        assert!(!hud.peer_failed());
+    }
+    for (status, words) in [(4, vec![]), (1, vec![0; 9]), (1, vec![0; 11]), (0, vec![])] {
+        assert!(hud.update_peer(status, &words).is_err());
+        assert_eq!(hud.snapshot(), Some(&retained));
+    }
+    let next = Progress {
+        song_ns: 10,
+        hits: 7,
+        misses: 2,
+        combo: 1,
+        max_combo: 4,
+    };
+    validate_progress(Some(first), next).unwrap();
+    hud.update_peer(1, &peer_words(next)).unwrap();
+    hud.update_peer(2, &[]).unwrap();
+    let closed = hud.snapshot().unwrap().clone();
+    assert!(hud.update_peer(1, &peer_words(next)).is_err());
+    assert_eq!(hud.snapshot(), Some(&closed));
+    hud.update_peer(3, &[]).unwrap();
+    let stopped = hud.snapshot().unwrap().clone();
+    assert!(hud.update_peer(2, &[]).is_err());
+    assert_eq!(hud.snapshot(), Some(&stopped));
+    hud.mark_peer_failed();
+    assert!(hud.peer_failed());
+    assert!(!hud.failed());
+    assert!(hud.snapshot().is_none());
+    assert!(hud.update_peer(3, &[]).is_err());
+}
+
+#[test]
+fn saved_prefix_and_peer_hud_share_the_common_view_but_neither_failure_can_erase_the_other() {
+    let (source, header, bytes) = recording(false);
+    let mut opponents = saved(header);
+    opponents
+        .add(&source, &bytes, OpponentKind::Own, "own prefix")
+        .unwrap();
+    opponents.advance_to(ts(HIT)).unwrap();
+    let peer = Progress {
+        song_ns: -1,
+        hits: 9007199254740993,
+        misses: 7,
+        combo: 1,
+        max_combo: 42,
+    };
+    let mut hud = SavedOpponentHud::default();
+    hud.update(&opponents).unwrap();
+    hud.update_peer(1, &peer_words(peer)).unwrap();
+    let combined = hud.snapshot().unwrap().clone();
+    assert_eq!(combined.ghosts[0].hits, 1);
+    assert_eq!(combined.network.as_ref().unwrap().progress, Some(peer));
+    #[cfg(feature = "graphics")]
+    {
+        let mut scene = Scene::new(960, 720);
+        competition_scoreboard(
+            &mut scene,
+            &ScoreSummary::default(),
+            hud.snapshot().unwrap(),
+        )
+        .unwrap();
+        assert!(!scene.rectangles().is_empty());
+        assert_eq!(hud.snapshot(), Some(&combined));
+    }
+    opponents.reset();
+    hud.update(&opponents).unwrap();
+    assert_eq!(hud.snapshot().unwrap().network, combined.network);
+    hud.mark_failed();
+    assert!(hud.failed());
+    assert!(!hud.peer_failed());
+    assert!(hud.snapshot().unwrap().ghosts.is_empty());
+    assert_eq!(hud.snapshot().unwrap().network, combined.network);
+    assert!(hud.update(&opponents).is_err());
+    hud.update_peer(2, &[]).unwrap();
+    assert_eq!(
+        hud.snapshot().unwrap().network.as_ref().unwrap().progress,
+        Some(peer)
+    );
+    let mut peer_failed = SavedOpponentHud::default();
+    opponents.advance_to(ts(HIT)).unwrap();
+    peer_failed.update(&opponents).unwrap();
+    peer_failed.update_peer(1, &peer_words(peer)).unwrap();
+    peer_failed.mark_peer_failed();
+    assert!(peer_failed.peer_failed());
+    assert!(!peer_failed.failed());
+    assert!(peer_failed.snapshot().unwrap().network.is_none());
+    assert_eq!(peer_failed.snapshot().unwrap().ghosts, combined.ghosts);
+    assert!(peer_failed.update_peer(3, &[]).is_err());
+    opponents.reset();
+    peer_failed.update(&opponents).unwrap();
+    assert_eq!(peer_failed.snapshot().unwrap().ghosts[0].hits, 0);
+    peer_failed.mark_failed();
+    assert!(peer_failed.snapshot().is_none());
+    assert_eq!(opponents.encoded_bytes(), bytes.len());
+    assert_eq!(opponents.song_time(), None);
 }
 
 #[test]

@@ -151,6 +151,8 @@ async function workerHarness(options = {}) {
       assert.equal(this.frees, 0);
       calls.push(["disable-opponent-hud"]);
     }
+    update_peer_hud() { assert.fail("Preview and solo fixtures must not publish peer HUD state"); }
+    disable_peer_hud() { assert.fail("Preview and solo fixtures must not own peer HUD state"); }
     configure_capture(...limits) { calls.push(["capture", ...limits]); }
     sample_count() { return options.sampleCount ?? 0; }
     next_sample() { return undefined; }

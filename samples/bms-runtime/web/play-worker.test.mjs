@@ -183,6 +183,8 @@ async function workerHarness(options = {}) {
       this.saved = [];
       this.savedReads = 0;
       this.hudDisables = 0;
+      this.peerUpdates = [];
+      this.peerDisables = 0;
       this.samples = [
         { id: 19n, rate: 44100, pcm: new Float32Array([0.25, -0.25, 0.5, -0.5]) },
         { id: 18446744073709551615n, rate: 96000, pcm: new Float32Array([1, -1]) },
@@ -250,6 +252,16 @@ async function workerHarness(options = {}) {
     disable_saved_opponent_hud() {
       this.live(); this.hudDisables++; this.calls.push(["disable-opponent-hud"]);
       if (options.disableSavedError) throw new Error(options.disableSavedError);
+    }
+    update_peer_hud(status, words) {
+      this.live(); assert.equal(this.stops, 0, "disposed gameplay cannot receive HUD writes");
+      assert.ok(words instanceof Uint32Array);
+      this.peerUpdates.push({ status, words: words.slice() });
+      options.peerUpdate?.(this, status, words);
+    }
+    disable_peer_hud() {
+      this.live(); this.peerDisables++;
+      if (options.disablePeerError) throw new Error(options.disablePeerError);
     }
     sample_count() { this.live(); return this.samples.length; }
     configure_capture(...limits) {
@@ -321,6 +333,8 @@ async function workerHarness(options = {}) {
   }
   if (options.missingSectionConstructor) BrowserGame.new_section = undefined;
   if (options.missingDisableSavedHud) BrowserGame.prototype.disable_saved_opponent_hud = undefined;
+  if (options.missingPeerUpdate) BrowserGame.prototype.update_peer_hud = undefined;
+  if (options.missingPeerDisable) BrowserGame.prototype.disable_peer_hud = undefined;
   if (options.missingPhysicalConstructor) BrowserGame.new_physical = undefined;
   if (options.missingInputBlob) BrowserGame.prototype.input_blob = undefined;
   if (options.missingContactConstructor) BrowserGame.new_physical_contact = undefined;
@@ -456,6 +470,11 @@ async function workerHarness(options = {}) {
     async expireNetwork() {
       const entry = [...timers].find(([id]) => timerDelays.get(id) === 2000);
       assert.ok(entry, "expected finite final drain deadline");
+      timers.delete(entry[0]); timerDelays.delete(entry[0]); entry[1](); await flushJobs();
+    },
+    async runTimer(delay) {
+      const entry = [...timers].find(([id]) => timerDelays.get(id) === delay);
+      assert.ok(entry, `expected controlled ${delay} ms callback`);
       timers.delete(entry[0]); timerDelays.delete(entry[0]); entry[1](); await flushJobs();
     },
     of(kind) { return messages.filter(value => value.kind === kind); },
@@ -2003,9 +2022,98 @@ test("replay rejects live steps and preserves output/ACK failures without invent
 
 const multiplayer = () => ({ url: "https://example.test:4433/competition", host: true, windowOriginNs: 9000000000n });
 
+test("peer progress updates only the Worker HUD, coalesces actual prefixes and retains final arrivals across gameplay disposal", async () => {
+  for (const lateFinal of [false, true]) {
+    const h = await activeNetwork(), owner = h.networks[0], game = h.games[0];
+    assert.deepEqual(game.peerUpdates[0], { status: 0, words: new Uint32Array() });
+    owner.emit({ kind: "connected" });
+    const peer = { songNs: -1n, hits: 18446744073709551615n, misses: 0n, combo: 0n, maxCombo: 1n };
+    owner.emit({ kind: "progress", ...peer });
+    const progressUpdates = () => game.peerUpdates.filter(value => value.words.length === 10);
+    assert.equal(progressUpdates().length, 1);
+    assert.deepEqual(Array.from(progressUpdates()[0].words), [4294967295, 4294967295, 4294967295, 4294967295, 0, 0, 0, 0, 1, 0]);
+    owner.emit({ kind: "progress", ...peer, songNs: 0n });
+    owner.emit({ kind: "progress", ...peer, songNs: 604800000000001n });
+    assert.equal(progressUpdates().length, 1, "rapid prefixes retain one latest pending display value");
+    h.setNetworkNow(1250); await h.runTimer(250);
+    assert.equal(progressUpdates().length, 2);
+    const latest = progressUpdates().at(-1).words;
+    assert.equal((BigInt(latest[1]) << 32n) | BigInt(latest[0]), 604800000000001n);
+    const final = { ...peer, songNs: 604800000000002n };
+    if (!lateFinal) {
+      owner.emit({ kind: "final-progress", ...final });
+      assert.equal(progressUpdates().length, 3, "a genuine final prefix bypasses the display cadence");
+    }
+    assert.equal(h.of("play-multiplayer").filter(value => ["progress", "final-progress"].includes(value.event.kind)).length, 0);
+    await h.send({ kind: "play-stop", playId: 7 });
+    assert.equal(game.frees, 1); assert.equal(owner.submissions.length, 1);
+    assert.equal(h.of("play-stopped").length, 0);
+    const afterFree = game.peerUpdates.length;
+    if (lateFinal) owner.emit({ kind: "final-progress", ...final });
+    assert.equal(game.peerUpdates.length, afterFree, "raw final evidence may arrive after Rust HUD ownership ended");
+    owner.submissions[0].gate.resolve(); await flushJobs();
+    assert.equal(owner.ackCalls, 1); assert.equal(h.of("play-stopped").length, 0);
+    owner.emit({ kind: "final-acknowledged" }); owner.ack.resolve(); await flushJobs();
+    const receipt = h.of("play-stopped").at(-1);
+    assert.equal(receipt.multiplayer.finalWritten, true); assert.equal(receipt.multiplayer.finalAcknowledged, true);
+    assert.equal(receipt.multiplayer.error, null);
+    assert.deepEqual(receipt.multiplayer.peer, { status: "stopped", progress: final, final: true, error: null });
+    assert.equal(game.peerDisables, 0); assertReleased(h);
+    const messages = h.messages.length;
+    owner.emit({ kind: "progress", ...peer }); await flushJobs();
+    assert.equal(h.messages.length, messages); assert.equal(game.peerUpdates.length, afterFree);
+  }
+});
+
+test("peer display failure is isolated from saved comparisons, local capture and genuine network final acknowledgements", async () => {
+  for (const capability of ["missingPeerUpdate", "missingPeerDisable"]) {
+    const refused = await catalogWorker({ [capability]: true });
+    await refused.send(startRequest({ multiplayer: multiplayer() }));
+    assert.ok(refused.of("play-reply").at(-1).error); assert.equal(refused.games.length, 0);
+    assert.equal(refused.preparedOwners.at(-1).frees, 1); assert.equal(refused.networkSessions.length, 0);
+    await refused.send(startRequest({ playId: 8 }));
+    assert.equal(refused.of("play-reply").at(-1).result.kind, "prepared");
+    await refused.send({ kind: "play-stop", playId: 8 });
+    assert.equal(refused.games[0].peerUpdates.length, 0);
+  }
+  const selected = replayFile();
+  const h = await activeNetwork({ disablePeerError: "peer hide failed",
+    peerUpdate(game, status, words) { if (words.length) throw new Error("actual peer display failed"); },
+    startRequest: startRequest({ multiplayer: multiplayer(), recordReplay: true,
+      opponents: [{ file: selected.file, sourceKey: "file:1", own: true, label: "own" }] }) });
+  const owner = h.networks[0], game = h.games[0]; owner.emit({ kind: "connected" });
+  const first = { songNs: -1n, hits: 5n, misses: 0n, combo: 5n, maxCombo: 5n };
+  owner.emit({ kind: "progress", ...first });
+  const notices = () => h.of("play-multiplayer").filter(value => value.event.kind === "peer-display-unavailable");
+  assert.equal(notices().length, 1); assert.match(notices()[0].event.error, /actual peer display failed.*peer hide failed/);
+  assert.equal(game.peerDisables, 1); assert.equal(owner.closes, 0); assert.equal(game.stops, 0);
+  const final = { ...first, songNs: 604800000000001n, hits: 6n, combo: 6n, maxCombo: 6n };
+  owner.emit({ kind: "final-progress", ...final });
+  h.setNetworkNow(1600); await h.send(step({ watermark: 2600000000n }));
+  assert.equal(h.of("play-step-done").length, 1); assert.equal(game.savedReads, 1);
+  assert.equal(game.hudDisables, 0); assert.equal(h.of("play-error").length, 0); assert.equal(notices().length, 1);
+  owner.submissions[0].gate.resolve(); await flushJobs();
+  await h.send({ kind: "play-stop", playId: 7 });
+  assert.equal(game.frees, 1); owner.submissions.at(-1).gate.resolve(); await flushJobs();
+  owner.emit({ kind: "final-acknowledged" }); owner.ack.resolve(); await flushJobs();
+  const receipt = h.of("play-stopped").at(-1);
+  assert.deepEqual(receipt.multiplayer.peer.progress, final); assert.equal(receipt.multiplayer.peer.final, true);
+  assert.match(receipt.multiplayer.peer.error, /actual peer display failed/);
+  assert.equal(receipt.multiplayer.finalWritten, true); assert.equal(receipt.multiplayer.finalAcknowledged, true);
+  assert.equal(receipt.multiplayer.error, null); assert.equal(receipt.savedOpponents.error, null);
+  assert.equal(receipt.savedOpponents.opponents[0].label, "own");
+  assert.ok(receipt.replay instanceof Uint8Array); assert.equal(receipt.replayError, null);
+  assert.equal(receipt.replayComplete, false); assertReleased(h);
+  await h.send(startRequest({ playId: 8 }));
+  const count = h.messages.length; owner.emit({ kind: "final-progress", ...final });
+  owner.disconnect(new Error("old callback")); await flushJobs();
+  assert.equal(h.messages.length, count); assert.equal(h.games[1].peerUpdates.length, 0);
+  await h.send({ kind: "play-stop", playId: 8 });
+});
+
 async function preparedNetwork(options = {}) {
   const h = await started({ ...options, allowNetworkClock: true,
-    startRequest: startRequest({ multiplayer: multiplayer() }) });
+    startRequest: options.startRequest ?? startRequest({ multiplayer: multiplayer() }) });
   while ((await h.rpc("play-sample")).result.kind !== "samples-end") {}
   for (;;) {
     const value = (await h.rpc("play-commands")).result;
@@ -2025,6 +2133,7 @@ async function activeNetwork(options = {}) {
   const h = await preparedNetwork(options);
   const rpcId = await requestNetwork(h);
   const owner = h.networks[0];
+  owner.emit({ kind: "connected" }); owner.emit({ kind: "ready" });
   owner.emit({ kind: "start", targetNs: 500000000n, songTargetNs: 600000000n, uncertaintyNs: 4n });
   await flushJobs();
   const reply = h.of("play-reply").find(value => value.rpcId === rpcId);
@@ -2100,9 +2209,10 @@ test("actual score cadence stays bounded and remote or disconnected state never 
   const peer = { songNs: -1n, hits: 18446744073709551615n, misses: 0n, combo: 0n, maxCombo: 1n };
   owner.emit({ kind: "progress", ...peer });
   owner.emit({ kind: "progress", ...peer, songNs: 0n });
-  assert.equal(h.of("play-multiplayer").filter(value => value.event.kind === "progress").length, 1);
+  assert.equal(h.of("play-multiplayer").filter(value => value.event.kind === "progress").length, 0);
   owner.emit({ kind: "final-progress", ...peer, songNs: 1n });
-  assert.equal(h.of("play-multiplayer").at(-1).event.kind, "final-progress");
+  assert.equal(h.of("play-multiplayer").filter(value => value.event.kind === "final-progress").length, 0);
+  assert.ok(game.peerUpdates.some(update => update.words.length === 10));
   assert.equal(game.score.hits, 18n);
   owner.disconnect(new Error("actual transport lost"));
   assert.match(h.of("play-multiplayer").at(-1).event.error, /transport lost/);
@@ -2131,7 +2241,9 @@ test("stop frees gameplay immediately but reports final write and peer ACK as se
   assert.equal(owner.ackCalls, 1);
   assert.equal(h.of("play-stopped").length, 0, "local write alone cannot claim final application ACK");
   owner.emit({ kind: "final-acknowledged" }); owner.ack.resolve(); await flushJobs();
-  assert.deepEqual(h.of("play-stopped")[0].multiplayer, { finalWritten: true, finalAcknowledged: true, error: null });
+  const outcome = h.of("play-stopped")[0].multiplayer;
+  assert.equal(outcome.finalWritten, true); assert.equal(outcome.finalAcknowledged, true); assert.equal(outcome.error, null);
+  assert.equal(outcome.peer.progress, null); assert.equal(outcome.peer.final, false);
   assert.equal(owner.config.signal.aborted, true);
   assert.equal(owner.closes, 1); assert.equal(h.networkSessions[0].frees, 1);
   assertReleased(h);
