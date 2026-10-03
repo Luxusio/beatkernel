@@ -75,8 +75,8 @@ The host now contains a playable start/stop source path through the common
 Runtime and separate AudioWorklet Mixer. The bounded native presentation
 observer is reused for continuous input-transport correction. Optional shared
 capture/export, local replay viewing and explicit saved-record catalog are
-source-integrated. Browser competition and network transport remain follow-on
-work. Source integration does not complete or validate the requested player.
+source-integrated. Explicit live WebTransport Play is source-integrated;
+the compatible HTTP/3 service and ranked browser competition remain follow-on work. Source integration does not complete or validate the requested player.
 
 ## Known ceiling
 
@@ -167,7 +167,8 @@ nonblocking shared SoloRuntime and bounded input/audio message ownership.
 Actual getOutputTimestamp pairs feed the existing native presentation
 discipline. Optional common capture exports canonical replay bytes. Local
 replay playback reuses the output host, with explicit saved-record selection.
-Browser competition/networking remain unfinished. Browser input timestamps use
+Live browser networking is source-integrated; its compatible service and ranked
+competition remain unfinished. Browser input timestamps use
 the originating Window performance domain; Worker and Window origins are not
 implicitly equal. Physical keyboards cannot be distinguished by DOM key events.
 The full player Goal remains open, with generated bindings, processor execution,
@@ -252,8 +253,9 @@ and outstanding steps/audio batch join, then uses the same bounded stop/disposal
 handshake. A manual stop, cancellation or failure does not become a natural
 finish. A browser without usable output timestamp evidence keeps manual Stop
 available and cannot claim natural completion. Replay playback and explicit
-record storage use separate owners below. Browser competition/networking remain
-unfinished; this acceptance contract is not evidence that source was executed.
+record storage use separate owners below. Live multiplayer uses the shared
+session, with compatible HTTP/3 service and ranked competition unfinished; this
+acceptance contract is not evidence that source was executed.
 
 A gameplay disposal error during completion or manual stop is retained as a
 cleanup failure. The Window terminates that Worker and requires reload before
@@ -387,3 +389,42 @@ Signed replay/preroll readout shall format one sign and the absolute exact
 nanosecond magnitude, including negative subsecond time and i64 minimum.
 Preview time admission shall remain nonnegative. Browser storage, binding,
 audio and authored fixture execution remain deferred until scheduled.
+
+
+## Explicit live multiplayer and output start
+
+Solo Play shall remain the default automatic audio path. An explicit live-only
+multiplayer option shall accept a bounded HTTPS WebTransport endpoint and host
+proposal/join role. Replay shall stay local. No selected assets or raw keyboard
+events shall be uploaded. A compatible HTTP/3 server and trusted certificate
+are required externally; the native raw QUIC listener is not that endpoint.
+
+The Worker shall derive exact setup identity from its actual pristine BrowserGame
+and use the existing shared Rust session through BrowserMultiplayerOwner. It
+shall open the connection and request readiness only after actual sample import,
+audio finalization and initial command acknowledgements. It shall translate the
+committed elapsed target using explicit Worker/Window performance time origins;
+wall-clock Date.now, receipt timestamps and guessed origins are not substitutes.
+
+A fresh bracketed audio clock shall project the committed Window target onto
+one immutable output frame, rounded upward. Game activation shall receive the
+same host origin projected from that frame. At least 100 ms of preparation lead
+and at most 100 ms combined peer/bracket uncertainty shall be required. Missed
+activation shall fail setup instead of choosing a different start. Browser clock
+coarsening and physical output latency remain measurement limitations; source
+integration does not guarantee acoustic synchronization.
+
+Actual local cumulative song/score/max-combo getters shall produce bounded
+progress updates, with at most one pending submission and no network operations
+in input/audio callback threads. Remote self-reported scores shall appear
+separately and shall neither replace local judgment nor claim ranked authority.
+Pre-start network failures shall fail preparation. During active play, network
+loss shall remain visible while local gameplay continues.
+
+Stop shall invalidate the gameplay owner before disposing it, retain actual
+readable score and replay prefix, and attempt a final progress write and genuine
+peer application ACK under one finite two-second cleanup deadline. Audio stop
+shall not abort that independent network drain. Missing ACK or network loss shall
+be labelled explicitly; a local write is not a peer receipt. All stale callbacks
+and timers shall remain fenced from later sessions. Browser/network/audio QA and
+fixture execution remain deferred; the persistent player task stays open.

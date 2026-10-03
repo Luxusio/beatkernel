@@ -80,7 +80,7 @@ canonical replay bytes after cleanup. Portable stepped replay and WASM
 preparation/render bindings reuse the existing replay audio and visual owners.
 Window/Worker replay launch uses the same audio host and recorded seed/section.
 Explicit saved-record browsing/storage feeds that replay path. Competition
-against browser records and browser networking remain unfinished.
+against browser records remains unfinished; live WebTransport Play is source-integrated.
 See the [browser host instructions](samples/bms-runtime/web/README.md).
 Browser source compilation does not establish playable browser behavior.
 
@@ -113,14 +113,15 @@ software start agreement and exact complete-write receipt IDs. Native QUIC
 delegates these transitions to it; connection and timeout ownership stay in the
 transport adapter.
 Callable browser WASM session bindings and a bounded WebTransport stream adapter
-are also provided as source components. Browser gameplay/UI wiring and the
-compatible HTTP/3 service remain unfinished.
+are also provided as source components and used by explicit live browser Play.
+The compatible HTTP/3 service remains unfinished.
 Browser gameplay can derive the same canonical identity without recording,
 and a controller composes the shared WASM session with the byte channel. It
 retains one pending submission and distinguishes local writes from final peer
-ACKs. Existing Play controls and audio start mapping still need integration.
-WebTransport requires its own compatible HTTP/3 server integration and remains
-unfinished. QUIC socket/TLS execution is still deferred.
+ACKs. Play controls now map the committed target onto one output frame and
+activate gameplay on that frame's host projection. WebTransport still requires
+a compatible HTTP/3 service; network/browser execution remains deferred.
+QUIC socket/TLS execution is still deferred.
 Use an explicit reachable IP for another machine. Network loss leaves local
 play running; remote progress is self-reported. A committed software start does
 not establish physical audio synchronization across devices.
@@ -298,8 +299,9 @@ pairs feed bounded continuous transport correction through the native shared
 observer. Optional canonical replay export uses the common capture owner.
 Portable stepped replay and WASM preparation/render bindings are source-integrated;
 browser replay launch now reuses the audio host. Explicit saved-record storage
-and selection are source-integrated; browser competition and networking remain
-follow-on work. See the
+and selection are source-integrated. Explicit live multiplayer uses the shared
+session and WebTransport in the Play host; the compatible HTTP/3 service and
+ranked competition remain follow-on work. See the
 [browser build and usage instructions](samples/bms-runtime/web/README.md) and
 [browser contract](doc/kernel/REQ__bms-browser.md). Generated bindings and actual
 browser/GPU execution remain unverified. Check the reusable graphics library with:
@@ -983,3 +985,12 @@ Native playback, permissions and physical synchronization remain unverified.
 ```sh
 cargo run -p beatkernel-bms-runtime --bin macos_bms -- --help
 ```
+
+
+The browser player also has an explicit live multiplayer source path using
+WebTransport and the shared BKMP v6 session. It waits for actual local audio
+preparation, applies one committed output start to audio and gameplay, and keeps
+peer-reported scores separate from local judgment. Solo and replay remain local.
+A compatible HTTP/3 pairing service, generated browser bindings and actual
+network/audio execution remain unfinished or unverified; see the
+[browser host](samples/bms-runtime/web/README.md#multiplayer-live-play).

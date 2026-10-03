@@ -15,9 +15,10 @@ QUIC. Its common session owner composes setup matching and software start
 agreement, with bounded events and exact complete-write receipt IDs. Native
 QUIC already delegates those transitions to the common owner. Callable
 `BrowserMultiplayer` WASM bindings and `multiplayer-transport.mjs` provide the
-session and WebTransport stream boundaries. Their integration into the existing
-Window/Worker Play flow and a compatible HTTP/3 service remains
-unfinished; Play does not open a multiplayer connection.
+session and WebTransport stream boundaries. The Window/Worker live Play source path now creates those owners after
+local audio preparation, maps the committed start onto the actual output grid
+and publishes genuine score summaries. A compatible HTTP/3 service remains
+unfinished; this path has not been executed.
 
 The DOM owns file selection, controls and layout. A dedicated module Worker owns
 the imported bytes, preparation and wgpu rendering on a transferred
@@ -29,8 +30,8 @@ scripts. Existing retained note instances and BGA texture caching are reused.
 `BrowserMultiplayer` owns the shared Rust session. Its constructor takes exact
 canonical setup bytes, a host/join role and actual preroll. `with_policy` exposes
 the software start bounds. `WebTransportChannel.open` in
-`multiplayer-transport.mjs` owns the browser stream. These components are not yet
-called by the existing Play flow.
+`multiplayer-transport.mjs` owns the browser stream. Explicit live multiplayer
+Play calls these components after samples and initial audio commands are acknowledged.
 
 `BrowserGame.competition_identity()` derives those bytes from the actual pristine
 gameplay judge and resolved chart seed without configuring capture. The
@@ -40,8 +41,8 @@ BigInt nanoseconds on the caller's host clock; the owner's `origin` maps elapsed
 software targets back to that same coordinate system. `request_ready` follows
 actual preparation. `submit(progress, finalPrefix)` resolves a complete local
 write, while `wait_final_ack` observes the separate final application ACK.
-One submission and one final waiter are permitted. The Window/Worker Play flow
-still needs to instantiate and integrate this owner.
+One submission and one final waiter are permitted. The Worker instantiates
+this owner for explicit multiplayer live Play; solo and replay remain local.
 
 An integrating owner requests readiness after preparation, reads at most
 `needed_bytes()` using `readPrefix`, then passes that bounded prefix to
@@ -58,8 +59,9 @@ The channel allows one read and one write together, with finite deadlines.
 Read prefixes and writes are limited to 65,547 bytes; received chunks and their
 retained backing buffers to 1 MiB. Empty chunks are skipped at most 16 times.
 Cancellation and remote closure fence late completions. No peer application ACK
-is inferred from a local write. A compatible HTTPS HTTP/3 service and actual
-gameplay/UI integration are still required.
+is inferred from a local write. A compatible HTTPS HTTP/3 service remains
+required; actual generated bindings, browser/network/audio and host fixtures
+have not been executed.
 
 ## Build and serve
 
@@ -167,8 +169,8 @@ review/QA remain deferred; the full player task stays open.
 The separate `browser-audio` feature exports the existing Rust Mixer through a
 numeric ABI for `audio-worklet.js`. It belongs to the same application crate
 and excludes graphics. The Play controls connect the component to common gameplay and keyboard input.
-Optional capture/download and replay use the same host; browser network play
-remains separate work.
+Optional capture/download and replay use the same host. Explicit live multiplayer
+uses its committed output start; the compatible HTTP/3 service remains separate work.
 
 When execution is scheduled, build and generate this artifact separately from
 the graphics bindings above. Each Cargo build replaces the common output WASM,
@@ -263,7 +265,8 @@ or an accuracy guarantee. Optional shared capture and replay download are
 source-integrated. Portable stepped replay and WASM preparation/render bindings
 reuse canonical recorded work and existing audio planning. Window/Worker replay
 launch reuses the same audio host. Explicit saved-record storage/browsing feeds
-the replay path; browser competition and networking remain unfinished.
+the replay path. Live WebTransport Play is source-integrated; its compatible
+service and ranked browser competition remain unfinished.
 
 Natural completion uses the existing shared SongCompletion owner. Every original
 object must finish judging; BGM and outgoing/local command work must finish;
@@ -325,7 +328,8 @@ replacement/page hiding and after at most 60 seconds. Stopped capture extraction
 is a single encoding attempt; serialization failure remains explicit and does
 not hide game cleanup failure. Local replay import/playback is source-integrated;
 Explicit saved-record storage/browsing feeds that replay path; browser
-competition and network opponents remain follow-on work. Source checks and authored fixtures
+record competition remains follow-on work; live network summaries are source-integrated.
+Source checks and authored fixtures
 do not establish that a browser download or replay ran.
 
 ## Replay runtime components
@@ -397,3 +401,36 @@ downloads remain useful. Stored complete/prefix labels are display metadata and
 do not authenticate a recording or prove it matches selected assets. Browser
 competition against saved records remains separate work. Storage/host fixtures
 are authored but unexecuted, and no IndexedDB/browser/audio behavior is verified.
+
+
+## Multiplayer live Play
+
+Leave **Multiplayer live play** unchecked for the usual solo path. To use the
+source integration, enable it and supply a compatible HTTPS WebTransport URL.
+Select **Propose start** for one participant and **Join start** for the other.
+Prepare the same chart/seed and matching gameplay/output setup on both sides.
+The URL needs a trusted certificate and an HTTP/3 service that pairs two BKMP v6
+streams; the native raw QUIC listener is not a WebTransport server. That service
+and actual interoperability are still unfinished. Selecting multiplayer never
+uploads chart assets or raw keyboard events. Replay remains local even while
+this option is selected.
+
+Audio resumes within the original Play gesture. Samples and initial commands
+finish first; only then does the Worker create the actual multiplayer session
+from BrowserGame's canonical setup identity and request readiness. The agreed
+elapsed target maps through explicit Worker/Window performance time origins.
+A fresh bracketed audio clock rounds upward to one output frame and its host
+projection is used for both AudioHost.arm and BrowserGame.activate. Insufficient
+lead, excessive uncertainty, an already-rendered frame or missed activation
+fails preparation instead of silently choosing another start. Software clocks
+and device output latency still limit physical synchronization.
+
+A separate readout labels the peer's self-reported counters. They do not replace
+local judgment or establish ranked results. During active play, connection loss
+leaves local gameplay running. Stop disposes gameplay first, then attempts the
+actual final score prefix and separate peer application ACK within a two-second
+network drain. Missing ACK is reported separately from local-write success;
+network errors do not relabel a genuine locally completed recording as a prefix.
+The page's HTTPS connection policy allows the explicitly selected server.
+Source fixtures and compile-only checks are preparation for later validation,
+not evidence of browser playback or multiplayer execution.
