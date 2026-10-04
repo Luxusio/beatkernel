@@ -983,3 +983,49 @@ room acceptance. Admission-only browser/native adapters still need migration to
 RoomPlayClient, actual committed output activation and progress/final ACKs. TLS,
 browser/native interoperability, physical synchronization and performance remain
 unverified under the user's execution deferral.
+
+
+## Browser room client committed-start bridge
+
+BrowserRoomClient uses the common RoomPlayClient. Its existing two-argument
+constructor retains zero preroll; explicit new_with_start(identity, players,
+preroll_ns) supplies actual local preparation preroll with the common default
+StartPolicy. The gameplay Worker uses the explicit constructor and its genuine
+100 ms preparation configuration, never a missing-field fallback. WASM exposes
+receive_bytes(bytes, captured_ns, processing_ns), next_write(processing_ns),
+written(id, completed_ns, processing_ns) and take_start(), with exact BigInt
+nanoseconds and existing bounded prefix/owned-frame rules. Only accepted
+Admitted/Snapshot metadata changes advance the snapshot revision; control frames
+do not republish an unchanged roster. Local request-state refusals remain
+recoverable, while decoder/protocol/transport failure fences ownership.
+
+BrowserRoomOwner requires an actual monotonic clock provider, captures one
+immutable origin before transport acquisition and gives the common client
+elapsed observations relative to that origin. Capture read-prefix/write API
+fulfillment time before subsequent actor work; processing time is separate.
+Every genuine read/full-write event wakes the bounded writer. No periodic timer
+pumps probes. A valid start DTO is delivered once through onStart(schedule,
+origin_ns) only from actual common Commit/write evidence. Valid schedule fields
+remain full-width BigInts; retained published values must not be caller mutable.
+A fixed Prepared handshake timeout starts once on actual Prepared observation
+and ends only on a committed schedule or joined close. All pending transport
+API promises and read/write loops remain joined, with each WASM handle freed once.
+
+Worker play-room-open requires the actual Window performance clock origin as
+windowOriginNs and retains it for that one room attempt. Translate the committed
+local schedule by owner_origin minus window_origin, verify the actual 100 ms
+preroll, and publish play-room start with targetHostNs/songTargetHostNs and
+uncertaintyNs. Schedule callbacks before asynchronous open returns must retain
+the same admitted owner/context. Leave, failure, stop, or stale callbacks cannot
+revive the attempt or authorize output. Room preparation RPC responses remain
+queueing evidence; only the committed-start event establishes a schedule.
+
+play-activate may use a room only with the same live committed target and a
+genuine future output-frame-aligned host start, within the existing one-frame
+rounding bound. Reuse the existing direct-audio ACK/preparation and common game
+activation checks. Preserve original Window input/output clock provenance and
+Worker rendering ownership. An absent, stale, mismatched or already-used start
+is a refusal. This adds synchronized start source integration; Page lobby,
+participant progress/final ACKs, native timed drivers and actual browser/audio
+interoperability remain required. No performance/runtime acceptance is inferred
+from JavaScript fixtures or source compilation.

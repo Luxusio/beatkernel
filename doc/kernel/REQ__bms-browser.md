@@ -959,8 +959,8 @@ rules; recoverable local request refusals do not destroy prepared gameplay.
 Ready requires the live direct command endpoint and actual audio preparation
 acknowledgement and remains distinct
 from output activation. Neither Frozen nor Prepared authorizes a synchronized
-start by itself. Refuse output activation until a true multi-host start protocol
-is composed, rather than treating a room roster as a bilateral start schedule.
+start by itself. Only the actual committed-start bridge below may authorize
+output activation; a room roster cannot substitute for a software schedule.
 
 Failed owner opening also joins its channel acquisition and any acquired channel
 read/write API continuations before rejecting, because no public owner handle is
@@ -974,8 +974,9 @@ and frees the locally held WASM handle once. Leave confirms only local complete
 write and still joins cleanup; no remote acknowledgement is inferred.
 
 This integration prepares the actual Worker lifecycle for the later page lobby
-and multi-host clock/start/progress/final-ACK composition. Do not expose a page
-start action that fabricates synchronization or claims these unfinished parts
+and multi-host gameplay progress/final-ACK composition. The committed-start
+bridge below adds clock/start source integration. Do not expose a page start
+action that fabricates synchronization or claims these unfinished parts
 are playable. Source fixtures are authored for deferred execution.
 
 ## Explicit live multiplayer and output start
@@ -1714,3 +1715,30 @@ geometry preserves the page and old routing; invalid visibility is a protocol
 failure. Playback uses already bound recorded events, preserving the original
 live spatial decision. Source/compile and deferred fixtures are not browser
 execution or measured latency evidence.
+
+
+## Prepared room committed-start integration
+
+The gameplay Worker uses BrowserRoomClient's explicit preroll constructor backed
+by RoomPlayClient and the actual BrowserRoomOwner monotonic clock/receipt owner.
+A room open request supplies the original Window performance clock origin; keep
+it fixed for the attempt. Actual common Commit evidence produces one translated
+start event using the owner origin and real 100 ms local preparation preroll.
+Only the same live, future output-frame-rounded target permits play-activate,
+with existing direct-audio ACK and game activation checks. Prepared snapshots
+and readiness RPC queueing alone remain insufficient. Failure, Leave, stop,
+stale owners and mismatched targets cannot authorize output activation.
+
+Clock probes and committed schedule processing stay on Worker. Window receives
+only event-driven room/schedule DTOs and retains browser-required output/input
+clock acquisition; no per-frame gameplay HUD or rendering returns to Window.
+Original read/full-write observations remain distinct from monotonic processing
+time in the common client. No timer polls progress; actual control reads wake
+the one bounded writer. Owner cleanup joins tracked API continuations and loops,
+and Prepared handshake expiry is fixed until real committed schedule evidence.
+
+This source bridge does not establish Page lobby, participant progress/final ACK,
+native drivers, generated binding compatibility, browser execution or physical
+audio/performance acceptance. Natural completion and disconnect policy for
+fully competing multi-host gameplay remain required; do not present a closed
+room or local full write as remote application acknowledgement.
