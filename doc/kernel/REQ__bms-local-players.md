@@ -126,8 +126,9 @@ Pending ACK never stops judging; partial or rejected ACK fences the whole owner
 and retains the real admitted prefix without replaying its tail. Source/compile
 and authored fixtures are not runtime acceptance. Browser bindings and Worker
 renderer integration, page assignment and per-member record callers are
-implemented in source; per-member comparisons, active-contact page remapping
-and browser acceptance remain requirements.
+implemented in source, including per-member saved comparisons. Local network
+competition, active-contact page remapping and browser acceptance remain
+requirements.
 
 Player IDs survive roster growth and shrink for retained members. A solo roster
 uses automatic input and clears previous explicit assignments. Each member of
@@ -306,7 +307,28 @@ devices and listeners. A cleanup failure prevents further playback until reload.
 Each captured member has an independent validated replay, completion label,
 score and export error. The page must offer explicit member selection for
 download or library save, retaining other valid prefixes when one export fails.
-Local playback must explicitly refuse unsupported network/saved-opponent
-combinations before acquiring audio. Page changes remain subject to Worker's
+Local playback must explicitly refuse unsupported network combinations and
+invalid saved-record targets before acquiring audio. Page changes remain subject to Worker's
 active-contact routing restriction. Authored fixtures and source inspections
 are preparation for deferred browser acceptance, not execution evidence.
+
+### Browser local saved-record competition
+
+Each selected saved record in local play must name an actual stable member ID.
+One record belongs to one comparison target; never implicitly duplicate records
+across all members or choose the first member. Keep the existing aggregate eight
+record and 64 MiB limits across the whole local session. Own/Other and labels
+remain display choices. The target member's pristine competition header admits
+compatibility; comparison advances only through that member's actual song
+frontier. Saved judging never changes live judgment, captures or shared audio.
+
+Worker owns saved-prefix advancement and retained per-member HUD snapshots.
+Final results preserve each record's member ownership and independent comparison
+failure. A failed member comparison disables only its own HUD and retains other
+members' results. Removed or unknown member targets refuse before consuming
+preparation. Solo keeps its existing untargeted comparisons; targeted local
+selections must be explicitly reassigned or cleared before solo playback.
+Reserve each member's comparison space after admission and before contact setup.
+Rendering and touch routing use the same shifted field bounds. Keep that space
+after a HUD failure; a disappearing comparison must never move a live touch lane.
+Actual browser/device/runtime acceptance remains deferred.

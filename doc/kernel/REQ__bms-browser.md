@@ -73,9 +73,10 @@ shared completion. Direct port ownership, chronology, stale callbacks and joined
 cleanup keep their existing barriers.
 
 Known ceiling: The page device-assignment and individual record save/download
-flows now call this protocol in source. Local saved/network comparisons require
-additional per-member ownership; selecting those unsupported combinations refuses explicitly
-and does not alter existing solo comparison behavior. Browser execution,
+flows now call this protocol in source. Local saved comparisons now require an
+explicit current member target for each selected record and use independent
+member ownership; local network comparisons remain unsupported and refuse
+explicitly without altering existing solo comparison behavior. Browser execution,
 generated bindings, physical devices/audio and performance acceptance remain
 unverified.
 
@@ -1450,5 +1451,28 @@ retain full-width acquired sources without using native settings hosts or
 browser product descriptions as identities. The Worker now accepts an optional
 local plan through the shared nonblocking owner and renders paged local fields.
 The browser page now calls that path with discovered exact assignments and
-individual member record selection. Per-member opponent integration and actual
-browser/device/runtime acceptance remain pending.
+individual member record selection and targeted saved comparisons. Local
+network competition and actual browser/device/runtime acceptance remain pending.
+
+## Local saved comparison ownership
+
+The page retains an explicit stable target player on each selected saved record.
+For local play every target must exist in the frozen roster; for solo play local
+targets must be cleared. Preserve the aggregate eight-record/64 MiB limits, read
+each file once on Worker, and admit it using the target member's actual pristine
+header. Each member owns its comparison state and advances from its own actual
+song frontier. Reuse common SavedOpponents and retained HUD snapshots; no saved
+judgment changes live scoring, captures or shared audio.
+
+Snapshot results include every actual member in roster order with independent
+opponents/error fields. Invalid member results disable only that member's HUD;
+invalid roster ownership refuses the envelope. Validate selected labels and
+Own/Other metadata against the frozen selections. Periodic valid counters stay
+on Worker, and Window shows only comparison failures and final summaries.
+
+Admitted comparison count reserves a fixed region before touch routing setup.
+The common renderer and touch helper share the shifted/shrunken field geometry.
+HUD failure keeps this region fixed and shows unavailable status, preserving
+active touch coordinates. Source integration and deferred fixtures do not prove
+browser execution, generated bindings or measured performance. Local network
+competition and active-contact page remapping remain follow-on work.

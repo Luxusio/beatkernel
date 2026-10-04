@@ -19,7 +19,12 @@ remain restricted until contact routing can be remapped safely.
 
 Local recordings are separate member captures. Choose the captured player before
 download or library save; one member's export failure must retain other valid
-prefixes. Local network/saved-opponent combinations currently refuse explicitly.
+prefixes. Assign each saved opponent to a current player using its target selector
+in the selected-opponents list. Clear local targets before solo playback. The
+whole session admits at most eight records and 64 MiB; each target's comparisons
+advance on Worker from its actual frontier. Comparison failure keeps that
+member's reserved display/touch geometry fixed. Local network combinations
+currently refuse explicitly.
 These page paths are source integrations with deferred fixtures; generated
 bindings, browser/device/audio execution and measured performance are unverified.
 
