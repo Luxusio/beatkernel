@@ -223,6 +223,33 @@ test("explicit room prefix bounds preserve defaults, owned writes, and coalesced
   assertReleased(h, small.transport, small.io);
 });
 
+test("idle acquisition retains cancellation ownership while ordinary reads retain deadlines", async () => {
+  const h = await harness();
+  const first = await h.opened();
+  await failure(attempt(() => first.owner.readPrefix(11, "idle")), "validation");
+  assert.equal(first.io.reads.length, 0);
+  const idle = attempt(() => first.owner.readPrefix(11, true));
+  await h.elapse(100);
+  assert.equal(idle.state, "pending");
+  assert.equal(first.transport.closes, 0);
+  first.io.reads[0].resolve({ done: false, value: Uint8Array.of(0x42) });
+  assert.deepEqual([...await success(idle)], [0x42]);
+  const ordinary = attempt(() => first.owner.readPrefix(10));
+  await h.elapse(30);
+  await failure(ordinary, "timeout");
+  assertReleased(h, first.transport, first.io);
+
+  const second = await h.opened();
+  const waiting = attempt(() => second.owner.readPrefix(11, true));
+  await h.elapse(100);
+  assert.equal(waiting.state, "pending");
+  second.owner.close();
+  await failure(waiting, "closed");
+  second.io.reads[0].resolve({ done: false, value: Uint8Array.of(1) });
+  await flush();
+  assertReleased(h, second.transport, second.io);
+});
+
 test("setup validates before construction and owns exactly one stream after actual readiness", async () => {
   const h = await harness();
   for (const url of ["", "http://example.test/", "/relative", "https://user:secret@example.test/",

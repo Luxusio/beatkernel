@@ -163,8 +163,10 @@ export class WebTransportChannel {
         this.#fail(error);
       };
       this.#pending.add(cancel);
-      timer = setTimeout(() => this.#fail(new WebTransportChannelError("timeout", operation,
-        `WebTransport ${operation} timed out.`)), timeoutMs);
+      if (timeoutMs !== null) {
+        timer = setTimeout(() => this.#fail(new WebTransportChannelError("timeout", operation,
+          `WebTransport ${operation} timed out.`)), timeoutMs);
+      }
       // The same timer covers ready plus stream creation during open. Every
       // promise has both handlers, even after timeout/cancellation wins.
       try { Promise.resolve(work()).then(value => finish(this.#failure, value), fail); }
@@ -172,15 +174,17 @@ export class WebTransportChannel {
     });
   }
 
-  async readPrefix(maxBytes) {
+  async readPrefix(maxBytes, waitForData = false) {
     this.#ensureOpen();
     if (this.#reading) throw new WebTransportChannelError("busy", "read", "A WebTransport read is already pending.");
-    if (!integer(maxBytes, 1, this.#config.maxPrefixBytes)) {
+    if (!integer(maxBytes, 1, this.#config.maxPrefixBytes) || typeof waitForData !== "boolean") {
       throw new WebTransportChannelError("validation", "read", `Read prefix must be between 1 and ${this.#config.maxPrefixBytes} bytes.`);
     }
     this.#reading = true;
     try {
-      return await this.#run("read", this.#config.ioTimeoutMs, async () => {
+      // Room owners bound a begun frame separately. Idle acquisition can wait
+      // for its first chunk while retaining the same cancellation ownership.
+      return await this.#run("read", waitForData ? null : this.#config.ioTimeoutMs, async () => {
         let empty = 0;
         while (this.#chunk === null) {
           const result = await this.#reader.read();
