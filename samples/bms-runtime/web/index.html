@@ -56,7 +56,7 @@
       <details class="binding-editor"><summary>Keyboard bindings</summary>
         <div id="bindings" aria-label="Live lane keyboard bindings"></div>
         <button id="bindings-reset" type="button" disabled>Reset keyboard defaults</button>
-        <p class="hint">Choose physical key positions for each lane. Unbound lanes need a matching HID profile or must be absent from the chart; one key can belong to only one lane. These page-local settings affect live play. Replay uses recorded inputs, and Escape always stops playback. Browser or system shortcuts may prevent some keys from reaching the game.</p>
+        <p class="hint">Choose physical key positions for each lane. Unbound lanes need matching HID or Gamepad button bindings or must be absent from the chart; one key can belong to only one lane. These page-local settings affect live play. Replay uses recorded inputs, and Escape always stops playback. Browser or system shortcuts may prevent some keys from reaching the game.</p>
       </details>
       <label><input id="touch-input" type="checkbox" disabled> Touch lanes with keyboard controls</label>
       <p class="hint">Enabled automatically on touch-capable browsers. A contact keeps its first lane until release; leaving the page stops playback. Use the same input mode for multiplayer and saved comparisons. Replay uses recorded input.</p>
@@ -66,6 +66,10 @@
       <p id="hid-profile-name" class="hint">Choose a version 1 HID profile for live play.</p>
       <p class="hint">Authorization opens the browser permission chooser. Live play automatically uses matching authorized interfaces; no separate solo device selection is needed. Profiles stay local, are limited to 1 MiB and are interpreted on the Worker. Replay uses recorded input.</p>
       <p id="hid-status" class="hint" role="status" aria-live="polite">Checking WebHID availability…</p>
+      <div class="replay-controls"><label>Optional Gamepad profile <input id="gamepad-profile" type="file" accept=".json,application/json" disabled></label>
+        <button id="gamepad-profile-clear" type="button" disabled>Use automatic Gamepad bindings</button></div>
+      <p id="gamepad-profile-name" class="hint">Automatic standard Gamepad bindings; choose an optional version 1 profile to customize.</p>
+      <p class="hint">Live play discovers browser-exposed Gamepads without a device chooser. Standard controllers with at least nine buttons use buttons 0–8 for solo lanes by default. Optional local profiles match product descriptions and control counts; they are limited to 1 MiB and checked during setup. Axis bindings do not act as keys. Replay uses recorded inputs.</p>
       <p><button id="play" type="button" disabled>Play live</button> <button id="stop" type="button" disabled>Stop</button></p>
       <div class="replay-controls"><label><input id="multiplayer" type="checkbox" disabled> Multiplayer live play</label>
         <label>Server <input id="multiplayer-url" type="url" placeholder="https://server.example/room" maxlength="4096" disabled></label>

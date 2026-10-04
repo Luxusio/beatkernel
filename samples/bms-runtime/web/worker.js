@@ -6,7 +6,7 @@ import { validateSelections, validateOpponentSnapshot } from "./saved-opponents.
 import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, projectTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
 import { snapshotHidDevices, hidSetupFromProfile } from "./hid-profile.mjs";
 import { AudioCommandClient } from "./audio-command-client.mjs";
-import { snapshotGamepadSetup, automaticGamepadSetup, GamepadAdapter } from "./gamepad-profile.mjs";
+import { snapshotGamepadSetup, snapshotGamepadDevices, automaticGamepadSetup, gamepadSetupFromProfile, GamepadAdapter } from "./gamepad-profile.mjs";
 const { BrowserGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
 let ready = null;
 let view = null;
@@ -600,13 +600,27 @@ async function preparePlay(state, request) {
     }
     let gamepad = null;
     let gamepadAdapter = null;
-    if (request.gamepadSetup !== undefined || request.gamepadDevices !== undefined) {
+    let gamepadDevices = null;
+    let gamepadProfileFile = null;
+    let gamepadProfileSize = 0;
+    if (request.gamepadSetup !== undefined || request.gamepadDevices !== undefined || request.gamepadProfileFile !== undefined) {
       if (state.mode !== "live" || !state.physicalInput) throw new Error("Gamepad setup requires live canonical physical input ownership.");
-      if (request.gamepadSetup !== undefined && request.gamepadDevices !== undefined) throw new Error("Choose automatic Gamepad devices or explicit bindings, not both.");
-      gamepad = request.gamepadDevices === undefined ? snapshotGamepadSetup(request.gamepadSetup)
-        : automaticGamepadSetup(request.gamepadDevices);
-      if (bindingWords.length + gamepad.physicalWords.length > 256 * 7) throw new Error("Combined physical binding capacity exceeded.");
-      gamepadAdapter = new GamepadAdapter(gamepad);
+      if (request.gamepadSetup !== undefined && (request.gamepadDevices !== undefined || request.gamepadProfileFile !== undefined)) {
+        throw new Error("Choose Gamepad devices or explicit numeric bindings, not both.");
+      }
+      if (request.gamepadProfileFile !== undefined) {
+        if (!(request.gamepadProfileFile instanceof File) || !integer(request.gamepadProfileFile.size, 1, 1024 * 1024)) {
+          throw new Error("Gamepad profiles require a nonempty file no larger than 1 MiB.");
+        }
+        gamepadProfileFile = request.gamepadProfileFile;
+        gamepadProfileSize = gamepadProfileFile.size;
+        gamepadDevices = snapshotGamepadDevices(request.gamepadDevices);
+      } else {
+        gamepad = request.gamepadDevices === undefined ? snapshotGamepadSetup(request.gamepadSetup)
+          : automaticGamepadSetup(request.gamepadDevices);
+        if (bindingWords.length + gamepad.physicalWords.length > 256 * 7) throw new Error("Combined physical binding capacity exceeded.");
+        gamepadAdapter = new GamepadAdapter(gamepad);
+      }
     }
     let hid = hidConfiguration(request.hidSetup, state.mode, state.physicalInput, bindingWords);
     let hidProfileFile = null;
@@ -650,6 +664,13 @@ async function preparePlay(state, request) {
       if (failed || play !== state) return;
       if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== hidProfileSize) throw new Error("HID profile file size changed or returned an invalid buffer.");
       hid = hidConfiguration(hidSetupFromProfile(new Uint8Array(bytes), hidDevices), state.mode, state.physicalInput, bindingWords);
+    }
+    if (gamepadProfileFile !== null) {
+      const bytes = await gamepadProfileFile.arrayBuffer();
+      if (failed || play !== state) return;
+      if (!(bytes instanceof ArrayBuffer) || bytes.resizable === true || bytes.byteLength !== gamepadProfileSize) throw new Error("Gamepad profile file size changed or returned an invalid buffer.");
+      gamepad = gamepadSetupFromProfile(new Uint8Array(bytes), gamepadDevices);
+      gamepadAdapter = new GamepadAdapter(gamepad);
     }
     if (gamepad !== null && hid !== null && gamepad.sources.some(source => hid.sources.has(source))) {
       throw new Error("Gamepad and HID source identities must not overlap.");

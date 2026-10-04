@@ -8,12 +8,11 @@ const integer = (value, min, max) => Number.isInteger(value) && value >= min && 
 const unsigned = value => typeof value === "bigint" && value >= 0n && value <= U64_MAX;
 const laneValid = lane => integer(lane, 0x11, 0x19) || integer(lane, 0x21, 0x29);
 
-export function automaticGamepadSetup(devices) {
-  if (!Array.isArray(devices) || devices.length > 16) throw new Error("Automatic Gamepad setup requires at most sixteen descriptors.");
+export function snapshotGamepadDevices(devices) {
+  if (!Array.isArray(devices) || devices.length > 16) throw new Error("Gamepad setup requires at most sixteen descriptors.");
   const sources = new Set();
   const slots = new Set();
-  const admitted = [];
-  const words = [];
+  const snapshot = [];
   for (const device of devices) {
     if (!device || typeof device !== "object" || Array.isArray(device)) throw new Error("Invalid automatic Gamepad descriptor.");
     const { source, index, id, mapping, buttons, axes } = device;
@@ -22,6 +21,15 @@ export function automaticGamepadSetup(devices) {
       || !integer(buttons, 0, 128) || !integer(axes, 0, 64)) throw new Error("Invalid automatic Gamepad identity or control counts.");
     sources.add(source);
     slots.add(index);
+    snapshot.push(Object.freeze({ source, index, id, mapping, buttons, axes }));
+  }
+  return Object.freeze(snapshot);
+}
+
+export function automaticGamepadSetup(devices) {
+  const admitted = [];
+  const words = [];
+  for (const { source, mapping, buttons, axes } of snapshotGamepadDevices(devices)) {
     if (mapping !== "standard" || buttons < 9) continue;
     admitted.push({ source, buttons, axes });
     const low = Number(source & 0xffffffffn);
@@ -29,6 +37,72 @@ export function automaticGamepadSetup(devices) {
     for (let button = 0; button < 9; button++) words.push(0x11 + button, low, high, 0, button);
   }
   return snapshotGamepadSetup({ devices: admitted, bindingWords: Uint32Array.from(words) });
+}
+
+function profileObject(value, allowed, required, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Reflect.ownKeys(value).some(key => !allowed.includes(key))
+    || required.some(key => !Object.hasOwn(value, key))) throw new Error(`Invalid ${label} properties.`);
+}
+
+// File acquisition and interpretation belong to Worker setup, never input callbacks.
+export function gamepadSetupFromProfile(bytes, devices) {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength < 1 || bytes.byteLength > 1024 * 1024
+    || !(bytes.buffer instanceof ArrayBuffer) || bytes.buffer.resizable === true) throw new Error("Gamepad profile requires one to 1048576 bytes of fixed ordinary UTF-8 storage.");
+  const input = new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const owned = snapshotGamepadDevices(devices);
+  const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(input));
+  profileObject(parsed, ["version", "profiles"], ["version", "profiles"], "Gamepad profile document");
+  if (parsed.version !== 1 || !Array.isArray(parsed.profiles) || parsed.profiles.length < 1 || parsed.profiles.length > 16) {
+    throw new Error("Gamepad profile version 1 requires one to sixteen profiles.");
+  }
+  for (const profile of parsed.profiles) {
+    profileObject(profile, ["id", "mapping", "buttons", "axes", "bindingWords"], ["bindingWords"], "Gamepad profile");
+    if ((Object.hasOwn(profile, "id") && (typeof profile.id !== "string" || profile.id.length > 1024))
+      || (Object.hasOwn(profile, "mapping") && profile.mapping !== "" && profile.mapping !== "standard")
+      || (Object.hasOwn(profile, "buttons") && !integer(profile.buttons, 0, 128))
+      || (Object.hasOwn(profile, "axes") && !integer(profile.axes, 0, 64))) throw new Error("Invalid exact Gamepad profile matcher.");
+    const words = profile.bindingWords;
+    if (!Array.isArray(words) || words.length < 3 || words.length > 256 * 3 || words.length % 3 !== 0) {
+      throw new Error("Gamepad profiles require one to 256 complete binding rows.");
+    }
+    for (const word of words) if (!integer(word, 0, 0xffffffff)) throw new Error("Gamepad binding words must be unsigned 32-bit integers.");
+    const seen = new Set();
+    for (let offset = 0; offset < words.length; offset += 3) {
+      const [lane, type, index] = words.slice(offset, offset + 3);
+      const maximum = type === 1 ? (profile.axes ?? 64) : (profile.buttons ?? 128);
+      const key = `${lane}:${type}:${index}`;
+      if (!laneValid(lane) || !integer(type, 0, 3) || index >= maximum || seen.has(key)) throw new Error("Invalid or duplicate Gamepad profile binding.");
+      seen.add(key);
+    }
+  }
+  const selected = [];
+  let rows = 0;
+  for (const device of owned) {
+    let matched = null;
+    for (const profile of parsed.profiles) {
+      if (["id", "mapping", "buttons", "axes"].every(key => !Object.hasOwn(profile, key) || profile[key] === device[key])) {
+        if (matched !== null) throw new Error("An owned Gamepad matches more than one profile.");
+        matched = profile;
+      }
+    }
+    if (matched === null) continue;
+    rows += matched.bindingWords.length / 3;
+    if (rows > 256) throw new Error("Matched Gamepad profiles exceed the combined binding capacity.");
+    selected.push({ device, profile: matched });
+  }
+  if (selected.length === 0) throw new Error("No owned Gamepad matches the selected profile.");
+  const words = new Uint32Array(rows * 5);
+  let offset = 0;
+  for (const { device, profile } of selected) {
+    const low = Number(device.source & 0xffffffffn);
+    const high = Number(device.source >> 32n);
+    for (let row = 0; row < profile.bindingWords.length; row += 3) {
+      words.set([profile.bindingWords[row], low, high, profile.bindingWords[row + 1], profile.bindingWords[row + 2]], offset);
+      offset += 5;
+    }
+  }
+  return snapshotGamepadSetup({ devices: selected.map(({ device }) => device), bindingWords: words });
 }
 
 export function snapshotGamepadSetup(value) {

@@ -8,7 +8,7 @@ import { SavedOpponentSelection, opponentLabel, validateOpponentSnapshot } from 
 import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
-const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input", "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status"].map(id => [id, byId(id)]));
+const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input", "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status", "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear"].map(id => [id, byId(id)]));
 let canvas = byId("canvas");
 let cssExtent = [0, 0];
 ui["touch-input"].checked = typeof window.PointerEvent === "function" && globalThis.navigator?.maxTouchPoints > 0;
@@ -35,6 +35,7 @@ let selectedReplay = null;
 let recordsStore = null;
 let recordsOperation = null;
 let selectedHidProfile = null;
+let selectedGamepadProfile = null;
 let hidPermission = null;
 let hidOwnershipFailed = false;
 const opponents = new SavedOpponentSelection();
@@ -153,7 +154,8 @@ function createSessionGamepads(session) {
     onDisconnect: event => {
       if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
       const participates = session.gamepadSources === null
-        ? session.gamepadDevices?.some(device => device.source === event.source && device.mapping === "standard" && device.buttons >= 9)
+        ? session.gamepadDevices?.some(device => device.source === event.source
+          && (session.gamepadProfileFile !== null || (device.mapping === "standard" && device.buttons >= 9)))
         : session.gamepadSources.has(event.source);
       if (participates) {
         void stopPlay("Playback stopped after a Gamepad disconnected.", true);
@@ -218,6 +220,8 @@ function controls() {
   ui["bindings-reset"].disabled = recordsDisabled;
   ui["touch-input"].disabled = recordsDisabled;
   for (const id of ["hid-input", "hid-authorize", "hid-profile"]) ui[id].disabled = recordsDisabled || !hidCapable();
+  ui["gamepad-profile"].disabled = recordsDisabled || typeof globalThis.navigator?.getGamepads !== "function";
+  ui["gamepad-profile-clear"].disabled = recordsDisabled || selectedGamepadProfile === null;
   for (const [, field] of bindingFields) field.disabled = recordsDisabled;
   for (const field of [ui["judge-early"], ui["judge-late"], ui["judge-offset"], ui["live-start"], ui["live-end"]]) field.disabled = recordsDisabled;
   ui["output-latency"].disabled = ui["output-rate"].disabled = recordsDisabled;
@@ -247,6 +251,7 @@ function stop() {
   density = null;
   selectedReplay = selectedReplayKey = null;
   selectedHidProfile = null;
+  selectedGamepadProfile = null;
   importedReplayKeys = new WeakMap();
   importedReplayId = 0;
   opponents.clear();
@@ -358,6 +363,8 @@ function start() {
   ui["hid-input"].checked = false;
   ui["hid-profile"].value = "";
   ui["hid-profile-name"].textContent = "Choose a version 1 HID profile for live play.";
+  ui["gamepad-profile"].value = "";
+  ui["gamepad-profile-name"].textContent = "Automatic standard Gamepad bindings; choose an optional version 1 profile to customize.";
   ui["hid-status"].textContent = hidCapable() ? "Authorize devices if needed; live play uses matching authorized interfaces automatically." : "WebHID is unavailable in this browser.";
   ui.records.replaceChildren(new Option("Refresh to browse saved records", ""));
   ui.keys.textContent = "";
@@ -476,6 +483,25 @@ ui["hid-profile"].addEventListener("change", event => {
   } catch (error) { status(String(error.message).slice(0, 4096), true); }
   finally { event.target.value = ""; }
 });
+ui["gamepad-profile"].addEventListener("change", event => {
+  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  try {
+    const file = event.target.files?.[0];
+    if (typeof navigator.getGamepads !== "function" || !(file instanceof File) || !Number.isSafeInteger(file.size)
+      || file.size < 1 || file.size > 1024 * 1024) throw new Error("Choose one nonempty Gamepad profile no larger than 1 MiB on a browser with Gamepad support.");
+    selectedGamepadProfile = file;
+    ui["gamepad-profile-name"].textContent = `${file.name.slice(0, 256)} · ${file.size} bytes · checked when starting play`;
+    controls();
+  } catch (error) { status(String(error.message).slice(0, 4096), true); }
+  finally { event.target.value = ""; }
+});
+ui["gamepad-profile-clear"].addEventListener("click", () => {
+  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  selectedGamepadProfile = null;
+  ui["gamepad-profile"].value = "";
+  ui["gamepad-profile-name"].textContent = "Automatic standard Gamepad bindings; choose an optional version 1 profile to customize.";
+  controls();
+});
 ui.stop.addEventListener("click", () => { void stopPlay("Playback stopped."); });
 ui["bindings-reset"].addEventListener("click", () => {
   if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
@@ -579,7 +605,7 @@ async function play(mode = "live") {
     rpc: null, timer: null, events: [], pressed: new Set(), bindings: [], sequence: 0n, nextSource: 3n, inputPumping: false,
     canvas, touchInput: false, contacts: new Map(), nextContact: 0n,
     hidOwner: null, hidConnecting: null, hidDevices: null, hidSources: null, hidProfileFile: null,
-    gamepadOwner: null, gamepadDevices: null, gamepadSources: null,
+    gamepadOwner: null, gamepadDevices: null, gamepadSources: null, gamepadProfileFile: null,
     tickId: 0, tickPending: null, commandsPending: true, startFrame: null,
     origin: null, lastHost: 0n, stopping: null, renderId: 0, renderPending: null,
     workerStarted: false, workerReleased: false, workerStop: null, finalScore: null,
@@ -607,6 +633,13 @@ async function play(mode = "live") {
         throw new Error("HID play requires WebHID and a selected nonempty profile no larger than 1 MiB.");
       }
       session.hidProfileFile = selectedHidProfile;
+    }
+    if (mode === "live" && selectedGamepadProfile !== null) {
+      if (typeof navigator.getGamepads !== "function" || !(selectedGamepadProfile instanceof File)
+        || !Number.isSafeInteger(selectedGamepadProfile.size) || selectedGamepadProfile.size < 1 || selectedGamepadProfile.size > 1024 * 1024) {
+        throw new Error("Live Gamepad profiles require Gamepad support and a nonempty file no larger than 1 MiB.");
+      }
+      session.gamepadProfileFile = selectedGamepadProfile;
     }
     session.contextOptions = audioOutputFromFields(ui["output-latency"].value, ui["output-latency-ms"].value, ui["output-rate"].value);
     session.audioLimits = audioLimitsFromFields({ queueCapacity: ui["audio-queue"].value, maxVoices: ui["audio-voices"].value,
@@ -656,6 +689,7 @@ async function play(mode = "live") {
         ...(session.opponentSelection ? { opponents: session.opponentSelection } : {}),
         ...(session.hidOwner ? { hidProfileFile: session.hidProfileFile, hidDevices: session.hidDevices } : {}),
         ...(session.gamepadOwner ? { gamepadDevices: session.gamepadDevices } : {}),
+        ...(session.gamepadProfileFile ? { gamepadProfileFile: session.gamepadProfileFile } : {}),
         keyPairs: Uint32Array.from(session.bindingSelection.flatMap(row => [row[0], row[2]])) };
     const prepared = await playRpc(session, "play-start", { libraryId, path: ui.chart.value,
       rate: session.audio.sampleRate, commandBatchLimit: session.commandBatchLimit, ...source });
@@ -681,8 +715,11 @@ async function play(mode = "live") {
     }
     if (session.gamepadOwner !== null) {
       const sources = prepared.gamepadSources;
-      const eligible = session.gamepadDevices.filter(device => device.mapping === "standard" && device.buttons >= 9);
-      if (!Array.isArray(sources) || sources.length !== eligible.length) throw new Error("Preparation omitted the exact eligible Gamepad sources.");
+      const custom = session.gamepadProfileFile !== null;
+      const eligible = custom ? session.gamepadDevices : session.gamepadDevices.filter(device => device.mapping === "standard" && device.buttons >= 9);
+      if (!Array.isArray(sources) || (custom ? sources.length < 1 || sources.length > eligible.length : sources.length !== eligible.length)) {
+        throw new Error("Preparation omitted the admitted Gamepad profile sources.");
+      }
       const admitted = new Set();
       const owned = session.gamepadOwner.devices;
       for (const source of sources) {
@@ -717,7 +754,7 @@ async function play(mode = "live") {
       : session.bindings.map(row => `${row[0].toString(16).toUpperCase()}: ${row[1]}`).join(" · ")
         + (session.touchInput ? " · Touch lanes enabled" : "")
         + (session.hidSources ? ` · ${session.hidSources.size} HID interface(s)` : "")
-        + (session.gamepadSources ? ` · ${session.gamepadSources.size} standard Gamepad(s); ${session.gamepadDevices.length - session.gamepadSources.size} unsupported layout(s) ignored` : "");
+        + (session.gamepadSources ? ` · ${session.gamepadSources.size} ${session.gamepadProfileFile ? "profile-configured" : "automatic standard"} Gamepad(s); ${session.gamepadDevices.length - session.gamepadSources.size} unmatched device(s) ignored` : "");
     for (let index = 0; index < prepared.samples; index++) {
       const sample = await playRpc(session, "play-sample");
       if (sample?.kind !== "sample") throw new Error("Prepared audio asset count changed.");
@@ -1107,7 +1144,7 @@ function stopPlay(reason, failed = false, completed = false) {
     finally {
       await workerStopped;
       session.hidOwner = session.hidConnecting = session.hidDevices = session.hidSources = session.hidProfileFile = null;
-      session.gamepadOwner = session.gamepadDevices = session.gamepadSources = null;
+      session.gamepadOwner = session.gamepadDevices = session.gamepadSources = session.gamepadProfileFile = null;
       if (session.cleanupError !== null) {
         failed = true;
         reason = `Gameplay cleanup failed: ${session.cleanupError} Reload the page before playing again.`;
