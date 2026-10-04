@@ -16,6 +16,7 @@ label { display: flex; flex-direction: column; gap: 6px; font-size: .9rem; min-w
 .binding-editor { margin-top: 16px; }
 .binding-editor summary { cursor: pointer; }
 #bindings { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 16px 0; }
+#local-sources { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin-top: 16px; }
 input, select, button { font: inherit; padding: 10px; border: 1px solid #63758c; border-radius: 5px; background: #111923; color: inherit; max-width: 100%; }
 input[type="file"] { width: 290px; }
 input[type="number"] { width: 140px; }

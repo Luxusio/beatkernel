@@ -3,12 +3,14 @@ import { AudioHost } from "./audio-host.mjs";
 import { RecordsStore } from "./record-store.mjs";
 import { HidInputOwner } from "./hid-input.mjs";
 import { GamepadInputOwner } from "./gamepad-input.mjs";
+import { LocalRoster, validateLocalPrepared, localReplayReceipt } from "./local-play-host.mjs";
 import { snapshotHidDevices } from "./hid-profile.mjs";
 import { SavedOpponentSelection, opponentLabel, validateOpponentSnapshot } from "./saved-opponents.mjs";
 import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
 const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input", "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status", "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear"].map(id => [id, byId(id)]));
+for (const id of ["local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay"]) ui[id] = byId(id);
 let canvas = byId("canvas");
 let cssExtent = [0, 0];
 ui["touch-input"].checked = typeof window.PointerEvent === "function" && globalThis.navigator?.maxTouchPoints > 0;
@@ -29,6 +31,7 @@ let hasPreview = false;
 let audioModule = null;
 let activePlay = null;
 let lastReplay = null;
+let capturedReplays = [];
 let replayURL = null;
 let replayURLTimer = null;
 let selectedReplay = null;
@@ -45,6 +48,132 @@ let importedReplayId = 0;
 let opponentButtons = [];
 let opponentResultRows = [];
 const bindingFields = createBindingFields();
+const localRoster = new LocalRoster();
+let localSetup = null;
+let localCleanup = null;
+let localDiscovery = null;
+let localFields = [];
+
+function inputOwnerCurrent(session) {
+  return (activePlay === session || localSetup === session) && session.owner === owner && session.phase !== "closing";
+}
+
+function showLocalRoster() {
+  const fields = document.createDocumentFragment();
+  localFields = localRoster.players.length === 1 ? [] : localRoster.players.map(player => {
+    const label = document.createElement("label");
+    label.textContent = `Player ${player}`;
+    const select = document.createElement("select");
+    select.id = `local-source-${player}`;
+    select.append(new Option("Choose an acquired source", ""));
+    for (const row of localSetup?.inventory ?? []) select.append(new Option(row.label, row.source.toString()));
+    select.value = localRoster.selected(player)?.toString() ?? "";
+    select.addEventListener("change", () => {
+      if (activePlay || localSetup?.phase !== "ready") return;
+      try {
+        const source = select.value === "" ? null : BigInt(select.value);
+        if (source !== null && !localSetup.inventory.some(row => row.source === source)) throw new Error("Choose an acquired source.");
+        localRoster.assign(player, source);
+        const touch = localRoster.players.findIndex(id => localRoster.selected(id) === 2n);
+        if (touch >= 0) ui["local-page"].value = String(Math.floor(touch / 4));
+        ui["local-status"].textContent = "Selections retained for this acquired source inventory.";
+      } catch (error) {
+        select.value = localRoster.selected(player)?.toString() ?? "";
+        ui["local-status"].textContent = String(error.message).slice(0, 4096);
+      }
+    });
+    label.append(select);
+    fields.append(label);
+    return select;
+  });
+  ui["local-sources"].replaceChildren(fields);
+  const previous = ui["local-page"].value;
+  ui["local-page"].replaceChildren();
+  for (let page = 0; page < Math.ceil(localRoster.players.length / 4); page++) {
+    ui["local-page"].append(new Option(`Players ${localRoster.players.slice(page * 4, page * 4 + 4).join(", ")}`, String(page)));
+  }
+  ui["local-page"].value = Number(previous) < Math.ceil(localRoster.players.length / 4) ? previous || "0" : "0";
+}
+
+function releaseLocalSources(reason = "Discover sources again before local play.", cancelDiscovery = true) {
+  if (cancelDiscovery) localDiscovery = null;
+  const setup = localSetup;
+  if (!setup) { controls(); return localCleanup ?? Promise.resolve(); }
+  localSetup = null;
+  setup.phase = "closing";
+  localRoster.clearSources();
+  showLocalRoster();
+  let gamepadError = null;
+  try { setup.gamepadOwner?.close(); gamepadError = setup.gamepadOwner?.cleanupFailure; }
+  catch (error) { gamepadError = error; }
+  let closed;
+  try { closed = setup.hidOwner?.close() ?? Promise.resolve(); }
+  catch (error) { closed = Promise.reject(error); }
+  const cleanup = Promise.resolve(closed).then(() => { if (gamepadError) throw gamepadError; }).catch(error => {
+    hidOwnershipFailed = true;
+    fatal(new Error(`Input cleanup failed: ${String(error.message).slice(0, 4096)} Reload the page.`));
+  }).finally(() => {
+    if (localCleanup === cleanup) localCleanup = null;
+    if (setup.owner === owner && !hidOwnershipFailed) ui["local-status"].textContent = reason;
+    controls();
+  });
+  localCleanup = cleanup;
+  controls();
+  return cleanup;
+}
+
+async function discoverLocalSources() {
+  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || localCleanup || localDiscovery
+    || localRoster.players.length === 1) return;
+  const operation = { owner, players: localRoster.players, hid: ui["hid-input"].checked,
+    hidProfile: selectedHidProfile, gamepadProfile: selectedGamepadProfile, touch: ui["touch-input"].checked };
+  localDiscovery = operation;
+  controls();
+  await releaseLocalSources(undefined, false);
+  if (localDiscovery !== operation || operation.owner !== owner || !initialized || activePlay || hidOwnershipFailed || localCleanup || document.hidden
+    || operation.players.join(",") !== localRoster.players.join(",") || operation.hid !== ui["hid-input"].checked
+    || operation.hidProfile !== selectedHidProfile || operation.gamepadProfile !== selectedGamepadProfile || operation.touch !== ui["touch-input"].checked) {
+    if (localDiscovery === operation) localDiscovery = null;
+    controls();
+    return;
+  }
+  const setup = { owner, phase: "preparing", sequence: 0n, nextSource: 3n, gamepadOwner: null, gamepadDevices: [],
+    gamepadSources: null, gamepadProfileFile: selectedGamepadProfile, hidOwner: null, hidDevices: null, hidSources: null,
+    hidProfileFile: ui["hid-input"].checked ? selectedHidProfile : null, touchInput: ui["touch-input"].checked === true, inventory: [] };
+  localSetup = setup;
+  controls();
+  ui["local-status"].textContent = "Acquiring local input sources…";
+  try {
+    if (ui["hid-input"].checked && (!hidCapable() || setup.hidProfileFile === null)) throw new Error("Select an HID profile and authorize its devices before discovery.");
+    if (setup.gamepadProfileFile !== null && typeof navigator.getGamepads !== "function") throw new Error("Gamepad acquisition is unavailable.");
+    if (setup.touchInput && typeof window.PointerEvent !== "function") throw new Error("Touch input is unavailable.");
+    if (typeof navigator.getGamepads === "function") {
+      setup.gamepadOwner = createSessionGamepads(setup);
+      setup.gamepadOwner.poll();
+      if (!inputOwnerCurrent(setup)) return;
+    }
+    setup.gamepadDevices = Object.freeze(setup.gamepadDevices);
+    if (setup.hidProfileFile !== null) {
+      setup.hidOwner = createSessionHid(setup);
+      const devices = await setup.hidOwner.connectAuthorized();
+      if (!inputOwnerCurrent(setup)) return;
+      setup.hidDevices = snapshotHidDevices(devices.map(({ source, device }) => ({ source, vendorId: device.vendorId, productId: device.productId })));
+    }
+    setup.inventory = Object.freeze([
+      Object.freeze({ source: 1n, label: "Keyboard · source 1" }),
+      ...(setup.touchInput ? [Object.freeze({ source: 2n, label: "Touch surface · source 2" })] : []),
+      ...(setup.hidDevices ?? []).map(device => Object.freeze({ source: device.source, label: `HID ${device.vendorId}:${device.productId} · source ${device.source}` })),
+      ...setup.gamepadDevices.map(device => Object.freeze({ source: device.source, label: `Gamepad ${device.id.slice(0, 128)} · source ${device.source}` })),
+    ]);
+    setup.phase = "ready";
+    localDiscovery = null;
+    showLocalRoster();
+    ui["local-status"].textContent = `${setup.inventory.length} acquired source(s). Choose a distinct source for each player. Device descriptions are labels, not identities.`;
+    controls();
+  } catch (error) {
+    if (localSetup === setup) await releaseLocalSources(`Source discovery failed: ${String(error.message).slice(0, 4096)}`);
+  }
+}
 
 function createBindingFields() {
   const rows = document.createDocumentFragment();
@@ -84,7 +213,7 @@ function cancelHidPermission() {
 }
 
 async function authorizeHid() {
-  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || localSetup || localDiscovery || localCleanup) return;
   const operation = { owner, input: null, cancelled: false, failure: null };
   hidPermission = operation;
   controls();
@@ -118,7 +247,7 @@ async function authorizeHid() {
 }
 
 function nextInputSequence(session) {
-  if (activePlay !== session || session.owner !== owner || session.phase === "closing") throw new Error("Input owner is no longer active.");
+  if (!inputOwnerCurrent(session)) throw new Error("Input owner is no longer active.");
   const sequence = session.sequence + 1n;
   if (sequence > 18446744073709551615n) throw new Error("Input acquisition sequence exhausted.");
   session.sequence = sequence;
@@ -126,7 +255,7 @@ function nextInputSequence(session) {
 }
 
 function nextInputSource(session) {
-  if (activePlay !== session || session.owner !== owner || session.phase === "closing") throw new Error("Input owner is no longer active.");
+  if (!inputOwnerCurrent(session)) throw new Error("Input owner is no longer active.");
   const source = session.nextSource;
   if (source > 18446744073709551615n) throw new Error("Input source identity exhausted.");
   session.nextSource++;
@@ -137,7 +266,7 @@ function createSessionGamepads(session) {
   return new GamepadInputOwner({ navigator, eventTarget: window,
     nextSource: () => nextInputSource(session), nextSequence: () => nextInputSequence(session),
     onSample: event => {
-      if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
+      if (!inputOwnerCurrent(session)) return;
       if (session.phase === "preparing") {
         if (session.gamepadDevices.length >= 16) throw new Error("Gamepad descriptor capacity exceeded.");
         session.gamepadDevices.push(Object.freeze({ source: event.source, index: event.index, id: event.id,
@@ -152,7 +281,9 @@ function createSessionGamepads(session) {
       session.completionReady = false;
     },
     onDisconnect: event => {
-      if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
+      if (!inputOwnerCurrent(session)) return;
+      if (localSetup === session) { void releaseLocalSources("A discovered Gamepad disconnected. Discover sources again."); return; }
+      if (session.localSources && !session.localSources.has(event.source)) return;
       const participates = session.gamepadSources === null
         ? session.gamepadDevices?.some(device => device.source === event.source
           && (session.gamepadProfileFile !== null || (device.mapping === "standard" && device.buttons >= 9)))
@@ -162,6 +293,15 @@ function createSessionGamepads(session) {
       }
     },
     onError: error => {
+      if (localSetup === session && inputOwnerCurrent(session)) {
+        if (error.cleanupError) {
+          hidOwnershipFailed = true;
+          fatal(new Error(`Gamepad input cleanup failed: ${String(error.cleanupError.message).slice(0, 4096)} Reload the page.`));
+          return;
+        }
+        void releaseLocalSources(`Gamepad discovery failed: ${String(error.message).slice(0, 4096)}`);
+        return;
+      }
       if (activePlay === session && session.owner === owner && session.phase !== "closing") {
         if (error.cleanupError) hidOwnershipFailed = true;
         void stopPlay(`Gamepad input failed: ${String(error.message).slice(0, 4096)}`
@@ -188,12 +328,18 @@ function createSessionHid(session) {
       pumpInput(session);
     },
     onDisconnect: event => {
-      if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
+      if (!inputOwnerCurrent(session)) return;
+      if (localSetup === session) { void releaseLocalSources("A discovered HID interface disconnected. Discover sources again."); return; }
+      if (session.localSources && !session.localSources.has(event.source)) return;
       if (session.hidSources === null || session.hidSources.has(event.source)) {
         void stopPlay("Playback stopped after an HID interface disconnected.", true);
       }
     },
     onError: error => {
+      if (localSetup === session && inputOwnerCurrent(session)) {
+        void releaseLocalSources(`HID discovery failed: ${String(error.message).slice(0, 4096)}`);
+        return;
+      }
       if (activePlay === session && session.owner === owner && session.phase !== "closing") {
         void stopPlay(`HID input failed: ${String(error.message).slice(0, 4096)}`, true);
       }
@@ -203,7 +349,7 @@ function createSessionHid(session) {
 
 function controls() {
   const playing = activePlay !== null;
-  const busy = recordsOperation !== null || hidPermission !== null || hidOwnershipFailed;
+  const busy = recordsOperation !== null || hidPermission !== null || hidOwnershipFailed || localCleanup !== null || localDiscovery !== null;
   ui.folder.disabled = !initialized || preparing || playing || busy || !("webkitdirectory" in ui.folder);
   ui.files.disabled = !initialized || preparing || playing || busy;
   for (const field of [ui.chart, ui.rate, ui.seed, ui.prepare]) field.disabled = !initialized || !libraryId || importing || preparing || playing || busy;
@@ -217,11 +363,20 @@ function controls() {
   ui["replay-file"].disabled = !initialized || importing || preparing || playing || busy;
   ui["replay-play"].disabled = ui.play.disabled || selectedReplay === null;
   const recordsDisabled = !initialized || importing || preparing || playing || busy;
+  const inputLocked = recordsDisabled || localSetup !== null;
+  ui["local-count"].disabled = recordsDisabled;
+  ui["local-discover"].disabled = recordsDisabled || localRoster.players.length === 1;
+  ui["local-release"].disabled = playing || localSetup === null;
+  for (const field of localFields) field.disabled = recordsDisabled || localSetup?.phase !== "ready";
+  ui["local-page"].disabled = activePlay ? activePlay.phase !== "playing" || !activePlay.localPlan
+    || activePlay.localSources.has(2n) || activePlay.pageChanging || activePlay.rpc !== null
+    : recordsDisabled || localRoster.players.length === 1;
+  ui["captured-replay"].disabled = playing || busy || capturedReplays.length === 0;
   ui["bindings-reset"].disabled = recordsDisabled;
-  ui["touch-input"].disabled = recordsDisabled;
-  for (const id of ["hid-input", "hid-authorize", "hid-profile"]) ui[id].disabled = recordsDisabled || !hidCapable();
-  ui["gamepad-profile"].disabled = recordsDisabled || typeof globalThis.navigator?.getGamepads !== "function";
-  ui["gamepad-profile-clear"].disabled = recordsDisabled || selectedGamepadProfile === null;
+  ui["touch-input"].disabled = inputLocked;
+  for (const id of ["hid-input", "hid-authorize", "hid-profile"]) ui[id].disabled = inputLocked || !hidCapable();
+  ui["gamepad-profile"].disabled = inputLocked || typeof globalThis.navigator?.getGamepads !== "function";
+  ui["gamepad-profile-clear"].disabled = inputLocked || selectedGamepadProfile === null;
   for (const [, field] of bindingFields) field.disabled = recordsDisabled;
   for (const field of [ui["judge-early"], ui["judge-late"], ui["judge-offset"], ui["live-start"], ui["live-end"]]) field.disabled = recordsDisabled;
   ui["output-latency"].disabled = ui["output-rate"].disabled = recordsDisabled;
@@ -240,6 +395,7 @@ function stop() {
   revokeReplayURL();
   closeRecords();
   cancelHidPermission();
+  void releaseLocalSources("Local sources released with the page.");
   if (activePlay?.phase !== "closing") void stopPlay("Playback stopped with the page.");
   ++owner;
   worker?.terminate();
@@ -412,6 +568,7 @@ function choose(event) {
   const files = event.target.files;
   if (!files?.length) return;
   if (files.length > 32768) return status("Select no more than 32,768 files.", true);
+  void releaseLocalSources("Song library changed. Discover local sources again.");
   importId = ++serial;
   importing = true;
   controls();
@@ -438,6 +595,27 @@ window.addEventListener("pageshow", event => { if (event.persisted) start(); });
 window.addEventListener("resize", resize);
 ui.play.addEventListener("click", () => { void play("live"); });
 ui["replay-play"].addEventListener("click", () => { void play("replay"); });
+ui["local-count"].addEventListener("change", () => {
+  if (activePlay) return;
+  try {
+    if (!/^[0-9]{1,2}$/.test(ui["local-count"].value)) throw new Error("Choose one to 64 local players.");
+    localRoster.setCount(Number(ui["local-count"].value));
+    localRoster.clearSources();
+    void releaseLocalSources(localRoster.players.length === 1 ? "One player uses inputs automatically. No source selection is needed." : "Discover sources before assigning local players.");
+    showLocalRoster();
+    ui["local-status"].textContent = localRoster.players.length === 1 ? "One player uses inputs automatically. No source selection is needed." : "Discover sources before assigning local players.";
+    controls();
+  } catch (error) { ui["local-count"].value = String(localRoster.players.length); status(error.message, true); }
+});
+ui["local-discover"].addEventListener("click", () => { void discoverLocalSources(); });
+ui["local-release"].addEventListener("click", () => { if (!activePlay) void releaseLocalSources(); });
+ui["local-page"].addEventListener("change", () => { void changeLocalPage(); });
+ui["captured-replay"].addEventListener("change", () => {
+  if (activePlay || recordsOperation) return;
+  lastReplay = capturedReplays.find(record => String(record.player ?? "solo") === ui["captured-replay"].value) ?? null;
+  ui.export.textContent = lastReplay ? `Download ${lastReplay.player === undefined ? "last replay" : `player ${lastReplay.player} replay`} (${lastReplay.complete ? "complete" : "prefix"})` : "Choose a captured replay";
+  controls();
+});
 ui.multiplayer.addEventListener("change", () => {
   if (activePlay) return;
   controls();
@@ -526,9 +704,10 @@ ui["opponents-clear"].addEventListener("click", () => {
   clearOpponentResults("No saved opponents selected.");
   controls();
 });
-window.addEventListener("blur", () => { cancelHidPermission(); void stopPlay("Playback stopped after losing focus."); });
+window.addEventListener("blur", () => { cancelHidPermission(); void releaseLocalSources("Local sources released after losing focus."); void stopPlay("Playback stopped after losing focus."); });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
+    void releaseLocalSources("Local sources released while the page is hidden.");
     void stopPlay("Playback stopped while the page is hidden.");
     cancelHidPermission();
     const pending = recordsOperation !== null;
@@ -598,10 +777,70 @@ function playRpc(session, kind, fields = {}, transfer = []) {
   });
 }
 
+async function changeLocalPage() {
+  const session = activePlay;
+  if (!session) return;
+  if (!session.localPlan || session.phase !== "playing" || session.pageChanging || session.rpc || session.localSources.has(2n)) {
+    ui["local-page"].value = String(session.localPage);
+    return;
+  }
+  const page = Number(ui["local-page"].value);
+  if (!Number.isInteger(page) || page < 0 || page >= Math.ceil(session.localPlan.players.length / 4)) {
+    ui["local-page"].value = String(session.localPage);
+    return;
+  }
+  session.pageChanging = true;
+  controls();
+  try {
+    const result = await playRpc(session, "play-page", { page });
+    if (activePlay !== session || session.owner !== owner || session.phase !== "playing") return;
+    if (result?.kind !== "local-page" || result.page !== page) {
+      void stopPlay("Local page response changed its requested identity.", true);
+      return;
+    }
+    session.localPage = page;
+    ui["local-status"].textContent = `Showing players ${session.localPlan.players.slice(page * 4, page * 4 + 4).join(", ")}.`;
+  } catch (error) {
+    if (activePlay === session && session.owner === owner && session.phase === "playing") {
+      ui["local-status"].textContent = `Page unchanged: ${String(error.message).slice(0, 4096)}`;
+    }
+  } finally {
+    session.pageChanging = false;
+    if (activePlay === session && session.owner === owner) {
+      ui["local-page"].value = String(session.localPage);
+      controls();
+    }
+  }
+}
+
 async function play(mode = "live") {
-  if (!initialized || !hasPreview || !audioModule || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  if (!initialized || !hasPreview || !audioModule || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || localDiscovery || localCleanup) return;
   if (mode === "replay" && selectedReplay === null) return;
-  const session = { id: ++serial, owner, mode, phase: "preparing", controller: new AbortController(), audio: null, opening: null,
+  let retained = null;
+  let localPlan = null;
+  let releasedSources = null;
+  if (mode === "live" && localRoster.players.length > 1) {
+    try {
+      if (ui.multiplayer.checked || opponents.size) throw new Error("Local players currently cannot combine network or saved opponents.");
+      retained = localSetup;
+      if (!retained || retained.phase !== "ready" || retained.owner !== owner) throw new Error("Discover and assign local input sources before playing.");
+      if (retained.touchInput !== (ui["touch-input"].checked === true)
+        || retained.hidProfileFile !== (ui["hid-input"].checked ? selectedHidProfile : null)
+        || retained.gamepadProfileFile !== selectedGamepadProfile) throw new Error("Input configuration changed. Discover local sources again.");
+      // Poll this exact owner before freezing the plan. A changed native
+      // connection retires its source and invalidates this discovered roster.
+      retained.gamepadOwner?.poll();
+      if (localSetup !== retained || retained.phase !== "ready") throw new Error("Local source ownership changed. Discover sources again.");
+      localPlan = localRoster.snapshot(retained.inventory.map(row => row.source), Number(ui["local-page"].value));
+      const touchIndex = localPlan.sources.indexOf(2n);
+      if (touchIndex >= 0 && Math.floor(touchIndex / 4) !== localPlan.page) throw new Error("The touch player must be on the visible starting page.");
+      localSetup = null;
+    } catch (error) { status(String(error.message).slice(0, 4096), true); return; }
+  } else if (localSetup) releasedSources = releaseLocalSources();
+  const acquired = retained ? { sequence: retained.sequence, nextSource: retained.nextSource,
+    gamepadOwner: retained.gamepadOwner, gamepadDevices: retained.gamepadDevices,
+    hidOwner: retained.hidOwner, hidDevices: retained.hidDevices } : {};
+  const session = Object.assign(retained ?? {}, { id: ++serial, owner, mode, phase: "preparing", controller: new AbortController(), audio: null, opening: null,
     rpc: null, timer: null, events: [], pressed: new Set(), bindings: [], sequence: 0n, nextSource: 3n, inputPumping: false,
     canvas, touchInput: false, contacts: new Map(), nextContact: 0n,
     hidOwner: null, hidConnecting: null, hidDevices: null, hidSources: null, hidProfileFile: null,
@@ -615,7 +854,9 @@ async function play(mode = "live") {
     opponentSelection: mode === "live" && opponents.size ? opponents.snapshot() : null,
     opponentCount: mode === "live" ? opponents.size : 0, opponentsFailed: false, opponentError: null,
     chartPath: ui.chart.value,
-    preview: { title: ui.title.textContent, details: ui.details.textContent, position: ui.position.value } };
+    preview: { title: ui.title.textContent, details: ui.details.textContent, position: ui.position.value } }, acquired,
+    { localPlan, localSources: localPlan ? new Set(localPlan.sources) : null, localReplays: null, localScores: null, recordLimits: null,
+      localPage: localPlan?.page ?? 0, pageChanging: false });
   activePlay = session;
   controls();
   status(mode === "replay" ? "Preparing recorded replay and audio…" : "Preparing playable chart and audio…");
@@ -626,7 +867,7 @@ async function play(mode = "live") {
       throw new Error("Touch play requires Pointer Events and canvas pointer capture support.");
     }
     session.inputMode = session.touchInput ? "physical-contact" : "physical";
-    if (session.touchInput) session.canvas.dataset.touchInput = "true";
+    if (session.touchInput && (!session.localSources || session.localSources.has(2n))) session.canvas.dataset.touchInput = "true";
     if (mode === "live" && ui["hid-input"].checked === true) {
       if (!hidCapable() || !(selectedHidProfile instanceof File) || !Number.isSafeInteger(selectedHidProfile.size)
         || selectedHidProfile.size < 1 || selectedHidProfile.size > 1024 * 1024) {
@@ -652,11 +893,12 @@ async function play(mode = "live") {
     session.bindingSelection = mode === "live" ? snapshotBindings(bindingFields.map(([lane, field]) => [lane, field.value])) : null;
     session.multiplayer = mode === "live" && ui.multiplayer.checked === true ? multiplayerConfiguration() : null;
     ui["multiplayer-status"].textContent = session.multiplayer ? "Preparing local audio before connecting…"
-      : mode === "replay" ? "Local replay · no multiplayer connection." : "Solo play selected.";
+      : mode === "replay" ? "Local replay · no multiplayer connection."
+        : session.localPlan ? "Local players · no network connection." : "Solo play selected.";
     clearOpponentResults(session.opponentSelection ? "Preparing selected saved opponents…"
       : mode === "replay" ? "Saved comparisons are inactive during replay playback." : "No saved opponents selected.");
-    if (session.hidProfileFile !== null) session.hidOwner = createSessionHid(session);
-    if (mode === "live" && typeof navigator.getGamepads === "function") {
+    if (!retained && session.hidProfileFile !== null) session.hidOwner = createSessionHid(session);
+    if (!retained && mode === "live" && typeof navigator.getGamepads === "function") {
       session.gamepadDevices = [];
       session.gamepadOwner = createSessionGamepads(session);
       session.gamepadOwner.poll();
@@ -670,36 +912,54 @@ async function play(mode = "live") {
       audioLimits: session.audioLimits,
       timeoutMs: 10000, signal: session.controller.signal });
     session.opening = opening;
-    if (session.hidOwner !== null) {
+    if (!retained && session.hidOwner !== null) {
       session.hidConnecting = session.hidOwner.connectAuthorized();
       session.hidConnecting.catch(() => {});
     }
     session.audio = await opening;
     if (activePlay !== session || session.phase === "closing") { await session.audio.stop(); return; }
-    if (session.hidOwner !== null) {
+    if (releasedSources) await releasedSources;
+    if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
+    if (hidOwnershipFailed) throw new Error("Input ownership cleanup failed. Reload the page.");
+    if (!retained && session.hidOwner !== null) {
       const devices = await session.hidConnecting;
       if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
       session.hidDevices = snapshotHidDevices(devices.map(({ source, device }) => ({ source, vendorId: device.vendorId, productId: device.productId })));
     }
+    if (session.localPlan) {
+      session.hidDevices = session.hidDevices?.filter(device => session.localSources.has(device.source)) ?? null;
+      session.gamepadDevices = session.gamepadDevices?.filter(device => session.localSources.has(device.source)) ?? null;
+    }
+    session.requestHid = session.hidOwner !== null && (!session.localPlan || session.hidDevices?.length > 0);
+    session.requestGamepad = session.gamepadOwner !== null && (!session.localPlan || session.gamepadDevices?.length > 0);
+    if (session.localPlan && !session.requestHid) session.hidSources = new Set();
+    if (session.localPlan && !session.requestGamepad) session.gamepadSources = new Set();
     session.workerStarted = true;
     const source = mode === "replay" ? { mode, replayFile: session.replayFile }
       : { mode, inputMode: session.inputMode, seed: ui.seed.value, recordReplay: session.recordReplay, timing: session.timing, startNs: session.startNs,
         ...(session.requestedEndNs === undefined ? {} : { endNs: session.requestedEndNs }),
         ...(session.multiplayer ? { multiplayer: session.multiplayer } : {}),
         ...(session.opponentSelection ? { opponents: session.opponentSelection } : {}),
-        ...(session.hidOwner ? { hidProfileFile: session.hidProfileFile, hidDevices: session.hidDevices } : {}),
-        ...(session.gamepadOwner ? { gamepadDevices: session.gamepadDevices } : {}),
-        ...(session.gamepadProfileFile ? { gamepadProfileFile: session.gamepadProfileFile } : {}),
+        ...(session.localPlan ? { localPlanWords: session.localPlan.words, localPage: session.localPlan.page } : {}),
+        ...(session.requestHid ? { hidProfileFile: session.hidProfileFile, hidDevices: session.hidDevices } : {}),
+        ...(session.requestGamepad ? { gamepadDevices: session.gamepadDevices } : {}),
+        ...(session.requestGamepad && session.gamepadProfileFile ? { gamepadProfileFile: session.gamepadProfileFile } : {}),
         keyPairs: Uint32Array.from(session.bindingSelection.flatMap(row => [row[0], row[2]])) };
     const prepared = await playRpc(session, "play-start", { libraryId, path: ui.chart.value,
       rate: session.audio.sampleRate, commandBatchLimit: session.commandBatchLimit, ...source });
     if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
     if (mode === "replay" ? prepared.mode !== "replay" : prepared.mode !== undefined && prepared.mode !== "live") throw new Error("Playback preparation mode changed.");
     if (mode === "live" && prepared.inputMode !== session.inputMode) throw new Error("Preparation did not admit the requested physical input route.");
-    if (session.hidOwner !== null) {
+    if (session.localPlan) {
+      const local = validateLocalPrepared(session.localPlan, prepared, session.recordReplay);
+      session.localPage = local.page;
+      session.recordLimits = local.recordLimits;
+    } else if (prepared.localPlayers !== undefined || prepared.localPage !== undefined) throw new Error("Preparation unexpectedly created local players.");
+    if (session.requestHid) {
       const count = prepared.hidSourceCount;
       const sources = prepared.hidSources;
-      if (!Number.isInteger(count) || count < 1 || count > 16 || !Array.isArray(sources) || sources.length !== count) {
+      if (!Number.isInteger(count) || count < 1 || count > 16 || !Array.isArray(sources) || sources.length !== count
+        || (session.localPlan && count !== session.hidDevices.length)) {
         throw new Error("Preparation omitted the exact admitted HID sources.");
       }
       const admitted = new Set();
@@ -713,11 +973,12 @@ async function play(mode = "live") {
     } else if (prepared.hidSourceCount !== undefined || prepared.hidSources !== undefined) {
       throw new Error("Preparation admitted HID without an owned device session.");
     }
-    if (session.gamepadOwner !== null) {
+    if (session.requestGamepad) {
       const sources = prepared.gamepadSources;
       const custom = session.gamepadProfileFile !== null;
-      const eligible = custom ? session.gamepadDevices : session.gamepadDevices.filter(device => device.mapping === "standard" && device.buttons >= 9);
-      if (!Array.isArray(sources) || (custom ? sources.length < 1 || sources.length > eligible.length : sources.length !== eligible.length)) {
+      const eligible = custom || session.localPlan ? session.gamepadDevices : session.gamepadDevices.filter(device => device.mapping === "standard" && device.buttons >= 9);
+      if (!Array.isArray(sources) || (session.localPlan ? sources.length !== eligible.length
+        : custom ? sources.length < 1 || sources.length > eligible.length : sources.length !== eligible.length)) {
         throw new Error("Preparation omitted the admitted Gamepad profile sources.");
       }
       const admitted = new Set();
@@ -745,14 +1006,16 @@ async function play(mode = "live") {
     session.opponentSelection = null;
     ui.title.textContent = prepared.title || ui.chart.value;
     ui.details.textContent = `${prepared.artist || "Unknown artist"} · ${prepared.notes} notes · ${prepared.samples} sounds · ${session.audio.sampleRate} Hz output · start ${seconds(preparedStart.toString())} s`
-      + (session.endNs === undefined ? "" : ` · ${mode === "replay" ? "recorded end" : "end"} ${seconds(session.endNs.toString())} s`);
-    if (session.hidOwner !== null || session.gamepadSources?.size > 0) {
+      + (session.endNs === undefined ? "" : ` · ${mode === "replay" ? "recorded end" : "end"} ${seconds(session.endNs.toString())} s`)
+      + (session.localPlan ? ` · ${session.localPlan.players.length} local players` : "");
+    if (session.localPlan || session.hidOwner !== null || session.gamepadSources?.size > 0) {
       bindingsFor(prepared.lanes); // Validate actual lane shape; Worker proved combined coverage.
-      session.bindings = bindingsFor(prepared.lanes.filter(lane => session.bindingSelection.some(row => row[0] === lane)), session.bindingSelection);
+      session.bindings = session.localSources && !session.localSources.has(1n) ? []
+        : bindingsFor(prepared.lanes.filter(lane => session.bindingSelection.some(row => row[0] === lane)), session.bindingSelection);
     } else session.bindings = mode === "replay" ? [] : bindingsFor(prepared.lanes, session.bindingSelection);
     ui.keys.textContent = mode === "replay" ? "Recorded input playback · Escape stops the replay."
       : session.bindings.map(row => `${row[0].toString(16).toUpperCase()}: ${row[1]}`).join(" · ")
-        + (session.touchInput ? " · Touch lanes enabled" : "")
+        + (session.touchInput && (!session.localSources || session.localSources.has(2n)) ? " · Touch lanes enabled" : "")
         + (session.hidSources ? ` · ${session.hidSources.size} HID interface(s)` : "")
         + (session.gamepadSources ? ` · ${session.gamepadSources.size} ${session.gamepadProfileFile ? "profile-configured" : "automatic standard"} Gamepad(s); ${session.gamepadDevices.length - session.gamepadSources.size} unmatched device(s) ignored` : "");
     for (let index = 0; index < prepared.samples; index++) {
@@ -823,6 +1086,7 @@ function key(event, down) {
   const session = activePlay;
   if (!session || session.phase === "closing") return;
   if (event.code === "Escape" && down) { event.preventDefault(); void stopPlay("Playback stopped."); return; }
+  if (session.localSources && !session.localSources.has(1n)) return;
   if (session.phase !== "playing") return;
   const binding = session.bindings.find(row => row[1] === event.code);
   if (!binding) return;
@@ -847,6 +1111,7 @@ function touch(event, phase, surface, lost = false) {
   const session = activePlay;
   if (!session || session.phase !== "playing" || !session.touchInput || session.mode !== "live"
     || surface !== canvas || surface !== session.canvas || session.owner !== owner) return;
+  if (session.localSources && !session.localSources.has(2n)) return;
   if (!lost && event.pointerType !== "touch") return;
   const id = event.pointerId;
   const previous = session.contacts.get(id);
@@ -1024,7 +1289,7 @@ function receivePlay(data) {
       session.cleanupError = String(data.message).slice(0, 4096);
       stop();
     } else releasePlayWorker(session);
-    void stopPlay(`Playback failed: ${data.message} · Hits ${data.hits}, misses ${data.misses}`, true);
+    void stopPlay(`Playback failed: ${data.message}` + (session.localPlan ? "" : ` · Hits ${data.hits}, misses ${data.misses}`), true);
   } else if (data.kind === "play-commands" && session.phase !== "closing") {
     void stopPlay("Unexpected Window command relay after direct audio handoff.", true);
   } else if (data.kind === "play-render-done" && session.phase === "playing") {
@@ -1168,17 +1433,24 @@ function stopPlay(reason, failed = false, completed = false) {
               : `Multiplayer ended without a confirmed final score write${outcome?.error ? `: ${String(outcome.error).slice(0, 4096)}` : "."}`;
           ui["multiplayer-status"].textContent = localOutcome + finalPeerText(outcome?.peer);
         }
-        const result = score && typeof score.hits === "bigint" && typeof score.misses === "bigint"
+        const result = !session.localPlan && score && typeof score.hits === "bigint" && typeof score.misses === "bigint"
           ? ` Hits ${score.hits} · Misses ${score.misses} · Combo ${score.combo ?? "unavailable"}.` : "";
         if (session.replayError !== null) {
           failed = true;
           reason += ` Replay export failed: ${session.replayError}`;
         }
-        if (session.replay !== null) {
+        if (session.localPlan && session.owner === owner) {
+          showLocalResults(session, failed);
+          localRoster.clearSources();
+          showLocalRoster();
+          ui["local-status"].textContent = "Local input sources released. Discover again before the next local session.";
+        } else if (session.replay !== null) {
           revokeReplayURL();
           lastReplay = { bytes: session.replay.bytes, complete: session.replay.complete && !failed, id: session.id,
             chartPath: session.chartPath, hits: score?.hits ?? null, misses: score?.misses ?? null, combo: score?.combo ?? null };
           ui.export.textContent = `Download last replay (${lastReplay.complete ? "complete" : "prefix"})`;
+          capturedReplays = [lastReplay];
+          showCapturedReplays(true);
         }
         activePlay = null;
         session.opponentSelection = null;
@@ -1191,6 +1463,12 @@ function stopPlay(reason, failed = false, completed = false) {
 }
 
 function replayReceipt(session, data) {
+  if (session.localPlan) {
+    session.localReplays = localReplayReceipt(session.localPlan, data, { recording: session.recordReplay,
+      natural: session.naturalFinishRequested, bytesPerMember: Math.floor(64 * 1024 * 1024 / session.localPlan.players.length) });
+    session.localScores = localScoreRows(session.localPlan, data.localScores);
+    return;
+  }
   try {
     // A non-recording older peer may omit export fields, but cannot publish bytes.
     if (!session.recordReplay && data.replay === undefined && data.replayComplete === undefined
@@ -1215,6 +1493,61 @@ function replayReceipt(session, data) {
     session.replayError = String(error.message).slice(0, 4096);
   }
 }
+
+function localScoreRows(plan, rows) {
+  return plan.players.map((player, index) => {
+    const unavailable = { player, songNs: null, hits: null, misses: null, combo: null, maxCombo: null };
+    if (!Array.isArray(rows) || rows.length !== plan.players.length) return unavailable;
+    const row = rows[index];
+    if (!row || row.player !== player || !(row.songNs === null || (typeof row.songNs === "bigint"
+      && row.songNs >= -9223372036854775808n && row.songNs <= 9223372036854775807n))) return unavailable;
+    if ([row.hits, row.misses, row.combo, row.maxCombo].some(value => !(value === null
+      || (typeof value === "bigint" && value >= 0n && value <= 18446744073709551615n)))) return unavailable;
+    if ((row.combo !== null && row.maxCombo !== null && row.combo > row.maxCombo)
+      || (row.maxCombo !== null && row.hits !== null && row.maxCombo > row.hits)
+      || (row.hits !== null && row.misses !== null && row.hits + row.misses > 18446744073709551615n)) return unavailable;
+    return { player, songNs: row.songNs, hits: row.hits, misses: row.misses, combo: row.combo, maxCombo: row.maxCombo };
+  });
+}
+
+function showCapturedReplays(selectSolo = false) {
+  ui["captured-replay"].replaceChildren(new Option("Choose a captured replay", ""));
+  for (const record of capturedReplays) {
+    ui["captured-replay"].append(new Option(`${record.player === undefined ? "Solo" : `Player ${record.player}`} · ${record.complete ? "complete" : "prefix"}`, String(record.player ?? "solo")));
+  }
+  ui["captured-replay"].value = selectSolo ? "solo" : "";
+  if (!selectSolo) { lastReplay = null; ui.export.textContent = "Choose a captured replay"; }
+}
+
+function showLocalResults(session, failed) {
+  const scores = session.localScores ?? localScoreRows(session.localPlan, null);
+  const rows = document.createDocumentFragment();
+  const recordings = [];
+  for (let index = 0; index < session.localPlan.players.length; index++) {
+    const player = session.localPlan.players[index];
+    const score = scores[index];
+    const replay = session.localReplays?.[index];
+    const item = document.createElement("li");
+    item.textContent = `Player ${player} · Hits ${score.hits ?? "unavailable"} · Misses ${score.misses ?? "unavailable"}`
+      + ` · Combo ${score.combo ?? "unavailable"} · Max combo ${score.maxCombo ?? "unavailable"}`
+      + (score.songNs === null ? "" : ` · ${seconds(score.songNs.toString())} s`)
+      + (replay?.replayError ? ` · Replay unavailable: ${replay.replayError}`
+        : replay?.replay ? ` · ${replay.replayComplete && !failed ? "Complete recording" : "Recorded prefix"}` : " · No recording");
+    rows.append(item);
+    if (replay?.replay) recordings.push({ player, bytes: replay.replay, complete: replay.replayComplete && !failed,
+      id: session.id, chartPath: session.chartPath, hits: score.hits, misses: score.misses, combo: score.combo });
+  }
+  ui["local-results"].replaceChildren(rows);
+  if (session.recordReplay) {
+    revokeReplayURL();
+    capturedReplays = recordings;
+    showCapturedReplays(); // A member recording is never selected by aliasing the first row.
+  }
+}
+
+function replayFilename(record) {
+  return `beatkernel-${record.id}${record.player === undefined ? "" : `-player-${record.player}`}-${record.complete ? "complete" : "prefix"}.bkr`;
+}
 function revokeReplayURL() {
   clearTimeout(replayURLTimer);
   replayURLTimer = null;
@@ -1229,7 +1562,7 @@ function downloadReplay() {
     replayURL = URL.createObjectURL(new Blob([lastReplay.bytes], { type: "application/octet-stream" }));
     link = document.createElement("a");
     link.href = replayURL;
-    link.download = `beatkernel-${lastReplay.id}-${lastReplay.complete ? "complete" : "prefix"}.bkr`;
+    link.download = replayFilename(lastReplay);
     document.body.appendChild(link);
     link.click();
     replayURLTimer = setTimeout(revokeReplayURL, 60000);
@@ -1384,7 +1717,7 @@ async function recordAction(action) {
       }
     } else {
       if (action === "save") {
-        await store.save({ bytes: captured.bytes, name: `beatkernel-${captured.id}-${captured.complete ? "complete" : "prefix"}.bkr`,
+        await store.save({ bytes: captured.bytes, name: replayFilename(captured),
           chartPath: captured.chartPath, complete: captured.complete,
           hits: captured.hits, misses: captured.misses, combo: captured.combo });
         if (!recordCurrent(operation)) return;

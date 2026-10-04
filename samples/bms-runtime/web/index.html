@@ -70,6 +70,15 @@
         <button id="gamepad-profile-clear" type="button" disabled>Use automatic Gamepad bindings</button></div>
       <p id="gamepad-profile-name" class="hint">Automatic standard Gamepad bindings; choose an optional version 1 profile to customize.</p>
       <p class="hint">Live play discovers browser-exposed Gamepads without a device chooser. Standard controllers with at least nine buttons use buttons 0–8 for solo lanes by default. Optional local profiles match product descriptions and control counts; they are limited to 1 MiB and checked during setup. Axis bindings do not act as keys. Replay uses recorded inputs.</p>
+      <details class="binding-editor"><summary>Local players</summary>
+        <div class="replay-controls"><label>Player count <input id="local-count" type="number" min="1" max="64" step="1" value="1" disabled></label>
+          <button id="local-discover" type="button" disabled>Discover local sources</button>
+          <button id="local-release" type="button" disabled>Release local sources</button>
+          <label>Visible players <select id="local-page" disabled><option value="0">Player 1</option></select></label></div>
+        <div id="local-sources" aria-label="Local player source assignments"></div>
+        <p id="local-status" class="hint" role="status" aria-live="polite">One player uses inputs automatically. No source selection is needed.</p>
+        <p class="hint">For two to 64 players, discover inputs and assign a distinct acquired source to each player. Keyboard and touch each count as one source. HID and Gamepad profiles must cover each assigned player's chart lanes. Four players appear per page; a page with active touch routing stays fixed. Local play currently excludes network and saved opponents. Sources are released after play; discover again for another local session.</p>
+      </details>
       <p><button id="play" type="button" disabled>Play live</button> <button id="stop" type="button" disabled>Stop</button></p>
       <div class="replay-controls"><label><input id="multiplayer" type="checkbox" disabled> Multiplayer live play</label>
         <label>Server <input id="multiplayer-url" type="url" placeholder="https://server.example/room" maxlength="4096" disabled></label>
@@ -77,7 +86,9 @@
       <p class="hint">Both players need the same chart, seed and output setup, and a compatible WebTransport server. Replay stays local.</p>
       <p id="multiplayer-status" class="hint" role="status" aria-live="polite">Solo play selected.</p>
       <div class="replay-controls"><label><input id="record" type="checkbox" disabled> Record replay</label>
+        <label>Captured replay <select id="captured-replay" disabled><option value="">No captured replay selected</option></select></label>
         <button id="export" type="button" disabled>Download last replay</button></div>
+      <ul id="local-results" class="opponent-list" aria-label="Local player final results"></ul>
       <p class="hint">Recording is optional. Interrupted plays export a replay prefix. The last captured record stays here until it is replaced or you close the page.</p>
       <div class="replay-controls"><label>Local replay <input id="replay-file" type="file" accept=".bkr" disabled></label>
         <button id="replay-play" type="button" disabled>Play replay</button></div>
