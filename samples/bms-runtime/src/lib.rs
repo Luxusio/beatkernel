@@ -118,6 +118,8 @@ pub mod multiplayer_clock;
 pub mod multiplayer_group;
 #[cfg(test)]
 mod multiplayer_group_fixtures;
+/// Bounded collecting and prepared host rosters, independent of transport I/O.
+pub mod multiplayer_group_rooms;
 #[cfg(test)]
 mod multiplayer_group_session_fixtures;
 #[cfg(test)]
