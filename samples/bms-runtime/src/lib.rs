@@ -139,6 +139,10 @@ pub mod multiplayer_room_clock;
 mod multiplayer_room_clock_fixtures;
 #[cfg(test)]
 mod multiplayer_room_fixtures;
+/// Timed incremental stream driving for common room admission and software start.
+pub mod multiplayer_room_io;
+#[cfg(test)]
+mod multiplayer_room_io_fixtures;
 /// Common client composition from room admission through committed start.
 pub mod multiplayer_room_play;
 #[cfg(test)]

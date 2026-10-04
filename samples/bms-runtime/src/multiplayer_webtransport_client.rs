@@ -185,6 +185,27 @@ mod native {
                 session, stream,
             ))
         }
+        /// Validate the actual room admission/start owner before connecting the
+        /// existing trusted endpoint. The caller supplies elapsed observations,
+        /// cancellation and deadlines while driving the returned stream owner.
+        /// Room authority follows admission order, not the bilateral role option.
+        /// A committed software schedule still needs actual output activation.
+        pub fn connect_room_play(
+            self,
+            identity: &[u8],
+            players: &[crate::local_players::PlayerId],
+            policy: crate::multiplayer_start::StartPolicy,
+            preroll_ns: i64,
+            stop: &AtomicBool,
+            deadline: Instant,
+        ) -> io::Result<crate::multiplayer_room_io::RoomPlayIo<WebTransportStream>> {
+            let session = crate::multiplayer_room_play::RoomPlayClient::new(
+                identity, players, policy, preroll_ns,
+            )
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            let stream = self.connect(stop, deadline)?;
+            Ok(crate::multiplayer_room_io::RoomPlayIo::new(session, stream))
+        }
         pub fn connect(
             self,
             stop: &AtomicBool,
