@@ -1,5 +1,26 @@
 # Unified BMS application and competition
 
+## Shared timed room stream driver
+
+Native room transport must compose the same RoomPlayClient used by the browser,
+including admission, actual probe observations and committed software schedules.
+Keep an incremental Read/Write driver inside the application crate, independent
+of OS or transport. Each step performs at most one write and one bounded read;
+retain partial frames and WouldBlock/Interrupted prefixes. Capture original
+elapsed timestamps immediately after successful stream operations, separately
+from later processing observations. Only the actual final write credits a frame;
+receive timestamps belong to the read completing that frame. Preserve global
+write IDs, ordered observations and the common early-response barriers.
+
+The caller supplies the clock and owns waiting, deadlines, cancellation and
+stream cleanup. Clock regressions, malformed/oversized frames, impossible I/O
+counts, EOF, write-zero and terminal transport errors fence the driver. Local
+state refusals remain recoverable. Stop and completed Leave prevent further
+transport access or schedule delivery. Native WebTransport exposes this actual
+timed driver with explicit StartPolicy and audio preroll, alongside admission-only
+compatibility. Full native app lobby/output activation, multi-host progress and
+final acknowledgement still require integration and runtime acceptance.
+
 The BMS application stays one crate (`samples/bms-runtime`) with internal
 modules and one primary executable. It composes the core, platform and BMS
 adapter crates. Existing diagnostic binaries remain available. Native play,
