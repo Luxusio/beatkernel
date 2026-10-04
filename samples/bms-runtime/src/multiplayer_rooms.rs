@@ -106,6 +106,22 @@ impl fmt::Display for RoomError {
 
 impl std::error::Error for RoomError {}
 
+/// Shared exact ASCII key policy for bilateral and explicit multi-host owners.
+pub(crate) fn validate_room_key(key: &str, max_bytes: usize) -> Result<(), RoomError> {
+    if !(1..=1024).contains(&max_bytes) {
+        return Err(RoomError::InvalidPolicy);
+    }
+    if key.is_empty()
+        || key.len() > max_bytes
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(RoomError::InvalidKey);
+    }
+    Ok(())
+}
+
 /// One bounded owner for bilateral stream membership.
 ///
 /// All times are explicit caller-supplied nanoseconds. Only successful operations
@@ -163,14 +179,7 @@ impl RoomRegistry {
     /// owned until the caller processes `expire` or explicitly releases it.
     pub fn join(&mut self, key: &str, now: i64) -> Result<JoinOutcome, RoomError> {
         self.validate_time(now)?;
-        if key.is_empty()
-            || key.len() > self.policy.max_key_bytes
-            || !key
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
-            return Err(RoomError::InvalidKey);
-        }
+        validate_room_key(key, self.policy.max_key_bytes)?;
         let previous = self.rooms.get(key).copied();
         let deadline = match previous {
             Some(RoomSnapshot::Paired { .. }) => return Err(RoomError::RoomFull),
