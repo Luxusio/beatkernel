@@ -1479,6 +1479,22 @@ browser execution, generated bindings or measured performance. Local network
 competition remains follow-on work; touch page remapping is source-integrated
 but runtime acceptance is unverified.
 
+### Per-member peer display admission
+
+BrowserLocalGame admits an optional peer HUD for an exact member before
+activation and before that member's touch layout is configured. It reuses the
+common validated peer-prefix HUD rather than changing the gameplay evaluator.
+Reserve 28 pixels for its lifecycle and progress rows plus 14 pixels per saved
+record, up to 140 pixels. Healthy peer rows remain at the admitted saved-space
+offset even if saved comparisons become unavailable. Peer failure hides only
+its own display; saved failure hides only saved rows. Failure indicators stay
+within their respective reserved space and do not alter render/touch geometry.
+Invalid or unadmitted updates and duplicate/late admission preserve accepted
+state. No update changes another member, advances gameplay or creates network
+evidence. The page and Worker still refuse local-network combinations until
+actual connections and coordinated common start are integrated. These APIs
+and deferred fixtures do not establish browser runtime acceptance.
+
 ## Touch-aware local page changes
 
 The Window marks a page change pending, freezes the maximum sequence of its

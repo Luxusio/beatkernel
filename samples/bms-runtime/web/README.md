@@ -27,6 +27,11 @@ whole session admits at most eight records and 64 MiB; each target's comparisons
 advance on Worker from its actual frontier. Comparison failure keeps that
 member's reserved display/touch geometry fixed. Local network combinations
 currently refuse explicitly.
+The Rust local binding also provides per-member peer HUD admission and exact
+progress updates for the upcoming network connection integration. Saved and
+peer rows reserve separate space before touch setup; display failures preserve
+that geometry and the other comparison type. This binding groundwork does not
+enable local network play in the page or Worker.
 These page paths are source integrations with deferred fixtures; generated
 bindings, browser/device/audio execution and measured performance are unverified.
 

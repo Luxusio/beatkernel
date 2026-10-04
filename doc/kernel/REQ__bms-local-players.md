@@ -20,6 +20,28 @@ retained through cleanup. Group reports update the matching PlayerId only.
 Saved opponents may be compared for each local member; combining a local group
 with the existing two-peer network mode still fails before resources start.
 
+Browser local peer presentation uses the existing common SavedOpponentHud for
+each exact stable PlayerId. Before activation and before that member's touch
+router is configured, explicitly admit one peer display. Admission creates a
+Waiting row and reserves 28 pixels, independently of the eight saved records
+(14 pixels each). The maximum reservation is 140 pixels. Duplicate admission,
+unknown members, post-activation admission and touch-layout changes fail without
+mutating accepted state. Saved-record admission after touch configuration also
+fails because it would change the same geometry.
+
+Only admitted members accept peer status and ten-word exact progress updates.
+Reuse the shared protocol validation and monotonic status/prefix rules; invalid
+updates preserve accepted display state. Disabling a member's peer display hides
+its peer rows but preserves saved opponents, the immutable reservation and all
+other members. Saved display failure similarly preserves its peer. Render the
+unavailable indicators inside their own reserved rows so the labels do not hide
+healthy saved or peer content. None of these passive presentation operations
+advances judgment, transport, audio or replay capture. The corresponding native
+geometry helper is shared with browser touch and rendering. The browser Worker
+and page still reject local network play until the actual connection and common
+start coordination are connected; binding availability is source groundwork,
+not playable network acceptance.
+
 A solo player starts without input-device selection. Two or more local players
 assign distinct input devices to prevent one physical event from playing every
 chart. Support a collection of players, including three and four; do not encode
