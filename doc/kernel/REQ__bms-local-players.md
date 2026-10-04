@@ -42,6 +42,36 @@ and page still reject local network play until the actual connection and common
 start coordination are connected; binding availability is source groundwork,
 not playable network acceptance.
 
+### Whole-cohort network progress boundary
+
+Read the whole local cohort from the actual StepLocalGameplay in retained
+PlayerId order. Each row contains that member's committed song frontier and
+actual cumulative hit, miss, combo and maximum-combo counts. Reading a snapshot
+does not advance any member or change output, transport, judgment or capture.
+The committed prefix remains observable after failure for final cleanup.
+Expose exact browser words as PlayerId followed by low/high halves of signed
+song time and four unsigned counters (eleven u32 words per member). Do not
+sum scores or substitute the shared song time for member frontiers.
+
+The portable group payload has schema byte 1, final-prefix byte 0/1, a little
+endian u16 member count, a little endian u64 sequence, then ordered rows of
+u32 PlayerId, i64 song nanoseconds and four u64 counters. Require 1..64 positive
+unique IDs and exactly the declared bytes. Maximum payload is 2828 bytes.
+Validate every row with the same scalar protocol rules. Later snapshots must
+retain the exact ordered roster and monotonic valid member prefixes; any bad
+row rejects the whole snapshot without accepting a sibling prefix. Decode
+requires the caller's exact expected sequence. Sequence, timestamps and
+counters retain their full widths, including signed minima and u64 maxima.
+
+This is a payload and actual-runtime snapshot component, independent of OS,
+transport handles, clock sampling and stream-write credit. The existing BKMP
+v6 Session still accepts scalar progress only. A group mode must subsequently
+negotiate remote roster/setup, carry these payloads, share one authoritative
+start/output mapping and preserve exact write/final acknowledgement ownership.
+No group codec call creates a connection, start receipt or final acknowledgement.
+Browser/native callers remain unfinished; tests authored and compile checks
+cannot prove network acceptance.
+
 A solo player starts without input-device selection. Two or more local players
 assign distinct input devices to prevent one physical event from playing every
 chart. Support a collection of players, including three and four; do not encode

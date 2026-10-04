@@ -1495,6 +1495,17 @@ evidence. The page and Worker still refuse local-network combinations until
 actual connections and coordinated common start are integrated. These APIs
 and deferred fixtures do not establish browser runtime acceptance.
 
+The local binding's progress_words reads all actual members in frozen order:
+each eleven-word row has PlayerId followed by low/high pairs for the member's
+own signed song time and four unsigned cumulative counters. It is a bounded
+control-side snapshot, outside input and audio callbacks. It never sums players,
+substitutes a shared frontier, samples a clock or advances gameplay. It remains
+available for the retained final prefix after gameplay failure. The portable
+whole-cohort payload codec is specified by
+[local input ownership](REQ__bms-local-players.md); the scalar BKMP v6 Session
+and current Worker/Page do not yet publish group payloads. Source compilation
+does not prove generated binding or network execution.
+
 ## Touch-aware local page changes
 
 The Window marks a page change pending, freezes the maximum sequence of its
