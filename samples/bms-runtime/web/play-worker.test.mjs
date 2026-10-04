@@ -370,6 +370,7 @@ async function workerHarness(options = {}) {
       this.memberPeerUpdates = [];
       this.memberPeerDisables = new Map();
       this.groupProgressReads = 0;
+      this.roomHudCalls = [];
     }
     get players() { this.live(); return options.localPlayers ?? new Uint32Array(this.memberIds); }
     memberValue(player, field) {
@@ -398,6 +399,34 @@ async function workerHarness(options = {}) {
       this.live(); assert.ok(this.memberIds.includes(player));
       this.calls.push(["local-peer-configure", player]); this.memberPeerConfigurations.push(player);
       if (options.localPeerConfigureError?.(player)) throw new Error("member peer reservation refused");
+    }
+    configure_room_hud(participant, words) {
+      this.live(); assert.equal(this.stops, 0); assert.ok(words instanceof Uint32Array);
+      const call = ["configure", participant, words.slice()];
+      this.roomHudCalls.push(call); this.calls.push(["room-hud", ...call]);
+      if (options.roomHudConfigureError) throw new Error(options.roomHudConfigureError);
+    }
+    update_room_hud(participant, sequence, finalPrefix, words) {
+      this.live(); assert.equal(this.stops, 0); assert.ok(words instanceof Uint32Array);
+      const call = ["update", participant, sequence, finalPrefix, words.slice()];
+      this.roomHudCalls.push(call); this.calls.push(["room-hud", ...call]);
+      if (options.roomHudUpdateError) throw new Error(options.roomHudUpdateError);
+    }
+    set_room_hud_status(status) {
+      this.live(); assert.equal(this.stops, 0);
+      this.roomHudCalls.push(["status", status]); this.calls.push(["room-hud", "status", status]);
+      if (options.roomHudStatusError) throw new Error(options.roomHudStatusError);
+    }
+    set_room_hud_page(page) {
+      this.live(); assert.equal(this.stops, 0);
+      this.roomHudCalls.push(["page", page]); this.calls.push(["room-hud", "page", page]);
+      if (options.roomHudPageError) throw new Error(options.roomHudPageError);
+    }
+    room_hud_pages() { this.live(); return options.roomHudPages ?? 1; }
+    disable_room_hud() {
+      this.live(); assert.equal(this.stops, 0);
+      this.roomHudCalls.push(["disable"]); this.calls.push(["room-hud", "disable"]);
+      if (options.roomHudDisableError) throw new Error(options.roomHudDisableError);
     }
     update_peer_hud(player, status, words) {
       this.live(); assert.equal(this.stops, 0); assert.ok(this.memberIds.includes(player));
@@ -473,6 +502,7 @@ async function workerHarness(options = {}) {
   if (options.missingLocalPeerConfigure) BrowserLocalGame.prototype.configure_peer_hud = undefined;
   if (options.missingLocalPeerUpdate) BrowserLocalGame.prototype.update_peer_hud = undefined;
   if (options.missingLocalPeerDisable) BrowserLocalGame.prototype.disable_peer_hud = undefined;
+  if (options.missingRoomHudMethod) BrowserLocalGame.prototype[options.missingRoomHudMethod] = undefined;
   class BrowserReplay extends BrowserGame {
     constructor(prepared, ...args) {
       super(prepared, ...args);
@@ -894,20 +924,20 @@ async function roomReceive(h, change, bytes = Uint8Array.of(1)) {
   channel.reads.at(-1).gate.resolve(bytes); await flushJobs();
   session.onReceive = null;
 }
-async function roomSnapshot(h) {
+async function roomSnapshot(h, members = null) {
   const session = h.roomSessions.at(-1);
   await roomReceive(h, () => { session.participantValue = 18446744073709551615n; session.revisionValue++; });
-  const snapshot = { phase: 0, deadlineNs: 9223372036854775807n, members: [
+  const snapshot = { phase: 0, deadlineNs: 9223372036854775807n, members: members ?? [
     { participant: 18446744073709551615n, players: session.players.slice(), prepared: false },
     { participant: 9007199254740993n, players: new Uint32Array([800, 4, 0xffffffff]), prepared: false },
   ] };
   await roomReceive(h, () => { session.dto = snapshot; session.revisionValue++; });
   return snapshot;
 }
-async function preparedRoomReceipt(h) {
+async function preparedRoomReceipt(h, members = null) {
   const session = h.roomSessions.at(-1), channel = h.roomChannels.at(-1);
   channel.writes[0].gate.resolve(); await flushJobs();
-  const admitted = await roomSnapshot(h);
+  const admitted = await roomSnapshot(h, members);
   await roomReceive(h, () => {
     session.dto = { ...admitted, phase: 1 }; session.revisionValue++;
   });
@@ -1298,12 +1328,126 @@ test("room progress uses the admitted member order and 250 ms acquisition cadenc
   assert.equal(game.groupProgressReads, 2); assert.equal(session.publications.length, 2);
   assert.deepEqual(session.publications[1].words, words);
   assert.equal(h.of("play-room").some(row => ["progress", "peer-progress", "receipts"].includes(row.event.kind)), false);
-  assert.deepEqual(game.memberPeerUpdates, [], "room HUD composition remains separate work");
+  assert.deepEqual(game.memberPeerUpdates, [], "room participants cannot alias the bilateral per-member peer slot");
+  assert.deepEqual(game.roomHudCalls.filter(call => call[0] === "update"), [
+    ["update", 9007199254740993n, 18446744073709551615n, true, acceptedPeer],
+  ]);
   await h.send({ kind: "play-stop", playId: 7 });
   const final = h.of("play-stopped").at(-1);
   assert.deepEqual(final.room.peers, [{ participant: 9007199254740993n,
     sequence: 18446744073709551615n, finalPrefix: true, words: acceptedPeer }]);
   assert.deepEqual(final.replays.map(row => row.player), [99, 7, 31]);
+});
+
+test("room HUD bridges every prepared participant and player with exact words and bounded correlated paging", async () => {
+  for (const count of [2, 3, 4, 64]) {
+    const pages = (count - 1) * 16;
+    const h = await roomPrepared({ roomHudPages: pages,
+      ...(count === 3 ? { startRequest: localRequest({ recordReplay: true }) } : {}) });
+    const game = h.locals[0];
+    const contactSetup = game.calls.filter(call => call[0].startsWith("local-touch"));
+    await requestRoom(h);
+    const session = h.roomSessions[0], channel = h.roomChannels[0];
+    const members = Array.from({ length: count }, (_, index) => ({
+      participant: 18446744073709551615n - BigInt(index), prepared: false,
+      players: index === 0 ? session.players.slice() : Uint32Array.from({ length: 64 }, (_, player) => 0xffffffff - player),
+    }));
+    [members[0], members[Math.floor(count / 2)]] = [members[Math.floor(count / 2)], members[0]];
+    await preparedRoomReceipt(h, members);
+    const expected = new Uint32Array(members.flatMap(member => [
+      Number(member.participant & 0xffffffffn), 0xffffffff, member.players.length, ...member.players,
+    ]));
+    assert.deepEqual(game.roomHudCalls, [["configure", 18446744073709551615n, expected]]);
+    assert.deepEqual(h.of("play-room").filter(row => row.event.kind === "score-pages").map(row => row.event),
+      [{ kind: "score-pages", page: 0, pages }]);
+    assert.equal(game.groupProgressReads, 0);
+    await roomReceive(h, () => { session.dto = { ...session.dto }; session.revisionValue++; });
+    assert.equal(game.roomHudCalls.filter(call => call[0] === "configure").length, 1);
+    assert.equal(h.of("play-room").filter(row => row.event.kind === "score-pages").length, 1);
+    await queueRoomStart(h);
+    const remote = members.filter(member => member.participant !== 18446744073709551615n);
+    const original = [];
+    const messages = h.messages.length;
+    for (const member of [...remote].reverse()) {
+      const words = new Uint32Array(Array.from(member.players).flatMap(player => [
+        player, 0xffffffff, 0x7fffffff, 0xffffffff, 0xffffffff, 0, 0, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff,
+      ]));
+      original.push(["update", member.participant, 18446744073709551615n, true, words.slice()]);
+      await roomReceive(h, () => session.peerProgress.push({ participant: member.participant,
+        sequence: 18446744073709551615n, finalPrefix: true, words }));
+      words.fill(0);
+    }
+    assert.deepEqual(game.roomHudCalls.filter(call => call[0] === "update"), original);
+    assert.equal(h.messages.length, messages, "all accepted remote rows remain off the Window message path");
+    assert.deepEqual(game.memberPeerUpdates, [], "same PlayerIds on different hosts never enter bilateral slots");
+    channel.writes.at(-1).gate.resolve(); await flushJobs();
+    assert.deepEqual(game.roomHudCalls.at(-1), ["status", 1]);
+    const start = h.of("play-room").find(row => row.event.kind === "start").event;
+    await h.rpc("play-activate", { hostNs: start.targetHostNs, targetHostNs: start.targetHostNs, startFrame: START });
+    await h.send(step({ watermark: start.targetHostNs }));
+    assert.equal(session.publications.length, 1);
+    for (const page of [pages - 1, 0]) {
+      const rpc = await requestRoom(h, "play-room-page", { page });
+      assert.deepEqual(roomReply(h, rpc).result, { kind: "room-page", page, pages });
+      assert.deepEqual(game.roomHudCalls.at(-1), ["page", page]);
+    }
+    const calls = game.roomHudCalls.length;
+    for (const page of [-1, pages, 0.5, "1", undefined]) {
+      const rpc = await requestRoom(h, "play-room-page", { page });
+      assert.ok(roomReply(h, rpc).error);
+      assert.equal(game.roomHudCalls.length, calls, "bad page cannot mutate the Rust presentation");
+      assert.equal(game.frees, 0);
+    }
+    channel.reads.at(-1).gate.reject(new Error("room disconnected after accepted prefixes")); await flushJobs();
+    assert.deepEqual(game.roomHudCalls.at(-1), ["status", 2]);
+    const retainedPage = await requestRoom(h, "play-room-page", { page: pages - 1 });
+    assert.deepEqual(roomReply(h, retainedPage).result, { kind: "room-page", page: pages - 1, pages });
+    assert.equal(game.frees, 0);
+    await h.send({ kind: "play-stop", playId: 7 });
+    const final = h.of("play-stopped").at(-1);
+    assert.deepEqual(final.room.peers.map(row => row.participant), remote.map(member => member.participant));
+    assert.equal(final.room.peers.reduce((length, row) => length + row.words.length / 11, 0), (count - 1) * 64);
+    assert.deepEqual(game.calls.filter(call => call[0].startsWith("local-touch")), contactSetup,
+      "room score membership, page changes and disconnect never remap local contact geometry");
+    assert.equal(game.frees, 1);
+    const posted = h.messages.length, hudCalls = game.roomHudCalls.length;
+    await requestRoom(h, "play-room-page", { page: 0 });
+    assert.equal(h.messages.length, posted); assert.equal(game.roomHudCalls.length, hudCalls);
+  }
+});
+
+test("room HUD capability and binding failures fence only presentation and preserve gameplay, publication and capture", async () => {
+  const cases = [
+    ...["configure_room_hud", "update_room_hud", "set_room_hud_status", "set_room_hud_page", "room_hud_pages", "disable_room_hud"]
+      .map(missingRoomHudMethod => ({ missingRoomHudMethod })),
+    { roomHudConfigureError: "display setup refused" }, { roomHudPages: 0 },
+    { roomHudUpdateError: "display prefix refused", roomHudDisableError: "display disable refused" },
+    { roomHudStatusError: "display lifecycle refused" }, { roomHudPageError: "display page refused" },
+  ];
+  for (const options of cases) {
+    const h = await roomPrepared(options), game = h.locals[0], start = await committedRoom(h);
+    const session = h.roomSessions[0], channel = h.roomChannels[0];
+    await h.rpc("play-activate", { hostNs: start.targetHostNs, targetHostNs: start.targetHostNs, startFrame: START });
+    const words = new Uint32Array([800, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0,
+      4, 0, 0, 2, 0, 0, 0, 2, 0, 2, 0, 0xffffffff, 0, 0, 3, 0, 0, 0, 3, 0, 3, 0]);
+    for (const sequence of [1n, 2n]) await roomReceive(h, () => session.peerProgress.push({
+      participant: 9007199254740993n, sequence, finalPrefix: false, words,
+    }));
+    const page = await requestRoom(h, "play-room-page", { page: 0 });
+    assert.ok(roomReply(h, page).error);
+    assert.equal(h.of("play-room").filter(row => row.event.kind === "display-unavailable").length, 1);
+    assert.ok(game.roomHudCalls.filter(call => call[0] === "disable").length <= 1);
+    assert.equal(h.of("play-error").length, 0); assert.equal(channel.closes, 0); assert.equal(game.stops, 0);
+    await h.send(step({ watermark: start.targetHostNs }));
+    assert.equal(h.of("play-step-done").length, 1); assert.equal(session.publications.length, 1);
+    assert.equal(game.calls.some(call => call[0] === "advance"), true);
+    await h.send({ kind: "play-stop", playId: 7 });
+    const final = h.of("play-stopped").at(-1);
+    assert.equal(final.released, true); assert.equal(final.room.error, null);
+    assert.equal(final.room.peers[0].sequence, 2n);
+    assert.ok(final.replays[0].replay instanceof Uint8Array);
+    assert.equal(game.frees, 1); assert.equal(session.frees, 1);
+  }
 });
 
 test("a completed output publishes one final room prefix outside cadence while actual write and read receipts remain distinct", async () => {
@@ -1454,6 +1598,7 @@ test("natural room drain retains peer and receipt callbacks after gameplay dispo
   const { h, game, session, channel } = await naturalRoomDrain({ roomHoldAfterClose: true });
   assert.equal(game.groupProgressReads, 1); assert.deepEqual(session.requests, ["ready"]);
   const calls = game.calls.length, messages = h.messages.length;
+  const hudCalls = game.roomHudCalls.length;
   const words = new Uint32Array([
     800, 0xffffffff, 0x7fffffff, 0xffffffff, 0xffffffff, 0, 0, 1, 0, 0xffffffff, 0xffffffff,
     4, 0, 0, 2, 0, 0, 0, 2, 0, 2, 0,
@@ -1486,6 +1631,7 @@ test("natural room drain retains peer and receipt callbacks after gameplay dispo
   assert.equal(final.replays[0].replayComplete, true); assert.ok(final.replays[0].replay instanceof Uint8Array);
   assert.deepEqual(game.disposals, ["group-progress", "stop", "take:4294967295", "free"]);
   assert.equal(game.calls.length, calls); assert.equal(session.publications.length, 1);
+  assert.equal(game.roomHudCalls.length, hudCalls, "retained final-drain prefixes never revisit the freed HUD binding");
   assert.deepEqual(session.credits, credited); assert.equal(session.received.length, received);
   assert.equal(session.requests.includes("leave"), false);
   assert.equal(h.of("play-stopped").length, 1); assert.equal(h.of("play-error").length, 0);

@@ -677,6 +677,51 @@ function roomOutcome(room) {
     error: errors.length ? message(errors.join("; cleanup: ")) : null, peers };
 }
 
+function roomHudFailure(state, room, error) {
+  if (room.hudFailed) return;
+  room.hudFailed = true;
+  if (play === state && state.game) {
+    try { state.game.disable_room_hud(); } catch {}
+    report("play-room", { playId: state.id, event: { kind: "display-unavailable", error: message(error) || "Room score display unavailable." } });
+    scheduleDraw();
+  }
+}
+
+function updateRoomHud(state, room, action) {
+  if (play !== state || !state.game || !room.hudConfigured || room.hudFailed) return;
+  try { action(state.game); scheduleDraw(); }
+  catch (error) { roomHudFailure(state, room, error); }
+}
+
+function configureRoomHud(state, room) {
+  if (room.peerPlayers === null || room.hudConfigured || room.hudFailed || play !== state || !state.game) return false;
+  try {
+    const game = state.game;
+    if (["configure_room_hud", "update_room_hud", "set_room_hud_status", "set_room_hud_page", "room_hud_pages", "disable_room_hud"]
+      .some(name => typeof game[name] !== "function")) throw new Error("Room score display binding unavailable.");
+    let length = 0, remote = 0;
+    for (const [participant, players] of room.peerPlayers) {
+      length += 3 + players.length;
+      if (participant !== room.participant) remote += players.length;
+    }
+    if (!integer(length, 8, 4288) || !integer(remote, 1, 4032)) throw new Error("Invalid room display roster extent.");
+    const words = new Uint32Array(length);
+    let offset = 0;
+    for (const [participant, players] of room.peerPlayers) {
+      words[offset++] = Number(participant & 0xffffffffn);
+      words[offset++] = Number(participant >> 32n);
+      words[offset++] = players.length;
+      words.set(players, offset); offset += players.length;
+    }
+    game.configure_room_hud(room.participant, words);
+    const pages = game.room_hud_pages();
+    if (!integer(pages, 1, 1008) || pages !== Math.ceil(remote / 4)) throw new Error("Room display returned an incorrect page count.");
+    room.hudConfigured = true; room.hudPages = pages;
+    scheduleDraw();
+    return true;
+  } catch (error) { roomHudFailure(state, room, error); return false; }
+}
+
 function sendRoomProgress(state, final = false) {
   const room = state.room;
   if (play !== state || !state.active || !state.game || !room || !room.start || room.disposed
@@ -784,6 +829,7 @@ function roomClosed(state, room, error) {
 function roomFailure(state, room, error) {
   if (!roomCallbacksCurrent(state, room)) return;
   room.failure ??= error;
+  updateRoomHud(state, room, game => game.set_room_hud_status(2));
   if (roomFinalization?.state === state && room.draining) {
     room.finalDrain = "failed";
     void closeRoom(room);
@@ -851,6 +897,7 @@ function openRoom(state, request) {
     windowOriginNs, originNs: null, start: null, failure: null, participant: null,
     localPlayers: Object.freeze(Array.from(players)), peerPlayers: null, peers: new Map(),
     lastProgress: null, finalQueued: false, draining: false, finalDrain: "cancelled",
+    hudConfigured: false, hudFailed: false, hudPage: 0, hudPages: 0,
     receipts: Object.freeze({ localFinalWritten: false, localFinalAcknowledged: false, complete: false, drainComplete: false }) };
   const client = session;
   state.room = room; // One attempt per play; this slot is never reset or reused.
@@ -870,7 +917,9 @@ function openRoom(state, request) {
         // session provides the participant; no roster position is substituted.
         const participant = room.owner?.participant ?? client.participant_id();
         retainRoomSnapshot(room, snapshot, participant);
+        const configured = configureRoomHud(state, room);
         report("play-room", { playId: state.id, event: { kind: "snapshot", participant, snapshot } });
+        if (configured) report("play-room", { playId: state.id, event: { kind: "score-pages", page: 0, pages: room.hudPages } });
       },
       onProgress: prefix => {
         if (!roomCallbacksCurrent(state, room)) return;
@@ -880,6 +929,7 @@ function openRoom(state, request) {
         const words = roomProgressWords(prefix.words, room.peerPlayers.get(prefix.participant), "accepted room peer progress");
         room.peers.set(prefix.participant, Object.freeze({ participant: prefix.participant,
           sequence: prefix.sequence, finalPrefix: prefix.finalPrefix, words }));
+        updateRoomHud(state, room, game => game.update_room_hud(prefix.participant, prefix.sequence, prefix.finalPrefix, words));
       },
       onReceipts: receipts => {
         if (!roomCallbacksCurrent(state, room)) return;
@@ -902,6 +952,7 @@ function openRoom(state, request) {
         }
         room.originNs = originNs;
         room.start = Object.freeze({ targetHostNs, songTargetHostNs, uncertaintyNs: schedule.uncertaintyNs });
+        updateRoomHud(state, room, game => game.set_room_hud_status(1));
         report("play-room", { playId: state.id, event: { kind: "start", ...room.start } });
       },
       onClose: error => {
@@ -943,6 +994,18 @@ function roomRequest(state, request) {
   try {
     if (request.kind === "play-room-open") { openRoom(state, request); return; }
     const room = state.room;
+    if (request.kind === "play-room-page") {
+      if (!room || !state.game || !state.prepared || room.hudFailed || !room.hudConfigured || room.rpcId !== null) {
+        throw new Error("Room score display is unavailable.");
+      }
+      if (!integer(request.page, 0, room.hudPages - 1)) throw new Error("Room score page is out of range.");
+      try { state.game.set_room_hud_page(request.page); }
+      catch (error) { roomHudFailure(state, room, error); throw error; }
+      room.hudPage = request.page;
+      scheduleDraw();
+      reply(state, request, { kind: "room-page", page: room.hudPage, pages: room.hudPages });
+      return;
+    }
     if (!room || room.disposed || room.leaving || room.rpcId !== null || !room.owner || room.owner.closed) {
       throw new Error("Wait for the current room owner before requesting a room action.");
     }
@@ -1872,6 +1935,7 @@ function handlePlay(request) {
   }
   if (request.kind === "play-stop" && roomFinalization?.state.id === request.playId) {
     if (request.completed !== undefined && typeof request.completed !== "boolean") return;
+    if (request.completed !== undefined && typeof request.completed !== "boolean") return;
     if (request.completed !== true) cancelRoomFinalization();
     return;
   }
@@ -1893,7 +1957,7 @@ function handlePlay(request) {
   try {
     if (request.kind === "play-stop") { stopPlay(state, request); return; }
     if (request.kind === "play-start") throw new Error("Gameplay setup is already owned by this identity.");
-    const roomRpc = ["play-room-open", "play-room-seal", "play-room-ready", "play-room-leave"].includes(request.kind);
+    const roomRpc = ["play-room-open", "play-room-seal", "play-room-ready", "play-room-leave", "play-room-page"].includes(request.kind);
     const requiresRpc = roomRpc || ["play-sample", "play-audio", "play-commands", "play-activate", "play-network-ready", "play-page"].includes(request.kind);
     if (request.rpcId !== undefined && !requiresRpc && request.kind !== "play-ack") throw new Error("Unexpected gameplay RPC identity.");
     rpc(state, request, requiresRpc);
