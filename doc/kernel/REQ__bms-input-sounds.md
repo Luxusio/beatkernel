@@ -108,8 +108,9 @@ cannot be reconstructed by this audio plan. Sources without invisible data keep
 their existing planning path.
 
 This connects typed prepared data to actual stepped sound admission/replay plans.
-Source asset preparation remains guarded until original sample loading, native
-solo/cohort Runtime sound installation and all remaining callers are integrated.
+Source asset preparation remains guarded until original sample loading and
+remaining offline Runtime callers are integrated. Native solo/cohort Runtime
+installation follows the contract below.
 Native recording identity follows the source-aware contract below. Tests and actual
 audio/device verification remain deferred.
 
@@ -170,3 +171,37 @@ changed-source refusal, disabled paths, setup limits and untouched judge state.
 Source preparation remains guarded until asset loading and native Runtime sound
 installation are integrated. Compilation does not prove recording/network or
 device execution.
+
+## Native Runtime installation
+
+native_audio::prepare_input_sounds(&PreparedBms) returns an optional validated
+InputSoundTimeline before the native solo owner moves its chart, sounds or PCM.
+Empty invisible sources return None and keep the unconfigured legacy path.
+Nonempty sources use the actual InputSoundPlan, gameplay/BGM voice namespaces,
+WAV gain and referenced PCM bank; absent samples or invalid/exhausted setup
+reject before audio preparation or output start. Native chart binding coverage
+includes every original invisible lane alongside retained visible lanes, also
+in practice sections with no retained judged objects.
+
+Each Linux/macOS/Windows solo caller retains this timeline until constructing
+its actual core Runtime, then configures it before any input or advance. Original
+song times and the existing Runtime selection/admission/telemetry policy remain
+authoritative. No keysound is emitted merely by advancing past a selection.
+
+PreparedCohort retains ordered input_sounds prepared by the existing
+prepare_local_input_sounds against actual remapped member sounds and reserved
+BGM voices, before capture, ghost or network preparation. All members share the
+original PCM bank. Actual local callers pass those timelines to
+activate_cohort_with_input_sounds, which constructs the common RuntimeGroup and
+installs them atomically before processing, alongside existing endpoint and
+InputMerger setup. The original activate_cohort remains an empty-plan wrapper
+for source compatibility. No-invisible cohorts retain empty plans and existing
+activation behavior. Installation failures cannot return a partially configured
+group. Native cleanup/startup/calibration and mixer capacity choices are unchanged.
+
+Prepare deferred fixtures through the actual native solo preparation helper,
+cohort preparation/activation and software Mixer: ordinary-hit precedence,
+empty-lane fresh presses, duplicate suppression, practice-time replacement,
+voice separation, exact endpoint exclusion, queue failure, malformed/missing
+resources and legacy behavior. Physical latency, platform input/output and
+source-file admission remain separate pending integration/acceptance.

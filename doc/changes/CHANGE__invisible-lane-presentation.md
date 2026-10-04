@@ -11,7 +11,9 @@ charts without invisible data retain their existing projection path.
 
 This presentation prerequisite does not enable source-file keysound playback.
 Shared preparation still refuses invisible timelines until original asset
-loading and legacy native solo/cohort Runtime sound installation are integrated.
+loading and remaining offline Runtime sound composition are integrated.
+Native solo/cohort Runtime installation is connected by the
+[native audio change](CHANGE__native-invisible-audio.md).
 Native capture/comparison identity is now connected by the
 [native identity change](CHANGE__native-invisible-identity.md). Logical
 duration is not audible completion; actual output drain remains authoritative.

@@ -20,8 +20,10 @@ output drain remains necessary. Finite sections retain their explicit end.
 ## Remaining integration
 
 Shared source preparation retains its unsupported-invisible guard. Original
-asset loading and legacy native solo/cohort Runtime sound composition need
-installation before that guard is removed. Native capture/comparison identity
+asset loading and remaining offline Runtime sound composition need integration
+before that guard is removed. Native solo/cohort Runtime installation is connected
+by the [native audio change](CHANGE__native-invisible-audio.md).
+Native capture/comparison identity
 is connected by the [native identity change](CHANGE__native-invisible-identity.md).
 These typed-path changes do not prove browser,
 physical-device/audio execution, latency or complete BMS support. Independent
@@ -29,7 +31,7 @@ fixtures are prepared for deferred execution; formal reviews/QA remain deferred.
 
 The subsequent [invisible lane presentation change](CHANGE__invisible-lane-presentation.md)
 includes invisible-only lanes in PlayerChart metadata and derived touch regions,
-without creating rendered or judged notes. Source assets and legacy native
+without creating rendered or judged notes. Source assets and remaining offline
 callers still require integration before source admission is enabled.
 
 ## Deferred verification preparation

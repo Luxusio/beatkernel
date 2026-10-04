@@ -11,7 +11,9 @@ describes semantic chart compatibility and does not authenticate resources.
 ## Remaining integration
 
 Source preparation still refuses invisible playback until original PCM loading
-and native Runtime installation are connected. Existing native recording
+and remaining offline Runtime composition are connected. Native Runtime
+installation is connected by the [native audio change](CHANGE__native-invisible-audio.md).
+Existing native recording
 section semantics and cleanup boundaries remain unchanged. Actual recording,
 browser/native interoperability, devices and formal review/QA are deferred.
 

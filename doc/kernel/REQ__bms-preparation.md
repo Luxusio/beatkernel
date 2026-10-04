@@ -106,8 +106,9 @@ Known ceiling: MP3 metadata skipping accepts one initial ID3v2.3/v2.4 header/bod
 
 ## Invisible keysound admission during staged integration
 
-The typed adapter invisible timeline is available separately. Until actual
-empty-key sound selection and replay identity consume it, prepare_from_source
+The typed adapter invisible timeline, source-aware replay identity and native/
+stepped Runtime installation are connected. Until referenced invisible PCM
+loading and remaining offline Runtime composition are integrated, prepare_from_source
 rejects nonempty invisible data immediately after parsing and before replay
 validation or resource resolution/read/decode. This shared guard covers native,
 browser, live and replay preparation. Empty/rest-only invisible rows retain
