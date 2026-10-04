@@ -1512,8 +1512,21 @@ Group event polling shares the bounded pending-event budget and remains
 available for cleanup after failure. Before entering generated WASM glue, a
 host must bound roster and word inputs to 64 players and 704 words; the Rust
 decoder also validates exact extents, identities and scalar score semantics.
-Source compilation
-does not prove generated binding or network execution.
+Source compilation does not prove generated binding or network execution.
+
+The Worker network owner's open options accept a strict boolean group flag,
+defaulting to false. Setting group: true requires send_group_progress and
+poll_group_event capabilities; submit_group(words, finalPrefix) then uses the
+same transport and read/write/clock/cleanup loop as scalar submit. Group submissions contain an
+owned snapshot of at most 704 member words (11 per player, 1..64 players),
+bounded before generated WASM glue copies them. Shared, resizable or detached
+buffers and wrong-mode submissions are refused without admitting a pending
+submission. Only the common Rust Session validates progression,
+rosters, sequence and final acknowledgement. Scalar and group event drains share
+one eight-event budget; synchronous callbacks may close the owner without any
+later access to its freed Session. Both modes retain one pending submission and
+one exact full-write/final-ACK barrier. This owner API does not itself enable
+local network UI or choose remote member HUD targets.
 
 ## Touch-aware local page changes
 
