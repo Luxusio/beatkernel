@@ -1,5 +1,21 @@
 # Browser host and shared selected-file preparation
 
+## Browser main-thread input ownership
+
+The browser Window acquires keyboard, touch/pointer, HID and Gamepad input.
+Keep browser-required permission prompts, user activation, lifecycle, resize
+notifications and event-driven setup/results DOM there. Gameplay canvas and HUD
+rendering belong to the Worker through OffscreenCanvas; Window must not run a
+gameplay rendering loop. Input mapping, judgment and network processing belong
+to the Worker; audio output belongs to the AudioWorklet.
+
+Forward original acquisition timestamps, source identities, sequence numbers
+and contact identities through the existing bounded input transport. Never
+replace acquisition time with Worker arrival time. Gamepad polling needed for
+acquisition is permitted on Window and does not authorize gameplay rendering.
+Solo input uses automatic source admission; multiple local players use distinct
+assigned acquired sources, including three, four and larger supported rosters.
+
 ## Actual multi-host room lobby caller
 
 Expose the BKMR room path as an explicit choice alongside the existing bilateral
