@@ -46,6 +46,16 @@ function progress(fields = {}) {
   return { songNs: I64_MIN, hits: U64_MAX, misses: 0n, combo: U64_MAX, maxCombo: U64_MAX, ...fields };
 }
 function admitted(id, bytes = Uint8Array.of(1, 2, 3)) { return { kind: 1, frame_id: id, bytes }; }
+function groupWords() {
+  return Uint32Array.of(
+    7, 0, 0x80000000, 0xffffffff, 0xffffffff, 0, 0,
+    0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff,
+    0xffffffff, 0xffffffff, 0x7fffffff, 0, 0, 0xffffffff, 0xffffffff, 0, 0, 0, 0,
+  );
+}
+function groupEvent(sequence = 0n, final = false) {
+  return { kind: final ? "group-final-progress" : "group-progress", sequence, words: groupWords() };
+}
 
 async function harness(faults = {}) {
   const trace = [];
@@ -120,6 +130,21 @@ async function harness(faults = {}) {
     free() { this.alive(); this.freed = true; this.frees++; trace.push(["session-free"]); },
   };
 
+  function enableGroup() {
+    session.groupCalls = [];
+    session.queuedGroupEvents = [];
+    session.send_group_progress = function(words, finalPrefix, now) {
+      this.alive(); this.groupCalls.push({ words, finalPrefix, now }); trace.push(["group-progress", [...words], finalPrefix, now]);
+      if (faults.groupError) throw faults.groupError;
+      return writeObject(this.application.shift() ?? admitted(91n));
+    };
+    session.poll_group_event = function() {
+      this.alive(); trace.push(["poll-group"]);
+      if (faults.groupEventError) throw faults.groupEventError;
+      return this.queuedGroupEvents.shift() ?? null;
+    };
+  }
+
   function channel() {
     return {
       reads: [], writes: [], closes: 0, closed: false,
@@ -137,7 +162,7 @@ async function harness(faults = {}) {
     return gate.promise;
   }
   const context = createContext({
-    AbortController, AbortSignal, URL, DOMException, Uint8Array, ArrayBuffer, SharedArrayBuffer, structuredClone,
+    AbortController, AbortSignal, URL, DOMException, Uint8Array, Uint32Array, ArrayBuffer, SharedArrayBuffer, structuredClone,
     Date: class extends Date { static now() { return wall; } }, performance: { now: () => wall },
     setTimeout(callback, delay, ...args) {
       const id = ++timerId;
@@ -169,7 +194,7 @@ async function harness(faults = {}) {
     return { owner, io };
   }
   return { BrowserMultiplayerOwner, BrowserMultiplayerOwnerError, session, events, closures, opens,
-    trace, timers, wrappers, origin, channel, opening, opened,
+    trace, timers, wrappers, origin, channel, opening, opened, enableGroup,
     setClock(value) { clockOverride = value; },
     async elapse(milliseconds) {
       const target = wall + milliseconds;
@@ -495,4 +520,261 @@ test("core, callback, clock, and output-object faults retain the first error and
   assert.equal(malformed.wrappers[0].frees, 1);
   assert.equal(io.writes.length, 0);
   cleaned(malformed, io);
+});
+
+test("explicit group configuration requires only its mode capabilities and preserves caller ownership on refusal", async () => {
+  for (const group of [null, 0, 1, "true", {}, []]) {
+    const h = await harness();
+    h.enableGroup();
+    await failure(h.opening({ group }), "validation");
+    assert.equal(h.session.frees, 0);
+    assert.equal(h.opens.length, 0);
+  }
+  for (const missing of ["send_group_progress", "poll_group_event"]) {
+    const h = await harness();
+    h.enableGroup();
+    delete h.session[missing];
+    await failure(h.opening({ group: true }), "validation");
+    assert.equal(h.session.closes, 0);
+    assert.equal(h.session.frees, 0);
+    assert.equal(h.opens.length, 0);
+  }
+  const group = await harness();
+  group.enableGroup();
+  delete group.session.send_progress;
+  const active = await group.opened({ group: true });
+  await failure(attempt(() => active.owner.submit(progress())), "validation");
+  assert.equal(active.owner.closed, false);
+  active.owner.close();
+  cleaned(group, active.io);
+
+  for (const options of [{}, { group: false }]) {
+    const h = await harness();
+    const { owner, io } = await h.opened(options);
+    await failure(attempt(() => owner.submit_group(groupWords())), "validation");
+    assert.equal(owner.closed, false);
+    assert.equal(h.trace.some(row => row[0] === "poll-group"), false);
+    h.session.controls.push({ kind: 2 });
+    const pending = attempt(() => owner.submit(progress()));
+    await failure(attempt(() => owner.submit_group(groupWords())), "busy");
+    await flush();
+    assert.equal(h.session.progressCalls.length, 1);
+    io.writes[0].gate.resolve();
+    await success(pending);
+    owner.close();
+    cleaned(h, io);
+  }
+});
+
+test("group submission snapshots full-width words before awaiting admission and keeps local write separate from peer ACK", async () => {
+  const h = await harness();
+  h.enableGroup();
+  const { owner, io } = await h.opened({ group: true });
+  const expected = [...groupWords()];
+  const storage = new Uint32Array(expected.length + 2);
+  storage.set(expected, 1);
+  const caller = storage.subarray(1, storage.length - 1);
+  const pending = attempt(() => owner.submit_group(caller, true));
+  caller.fill(0);
+  const acknowledged = attempt(() => owner.wait_final_ack());
+  await failure(attempt(() => owner.submit_group(groupWords())), "busy");
+  await failure(attempt(() => owner.submit(progress())), "busy");
+  await flush();
+  assert.equal(h.session.groupCalls.length, 0);
+  assert.equal(h.session.progressCalls.length, 0);
+  assert.equal(io.writes.length, 0);
+  h.session.controls.push({ kind: 2 });
+  h.session.application.push(admitted(U64_MAX, Uint8Array.of(14, 13, 12)));
+  owner.request_ready();
+  await flush();
+  const call = h.session.groupCalls[0];
+  assert.equal(h.session.groupCalls.length, 1);
+  assert.ok(call.words instanceof Uint32Array);
+  assert.notEqual(call.words.buffer, caller.buffer);
+  assert.deepEqual([...call.words], expected);
+  assert.equal(call.finalPrefix, true);
+  assert.equal(call.now, 0n);
+  assert.deepEqual(io.writes[0].bytes, [14, 13, 12]);
+  assert.equal(h.session.writtenCalls.length, 0);
+  assert.equal(pending.state, "pending");
+  await failure(attempt(() => owner.submit(progress())), "busy");
+  await h.elapse(2);
+  io.writes[0].gate.resolve();
+  await success(pending);
+  assert.deepEqual(h.session.writtenCalls, [{ id: U64_MAX, now: 2_000_000n }]);
+  assert.equal(acknowledged.state, "pending");
+  await failure(attempt(() => owner.submit(progress())), "validation");
+  h.session.onReceive = () => h.session.queuedGroupEvents.push(groupEvent(U64_MAX, true));
+  io.reads[0].gate.resolve(Uint8Array.of(1));
+  await flush();
+  assert.equal(h.events.at(-1).kind, "group-final-progress");
+  assert.equal(h.events.at(-1).sequence, U64_MAX);
+  assert.equal(acknowledged.state, "pending", "a remote final prefix is not the core ACK event");
+  h.session.onReceive = () => h.session.queuedEvents.push({ kind: "final-acknowledged" });
+  io.reads[1].gate.resolve(Uint8Array.of(2));
+  await success(acknowledged);
+  assert.ok(h.wrappers.every(wrapper => wrapper.frees === 1));
+  owner.close();
+  cleaned(h, io);
+});
+
+test("group word extent and backing refusals are recoverable and a 704-word snapshot reaches the binding boundary intact", async () => {
+  const h = await harness();
+  h.enableGroup();
+  const { owner, io } = await h.opened({ group: true });
+  const invalid = [null, [], new Uint8Array(44), new Uint32Array(0), new Uint32Array(10),
+    new Uint32Array(12), new Uint32Array(705), new Uint32Array(715),
+    new Uint32Array(new SharedArrayBuffer(44))];
+  const detached = new Uint32Array(11);
+  structuredClone(detached.buffer, { transfer: [detached.buffer] });
+  invalid.push(detached);
+  const resizable = new ArrayBuffer(44, { maxByteLength: 88 });
+  if (resizable.resizable === true) invalid.push(new Uint32Array(resizable));
+  for (const value of invalid) {
+    await failure(attempt(() => owner.submit_group(value)), "validation");
+    assert.equal(owner.closed, false);
+  }
+  await failure(attempt(() => owner.submit_group(groupWords(), 1)), "validation");
+  assert.equal(h.session.groupCalls.length, 0);
+  assert.equal(io.writes.length, 0);
+  const maximum = new Uint32Array(704);
+  for (let member = 0; member < 64; member++) maximum[member * 11] = member + 1;
+  const expected = [...maximum];
+  h.session.controls.push({ kind: 2 });
+  const pending = attempt(() => owner.submit_group(maximum));
+  maximum.fill(0xffffffff);
+  await flush();
+  assert.deepEqual([...h.session.groupCalls[0].words], expected);
+  assert.equal(h.session.groupCalls[0].finalPrefix, false);
+  io.writes[0].gate.resolve();
+  await success(pending);
+  owner.close();
+  cleaned(h, io);
+});
+
+test("group and lifecycle callbacks share eight slots and retain zero and maximum sequence DTO values", async () => {
+  for (const overflow of [false, true]) {
+    const h = await harness();
+    h.enableGroup();
+    const { owner, io } = await h.opened({ group: true });
+    const waiting = attempt(() => owner.wait_final_ack());
+    h.session.onReceive = () => {
+      h.session.queuedGroupEvents.push({ kind: "roster", players: Uint32Array.of(7, 0xffffffff) },
+        groupEvent(0n), groupEvent(U64_MAX), groupEvent(U64_MAX, true));
+      if (overflow) h.session.queuedGroupEvents.push(groupEvent(1n));
+      h.session.queuedEvents.push({ kind: "connected" }, { kind: "ready" },
+        { kind: "start" }, { kind: "final-acknowledged" });
+    };
+    io.reads[0].gate.resolve(Uint8Array.of(1));
+    if (overflow) {
+      await failure(waiting, "core");
+      assert.deepEqual(h.events.map(event => event.kind), ["roster", "group-progress", "group-progress",
+        "group-final-progress", "group-progress", "connected", "ready", "start"]);
+    } else {
+      await success(waiting);
+      assert.deepEqual(h.events.map(event => event.kind), ["roster", "group-progress", "group-progress",
+        "group-final-progress", "connected", "ready", "start", "final-acknowledged"]);
+      assert.equal(h.events[1].sequence, 0n);
+      assert.equal(h.events[2].sequence, U64_MAX);
+      assert.deepEqual([...h.events[0].players], [7, 0xffffffff]);
+      assert.equal(owner.closed, false);
+      owner.close();
+    }
+    assert.equal(h.events.length, 8);
+    cleaned(h, io);
+  }
+  for (const event of [
+    { kind: "roster", players: [] }, { kind: "roster", players: new Uint32Array(0) },
+    { kind: "roster", players: new Uint32Array(65) },
+    { kind: "roster", players: new Uint32Array(new SharedArrayBuffer(4)) },
+    groupEvent(-1n), groupEvent(U64_MAX + 1n), groupEvent(0),
+    { ...groupEvent(), words: new Uint32Array(12) },
+    { ...groupEvent(), words: new Uint32Array(new SharedArrayBuffer(44)) },
+  ]) {
+    const h = await harness();
+    h.enableGroup();
+    const { owner, io } = await h.opened({ group: true });
+    const waiting = attempt(() => owner.wait_final_ack());
+    h.session.onReceive = () => h.session.queuedGroupEvents.push(event);
+    io.reads[0].gate.resolve(Uint8Array.of(1));
+    await failure(waiting, "core");
+    assert.equal(h.events.length, 0);
+    cleaned(h, io);
+  }
+});
+
+test("group callback closure or failure preserves completed writes but stops draining before freed core access", async () => {
+  for (const close of [true, false]) {
+    const h = await harness();
+    h.enableGroup();
+    const cause = new Error("group consumer failed");
+    const delivered = [];
+    let active;
+    active = await h.opened({ group: true, onEvent(event) {
+      delivered.push(event.kind);
+      if (close) active.owner.close(); else throw cause;
+    } });
+    const acknowledged = attempt(() => active.owner.wait_final_ack());
+    h.session.controls.push({ kind: 2 });
+    h.session.onWritten = () => {
+      h.session.queuedGroupEvents.push(groupEvent(0n, true), groupEvent(1n));
+      h.session.queuedEvents.push({ kind: "final-acknowledged" });
+    };
+    const submitted = attempt(() => active.owner.submit_group(groupWords(), true));
+    await flush();
+    active.io.writes[0].gate.resolve();
+    await success(submitted);
+    const error = await failure(acknowledged, close ? "closed" : "callback");
+    if (!close) assert.equal(error.cause, cause);
+    assert.deepEqual(delivered, ["group-final-progress"]);
+    assert.equal(h.session.queuedGroupEvents.length, 1);
+    assert.equal(h.session.queuedEvents.length, 1);
+    assert.equal(h.session.writtenCalls.length, 1);
+    assert.equal(await failure(attempt(() => active.owner.submit_group(groupWords())), error.code), error);
+    active.io.reads[0].gate.resolve(Uint8Array.of(2));
+    await flush();
+    assert.equal(h.session.received.length, 0);
+    cleaned(h, active.io);
+  }
+});
+
+test("group cancellation, deadlines and core refusal settle the shared slot once and ignore late completions", async () => {
+  for (const ending of ["closed", "aborted", "timeout"]) {
+    const h = await harness();
+    h.enableGroup();
+    const signal = new AbortController();
+    const { owner, io } = await h.opened({ group: true, signal: signal.signal });
+    h.session.controls.push({ kind: 2 });
+    const pending = attempt(() => owner.submit_group(groupWords(), true));
+    const acknowledged = attempt(() => owner.wait_final_ack());
+    await flush();
+    assert.equal(h.session.groupCalls.length, 1);
+    assert.equal(io.writes.length, 1);
+    if (ending === "closed") owner.close();
+    else if (ending === "aborted") signal.abort();
+    else await h.elapse(50);
+    const error = await failure(pending, ending);
+    assert.equal(await failure(acknowledged, ending), error);
+    assert.equal(await failure(attempt(() => owner.submit_group(groupWords())), ending), error);
+    io.reads[0].gate.resolve(Uint8Array.of(1));
+    io.writes[0].gate.resolve();
+    await flush();
+    assert.equal(h.session.writtenCalls.length, 0);
+    assert.equal(h.session.received.length, 0);
+    assert.equal(h.events.length, 0);
+    owner.close();
+    cleaned(h, io);
+  }
+  const cause = new Error("Rust refused the actual group roster");
+  const h = await harness({ groupError: cause });
+  h.enableGroup();
+  const { owner, io } = await h.opened({ group: true });
+  h.session.controls.push({ kind: 2 });
+  const pending = attempt(() => owner.submit_group(groupWords()));
+  const error = await failure(pending, "core");
+  assert.equal(error.cause, cause);
+  assert.equal(io.writes.length, 0);
+  assert.equal(h.session.groupCalls.length, 1);
+  assert.equal(await failure(attempt(() => owner.submit_group(groupWords())), "core"), error);
+  cleaned(h, io);
 });
