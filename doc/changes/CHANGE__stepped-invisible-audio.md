@@ -20,8 +20,10 @@ output drain remains necessary. Finite sections retain their explicit end.
 ## Remaining integration
 
 Shared source preparation retains its unsupported-invisible guard. Original
-asset loading and legacy native solo/cohort/capture composition need installation
-before that guard is removed. These typed-path changes do not prove browser,
+asset loading and legacy native solo/cohort Runtime sound composition need
+installation before that guard is removed. Native capture/comparison identity
+is connected by the [native identity change](CHANGE__native-invisible-identity.md).
+These typed-path changes do not prove browser,
 physical-device/audio execution, latency or complete BMS support. Independent
 fixtures are prepared for deferred execution; formal reviews/QA remain deferred.
 

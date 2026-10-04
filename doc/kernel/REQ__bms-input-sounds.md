@@ -109,7 +109,8 @@ their existing planning path.
 
 This connects typed prepared data to actual stepped sound admission/replay plans.
 Source asset preparation remains guarded until original sample loading, native
-solo/cohort/capture and all remaining callers are integrated. Tests and actual
+solo/cohort Runtime sound installation and all remaining callers are integrated.
+Native recording identity follows the source-aware contract below. Tests and actual
 audio/device verification remain deferred.
 
 Unlimited song completion must not finish before the last invisible selection.
@@ -141,3 +142,31 @@ and playfield geometry, including invisible-only, mixed scratch/double-side,
 practice, exact timing and malformed source cases. These fixtures do not prove
 native/browser rendering or input-device execution. Source preparation remains
 guarded until asset and native caller integration is complete.
+
+## Native recording and competition identity
+
+Native source-aware recording prepares InputSoundIdentity from the actual
+selected BmsChart and supplies it to LiveReplayCapture::new_with_input_sounds
+with the native ButtonOnly mode. Retain existing start, branch seed and capture
+bounds/budgets. The old source-free prepare_capture helper remains compatible;
+actual native solo and cohort callers use prepare_capture_for_source instead.
+Disabled capture retains None without validating unused source metadata.
+An enabled capture refuses invalid invisible metadata before creating a log.
+No-invisible sources retain byte-identical legacy replay headers.
+
+LiveCompetition prepares enabled ghost/network compatibility from the same
+source-aware capture header before reading opponents or acquiring network
+resources. NativeGroupCompetition computes the selected source identity once
+and uses it for every member's actual header and competition identity, retaining
+roster/member validation and mismatch refusal. Equivalent per-player voice,
+binding and device assignments do not change chart compatibility. Changed
+invisible sample, lane, original time or gain changes compatibility even when
+the judged chart is unchanged. This fingerprint is neither authentication nor
+an asset-content digest. No platform-specific competition protocol is added.
+
+Prepare deferred fixtures against actual native capture, cohort preparation,
+ghost loading and pure native-group canonical identity. Check legacy bytes,
+changed-source refusal, disabled paths, setup limits and untouched judge state.
+Source preparation remains guarded until asset loading and native Runtime sound
+installation are integrated. Compilation does not prove recording/network or
+device execution.

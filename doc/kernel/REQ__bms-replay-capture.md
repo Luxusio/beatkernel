@@ -107,5 +107,14 @@ missing or injected invisible selection or changed WAV gain must mismatch;
 legacy headers cannot authorize an invisible source. Practice retains selections
 before the start so they remain part of the identity and active-key selection.
 
-This does not enable invisible audio. Asset/runtime installation and replay
-command selection are pending; the shared preparation admission guard remains.
+Native recording and competition preparation use the same source-aware header
+as specified in [REQ__bms-input-sounds.md](REQ__bms-input-sounds.md#native-recording-and-competition-identity).
+Actual solo/cohort capture uses prepare_capture_for_source; the source-free
+legacy helper remains available with its existing output. Disabled recording
+does not validate unused source metadata. Enabled ghost/network preparation
+uses selected source identity before opponent IO or endpoint acquisition.
+
+Typed stepped runtime installation and replay command selection are connected.
+Shared source asset preparation remains guarded until asset loading and legacy
+native Runtime sound installation are integrated. None of these source changes
+proves actual device/audio/network execution.
