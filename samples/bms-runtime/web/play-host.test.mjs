@@ -213,8 +213,9 @@ async function harness(faults = {}) {
     "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate",
     "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input",
     "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status",
-    "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear"]) {
-    elements.set(id, new Element(id === "chart" || id === "records" ? "select" : id, id));
+    "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear",
+    "local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay"]) {
+    elements.set(id, new Element(["chart", "records", "local-page", "captured-replay"].includes(id) ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
   elements.get("rate").value = "44100";
@@ -226,6 +227,7 @@ async function harness(faults = {}) {
   elements.get("judge-offset").value = "0";
   elements.get("live-start").value = "0";
   elements.get("live-end").value = "";
+  elements.get("local-count").value = "1";
   elements.get("output-latency").value = "interactive";
   elements.get("output-latency-ms").value = "10";
   elements.get("output-rate").value = "";
@@ -465,7 +467,7 @@ async function harness(faults = {}) {
     this.setExport("RecordsStore", RecordsStore);
   }, { context });
   const modules = new Map();
-  for (const name of ["host_model.mjs", "play-model.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "main.js"]) {
+  for (const name of ["host_model.mjs", "play-model.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "local-play-host.mjs", "main.js"]) {
     const url = new URL(name, import.meta.url);
     modules.set(name, new SourceTextModule(await readFile(url, "utf8"), {
       context, identifier: url.href, initializeImportMeta(meta) { meta.url = url.href; },
@@ -530,13 +532,22 @@ async function harness(faults = {}) {
   }
   async function prepared(start, sampleCount = 0) {
     const worker = workers.at(-1);
+    const localPlayers = start.localPlanWords === undefined ? null
+      : Array.from(start.localPlanWords).filter((_, index) => index % 4 === 0);
+    const localSources = start.localPlanWords === undefined ? null
+      : Array.from({ length: start.localPlanWords.length / 4 }, (_, index) =>
+        BigInt(start.localPlanWords[index * 4 + 2]) | BigInt(start.localPlanWords[index * 4 + 3]) << 32n);
     await reply(start, { kind: "prepared", title: "Actual runtime", artist: "Runtime artist",
       notes: 6, samples: sampleCount, lanes: [0x11], opponentCount: start.opponents?.length ?? 0,
       startNs: start.mode === "replay" ? faults.replayStart ?? 0n : start.startNs ?? 0n,
       ...(start.hidProfileFile ? { hidSources: faults.hidAdmittedSources ?? start.hidDevices.map(device => device.source),
         hidSourceCount: (faults.hidAdmittedSources ?? start.hidDevices).length } : {}),
       ...(start.gamepadDevices !== undefined ? { gamepadSources: faults.gamepadAdmittedSources
-        ?? start.gamepadDevices.filter(device => device.mapping === "standard" && device.buttons >= 9).map(device => device.source) } : {}),
+        ?? start.gamepadDevices.filter(device => device.mapping === "standard" && device.buttons >= 9
+          && (localSources === null || localSources.includes(device.source))).map(device => device.source) } : {}),
+      ...(localPlayers === null ? {} : { localPlayers, localPage: start.localPage ?? 0,
+        ...(start.recordReplay ? { recordLimits: { bytes: Math.floor(64 * 1024 * 1024 / localPlayers.length),
+          records: Math.floor(1000000 / localPlayers.length) } } : {}) }),
       ...(start.mode === "replay" ? { mode: "replay", recordedUntilNs: 2350000000n } : {}) });
     for (let index = 0; index < sampleCount; index++) {
       await reply(worker.last("play-sample"), { kind: "sample", id: BigInt(index + 1), rate: 44100,
@@ -587,6 +598,166 @@ async function harness(faults = {}) {
     },
   };
 }
+
+async function localCount(h, count) {
+  h.get("local-count").value = String(count); h.get("local-count").emit("change"); await flush();
+}
+function localAssign(h, player, source) {
+  const field = h.get(`local-source-${player}`);
+  assert.ok(field, "retained player source selector");
+  field.value = String(source); field.emit("change");
+}
+function localFinal(start, overrides = {}) {
+  const players = Array.from(start.localPlanWords).filter((_, index) => index % 4 === 0);
+  return finalScore(start.playId, { primaryPlayer: players[0], hits: BigInt(players[0]), misses: 0n, combo: 0n,
+    maxCombo: BigInt(players[0]), replay: null, replayError: null, replayComplete: false,
+    localScores: players.map(player => ({ player, songNs: 2350000000n, hits: BigInt(player), misses: 0n, combo: 0n, maxCombo: BigInt(player) })),
+    replays: players.map(player => ({ player, replay: null, replayError: null, replayComplete: false })), ...overrides });
+}
+
+test("local discovery retains actual mixed-device owners through one synchronous plan snapshot and filters unassigned acquisitions", async () => {
+  const opening = deferred(), chosen = nativeGamepad(0), ignored = nativeGamepad(1, { id: chosen.id });
+  const h = await harness({ gamepads: [chosen, ignored], hidSupported: true,
+    hidDescriptors: [{ vendorId: 1, productId: 2 }], openGate: opening });
+  const preview = await h.preview(); const profile = selectedControllerProfile(); chooseControllerProfile(h, profile.file);
+  await localCount(h, 3); h.click("local-discover"); await flush();
+  assert.equal(h.opens.length, 0); assert.equal(h.hid.requests.length, 0); assert.equal(h.hid.gets, 1);
+  assert.equal(h.hidDevices[0].opens, 1); assert.equal(h.hidDevices[0].closes, 0);
+  const options = h.get("local-source-1").children;
+  const padSources = options.filter(option => option.textContent.startsWith("Gamepad ")).map(option => BigInt(option.value));
+  const hidSource = BigInt(options.find(option => option.textContent.startsWith("HID ")).value);
+  assert.equal(padSources.length, 2); assert.notEqual(padSources[0], padSources[1]);
+  assert.ok(hidSource > padSources[1]);
+  localAssign(h, 1, 1n); localAssign(h, 2, padSources[0]); localAssign(h, 3, hidSource);
+  const native = h.hidDevices[0], staleDisconnect = [...h.window.listeners.get("gamepaddisconnected")][0];
+  h.click("play");
+  assert.equal(h.opens.length, 1); assert.equal(h.opens[0].gesture, true);
+  for (const id of ["local-count", "local-discover", "local-source-1", "local-source-2", "local-source-3"]) assert.equal(h.get(id).disabled, true);
+  h.get("local-source-2").value = padSources[1].toString(); h.get("local-source-2").emit("change");
+  opening.resolve(h.audio); await flush();
+  const worker = h.workers[0], start = worker.last("play-start");
+  assert.deepEqual(Array.from(start.localPlanWords), [1, 1, 1, 0, 2, 1, Number(padSources[0]), 0, 3, 1, Number(hidSource), 0]);
+  assert.equal(start.localPage, 0); assert.equal(start.hidProfileFile, profile.file);
+  assert.equal(h.hid.gets, 1); assert.equal(native.opens, 1); assert.equal(native.closes, 0);
+  assert.equal(h.window.listeners.get("gamepaddisconnected").size, 1);
+  const handoff = await h.prepared(start, 1); await h.reply(handoff, null); await h.reply(worker.last("play-activate"), null);
+  const display = watchPlayDisplay(h), layout = h.layoutReads;
+  h.setNow(1300.125); chosen.timestamp = 1300.0625; ignored.timestamp = 1300.0625;
+  chosen.buttons[0] = { value: 0.25, pressed: true, touched: true };
+  ignored.buttons[0] = { value: 1, pressed: true, touched: true };
+  native.emit("inputreport", { device: native, reportId: 7, timeStamp: 1300.125, data: new DataView(Uint8Array.from([7, 5]).buffer) });
+  const input = worker.last("play-step");
+  assert.deepEqual(input.events.map(event => [event.kind, event.source]), [["hid", hidSource], ["gamepad", padSources[0]]]);
+  assert.equal(input.events[0].hostNs, 1300125000n); assert.equal(input.events[1].hostNs, 1300062500n);
+  assert.equal(h.layoutReads, layout); assert.deepEqual(display, []);
+  assert.equal(profile.reads, 0); assert.equal(h.audio.samples.length, 1);
+  h.click("stop"); await flush(); await h.receive(localFinal(start));
+  assert.equal(native.closes, 1); assert.equal(h.window.listeners.get("gamepaddisconnected")?.size ?? 0, 0);
+  assert.equal(h.get("position").value, preview.position);
+  const posts = worker.posts.length;
+  staleDisconnect({ gamepad: chosen }); await flush(); assert.equal(worker.posts.length, posts);
+  await h.close();
+});
+
+test("local preparation refuses stale or contradictory ownership before PCM and cancelled discovery cannot resurrect acquired devices", async () => {
+  const missing = await harness({ touchSupported: true }); await missing.preview();
+  await localCount(missing, 2); missing.click("play"); await flush();
+  assert.equal(missing.opens.length, 0); assert.equal(missing.workers[0].messages("play-start").length, 0);
+  await missing.close();
+  for (const conflict of ["network", "opponents"]) {
+    const h = await harness({ touchSupported: true }); await h.preview();
+    await localCount(h, 2); h.click("local-discover"); await flush();
+    localAssign(h, 1, 1n); localAssign(h, 2, 2n);
+    if (conflict === "network") { h.get("multiplayer").checked = true; h.get("multiplayer-url").value = "https://room.example/rooms/local"; }
+    else selectOpponent(h, selectedRecording());
+    h.click("play"); await flush();
+    assert.equal(h.opens.length, 0); assert.equal(h.workers[0].messages("play-start").length, 0);
+    await h.close();
+  }
+  for (const changed of [{ localPlayers: [2, 1] }, { localPlayers: [1, 1] },
+    { recordLimits: { bytes: 33554433, records: 500000 } }]) {
+    const h = await harness({ touchSupported: true }); await h.preview();
+    await localCount(h, 2); h.click("local-discover"); await flush();
+    localAssign(h, 1, 1n); localAssign(h, 2, 2n); h.get("record").checked = true;
+    const start = await h.begin(), worker = h.workers[0];
+    await h.reply(start, { kind: "prepared", title: "Contradictory local preparation", samples: 1, lanes: [0x11],
+      startNs: 0n, opponentCount: 0, localPlayers: [1, 2], localPage: 0,
+      recordLimits: { bytes: 33554432, records: 500000 }, ...changed });
+    assert.equal(worker.messages("play-sample").length, 0); assert.equal(h.audio.samples.length, 0);
+    assert.equal(worker.last("play-stop").playId, start.playId);
+    await h.receive(localFinal(start)); assert.equal(h.get("play").disabled, false);
+    await h.close();
+  }
+  const opening = deferred(), closing = deferred();
+  const pending = await harness({ hidSupported: true, hidDescriptors: [{ vendorId: 1, productId: 2 }],
+    hidOpenGate: opening, hidCloseGate: closing });
+  await pending.preview(); chooseControllerProfile(pending, selectedControllerProfile().file);
+  await localCount(pending, 2); pending.click("local-discover"); await flush();
+  assert.equal(pending.hidDevices[0].opens, 1); assert.equal(pending.get("play").disabled, true);
+  pending.window.emit("pagehide"); await flush();
+  const status = pending.get("local-status").textContent;
+  opening.resolve(); await flush(); assert.equal(pending.hidDevices[0].closes, 1);
+  closing.resolve(); await flush();
+  assert.equal(pending.opens.length, 0); assert.equal(pending.hidDevices[0].listeners.get("inputreport")?.size ?? 0, 0);
+  assert.equal(pending.get("local-status").textContent, status, "old discovery completion cannot publish into another page owner");
+  assert.equal(pending.workers[0].messages("play-start").length, 0);
+  await pending.close();
+});
+
+test("joined local capture retains each valid member prefix for explicit download and save while replay ignores the roster", async () => {
+  const stopping = deferred(), pad = nativeGamepad();
+  const h = await harness({ touchSupported: true, gamepads: [pad], stopGate: stopping });
+  await h.preview(); await localCount(h, 3); h.click("local-discover"); await flush();
+  const source = BigInt(h.get("local-source-1").children.find(option => option.textContent.startsWith("Gamepad ")).value);
+  localAssign(h, 1, 1n); localAssign(h, 2, 2n); localAssign(h, 3, source);
+  h.get("record").checked = true;
+  const session = await h.launch(), worker = h.workers[0];
+  assert.equal(session.start.recordReplay, true);
+  const first = Uint8Array.from([66, 75, 82, 1]), third = Uint8Array.from([66, 75, 82, 3, 255]);
+  const result = localFinal(session.start, {
+    localScores: [
+      { player: 1, songNs: 2350000000n, hits: 1n, misses: 0n, combo: 0n, maxCombo: 1n },
+      { player: 2, songNs: 2350000000n, hits: 2n, misses: 0n, combo: 0n, maxCombo: 2n },
+      { player: 3, songNs: 2350000000n, hits: 18446744073709551615n, misses: 0n, combo: 0n, maxCombo: 18446744073709551615n },
+    ],
+    replays: [
+      { player: 1, replay: first, replayError: null, replayComplete: false },
+      { player: 2, replay: null, replayError: "member 2 codec capacity refused", replayComplete: false },
+      { player: 3, replay: third, replayError: null, replayComplete: false },
+    ],
+  });
+  h.click("stop"); await flush(); await h.receive(result);
+  assert.equal(h.get("export").disabled, true); assert.equal(h.get("captured-replay").disabled, true);
+  assert.equal(h.recordCalls.length, 0); assert.equal(h.urls.length, 0);
+  stopping.resolve(); await flush();
+  assert.equal(h.get("play").disabled, false); assert.equal(worker.terminations, 0);
+  const choices = h.get("captured-replay").children.filter(option => option.value !== "");
+  assert.equal(choices.length, 2); assert.match(choices[0].textContent, /1/); assert.match(choices[1].textContent, /3/);
+  const rows = h.get("local-results").children.map(row => row.textContent).join("\n");
+  assert.match(rows, /member 2 codec capacity refused/); assert.match(rows, /18446744073709551615/);
+  assert.equal(h.get("export").disabled, true, "a local recording requires an explicit member choice");
+  assert.equal(h.get("records-save").disabled, true); assert.equal(h.recordCalls.length, 0, "capture never saves itself");
+  h.get("captured-replay").value = choices[1].value; h.get("captured-replay").emit("change");
+  assert.equal(h.get("export").disabled, false);
+  h.click("export"); await flush();
+  assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), third);
+  assert.equal(h.downloads.at(-1).filename, `beatkernel-${session.id}-player-3-prefix.bkr`);
+  h.click("records-save"); await flush();
+  const saved = h.recordCalls.find(call => call.method === "save");
+  assert.ok(saved); assert.deepEqual(saved.value.bytes, third); assert.equal(saved.value.complete, false);
+  assert.equal(saved.value.hits, 18446744073709551615n); assert.equal(saved.value.misses, 0n); assert.equal(saved.value.combo, 0n);
+  h.get("captured-replay").value = choices[0].value; h.get("captured-replay").emit("change");
+  h.click("export"); await flush();
+  assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), first);
+  const reads = h.gamepadReads; chooseRecording(h, [selectedRecording().file]);
+  const replay = await h.launch(0, "replay");
+  assert.equal(Object.hasOwn(replay.start, "localPlanWords"), false); assert.equal(Object.hasOwn(replay.start, "localPage"), false);
+  assert.equal(Object.hasOwn(replay.start, "gamepadDevices"), false); assert.equal(h.gamepadReads, reads);
+  const currentRows = h.get("local-results").children.map(row => row.textContent);
+  await h.receive({ ...result, replays: [] });
+  assert.deepEqual(h.get("local-results").children.map(row => row.textContent), currentRows);
+  h.click("stop"); await flush(); await h.receive(finalScore(replay.id)); await h.close();
+});
 
 test("live and replay transfer one real command descriptor after PCM finish and wait for initial Worker drain before arm", async () => {
   for (const mode of ["live", "replay"]) {
