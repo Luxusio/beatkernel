@@ -99,6 +99,33 @@ No group codec call creates a connection, start receipt or final acknowledgement
 Complete browser/native callers remain unfinished; tests authored and compile checks
 cannot prove network acceptance.
 
+The native GroupMultiplayer owner is a typed facade over the same Multiplayer
+worker, options, endpoint/stream abstraction, epoch, readiness, start and cleanup
+state. Group constructors host/join/webtransport admit a positive distinct
+ordered roster of 1..64 IDs and the bounded canonical identity before endpoint
+side effects. One actual prepared common Session is transferred to the worker;
+do not create a second evaluator or OS-specific group protocol.
+
+Native group publication accepts actual MemberProgress rows matching the frozen
+local roster and common cumulative-prefix validation. Ordinary queue saturation
+fences the owner; terminal saturation is retryable until the existing cleanup
+deadline. An accepted queue message is not a write or ACK receipt. Local state
+changes only after successful admission, and invalid later members preserve
+the whole previous prefix. GroupMultiplayer.poll returns typed lifecycle/group
+notices from one bounded incoming queue and retains actual remote roster,
+latest group prefix and final group prefix across disconnect for final results.
+Scalar constructors and event API keep their existing contract without a group
+prefix alias.
+
+The shared worker submits scalar or group messages only through the real
+Session application slot, credits written only after the exact full frame and
+forwards bounded group/lifecycle events on the same route. Final group delivery
+uses the existing readiness, committed start, cancellation and deadline loop
+and succeeds only on the real final-acknowledged event. QUIC receipt/stream
+finish cannot substitute for application acknowledgement. Runtime/native UI
+callers still require migration to this facade and actual transport acceptance
+remains unverified.
+
 A solo player starts without input-device selection. Two or more local players
 assign distinct input devices to prevent one physical event from playing every
 chart. Support a collection of players, including three and four; do not encode
