@@ -41,8 +41,9 @@ metadata/finite/duplicate/budget refusal, exclusive ownership, independent
 sequences, stale callbacks, getter reentrancy, deadlines and joined release.
 Whitespace inspection found no diagnostics; these are authored source fixtures,
 not executed evidence.
-The live/local/replay caller still uses Window PCM relay until the dependent
-Worker upload migration is implemented. Component source does not establish
+At this component commit the live/local/replay caller still used Window PCM
+relay. The dependent caller migration is recorded in
+[Direct browser sample upload](CHANGE__browser-direct-sample-upload.md). Component source does not establish
 actual direct application upload, real browser/audio behavior or reduced input
 latency. No JavaScript parser, assertion/test, browser/app/audio/device/generated
 binding or formal review/QA execution is claimed; unchanged Rust checks do not

@@ -2025,8 +2025,8 @@ ownership, timeouts, stop races and deallocation rules remain unchanged.
 Author deferred actual host and Worklet fixtures for NaN/+Infinity/-Infinity,
 metadata bounds, valid and empty buffers, ACK accounting and stop/deallocation.
 Source inspection does not prove browser responsiveness or measured latency.
-This removes the Window value scan; setup PCM messages still pass through Window,
-and direct Worker-to-Worklet sample upload remains a later ownership migration.
+At the value-scan removal step, setup PCM still passed through Window. The
+actual caller sample-port migration below removes that relay.
 
 ## Dedicated setup sample transport component
 
@@ -2057,9 +2057,40 @@ sample endpoint too. Fresh host stop closes both transferred endpoints and owns
 actual free; stale saved sample callbacks after close must not mutate later
 owners. Preserve legacy host-only upload and dedicated command behavior.
 
-Implement component source and independent deferred endpoint/client/lifecycle
-fixtures first, then migrate actual live/local/replay caller upload in a dependent
-step. Until that migration is implemented, PCM still passes through Window in the
-application. No direct-upload/performance/browser acceptance from component
-source. No JS parsing, tests, apps, browser/audio/generated bindings or ordered
+Component source and independent deferred endpoint/client/lifecycle fixtures
+precede the actual live/local/replay caller migration described below. The
+application now adopts the dedicated upload port; this source integration
+provides no performance/browser acceptance. No JS parsing, tests, apps, browser/audio/generated bindings or ordered
 formal review/QA execution under the standing deferral.
+
+## Actual caller sample-port migration
+
+Window is the acquisition owner for keyboard, touch/pointer, HID and Gamepad
+input, with browser-required permissions, activation, lifecycle, resize and
+output-clock observations. Gameplay mapping, judgment, OffscreenCanvas rendering
+and HUD remain Worker-owned; audio rendering remains Worklet-owned. Event-driven
+setup/final DOM is permitted. Never move gameplay drawing or PCM scanning back
+to Window. Preserve original timestamps, full u64 sequence/source/contact and
+clock metadata across this boundary.
+
+The common live/local/replay caller must transfer one openSamplePort descriptor
+through play-samples-upload. No PCM sample or per-sample relay crosses Window.
+Worker adopts AudioSampleClient only in pristine setup before any legacy sample
+read or command handoff. It enumerates exactly the prepared sample count, frees
+each actual WASM sample wrapper exactly once, awaits each actual insertion ACK,
+then verifies next_sample is null and awaits end-samples ACK. Only that success
+sets samplesEnded and replies samples-uploaded with exact admitted count/bytes.
+Window validates that bounded receipt before finish and command handoff.
+
+The aggregate upload RPC has no 10-second whole-bank deadline: each individual
+sample/end request keeps the configured client timeout and bounded count/bytes.
+Stop/failure cancels its pending RPC, closes the producer and invalidates all
+continuations before releasing the game. Invalid/stale/unsupported handoffs
+close their transferred endpoint. Legacy explicit play-sample compatibility is
+mutually exclusive with direct adoption, never a fallback after failed transfer.
+No activation/command handoff before genuine upload completion.
+
+Author independent actual main/Worker fixtures for successful solo/local/replay
+flow, ACK gating, count/byte validation, stop while awaiting ACK, stale owners,
+transfer/timeout failures and endpoint cleanup. JS-only source/whitespace
+inspection; execution and formal review/QA remain deferred.
