@@ -124,6 +124,30 @@ and grading fixtures remain the behavior tests; execution of both fixtures and
 this example stays deferred.
 
 
+## Explicit contact ownership without judged objects
+
+JudgeEngine::new_with_contacts(chart,rules,profile) and
+with_policies_and_contacts(chart,rules,profile,resolver,policy) explicitly enable
+contact ownership at construction, including empty charts. Existing new and
+with_policies retain their exact eligibility-inferred behavior and canonical
+state. The constructors share all validation and candidate logic; explicit
+tracking does not make button-only objects touch-eligible and adds no objects.
+Actual Down/Up/Cancel ownership, freshness, full source/surface/control/contact
+identities and snapshot/restore operate identically to existing press engines.
+Duplicate Down is not fresh; Move cannot acquire a contact. Configuration is
+immutable, included in pristine canonical identity through the existing enabled
+contact extension, cloned and checked during restoration. Restore across
+enabled/disabled configurations fails atomically. Explicit and inferred contact
+engines with identical actual enabled configuration have identical state bytes.
+
+The BMS application chooses explicit tracking when its selected input mode is
+ButtonOrContact and its source has invisible selections. Actual stepped solo,
+local-member preparation and replay reconstruction must choose the same mode,
+including after all visible objects are removed by practice selection. Existing
+sources without invisible selections keep their historical constructor/identity.
+This does not enable unsupported BMS invisible playback before sample, runtime
+timeline and replay-identity/audio integration is finished.
+
 ## Opt-in button/contact press interactions
 
 Offer explicit press instant/hold evaluators for genuine button and touch events.

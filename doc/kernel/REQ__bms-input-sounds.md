@@ -48,3 +48,9 @@ identity does not include invisible selections; a canonical source-aware replay
 identity must compare them before playback. Explicit contact-mode ownership must
 also work on an invisible-only chart with no visible press evaluator. None of
 these requirements can be satisfied by adding synthetic judged notes.
+
+Explicit contact tracking is provided by the constructors documented in
+REQ__judge.md and selected by stepped solo/local and replay construction for
+invisible contact-mode sources. It tracks contact ownership independently of
+remaining visible objects. This prerequisite alone does not install sounds or
+make the existing replay identity source-aware.
