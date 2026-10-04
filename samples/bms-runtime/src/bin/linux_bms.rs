@@ -744,7 +744,11 @@ mod native {
         let (prepared, section) = prepare_chart(NativeChartConfig {
             path: &options.chart,
             format: options.format,
-            limits: PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
+            limits: PcmLimits::new(
+                64 * 1024 * 1024,
+                256 * 1024 * 1024,
+                beatkernel_bms_runtime::DEFAULT_BMS_PCM_SAMPLES,
+            )?,
             channels: if options.mono_stereo {
                 ChannelPolicy::MonoToStereo
             } else {

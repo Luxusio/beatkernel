@@ -71,7 +71,11 @@ pub fn render_replay(
         prepared,
         &file,
         limits,
-        beatkernel::audio::PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
+        beatkernel::audio::PcmLimits::new(
+            64 * 1024 * 1024,
+            256 * 1024 * 1024,
+            crate::DEFAULT_BMS_PCM_SAMPLES,
+        )?,
     )?;
     let format = prepared.bank.format();
     let rate = format.sample_rate();

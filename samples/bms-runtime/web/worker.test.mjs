@@ -278,10 +278,10 @@ test("section start routes fresh preparations and exact source metadata before c
     const game = worker.games[0];
     if (startNs) {
       assert.equal(entry.method, "prepare_chart_at");
-      assert.deepEqual(entry.args, [48000, 2, 18446744073709551615n, startNs, 64 * 1024 * 1024, 256 * 1024 * 1024, 1296]);
+      assert.deepEqual(entry.args, [48000, 2, 18446744073709551615n, startNs, 64 * 1024 * 1024, 256 * 1024 * 1024, 3844]);
     } else {
       assert.equal(entry.method, undefined);
-      assert.deepEqual(entry.args, [48000, 2, 18446744073709551615n, 64 * 1024 * 1024, 256 * 1024 * 1024, 1296]);
+      assert.deepEqual(entry.args, [48000, 2, 18446744073709551615n, 64 * 1024 * 1024, 256 * 1024 * 1024, 3844]);
     }
     assert.equal(worker.of("play-reply").at(-1).result.startNs, startNs ?? 0n);
     assert.equal(game.prepared.start_ns, startNs ?? 0n);
@@ -299,10 +299,10 @@ test("section start routes fresh preparations and exact source metadata before c
   await startGame(legacy, []);
   assert.equal(legacy.of("play-reply").at(-1).result.startNs, 0n);
   await legacy.send({ kind: "play-stop", playId: 1 });
-  const full = await gameWorker({ sampleCount: 5392 });
+  const full = await gameWorker({ sampleCount: 7940 });
   await startGame(full, [], { startNs: 1n });
-  assert.equal(full.of("play-reply").at(-1).result.samples, 5392);
-  assert.equal(full.libraries[0].preparations[0].args.at(-1), 1296);
+  assert.equal(full.of("play-reply").at(-1).result.samples, 7940);
+  assert.equal(full.libraries[0].preparations[0].args.at(-1), 3844);
   await full.send({ kind: "play-stop", playId: 1 });
 });
 
@@ -328,7 +328,7 @@ test("invalid requested starts fail before acquisition and mismatched prepared s
     assert.equal(worker.of("play-error").length, 1);
     assert.equal(worker.of("play-reply").some(reply => reply.result?.kind === "prepared"), false);
   }
-  const oversized = await gameWorker({ sampleCount: 5393 });
+  const oversized = await gameWorker({ sampleCount: 7941 });
   await startGame(oversized, [], { startNs: 1n });
   assert.equal(oversized.of("play-error").length, 1);
   assert.equal(oversized.of("play-reply").some(reply => reply.result?.kind === "prepared"), false);
@@ -590,6 +590,9 @@ test("invalid import metadata acquires no bytes and preserves the admitted libra
   await worker.send({ kind: "select", id: 12, libraryId: 10, path: "song/chart.bms", rate: 44100, seed: "18446744073709551615" });
   assert.equal(worker.views[0].current.path, "song/chart.bms");
   assert.equal(worker.libraries[0].preparations[0].args[2], 18446744073709551615n);
+  assert.deepEqual(worker.libraries[0].preparations[0].args,
+    [44100, 2, 18446744073709551615n, 64 * 1024 * 1024, 256 * 1024 * 1024, 3844],
+    "actual preview preparation keeps the same original count and independent byte budgets as live/replay");
 });
 
 test("an ignored catalog followed by a failed import preserves the accepted library until matching acknowledgement", async () => {

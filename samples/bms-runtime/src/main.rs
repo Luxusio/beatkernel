@@ -68,7 +68,11 @@ fn render_offline_args(args: &[String]) -> Result<()> {
     let prepared = load_prepared(
         Path::new(&args[0]),
         format,
-        PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
+        PcmLimits::new(
+            64 * 1024 * 1024,
+            256 * 1024 * 1024,
+            beatkernel_bms_runtime::DEFAULT_BMS_PCM_SAMPLES,
+        )?,
         ChannelPolicy::Exact,
     )?;
     for warning in &prepared.source.warnings {

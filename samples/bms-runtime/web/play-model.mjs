@@ -5,8 +5,9 @@ const I64_MAX = 9223372036854775807n;
 const I64_MIN = -9223372036854775808n;
 const U64_MAX = 18446744073709551615n;
 const DEFAULT_TIMING = Object.freeze({ earlyNs: 50000000n, lateNs: 50000000n, offsetNs: 0n });
-// The original decoder admits 1296 assets; section preparation may add 4096 tails.
-export const PLAY_PCM_SAMPLES = 1296 + 4096;
+// Original samples cover base62; section preparation may add 4096 tails.
+export const ORIGINAL_PCM_SAMPLES = 62 * 62;
+export const PLAY_PCM_SAMPLES = ORIGINAL_PCM_SAMPLES + 4096;
 
 export function startFromSeconds(value) {
   if (typeof value !== "string" || value.length > 20 || value.trim() !== value) throw new Error("Enter nonnegative start seconds with up to nine decimal places.");

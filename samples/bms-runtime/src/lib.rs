@@ -331,6 +331,12 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Default original PCM sample capacity for the complete two-digit base62 namespace.
+pub const DEFAULT_BMS_PCM_SAMPLES: usize = 62 * 62;
+
+#[cfg(test)]
+mod pcm_radix_fixtures;
+
 /// Fully prepared chart and owned assets; all timestamps remain in song time.
 #[derive(Debug)]
 pub struct PreparedBms {

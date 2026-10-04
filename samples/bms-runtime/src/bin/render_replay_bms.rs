@@ -127,7 +127,11 @@ fn run(options: Options) -> Result<()> {
     let prepared = load_prepared_for_replay(
         &options.chart,
         options.format,
-        PcmLimits::new(64 * 1024 * 1024, 256 * 1024 * 1024, 1295)?,
+        PcmLimits::new(
+            64 * 1024 * 1024,
+            256 * 1024 * 1024,
+            beatkernel_bms_runtime::DEFAULT_BMS_PCM_SAMPLES,
+        )?,
         ChannelPolicy::Exact,
         &file,
         limits,

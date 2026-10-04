@@ -6,7 +6,7 @@ import {
   presentationPoint, presentationPair, reportWord, renderedCursor,
   KEY_BINDINGS, KEY_CHOICES, snapshotBindings, bindingsFor,
   parseTimingMilliseconds, timingFromMilliseconds, validateTiming,
-  PLAY_PCM_SAMPLES, startFromSeconds, validateStart, validateEnd, sectionFromSeconds,
+  ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, startFromSeconds, validateStart, validateEnd, sectionFromSeconds,
   audioOutputFromFields, audioLimitsFromFields, replayOutputFromMetadata,
 } from "./play-model.mjs";
 
@@ -206,7 +206,8 @@ test("section seconds preserve exact original-song nanoseconds and bounded playb
   assert.equal(validateStart(), 0n);
   assert.equal(validateStart(I64_MAX), I64_MAX, "binary protocol preserves the full signed range; text reserves existing preview lookahead");
   for (const value of [null, "0", 0, -1n, I64_MAX + 1n]) assert.throws(() => validateStart(value));
-  assert.equal(PLAY_PCM_SAMPLES, 5392, "1296 original assets plus the bounded 4096 selected suffixes");
+  assert.equal(ORIGINAL_PCM_SAMPLES, 3844, "full two-digit base62 original resource capacity");
+  assert.equal(PLAY_PCM_SAMPLES, 7940, "3844 original assets plus the bounded 4096 selected suffixes");
 });
 
 test("judge timing text preserves exact nanoseconds across signed decimal milliseconds and the full i64 range", () => {

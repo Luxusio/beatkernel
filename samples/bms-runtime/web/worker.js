@@ -1,6 +1,6 @@
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
-import { PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, renderedCursor } from "./play-model.mjs";
+import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, renderedCursor } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { BrowserRoomOwner } from "./room-owner.mjs";
 import { validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
@@ -181,7 +181,7 @@ async function selectChart(request) {
     if (importing || !library || request.libraryId !== libraryId) throw new Error("Wait for the selected library to finish loading.");
     if (!Number.isInteger(request.rate) || request.rate < 1 || request.rate > 0xffffffff) throw new Error("Sample rate must be a positive 32-bit integer.");
     if (typeof request.seed !== "string" || !/^\d{1,20}$/.test(request.seed) || BigInt(request.seed) > 0xffffffffffffffffn) throw new Error("Chart seed must fit an unsigned 64-bit integer.");
-    prepared = library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, 1296);
+    prepared = library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES);
     const metadata = {
       title: prepared.title, artist: prepared.artist, duration: prepared.duration_ns.toString(),
       notes: prepared.note_count, samples: prepared.sample_count, images: prepared.image_count,
@@ -1438,13 +1438,13 @@ async function preparePlay(state, request) {
       if (failed || play !== state) return;
       if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== replaySize) throw new Error("Replay file size changed or returned an invalid buffer.");
       prepared = library.prepare_replay_chart(request.path, new Uint8Array(bytes), request.rate, 2,
-        64 * 1024 * 1024, 256 * 1024 * 1024, 1296);
+        64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES);
     } else {
       if (typeof request.seed !== "string" || !/^\d{1,20}$/.test(request.seed) || BigInt(request.seed) > U64_MAX) throw new Error("Invalid gameplay chart seed.");
       prepared = requestedStart === 0n
-        ? library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, 1296)
+        ? library.prepare_chart(request.path, request.rate, 2, BigInt(request.seed), 64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES)
         : library.prepare_chart_at(request.path, request.rate, 2, BigInt(request.seed), requestedStart,
-          64 * 1024 * 1024, 256 * 1024 * 1024, 1296);
+          64 * 1024 * 1024, 256 * 1024 * 1024, ORIGINAL_PCM_SAMPLES);
     }
     const actualStart = prepared.start_ns;
     const startNs = actualStart === undefined && requestedStart === 0n ? 0n : actualStart;

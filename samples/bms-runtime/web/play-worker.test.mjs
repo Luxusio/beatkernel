@@ -3671,7 +3671,7 @@ test("finite live ownership uses the consuming static constructor and snapshots 
     const game = h.games[0], metadata = h.of("play-reply")[0].result;
     assert.equal(h.sectionConstructions.length, finite ? 1 : 0);
     assert.deepEqual(h.libraries[0].preparations[1].args,
-      [44100, 2, 18446744073709551615n, startNs, 64 * 1024 * 1024, 256 * 1024 * 1024, 1296]);
+      [44100, 2, 18446744073709551615n, startNs, 64 * 1024 * 1024, 256 * 1024 * 1024, 3844]);
     assert.deepEqual(game.args.slice(0, 5), [0n, 100000000n, 7000001n, 9000002n, -3n]);
     assert.deepEqual(Array.from(game.args[5]), Array.from(pairs()));
     if (finite) {
@@ -3766,7 +3766,7 @@ test("prepared ownership, original-rate PCM transfers and setup batches retain t
   const metadata = h.of("play-reply")[0].result;
   assert.deepEqual(structuredClone(metadata), { kind: "prepared", samples: 2, opponentCount: 0, startNs: 0n,
     title: "Actual prepared metadata", artist: "Fixture", notes: 23, lanes: [0x11, 0x12] });
-  assert.deepEqual(h.libraries[0].preparations[1].args, [48000, 2, 18446744073709551615n, 64 * 1024 * 1024, 256 * 1024 * 1024, 1296]);
+  assert.deepEqual(h.libraries[0].preparations[1].args, [48000, 2, 18446744073709551615n, 64 * 1024 * 1024, 256 * 1024 * 1024, 3844]);
   assert.deepEqual(game.args.slice(0, 5), [0n, 100000000n, 50000000n, 50000000n, 0n]);
   assert.deepEqual(Array.from(game.args[5]), Array.from(pairs()));
   for (const [index, expected] of [[0, [19n, 44100, [0.25, -0.25, 0.5, -0.5]]], [1, [18446744073709551615n, 96000, [1, -1]]]]) {
@@ -4355,7 +4355,7 @@ test("replay reads once through canonical preparation and shares original PCM, A
   assert.equal(h.libraries[0].preparations.length, 1, "only the accepted preview uses live-seed preparation");
   const preparation = h.libraries[0].replayPreparations[0];
   assert.deepEqual(preparation.bytes, file.bytes);
-  assert.deepEqual(preparation.args, [48000, 2, 64 * 1024 * 1024, 256 * 1024 * 1024, 1296]);
+  assert.deepEqual(preparation.args, [48000, 2, 64 * 1024 * 1024, 256 * 1024 * 1024, 3844]);
   for (const rate of [44100, 96000]) {
     const sample = (await h.rpc("play-sample")).result;
     assert.equal(sample.rate, rate);
