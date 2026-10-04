@@ -1,5 +1,6 @@
 //! Single-owner forward runtime connecting canonical input to scalar audio.
 
+pub mod input_sound;
 pub mod playback;
 pub mod restart;
 
@@ -16,6 +17,7 @@ use crate::{
     transport::{Transport, TransportError},
 };
 use std::{collections::HashMap, fmt, time::Instant};
+use input_sound::InputSoundTimeline;
 
 /// Explicit sound associated with one accepted chart stage.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -76,6 +78,8 @@ pub enum RuntimeError {
     Transport(TransportError),
     /// Sound configuration contains a nonfinite gain.
     InvalidGain,
+    /// Input sounds are already configured or a runtime operation was committed.
+    InputSoundConfigurationLocked,
     /// A logical song endpoint must be nonnegative.
     InvalidSongEnd,
     /// Endpoint setup is immutable after configuration or a committed operation.
@@ -185,6 +189,8 @@ pub struct Runtime {
     judge: JudgeEngine,
     producer: CommandProducer,
     sounds: Vec<SoundBinding>,
+    input_sounds: Option<InputSoundTimeline>,
+    input_sounds_locked: bool,
     last_host: Option<Timestamp>,
     last_song: Option<Timestamp>,
     song_end: Option<Timestamp>,
@@ -218,6 +224,8 @@ impl Runtime {
             judge,
             producer,
             sounds,
+            input_sounds: None,
+            input_sounds_locked: false,
             last_host: None,
             last_song: None,
             song_end: None,
@@ -225,6 +233,20 @@ impl Runtime {
             telemetry: RuntimeTelemetry::new(telemetry_capacity),
             processing_clock: RuntimeProcessingClock::Native,
         })
+    }
+
+    /// Installs an immutable press-sound timeline once, before committed input
+    /// or advancement. Same-chart state/session restoration retains both the
+    /// timeline and this configuration lock; changed charts need a new owner.
+    pub fn configure_input_sounds(
+        &mut self,
+        timeline: InputSoundTimeline,
+    ) -> Result<(), RuntimeError> {
+        if self.input_sounds_locked || self.input_sounds.is_some() {
+            return Err(RuntimeError::InputSoundConfigurationLocked);
+        }
+        self.input_sounds = Some(timeline);
+        Ok(())
     }
 
     /// Installs one immutable logical endpoint before any committed operation.
@@ -353,6 +375,7 @@ impl Runtime {
             self.commit_time(host.timestamp, mapped_song);
             let counters = self.telemetry.counters_mut();
             counters.inputs = counters.inputs.saturating_add(1);
+            let mut input_commands = Vec::new();
             if report.song_end_reached {
                 match self.judge.advance_to(report.song_time) {
                     Ok(events) => report.judge_events = events,
@@ -370,8 +393,20 @@ impl Runtime {
                     None
                 };
                 for bound in single.into_iter().chain(fallback.into_iter().flatten()) {
+                    let fresh = self.input_sounds.is_some() && self.judge.is_fresh_press(&bound);
                     match self.judge.push_input(&bound, report.song_time) {
                         Ok(events) => {
+                            if let Some(command) = self.input_sounds.as_ref().and_then(|timeline| {
+                                timeline.command_for_press(
+                                    &bound,
+                                    fresh,
+                                    report.song_time,
+                                    report.audio_at.timestamp,
+                                    &events,
+                                )
+                            }) {
+                                input_commands.push(command);
+                            }
                             report.bound_inputs.push(bound);
                             report.judge_events.extend(events);
                         }
@@ -387,7 +422,7 @@ impl Runtime {
                 }
                 report.input = Some(input);
             }
-            self.publish(&mut report);
+            self.publish(&mut report, &input_commands);
             Ok(report)
         })();
         self.observe(started, result.as_ref().is_err());
@@ -412,7 +447,7 @@ impl Runtime {
                 }
                 Err(error) => report.judge_error = Some(error),
             }
-            self.publish(&mut report);
+            self.publish(&mut report, &[]);
             Ok(report)
         })();
         self.observe(started, result.as_ref().is_err());
@@ -464,6 +499,7 @@ impl Runtime {
     }
 
     fn commit_time(&mut self, host: Timestamp, song: Timestamp) {
+        self.input_sounds_locked = true;
         self.last_host = Some(host);
         self.last_song = Some(song);
     }
@@ -486,7 +522,7 @@ impl Runtime {
         self.producer.request_pause(paused);
     }
 
-    fn publish(&mut self, report: &mut RuntimeReport) {
+    fn publish(&mut self, report: &mut RuntimeReport, input_commands: &[AudioCommand]) {
         let counters = self.telemetry.counters_mut();
         counters.judge_results = counters
             .judge_results
@@ -510,6 +546,14 @@ impl Runtime {
                         report.audio_failures.push(error);
                     }
                 }
+            }
+        }
+        // Accepted bound presses retain their order, after all judged sounds.
+        // A later fanout or queue failure cannot erase an earlier sound attempt.
+        for &command in input_commands {
+            match admit_audio(&mut self.producer, counters, command) {
+                Ok(()) => report.audio_commands.push(command),
+                Err(error) => report.audio_failures.push(error),
             }
         }
     }
@@ -561,7 +605,7 @@ impl Runtime {
     }
     /// Replaces both gameplay owners after explicit replay reconstruction.
     /// Resets input chronology, acquisition sequences and song-end setup; leaves telemetry,
-    /// bindings and already queued audio commands intact. The caller must
+    /// bindings, configured input sounds and already queued audio commands intact. The caller must
     /// separately synchronize audio output when restoring a timeline. Configured
     /// touch regions remain, but held routes are cleared for a fresh contact start;
     /// restoring active contacts requires `replace_state_with_touch_router` instead.

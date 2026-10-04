@@ -144,6 +144,34 @@ impl JudgeEngine {
         Ok(engine)
     }
 
+    /// Checks actual button/contact ownership without committing a press.
+    /// Only a new Down is fresh; touch also requires enabled contact semantics.
+    pub fn is_fresh_press(&self, event: &GameInputEvent) -> bool {
+        match &event.physical {
+            PhysicalInputEvent::Button(button) => {
+                button.state == ButtonState::Down
+                    && !self.held.contains(&InputOwner {
+                        source: button.meta.source,
+                        physical: button.control,
+                        game_control: event.game_control,
+                    })
+            }
+            PhysicalInputEvent::Touch(touch) => {
+                self.contact_enabled
+                    && touch.phase == TouchPhase::Down
+                    && !self.held_contacts.contains(&(
+                        InputOwner {
+                            source: touch.meta.source,
+                            physical: touch.control,
+                            game_control: event.game_control,
+                        },
+                        touch.contact,
+                    ))
+            }
+            _ => false,
+        }
+    }
+
     /// Processes unchanged bound input at unoffset mapped song time.
     ///
     /// Time and resolver errors leave engine-owned state unchanged. Equal
@@ -179,12 +207,9 @@ impl JudgeEngine {
             )),
             _ => None,
         };
-        let fresh_button = button.is_some_and(|(owner, state)| {
-            state == ButtonState::Down && !self.held.contains(&owner)
-        });
-        let fresh_contact = contact.is_some_and(|(owner, phase)| {
-            phase == TouchPhase::Down && !self.held_contacts.contains(&owner)
-        });
+        let fresh = self.is_fresh_press(event);
+        let fresh_button = button.is_some() && fresh;
+        let fresh_contact = contact.is_some() && fresh;
         let candidates = self.candidates(event, time, fresh_button, fresh_contact);
         let selected = if candidates.is_empty() {
             None
