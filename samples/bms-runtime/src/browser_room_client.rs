@@ -112,6 +112,31 @@ impl BrowserRoomClient {
     fn decoder(&mut self) -> Result<&mut RoomFrameDecoder, RoomPlayError> {
         self.decoder.as_mut().ok_or(RoomPlayError::InvalidState)
     }
+
+    fn local_result(&mut self, result: Result<(), JsValue>) -> Result<(), JsValue> {
+        if let Err(value) = &result {
+            if self.failure.is_none() {
+                // The JS owner distinguishes a recoverable local phase refusal
+                // from malformed protocol evidence that failed this facade.
+                match js_sys::Reflect::set(
+                    value,
+                    &JsValue::from_str("code"),
+                    &JsValue::from_str("state"),
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        self.close();
+                        return Err(error("room error property assignment refused"));
+                    }
+                    Err(failure) => {
+                        self.close();
+                        return Err(failure);
+                    }
+                }
+            }
+        }
+        result
+    }
 }
 
 #[wasm_bindgen]
@@ -164,6 +189,13 @@ impl BrowserRoomClient {
         self.operate(false, |owner| owner.session()?.request_leave())
     }
 
+    /// Premature/repeated local requests return code="state" without failing
+    /// the live facade. Actual received drain protocol errors remain fatal.
+    pub fn request_drain(&mut self) -> Result<(), JsValue> {
+        let result = self.operate(false, |owner| owner.session()?.request_drain());
+        self.local_result(result)
+    }
+
     /// The Worker bounds and owns complete eleven-word rows before WASM copies
     /// them. Common validation retains counter, roster and finality authority.
     pub fn publish_progress(&mut self, words: Vec<u32>, final_prefix: bool) -> Result<(), JsValue> {
@@ -172,28 +204,7 @@ impl BrowserRoomClient {
                 .map_err(|_| RoomPlayError::Progress(RoomProgressClientError::InvalidProgress))?;
             owner.session()?.publish_progress(&members, final_prefix)
         });
-        if let Err(value) = &result {
-            if self.failure.is_none() {
-                // The JS owner must distinguish a local phase refusal from a
-                // malformed common prefix that permanently failed this facade.
-                match js_sys::Reflect::set(
-                    value,
-                    &JsValue::from_str("code"),
-                    &JsValue::from_str("state"),
-                ) {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        self.close();
-                        return Err(error("room error property assignment refused"));
-                    }
-                    Err(failure) => {
-                        self.close();
-                        return Err(failure);
-                    }
-                }
-            }
-        }
-        result
+        self.local_result(result)
     }
 
     pub fn needed_bytes(&mut self) -> Result<u32, JsValue> {
@@ -336,6 +347,14 @@ impl BrowserRoomClient {
                 .session
                 .as_ref()
                 .is_some_and(RoomPlayClient::progress_complete)
+    }
+
+    pub fn drain_complete(&self) -> bool {
+        self.failure.is_none()
+            && self
+                .session
+                .as_ref()
+                .is_some_and(RoomPlayClient::drain_complete)
     }
 
     /// Consumes only a genuine committed common schedule. All values retain
