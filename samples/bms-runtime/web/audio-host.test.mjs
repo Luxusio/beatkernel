@@ -653,8 +653,7 @@ test("sample preflight rejects unsafe buffers and bounds without posting, and ov
     sample({ id: 1 }), sample({ id: -1n }), sample({ id: U64_MAX + 1n }),
     sample({ rate: 0 }), sample({ rate: 4294967296 }), sample({ channels: 1 }),
     sample({ pcm: new Uint8Array(4) }), sample({ pcm: new Float32Array(3) }),
-    sample({ pcm: new Float32Array(6) }), sample({ pcm: new Float32Array([NaN, 0]) }),
-    sample({ pcm: new Float32Array([0, Infinity]) }),
+    sample({ pcm: new Float32Array(6) }),
     sample({ pcm: new Float32Array(new ArrayBuffer(24), 4, 4) }),
     sample({ pcm: new Float32Array(new SharedArrayBuffer(16)) }),
     sample({ pcm: detached }),
@@ -677,6 +676,64 @@ test("sample preflight rejects unsafe buffers and bounds without posting, and ov
   await acknowledged(h, () => owner.sample(sample({ id: 2n, pcm: new Float32Array(2) })));
   await localError(h, () => owner.sample(sample({ id: 3n, pcm: new Float32Array(0) })), "validation");
   assert.deepEqual(h.sent.map(entry => entry.message.sequence), [1, 2]);
+  await stop(h, owner);
+});
+
+test("nonfinite PCM transfers once and only the correlated remote refusal fences admission and joins cleanup", async () => {
+  for (const value of [NaN, Infinity, -Infinity]) {
+    const closing = deferred();
+    const h = await harness({ closeGate: closing });
+    const owner = await open(h);
+    await acknowledged(h, () => owner.sample(sample()));
+    const invalid = sample({ id: 2n, pcm: new Float32Array([0.25, value]) });
+    const backing = invalid.pcm.buffer;
+    const pending = observe(() => owner.sample(invalid));
+    assert.equal(invalid.pcm.byteLength, 0, "the original nonfinite backing has transferred");
+    const upload = h.last();
+    assert.equal(upload.kind, "sample"); assert.equal(upload.id, 2n);
+    assert.equal(upload.sequence, 2); assert.equal(upload.generation, 17);
+    assert.equal(h.sent.at(-1).transfers[0], backing);
+    assert.equal(upload.pcm[0], 0.25); assert.ok(Object.is(upload.pcm[1], value));
+    await flush(); assert.equal(pending.settled, false, "transfer is not sample admission evidence");
+    h.reply(upload, { generation: 16 });
+    await flush(); assert.equal(pending.settled, false, "stale success cannot commit sample accounting");
+    // This is an explicit remote ACK boundary, not a second host-side PCM validator.
+    h.reply(upload, { status: 100, admitted: 0, error: "sample-pcm" });
+    h.nodes[0].port.emit("message", { kind: "terminal", generation: 17, status: 100 });
+    const error = failure(await pending.result, "remote");
+    assert.equal(error.operation, "sample"); assert.equal(error.sequence, 2);
+    assert.equal(error.generation, 17); assert.equal(error.status, 100); assert.equal(error.admitted, 0);
+    assert.equal(owner.state, "failed");
+    await localError(h, () => owner.sample(invalid), "remote");
+    await localError(h, () => owner.finish(), "remote");
+    assert.equal(h.sent.filter(entry => entry.message.kind === "sample").length, 2, "consumed PCM is never retried");
+    const joined = owner.stop(); assert.equal(owner.stop(), joined);
+    const waiting = observe(() => joined);
+    await flush(); assert.equal(h.last().kind, "stop"); assert.equal(h.last().sequence, 3);
+    h.reply(h.last()); await flush();
+    assert.equal(h.contexts[0].closes, 1);
+    assert.equal(waiting.settled, false, "stop ACK does not substitute for context close completion");
+    closing.resolve(); assert.equal((await waiting.result).ok, true);
+    assert.equal(owner.stop(), joined); assert.equal(owner.state, "failed");
+    assert.equal(invalid.pcm.byteLength, 0); assertClean(h);
+  }
+});
+
+test("valid empty PCM retains exclusive transfer ownership and consumes identity capacity only after its ACK", async () => {
+  const h = await harness();
+  const owner = await open(h, options({ pcmLimits: { maxTotalBytes: 16 } }));
+  const empty = sample({ pcm: new Float32Array(0) });
+  const backing = empty.pcm.buffer;
+  const pending = observe(() => owner.sample(empty));
+  assert.equal(h.last().pcm.length, 0); assert.equal(h.sent[0].transfers[0], backing);
+  assert.throws(() => new Float32Array(backing, 0, 0), TypeError, "empty backing is genuinely detached");
+  await localError(h, () => owner.sample(sample()), "busy");
+  h.reply(h.last()); assert.equal((await pending.result).ok, true);
+  await localError(h, () => owner.sample(sample({ pcm: new Float32Array(0) })), "validation");
+  await acknowledged(h, () => owner.sample(sample({ id: 2n })));
+  await localError(h, () => owner.sample(sample({ id: 3n, pcm: new Float32Array(0) })), "validation");
+  assert.deepEqual(h.sent.map(entry => entry.message.id), [1n, 2n]);
+  await acknowledged(h, () => owner.finish());
   await stop(h, owner);
 });
 

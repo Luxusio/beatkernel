@@ -303,9 +303,8 @@ export class AudioHost {
     } catch (cause) {
       throw this.#error("validation", "sample", "PCM backing buffer is detached.", { cause });
     }
-    for (let index = 0; index < pcm.length; index++) {
-      if (!Number.isFinite(pcm[index])) throw this.#error("validation", "sample", "PCM must contain only finite samples.");
-    }
+    // Worklet validates finite values before insert_sample. Bad PCM causes a
+    // remote error and fences this owner; the transferred buffer cannot be retried.
     const bytes = pcm.byteLength;
     return this.#request("sample", { id, rate, channels, pcm }, 0, [pcm.buffer], () => {
       this.#sampleIds.add(id);

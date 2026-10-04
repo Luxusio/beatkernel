@@ -403,6 +403,48 @@ test("sample limits and malformed PCM reject before binding copies while exact b
   h.send(processor, "stop", 4);
 });
 
+test("transferred NaN and both infinities reject before Rust insertion and leave deallocation to actual host stop", async () => {
+  for (const value of [NaN, Infinity, -Infinity]) {
+    const h = await harness();
+    const processor = h.create(), owner = h.owners[0];
+    assert.equal(h.send(processor, "sample", 1, sample()).status, 0);
+    const pcm = new Float32Array([0.25, value]);
+    const transferred = structuredClone(sample({ id: 2n, pcm }), { transfer: [pcm.buffer] });
+    assert.equal(pcm.byteLength, 0);
+    const ack = h.send(processor, "sample", 2, transferred);
+    assert.equal(ack.operation, "sample"); assert.equal(ack.generation, 17); assert.equal(ack.sequence, 2);
+    assert.equal(ack.status, 100); assert.equal(ack.admitted, 0); assert.equal(ack.error, "sample-pcm");
+    assert.equal(owner.calls.samples.length, 1, "the binding saw only the earlier admitted finite sample");
+    assert.deepEqual(Array.from(owner.calls.samples[0][3]), [0.25, -0.25, 0.5, -0.5]);
+    assert.equal(owner.frees, 0);
+    assert.equal(notices(processor, "terminal").length, 1);
+    assert.equal(notices(processor, "terminal")[0].status, 100);
+    assert.notEqual(h.send(processor, "finish", 3).status, 0);
+    assert.equal(owner.calls.finish, 0);
+    assert.notEqual(h.send(processor, "sample", 4, sample({ id: 2n, pcm: new Float32Array(0) })).status, 0);
+    assert.equal(owner.calls.samples.length, 1, "fencing prevents retry even with a fresh valid buffer");
+    const silent = planar(2);
+    assert.equal(h.process(processor, 0, silent), false); assertSilent(silent);
+    assert.equal(owner.calls.render.length, 0); assert.equal(owner.frees, 0);
+    assert.equal(notices(processor, "terminal").length, 1);
+    assert.equal(h.send(processor, "stop", 5).status, 0);
+    assert.equal(owner.frees, 1); assert.equal(processor.port.closed, true);
+    assert.equal(processor.port.onmessage, null);
+
+    // Cleanup releases the singleton; a new owner can accept empty PCM and
+    // genuine finite data under the original exact per-asset/aggregate limits.
+    const next = h.create(), replacement = h.owners[1];
+    const empty = new Float32Array(0);
+    assert.equal(h.send(next, "sample", 1, sample({ pcm: empty })).status, 0);
+    assert.equal(replacement.calls.samples[0][3], empty);
+    assert.equal(h.send(next, "sample", 2, sample({ id: 2n })).status, 0);
+    assert.equal(replacement.calls.samples.length, 2);
+    assert.equal(h.send(next, "finish", 3).status, 0);
+    assert.equal(h.send(next, "stop", 4).status, 0);
+    assert.equal(replacement.frees, 1);
+  }
+});
+
 test("finite finish selects the exact binding once and omitted endpoints preserve unlimited setup", async () => {
   for (const fields of [{}, { endFrame: undefined }, { endFrame: 0n }, { endFrame: 1n },
     { endFrame: 9007199254740993n }, { endFrame: 18446744073709551615n }]) {
