@@ -457,3 +457,34 @@ never enter the local judge. Cohort network application integration remains
 required and must use one shared owner for all local members, rather than
 opening one connection per member. Compilation and deferred fixtures do not
 prove native/browser interoperability or performance acceptance.
+
+### Shared native cohort network owner
+
+NativeGroupCompetition prepares one GroupMultiplayer for the complete ordered
+local roster. Before endpoint side effects, derive and compare every member's
+actual canonical chart/rules/section/branch identity using the original judges,
+shared host domain, end and native preroll. Ghost preparation remains per member
+with network disabled; never open a connection per member. The shared owner
+implements NativeStartAgreement and uses the existing actual silent-output
+calibration, committed start-frame application and presentation evidence.
+
+After observing an actual complete or failed-prefix batch, publish every
+member's retained score/frontier in one bounded unchanged-order snapshot.
+Ordinary saturation disconnects comparison while local play continues; final
+admission/real ACK wait happens only after native output/input cleanup.
+Accepted remote roster ordinals freeze per-local-member targets; surplus local
+rows stay unassigned. Validate the full prefix before publishing any peer row,
+preserve saved ghosts on network updates, and preserve network rows on saved
+ghost updates. Per-member presentation is atomic across the registered roster.
+
+Platform compositions acquire input and output evidence through native adapters
+while this common owner implements protocol/start/score policy. Existing
+unsupported composition guards must remain until their actual shared start and
+cleanup path is connected. Source/compilation are not device/transport or
+physical synchronization acceptance.
+
+A cohort canceled or failed before any successful actual report observation
+skips terminal progress/ACK publication and still joins the shared owner.
+Initialized setup counters are not a committed gameplay prefix. Preserve a
+failed startup lifecycle through cleanup. Malformed final state cannot skip
+worker join or independent capture publication attempts.
