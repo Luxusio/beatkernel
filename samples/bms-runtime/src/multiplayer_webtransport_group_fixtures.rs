@@ -3,7 +3,9 @@
 use super::*;
 use crate::{
     local_players::PlayerId,
+    multiplayer_group::{GroupPrefix, MemberProgress},
     multiplayer_group_rooms::{GroupRoomPhase, GroupRoomPolicy, GroupRoomRegistry},
+    multiplayer_protocol::Progress,
     multiplayer_room_play::RoomPlayClient,
     multiplayer_room_wire::{RoomMessage, decode_message, encode_message},
     multiplayer_rooms::ParticipantId,
@@ -903,5 +905,336 @@ fn prepared_deadline_receipt_lease_and_output_failures_preserve_exact_room_relea
                 .try_recv()
                 .is_err()
         );
+    }
+}
+
+// Exchange actual client/actor messages through the same bounded channels used
+// above, stopping only after each real client has received its matching Commit.
+// The returned server write IDs remain uncredited.
+fn pending_commit_room(
+    cohort: &mut ControlCohort,
+) -> (PreparedRoom, Vec<(ParticipantId, u64)>, i64) {
+    let mut room =
+        PreparedRoom::new(cohort.registry.room("room").unwrap(), 3, 10_000_000_000).unwrap();
+    for turn in 0..64 {
+        let at = 10_000 + turn * 1_000;
+        room.pump(&cohort.senders, at).unwrap();
+        let mut writes = Vec::new();
+        let mut commits = Vec::new();
+        for index in 0..cohort.ids.len() {
+            let id = cohort.ids[index];
+            let shift = if index % 2 == 0 { 1_000 } else { -1_000 };
+            if let Ok(frame) = cohort.receivers.get_mut(&id).unwrap().try_recv() {
+                let message = decode_message(&frame.bytes).unwrap();
+                let write_id = frame.receipt.unwrap();
+                if matches!(message, RoomMessage::Start(StartMessage::Commit(_))) {
+                    commits.push((id, write_id));
+                } else {
+                    writes.push((id, write_id));
+                }
+                cohort.clients[index]
+                    .receive_at(message, at + shift + 10, at + shift + 100)
+                    .unwrap();
+                assert!(cohort.receivers.get_mut(&id).unwrap().try_recv().is_err());
+            }
+        }
+        for index in 0..cohort.ids.len() {
+            let shift = if index % 2 == 0 { 1_000 } else { -1_000 };
+            if let Some(frame) = cohort.clients[index].poll_write(at + shift + 200).unwrap() {
+                cohort.clients[index]
+                    .written_at(frame.id, at + shift + 201, at + shift + 202)
+                    .unwrap();
+                room.receive(
+                    cohort.ids[index],
+                    &decode_message(&frame.bytes).unwrap(),
+                    at + 230,
+                    at + 300,
+                )
+                .unwrap();
+            }
+        }
+        for (id, write_id) in writes {
+            room.written(id, write_id, at + 1, at + 400).unwrap();
+        }
+        if !commits.is_empty() {
+            assert_eq!(commits.len(), cohort.ids.len());
+            for client in &mut cohort.clients {
+                assert!(
+                    client.take_schedule().is_some(),
+                    "actual matching Commit produced the schedule"
+                );
+                assert!(client.take_schedule().is_none());
+            }
+            assert!(!room.committed());
+            return (room, commits, at);
+        }
+    }
+    panic!("bounded real clock/start exchange did not reach Commit");
+}
+
+fn room_upload(player: PlayerId, final_prefix: bool) -> RoomMessage {
+    RoomMessage::Progress(GroupPrefix {
+        sequence: 1,
+        final_prefix,
+        members: vec![MemberProgress {
+            player,
+            progress: Progress {
+                song_ns: 604_800_000_000_000,
+                hits: 1,
+                misses: 0,
+                combo: 1,
+                max_combo: 1,
+            },
+        }],
+    })
+}
+
+#[test]
+fn actual_server_stages_after_own_commit_and_relays_only_after_all_commit_and_ack_receipts() {
+    for count in [2usize, 3, 4] {
+        let mut cohort = ControlCohort::prepared(count);
+        let mut before_start =
+            PreparedRoom::new(cohort.registry.room("room").unwrap(), 3, 10_000_000_000).unwrap();
+        assert!(
+            before_start
+                .receive(cohort.ids[0], &room_upload(PlayerId(1), false), 4, 4)
+                .is_err()
+        );
+        let (mut room, commits, at) = pending_commit_room(&mut cohort);
+        for index in 0..count {
+            let upload = room_upload(PlayerId(index as u32 + 1), true);
+            assert!(
+                room.receive(cohort.ids[index], &upload, at - 1, at + 500)
+                    .is_err(),
+                "capture must follow this lease's actual Commit admission"
+            );
+            room.receive(cohort.ids[index], &upload, at + 20, at + 500)
+                .unwrap();
+        }
+        room.pump(&cohort.senders, at + 600).unwrap();
+        for id in &cohort.ids {
+            assert!(cohort.receivers.get_mut(id).unwrap().try_recv().is_err());
+        }
+        for &(id, write_id) in &commits[..count - 1] {
+            room.written(id, write_id, at + 1, at + 700).unwrap();
+        }
+        room.pump(&cohort.senders, at + 701).unwrap();
+        assert!(!room.committed());
+        for id in &cohort.ids {
+            assert!(cohort.receivers.get_mut(id).unwrap().try_recv().is_err());
+        }
+        let (last, last_write) = commits[count - 1];
+        room.written(last, last_write, at + 1, at + 800).unwrap();
+        assert!(room.committed());
+        assert!(!room.complete());
+
+        let mut delivered = Vec::new();
+        let mut aggregate_writes = Vec::new();
+        let mut shared_prefixes: BTreeMap<ParticipantId, Arc<Vec<u8>>> = BTreeMap::new();
+        let mut outer_ids = commits.iter().map(|(_, id)| *id).collect::<Vec<_>>();
+        for turn in 0..count * 3 {
+            let now = at + 900 + turn as i64 * 100;
+            room.pump(&cohort.senders, now).unwrap();
+            let mut writes = Vec::new();
+            for index in 0..count {
+                let recipient = cohort.ids[index];
+                if let Ok(frame) = cohort.receivers.get_mut(&recipient).unwrap().try_recv() {
+                    let write_id = frame.receipt.unwrap();
+                    assert_eq!(
+                        write_id,
+                        outer_ids[index] + 1,
+                        "control and relay share one opaque write sequence"
+                    );
+                    outer_ids[index] = write_id;
+                    match decode_message(&frame.bytes).unwrap() {
+                        RoomMessage::PeerProgress {
+                            participant,
+                            prefix,
+                        } => {
+                            assert_ne!(participant, recipient);
+                            assert!(!delivered.contains(&(recipient, participant)));
+                            delivered.push((recipient, participant));
+                            let source_index =
+                                cohort.ids.iter().position(|&id| id == participant).unwrap();
+                            let RoomMessage::Progress(expected) =
+                                room_upload(PlayerId(source_index as u32 + 1), true)
+                            else {
+                                unreachable!()
+                            };
+                            assert_eq!(prefix, expected);
+                            if let Some(shared) = shared_prefixes.get(&participant) {
+                                assert!(Arc::ptr_eq(shared, &frame.bytes));
+                            } else {
+                                shared_prefixes.insert(participant, frame.bytes.clone());
+                            }
+                            // Real application ACK may arrive before the actor receives
+                            // its write-completion command, but cannot replace it.
+                            let ack = RoomMessage::FinalAck {
+                                participant,
+                                sequence: prefix.sequence,
+                            };
+                            assert!(
+                                room.receive(recipient, &ack, now - 1, now + 20).is_err(),
+                                "an earlier captured ACK cannot acknowledge a later admitted final relay"
+                            );
+                            room.receive(recipient, &ack, now + 10, now + 20).unwrap();
+                            writes.push((recipient, write_id));
+                        }
+                        RoomMessage::FinalAck {
+                            participant,
+                            sequence,
+                        } => {
+                            assert_eq!((participant, sequence), (recipient, 1));
+                            assert!(!aggregate_writes.iter().any(|&(id, _)| id == recipient));
+                            aggregate_writes.push((recipient, write_id));
+                            // Release earlier aggregate slots so other sources can
+                            // still reach this recipient; retain the last barrier.
+                            if aggregate_writes.len() < count {
+                                writes.push((recipient, write_id));
+                            }
+                        }
+                        message => panic!("unexpected post-Commit frame: {message:?}"),
+                    }
+                    assert!(
+                        cohort
+                            .receivers
+                            .get_mut(&recipient)
+                            .unwrap()
+                            .try_recv()
+                            .is_err()
+                    );
+                }
+            }
+            assert!(!room.complete());
+            for (id, write_id) in writes {
+                room.written(id, write_id, now + 1, now + 30).unwrap();
+            }
+            if aggregate_writes.len() == count {
+                break;
+            }
+        }
+        assert_eq!(delivered.len(), count * (count - 1));
+        assert_eq!(aggregate_writes.len(), count);
+        assert!(!room.complete());
+        let receipt_now = at + 10_000;
+        let (id, write_id) = *aggregate_writes.last().unwrap();
+        room.written(id, write_id, receipt_now, receipt_now)
+            .unwrap();
+        assert!(room.complete());
+        assert_eq!(
+            cohort.registry.participant_count(),
+            count,
+            "completion does not manufacture Leave or close streams"
+        );
+    }
+}
+
+#[test]
+fn relay_queue_failure_and_stale_receipts_release_exact_room_after_real_committed_start() {
+    for failure in 0..3 {
+        let mut cohort = ControlCohort::prepared(2);
+        let other = add_host(
+            &mut cohort.registry,
+            &mut cohort.senders,
+            &mut cohort.receivers,
+            "other",
+            &[PlayerId(9)],
+            2,
+        );
+        let (mut room, commits, at) = pending_commit_room(&mut cohort);
+        for &(id, write_id) in &commits {
+            room.written(id, write_id, at + 1, at + 500).unwrap();
+        }
+        assert!(room.committed());
+        assert!(
+            room.receive(
+                other.id,
+                &room_upload(PlayerId(9), false),
+                at + 510,
+                at + 520
+            )
+            .is_err()
+        );
+        let source = cohort.ids[0];
+        let blocked = cohort.ids[1];
+        room.receive(source, &room_upload(PlayerId(1), false), at + 510, at + 520)
+            .unwrap();
+        match failure {
+            0 => {
+                for _ in 0..OUTGOING_CAPACITY {
+                    cohort.senders[&blocked]
+                        .try_send(queued(
+                            Arc::new(encode_message(&RoomMessage::Ready).unwrap()),
+                            None,
+                        ))
+                        .unwrap();
+                }
+            }
+            1 => {
+                cohort.receivers.remove(&blocked);
+            }
+            _ => {
+                cohort.senders.remove(&blocked);
+            }
+        }
+        assert!(room.pump(&cohort.senders, at + 530).is_err());
+        assert!(!room.complete());
+        assert!(
+            room.written(blocked, commits[1].1 + 1, at + 531, at + 540)
+                .is_err(),
+            "queue failure cannot create a completed relay write"
+        );
+        let released = cohort.registry.release(blocked, at + 550).unwrap();
+        assert_eq!(
+            released.iter().map(|ticket| ticket.id).collect::<Vec<_>>(),
+            cohort.ids
+        );
+        for ticket in released {
+            cohort.senders.remove(&ticket.id);
+        }
+        drop(room);
+        assert_eq!(
+            cohort.registry.room("other").unwrap().members[0].id,
+            other.id
+        );
+        assert!(
+            cohort
+                .receivers
+                .get_mut(&other.id)
+                .unwrap()
+                .try_recv()
+                .is_err()
+        );
+        let a = cohort
+            .registry
+            .join("room", b"replacement", &[PlayerId(7)], at + 550)
+            .unwrap();
+        let b = cohort
+            .registry
+            .join("room", b"replacement", &[PlayerId(8)], at + 550)
+            .unwrap();
+        cohort.registry.seal(a.id, at + 551).unwrap();
+        cohort.registry.ready(a.id, at + 552).unwrap();
+        cohort.registry.ready(b.id, at + 552).unwrap();
+        let mut replacement =
+            PreparedRoom::new(cohort.registry.room("room").unwrap(), at + 553, 1_000).unwrap();
+        assert!(
+            replacement
+                .written(blocked, commits[1].1 + 1, at + 554, at + 554)
+                .is_err()
+        );
+        assert!(
+            replacement
+                .receive(source, &room_upload(PlayerId(1), true), at + 554, at + 554)
+                .is_err()
+        );
+        assert!(
+            cohort
+                .registry
+                .release(blocked, at + 555)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(cohort.registry.room("room").unwrap().members[0].id, a.id);
     }
 }

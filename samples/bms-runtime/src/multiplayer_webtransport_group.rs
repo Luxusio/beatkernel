@@ -1,5 +1,5 @@
-//! Actual BKMR admission and measured software-start ownership.
-//! Progress, gameplay and final application ACK traffic remain unsupported.
+//! Actual BKMR admission, measured software start and bounded progress relay.
+//! Client gameplay publication/consumption remains a separate integration.
 
 use super::*;
 use crate::local_players::PlayerId;
@@ -8,6 +8,7 @@ use crate::multiplayer_group_rooms::{
     GroupRoomSnapshot,
 };
 use crate::multiplayer_room_clock::RoomClockExchange;
+use crate::multiplayer_room_progress::RoomProgressRelay;
 use crate::multiplayer_room_start::RoomStartCoordinator;
 use crate::multiplayer_room_wire::{RoomFrameDecoder, RoomMessage, encode_message};
 use crate::multiplayer_start::{StartMessage, StartPolicy};
@@ -26,6 +27,7 @@ type Frames = BTreeMap<ParticipantId, mpsc::Sender<QueuedFrame>>;
 enum ControlReceipt {
     Clock(u64),
     Start(StartMessage),
+    Relay(u64),
 }
 
 struct PeerControl {
@@ -36,12 +38,15 @@ struct PeerControl {
     in_flight: Option<(u64, ControlReceipt, i64)>,
     pending_accept: Option<StartMessage>,
     last_received: Option<i64>,
+    commit_admitted: Option<i64>,
+    final_admitted: [Option<i64>; 64],
 }
 
 /// The same bounded control owner is called by the live actor and portable
 /// channel fixtures. Queue/transport failures require whole-room disposal.
 struct PreparedRoom {
     coordinator: RoomStartCoordinator,
+    relay: RoomProgressRelay,
     peers: Vec<PeerControl>,
     prepared_now: i64,
     deadline: i64,
@@ -58,6 +63,7 @@ impl PreparedRoom {
             .ok_or_else(|| invalid("prepared room deadline overflow"))?;
         let coordinator =
             RoomStartCoordinator::new(snapshot, StartPolicy::default()).map_err(invalid)?;
+        let relay = RoomProgressRelay::new(snapshot).map_err(invalid)?;
         let mut peers = Vec::new();
         peers
             .try_reserve_exact(snapshot.members.len())
@@ -71,10 +77,13 @@ impl PreparedRoom {
                 in_flight: None,
                 pending_accept: None,
                 last_received: None,
+                commit_admitted: None,
+                final_admitted: [None; 64],
             });
         }
         Ok(Self {
             coordinator,
+            relay,
             peers,
             prepared_now: now,
             deadline,
@@ -108,6 +117,12 @@ impl PreparedRoom {
     ) -> io::Result<()> {
         self.validate_now(now)?;
         let index = self.peer_index(id)?;
+        let ack_admitted = match message {
+            RoomMessage::FinalAck { participant, .. } => {
+                self.peers[index].final_admitted[self.peer_index(*participant)?]
+            }
+            _ => None,
+        };
         let peer = &mut self.peers[index];
         if captured_ns < self.prepared_now
             || captured_ns > now
@@ -118,6 +133,25 @@ impl PreparedRoom {
             return Err(invalid("invalid prepared room read observation"));
         }
         match message {
+            RoomMessage::Progress(_) => {
+                if !peer
+                    .commit_admitted
+                    .is_some_and(|admitted| captured_ns >= admitted)
+                {
+                    return Err(invalid("room progress precedes its admitted Commit"));
+                }
+                self.relay.receive(id, message).map_err(invalid)?;
+            }
+            RoomMessage::FinalAck { .. } => {
+                if !self.relay.active()
+                    || !ack_admitted.is_some_and(|admitted| captured_ns >= admitted)
+                {
+                    return Err(invalid(
+                        "room final acknowledgement precedes its admitted final relay",
+                    ));
+                }
+                self.relay.receive(id, message).map_err(invalid)?;
+            }
             RoomMessage::ClockPing { .. } | RoomMessage::ClockPong { .. } => {
                 peer.clock
                     .receive_at(message, captured_ns, now)
@@ -190,8 +224,12 @@ impl PreparedRoom {
                 self.coordinator = candidate;
                 peer.pending_accept = None;
             }
+            ControlReceipt::Relay(inner) => self.relay.written(id, inner).map_err(invalid)?,
         }
         peer.in_flight = None;
+        if self.coordinator.committed() && !self.relay.active() {
+            self.relay.activate().map_err(invalid)?;
+        }
         self.last_now = now;
         Ok(())
     }
@@ -214,29 +252,51 @@ impl PreparedRoom {
             }
             let mut clock = peer.clock.clone();
             let next = if let Some(frame) = clock.next(now).map_err(invalid)? {
-                Some((frame.bytes, ControlReceipt::Clock(frame.id)))
+                Some((Arc::new(frame.bytes), ControlReceipt::Clock(frame.id), None))
             } else if let Some(message) = self.coordinator.next(peer.id, now).map_err(invalid)? {
                 Some((
-                    encode_message(&RoomMessage::Start(message)).map_err(invalid)?,
+                    Arc::new(encode_message(&RoomMessage::Start(message)).map_err(invalid)?),
                     ControlReceipt::Start(message),
+                    None,
+                ))
+            } else if let Some(frame) = self.relay.poll_write(peer.id).map_err(invalid)? {
+                Some((
+                    frame.bytes,
+                    ControlReceipt::Relay(frame.id),
+                    frame.final_source,
                 ))
             } else {
                 None
             };
-            if let Some((bytes, receipt)) = next {
+            if let Some((bytes, receipt, final_source)) = next {
                 let id = peer
                     .next_id
                     .ok_or_else(|| invalid("room control write identity exhausted"))?;
+                let final_index = final_source
+                    .map(|source| {
+                        self.coordinator
+                            .participants()
+                            .iter()
+                            .position(|id| *id == source)
+                            .ok_or_else(|| invalid("unknown final relay source"))
+                    })
+                    .transpose()?;
                 frames
                     .get(&peer.id)
                     .ok_or_else(|| invalid("prepared room output lease missing"))?
                     .try_send(QueuedFrame {
-                        bytes: Arc::new(bytes),
+                        bytes,
                         receipt: Some(id),
                     })
                     .map_err(|_| invalid("prepared room output full or closed"))?;
                 peer.next_id = id.checked_add(1);
                 peer.in_flight = Some((id, receipt, now));
+                if matches!(receipt, ControlReceipt::Start(StartMessage::Commit(_))) {
+                    peer.commit_admitted = Some(now);
+                }
+                if let Some(source) = final_index {
+                    peer.final_admitted[source] = Some(now);
+                }
             }
             peer.clock = clock;
         }
@@ -250,6 +310,11 @@ impl PreparedRoom {
 
     fn committed(&self) -> bool {
         self.coordinator.committed()
+    }
+
+    #[cfg(test)]
+    fn complete(&self) -> bool {
+        self.relay.complete()
     }
 }
 
