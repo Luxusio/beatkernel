@@ -52,9 +52,9 @@ requires exact member binding selectors and disjoint voice ownership. Source
 validation belongs to setup and adds no per-input or audio-callback work.
 
 Browser local bindings and the Worker now use this shared bridge, including
-paged multi-field rendering. The actual browser page remains solo pending
-device assignment and per-member record storage. Actual browser/device/runtime
-acceptance remains deferred.
+paged multi-field rendering. The browser page now connects discovered source
+assignment and per-member record save/download selection in source. Actual
+browser/device/runtime acceptance remains deferred.
 
 ### Common prepared members
 
@@ -83,8 +83,9 @@ Native cohort preparation uses this same builder with ButtonOnly rules and
 its existing keyboard maps. Host-owned capture/completion/opponent loading
 remains outside the common builder. Existing native source/device constraints,
 recording identities and voice order must be preserved. Browser group ownership
-now uses this common prepared member layer. A playable browser multi-player
-page still requires assignment and per-member storage integration.
+now uses this common prepared member layer. The browser page assignment and
+per-member storage callers are implemented in source; playable acceptance
+remains unverified.
 
 ### Nonblocking shared local gameplay owner
 
@@ -124,8 +125,9 @@ queue/BGM credits/ACK and exact executed acknowledged command counts.
 Pending ACK never stops judging; partial or rejected ACK fences the whole owner
 and retains the real admitted prefix without replaying its tail. Source/compile
 and authored fixtures are not runtime acceptance. Browser bindings and Worker
-renderer integration are implemented in source; page assignment, per-member
-records and comparisons, and active-contact page remapping remain requirements.
+renderer integration, page assignment and per-member record callers are
+implemented in source; per-member comparisons, active-contact page remapping
+and browser acceptance remain requirements.
 
 Player IDs survive roster growth and shrink for retained members. A solo roster
 uses automatic input and clears previous explicit assignments. Each member of
@@ -174,7 +176,7 @@ same group through an adapter. Linux terminal local sessions compose multiple
 devices with this group and publishes the same member reports to graphical
 panels. Settings Players supplies the native roster; Windows and macOS source
 paths likewise acquire multiple exact inputs as described above. Native
-execution acceptance and actual browser page assignment remain pending.
+execution acceptance and actual browser gameplay acceptance remain pending.
 
 Group telemetry retention is limited to 65536 samples per member and 1048576
 samples in aggregate; zero retains counters only. Each member's judge/history
@@ -278,3 +280,33 @@ atomically rather than reusing retired IDs.
 
 ### Native finite local cohort endpoints
 WASAPI shared/exclusive and CoreAudio local 2..64 sessions accept --end-ns with one shared immutable audio/logical end. Finish only after actual native presentation, every acquisition source drained, real globally committed input frontier past the terminal boundary, all members at logical end and pending resume reconciliation complete. Preserve per-player original-input prefixes and independent captures/scores; do not force unfinished notes. ASIO/network finite integration remains pending. Fixtures must be prepared for later execution; source compilation is not native acceptance.
+
+### Browser page local assignment and records
+
+The browser page must keep solo automatic and expose source assignment only for
+two or more players. Retained players keep positive stable IDs when resizing;
+growth never reuses retired IDs. A session snapshots a one-to-64-member plan
+before asynchronous preparation. Multi-player rows use distinct full-width
+acquired source IDs: keyboard source 1, touch source 2, or owned HID/Gamepad
+attachments. Product descriptions are display labels, not route identities.
+Missing, disconnected, duplicate or unconfigured sources refuse preparation.
+The roster limit does not promise 64 browser devices: current acquisition caps
+HID and Gamepad at 16 each, plus one keyboard and one touch aggregate. Actual
+source availability and the combined 256-binding-row budget may impose lower
+limits. Browsers cannot assign separate keyboards from the aggregate events.
+Window acquires input and filters unassigned sources before enqueueing, retaining
+original timestamps, sequence numbers, contacts and provenance. Worker performs
+binding, judgment, score calculation and paged OffscreenCanvas rendering.
+Discovery retains the actual acquisition owners until adoption or cleanup;
+adoption never reallocates selected identities or resets acquired input sequence
+numbers. Overlapping discovery is refused. Cancellation, focus loss, library
+reset and page teardown fence asynchronous discovery before releasing all owned
+devices and listeners. A cleanup failure prevents further playback until reload.
+
+Each captured member has an independent validated replay, completion label,
+score and export error. The page must offer explicit member selection for
+download or library save, retaining other valid prefixes when one export fails.
+Local playback must explicitly refuse unsupported network/saved-opponent
+combinations before acquiring audio. Page changes remain subject to Worker's
+active-contact routing restriction. Authored fixtures and source inspections
+are preparation for deferred browser acceptance, not execution evidence.

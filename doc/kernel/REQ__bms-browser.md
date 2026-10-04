@@ -24,10 +24,10 @@ bounded image cache; select backgrounds from each visible member's own frontier.
 Drawing neither advances judgment nor creates output evidence. Invalid page
 requests refuse before surface recreation or resource synchronization.
 
-Known ceiling: The current browser page remains solo until its device assignment
-flow starts the new local Worker caller and handles per-member records. Rust binding
-availability does not prove browser execution, generated JS bindings, device
-coverage, shared audio completion or performance acceptance.
+Known ceiling: The browser page now connects local source assignment and
+per-member record selection to the local Worker caller in source. This does not
+prove browser execution, generated JS bindings, device coverage, shared audio
+completion or performance acceptance.
 The 64-member roster bound and 256 combined binding-row bound are independent:
 a chart requiring many lanes can reach the binding budget before the roster
 bound. Refuse incomplete member coverage rather than silently sharing sources
@@ -72,9 +72,9 @@ after other export failures, and claim complete captures only after genuine
 shared completion. Direct port ownership, chronology, stale callbacks and joined
 cleanup keep their existing barriers.
 
-Known ceiling: This caller protocol needs the actual page device-assignment and
-multi-record storage flows. Local saved/network comparisons require additional
-per-member ownership; selecting those unsupported combinations refuses explicitly
+Known ceiling: The page device-assignment and individual record save/download
+flows now call this protocol in source. Local saved/network comparisons require
+additional per-member ownership; selecting those unsupported combinations refuses explicitly
 and does not alter existing solo comparison behavior. Browser execution,
 generated bindings, physical devices/audio and performance acceptance remain
 unverified.
@@ -1449,6 +1449,6 @@ The portable resolved local source plan is specified in
 retain full-width acquired sources without using native settings hosts or
 browser product descriptions as identities. The Worker now accepts an optional
 local plan through the shared nonblocking owner and renders paged local fields.
-The actual browser page remains solo until device assignment calls that path
-and stores per-member records. Per-member opponent integration and actual
+The browser page now calls that path with discovered exact assignments and
+individual member record selection. Per-member opponent integration and actual
 browser/device/runtime acceptance remain pending.

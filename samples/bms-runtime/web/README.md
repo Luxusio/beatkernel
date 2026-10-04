@@ -1,5 +1,28 @@
 # Browser BMS player
 
+## Local player setup
+
+Keep **Player count** at one for automatic solo acquisition. For local play with
+two or more players, configure optional HID/Gamepad profiles and touch support,
+authorize HID if needed, then choose **Discover local sources**. Assign a distinct
+acquired source to each player. Keyboard and touch are browser-wide aggregates;
+HID and Gamepad attachments keep their actual allocated identities through play.
+Source descriptions are labels. Devices are released after play or explicit
+release; discover again before the next local session. Retained players keep
+their IDs when the count changes, and retired IDs are not reused.
+
+The common roster supports up to 64 members, subject to actual source availability
+and the combined 256-binding-row budget. Browser acquisition currently allows up
+to 16 HID interfaces and 16 Gamepads, plus keyboard and touch. Rendering uses
+four fields per page on the Worker. With a configured touch player, page changes
+remain restricted until contact routing can be remapped safely.
+
+Local recordings are separate member captures. Choose the captured player before
+download or library save; one member's export failure must retain other valid
+prefixes. Local network/saved-opponent combinations currently refuse explicitly.
+These page paths are source integrations with deferred fixtures; generated
+bindings, browser/device/audio execution and measured performance are unverified.
+
 The optional `browser` feature belongs to the existing `beatkernel-bms-runtime`
 application crate. This host imports user-selected files, prepares chart/audio/
 image data through the common Rust algorithms, and displays compiled notes and
