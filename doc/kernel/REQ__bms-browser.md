@@ -1,5 +1,28 @@
 # Browser host and shared selected-file preparation
 
+## Actual multi-host room lobby caller
+
+Expose the BKMR room path as an explicit choice alongside the existing bilateral
+connection. Snapshot one canonical HTTPS `/rooms/<bounded ASCII key>` URL and
+the original Window clock origin before asynchronous preparation. A room uses
+the actual automatic solo or assigned local roster; replay remains local.
+After shared sample preparation and direct command acknowledgements, open the
+actual Worker room owner. Publish bounded, event-driven roster/readiness status;
+only the admitted creator may seal a collecting room containing at least two
+participants, and each host explicitly readies its own frozen roster.
+
+Queued Seal or Ready replies are never start authority. Retain exactly one
+genuine Worker committed-start event, including an event arriving before an RPC
+reply, and project its exact 100 ms preroll through actual output-clock evidence.
+Arm and activate only that live future schedule. Refuse malformed or repeated
+schedules and stale owners. Leaving/cancellation must settle pending waits and
+join actual Worker/audio/input cleanup without reviving another play session.
+Lobby controls must not contend with another pending playback RPC, and must
+disable on closure or completed start. No periodic DOM gameplay HUD or protocol
+implementation returns to Window. Room progress/final acknowledgement and
+multi-host competitive score presentation remain follow-on requirements, so
+the lobby must not claim those features or runtime interoperability are complete.
+
 ## Local gameplay binding boundary
 
 The browser local gameplay binding consumes one live BrowserPrepared and the
