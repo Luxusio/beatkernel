@@ -125,6 +125,7 @@ export class AudioHost {
   #abort = null;
   #sampleIds = new Set();
   #pcmBytes = 0;
+  #samplesTransferred = false;
   #commandsTransferred = false;
 
   constructor(token, config) {
@@ -283,33 +284,85 @@ export class AudioHost {
 
   async sample(input) {
     this.#gate("sample", ["setup"]);
+    if (this.#samplesTransferred) throw this.#error("state", "sample", "Sample authority belongs to the transferred port.");
     const id = input?.id;
     const rate = input?.rate;
     const channels = input?.channels;
     const pcm = input?.pcm;
+    const buffer = pcm?.buffer;
+    const bytes = pcm?.byteLength;
+    const offset = pcm?.byteOffset;
+    const length = pcm?.length;
+    const bufferBytes = buffer?.byteLength;
+    const resizable = buffer?.resizable;
+    this.#gate("sample", ["setup"]);
+    if (this.#samplesTransferred) throw this.#error("state", "sample", "Sample authority belongs to the transferred port.");
     const limits = this.#config.pcmLimits;
     if (!unsigned(id) || !integer(rate, 1, 0xffffffff) || channels !== this.channels
-      || !(pcm instanceof Float32Array) || !(pcm.buffer instanceof ArrayBuffer)
-      || pcm.buffer.resizable === true || pcm.byteOffset !== 0 || pcm.byteLength !== pcm.buffer.byteLength
-      || pcm.length % channels !== 0 || pcm.byteLength > limits.maxAssetBytes
-      || pcm.byteLength > limits.maxTotalBytes - this.#pcmBytes
+      || !(pcm instanceof Float32Array) || !(buffer instanceof ArrayBuffer)
+      || resizable === true || offset !== 0 || bytes !== bufferBytes
+      || length % channels !== 0 || bytes > limits.maxAssetBytes
+      || bytes > limits.maxTotalBytes - this.#pcmBytes
       || this.#sampleIds.size >= limits.maxSamples || this.#sampleIds.has(id)) {
       throw this.#error("validation", "sample", "Invalid sample or nonexclusive PCM backing buffer.");
     }
     try {
       // A detached empty view otherwise has the same sizes as a valid empty
       // sample. Constructing a zero-length view detects detachment without a copy.
-      new Float32Array(pcm.buffer, 0, 0);
+      new Float32Array(buffer, 0, 0);
     } catch (cause) {
       throw this.#error("validation", "sample", "PCM backing buffer is detached.", { cause });
     }
     // Worklet validates finite values before insert_sample. Bad PCM causes a
     // remote error and fences this owner; the transferred buffer cannot be retried.
-    const bytes = pcm.byteLength;
-    return this.#request("sample", { id, rate, channels, pcm }, 0, [pcm.buffer], () => {
+    this.#gate("sample", ["setup"]);
+    if (this.#samplesTransferred) throw this.#error("state", "sample", "Sample authority belongs to the transferred port.");
+    return this.#request("sample", { id, rate, channels, pcm }, 0, [buffer], () => {
       this.#sampleIds.add(id);
       this.#pcmBytes += bytes;
     });
+  }
+
+  async openSamplePort() {
+    this.#gate("attach-samples", ["setup"]);
+    if (this.#samplesTransferred || this.#sampleIds.size !== 0) {
+      throw this.#error("state", "attach-samples", "Sample handoff requires empty setup and an untransferred owner.");
+    }
+    if (typeof globalThis.MessageChannel !== "function") {
+      throw this.#error("unsupported", "attach-samples", "MessageChannel is required for direct sample ownership.");
+    }
+    let port1;
+    let port2;
+    try {
+      const channel = new MessageChannel();
+      port1 = channel.port1;
+      port2 = channel.port2;
+      if (port1 === port2 || ![port1, port2].every(port => port
+        && ["postMessage", "start", "close"].every(name => typeof port[name] === "function"))) {
+        throw this.#error("unsupported", "attach-samples", "MessageChannel did not provide two usable endpoints.");
+      }
+      this.#gate("attach-samples", ["setup"]);
+      if (this.#samplesTransferred || this.#sampleIds.size !== 0) {
+        throw this.#error("state", "attach-samples", "Sample ownership changed during channel allocation.");
+      }
+    } catch (cause) {
+      try { port1?.close(); } catch {}
+      try { port2?.close(); } catch {}
+      throw cause instanceof AudioHostError ? cause : this.#error("transport", "attach-samples", "Sample channel allocation failed.", { cause });
+    }
+    // Ambiguous transfer cannot restore host upload authority.
+    this.#samplesTransferred = true;
+    try {
+      await this.#request("attach-samples", { port: port2 }, 0, [port2]);
+      if (this.#failure) throw this.#failure;
+      if (this.#stopPromise) throw this.#error("closed", "attach-samples", "Audio owner stopped during sample handoff.");
+      return Object.freeze({ port: port1, generation: this.generation, channels: this.channels,
+        pcmLimits: Object.freeze({ ...this.#config.pcmLimits }), timeoutMs: this.#config.timeoutMs });
+    } catch (error) {
+      try { port1.close(); } catch {}
+      try { port2.close(); } catch {}
+      throw error;
+    }
   }
 
   async finish(endFrame = undefined) {

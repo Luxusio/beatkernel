@@ -93,7 +93,7 @@ async function harness(faults = {}) {
       if (postAttempts === faults.postThrowsAt) throw new Error("injected postMessage failure");
       assert.equal(this.closes, 0, "posting after port cleanup");
       const transfers = Array.isArray(transfer) ? transfer : transfer.transfer ?? [];
-      const snapshot = message.kind === "attach-commands"
+      const snapshot = ["attach-commands", "attach-samples"].includes(message.kind)
         ? { ...structuredClone({ ...message, port: undefined }), port: message.port }
         : structuredClone(message, { transfer: transfers });
       this.sent.push({ message: snapshot, transfers: [...transfers] });
@@ -296,6 +296,71 @@ async function stop(h, owner, expectedState = "closed") {
   assert.equal(owner.state, expectedState);
   assertClean(h);
 }
+
+test("sample handoff requires empty setup and transfers exclusive upload authority only after its own ACK", async () => {
+  const h = await harness(), owner = await open(h);
+  const pending = observe(() => owner.openSamplePort()), attachment = h.last(), channel = h.channels[0];
+  assert.equal(attachment.kind, "attach-samples"); assert.equal(attachment.sequence, 1);
+  assert.equal(attachment.generation, 17); assert.equal(attachment.port, channel.port2);
+  assert.deepEqual(h.sent.at(-1).transfers, [channel.port2]);
+  await flush(); assert.equal(pending.settled, false);
+  await localError(h, () => owner.sample(sample()), "busy");
+  await localError(h, () => owner.openSamplePort(), "busy");
+  h.reply(attachment, { generation: 16 }); await flush(); assert.equal(pending.settled, false);
+  h.reply(attachment); const adopted = await pending.result; assert.equal(adopted.ok, true);
+  const descriptor = adopted.value;
+  assert.equal(descriptor.port, channel.port1); assert.equal(descriptor.generation, 17);
+  assert.equal(descriptor.channels, 2); assert.equal(descriptor.timeoutMs, 50);
+  assert.deepEqual({ ...descriptor.pcmLimits }, { maxAssetBytes: 16, maxTotalBytes: 24, maxSamples: 2 });
+  assert.ok(Object.isFrozen(descriptor)); assert.ok(Object.isFrozen(descriptor.pcmLimits));
+  const untransferred = sample();
+  await localError(h, () => owner.sample(untransferred), "state");
+  assert.equal(untransferred.pcm.byteLength, 16);
+  await localError(h, () => owner.openSamplePort(), "state");
+  // The processor alone validates end-samples; the host consumes its ordinary finish ACK.
+  await acknowledged(h, () => owner.finish(7n)); assert.equal(h.last().sequence, 2);
+  assert.equal(h.last().endFrame, 7n);
+  await acknowledged(h, () => owner.arm(11n));
+  descriptor.port.close(); // Adopted client endpoint is caller-owned.
+  await stop(h, owner); assert.equal(channel.port1.closes, 1);
+  assert.equal(h.sent.filter(item => item.message.kind === "sample").length, 0);
+
+  for (const phase of ["sample", "finish"]) {
+    const used = await harness(), previous = await open(used);
+    if (phase === "sample") await acknowledged(used, () => previous.sample(sample({ pcm: new Float32Array(0) })));
+    else await acknowledged(used, () => previous.finish());
+    await localError(used, () => previous.openSamplePort(), "state");
+    assert.equal(used.channels.length, 0); await stop(used, previous);
+  }
+});
+
+test("failed or cancelled sample handoff closes unreturned ports and never restores a second sample producer", async () => {
+  const closing = deferred(), h = await harness({ closeGate: closing });
+  const owner = await open(h), opening = observe(() => owner.openSamplePort()), attachment = h.last();
+  const joined = observe(() => owner.stop()); await flush();
+  failure(await opening.result, "closed");
+  assert.equal(h.channels[0].port1.closes, 1); assert.equal(h.channels[0].port2.closes, 1);
+  const stopMessage = h.last(); assert.equal(stopMessage.kind, "stop");
+  h.reply(attachment); await flush(); assert.equal(joined.settled, false);
+  h.reply(stopMessage); await flush(); assert.equal(joined.settled, false);
+  assert.equal(h.contexts[0].closes, 1);
+  closing.resolve(); assert.equal((await joined.result).ok, true); assertClean(h);
+  await localError(h, () => owner.sample(sample()), "closed");
+
+  for (const kind of ["remote", "protocol", "timeout", "post"]) {
+    const failed = await harness(kind === "post" ? { postThrowsAt: 1 } : {}), current = await open(failed);
+    const pending = observe(() => current.openSamplePort());
+    if (kind === "remote") failed.reply(failed.last(), { status: 3, error: "sample-port refused" });
+    else if (kind === "protocol") failed.reply(failed.last(), { admitted: 1 });
+    else if (kind === "timeout") await failed.expire();
+    const error = failure(await pending.result, kind === "post" ? "transport" : kind);
+    assert.equal(failed.channels[0].port1.closes, 1); assert.equal(failed.channels[0].port2.closes, 1);
+    assert.equal(await localError(failed, () => current.sample(sample()), error.code), error);
+    assert.equal(await localError(failed, () => current.openSamplePort(), error.code), error);
+    await stop(failed, current, "failed");
+    assert.equal(failed.sent.filter(item => item.message.kind === "sample").length, 0);
+  }
+});
 
 test("command handoff is a single acknowledged transfer while host polling, arming and stop retain their own control sequence", async () => {
   const h = await harness(), owner = await open(h);

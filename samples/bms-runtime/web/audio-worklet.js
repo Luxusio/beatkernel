@@ -57,6 +57,8 @@ function validOptions(options) {
 
 // Controls use generation and consecutive sequence numbers beginning at 1.
 // sample: {id: bigint, rate, channels, pcm: Float32Array}; finish: {endFrame?: bigint}; arm: {frame: bigint};
+// attach-samples: {port}; its independent setup sequence accepts sample and
+// end-samples: {count, bytes}. Only an accepted end permits host finish.
 // commands: {commands: [{kind, voice, sample, at, gain, value, denominator}]}; poll; stop.
 // Command IDs/denominator are u64 BigInt; at/value are i64 BigInt. No fields default.
 // ACK admitted counts only this batch's exact successful queue prefix. A failed
@@ -71,6 +73,10 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     this.sequence = 0;
     this.commandPort = null;
     this.commandSequence = 0;
+    this.samplePort = null;
+    this.sampleSequence = 0;
+    this.samplesTransferred = false;
+    this.samplesEnded = false;
     this.channels = config.channels;
     this.maxFrames = config.audioLimits.maxFrames;
     this.maxBatch = config.audioLimits.queueCapacity;
@@ -116,6 +122,7 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
       this.terminal.status = status;
       try { this.port.postMessage(this.terminal); } catch {}
       try { this.commandPort?.postMessage(this.terminal); } catch {}
+      try { this.samplePort?.postMessage(this.terminal); } catch {}
     }
   }
 
@@ -128,7 +135,8 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
 
   reject(message, status, error, admitted = 0, port = this.port) {
     // A refused transfer still owns its received endpoint, not a live producer.
-    if (message?.kind === "attach-commands" && message.port !== this.commandPort && message.port !== this.port) {
+    if ((message?.kind === "attach-commands" || message?.kind === "attach-samples")
+      && message.port !== this.commandPort && message.port !== this.samplePort && message.port !== this.port) {
       try { message.port?.close(); } catch {}
     }
     try { this.ack(message, status, admitted, error, null, port); } catch {}
@@ -139,12 +147,25 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     const port = this.commandPort;
     if (port === null) return;
     this.commandPort = null;
-    try { port.postMessage({ kind: "closed", generation: this.generation }); }
-    finally {
-      port.onmessage = null;
-      port.onmessageerror = null;
-      port.close();
+    this.closeTransferredPort(port, true);
+  }
+
+  closeSamplePort(notify = true) {
+    const port = this.samplePort;
+    if (port === null) return;
+    this.samplePort = null;
+    this.closeTransferredPort(port, notify);
+  }
+
+  closeTransferredPort(port, notify) {
+    let failure = null;
+    if (notify) {
+      try { port.postMessage({ kind: "closed", generation: this.generation }); } catch (error) { failure = { error }; }
     }
+    try { port.onmessage = null; } catch (error) { failure ??= { error }; }
+    try { port.onmessageerror = null; } catch (error) { failure ??= { error }; }
+    try { port.close(); } catch (error) { failure ??= { error }; }
+    if (failure) throw failure.error;
   }
 
   stop(message) {
@@ -155,18 +176,22 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     this.buffer = null;
     this.memory = null;
     this.sampleIds.clear();
+    let failure = null;
     try {
       if (this.owner !== null) {
         this.owner.free();
         this.owner = null;
       }
     } catch (error) {
-      this.fence(EXCEPTION);
-      throw error;
-    } finally {
-      this.closeCommandPort();
+      failure = { error };
     }
-    if (liveOwner === this) liveOwner = null;
+    try { this.closeSamplePort(); } catch (error) { failure ??= { error }; }
+    try { this.closeCommandPort(); } catch (error) { failure ??= { error }; }
+    if (this.owner === null && liveOwner === this) liveOwner = null;
+    if (failure) {
+      this.fence(EXCEPTION);
+      throw failure.error;
+    }
     this.ack(message, 0);
     this.port.onmessage = null;
     this.port.close();
@@ -243,6 +268,87 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     }
   }
 
+  sample(message, port = this.port) {
+    try {
+      const pcm = message.pcm;
+      if (this.phase !== 0) {
+        this.reject(message, STATE, "sample-state", 0, port);
+        return;
+      }
+      if (!unsigned(message.id) || !integer(message.rate, 1, 0xffffffff)
+        || message.channels !== this.channels || !(pcm instanceof Float32Array)
+        || !(pcm.buffer instanceof ArrayBuffer) || pcm.buffer.resizable === true
+        || pcm.byteOffset !== 0 || pcm.byteLength !== pcm.buffer.byteLength
+        || pcm.length % this.channels !== 0 || pcm.byteLength > this.pcmLimits.maxAssetBytes
+        || pcm.byteLength > this.pcmLimits.maxTotalBytes - this.pcmBytes
+        || this.sampleIds.size >= this.pcmLimits.maxSamples || this.sampleIds.has(message.id)) {
+        this.reject(message, INVALID, "sample", 0, port);
+        return;
+      }
+      try { new Float32Array(pcm.buffer, 0, 0); } catch {
+        this.reject(message, INVALID, "sample", 0, port);
+        return;
+      }
+      // Both producers use this finite preflight before a binding allocation.
+      for (let index = 0; index < pcm.length; index++) {
+        if (!Number.isFinite(pcm[index])) {
+          this.reject(message, INVALID, "sample-pcm", 0, port);
+          return;
+        }
+      }
+      const status = this.owner.insert_sample(message.id, message.rate, message.channels, pcm);
+      if (status !== 0) {
+        this.reject(message, status, "audio", 0, port);
+        return;
+      }
+      this.sampleIds.add(message.id);
+      this.pcmBytes += pcm.byteLength;
+      this.ack(message, 0, 0, null, null, port);
+    } catch {
+      this.reject(message, EXCEPTION, "exception", 0, port);
+    }
+  }
+
+  sampleControl(message, port) {
+    // A saved handler from an ended/stopped endpoint has no current authority.
+    if (port !== this.samplePort) return;
+    try {
+      if (!message || typeof message !== "object"
+        || (message.kind !== "sample" && message.kind !== "end-samples")) {
+        this.reject(message, INVALID, "sample-operation", 0, port);
+        return;
+      }
+      if (message.generation !== this.generation) {
+        this.reject(message, GENERATION, "generation", 0, port);
+        return;
+      }
+      if (!integer(message.sequence, 1, Number.MAX_SAFE_INTEGER) || message.sequence !== this.sampleSequence + 1) {
+        this.reject(message, SEQUENCE, "sequence", 0, port);
+        return;
+      }
+      this.sampleSequence = message.sequence;
+      if (this.failed || this.phase !== 0 || this.samplesEnded) {
+        this.reject(message, STATE, "fenced", 0, port);
+        return;
+      }
+      if (message.kind === "sample") {
+        this.sample(message, port);
+        return;
+      }
+      if (!integer(message.count, 0, this.pcmLimits.maxSamples)
+        || !integer(message.bytes, 0, this.pcmLimits.maxTotalBytes)
+        || message.count !== this.sampleIds.size || message.bytes !== this.pcmBytes) {
+        this.reject(message, INVALID, "sample-end", 0, port);
+        return;
+      }
+      this.ack(message, 0, 0, null, null, port);
+      this.closeSamplePort(false);
+      this.samplesEnded = true;
+    } catch {
+      this.reject(message, EXCEPTION, "exception", 0, port);
+    }
+  }
+
   control(message) {
     let admitted = 0;
     try {
@@ -272,33 +378,14 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
       }
       let status = 0;
       if (message.kind === "sample") {
-        const pcm = message.pcm;
-        if (this.phase !== 0) {
-          this.reject(message, STATE, "sample-state");
+        if (this.samplesTransferred) {
+          this.reject(message, STATE, "transferred-sample-owner");
           return;
         }
-        if (!unsigned(message.id) || !integer(message.rate, 1, 0xffffffff)
-          || message.channels !== this.channels || !(pcm instanceof Float32Array)
-          || pcm.length % this.channels !== 0 || pcm.byteLength > this.pcmLimits.maxAssetBytes
-          || pcm.byteLength > this.pcmLimits.maxTotalBytes - this.pcmBytes
-          || this.sampleIds.size >= this.pcmLimits.maxSamples || this.sampleIds.has(message.id)) {
-          this.reject(message, INVALID, "sample");
-          return;
-        }
-        // Avoid a binding allocation for malformed PCM. Rust also validates it.
-        for (let index = 0; index < pcm.length; index++) {
-          if (!Number.isFinite(pcm[index])) {
-            this.reject(message, INVALID, "sample-pcm");
-            return;
-          }
-        }
-        status = this.owner.insert_sample(message.id, message.rate, message.channels, pcm);
-        if (status === 0) {
-          this.sampleIds.add(message.id);
-          this.pcmBytes += pcm.byteLength;
-        }
+        this.sample(message);
+        return;
       } else if (message.kind === "finish") {
-        if (this.phase !== 0) {
+        if (this.phase !== 0 || (this.samplesTransferred && !this.samplesEnded)) {
           this.reject(message, STATE, "finish-state");
           return;
         }
@@ -322,6 +409,19 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
           this.output = new Float32Array(this.buffer, pointer, length);
           this.phase = 1;
         }
+      } else if (message.kind === "attach-samples") {
+        const port = message.port;
+        if (this.phase !== 0 || this.samplesTransferred || this.sampleIds.size !== 0
+          || !port || port === this.port || port === this.commandPort
+          || !["postMessage", "start", "close"].every(name => typeof port[name] === "function")) {
+          this.reject(message, STATE, "sample-port");
+          return;
+        }
+        this.samplesTransferred = true;
+        this.samplePort = port;
+        port.onmessage = event => this.sampleControl(event.data, port);
+        port.onmessageerror = () => { if (this.samplePort === port) this.fence(INVALID); };
+        port.start();
       } else if (message.kind === "attach-commands") {
         const port = message.port;
         if (this.phase !== 1 || this.commandPort !== null || !port || port === this.port

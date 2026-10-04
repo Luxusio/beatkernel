@@ -150,6 +150,137 @@ function assertSilent(output) {
   for (const bus of output) for (const channel of bus) assert.ok(channel.every(value => value === 0));
 }
 
+test("dedicated samples use shared insertion with independent sequence and exact EOS totals while host finish and free remain authoritative", async () => {
+  const h = await harness(), processor = h.create({ pcmLimits: { maxSamples: 3 } }), owner = h.owners[0];
+  const port = h.commandPort(); // Controlled MessagePort edge, shared with the command fixtures.
+  assert.equal(h.send(processor, "attach-samples", 1, { port }).status, 0);
+  assert.equal(port.starts, 1); assert.equal(port.messages.length, 0);
+  const stale = port.onmessage;
+  const inputs = [sample({ id: 18446744073709551615n }), sample({ id: 0n, pcm: new Float32Array(0) }),
+    sample({ id: 9007199254740993n, rate: 96000, pcm: new Float32Array([1, -1]) })];
+  for (const [index, input] of inputs.entries()) {
+    const backing = input.pcm.buffer;
+    const message = structuredClone({ kind: "sample", generation: 17, sequence: index + 1, ...input }, { transfer: [backing] });
+    assert.throws(() => new Float32Array(backing, 0, 0), TypeError);
+    port.send(message);
+    assert.deepEqual(port.messages.at(-1), { kind: "ack", generation: 17, sequence: index + 1,
+      operation: "sample", status: 0, admitted: 0, error: null, report: null });
+  }
+  assert.equal(owner.calls.samples.length, 3);
+  assert.deepEqual(owner.calls.samples.map(args => [args[0], args[1], args[2], Array.from(args[3])]), [
+    [18446744073709551615n, 44100, 2, [0.25, -0.25, 0.5, -0.5]],
+    [0n, 44100, 2, []], [9007199254740993n, 96000, 2, [1, -1]],
+  ]);
+  assert.equal(notices(processor, "ack").length, 1, "direct sample ACKs never use the host lane");
+  port.send({ kind: "end-samples", generation: 17, sequence: 4, count: 3, bytes: 24 });
+  assert.deepEqual(port.messages.at(-1), { kind: "ack", generation: 17, sequence: 4,
+    operation: "end-samples", status: 0, admitted: 0, error: null, report: null });
+  assert.equal(port.closes, 1); assert.equal(port.onmessage, null); assert.equal(port.onmessageerror, null);
+  assert.equal(owner.frees, 0); assert.equal(owner.calls.finish, 0);
+  const replies = port.messages.length;
+  stale({ data: { kind: "sample", generation: 17, sequence: 5, ...sample() } });
+  assert.equal(port.messages.length, replies); assert.equal(owner.calls.samples.length, 3);
+  assert.equal(h.send(processor, "finish", 2, { endFrame: 7n }).status, 0);
+  assert.deepEqual(owner.calls.finishAt, [7n]);
+  const commands = h.commandPort(); assert.equal(h.send(processor, "attach-commands", 3, { port: commands }).status, 0);
+  assert.equal(h.send(processor, "arm", 4, { frame: 11n }).status, 0);
+  commands.send({ kind: "commands", generation: 17, sequence: 1, commands: [command()] });
+  assert.equal(commands.messages.at(-1).admitted, 1);
+  assert.equal(h.send(processor, "stop", 5).status, 0);
+  assert.equal(owner.frees, 1); assert.equal(port.closes, 1); assert.equal(commands.closes, 1);
+  assert.equal(processor.port.closed, true);
+  const replacement = h.create();
+  stale({ data: { kind: "sample", generation: 17, sequence: 5, ...sample() } });
+  assert.equal(h.owners[1].calls.samples.length, 0); h.send(replacement, "stop", 1);
+});
+
+test("direct sample validation and end totals refuse before inappropriate binding calls and fence both lanes", async () => {
+  const cases = [
+    ...[NaN, Infinity, -Infinity].map(value => ({ input: () => sample({ pcm: new Float32Array([0, value]) }) })),
+    { input: () => sample({ id: -1n }) }, { input: () => sample({ rate: 0 }) },
+    { input: () => sample({ channels: 1 }) }, { input: () => sample({ pcm: new Float32Array(3) }) },
+    { input: () => sample({ pcm: new Float32Array(6) }) },
+    { input: () => sample({ pcm: new Float32Array(new ArrayBuffer(16), 8, 2) }) },
+    { input: () => sample({ pcm: new Float32Array(new SharedArrayBuffer(8)) }) },
+    { input: () => sample({ pcm: new Float32Array(new ArrayBuffer(8, { maxByteLength: 16 })) }) },
+    { input: () => { const pcm = new Float32Array(0);
+      structuredClone(pcm.buffer, { transfer: [pcm.buffer] }); return sample({ pcm }); } },
+    { fields: { generation: 16 } }, { fields: { sequence: 2 } },
+    { fields: { sequence: Number.MAX_SAFE_INTEGER + 1 } }, { fields: { kind: "finish" } },
+    { fields: { kind: "stop" } }, { fields: { kind: "commands", commands: [command()] } },
+    { prefix: true, input: () => sample() }, // Duplicate actual ID.
+    { prefix: true, input: () => sample({ id: 2n }) }, // Remaining total is only eight bytes.
+    { prefix: true, limits: { maxSamples: 1 }, input: () => sample({ id: 2n, pcm: new Float32Array(0) }) },
+    ...[{ count: 0, bytes: 16 }, { count: 1, bytes: 0 }, { count: 2, bytes: 16 },
+      { count: 1.5, bytes: 16 }, { count: 1, bytes: 17 }].map(totals => ({ prefix: true,
+      fields: { kind: "end-samples", ...totals } })),
+  ];
+  for (const scenario of cases) {
+    const h = await harness(), processor = h.create({ pcmLimits: scenario.limits }), owner = h.owners[0], port = h.commandPort();
+    h.send(processor, "attach-samples", 1, { port });
+    let sequence = 1;
+    if (scenario.prefix) { port.send({ kind: "sample", generation: 17, sequence: sequence++, ...sample() });
+      assert.equal(port.messages.at(-1).status, 0); }
+    const prior = owner.calls.samples.length;
+    port.send({ kind: "sample", generation: 17, sequence, ...(scenario.input?.() ?? sample()), ...scenario.fields });
+    const ack = port.messages.filter(message => message.kind === "ack").at(-1);
+    assert.notEqual(ack.status, 0); assert.equal(ack.admitted, 0); assert.equal(ack.report, null);
+    assert.equal(owner.calls.samples.length, prior); assert.equal(owner.calls.finish, 0); assert.equal(owner.frees, 0);
+    assert.equal(notices(processor, "terminal").length, 1);
+    assert.equal(port.messages.filter(message => message.kind === "terminal").length, 1);
+    port.send({ kind: "end-samples", generation: 17, sequence: sequence + 1, count: prior, bytes: prior * 16 });
+    assert.equal(owner.calls.samples.length, prior); assert.equal(owner.calls.finish, 0);
+    assert.equal(port.messages.filter(message => message.kind === "terminal").length, 1);
+    assert.equal(h.send(processor, "stop", 2).status, 0);
+    assert.equal(owner.frees, 1); assert.equal(port.closes, 1); assert.equal(port.onmessage, null);
+  }
+  // A valid PCM shape can still be refused by the actual binding boundary; end cannot credit it.
+  const failed = await harness({ sampleStatus: 7 }), processor = failed.create(), port = failed.commandPort();
+  failed.send(processor, "attach-samples", 1, { port });
+  port.send({ kind: "sample", generation: 17, sequence: 1, ...sample() });
+  assert.equal(port.messages.find(message => message.kind === "ack").status, 7);
+  assert.equal(failed.owners[0].calls.samples.length, 1);
+  assert.equal(failed.owners[0].frees, 0); failed.send(processor, "stop", 2);
+  assert.equal(failed.owners[0].frees, 1);
+});
+
+test("sample attachment, premature host finish and endpoint failures preserve exclusive ownership until actual stop", async () => {
+  for (const phase of ["host-sample", "finished", "duplicate"]) {
+    const h = await harness(), processor = h.create(), owner = h.owners[0]; let sequence = 0;
+    if (phase === "host-sample") h.send(processor, "sample", ++sequence, sample({ pcm: new Float32Array(0) }));
+    if (phase === "finished") h.send(processor, "finish", ++sequence);
+    const adopted = phase === "duplicate" ? h.commandPort() : null;
+    if (adopted) assert.equal(h.send(processor, "attach-samples", ++sequence, { port: adopted }).status, 0);
+    const refused = h.commandPort();
+    assert.notEqual(h.send(processor, "attach-samples", ++sequence, { port: refused }).status, 0);
+    assert.equal(refused.closes, 1); assert.equal(owner.frees, 0);
+    assert.equal(notices(processor, "terminal").length, 1);
+    h.send(processor, "stop", ++sequence); assert.equal(owner.frees, 1);
+    if (adopted) assert.equal(adopted.closes, 1);
+  }
+  for (const action of ["finish", "host-sample", "messageerror", "stop"]) {
+    const h = await harness(), processor = h.create(), owner = h.owners[0], port = h.commandPort();
+    h.send(processor, "attach-samples", 1, { port }); const stale = port.onmessage;
+    if (action === "finish") { assert.notEqual(h.send(processor, "finish", 2).status, 0); assert.equal(owner.calls.finish, 0); }
+    else if (action === "host-sample") assert.notEqual(h.send(processor, "sample", 2, sample()).status, 0);
+    else if (action === "messageerror") port.onmessageerror({});
+    assert.equal(owner.calls.samples.length, 0); assert.equal(owner.frees, 0);
+    if (action !== "stop") assert.equal(port.messages.filter(message => message.kind === "terminal").length, 1);
+    assert.equal(h.send(processor, "stop", action === "stop" ? 2 : 3).status, 0); assert.equal(owner.frees, 1);
+    assert.equal(port.closes, 1); assert.deepEqual(port.messages.at(-1), { kind: "closed", generation: 17 });
+    const replacement = h.create(), count = port.messages.length;
+    stale({ data: { kind: "end-samples", generation: 17, sequence: 1, count: 0, bytes: 0 } });
+    assert.equal(port.messages.length, count); assert.equal(h.owners[1].calls.samples.length, 0);
+    h.send(replacement, "stop", 1);
+  }
+  const h = await harness(), processor = h.create(), port = h.commandPort();
+  h.send(processor, "attach-samples", 1, { port });
+  port.send({ kind: "end-samples", generation: 17, sequence: 1, count: 0, bytes: 0 });
+  assert.equal(port.messages.at(-1).status, 0); assert.equal(port.closes, 1);
+  assert.equal(h.send(processor, "finish", 2).status, 0); assert.equal(h.owners[0].calls.finish, 1);
+  h.send(processor, "stop", 3); assert.equal(h.owners[0].frees, 1); assert.equal(port.closes, 1);
+});
+
 test("dedicated command ownership uses the actual shared enqueue path and independent sequence while host poll and stop remain authoritative", async () => {
   const h = await harness(), processor = h.create(), owner = h.owners[0];
   h.send(processor, "finish", 1);
