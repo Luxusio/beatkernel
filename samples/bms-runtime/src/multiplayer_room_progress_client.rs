@@ -16,6 +16,7 @@ pub enum RoomProgressClientError {
     InvalidState,
     InvalidProgress,
     InvalidAck,
+    InvalidDrain,
     InvalidObservation,
     TimeRegression,
     UnknownWrite,
@@ -36,6 +37,9 @@ impl fmt::Display for RoomProgressClientError {
             }
             Self::InvalidAck => {
                 f.write_str("room aggregate ACK does not match the actual final upload")
+            }
+            Self::InvalidDrain => {
+                f.write_str("room drain notice lacks matching readiness evidence")
             }
             Self::InvalidObservation => f.write_str("invalid room progress observation time"),
             Self::TimeRegression => f.write_str("room progress observation regressed"),
@@ -83,6 +87,7 @@ struct Peer {
 enum Receipt {
     Upload { final_prefix: bool },
     Ack(usize),
+    DrainReady,
 }
 
 /// One latest accepted local snapshot, one pending upload and one actual write
@@ -103,6 +108,10 @@ pub struct RoomProgressClient {
     final_written: bool,
     final_acknowledged: bool,
     early_final_ack: bool,
+    drain_requested: bool,
+    drain_admitted: Option<i64>,
+    drain_written: bool,
+    drain_notice: bool,
     last_poll: Option<i64>,
     last_received: Option<i64>,
     active: bool,
@@ -154,6 +163,10 @@ impl RoomProgressClient {
             final_written: false,
             final_acknowledged: false,
             early_final_ack: false,
+            drain_requested: false,
+            drain_admitted: None,
+            drain_written: false,
+            drain_notice: false,
             last_poll: None,
             last_received: None,
             active: false,
@@ -295,6 +308,31 @@ impl RoomProgressClient {
                     return Err(RoomProgressClientError::InvalidAck);
                 }
             }
+            RoomMessage::DrainComplete {
+                participant,
+                sequence,
+            } => {
+                let admitted = self
+                    .drain_admitted
+                    .ok_or(RoomProgressClientError::InvalidDrain)?;
+                let (expected, _) = self
+                    .final_upload
+                    .ok_or(RoomProgressClientError::InvalidDrain)?;
+                if !self.active
+                    || !self.drain_requested
+                    || self.drain_notice
+                    || *participant != self.peers[self.own].id
+                    || *sequence != expected
+                    || captured_ns < admitted
+                    || (!self.drain_written
+                        && !matches!(self.in_flight, Some((_, Receipt::DrainReady))))
+                {
+                    return Err(RoomProgressClientError::InvalidDrain);
+                }
+                // A matching early notice remains gated by the real Ready
+                // full-write receipt; receiving bytes alone grants no drain.
+                self.drain_notice = true;
+            }
             _ => return Err(RoomProgressClientError::InvalidState),
         }
         self.last_received = Some(captured_ns);
@@ -304,7 +342,11 @@ impl RoomProgressClient {
     /// Lets the enclosing common owner preflight its external write ID without
     /// cloning peer histories or mutating this child's pending work.
     pub(crate) fn has_pending_write(&self) -> bool {
-        self.active() && self.in_flight.is_none() && (self.pending_acks != 0 || self.upload_pending)
+        self.active()
+            && self.in_flight.is_none()
+            && (self.pending_acks != 0
+                || self.upload_pending
+                || (self.drain_requested && self.drain_admitted.is_none()))
     }
 
     pub fn poll_write(
@@ -339,7 +381,7 @@ impl RoomProgressClient {
                 },
                 Receipt::Ack(index),
             )
-        } else {
+        } else if self.upload_pending {
             let sequence = self
                 .next_sequence
                 .ok_or(RoomProgressClientError::IdExhausted)?;
@@ -358,6 +400,17 @@ impl RoomProgressClient {
                     final_prefix: self.final_queued,
                 },
             )
+        } else {
+            let (sequence, _) = self
+                .final_upload
+                .ok_or(RoomProgressClientError::InvalidDrain)?;
+            (
+                RoomMessage::DrainReady {
+                    participant: self.peers[self.own].id,
+                    sequence,
+                },
+                Receipt::DrainReady,
+            )
         };
         let bytes = encode_message(&message)?;
         if let RoomMessage::Progress(prefix) = message {
@@ -369,6 +422,8 @@ impl RoomProgressClient {
         } else if let Some(index) = ack {
             self.pending_acks &= !(1u64 << index);
             self.ack_cursor = (index + 1) % self.peers.len();
+        } else {
+            self.drain_admitted = Some(now);
         }
         self.next_id = id.checked_add(1);
         self.in_flight = Some((id, receipt));
@@ -394,6 +449,7 @@ impl RoomProgressClient {
             }
             Receipt::Upload { .. } => {}
             Receipt::Ack(index) => self.peers[index].ack_written = true,
+            Receipt::DrainReady => self.drain_written = true,
         }
         self.in_flight = None;
         Ok(())
@@ -431,6 +487,21 @@ impl RoomProgressClient {
                         .is_some_and(|prefix| prefix.final_prefix)
                         && peer.ack_written)
             })
+    }
+
+    /// Opt in to coordinated drain only after all genuine local receipts. The
+    /// existing local-completion boundary never queues readiness implicitly.
+    pub fn request_drain(&mut self) -> Result<(), RoomProgressClientError> {
+        self.ensure_live()?;
+        if !self.local_complete() || self.drain_requested {
+            return Err(RoomProgressClientError::InvalidDrain);
+        }
+        self.drain_requested = true;
+        Ok(())
+    }
+
+    pub fn drain_complete(&self) -> bool {
+        self.active() && self.drain_written && self.drain_notice
     }
 
     pub fn stop(&mut self) {

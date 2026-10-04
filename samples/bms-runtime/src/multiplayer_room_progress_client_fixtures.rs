@@ -516,3 +516,216 @@ fn invalid_membership_clock_and_stop_fence_preserve_accepted_progress_without_la
     assert!(client.peer_progress(members[1].id).unwrap().final_prefix);
     assert!(!client.peer_final_ack_written(members[1].id));
 }
+
+#[test]
+fn drain_is_explicit_after_all_local_receipts_and_early_complete_waits_for_the_exact_ready_write() {
+    for count in [2usize, 3, 4, 64] {
+        let registry = prepared(count, 1);
+        let snapshot = registry.room("room").unwrap();
+        let own = &snapshot.members[0];
+        let mut client = RoomProgressClient::new(snapshot, own.id).unwrap();
+        let before = client.clone();
+        assert!(client.request_drain().is_err());
+        assert_eq!(client, before);
+        client.activate().unwrap();
+        client.publish(&rows(&own.players, 1), true).unwrap();
+        let upload = client.poll_write(100).unwrap().unwrap();
+        client
+            .receive(
+                &RoomMessage::FinalAck {
+                    participant: own.id,
+                    sequence: 1,
+                },
+                100,
+            )
+            .unwrap();
+        let before = client.clone();
+        assert!(
+            client.request_drain().is_err(),
+            "an early aggregate ACK has no full-upload credit"
+        );
+        assert_eq!(client, before);
+        client.written(upload.id).unwrap();
+        assert!(client.local_final_acknowledged());
+        let before = client.clone();
+        assert!(
+            client.request_drain().is_err(),
+            "all remote finals are also required"
+        );
+        assert_eq!(client, before);
+        for member in &snapshot.members[1..] {
+            client
+                .receive(&peer(member.id, &member.players, 7, 7, true), 101)
+                .unwrap();
+        }
+        for _ in 1..count {
+            let ack = client.poll_write(102).unwrap().unwrap();
+            let before = client.clone();
+            assert!(
+                client.request_drain().is_err(),
+                "the current recipient ACK still requires its full write"
+            );
+            assert_eq!(client, before);
+            client.written(ack.id).unwrap();
+        }
+        assert!(client.local_complete());
+        assert!(!client.drain_complete());
+        assert!(
+            client.poll_write(103).unwrap().is_none(),
+            "local completion never emits automatic readiness"
+        );
+        client.request_drain().unwrap();
+        let notice = RoomMessage::DrainComplete {
+            participant: own.id,
+            sequence: 1,
+        };
+        let before = client.clone();
+        assert!(
+            client.receive(&notice, 103).is_err(),
+            "requesting drain alone establishes no wire admission floor"
+        );
+        assert!(client.request_drain().is_err());
+        assert_eq!(client, before);
+        let ready = client.poll_write(104).unwrap().unwrap();
+        assert_eq!(ready.id, count as u64 + 1);
+        assert_eq!(
+            wire(&ready),
+            RoomMessage::DrainReady {
+                participant: own.id,
+                sequence: 1
+            }
+        );
+        assert!(client.poll_write(105).unwrap().is_none());
+        client.receive(&notice, 104).unwrap();
+        assert!(
+            !client.drain_complete(),
+            "a delayed write callback still owns the Ready frame"
+        );
+        let pending = client.clone();
+        assert!(client.receive(&notice, 105).is_err());
+        assert!(client.written(ready.id + 1).is_err());
+        assert_eq!(client, pending);
+        client.written(ready.id).unwrap();
+        assert!(client.local_complete() && client.drain_complete());
+        assert!(client.poll_write(106).unwrap().is_none());
+        let complete = client.clone();
+        assert!(client.request_drain().is_err());
+        assert!(client.receive(&notice, 106).is_err());
+        assert!(client.written(ready.id).is_err());
+        assert_eq!(client, complete);
+    }
+}
+
+#[test]
+fn malformed_or_pre_admission_complete_is_atomic_and_stop_revokes_early_and_written_drain_authority()
+ {
+    let registry = prepared(2, 1);
+    let snapshot = registry.room("room").unwrap();
+    let own = &snapshot.members[0];
+    let other = &snapshot.members[1];
+    let mut client = RoomProgressClient::new(snapshot, own.id).unwrap();
+    client.activate().unwrap();
+    client.publish(&rows(&own.players, 1), true).unwrap();
+    let upload = client.poll_write(10).unwrap().unwrap();
+    client.written(upload.id).unwrap();
+    client
+        .receive(&peer(other.id, &other.players, u64::MAX, 1, true), 20)
+        .unwrap();
+    let ack = client.poll_write(30).unwrap().unwrap();
+    assert_eq!(
+        wire(&ack),
+        RoomMessage::FinalAck {
+            participant: other.id,
+            sequence: u64::MAX
+        }
+    );
+    client.written(ack.id).unwrap();
+    client
+        .receive(
+            &RoomMessage::FinalAck {
+                participant: own.id,
+                sequence: 1,
+            },
+            40,
+        )
+        .unwrap();
+    assert!(client.local_complete());
+    client.request_drain().unwrap();
+    let ready = client.poll_write(1000).unwrap().unwrap();
+    let notice = RoomMessage::DrainComplete {
+        participant: own.id,
+        sequence: 1,
+    };
+    for (message, captured) in [
+        (notice.clone(), -1),
+        (notice.clone(), 999),
+        (
+            RoomMessage::DrainComplete {
+                participant: ParticipantId(0),
+                sequence: 1,
+            },
+            1000,
+        ),
+        (
+            RoomMessage::DrainComplete {
+                participant: other.id,
+                sequence: 1,
+            },
+            1000,
+        ),
+        (
+            RoomMessage::DrainComplete {
+                participant: ParticipantId(u64::MAX),
+                sequence: 1,
+            },
+            1000,
+        ),
+        (
+            RoomMessage::DrainComplete {
+                participant: own.id,
+                sequence: 0,
+            },
+            1000,
+        ),
+        (
+            RoomMessage::DrainComplete {
+                participant: own.id,
+                sequence: 2,
+            },
+            1000,
+        ),
+        (
+            RoomMessage::DrainReady {
+                participant: own.id,
+                sequence: 1,
+            },
+            1000,
+        ),
+    ] {
+        let before = client.clone();
+        assert!(client.receive(&message, captured).is_err());
+        assert_eq!(client, before);
+    }
+    let mut after_full_write = client.clone();
+    after_full_write.written(ready.id).unwrap();
+    assert!(!after_full_write.drain_complete());
+    after_full_write.receive(&notice, 1000).unwrap();
+    assert!(after_full_write.drain_complete());
+    after_full_write.stop();
+    assert!(!after_full_write.drain_complete());
+    assert!(after_full_write.local_final_written() && after_full_write.local_final_acknowledged());
+
+    client.receive(&notice, 1000).unwrap();
+    assert!(!client.drain_complete());
+    client.stop();
+    client.stop();
+    let stopped = client.clone();
+    assert!(client.written(ready.id).is_err());
+    assert!(client.receive(&notice, 1001).is_err());
+    assert!(client.request_drain().is_err());
+    assert!(client.poll_write(1001).is_err());
+    assert_eq!(client, stopped);
+    assert!(!client.local_complete() && !client.drain_complete());
+    assert!(client.peer_final_ack_written(other.id));
+    assert_eq!(client.peer_progress(other.id).unwrap().sequence, u64::MAX);
+}

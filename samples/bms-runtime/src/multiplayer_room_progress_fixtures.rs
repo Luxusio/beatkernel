@@ -7,6 +7,7 @@ use crate::{
     },
     multiplayer_protocol::Progress,
     multiplayer_room_progress::{RoomProgressRelay, RoomRelayWrite},
+    multiplayer_room_progress_client::RoomProgressClient,
     multiplayer_room_wire::{RoomMessage, decode_message, encode_message},
     multiplayer_rooms::ParticipantId,
 };
@@ -59,6 +60,69 @@ fn decoded(frame: &RoomRelayWrite) -> RoomMessage {
         frame.bytes.as_slice()
     );
     message
+}
+
+fn pending_aggregates(
+    snapshot: GroupRoomSnapshot<'_>,
+    timed: bool,
+) -> (RoomProgressRelay, Vec<(ParticipantId, RoomRelayWrite)>) {
+    let mut relay = RoomProgressRelay::new(snapshot).unwrap();
+    relay.activate().unwrap();
+    for member in snapshot.members {
+        relay
+            .receive_at(
+                member.id,
+                &RoomMessage::Progress(prefix(&member.players, 1, true)),
+                10,
+            )
+            .unwrap();
+    }
+    let mut acknowledgements = Vec::new();
+    for member in snapshot.members {
+        for _ in 1..snapshot.members.len() {
+            let frame = relay.poll_write_at(member.id, 20).unwrap().unwrap();
+            let RoomMessage::PeerProgress {
+                participant,
+                prefix,
+            } = decoded(&frame)
+            else {
+                panic!("final peer prefix required")
+            };
+            relay.written(member.id, frame.id).unwrap();
+            acknowledgements.push((
+                member.id,
+                RoomMessage::FinalAck {
+                    participant,
+                    sequence: prefix.sequence,
+                },
+            ));
+        }
+    }
+    for (recipient, acknowledgement) in acknowledgements {
+        relay.receive_at(recipient, &acknowledgement, 30).unwrap();
+    }
+    let aggregates = snapshot
+        .members
+        .iter()
+        .map(|member| {
+            let frame = if timed {
+                relay.poll_write_at(member.id, 40)
+            } else {
+                relay.poll_write(member.id)
+            }
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                decoded(&frame),
+                RoomMessage::FinalAck {
+                    participant: member.id,
+                    sequence: 1
+                }
+            );
+            (member.id, frame)
+        })
+        .collect();
+    (relay, aggregates)
 }
 
 #[test]
@@ -563,4 +627,296 @@ fn malformed_prepared_snapshots_full_width_host_identity_and_stop_preserve_bound
             )
             .is_err()
     );
+}
+
+#[test]
+fn actual_clients_and_relay_drain_two_three_four_and_sixty_four_hosts_only_after_every_receipt() {
+    for count in [2usize, 3, 4, 64] {
+        let registry = prepared(count, 1);
+        let snapshot = registry.room("room").unwrap();
+        let mut relay = RoomProgressRelay::new(snapshot).unwrap();
+        relay.activate().unwrap();
+        let mut clients = snapshot
+            .members
+            .iter()
+            .map(|member| {
+                let mut client = RoomProgressClient::new(snapshot, member.id).unwrap();
+                client.activate().unwrap();
+                client
+                    .publish(&prefix(&member.players, 1, true).members, true)
+                    .unwrap();
+                client
+            })
+            .collect::<Vec<_>>();
+        for (member, client) in snapshot.members.iter().zip(&mut clients) {
+            let upload = client.poll_write(10).unwrap().unwrap();
+            relay
+                .receive_at(member.id, &decode_message(&upload.bytes).unwrap(), 20)
+                .unwrap();
+            client.written(upload.id).unwrap();
+        }
+        for (member, client) in snapshot.members.iter().zip(&mut clients) {
+            for _ in 1..count {
+                let frame = relay.poll_write_at(member.id, 30).unwrap().unwrap();
+                client.receive(&decoded(&frame), 40).unwrap();
+                relay.written(member.id, frame.id).unwrap();
+            }
+        }
+        for (member, client) in snapshot.members.iter().zip(&mut clients) {
+            for _ in 1..count {
+                let ack = client.poll_write(50).unwrap().unwrap();
+                relay
+                    .receive_at(member.id, &decode_message(&ack.bytes).unwrap(), 60)
+                    .unwrap();
+                client.written(ack.id).unwrap();
+            }
+            assert!(!client.local_complete());
+        }
+        let mut aggregates = Vec::new();
+        let mut ready_frames = Vec::new();
+        for (member, client) in snapshot.members.iter().zip(&mut clients) {
+            let aggregate = relay.poll_write_at(member.id, 70).unwrap().unwrap();
+            assert_eq!(aggregate.id, count as u64);
+            client.receive(&decoded(&aggregate), 80).unwrap();
+            assert!(client.local_complete());
+            assert!(!client.drain_complete());
+            client.request_drain().unwrap();
+            let ready = client.poll_write(90).unwrap().unwrap();
+            assert_eq!(
+                ready.id,
+                count as u64 + 1,
+                "drain shares the actual upload/ACK write-ID space"
+            );
+            assert_eq!(
+                decode_message(&ready.bytes).unwrap(),
+                RoomMessage::DrainReady {
+                    participant: member.id,
+                    sequence: 1
+                }
+            );
+            ready_frames.push(ready);
+            aggregates.push(aggregate);
+        }
+        for index in 0..count - 1 {
+            relay
+                .receive_at(
+                    snapshot.members[index].id,
+                    &decode_message(&ready_frames[index].bytes).unwrap(),
+                    100,
+                )
+                .unwrap();
+            clients[index].written(ready_frames[index].id).unwrap();
+        }
+        assert!(!relay.complete() && !relay.drained());
+        for (member, aggregate) in snapshot.members.iter().zip(&aggregates) {
+            relay.written(member.id, aggregate.id).unwrap();
+        }
+        assert!(relay.complete());
+        for member in snapshot.members {
+            assert!(
+                relay.poll_write_at(member.id, 110).unwrap().is_none(),
+                "one host has not requested drain"
+            );
+        }
+        let last = count - 1;
+        relay
+            .receive_at(
+                snapshot.members[last].id,
+                &decode_message(&ready_frames[last].bytes).unwrap(),
+                100,
+            )
+            .unwrap();
+        clients[last].written(ready_frames[last].id).unwrap();
+        for (index, (member, client)) in snapshot.members.iter().zip(&mut clients).enumerate() {
+            let notice = relay.poll_write_at(member.id, 120).unwrap().unwrap();
+            assert_eq!(notice.id, count as u64 + 1);
+            assert_eq!(notice.final_source, None);
+            assert_eq!(
+                decoded(&notice),
+                RoomMessage::DrainComplete {
+                    participant: member.id,
+                    sequence: 1
+                }
+            );
+            assert!(!relay.drained());
+            assert!(relay.poll_write_at(member.id, 121).unwrap().is_none());
+            client.receive(&decoded(&notice), 130).unwrap();
+            assert!(
+                client.drain_complete(),
+                "this client needs no unrelated recipient's notice write"
+            );
+            relay.written(member.id, notice.id).unwrap();
+            assert_eq!(relay.drained(), index + 1 == count);
+            assert!(
+                client.poll_write(140).unwrap().is_none(),
+                "drain does not fabricate Leave or another protocol frame"
+            );
+        }
+        assert!(clients.iter().all(RoomProgressClient::drain_complete));
+        relay.stop();
+        assert!(
+            !relay.drained(),
+            "Stop revokes even a fully written coordinated drain"
+        );
+    }
+}
+
+#[test]
+fn drain_ready_requires_exact_lease_sequence_capture_and_full_aggregate_receipt_atomically() {
+    let registry = prepared(3, 1);
+    let snapshot = registry.room("room").unwrap();
+    let (mut relay, aggregates) = pending_aggregates(snapshot, true);
+    let own = snapshot.members[0].id;
+    let ready = RoomMessage::DrainReady {
+        participant: own,
+        sequence: 1,
+    };
+    for (lease, message, captured) in [
+        (own, ready.clone(), -1),
+        (own, ready.clone(), 29),
+        (own, ready.clone(), 39),
+        (ParticipantId(u64::MAX), ready.clone(), 40),
+        (snapshot.members[1].id, ready.clone(), 40),
+        (
+            own,
+            RoomMessage::DrainReady {
+                participant: own,
+                sequence: 2,
+            },
+            40,
+        ),
+        (
+            own,
+            RoomMessage::DrainComplete {
+                participant: own,
+                sequence: 1,
+            },
+            40,
+        ),
+    ] {
+        let before = relay.clone();
+        assert!(relay.receive_at(lease, &message, captured).is_err());
+        assert_eq!(relay, before);
+    }
+    let before = relay.clone();
+    assert!(
+        relay.receive(own, &ready).is_err(),
+        "untimed receive supplies no original capture"
+    );
+    assert_eq!(relay, before);
+    relay.receive_at(own, &ready, 40).unwrap();
+    let pending = relay.clone();
+    assert!(relay.receive_at(own, &ready, 41).is_err());
+    assert!(relay.written(own, aggregates[0].1.id + 1).is_err());
+    assert_eq!(relay, pending);
+    for (recipient, aggregate) in &aggregates[1..] {
+        relay
+            .receive_at(
+                *recipient,
+                &RoomMessage::DrainReady {
+                    participant: *recipient,
+                    sequence: 1,
+                },
+                40,
+            )
+            .unwrap();
+        relay.written(*recipient, aggregate.id).unwrap();
+    }
+    for member in snapshot.members {
+        assert!(
+            relay.poll_write_at(member.id, 50).unwrap().is_none(),
+            "early readiness cannot credit the remaining aggregate write"
+        );
+    }
+    assert!(!relay.complete() && !relay.drained());
+    relay.written(own, aggregates[0].1.id).unwrap();
+    assert!(relay.complete());
+    let complete = relay.poll_write_at(own, 51).unwrap().unwrap();
+    assert_eq!(
+        decoded(&complete),
+        RoomMessage::DrainComplete {
+            participant: own,
+            sequence: 1
+        }
+    );
+    let before = relay.clone();
+    assert!(relay.receive_at(own, &ready, 51).is_err());
+    assert!(relay.written(own, aggregates[0].1.id).is_err());
+    assert_eq!(relay, before);
+    relay.written(own, complete.id).unwrap();
+    assert!(
+        !relay.drained(),
+        "the other actual Complete notices still need full writes"
+    );
+}
+
+#[test]
+fn untimed_aggregate_and_stop_never_gain_drain_authority_from_later_polling_or_receipts() {
+    let registry = prepared(2, 1);
+    let snapshot = registry.room("room").unwrap();
+    let (mut legacy, aggregates) = pending_aggregates(snapshot, false);
+    for (recipient, aggregate) in &aggregates {
+        assert!(legacy.poll_write_at(*recipient, 100).unwrap().is_none());
+        legacy.written(*recipient, aggregate.id).unwrap();
+        let before = legacy.clone();
+        assert!(
+            legacy
+                .receive_at(
+                    *recipient,
+                    &RoomMessage::DrainReady {
+                        participant: *recipient,
+                        sequence: 1
+                    },
+                    101
+                )
+                .is_err()
+        );
+        assert_eq!(
+            legacy, before,
+            "an untimed aggregate cannot acquire a fictional admission floor later"
+        );
+    }
+    assert!(legacy.complete());
+    assert!(!legacy.drained());
+
+    let (mut relay, aggregates) = pending_aggregates(snapshot, true);
+    for now in [-1, 39] {
+        let before = relay.clone();
+        assert!(relay.poll_write_at(snapshot.members[0].id, now).is_err());
+        assert_eq!(relay, before);
+    }
+    for (recipient, aggregate) in &aggregates {
+        relay.written(*recipient, aggregate.id).unwrap();
+        relay
+            .receive_at(
+                *recipient,
+                &RoomMessage::DrainReady {
+                    participant: *recipient,
+                    sequence: 1,
+                },
+                50,
+            )
+            .unwrap();
+    }
+    let own = snapshot.members[0].id;
+    let notice = relay.poll_write_at(own, 60).unwrap().unwrap();
+    relay.stop();
+    relay.stop();
+    assert!(!relay.active() && !relay.complete() && !relay.drained());
+    let stopped = relay.clone();
+    assert!(relay.written(own, notice.id).is_err());
+    assert!(relay.poll_write_at(own, 61).is_err());
+    assert!(
+        relay
+            .receive_at(
+                own,
+                &RoomMessage::DrainReady {
+                    participant: own,
+                    sequence: 1
+                },
+                61
+            )
+            .is_err()
+    );
+    assert_eq!(relay, stopped);
 }

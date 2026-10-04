@@ -16,6 +16,9 @@ pub enum RoomProgressError {
     InvalidState,
     InvalidProgress,
     InvalidAck,
+    InvalidDrain,
+    InvalidObservation,
+    TimeRegression,
     UnknownWrite,
     IdExhausted,
     Stopped,
@@ -35,6 +38,11 @@ impl fmt::Display for RoomProgressError {
             Self::InvalidAck => {
                 f.write_str("room final acknowledgement lacks matching delivery evidence")
             }
+            Self::InvalidDrain => {
+                f.write_str("room drain readiness lacks matching aggregate write evidence")
+            }
+            Self::InvalidObservation => f.write_str("room relay observation must be nonnegative"),
+            Self::TimeRegression => f.write_str("room relay observation regressed"),
             Self::UnknownWrite => {
                 f.write_str("room relay receipt does not match its in-flight frame")
             }
@@ -83,6 +91,9 @@ struct Source {
     delivered: u64,
     acknowledged: u64,
     aggregate_written: bool,
+    aggregate_admitted: Option<i64>,
+    drain_ready: bool,
+    drain_complete_written: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,7 +104,10 @@ enum Receipt {
         final_prefix: bool,
         early_ack: bool,
     },
-    Aggregate,
+    Aggregate {
+        early_ready: bool,
+    },
+    DrainComplete,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +116,8 @@ struct Recipient {
     cursor: usize,
     next_id: Option<u64>,
     in_flight: Option<(u64, Receipt)>,
+    last_poll: Option<i64>,
+    last_received: Option<i64>,
 }
 
 /// One latest encoded prefix per source and one bounded write slot per recipient.
@@ -147,12 +163,17 @@ impl RoomProgressRelay {
                 delivered: 0,
                 acknowledged: 0,
                 aggregate_written: false,
+                aggregate_admitted: None,
+                drain_ready: false,
+                drain_complete_written: false,
             });
             recipients.push(Recipient {
                 dirty: 0,
                 cursor: 0,
                 next_id: Some(1),
                 in_flight: None,
+                last_poll: None,
+                last_received: None,
             });
         }
         let mask = if sources.len() == 64 {
@@ -208,15 +229,96 @@ impl RoomProgressRelay {
         lease: ParticipantId,
         message: &RoomMessage,
     ) -> Result<(), RoomProgressError> {
+        self.receive_inner(lease, message, None)
+    }
+
+    /// Original read capture is independent of later processing/poll times.
+    /// Untimed reception cannot authorize coordinated drain readiness.
+    pub fn receive_at(
+        &mut self,
+        lease: ParticipantId,
+        message: &RoomMessage,
+        captured_ns: i64,
+    ) -> Result<(), RoomProgressError> {
+        self.receive_inner(lease, message, Some(captured_ns))
+    }
+
+    fn receive_inner(
+        &mut self,
+        lease: ParticipantId,
+        message: &RoomMessage,
+        captured_ns: Option<i64>,
+    ) -> Result<(), RoomProgressError> {
         self.ensure_live()?;
         let index = self.index(lease)?;
+        if let Some(captured) = captured_ns {
+            if captured < 0 {
+                return Err(RoomProgressError::InvalidObservation);
+            }
+            if self.recipients[index]
+                .last_received
+                .is_some_and(|previous| captured < previous)
+            {
+                return Err(RoomProgressError::TimeRegression);
+            }
+        }
         match message {
             RoomMessage::Progress(prefix) => self.receive_progress(index, prefix),
             RoomMessage::FinalAck {
                 participant,
                 sequence,
             } => self.receive_ack(index, *participant, *sequence),
+            RoomMessage::DrainReady {
+                participant,
+                sequence,
+            } => self.receive_drain_ready(
+                index,
+                *participant,
+                *sequence,
+                captured_ns.ok_or(RoomProgressError::InvalidDrain)?,
+            ),
             _ => Err(RoomProgressError::InvalidState),
+        }?;
+        if let Some(captured) = captured_ns {
+            self.recipients[index].last_received = Some(captured);
+        }
+        Ok(())
+    }
+
+    fn receive_drain_ready(
+        &mut self,
+        index: usize,
+        participant: ParticipantId,
+        sequence: u64,
+        captured_ns: i64,
+    ) -> Result<(), RoomProgressError> {
+        let source = &self.sources[index];
+        let admitted = source
+            .aggregate_admitted
+            .ok_or(RoomProgressError::InvalidDrain)?;
+        let final_prefix = source
+            .latest
+            .as_ref()
+            .filter(|latest| latest.prefix.final_prefix)
+            .ok_or(RoomProgressError::InvalidDrain)?;
+        if !self.active
+            || participant != source.id
+            || sequence != final_prefix.prefix.sequence
+            || captured_ns < admitted
+            || source.drain_ready
+        {
+            return Err(RoomProgressError::InvalidDrain);
+        }
+        if source.aggregate_written {
+            self.sources[index].drain_ready = true;
+            return Ok(());
+        }
+        match &mut self.recipients[index].in_flight {
+            Some((_, Receipt::Aggregate { early_ready })) if !*early_ready => {
+                *early_ready = true;
+                Ok(())
+            }
+            _ => Err(RoomProgressError::InvalidDrain),
         }
     }
 
@@ -326,8 +428,50 @@ impl RoomProgressRelay {
         &mut self,
         recipient: ParticipantId,
     ) -> Result<Option<RoomRelayWrite>, RoomProgressError> {
+        self.poll_write_inner(recipient, None)
+    }
+
+    /// Admit a frame with its actual processing timestamp. Only timed aggregate
+    /// admissions establish the capture floor for a later DrainReady.
+    pub fn poll_write_at(
+        &mut self,
+        recipient: ParticipantId,
+        admitted_ns: i64,
+    ) -> Result<Option<RoomRelayWrite>, RoomProgressError> {
+        self.poll_write_inner(recipient, Some(admitted_ns))
+    }
+
+    fn poll_write_inner(
+        &mut self,
+        recipient: ParticipantId,
+        admitted_ns: Option<i64>,
+    ) -> Result<Option<RoomRelayWrite>, RoomProgressError> {
         self.ensure_live()?;
         let index = self.index(recipient)?;
+        if let Some(admitted) = admitted_ns {
+            if admitted < 0 {
+                return Err(RoomProgressError::InvalidObservation);
+            }
+            if self.recipients[index]
+                .last_poll
+                .is_some_and(|previous| admitted < previous)
+            {
+                return Err(RoomProgressError::TimeRegression);
+            }
+        }
+        let frame = self.poll_recipient(index, admitted_ns)?;
+        if let Some(admitted) = admitted_ns {
+            self.recipients[index].last_poll = Some(admitted);
+        }
+        Ok(frame)
+    }
+
+    fn poll_recipient(
+        &mut self,
+        index: usize,
+        admitted_ns: Option<i64>,
+    ) -> Result<Option<RoomRelayWrite>, RoomProgressError> {
+        let recipient = self.sources[index].id;
         let state = self.recipients[index];
         if !self.active || state.in_flight.is_some() {
             return Ok(None);
@@ -343,7 +487,7 @@ impl RoomProgressRelay {
                 participant: recipient,
                 sequence: latest.prefix.sequence,
             })?);
-            Some((bytes, Receipt::Aggregate, None))
+            Some((bytes, Receipt::Aggregate { early_ready: false }, None))
         } else {
             let next_source = (0..self.sources.len())
                 .map(|offset| (state.cursor + offset) % self.sources.len())
@@ -363,6 +507,16 @@ impl RoomProgressRelay {
                     },
                     Some(source),
                 ))
+            } else if !source.drain_complete_written && self.all_drain_ready() {
+                let latest = source
+                    .latest
+                    .as_ref()
+                    .ok_or(RoomProgressError::InvalidDrain)?;
+                let bytes = Arc::new(encode_message(&RoomMessage::DrainComplete {
+                    participant: recipient,
+                    sequence: latest.prefix.sequence,
+                })?);
+                Some((bytes, Receipt::DrainComplete, None))
             } else {
                 None
             }
@@ -374,6 +528,9 @@ impl RoomProgressRelay {
         let state = &mut self.recipients[index];
         state.next_id = id.checked_add(1);
         state.in_flight = Some((id, receipt));
+        if matches!(receipt, Receipt::Aggregate { .. }) {
+            self.sources[index].aggregate_admitted = admitted_ns;
+        }
         if let Some(source) = source {
             state.dirty &= !(1u64 << source);
             state.cursor = (source + 1) % self.sources.len();
@@ -419,7 +576,13 @@ impl RoomProgressRelay {
                 }
             }
             Receipt::Prefix { .. } => {}
-            Receipt::Aggregate => self.sources[index].aggregate_written = true,
+            Receipt::Aggregate { early_ready } => {
+                self.sources[index].aggregate_written = true;
+                if early_ready {
+                    self.sources[index].drain_ready = true;
+                }
+            }
+            Receipt::DrainComplete => self.sources[index].drain_complete_written = true,
         }
         self.recipients[index].in_flight = None;
         Ok(())
@@ -447,6 +610,20 @@ impl RoomProgressRelay {
                     && source.acknowledged == self.required(index)
                     && source.aggregate_written
             })
+    }
+
+    fn all_drain_ready(&self) -> bool {
+        self.complete() && self.sources.iter().all(|source| source.drain_ready)
+    }
+
+    /// Every host readied after genuine aggregate delivery and every Complete
+    /// notice was fully written. Transport disposal remains the caller's job.
+    pub fn drained(&self) -> bool {
+        self.all_drain_ready()
+            && self
+                .sources
+                .iter()
+                .all(|source| source.drain_complete_written)
     }
 
     pub fn stop(&mut self) {
