@@ -800,6 +800,7 @@ async function workerHarness(options = {}) {
   const physicalHelper = new SourceTextModule(await readFile(new URL("./physical-input.mjs", import.meta.url), "utf8"), { context });
   const hidProfileHelper = new SourceTextModule(await readFile(new URL("./hid-profile.mjs", import.meta.url), "utf8"), { context });
   const gamepadProfileHelper = new SourceTextModule(await readFile(new URL("./gamepad-profile.mjs", import.meta.url), "utf8"), { context });
+  const pointerProfileHelper = new SourceTextModule(await readFile(new URL("./pointer-profile.mjs", import.meta.url), "utf8"), { context });
   const commandClient = new SourceTextModule(await readFile(new URL("./audio-command-client.mjs", import.meta.url), "utf8"), { context });
   const sampleClient = new SourceTextModule(await readFile(new URL("./audio-sample-client.mjs", import.meta.url), "utf8"), { context });
   const localHelper = new SourceTextModule(await readFile(new URL("./local-play-model.mjs", import.meta.url), "utf8"), { context });
@@ -818,6 +819,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./physical-input.mjs") return physicalHelper;
     if (specifier === "./hid-profile.mjs") return hidProfileHelper;
     if (specifier === "./gamepad-profile.mjs") return gamepadProfileHelper;
+    if (specifier === "./pointer-profile.mjs") return pointerProfileHelper;
     if (specifier === "./audio-command-client.mjs") return commandClient;
     if (specifier === "./audio-sample-client.mjs") return sampleClient;
     if (specifier === "./local-play-model.mjs") return localHelper;
@@ -3042,6 +3044,221 @@ test("comparison errors hide the HUD once and remain separate from actual local 
   assert.equal(failed.replayError, null); assertReleased(h);
   await h.send(step({ tickId: 2 }));
   assert.equal(game.savedReads, 1); assert.equal(h.of("play-error").length, 1);
+});
+
+const POINTER_MOUSE = 0xfedcba9876543210n;
+const POINTER_PEN = 18446744073709551615n;
+function pointerSetup(rows = [[0x11, POINTER_MOUSE, 0], [0x11, POINTER_MOUSE, 1],
+  [0x12, POINTER_PEN, 0], [0x12, POINTER_PEN, 32]], devices = [
+  { source: POINTER_MOUSE, pointerType: "mouse" }, { source: POINTER_PEN, pointerType: "pen" },
+]) {
+  return { devices, bindingWords: new Uint32Array(rows.flatMap(([lane, source, control]) =>
+    [lane, Number(source & 0xffffffffn), Number(source >> 32n), control])) };
+}
+function pointerEvent(fields = {}) {
+  return { kind: "pointer", pointerType: "mouse", source: POINTER_MOUSE, hostNs: ORIGIN,
+    sequence: 1n, code: 0x12345678, control: 0, mode: 1, x: -0, y: -12.5, ...fields };
+}
+function pointerButton(fields = {}) {
+  return { kind: "pointer-button", pointerType: "mouse", source: POINTER_MOUSE, hostNs: ORIGIN,
+    sequence: 2n, code: 0xffffffff, control: 1, state: 0, ...fields };
+}
+async function pointerActive(fields = {}, options = {}) {
+  const h = await started({ ...options, startRequest: startRequest({ inputMode: "physical", pointerSetup: pointerSetup(), ...fields }) });
+  assert.equal((await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START })).result, null);
+  return h;
+}
+
+test("Worker snapshots pointer namespaces and sends original mixed acquisitions through the actual solo canonical routes", async () => {
+  for (const inputMode of ["physical", "physical-contact"]) {
+    const raw = pointerSetup(), h = await catalogWorker();
+    h.post(startRequest({ inputMode, pointerSetup: raw, hidSetup: hidSetup([3n]), recordReplay: true }));
+    raw.devices[0].source = 4n; raw.devices[1].pointerType = "mouse"; raw.bindingWords.fill(0);
+    await flushJobs();
+    const prepared = h.of("play-reply").at(-1).result;
+    assert.equal(prepared.kind, "prepared");
+    assert.deepEqual(prepared.pointerDevices, [{ source: POINTER_MOUSE, pointerType: "mouse" }, { source: POINTER_PEN, pointerType: "pen" }]);
+    assert.deepEqual(prepared.hidSources, [3n]);
+    const constructor = (inputMode === "physical" ? h.physicalConstructions : h.contactConstructions)[0];
+    assert.deepEqual(Array.from(constructor.args[5].slice(-28)), [
+      0x11, 1, 0x76543210, 0xfedcba98, 1, 0x574d4f55, 0,
+      0x11, 1, 0x76543210, 0xfedcba98, 1, 0x574d4f55, 1,
+      0x12, 1, 0xffffffff, 0xffffffff, 1, 0x5750454e, 0,
+      0x12, 1, 0xffffffff, 0xffffffff, 1, 0x5750454e, 32,
+    ]);
+    await h.send({ kind: "play-activate", playId: 7, rpcId: 2, hostNs: ORIGIN, startFrame: START });
+    const mouse = pointerEvent({ sequence: 18446744073709551614n });
+    const repeat = pointerButton({ sequence: 18446744073709551615n, state: 2 });
+    const pen = pointerButton({ source: POINTER_PEN, pointerType: "pen", control: 32, code: 7,
+      hostNs: ORIGIN + 1n, sequence: 18446744073709551614n });
+    const absolute = pointerEvent({ source: POINTER_PEN, pointerType: "pen", mode: 0, x: 1.5, y: -2.25,
+      hostNs: ORIGIN + 1n, sequence: 18446744073709551615n });
+    const key = { hostNs: ORIGIN + 3n, key: 2, down: true, sequence: 100n };
+    const events = [key, mouse, pen, hidEvent({ source: 3n, hostNs: ORIGIN + 2n, sequence: 0n }), repeat, absolute];
+    if (inputMode === "physical-contact") events.push(touchEvent({ hostNs: ORIGIN + 2n, sequence: 9n }));
+    await h.send(step({ events, watermark: ORIGIN + 3n, audioNs: 100000003n }));
+    const game = h.games[0], calls = inputCalls(game);
+    assert.deepEqual(calls.map(call => call[0]), inputMode === "physical-contact"
+      ? ["blob", "blob", "blob", "blob", "hid", "touch", "blob", "advance"]
+      : ["blob", "blob", "blob", "blob", "hid", "blob", "advance"]);
+    const expected = [
+      [77, 3, POINTER_MOUSE, ORIGIN, 18446744073709551614n, 0x574d4f55, 0x12345678, 0],
+      [69, 0, POINTER_MOUSE, ORIGIN, 18446744073709551615n, 0x574d4f55, 0xffffffff, 1],
+      [69, 0, POINTER_PEN, ORIGIN + 1n, 18446744073709551614n, 0x5750454e, 7, 32],
+      [77, 3, POINTER_PEN, ORIGIN + 1n, 18446744073709551615n, 0x5750454e, 0x12345678, 0],
+    ];
+    for (let index = 0; index < 4; index++) {
+      const bytes = calls[index][1], packet = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      assert.deepEqual([bytes.length, bytes[6], packet.getBigUint64(7, true), packet.getBigInt64(15, true),
+        packet.getBigUint64(27, true), packet.getUint32(36, true), packet.getUint32(41, true), packet.getUint32(64, true)], expected[index]);
+      assert.equal(packet.getUint32(23, true), 0x57494e); assert.equal(packet.getUint32(46, true), 0x57494e);
+      assert.equal(packet.getBigInt64(50, true), expected[index][3]);
+      assert.equal(bytes[58], 0); assert.equal(bytes[59], 1); assert.equal(packet.getUint32(60, true), expected[index][5]);
+    }
+    assert.equal(new DataView(calls[0][1].buffer).getUint32(68, true), 0x80000000);
+    assert.equal(new DataView(calls[0][1].buffer).getFloat32(72, true), -12.5); assert.equal(calls[0][1][76], 1);
+    assert.equal(calls[1][1][68], 2); assert.equal(calls[2][1][68], 0);
+    assert.equal(new DataView(calls[3][1].buffer).getFloat32(68, true), 1.5);
+    assert.equal(new DataView(calls[3][1].buffer).getFloat32(72, true), -2.25); assert.equal(calls[3][1][76], 0);
+    assert.ok(calls.every(call => call.at(-1) === 100000003n));
+    assert.equal(h.of("play-step-done").at(-1).hits, SCORE.hits, "scripted binding scores do not claim position-based judgment");
+    await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+  }
+});
+
+test("exact local pointer rosters retain player-qualified rows and exclude unassigned sources without position-only press coverage", async () => {
+  const rows = [[0x11, POINTER_MOUSE, 0], [0x11, POINTER_MOUSE, 1], [0x12, POINTER_MOUSE, 2],
+    [0x11, POINTER_PEN, 31], [0x12, POINTER_PEN, 32], [0x11, 3n, 1], [0x12, 3n, 2]];
+  const devices = [{ source: POINTER_MOUSE, pointerType: "mouse" }, { source: POINTER_PEN, pointerType: "pen" },
+    { source: 3n, pointerType: "mouse" }];
+  const h = await started({ startRequest: localRequest({ inputMode: "physical", hidSetup: undefined,
+    keyPairs: new Uint32Array(), localPlanWords: localPlan([[99, POINTER_MOUSE], [0xffffffff, POINTER_PEN]]),
+    pointerSetup: pointerSetup(rows, devices) }) });
+  const prepared = h.of("play-reply")[0].result;
+  assert.deepEqual(prepared.localPlayers, [99, 0xffffffff]);
+  assert.deepEqual(prepared.pointerDevices, devices.slice(0, 2));
+  assert.equal(h.games.length, 0); assert.equal(h.locals.length, 1);
+  assert.deepEqual(Array.from(h.localConstructions[0].args[6]), [
+    99, 0x11, 1, 0x76543210, 0xfedcba98, 1, 0x574d4f55, 0,
+    99, 0x11, 1, 0x76543210, 0xfedcba98, 1, 0x574d4f55, 1,
+    99, 0x12, 1, 0x76543210, 0xfedcba98, 1, 0x574d4f55, 2,
+    0xffffffff, 0x11, 1, 0xffffffff, 0xffffffff, 1, 0x5750454e, 31,
+    0xffffffff, 0x12, 1, 0xffffffff, 0xffffffff, 1, 0x5750454e, 32,
+  ]);
+  assert.equal((await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START })).result, null);
+  await h.send(step({ events: [pointerEvent(), pointerButton({ source: POINTER_PEN, pointerType: "pen", control: 32, sequence: 0n })] }));
+  const game = h.locals[0];
+  assert.deepEqual(inputCalls(game).map(call => call[0]), ["blob", "blob", "advance"]);
+  assert.deepEqual(inputCalls(game).slice(0, 2).map(call => new DataView(call[1].buffer).getBigUint64(7, true)), [POINTER_MOUSE, POINTER_PEN]);
+  const before = inputCalls(game).length;
+  await h.send(step({ tickId: 2, events: [pointerButton(), pointerButton({ source: 3n, sequence: 0n })] }));
+  assert.equal(inputCalls(game).length, before, "an unassigned configured source refuses the whole following batch");
+  assert.equal(game.stops, 1); assert.equal(game.frees, 1); assert.equal(h.of("play-error").length, 1);
+
+  const absent = await started({ startRequest: localRequest({ hidSetup: undefined,
+    localPlanWords: localPlan([[9, 1n], [10, 2n]]), pointerSetup: pointerSetup() }) });
+  assert.deepEqual(absent.of("play-reply")[0].result.pointerDevices, []);
+  await absent.send({ kind: "play-stop", playId: 7 }); assert.equal(absent.locals[0].frees, 1);
+  const uncovered = await catalogWorker();
+  await uncovered.send(localRequest({ inputMode: "physical", hidSetup: undefined, keyPairs: new Uint32Array(),
+    localPlanWords: localPlan([[99, POINTER_MOUSE], [7, POINTER_PEN]]),
+    pointerSetup: pointerSetup([[0x11, POINTER_MOUSE, 1], [0x12, POINTER_MOUSE, 0], [0x11, POINTER_PEN, 1], [0x12, POINTER_PEN, 2]]) }));
+  assert.equal(uncovered.locals.length, 0); assert.equal(uncovered.of("play-error").length, 1);
+  assert.equal(uncovered.preparedOwners.at(-1).moved, false); assert.equal(uncovered.preparedOwners.at(-1).frees, 1);
+});
+
+test("pointer setup rejects replay, source collisions and combined overflow before consuming a chart while the exact capacity remains usable", async () => {
+  const wideDevices = Array.from({ length: 8 }, (_, index) => ({ source: BigInt(index + 10), pointerType: index % 2 ? "pen" : "mouse" }));
+  const wideRows = wideDevices.flatMap(({ source }) => Array.from({ length: 32 }, (_, index) => [index % 2 ? 0x12 : 0x11, source, index + 1]));
+  const requests = [startRequest({ pointerSetup: pointerSetup() }), replayRequest(replayFile().file, { pointerSetup: pointerSetup() }),
+    startRequest({ inputMode: "physical", pointerSetup: pointerSetup(), hidSetup: hidSetup([POINTER_MOUSE]) }),
+    startRequest({ inputMode: "physical", gamepadSetup: gamepadSetup(), pointerSetup: pointerSetup([[0x11, GAMEPAD_SOURCE, 1]],
+      [{ source: GAMEPAD_SOURCE, pointerType: "mouse" }]) }),
+    startRequest({ inputMode: "physical", pointerSetup: pointerSetup(wideRows, wideDevices) }),
+    startRequest({ inputMode: "physical", keyPairs: new Uint32Array(), pointerSetup: pointerSetup([[0x11, POINTER_MOUSE, 1], [0x12, POINTER_PEN, 0]]) }),
+  ];
+  for (const request of requests) {
+    const h = await catalogWorker(); await h.send(request);
+    assert.equal(h.games.length + h.locals.length + h.replays.length, 0);
+    assert.equal(h.physicalConstructions.length + h.contactConstructions.length + h.localConstructions.length, 0);
+    assert.equal(h.of("play-error").length, 1);
+    assert.equal(h.of("play-reply").some(reply => reply.result?.kind === "prepared"), false);
+    assert.ok(h.preparedOwners.every(owner => !owner.moved));
+  }
+  const exact = await started({ startRequest: startRequest({ inputMode: "physical", keyPairs: new Uint32Array(),
+    pointerSetup: pointerSetup(wideRows, wideDevices) }) });
+  assert.equal(exact.physicalConstructions[0].args[5].length, 1792);
+  assert.deepEqual(exact.of("play-reply")[0].result.pointerDevices, wideDevices);
+  await exact.send({ kind: "play-stop", playId: 7 }); assertReleased(exact);
+  for (const options of [{ missingInputBlob: true }, { missingPhysicalConstructor: true }]) {
+    const h = await catalogWorker(options);
+    await h.send(startRequest({ inputMode: "physical", pointerSetup: pointerSetup() }));
+    assert.equal(h.games.length, 0); assert.equal(h.of("play-error").length, 1);
+  }
+  const ordinary = await started({ startRequest: startRequest({ inputMode: "physical" }) });
+  assert.equal(Object.hasOwn(ordinary.of("play-reply")[0].result, "pointerDevices"), false);
+  await ordinary.send({ kind: "play-stop", playId: 7 }); assertReleased(ordinary);
+});
+
+test("pointer batches keep atomic validation, original source order, fanout and stopped-owner fences", async () => {
+  const invalid = [pointerEvent({ source: 3n }), pointerEvent({ pointerType: "pen" }), pointerEvent({ control: 1 }),
+    pointerEvent({ x: Infinity }), pointerEvent({ y: 3.5e38 }), pointerEvent({ mode: 2 }), pointerEvent({ sequence: -1n }),
+    pointerEvent({ code: 4294967296 }), pointerButton({ control: 0 }), pointerButton({ control: 2 }),
+    pointerButton({ state: 3 }), pointerButton({ source: Number(POINTER_MOUSE) })];
+  for (const bad of invalid) {
+    const h = await pointerActive();
+    await h.send(step({ events: [{ hostNs: ORIGIN, key: 2, down: true, sequence: 0n }, bad] }));
+    assert.equal(inputCalls(h.games[0]).length, 0); assert.equal(h.of("play-step-done").length, 0); assertReleased(h);
+  }
+  for (const events of [[pointerEvent({ sequence: 1n }), pointerButton({ sequence: 0n })],
+    [pointerEvent({ hostNs: ORIGIN + 1n }), pointerButton({ hostNs: ORIGIN })],
+    [pointerEvent({ hostNs: ORIGIN + 2n })]]) {
+    const h = await pointerActive();
+    await h.send(step({ events, watermark: ORIGIN + 1n }));
+    assert.equal(inputCalls(h.games[0]).length, 0); assertReleased(h);
+  }
+  const prior = await pointerActive();
+  await prior.send(step({ events: [pointerEvent({ hostNs: ORIGIN - 1n })] }));
+  assert.equal(prior.of("play-step-done").at(-1).preOriginInputs, 1);
+  assert.deepEqual(inputCalls(prior.games[0]).map(call => call[0]), ["advance"]);
+  await prior.send(step({ tickId: 2, events: [pointerButton({ sequence: 2n })], watermark: ORIGIN + 10n }));
+  const committedCalls = inputCalls(prior.games[0]).length;
+  await prior.send(step({ tickId: 3, events: [pointerEvent({ sequence: 3n, hostNs: ORIGIN + 5n })], watermark: ORIGIN + 10n }));
+  assert.equal(inputCalls(prior.games[0]).length, committedCalls, "new pointer bytes cannot rewind the committed watermark");
+  assertReleased(prior);
+
+  const many = Array.from({ length: 256 }, (_, index) => pointerEvent({ sequence: BigInt(index), x: index }));
+  const exact = await pointerActive(); await exact.send(step({ events: many }));
+  assert.equal(inputCalls(exact.games[0]).filter(call => call[0] === "blob").length, 256);
+  assert.equal(new DataView(inputCalls(exact.games[0])[255][1].buffer).getBigUint64(27, true), 255n);
+  await exact.send({ kind: "play-stop", playId: 7 }); assertReleased(exact);
+  const padRows = Array.from({ length: 127 }, (_, index) => [0x11, 0, index]);
+  for (const overflow of [false, true]) {
+    const mixed = await gamepadActive({}, { pointerSetup: pointerSetup(), gamepadSetup: gamepadSetup(padRows, 128, 0) });
+    const buttons = pressed => Array.from({ length: 128 }, () => ({ value: pressed ? 1 : 0, pressed, touched: false }));
+    const events = [gamepadEvent({ axes: [], buttons: buttons(true) }), pointerEvent({ hostNs: GAMEPAD_HOST }),
+      gamepadEvent({ axes: [], buttons: buttons(false), sequence: 2n }), pointerButton({ hostNs: GAMEPAD_HOST })];
+    if (overflow) events.push(pointerButton({ hostNs: GAMEPAD_HOST, source: POINTER_PEN, pointerType: "pen", control: 32, sequence: 0n }));
+    await mixed.send(step({ events, watermark: GAMEPAD_HOST }));
+    assert.equal(inputCalls(mixed.games[0]).filter(call => call[0] === "blob").length, overflow ? 0 : 256,
+      "pointer packets share the post-Gamepad-expansion cap, even when the acquired event array is small");
+    if (overflow) assert.equal(inputCalls(mixed.games[0]).length, 0);
+    else await mixed.send({ kind: "play-stop", playId: 7 });
+    assertReleased(mixed);
+  }
+  const excess = await pointerActive();
+  const rejected = step({ events: [...many, pointerButton({ sequence: 256n })] });
+  await excess.send(rejected); assert.equal(inputCalls(excess.games[0]).length, 0); assertReleased(excess);
+  const count = excess.of("play-error").length;
+  await excess.send(rejected); assert.equal(excess.of("play-error").length, count);
+  await excess.send(startRequest({ playId: 8, inputMode: "physical" }));
+  await excess.send({ kind: "play-activate", playId: 8, rpcId: 2, hostNs: ORIGIN, startFrame: START });
+  const replacement = excess.games[1];
+  await excess.send(step({ events: [pointerEvent()] }));
+  assert.equal(inputCalls(replacement).length, 0, "stale batches never touch the replacement binding");
+  await excess.send(step({ playId: 8, events: [pointerEvent()] }));
+  assert.equal(inputCalls(replacement).length, 0, "disposed pointer admission is not inherited by a plain new session");
+  assert.equal(replacement.stops, 1); assert.equal(replacement.frees, 1);
 });
 
 const GAMEPAD_SOURCE = 0x8877665544332211n;

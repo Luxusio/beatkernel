@@ -4,13 +4,14 @@ import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, va
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { BrowserRoomOwner } from "./room-owner.mjs";
 import { validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
-import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
+import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, encodeRawHidEvent, encodePointerEvent, encodePointerButtonEvent } from "./physical-input.mjs";
 import { snapshotHidDevices, hidSetupFromProfile } from "./hid-profile.mjs";
 import { AudioCommandClient } from "./audio-command-client.mjs";
 import { AudioSampleClient } from "./audio-sample-client.mjs";
 import { snapshotGamepadSetup, snapshotGamepadDevices, automaticGamepadSetup, gamepadSetupFromProfile, GamepadAdapter } from "./gamepad-profile.mjs";
 import { snapshotLocalPlan, localBindingWords } from "./local-play-model.mjs";
 import { encodeBrowserSettings, decodeBrowserSettings } from "./settings-profile.mjs";
+import { snapshotPointerSetup } from "./pointer-profile.mjs";
 const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserRoomResults, BrowserView } = runtime;
 let ready = null;
 let view = null;
@@ -1172,6 +1173,8 @@ function disposeGame(state) {
   state.renderObservation = null;
   state.lastPresentation = null;
   state.gamepadAdapter = null;
+  state.pointerSources?.clear();
+  state.pointerSources = null;
   state.sourceOrder.clear();
   client?.close();
   const game = state.game;
@@ -1369,6 +1372,11 @@ async function preparePlay(state, request) {
       bindingsFor(lanes);
       if (state.physicalInput) bindingWords = keyboardBindingWords(pairs);
     }
+    let pointer = null;
+    if (request.pointerSetup !== undefined) {
+      if (state.mode !== "live" || !state.physicalInput) throw new Error("Pointer setup requires live canonical physical input ownership.");
+      pointer = snapshotPointerSetup(request.pointerSetup);
+    }
     let gamepad = null;
     let gamepadAdapter = null;
     let gamepadDevices = null;
@@ -1450,12 +1458,15 @@ async function preparePlay(state, request) {
     if (gamepad !== null && hid !== null && gamepad.sources.some(source => hid.sources.has(source))) {
       throw new Error("Gamepad and HID source identities must not overlap.");
     }
+    if (pointer !== null && pointer.sources.some(source => hid?.sources.has(source) || gamepad?.sources.includes(source))) {
+      throw new Error("Pointer, Gamepad and HID source identities must not overlap.");
+    }
     if (state.localPlan && hid !== null && !state.localPlan.members.some(member => member.source === null)
       && [...hid.sources].some(source => !state.localPlan.members.some(member => member.source === source))) {
       throw new Error("Every configured HID source must belong to a local player.");
     }
     if (bindingWords !== null && bindingWords.length + (hid?.bindingWords.length ?? 0)
-      + (gamepad?.physicalWords.length ?? 0) > 256 * 7) throw new Error("Combined physical binding capacity exceeded.");
+      + (gamepad?.physicalWords.length ?? 0) + (pointer?.physicalWords.length ?? 0) > 256 * 7) throw new Error("Combined physical binding capacity exceeded.");
     if (hid !== null) {
       const combined = new Uint32Array(bindingWords.length + hid.bindingWords.length);
       combined.set(bindingWords);
@@ -1469,6 +1480,28 @@ async function preparePlay(state, request) {
       combined.set(gamepad.physicalWords, bindingWords.length);
       bindingWords = combined;
       for (const lane of gamepad.lanes) if (!lanes.includes(lane)) lanes.push(lane);
+    }
+    let pressBindingWords = null;
+    if (pointer !== null) {
+      if (state.localPlan) {
+        let buttonRows = 0;
+        for (let index = 6; index < pointer.physicalWords.length; index += 7) {
+          if (pointer.physicalWords[index] !== 0) buttonRows++;
+        }
+        pressBindingWords = new Uint32Array(bindingWords.length + buttonRows * 7);
+        pressBindingWords.set(bindingWords);
+        let offset = bindingWords.length;
+        for (let index = 0; index < pointer.physicalWords.length; index += 7) {
+          if (pointer.physicalWords[index + 6] === 0) continue;
+          pressBindingWords.set(pointer.physicalWords.subarray(index, index + 7), offset);
+          offset += 7;
+        }
+      }
+      const combined = new Uint32Array(bindingWords.length + pointer.physicalWords.length);
+      combined.set(bindingWords);
+      combined.set(pointer.physicalWords, bindingWords.length);
+      bindingWords = combined;
+      for (const lane of pointer.lanes) if (!lanes.includes(lane)) lanes.push(lane);
     }
     if (state.mode === "replay") {
       if (request.recordReplay === true) throw new Error("Replay playback cannot record live input.");
@@ -1492,11 +1525,13 @@ async function preparePlay(state, request) {
     const chartLanes = Array.from(prepared.lanes);
     bindingsFor(chartLanes);
     if (state.mode === "live" && !state.localPlan && chartLanes.some(lane => !lanes.includes(lane))) {
-      throw new Error(hid === null && gamepad === null ? "A prepared lane has no supplied key binding." : "A prepared lane has no supplied press-capable physical binding.");
+      throw new Error(hid === null && gamepad === null && pointer === null ? "A prepared lane has no supplied key binding." : "A prepared lane has no supplied press-capable physical binding.");
     }
     const metadata = { title: prepared.title, artist: prepared.artist, notes: prepared.note_count, lanes: chartLanes, startNs };
     let localBindings = null;
     if (state.localPlan) {
+      // Position/displacement controls cannot establish local press coverage.
+      if (pressBindingWords !== null) localBindingWords(state.localPlan, pressBindingWords, chartLanes, state.touchInput);
       localBindings = localBindingWords(state.localPlan, bindingWords, chartLanes, state.touchInput);
       state.touchPlayer = localBindings.touchPlayer;
       if (state.touchPlayer !== null && Math.floor(state.localPlan.members.findIndex(member => member.player === state.touchPlayer) / 4) !== state.localPage) {
@@ -1576,6 +1611,16 @@ async function preparePlay(state, request) {
       state.gamepadAdapter = gamepadAdapter;
       metadata.gamepadSources = state.localPlan && !state.localPlan.members.some(member => member.source === null)
         ? gamepad.sources.filter(source => state.localPlan.members.some(member => member.source === source)) : gamepad.sources;
+    }
+    if (pointer !== null) {
+      const devices = state.localPlan && !state.localPlan.members.some(member => member.source === null)
+        ? pointer.devices.filter(device => state.localPlan.members.some(member => member.source === device.source)) : pointer.devices;
+      state.pointerSources = new Map(devices.map(device => [device.source, { pointerType: device.pointerType, controls: new Set() }]));
+      for (let index = 0; index < pointer.bindingWords.length; index += 4) {
+        const source = BigInt(pointer.bindingWords[index + 1]) | (BigInt(pointer.bindingWords[index + 2]) << 32n);
+        state.pointerSources.get(source)?.controls.add(pointer.bindingWords[index + 3]);
+      }
+      metadata.pointerDevices = devices;
     }
     const output = replayOutputFromMetadata(startNs, state.game.end_ns, state.game.playback_end_frame, request.rate);
     if (state.mode === "live" && output.endNs !== requestedEnd) throw new Error("Actual live section end differs from its request.");
@@ -2038,8 +2083,18 @@ function stepPlay(state, request) {
   const entries = [];
   // Validate the complete bounded batch before the first actual Runtime call.
   for (let index = 0; index < request.events.length; index++) {
-    const event = request.events[index];
-    if (!event || typeof event !== "object" || Array.isArray(event) || !hostTime(event.hostNs) || !unsigned(event.sequence)) {
+    let event = request.events[index];
+    if (!event || typeof event !== "object" || Array.isArray(event)) {
+      throw new Error("Invalid gameplay input or source chronology.");
+    }
+    const kind = event.kind;
+    if (kind === "pointer" || kind === "pointer-button") {
+      const { pointerType, hostNs, source, sequence, code, control } = event;
+      event = kind === "pointer"
+        ? { kind, pointerType, hostNs, source, sequence, code, control, mode: event.mode, x: event.x, y: event.y }
+        : { kind, pointerType, hostNs, source, sequence, code, control, state: event.state };
+    }
+    if (!hostTime(event.hostNs) || !unsigned(event.sequence)) {
       throw new Error("Invalid gameplay input or source chronology.");
     }
     let encoded = null;
@@ -2058,6 +2113,15 @@ function stepPlay(state, request) {
     } else if (event.kind === "hid") {
       if (state.hidSources === null || !state.hidSources.has(event.source)) throw new Error("HID input requires an admitted source profile.");
       encoded = { kind: "hid", bytes: encodeRawHidEvent(event) };
+      source = event.source;
+    } else if (event.kind === "pointer" || event.kind === "pointer-button") {
+      const device = state.pointerSources?.get(event.source);
+      if (!device || device.pointerType !== event.pointerType
+        || (event.kind === "pointer" ? event.control !== 0
+          : !integer(event.control, 1, 32) || !device.controls.has(event.control))) {
+        throw new Error("Pointer input requires an admitted source, matching type and configured button control.");
+      }
+      encoded = { kind: event.kind, bytes: event.kind === "pointer" ? encodePointerEvent(event) : encodePointerButtonEvent(event) };
       source = event.source;
     } else if (event.kind === "touch") {
       if (!state.touchInput) throw new Error("Touch input requires the prepared contact mode.");
@@ -2150,7 +2214,7 @@ function handlePlay(request) {
       recordReplay: false, completed: false,
       localPlan: null, localPage: 0, touchPlayer: null, recordLimits: null,
       mode: "live", physicalInput: false, touchInput: false, touchWidth: null, touchHeight: null,
-      hidSources: null, gamepadAdapter: null,
+      hidSources: null, gamepadAdapter: null, pointerSources: null,
       rate: null, network: null, room: null, samplesEnded: false, commandsDrained: false,
       prepared: false, opponentCount: 0, opponentsFailed: false, opponentError: null, lastOpponents: null,
     };
