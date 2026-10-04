@@ -88,4 +88,8 @@ header cannot authorize a nonempty invisible timeline. A source with no
 invisible selections retains its exact legacy header; injected, removed or
 changed selections and changed invisible gain must reject as setup mismatches.
 This validation establishes compatibility metadata, not PCM content identity.
-Actual invisible sound planning remains a separate pending integration.
+Actual invisible sound planning uses the shared timeline and real reconstructed
+judge freshness/results described in REQ__bms-input-sounds.md. Source preparation
+loads original referenced PCM before practice/replay composition. Runtime/device
+execution remains deferred; logical identity cannot prove original queue
+admission failures or physical output timing.

@@ -115,8 +115,9 @@ does not validate unused source metadata. Enabled ghost/network preparation
 uses selected source identity before opponent IO or endpoint acquisition.
 
 Typed stepped runtime installation and replay command selection are connected.
-Shared source asset preparation remains guarded until asset loading and remaining
-offline Runtime sound composition are integrated. Native Runtime installation
+Shared source asset preparation loads all original referenced invisible PCM,
+and offline Runtime sound composition installs the same selection timeline.
+Native Runtime installation
 uses the common timeline policy documented in REQ__bms-input-sounds.md.
 None of these source changes
 proves actual device/audio/network execution.

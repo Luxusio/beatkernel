@@ -15,8 +15,8 @@ existing common Runtime; advancing a marker does not trigger a sound.
 
 ## Remaining integration
 
-Source-file admission retains its invisible guard until referenced-asset
-loading and the remaining synthetic offline Runtime composition are extended.
+Source-file admission and remaining synthetic offline Runtime composition are
+connected by the [source admission change](CHANGE__invisible-source-admission.md).
 Native device/audio timing, Windows/macOS target branches,
 browser/native execution and formal review/QA remain deferred. User-selected
 voice capacity, calibration, startup and cleanup behavior are unchanged.

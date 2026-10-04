@@ -10,8 +10,8 @@ describes semantic chart compatibility and does not authenticate resources.
 
 ## Remaining integration
 
-Source preparation still refuses invisible playback until original PCM loading
-and remaining offline Runtime composition are connected. Native Runtime
+Source preparation and remaining offline Runtime composition are connected by
+the [source admission change](CHANGE__invisible-source-admission.md). Native Runtime
 installation is connected by the [native audio change](CHANGE__native-invisible-audio.md).
 Existing native recording
 section semantics and cleanup boundaries remain unchanged. Actual recording,

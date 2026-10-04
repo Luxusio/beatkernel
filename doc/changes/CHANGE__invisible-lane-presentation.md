@@ -9,9 +9,8 @@ charts without invisible data retain their existing projection path.
 
 ## Remaining integration
 
-This presentation prerequisite does not enable source-file keysound playback.
-Shared preparation still refuses invisible timelines until original asset
-loading and remaining offline Runtime sound composition are integrated.
+Shared preparation and remaining offline Runtime composition are connected by
+the [source admission change](CHANGE__invisible-source-admission.md).
 Native solo/cohort Runtime installation is connected by the
 [native audio change](CHANGE__native-invisible-audio.md).
 Native capture/comparison identity is now connected by the

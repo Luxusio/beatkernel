@@ -34,17 +34,17 @@ WAV gain, lane reuse, deterministic/disjoint voices, original resource coverage,
 capacity/invalid configuration/exhaustion and atomic allocator behavior. Include
 actual core fresh-press command selection through the resulting timeline.
 
-This prerequisite does not enable BMS playback yet. Actual preparation must
+Actual preparation must
 load these samples and install the plan in all solo/local runtimes; replay
 identity and audio reconstruction must incorporate the same selections before
-the existing unsupported-invisible admission guard can be removed. Browser,
+source admission. These paths are connected by the contracts below. Browser,
 device/audio execution, tests and formal QA remain deferred.
 
-The remaining integration must treat invisible lanes as required input-binding
+Integration treats invisible lanes as required input-binding
 coverage alongside visible lanes for local members. Practice filtering removes
 earlier judged objects but retains the original invisible timeline, including
 the selection active before the start. Existing pristine-judge-only replay
-identity does not include invisible selections; a canonical source-aware replay
+identity does not include invisible selections; the canonical source-aware replay
 identity must compare them before playback. Explicit contact-mode ownership must
 also work on an invisible-only chart with no visible press evaluator. None of
 these requirements can be satisfied by adding synthetic judged notes.
@@ -60,8 +60,7 @@ selected section retains no judged object or BGM command. Empty ordinary
 sections with no invisible selection keep their existing rejection. Reserve all
 original invisible SampleId values when allocating BGM suffix sample identities
 so that a keysound-only resource cannot be overwritten by a practice music tail.
-This typed preparation prerequisite does not remove source asset admission's
-invisible playback guard.
+Source preparation loads original invisible resources as specified below.
 
 ## Runtime installation and replay selection
 
@@ -108,9 +107,8 @@ cannot be reconstructed by this audio plan. Sources without invisible data keep
 their existing planning path.
 
 This connects typed prepared data to actual stepped sound admission/replay plans.
-Source asset preparation remains guarded until original sample loading and
-remaining offline Runtime callers are integrated. Native solo/cohort Runtime
-installation follows the contract below.
+Source asset preparation and offline Runtime installation follow the contracts
+below. Native solo/cohort Runtime installation follows the contract below.
 Native recording identity follows the source-aware contract below. Tests and actual
 audio/device verification remain deferred.
 
@@ -141,8 +139,7 @@ retains original lane availability without synthesizing section notes.
 Prepare deferred fixtures against actual chart projection, touch-region routing
 and playfield geometry, including invisible-only, mixed scratch/double-side,
 practice, exact timing and malformed source cases. These fixtures do not prove
-native/browser rendering or input-device execution. Source preparation remains
-guarded until asset and native caller integration is complete.
+native/browser rendering or input-device execution.
 
 ## Native recording and competition identity
 
@@ -168,8 +165,7 @@ an asset-content digest. No platform-specific competition protocol is added.
 Prepare deferred fixtures against actual native capture, cohort preparation,
 ghost loading and pure native-group canonical identity. Check legacy bytes,
 changed-source refusal, disabled paths, setup limits and untouched judge state.
-Source preparation remains guarded until asset loading and native Runtime sound
-installation are integrated. Compilation does not prove recording/network or
+Compilation does not prove recording/network or
 device execution.
 
 ## Native Runtime installation
@@ -204,4 +200,35 @@ cohort preparation/activation and software Mixer: ordinary-hit precedence,
 empty-lane fresh presses, duplicate suppression, practice-time replacement,
 voice separation, exact endpoint exclusion, queue failure, malformed/missing
 resources and legacy behavior. Physical latency, platform input/output and
-source-file admission remain separate pending integration/acceptance.
+source-file admission remain subject to the preparation contract and deferred
+execution acceptance.
+
+## Source admission and offline composition
+
+prepare_from_source admits nonempty invisible selections through the actual
+parser, WAV gain and checked compile_invisible timing before replay setup and
+resource acquisition. Replay validation still precedes asset resolve/read/decode;
+invalid or legacy replay identity cannot acquire resources for a changed
+invisible source. Empty invisible data preserves the existing ordinary path.
+Referenced PCM identities are the unique union of visible notes, compiled BGM
+and all original invisible selections, including replaced selections and those
+earlier than a practice start. Enforce the shared sample-count cap before any
+resource resolution. Preserve existing path policy, bounded reads, decoding,
+channel conversion, alias reuse and PCM/bank budgets. Unreferenced definitions
+and inactive/rest-only selections do not add PCM or playable events.
+
+Offline synthetic rendering builds the same InputSoundPlan against actual
+ordinary/BGM voices and PCM before moving prepared resources. Its actual core
+Runtime installs nonempty plans before inputs/advances; physical lane bindings
+include original invisible lanes. Synthetic events still come only from actual
+visible object heads/endpoints. No input, judged object, BGM or Play is invented
+for an invisible marker. Invisible-only sources without BGM therefore render
+silence until an actual input owner selects a keysound. Empty sources preserve
+legacy offline output and runtime behavior.
+
+Prepare deferred fixtures against actual prepare_from_source, counted asset
+boundaries, aliases/radix/caps/channel policies, real stepped/native preparation,
+source-aware capture/replay planning and actual offline software Mixer. Include
+failure before resource IO and no automatic invisible sound. Source admission
+is an implementation connection, not physical-device/browser/audio verification
+or a full BMS support claim; mines remain unsupported.

@@ -196,19 +196,20 @@ records are keysound-selection metadata, never automatic BGM, judged objects,
 score events or render notes. Existing compile() remains the playable visible
 chart/BGM/BGA API; callers use the explicit invisible timeline API.
 
-This foundation does not yet implement empty-key sound selection or its replay
-identity. Shared prepare_from_source must reject any nonempty invisible timeline
-immediately after parsing, before replay setup or any asset resolve/read/decode.
-Consequently current native/browser/live/replay preparation cannot silently
-accept a chart while omitting invisible sounds. Parser/timeline availability is
-not playable invisible-note support. Mines remain unsupported.
+The application consumes this timeline through shared source preparation,
+InputSoundPlan and Runtime/replay policy described in REQ__bms-input-sounds.md.
+Validate original timing and replay compatibility before resource acquisition;
+load every referenced invisible PCM without adding BGM or judged objects.
+Parser/timeline/source compilation does not establish browser/device/audio
+execution. Mines remain unsupported.
 
 Independent deferred parser/timing fixtures cover lane mapping, all radix modes,
 conditional selection, duplicate policies/rests, diagnostics/caps, variable
 measures and BPM/STOP timing, simultaneous layers and gameplay/grid identity.
-Shared preparation fixtures cover early explicit refusal without asset or decoder
-calls and unchanged supported charts. Runtime tests, browser/devices/audio and
-full invisible sound/replay integration remain pending.
+Shared preparation fixtures cover actual invisible asset admission, early
+malformed/replay/resource-cap refusal before asset/decoder calls and unchanged
+empty/rest-only charts. Runtime test execution and browser/devices/audio
+acceptance remain pending.
 
 The [BMSE author help](https://hitkey.nekokan.dyndns.info/bmse_help_full/main.html)
 describes invisible objects as unjudged keysound changes.

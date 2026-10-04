@@ -104,12 +104,17 @@ Compatible lookup shall add MP3 while retaining literal priority/error refusal, 
 
 Known ceiling: MP3 metadata skipping accepts one initial ID3v2.3/v2.4 header/body (v2.4 footer must match) and a trailing ID3v1 block; metadata contents are not parsed or validated. ID3v2.2, APEv2, free-format streams, Layers I/II and unknown nonzero Xing encoder extensions are unsupported. Recognized LAME/Lavc extension fields and Xing audio-frame counts are validated, but encoder/tag checksum and optional byte-count/seek fields are not validated. TaggedGapless applies leading delay+529 and trailing padding−529 source frames, requiring padding≥529 and combined trim≤actual raw frames; RawFrames skips the metadata frame but ignores timing cuts. Protected Layer III frames validate CRC16 over header/side information; main data is outside that checksum and broader conformance remains unverified. A clipped beginning with unavailable reservoir returns a codec error instead of dropping frames. Scalar decoding uses fixed decoder and a scratch buffer for 2304 f32 samples, separately from capped retained PCM; timing without metadata cannot be inferred. Native/performance/acoustic acceptance remains pending.
 
-## Invisible keysound admission during staged integration
+## Invisible keysound source admission
 
-The typed adapter invisible timeline, source-aware replay identity and native/
-stepped Runtime installation are connected. Until referenced invisible PCM
-loading and remaining offline Runtime composition are integrated, prepare_from_source
-rejects nonempty invisible data immediately after parsing and before replay
-validation or resource resolution/read/decode. This shared guard covers native,
-browser, live and replay preparation. Empty/rest-only invisible rows retain
-ordinary preparation. No silent omission, BGM conversion or fake judged note.
+prepare_from_source validates nonempty invisible timing through compile_invisible
+after parsing and WAV gain, before replay setup or resource resolution/read/decode.
+Source-aware replay validation precedes all asset IO. Load the unique union of
+visible-note, compiled BGM and original invisible sample identities, subject to
+existing sample-count, path, decode, channel and PCM/bank budgets. All original
+selections remain referenced, even when replaced or earlier than a practice
+start; unused definitions and inactive/rest-only rows add no PCM. Equal resolved
+keys reuse decoding under the existing alias policy. Empty invisible sources
+retain ordinary preparation. No silent omission, BGM conversion or fake judged
+note. Native/stepped/offline Runtime installation and replay selection use the
+shared policy in REQ__bms-input-sounds.md. Test execution and native/browser/
+physical audio acceptance remain deferred.
