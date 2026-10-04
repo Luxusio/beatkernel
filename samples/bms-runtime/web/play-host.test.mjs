@@ -44,6 +44,11 @@ function selectedControllerProfile(size = 128) {
 function chooseControllerProfile(h, file) {
   h.get("hid-profile").files = [file]; h.get("hid-profile").emit("change");
 }
+function nativeGamepad(index = 0, fields = {}) {
+  return { index, id: "standard gamepad", mapping: "standard", connected: true, timestamp: 1000,
+    axes: [0.12345678901234568],
+    buttons: Array.from({ length: 9 }, () => ({ value: 0, pressed: false, touched: false })), ...fields };
+}
 function watchPlayDisplay(h) {
   const writes = [];
   for (const [id, property] of [["status", "textContent"], ["position", "value"],
@@ -81,6 +86,7 @@ async function harness(faults = {}) {
   let now = 1000;
   let nextTimer = 0;
   let gesture = false;
+  let gamepadReads = 0;
 
   class Events {
     constructor() { this.listeners = new Map(); }
@@ -270,6 +276,16 @@ async function harness(faults = {}) {
   Object.assign(window, { isSecureContext: true, devicePixelRatio: 1, Worker,
     OffscreenCanvas: class {}, ResizeObserver, matchMedia: () => new Events() });
   if (faults.touchSupported) window.PointerEvent = class {};
+  const addWindowListener = window.addEventListener.bind(window);
+  window.addEventListener = (kind, listener) => {
+    addWindowListener(kind, listener);
+    if (faults.gamepadListenerError && kind === "gamepaddisconnected") throw faults.gamepadListenerError;
+  };
+  const removeWindowListener = window.removeEventListener.bind(window);
+  window.removeEventListener = (kind, listener) => {
+    removeWindowListener(kind, listener);
+    if (faults.gamepadCleanupError && ["gamepadconnected", "gamepaddisconnected"].includes(kind)) throw faults.gamepadCleanupError;
+  };
 
   function createAudio() { return {
     sampleRate: faults.actualRate ?? 48000,
@@ -350,9 +366,17 @@ async function harness(faults = {}) {
     }
     static revokeObjectURL(url) { revoked.push(url); }
   }
+  const browserNavigator = { maxTouchPoints: faults.touchPoints ?? (faults.touchSupported ? 2 : 0), ...(faults.hidSupported ? { hid } : {}) };
+  if (Object.hasOwn(faults, "gamepads")) browserNavigator.getGamepads = function () {
+    assert.equal(this, browserNavigator);
+    gamepadReads++; traces.push(["gamepad-poll"]);
+    faults.onGamepadPoll?.(gamepadReads);
+    if (faults.gamepadReadError) throw faults.gamepadReadError;
+    return faults.gamepads;
+  };
   const context = createContext({
     document, window, Worker, ResizeObserver, Option,
-    navigator: { maxTouchPoints: faults.touchPoints ?? (faults.touchSupported ? 2 : 0), ...(faults.hidSupported ? { hid } : {}) },
+    navigator: browserNavigator,
     AbortController, AbortSignal, URL: ControlledURL, Blob, TextEncoder, File, Uint8Array, Uint32Array, Float32Array, DataView,
     ArrayBuffer, structuredClone, performance: { timeOrigin: 9000, now: () => now },
     WebAssembly: { compile: async binary => {
@@ -429,7 +453,7 @@ async function harness(faults = {}) {
     this.setExport("RecordsStore", RecordsStore);
   }, { context });
   const modules = new Map();
-  for (const name of ["host_model.mjs", "play-model.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "main.js"]) {
+  for (const name of ["host_model.mjs", "play-model.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "main.js"]) {
     const url = new URL(name, import.meta.url);
     modules.set(name, new SourceTextModule(await readFile(url, "utf8"), {
       context, identifier: url.href, initializeImportMeta(meta) { meta.url = url.href; },
@@ -499,6 +523,8 @@ async function harness(faults = {}) {
       startNs: start.mode === "replay" ? faults.replayStart ?? 0n : start.startNs ?? 0n,
       ...(start.hidProfileFile ? { hidSources: faults.hidAdmittedSources ?? start.hidDevices.map(device => device.source),
         hidSourceCount: (faults.hidAdmittedSources ?? start.hidDevices).length } : {}),
+      ...(start.gamepadDevices !== undefined ? { gamepadSources: faults.gamepadAdmittedSources
+        ?? start.gamepadDevices.filter(device => device.mapping === "standard" && device.buttons >= 9).map(device => device.source) } : {}),
       ...(start.mode === "replay" ? { mode: "replay", recordedUntilNs: 2350000000n } : {}) });
     for (let index = 0; index < sampleCount; index++) {
       await reply(worker.last("play-sample"), { kind: "sample", id: BigInt(index + 1), rate: 44100,
@@ -537,6 +563,7 @@ async function harness(faults = {}) {
   }
   return { get, workers, get audio() { return audio; }, opens, traces, faults, timers, moduleToken, window, document, urls, revoked, downloads,
     recordOpens, recordCalls, recordOwners, captures, releases, hid, hidDevices, get layoutReads() { return layoutReads; },
+    get gamepadReads() { return gamepadReads; },
     resize(width, height) { viewport = { width, height }; resizeObservers.at(-1).callback(); },
     click, receive, reply, preview, begin, prepared, launch, advance,
     setNow(value) { assert.ok(value >= now); now = value; },
@@ -872,6 +899,154 @@ test("raw observation acquisition failures never fall back and replay never acqu
     assert.equal(h.audio.stopStarts, 1); assert.equal(h.get("play").disabled, false);
     await h.close();
   }
+});
+
+test("live page discovers Gamepads before gesture audio and shares genuine sources and acquisition sequences with HID and keyboard", async () => {
+  const standard = nativeGamepad(1), ignored = nativeGamepad(3, { mapping: "" });
+  const slots = [null, standard, null, ignored];
+  const h = await harness({ gamepads: slots, hidSupported: true, hidDescriptors: [{ vendorId: 1, productId: 2 }] });
+  const preview = await h.preview(); chooseControllerProfile(h, selectedControllerProfile().file);
+  assert.equal(h.gamepadReads, 0);
+  const start = await h.begin(), worker = h.workers[0];
+  assert.equal(h.gamepadReads, 1); assert.equal(h.opens[0].gesture, true);
+  assert.ok(h.traces.findIndex(row => row[0] === "gamepad-poll") < h.traces.findIndex(row => row[0] === "open"));
+  assert.equal(h.hid.requests.length, 0); assert.equal(h.hid.gets, 1);
+  assert.equal(start.gamepadDevices.length, 2);
+  const [padSource, ignoredSource] = start.gamepadDevices.map(device => device.source), hidSource = start.hidDevices[0].source;
+  assert.ok(padSource >= 3n && ignoredSource > padSource && hidSource > ignoredSource);
+  assert.deepEqual(start.gamepadDevices, [
+    { source: padSource, index: 1, id: standard.id, mapping: "standard", buttons: 9, axes: 1 },
+    { source: ignoredSource, index: 3, id: ignored.id, mapping: "", buttons: 9, axes: 1 },
+  ]);
+  const attachment = await h.prepared(start); await h.reply(attachment, null); await h.reply(worker.last("play-activate"), null);
+  const native = h.hidDevices[0], display = watchPlayDisplay(h), layoutReads = h.layoutReads;
+  h.setNow(1300.125);
+  standard.timestamp = 1300.0625;
+  standard.buttons[0] = { value: 0.12345678901234566, pressed: true, touched: false };
+  native.emit("inputreport", { device: native, reportId: 7, timeStamp: 1300.125, data: new DataView(Uint8Array.from([7, 255]).buffer) });
+  const first = worker.last("play-step");
+  assert.deepEqual(first.events.map(event => event.kind), ["hid", "gamepad"], "Window preserves acquisition order; Worker orders native timestamps");
+  const acquired = first.events[1];
+  assert.equal(acquired.source, padSource); assert.equal(first.events[0].source, hidSource);
+  assert.equal(acquired.hostNs, 1300062500n); assert.equal(acquired.timestampMs, 1300.0625);
+  assert.equal(first.events[0].hostNs, 1300125000n);
+  assert.equal(acquired.sequence, first.events[0].sequence + 1n);
+  assert.equal(acquired.axes[0], 0.12345678901234568);
+  assert.equal(acquired.buttons[0].value, 0.12345678901234566);
+  assert.equal(Object.hasOwn(acquired, "bytes"), false); assert.equal(Object.hasOwn(acquired, "key"), false);
+  standard.axes[0] = 0.75; standard.buttons[0].value = 0.5;
+  assert.equal(acquired.axes[0], 0.12345678901234568); assert.equal(acquired.buttons[0].value, 0.12345678901234566);
+  standard.timestamp = 1300.1875; h.setNow(1300.25);
+  h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300.25 });
+  const done = request => h.receive({ kind: "play-step-done", playId: start.playId, tickId: request.tickId,
+    songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+  await done(first);
+  const second = worker.last("play-step");
+  assert.ok(second.tickId > first.tickId);
+  assert.equal(second.events[0].key, 2); assert.equal(second.events[1].kind, "gamepad");
+  assert.ok(second.events[0].sequence > acquired.sequence);
+  assert.equal(second.events[1].sequence, second.events[0].sequence + 1n);
+  assert.equal(second.events[1].hostNs, 1300187500n, "poll time never replaces the browser sample timestamp");
+  assert.equal(h.gamepadReads, 3, "one acquisition accompanies each available input pump");
+  assert.equal(h.layoutReads, layoutReads); assert.deepEqual(display, []);
+  h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+  assert.equal(h.window.listeners.get("gamepadconnected")?.size ?? 0, 0);
+  assert.equal(h.window.listeners.get("gamepaddisconnected")?.size ?? 0, 0);
+  assert.equal(native.closes, 1); assert.equal(h.get("position").value, preview.position);
+  await h.close();
+});
+
+test("unavailable or unsupported Gamepads preserve keyboard play while replay never acquires live device snapshots", async () => {
+  const unavailable = await harness(); await unavailable.preview();
+  const solo = await unavailable.launch();
+  assert.equal(Object.hasOwn(solo.start, "gamepadDevices"), false);
+  assert.equal(unavailable.gamepadReads, 0);
+  unavailable.click("stop"); await flush(); await unavailable.receive(finalScore(solo.id)); await unavailable.close();
+
+  for (const pads of [[], [nativeGamepad(0, { mapping: "" }), nativeGamepad(1, { buttons: nativeGamepad().buttons.slice(0, 8) })]]) {
+    const h = await harness({ gamepads: pads }); await h.preview();
+    const start = await h.begin(), worker = h.workers[0];
+    assert.equal(start.gamepadDevices.length, pads.length);
+    if (pads.length) {
+      pads[0].connected = false;
+      h.window.emit("gamepaddisconnected", { gamepad: pads[0] }); await flush();
+      assert.equal(worker.messages("play-stop").length, 0, "unsupported devices do not participate even while preparation is pending");
+    }
+    const attachment = await h.prepared(start); await h.reply(attachment, null); await h.reply(worker.last("play-activate"), null);
+    h.setNow(1300); await h.advance(8);
+    assert.deepEqual(worker.last("play-step").events, [], "unsupported layouts never become guessed key bindings");
+    assert.match(h.get("keys").textContent, /0 standard Gamepad/);
+    h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+    h.faults.gamepads = [nativeGamepad()];
+    chooseRecording(h, [selectedRecording().file]);
+    const reads = h.gamepadReads, replay = await h.launch(0, "replay");
+    assert.equal(Object.hasOwn(replay.start, "gamepadDevices"), false);
+    h.setNow(1500); await h.advance(8);
+    assert.equal(h.gamepadReads, reads);
+    assert.equal(h.window.listeners.get("gamepadconnected")?.size ?? 0, 0);
+    assert.equal(worker.messages("play-step").filter(request => request.playId === replay.id).length, 0);
+    h.click("stop"); await flush(); await h.receive(finalScore(replay.id)); await h.close();
+  }
+});
+
+test("Gamepad source admission, disconnection, reentrant cancellation and failed detach preserve current ownership and cleanup barriers", async () => {
+  for (const sources of [undefined, [], [3], [99n], [3n, 3n]]) {
+    const h = await harness({ gamepads: [nativeGamepad()] }); await h.preview();
+    const start = await h.begin(), worker = h.workers[0];
+    await h.reply(start, { kind: "prepared", title: "Bad Gamepad source receipt", samples: 1, lanes: [0x11],
+      startNs: 0n, opponentCount: 0, ...(sources === undefined ? {} : { gamepadSources: sources }) });
+    assert.equal(worker.messages("play-sample").length, 0); assert.equal(h.audio.samples.length, 0);
+    assert.equal(worker.last("play-stop").playId, start.playId);
+    await h.receive(finalScore(start.playId)); assert.equal(h.get("play").disabled, false); await h.close();
+  }
+  const native = nativeGamepad(), h = await harness({ gamepads: [native] }); await h.preview();
+  const start = await h.begin(), worker = h.workers[0];
+  const stale = [...h.window.listeners.get("gamepaddisconnected")][0];
+  native.connected = false; h.window.emit("gamepaddisconnected", { gamepad: native }); await flush();
+  assert.equal(worker.last("play-stop").playId, start.playId);
+  assert.equal(worker.messages("play-step").length, 0); await h.receive(finalScore(start.playId));
+  const replacement = nativeGamepad(); h.faults.gamepads = [replacement];
+  const next = await h.launch(); const messages = worker.posts.length;
+  stale({ gamepad: native }); await flush();
+  assert.equal(worker.posts.length, messages, "a retired native callback cannot close the replacement session");
+  replacement.connected = false; h.window.emit("gamepaddisconnected", { gamepad: replacement }); await flush();
+  assert.equal(worker.last("play-stop").playId, next.id);
+  assert.equal(worker.messages("play-step").length, 0, "disconnect does not synthesize releases");
+  await h.receive(finalScore(next.id)); await h.close();
+
+  const reentrant = await harness({ gamepads: [nativeGamepad()] }); await reentrant.preview();
+  const active = await reentrant.launch();
+  reentrant.faults.onGamepadPoll = () => reentrant.click("stop");
+  reentrant.setNow(1300); await reentrant.advance(8);
+  assert.equal(reentrant.workers[0].messages("play-step").length, 0);
+  assert.equal(reentrant.workers[0].last("play-stop").playId, active.id);
+  await reentrant.receive(finalScore(active.id)); await reentrant.close();
+
+  const dirty = await harness({ gamepads: [nativeGamepad()] }); await dirty.preview();
+  const playing = await dirty.launch();
+  dirty.faults.gamepadReadError = new Error("native polling failed");
+  dirty.faults.gamepadCleanupError = new Error("listener removal also failed");
+  dirty.setNow(1300); await dirty.advance(8);
+  assert.equal(dirty.workers[0].messages("play-step").length, 0);
+  await dirty.receive(finalScore(playing.id));
+  assert.match(dirty.get("status").textContent, /Gamepad input failed/);
+  assert.match(dirty.get("status").textContent, /Gamepad cleanup failed.*Reload/i);
+  assert.equal(dirty.get("play").disabled, true);
+  assert.equal(dirty.window.listeners.get("gamepaddisconnected")?.size ?? 0, 0);
+  await dirty.close();
+  const denied = await harness({ gamepads: [], gamepadReadError: new Error("browser denied Gamepad acquisition") });
+  await denied.preview(); assert.equal(await denied.begin(), undefined);
+  assert.equal(denied.opens.length, 0); assert.equal(denied.workers[0].messages("play-start").length, 0);
+  await denied.close();
+  const setup = await harness({ gamepads: [], gamepadListenerError: new Error("native listener setup refused"),
+    gamepadCleanupError: new Error("partially registered listener removal failed") });
+  await setup.preview(); assert.equal(await setup.begin(), undefined);
+  assert.equal(setup.opens.length, 0);
+  assert.equal(setup.get("play").disabled, true, "failed construction still owns its failed listener cleanup");
+  assert.match(setup.get("status").textContent, /cleanup failed.*Reload/i);
+  assert.equal(setup.window.listeners.get("gamepadconnected")?.size ?? 0, 0);
+  assert.equal(setup.window.listeners.get("gamepaddisconnected")?.size ?? 0, 0);
+  await setup.close();
 });
 
 test("HID permission remains an explicit gesture, retains profile metadata only and joins cancelled native ownership without stale page updates", async () => {

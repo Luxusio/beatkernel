@@ -278,3 +278,45 @@ test("late opens disconnects and callback or close failures release only owned h
   assert.equal(broken.closes, 1);
   assert.equal(cleanup.hid.count("disconnect"), 0);
 });
+
+test("optional shared source allocation preserves full identity, burns retired IDs and rejects collisions before native opens", async () => {
+  let next = 9007199254740993n, allocations = 0;
+  const allocate = () => { allocations++; return next++; };
+  const first = device("first"), second = device("second");
+  const h = rig({ authorized: [first], options: { nextSource: allocate } });
+  await h.owner.connectAuthorized();
+  assert.equal(h.owner.devices[0].source, 9007199254740993n);
+  assert.equal(allocate(), 9007199254740994n, "another input owner shares the allocator without reusing the HID source");
+  h.hid.authorized = [first, first, second];
+  await h.owner.connectAuthorized();
+  assert.deepEqual(h.owner.devices.map(value => value.source), [9007199254740993n, 9007199254740995n]);
+  assert.equal(allocations, 3, "rediscovery and duplicate native objects do not allocate new identities");
+  second.emit("inputreport", report(second));
+  assert.equal(h.reports[0].source, 9007199254740995n);
+  h.hid.emit("disconnect", { device: first, timeStamp: 1400 }); await flush();
+  await h.owner.connectAuthorized();
+  assert.equal(h.owner.devices.find(value => value.device === first).source, 9007199254740996n);
+  await h.owner.close(); assert.equal(first.closes, 2); assert.equal(second.closes, 1);
+
+  for (const values of [[3n, 3n], [4n, 3n], [3n, 18446744073709551616n], [3n, 2n], [3n, 4]]) {
+    const one = device("unopened first"), two = device("unopened second");
+    let index = 0;
+    const invalid = rig({ authorized: [one, two], options: { nextSource: () => values[index++] } });
+    const error = await rejected(attempt(() => invalid.owner.connectAuthorized()), /source|identity|allocator/i);
+    assert.equal(invalid.owner.failure, error); await invalid.owner.close();
+    assert.equal(one.opens, 0); assert.equal(two.opens, 0);
+    assert.equal(one.closes, 0); assert.equal(two.closes, 0);
+    assert.deepEqual(invalid.owner.devices, []);
+  }
+  const maximum = device("last allocatable source"), exhausted = device("exhausted");
+  let source = 18446744073709551615n;
+  const boundary = rig({ authorized: [maximum], options: { nextSource: () => source++ } });
+  await boundary.owner.connectAuthorized();
+  assert.equal(boundary.owner.devices[0].source, 18446744073709551615n);
+  boundary.hid.authorized = [maximum, exhausted];
+  await rejected(attempt(() => boundary.owner.connectAuthorized()), /source|identity|allocator/i);
+  await boundary.owner.close(); assert.equal(maximum.closes, 1); assert.equal(exhausted.opens, 0);
+  const legacy = rig({ authorized: [device("default allocation")] });
+  await legacy.owner.connectAuthorized(); assert.equal(legacy.owner.devices[0].source, 3n); await legacy.owner.close();
+  assert.throws(() => rig({ options: { nextSource: 3n } }));
+});

@@ -1165,7 +1165,7 @@ test("Worker refuses invalid Gamepad ownership or batches atomically and keeps p
     assert.equal(h.of("play-error").length, 1);
   }
   for (const bad of [gamepadEvent({ source: 4n }), gamepadEvent({ axes: [NaN] }),
-    gamepadEvent({ hostNs: GAMEPAD_HOST + 1n }), gamepadEvent({ sequence: 0n })]) {
+    gamepadEvent({ hostNs: GAMEPAD_HOST + 1n }), gamepadEvent({ sequence: -1n })]) {
     const h = await gamepadActive();
     await h.send(step({ events: [{ hostNs: GAMEPAD_HOST, key: 2, down: true, sequence: 1n }, bad], watermark: GAMEPAD_HOST + 1n }));
     assert.equal(inputCalls(h.games[0]).length, 0);
@@ -1235,6 +1235,83 @@ test("Worker refuses invalid Gamepad ownership or batches atomically and keeps p
   assert.match(partial.of("play-error").at(-1).message, /actual canonical prefix failure/);
   assertReleased(partial);
   await partial.send(pending); assert.equal(accepted, 2, "committed binding failure cannot retry the physical fanout");
+});
+
+test("automatic Gamepad device setup retains real identities and Worker orders different sources by original timestamps without sequence rewriting", async () => {
+  const devices = [{ source: GAMEPAD_SOURCE, index: 7, id: "same model", mapping: "standard", buttons: 9, axes: 1 },
+    { source: 3n, index: 0, id: "same model", mapping: "", buttons: 9, axes: 0 }];
+  const auto = await catalogWorker({ lanes: [0x11, 0x19] });
+  auto.post(startRequest({ inputMode: "physical", keyPairs: new Uint32Array(), gamepadDevices: devices }));
+  devices[0].source = 4n; devices[0].buttons = 0; devices.length = 0;
+  await flushJobs();
+  assert.deepEqual(auto.of("play-reply").at(-1).result.gamepadSources, [GAMEPAD_SOURCE]);
+  const words = auto.physicalConstructions[0].args[5];
+  assert.equal(words.length, 63);
+  assert.deepEqual(Array.from(words.slice(0, 7)), [0x11, 1, 0x44332211, 0x88776655, 1, 0x57475044, 0]);
+  assert.deepEqual(Array.from(words.slice(-7)), [0x19, 1, 0x44332211, 0x88776655, 1, 0x57475044, 8]);
+  await auto.send({ kind: "play-activate", playId: 7, rpcId: 2, hostNs: GAMEPAD_HOST, startFrame: START });
+  const buttons = Array.from({ length: 9 }, (_, index) => ({ value: index === 8 ? 1 : 0, pressed: index === 8, touched: false }));
+  await auto.send(step({ events: [gamepadEvent({ buttons, id: "same model" })], watermark: GAMEPAD_HOST }));
+  const packet = inputCalls(auto.games[0]).find(call => call[0] === "blob")[1];
+  assert.equal(new DataView(packet.buffer).getUint32(64, true), 8);
+  assert.equal(new DataView(packet.buffer).getBigUint64(7, true), GAMEPAD_SOURCE);
+  await auto.send({ kind: "play-stop", playId: 7 }); assertReleased(auto);
+
+  const h = await gamepadActive({}, { inputMode: "physical-contact", hidSetup: hidSetup([3n]) });
+  const acquired = gamepadEvent({ timestampMs: 1001, hostNs: 1001000000n, sequence: 2n });
+  const key = { hostNs: 1003000000n, key: 2, down: true, sequence: 100n };
+  const touch = touchEvent({ hostNs: 1002000000n, sequence: 9n });
+  const hid = hidEvent({ source: 3n, hostNs: 1001000000n, sequence: 0n });
+  await h.send(step({ events: [key, acquired, touch, hid], watermark: 1004000000n }));
+  const calls = inputCalls(h.games[0]);
+  assert.deepEqual(calls.map(call => call[0]), ["blob", "hid", "touch", "blob", "advance"]);
+  assert.deepEqual(calls.slice(0, 4).map(call => new DataView(call[1].buffer).getBigUint64(7, true)), [GAMEPAD_SOURCE, 3n, 2n, 1n]);
+  assert.deepEqual(calls.slice(0, 4).map(call => new DataView(call[1].buffer).getBigUint64(27, true)), [2n, 0n, 9n, 100n]);
+  assert.deepEqual(calls.slice(0, 4).map(call => new DataView(call[1].buffer).getBigInt64(15, true)),
+    [1001000000n, 1001000000n, 1002000000n, 1003000000n]);
+  assert.deepEqual(Array.from(calls[1][1]), Array.from(encodeRawHidEvent(hid)));
+  assert.deepEqual(Array.from(calls[2][1]), Array.from(encodeTouchEvent(touch)));
+  assert.deepEqual(Array.from(calls[3][1]), Array.from(encodeKeyboardEvent(key)));
+  await h.send(step({ tickId: 2, events: [{ ...acquired, sequence: 3n }], watermark: 1005000000n }));
+  assert.equal(h.of("play-step-done").length, 2);
+  assert.equal(inputCalls(h.games[0]).length, 6, "unchanged old Gamepad samples advance source order without rewinding the Runtime frontier");
+  await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+});
+
+test("automatic setup and per-source draft ordering refuse conflicting modes or invalid tails without weakening the committed host boundary", async () => {
+  const descriptors = () => [{ source: GAMEPAD_SOURCE, index: 7, id: "standard", mapping: "standard", buttons: 9, axes: 1 }];
+  for (const request of [startRequest({ gamepadDevices: descriptors() }),
+    replayRequest(replayFile().file, { gamepadDevices: descriptors() }),
+    startRequest({ inputMode: "physical", gamepadDevices: descriptors(), gamepadSetup: gamepadSetup() }),
+    startRequest({ inputMode: "physical", gamepadDevices: descriptors(), hidSetup: hidSetup([GAMEPAD_SOURCE]) })]) {
+    const h = await catalogWorker(); await h.send(request);
+    assert.equal(h.games.length, 0); assert.equal(h.replays.length, 0); assert.equal(h.of("play-error").length, 1);
+  }
+  const empty = await started({ startRequest: startRequest({ inputMode: "physical", gamepadDevices: [] }) });
+  assert.deepEqual(empty.of("play-reply")[0].result.gamepadSources, []);
+  await empty.send({ kind: "play-stop", playId: 7 });
+  const invalidBatches = [
+    [{ hostNs: GAMEPAD_HOST + 1n, key: 2, down: true, sequence: 1n }, { hostNs: GAMEPAD_HOST, key: 2, down: false, sequence: 2n }],
+    [hidEvent({ source: 3n, hostNs: GAMEPAD_HOST, sequence: 9n }), hidEvent({ source: 3n, hostNs: GAMEPAD_HOST, sequence: 8n })],
+    [touchEvent({ hostNs: GAMEPAD_HOST + 1n, sequence: 1n }), touchEvent({ hostNs: GAMEPAD_HOST, sequence: 2n, phase: 2 })],
+    [gamepadEvent({ sequence: 3n }), gamepadEvent({ sequence: 2n })],
+    [gamepadEvent(), { hostNs: GAMEPAD_HOST + 1n, key: 2, down: true, sequence: 9n },
+      hidEvent({ source: 3n, hostNs: GAMEPAD_HOST, sequence: 0n, data: new Uint8Array(1025) })],
+  ];
+  for (const events of invalidBatches) {
+    const h = await gamepadActive({}, { inputMode: "physical-contact", hidSetup: hidSetup([3n]) });
+    await h.send(step({ events, watermark: GAMEPAD_HOST + 2n }));
+    assert.equal(inputCalls(h.games[0]).length, 0); assert.equal(h.of("play-step-done").length, 0); assertReleased(h);
+  }
+  const prefix = await gamepadActive({}, { hidSetup: hidSetup([3n]) });
+  await prefix.send(step({ events: [hidEvent({ source: 3n, hostNs: GAMEPAD_HOST, sequence: 9n })], watermark: 1100000000n }));
+  assert.equal(inputCalls(prefix.games[0]).length, 2);
+  await prefix.send(step({ tickId: 2, events: [
+    { hostNs: 1200000000n, key: 2, down: true, sequence: 1n },
+    hidEvent({ source: 3n, hostNs: 1050000000n, sequence: 10n }),
+  ], watermark: 1200000000n }));
+  assert.equal(inputCalls(prefix.games[0]).length, 2, "sorting cannot admit any newly changed event behind a previously committed watermark");
+  assert.equal(prefix.of("play-step-done").length, 1); assertReleased(prefix);
 });
 
 const HID_SOURCE = 18446744073709551615n;
@@ -1474,7 +1551,7 @@ test("mixed keyboard contact and numbered or zero-ID HID inputs use the actual c
 test("a late malformed HID event or unknown source refuses the entire mixed batch before any gameplay mutation", async () => {
   const invalid = [hidEvent({ source: 4n }), hidEvent({ source: Number(HID_SOURCE) }), hidEvent({ reportId: 256 }),
     hidEvent({ data: [1] }), hidEvent({ data: new Uint8Array(1025) }), hidEvent({ hostNs: -1n }),
-    hidEvent({ sequence: 18446744073709551616n }), hidEvent({ sequence: 0n }), hidEvent({ hostNs: ORIGIN - 1n })];
+    hidEvent({ sequence: 18446744073709551616n }), hidEvent({ sequence: -1n }), hidEvent({ hostNs: 9223372036854775808n })];
   for (const bad of invalid) {
     const h = await active({ startRequest: startRequest({ inputMode: "physical-contact", hidSetup: hidSetup() }) });
     const key = { hostNs: ORIGIN, key: 2, down: true, sequence: 1n };

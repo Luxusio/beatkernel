@@ -2,7 +2,7 @@
 // core BKPI v1 field offsets, without browser devices or a simulated judge.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GamepadAdapter, snapshotGamepadSetup } from "./gamepad-profile.mjs";
+import { GamepadAdapter, automaticGamepadSetup, snapshotGamepadSetup } from "./gamepad-profile.mjs";
 
 const SOURCE = 0x8877665544332211n;
 const SEQUENCE = 0x0102030405060708n;
@@ -183,4 +183,43 @@ test("exact fanout capacity emits each physical field once even when several lan
   const fanout = new GamepadAdapter(setup([[0x11, 0, 0], [0x12, 0, 0], [0x13, 0, 0]]));
   assert.equal(fanout.decode(sample({ buttons: [button(true), button(false)] })).length, 1,
     "BindingMap owns lane fanout; the profile emits one genuine physical event");
+});
+
+test("automatic standard profiles bind nine genuine buttons with exact sources and reject malformed ignored descriptors", () => {
+  const standard = { source: U64_MAX, index: 63, id: "same product", mapping: "standard", buttons: 128, axes: 64 };
+  const raw = [{ source: 3n, index: 0, id: "same product", mapping: "", buttons: 9, axes: 0 }, standard,
+    { source: 4n, index: 1, id: "small standard controller", mapping: "standard", buttons: 8, axes: 2 }];
+  const automatic = automaticGamepadSetup(raw);
+  assert.deepEqual(automatic.devices, [{ source: U64_MAX, buttons: 128, axes: 64 }]);
+  assert.deepEqual(automatic.sources, [U64_MAX]);
+  assert.deepEqual(Array.from(automatic.bindingWords), [
+    0x11, 0xffffffff, 0xffffffff, 0, 0, 0x12, 0xffffffff, 0xffffffff, 0, 1,
+    0x13, 0xffffffff, 0xffffffff, 0, 2, 0x14, 0xffffffff, 0xffffffff, 0, 3,
+    0x15, 0xffffffff, 0xffffffff, 0, 4, 0x16, 0xffffffff, 0xffffffff, 0, 5,
+    0x17, 0xffffffff, 0xffffffff, 0, 6, 0x18, 0xffffffff, 0xffffffff, 0, 7,
+    0x19, 0xffffffff, 0xffffffff, 0, 8,
+  ]);
+  assert.deepEqual(automatic.lanes, [0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19]);
+  assert.equal(automatic.physicalWords.length, 63);
+  for (let index = 0; index < 9; index++) {
+    assert.deepEqual(Array.from(automatic.physicalWords.slice(index * 7, index * 7 + 7)),
+      [0x11 + index, 1, 0xffffffff, 0xffffffff, 1, 0x57475044, index]);
+  }
+  standard.source = 5n; standard.buttons = 0; raw.length = 0;
+  assert.deepEqual(automatic.sources, [U64_MAX]);
+  assert.equal(automatic.devices[0].buttons, 128);
+  assert.ok(Object.isFrozen(automatic) && Object.isFrozen(automatic.devices));
+  assert.deepEqual(automaticGamepadSetup([]).sources, []);
+  const many = Array.from({ length: 16 }, (_, index) => ({ source: BigInt(index + 3), index,
+    id: "one model", mapping: "standard", buttons: 9, axes: 0 }));
+  assert.equal(automaticGamepadSetup(many).bindingWords.length, 16 * 9 * 5);
+  assert.throws(() => automaticGamepadSetup([...many, { ...many[0], source: 19n, index: 16 }]));
+  const ignored = { source: 3n, index: 0, id: "unmapped", mapping: "", buttons: 0, axes: 0 };
+  for (const fields of [{ source: 2n }, { source: 3 }, { source: U64_MAX + 1n }, { index: 64 },
+    { id: "x".repeat(1025) }, { mapping: "unknown" }, { buttons: 129 }, { axes: 65 }]) {
+    assert.throws(() => automaticGamepadSetup([{ ...ignored, ...fields }]));
+  }
+  assert.throws(() => automaticGamepadSetup([ignored, { ...ignored, source: 4n }]));
+  assert.throws(() => automaticGamepadSetup([ignored, { ...ignored, index: 1 }]));
+  assert.throws(() => automaticGamepadSetup(new Array(1)));
 });
