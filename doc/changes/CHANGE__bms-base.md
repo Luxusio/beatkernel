@@ -19,7 +19,9 @@ source indexing. Generic crop identities expand to3843 without changing signed
 coordinate validation. Image preparation admits the matching3844-identity
 namespace while byte/dimension/decode/GPU concurrency limits stay bounded.
 Audio asset counts remain separately configurable preparation limits; radix
-support does not promise unlimited simultaneously decoded assets.
+support does not promise unlimited simultaneously decoded assets. The later
+[PCM capacity slice](CHANGE__bms-pcm-radix.md) aligns caller defaults with the
+full resource namespace.
 
 ## Compatibility references
 

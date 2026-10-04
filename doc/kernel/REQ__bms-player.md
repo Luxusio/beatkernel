@@ -1937,3 +1937,22 @@ retain atomic capacity refusal, and clear releases all visual ownership while
 retaining reusable storage. Playback-prefix presentation follows only recorded
 operations and must match live ownership transitions. Compilation and authored
 fixtures do not establish actual browser/device acceptance.
+
+## Selectable-radix audio preparation capacity
+
+The shared application's default original PCM sample capacity is3844, covering
+the two-character base62 namespace (zero stays an empty chart row token). All
+native solo/local/offline/replay caller presets use the same exported constant;
+64MiB per asset and256MiB total decoded bank bounds remain unchanged. Explicit
+caller-supplied tighter PcmLimits remain authoritative. Section preparation keeps
+its existing bounded addition of at most4096 crossing BGM suffixes; original
+numeric sample identities and original-song times remain intact.
+
+Browser Worker original preparation uses a shared JS3844 constant and Worklet
+handoff admits at most7940 original-plus-suffix samples. Match the Rust preset;
+this is a bounded cross-language compatibility contract, not a new runtime
+allocation or gameplay loop. Update actual Worker launch fixtures, and author
+portable real preparation/section tests with >1295 and up to3843 referenced
+samples plus4096 tails, explicit low-count rejection before decode, byte-bound
+rejection and unchanged keysound identities. Test execution, generated bindings,
+browser/device/audio/performance and ordered QA remain deferred.
