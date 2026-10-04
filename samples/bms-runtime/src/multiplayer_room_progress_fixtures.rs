@@ -920,3 +920,61 @@ fn untimed_aggregate_and_stop_never_gain_drain_authority_from_later_polling_or_r
     );
     assert_eq!(relay, stopped);
 }
+
+#[test]
+fn recipient_drain_accessors_distinguish_queued_complete_from_its_exact_full_write() {
+    let registry = prepared(4, 1);
+    let snapshot = registry.room("room").unwrap();
+    let (mut relay, aggregates) = pending_aggregates(snapshot, true);
+    for member in snapshot.members {
+        assert!(!relay.drain_complete_admitted(member.id).unwrap());
+        assert!(!relay.drain_complete_written(member.id).unwrap());
+    }
+    for unknown in [ParticipantId(0), ParticipantId(u64::MAX)] {
+        let before = relay.clone();
+        assert!(relay.drain_complete_admitted(unknown).is_err());
+        assert!(relay.drain_complete_written(unknown).is_err());
+        assert_eq!(relay, before);
+    }
+    for (recipient, aggregate) in &aggregates {
+        relay.written(*recipient, aggregate.id).unwrap();
+        relay
+            .receive_at(
+                *recipient,
+                &RoomMessage::DrainReady {
+                    participant: *recipient,
+                    sequence: 1,
+                },
+                50,
+            )
+            .unwrap();
+    }
+    assert!(relay.complete());
+    assert!(!relay.drained());
+    let first = snapshot.members[0].id;
+    let notice = relay.poll_write_at(first, 60).unwrap().unwrap();
+    assert_eq!(
+        decoded(&notice),
+        RoomMessage::DrainComplete {
+            participant: first,
+            sequence: 1
+        }
+    );
+    assert!(relay.drain_complete_admitted(first).unwrap());
+    assert!(!relay.drain_complete_written(first).unwrap());
+    assert!(relay.poll_write_at(first, 61).unwrap().is_none());
+    let pending = relay.clone();
+    assert!(relay.written(first, notice.id - 1).is_err());
+    assert_eq!(relay, pending);
+    for member in &snapshot.members[1..] {
+        assert!(!relay.drain_complete_admitted(member.id).unwrap());
+        assert!(!relay.drain_complete_written(member.id).unwrap());
+    }
+    relay.written(first, notice.id).unwrap();
+    assert!(relay.drain_complete_admitted(first).unwrap());
+    assert!(relay.drain_complete_written(first).unwrap());
+    assert!(!relay.drained());
+    let completed = relay.clone();
+    assert!(relay.written(first, notice.id).is_err());
+    assert_eq!(relay, completed);
+}

@@ -626,6 +626,30 @@ impl RoomProgressRelay {
                 .all(|source| source.drain_complete_written)
     }
 
+    /// The exact recipient's Complete has entered its actual relay write slot
+    /// or was fully written. This never grants credit for a transport closure.
+    pub fn drain_complete_admitted(
+        &self,
+        recipient: ParticipantId,
+    ) -> Result<bool, RoomProgressError> {
+        let index = self.index(recipient)?;
+        self.ensure_live()?;
+        Ok(self.sources[index].drain_complete_written
+            || matches!(
+                self.recipients[index].in_flight,
+                Some((_, Receipt::DrainComplete))
+            ))
+    }
+
+    pub fn drain_complete_written(
+        &self,
+        recipient: ParticipantId,
+    ) -> Result<bool, RoomProgressError> {
+        let index = self.index(recipient)?;
+        self.ensure_live()?;
+        Ok(self.sources[index].drain_complete_written)
+    }
+
     pub fn stop(&mut self) {
         self.stopped = true;
         for recipient in &mut self.recipients {
