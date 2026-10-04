@@ -7,7 +7,8 @@ import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTou
 import { snapshotHidDevices, hidSetupFromProfile } from "./hid-profile.mjs";
 import { AudioCommandClient } from "./audio-command-client.mjs";
 import { snapshotGamepadSetup, snapshotGamepadDevices, automaticGamepadSetup, gamepadSetupFromProfile, GamepadAdapter } from "./gamepad-profile.mjs";
-const { BrowserGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
+import { snapshotLocalPlan, localBindingWords } from "./local-play-model.mjs";
+const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
 let ready = null;
 let view = null;
 let library = null;
@@ -54,6 +55,7 @@ function scheduleDraw(reset = true) {
     redraw = null;
     try {
       if (play?.game && play.mode === "replay") view.draw_replay(play.game);
+      else if (play?.game && play.localPlan) view.draw_local_game(play.game, play.localPage);
       else if (play?.game) view.draw_game(play.game);
       else view.draw();
       if (view.needs_redraw()) {
@@ -194,6 +196,22 @@ function signed(value) { return typeof value === "bigint" && value >= -I64_MAX -
 
 function statistics(state) {
   const result = { songNs: null, hits: null, misses: null, combo: null, maxCombo: null, preOriginInputs: state.preOriginInputs };
+  if (state.localPlan) {
+    result.primaryPlayer = state.localPlan.members[0].player;
+    result.localScores = state.localPlan.members.map(({ player }) => {
+      const row = { player, songNs: null, hits: null, misses: null, combo: null, maxCombo: null };
+      if (state.game) for (const [field, method] of [["songNs", "member_song_ns"], ["hits", "hits"], ["misses", "misses"], ["combo", "combo"], ["maxCombo", "max_combo"]]) {
+        try {
+          const value = state.game[method](player);
+          if (field === "songNs" ? signed(value) : unsigned(value)) row[field] = value;
+        } catch {}
+      }
+      return row;
+    });
+    const first = result.localScores[0];
+    for (const name of ["songNs", "hits", "misses", "combo", "maxCombo"]) result[name] = first[name];
+    return result;
+  }
   if (state.game) {
     for (const [field, getter] of [["songNs", "song_ns"], ["hits", "hits"], ["misses", "misses"], ["combo", "combo"], ["maxCombo", "max_combo"]]) {
       // Preserve every readable actual field even if a terminal binding fault
@@ -454,11 +472,30 @@ function disposeGame(state) {
   client?.close();
   const game = state.game;
   state.game = null;
-  const result = { cleanupError: null, replay: null, replayError: null };
+  const result = { cleanupError: null, replay: null, replayError: null,
+    ...(state.localPlan ? { replays: state.localPlan.members.map(({ player }) => ({ player, replay: null, replayError: null, replayComplete: false })) } : {}) };
   if (!game) return result;
   let stopped = false;
   try { game.stop(); stopped = true; } catch (cause) { result.cleanupError = cause; }
-  if (state.mode === "live" && state.recordReplay && stopped) {
+  if (state.localPlan && state.recordReplay && stopped) {
+    let total = 0;
+    const buffers = new Set();
+    for (const row of result.replays) {
+      try {
+        const bytes = game.take_replay(row.player);
+        if (bytes == null) continue; // A setup failure may precede this member's capture.
+        if (!(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer)
+          || bytes.buffer.resizable === true || bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength
+          || bytes.length === 0 || bytes.length > state.recordLimits.bytes
+          || total + bytes.length > 64 * 1024 * 1024 || buffers.has(bytes.buffer)) {
+          throw new Error("Local recorded replay has an invalid bounded transferable layout.");
+        }
+        total += bytes.length;
+        buffers.add(bytes.buffer);
+        row.replay = bytes;
+      } catch (cause) { row.replayError = message(cause); }
+    }
+  } else if (state.mode === "live" && state.recordReplay && stopped) {
     try {
       const bytes = game.take_replay();
       if (!(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer)
@@ -471,6 +508,11 @@ function disposeGame(state) {
   return result;
 }
 
+function replayTransfers(replay, replays) {
+  return replays ? replays.filter(row => row.replay !== null).map(row => row.replay.buffer)
+    : replay ? [replay.buffer] : [];
+}
+
 function failPlay(state, error, request = null) {
   if (play !== state) return;
   const score = statistics(state);
@@ -478,7 +520,7 @@ function failPlay(state, error, request = null) {
   play = null; // Invalidates a still-awaiting preparation before releasing owners.
   stopRedraw();
   closeNetwork(state.network);
-  const { cleanupError, replay, replayError } = disposeGame(state);
+  const { cleanupError, replay, replayError, replays } = disposeGame(state);
   const text = message(cleanupError ? `${message(error)}; cleanup: ${message(cleanupError)}` : error);
   const pending = new Set([request?.rpcId, state.startRpcId, state.audioRpcId, state.network?.rpcId]);
   state.startRpcId = null;
@@ -486,9 +528,9 @@ function failPlay(state, error, request = null) {
   if (state.network) state.network.rpcId = null;
   for (const rpcId of pending) if (identity(rpcId)) report("play-reply", { playId: state.id, rpcId, error: text });
   report("play-error", { playId: state.id, message: text, released: cleanupError === null,
-    replay, replayComplete: false, replayError, ...score,
+    replay, replayComplete: false, replayError, ...score, ...(replays ? { replays } : {}),
     ...(state.network ? { multiplayer: multiplayerOutcome(state.network) } : {}),
-    ...(savedOpponents ? { savedOpponents } : {}) }, replay ? [replay.buffer] : []);
+    ...(savedOpponents ? { savedOpponents } : {}) }, replayTransfers(replay, replays));
   scheduleDraw();
 }
 
@@ -505,7 +547,7 @@ function stopPlay(state, request) {
     state.network.stopping = true;
     clearRemoteProgress(state.network);
   }
-  const { cleanupError, replay, replayError } = disposeGame(state);
+  const { cleanupError, replay, replayError, replays } = disposeGame(state);
   const pending = new Set([state.startRpcId, state.audioRpcId, state.network?.rpcId]);
   state.startRpcId = null;
   state.audioRpcId = null;
@@ -514,12 +556,13 @@ function stopPlay(state, request) {
     report("play-reply", { playId: state.id, rpcId, error: "Gameplay setup was stopped." });
   }
   const stopped = multiplayer => {
+    if (replays) for (const row of replays) row.replayComplete = !cleanupError && completed && row.replay !== null && row.replayError === null;
     const result = { replay, replayError, ...score, ...(multiplayer ? { multiplayer } : {}),
-      ...(savedOpponents ? { savedOpponents } : {}) };
+      ...(savedOpponents ? { savedOpponents } : {}), ...(replays ? { replays } : {}) };
     if (cleanupError) report("play-error", { playId: state.id, message: message(cleanupError), released: false,
-      ...result, replayComplete: false }, replay ? [replay.buffer] : []);
+      ...result, replayComplete: false }, replayTransfers(replay, replays));
     else report("play-stopped", { playId: state.id, ...result,
-      replayComplete: completed && replay !== null }, replay ? [replay.buffer] : []);
+      replayComplete: completed && replay !== null }, replayTransfers(replay, replays));
   };
   scheduleDraw();
   // The game and samples are already released. Network disposal cannot delay
@@ -583,6 +626,12 @@ async function preparePlay(state, request) {
     }
     state.touchInput = request.inputMode === "physical-contact";
     state.physicalInput = request.inputMode === "physical" || state.touchInput;
+    if (request.localPlanWords !== undefined) {
+      if (state.mode !== "live" || !state.physicalInput) throw new Error("Local players require live canonical physical input.");
+      state.localPlan = snapshotLocalPlan(request.localPlanWords);
+      state.localPage = request.localPage === undefined ? 0 : request.localPage;
+      if (!integer(state.localPage, 0, Math.ceil(state.localPlan.members.length / 4) - 1)) throw new Error("Invalid initial local player page.");
+    } else if (request.localPage !== undefined) throw new Error("A local page requires a local source plan.");
     let pairs = null;
     let bindingWords = null;
     const lanes = [];
@@ -642,6 +691,7 @@ async function preparePlay(state, request) {
     state.network = multiplayerConfiguration(request.multiplayer, state.mode);
     const opponents = state.mode === "live" && request.opponents !== undefined
       ? validateSelections(request.opponents) : NO_OPPONENTS;
+    if (state.localPlan && (state.network || opponents.length)) throw new Error("Local gameplay cannot yet combine network or saved opponents.");
     let replayFile = null;
     let replaySize = 0;
     if (state.mode === "replay") {
@@ -674,6 +724,10 @@ async function preparePlay(state, request) {
     }
     if (gamepad !== null && hid !== null && gamepad.sources.some(source => hid.sources.has(source))) {
       throw new Error("Gamepad and HID source identities must not overlap.");
+    }
+    if (state.localPlan && hid !== null && !state.localPlan.members.some(member => member.source === null)
+      && [...hid.sources].some(source => !state.localPlan.members.some(member => member.source === source))) {
+      throw new Error("Every configured HID source must belong to a local player.");
     }
     if (bindingWords !== null && bindingWords.length + (hid?.bindingWords.length ?? 0)
       + (gamepad?.physicalWords.length ?? 0) > 256 * 7) throw new Error("Combined physical binding capacity exceeded.");
@@ -712,20 +766,34 @@ async function preparePlay(state, request) {
     if (state.mode === "live" && startNs !== requestedStart) throw new Error("Prepared live section start differs from its request.");
     const chartLanes = Array.from(prepared.lanes);
     bindingsFor(chartLanes);
-    if (state.mode === "live" && chartLanes.some(lane => !lanes.includes(lane))) {
+    if (state.mode === "live" && !state.localPlan && chartLanes.some(lane => !lanes.includes(lane))) {
       throw new Error(hid === null && gamepad === null ? "A prepared lane has no supplied key binding." : "A prepared lane has no supplied press-capable physical binding.");
     }
     const metadata = { title: prepared.title, artist: prepared.artist, notes: prepared.note_count, lanes: chartLanes, startNs };
-    if (state.physicalInput && (typeof (state.touchInput ? BrowserGame?.new_physical_contact : BrowserGame?.new_physical) !== "function"
-      || typeof BrowserGame?.prototype?.input_blob !== "function")) {
+    let localBindings = null;
+    if (state.localPlan) {
+      localBindings = localBindingWords(state.localPlan, bindingWords, chartLanes, state.touchInput);
+      state.touchPlayer = localBindings.touchPlayer;
+      if (state.touchPlayer !== null && Math.floor(state.localPlan.members.findIndex(member => member.player === state.touchPlayer) / 4) !== state.localPage) {
+        throw new Error("The touch player must be visible on the initial local page.");
+      }
+      if (typeof BrowserLocalGame?.new_physical !== "function" || typeof view?.draw_local_game !== "function") {
+        throw new Error("The gameplay binding does not provide local player ownership and rendering.");
+      }
+    }
+    const Game = state.localPlan ? BrowserLocalGame : BrowserGame;
+    const physicalConstructor = state.localPlan || !state.touchInput ? Game?.new_physical : Game?.new_physical_contact;
+    if (state.physicalInput && (typeof physicalConstructor !== "function"
+      || typeof Game?.prototype?.input_blob !== "function")) {
       throw new Error("The gameplay binding does not provide canonical physical input ownership.");
     }
-    if (state.touchInput && (typeof BrowserGame?.prototype?.configure_touch_regions !== "function"
-      || typeof BrowserGame?.prototype?.input_blob_at !== "function")) {
+    if (state.touchInput && (typeof Game?.prototype?.configure_touch_regions !== "function"
+      || typeof Game?.prototype?.input_blob_at !== "function"
+      || (state.localPlan && typeof Game?.prototype?.touch_bounds !== "function"))) {
       throw new Error("The gameplay binding does not provide contact routing ownership.");
     }
-    if (hid !== null && (typeof BrowserGame?.prototype?.configure_hid_devices !== "function"
-      || typeof BrowserGame?.prototype?.input_hid_blob !== "function")) {
+    if (hid !== null && (typeof Game?.prototype?.configure_hid_devices !== "function"
+      || typeof Game?.prototype?.input_hid_blob !== "function")) {
       throw new Error("The gameplay binding does not provide HID profile ownership.");
     }
     if (opponents.length && (typeof BrowserGame?.prototype?.add_saved_opponent !== "function"
@@ -744,6 +812,9 @@ async function preparePlay(state, request) {
     prepared = null; // A consuming Rust constructor also owns the argument on Err.
     state.game = state.mode === "replay"
       ? new BrowserReplay(moved, 100000000n)
+      : state.localPlan
+        ? BrowserLocalGame.new_physical(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs,
+          state.localPlan.words, localBindings.words, requestedEnd, state.touchInput, 4096, 1024)
       : state.touchInput
         ? BrowserGame.new_physical_contact(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, bindingWords, requestedEnd, 4096, 1024)
         : state.physicalInput
@@ -751,24 +822,43 @@ async function preparePlay(state, request) {
           : requestedEnd === undefined
             ? new BrowserGame(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs)
             : BrowserGame.new_section(moved, 0n, 100000000n, timing.earlyNs, timing.lateNs, timing.offsetNs, pairs, requestedEnd);
+    if (state.localPlan) {
+      const actual = state.game.players;
+      if (!(actual instanceof Uint32Array) || !(actual.buffer instanceof ArrayBuffer)
+        || actual.buffer.resizable === true || actual.length !== state.localPlan.members.length
+        || actual.some((player, index) => player !== state.localPlan.members[index].player)) {
+        throw new Error("Actual local player identities differ from the prepared source plan.");
+      }
+      metadata.localPlayers = Array.from(actual);
+      metadata.localPage = state.localPage;
+    }
     if (state.network) updatePeerHud(state);
     if (state.physicalInput) metadata.inputMode = request.inputMode;
     if (state.touchInput) {
-      const bounds = state.game.touch_bounds;
       const width = state.game.touch_width;
       const height = state.game.touch_height;
-      if (!(bounds instanceof Float32Array) || bounds.length !== chartLanes.length * 4
-        || !integer(width, 1, 0xffffffff) || !integer(height, 1, 0xffffffff)) {
+      if (!integer(width, 1, 0xffffffff) || !integer(height, 1, 0xffffffff)) {
         throw new Error("Actual touch layout dimensions or lane bounds are invalid.");
       }
-      for (let index = 0; index < bounds.length; index += 4) {
-        if (!Number.isFinite(bounds[index]) || !Number.isFinite(bounds[index + 1])
-          || !Number.isFinite(bounds[index + 2]) || !Number.isFinite(bounds[index + 3])
-          || bounds[index] >= bounds[index + 2] || bounds[index + 1] >= bounds[index + 3]) {
-          throw new Error("Actual touch layout has invalid region bounds.");
+      if (!state.localPlan || state.touchPlayer !== null) {
+        const bounds = state.localPlan ? state.game.touch_bounds(state.touchPlayer, state.localPage) : state.game.touch_bounds;
+        if (!(bounds instanceof Float32Array) || bounds.length !== chartLanes.length * 4) throw new Error("Actual touch layout lane bounds are invalid.");
+        for (let index = 0; index < bounds.length; index += 4) {
+          if (!Number.isFinite(bounds[index]) || !Number.isFinite(bounds[index + 1])
+            || !Number.isFinite(bounds[index + 2]) || !Number.isFinite(bounds[index + 3])
+            || bounds[index] >= bounds[index + 2] || bounds[index + 1] >= bounds[index + 3]) {
+            throw new Error("Actual touch layout has invalid region bounds.");
+          }
         }
+        const touchWords = touchBindingWords(chartLanes);
+        if (state.localPlan) {
+          const member = state.localPlan.members.find(member => member.player === state.touchPlayer);
+          if (member.source !== null) for (let index = 0; index < touchWords.length; index += 7) {
+            touchWords[index + 1] = 1; touchWords[index + 2] = 2;
+          }
+          state.game.configure_touch_regions(state.touchPlayer, touchWords, bounds, 256);
+        } else state.game.configure_touch_regions(touchWords, bounds, 256);
       }
-      state.game.configure_touch_regions(touchBindingWords(chartLanes), bounds, 256);
       state.touchWidth = width;
       state.touchHeight = height;
     }
@@ -780,7 +870,8 @@ async function preparePlay(state, request) {
     }
     if (gamepad !== null) {
       state.gamepadAdapter = gamepadAdapter;
-      metadata.gamepadSources = gamepad.sources;
+      metadata.gamepadSources = state.localPlan && !state.localPlan.members.some(member => member.source === null)
+        ? gamepad.sources.filter(source => state.localPlan.members.some(member => member.source === source)) : gamepad.sources;
     }
     const output = replayOutputFromMetadata(startNs, state.game.end_ns, state.game.playback_end_frame, request.rate);
     if (state.mode === "live" && output.endNs !== requestedEnd) throw new Error("Actual live section end differs from its request.");
@@ -803,8 +894,16 @@ async function preparePlay(state, request) {
       metadata.mode = "replay";
       metadata.recordedUntilNs = recordedUntilNs;
     } else if (request.recordReplay === true) {
-      state.game.configure_capture(64 * 1024 * 1024, 1000000);
-      state.recordReplay = true;
+      if (state.localPlan) {
+        state.recordLimits = { bytes: Math.floor(64 * 1024 * 1024 / state.localPlan.members.length),
+          records: Math.floor(1000000 / state.localPlan.members.length) };
+        metadata.recordLimits = { ...state.recordLimits };
+        state.recordReplay = true; // Preserve earlier configured prefixes if a later setup refuses.
+        for (const { player } of state.localPlan.members) state.game.configure_capture(player, state.recordLimits.bytes, state.recordLimits.records);
+      } else {
+        state.game.configure_capture(64 * 1024 * 1024, 1000000);
+        state.recordReplay = true;
+      }
     }
     state.keys = keys;
     state.prepared = true;
@@ -946,7 +1045,7 @@ function publishRender(state, observation, completed) {
   if (completed && commandsPending(state)) throw new Error("Completion produced outstanding gameplay commands.");
   report("play-render-done", { playId: state.id, renderId: observation.renderId, completed,
     commandsPending: commandsPending(state), observedTick: state.lastTick,
-    ...(state.mode === "replay" ? statistics(state) : {}) });
+    ...(state.mode === "replay" || state.localPlan ? statistics(state) : {}) });
   if (state.mode === "replay") scheduleDraw();
 }
 
@@ -1164,6 +1263,7 @@ function handlePlay(request) {
       lastRpc: 0, lastTick: 0, lastRender: 0,
       lastHost: null, lastSequence: null, sourceOrder: new Map(), preOriginInputs: 0,
       recordReplay: false, completed: false,
+      localPlan: null, localPage: 0, touchPlayer: null, recordLimits: null,
       mode: "live", physicalInput: false, touchInput: false, touchWidth: null, touchHeight: null,
       hidSources: null, gamepadAdapter: null,
       rate: null, network: null, samplesEnded: false, commandsDrained: false,
@@ -1180,9 +1280,22 @@ function handlePlay(request) {
   try {
     if (request.kind === "play-stop") { stopPlay(state, request); return; }
     if (request.kind === "play-start") throw new Error("Gameplay setup is already owned by this identity.");
-    const requiresRpc = ["play-sample", "play-audio", "play-commands", "play-activate", "play-network-ready"].includes(request.kind);
+    const requiresRpc = ["play-sample", "play-audio", "play-commands", "play-activate", "play-network-ready", "play-page"].includes(request.kind);
     if (request.rpcId !== undefined && !requiresRpc && request.kind !== "play-ack") throw new Error("Unexpected gameplay RPC identity.");
     rpc(state, request, requiresRpc);
+    if (request.kind === "play-page") {
+      let reason = null;
+      if (!state.localPlan || !state.game || !state.prepared) reason = "Wait for actual local player preparation before paging.";
+      else if (!integer(request.page, 0, Math.ceil(state.localPlan.members.length / 4) - 1)) reason = "Invalid local player page.";
+      else if (state.touchPlayer !== null && request.page !== state.localPage) reason = "The configured touch player page cannot move during this session.";
+      if (reason !== null) report("play-reply", { playId: state.id, rpcId: request.rpcId, error: reason });
+      else {
+        state.localPage = request.page;
+        reply(state, request, { kind: "local-page", page: state.localPage });
+        scheduleDraw();
+      }
+      return;
+    }
     if (!state.game || !state.prepared) throw new Error("Wait for actual gameplay preparation.");
     if (request.kind === "play-sample") samplePlay(state, request);
     else if (request.kind === "play-audio") { audioHandled = true; attachAudio(state, request); }
