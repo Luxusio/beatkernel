@@ -1266,8 +1266,8 @@ original sample, independent of fanout. Keep setup, timing, input and lifetime o
 Worker; Window remains responsible for browser-required acquisition only.
 
 Known ceiling: Automatic standard solo Window forwarding is implemented in
-source as described below. Explicit nonstandard page profile selection remains
-work. This does not prove browser/device/capture/replay acceptance. Axis/touched bindings do
+source as described below. Explicit nonstandard page profile selection also has a source implementation
+as described below. This does not prove browser/device/capture/replay acceptance. Axis/touched bindings do
 not imply support by ordinary press judgment. Late sampled changes are refused
 by the existing committed-prefix contract; polling cannot recover unobserved
 intermediate transitions. Browser input latency needs actual measurement.
@@ -1314,6 +1314,50 @@ original time and prior cursor, never a stale last Gamepad sample.
 
 Known ceiling: Actual browser/device execution and measured latency remain
 unverified. Snapshot polling cannot recover intermediate transitions.
-Nonstandard automatic bindings and local multiplayer assignment remain work;
+Nonstandard layouts have optional explicit profile support; automatic inferred
+bindings and local multiplayer assignment remain work;
 explicit configured axis events do not imply ordinary press-chart judgment.
 The existing late-input refusal remains observable at the committed frontier.
+
+
+## Optional Gamepad profile file
+
+Window accepts an optional actual JSON profile File for live Gamepad play and
+forwards it unchanged. It validates only the nonempty file's size (at most
+1 MiB), retains its selection across stop and invalid replacements, and offers
+explicit clear to restore automatic standard mapping. Selection/clear controls
+are locked during active work. Replay ignores the live profile and performs
+no device acquisition. An explicit profile requires Gamepad acquisition support.
+File reading, parsing, matching and control construction belong to Worker.
+
+Version 1 is strict UTF-8 JSON with exactly `version` and `profiles`. Profiles
+number one to sixteen. Each profile has mandatory `bindingWords` (one to 256
+complete three-word rows: lane, type, index) and optional exact `id`, `mapping`,
+`buttons` and `axes` matchers. Unknown fields and coercion are refused. Product
+descriptions are bounded to 1024 code units; mapping is empty or standard,
+button count 0–128, axis count 0–64. Types are the existing pressed button,
+absolute stick axis, analog button value and touched button namespaces.
+Only pressed-button bindings prove ordinary press-chart coverage.
+
+Worker snapshots actual source descriptors before asynchronous reads. Every
+profile is validated, including unmatched ones. For each owned source, zero
+matches means ignored; multiple matches mean ambiguous and fail. No matched
+source fails an explicitly selected profile. Checked controls use the actual
+matched device's counts. Build exact-source binding rows retaining all 64
+source bits and enforce at most 256 combined Gamepad rows. Several identical
+products may share a profile while retaining separate runtime sources. The
+product description is not a serial identity or a local-player assignment.
+
+Read the actual File exactly once and require its returned fixed byte length
+to match the snapshotted size. Ownership is checked after each await, so stop
+cannot create a late game. Explicit profile plus descriptors is exclusive
+with lower-level numeric `gamepadSetup`; no profile preserves automatic setup.
+Window verifies a nonempty distinct admitted subset of its actual owned
+sources before audio activation. It does not parse matchers to infer admission.
+During explicit-profile preparation an owned candidate disconnect cancels
+setup; after preparation only admitted disconnects stop play.
+
+Known ceiling: Profile/page source support does not establish actual browser,
+device, capture/replay or latency acceptance. Typed axes remain axes without
+ordinary press judgment. Local multiplayer assignment is separate remaining
+work, and polling/committed-frontier limits remain as specified above.

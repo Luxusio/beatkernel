@@ -950,4 +950,31 @@ ignored. Replay performs no Gamepad discovery. HID/Gamepad share source
 allocation, admitted disconnect stops play, and cleanup failures require
 reload. Mixed sources are ordered by original timestamp on Worker while
 retaining source-specific acquisition sequence. Browser/device latency,
-nonstandard page bindings and local multiplayer assignment remain pending.
+nonstandard automatic inference and local multiplayer assignment remain
+pending. Optional explicit nonstandard profiles are described below.
+
+
+Choose an optional Gamepad profile JSON file to customize nonstandard controls.
+Window retains and forwards the actual File; Worker parses and matches it during
+live setup. Clear profile restores standard automatic bindings. Replay ignores
+this draft. Version 1 uses profiles with optional exact product `id`, `mapping`,
+button count `buttons` and axis count `axes`, and mandatory triples of lane,
+control type and index in `bindingWords`. Types 0–3 mean pressed button, stick
+axis, analog button value and touched button; axes remain typed axes. For example:
+
+```json
+{
+  "version": 1,
+  "profiles": [{
+    "mapping": "",
+    "buttons": 2,
+    "bindingWords": [17, 0, 0, 18, 0, 1]
+  }]
+}
+```
+
+This example matches nonstandard devices with exactly two buttons; use the
+actual controller's layout and matchers. Ambiguity, invalid rows, no matching
+source and out-of-range controls are refused. Bounds and lifecycle rules are
+in `doc/kernel/REQ__bms-browser.md`. Profile tests and browser/device execution
+remain deferred; no physical timing acceptance is claimed.
