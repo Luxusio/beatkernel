@@ -910,6 +910,37 @@ This limit extension is a component for future browser room integration.
 Generated bindings and a Worker-owned room client are still required; it does
 not select group mode automatically or prove browser/server interoperability.
 
+## Worker room admission owner
+
+Expose the actual common RoomClientSession through BrowserRoomClient bindings.
+WASM owns BKMR decoding, participant leases, roster/phase validation, request
+roles and complete-write receipts. Supply bounded prefixes only after checking
+decoder need in JavaScript; never parse or reconstruct room protocol in JS.
+Export complete bounded snapshots with full-width participant IDs and typed
+local player rosters. A revision records successfully received frames only.
+
+The room owner component runs with the game/network Worker and acquires exactly
+one WebTransport channel using the 65808-byte prefix limit. It retains one
+pending read and one pending write. Join/setup has one overall deadline until
+the first valid room snapshot. Idle room reads await data/cancellation; after
+the first bytes, a separate deadline bounds the whole incomplete frame, without
+resetting on each small fragment. Writes complete before crediting frame IDs.
+Queued requests wake the writer directly; admission needs no periodic timer.
+
+Seal/readiness requests retain common role/preparation rules. Local state
+refusals are recoverable; stream, decoder, malformed DTO or lifecycle failures
+fence the owner. Leave resolves only after its complete local write, without
+claiming a remote ACK. Close/cancel joins owned loop and channel read/write API continuations, closes the
+channel and closes/frees WASM ownership once. Late open/read/write completion
+cannot access freed WASM or revive an owner. Platform cleanup promises remain
+best-effort and do not certify OS/browser resource release.
+
+Publish room snapshots only on successful changes, using bounded callbacks and
+retained state in Worker. Window does not relay frames, ACKs or periodic roster
+updates. The component and source bindings do not yet establish generated-glue,
+Worker/page lobby integration, multi-host starts/progress/final ACKs or browser
+interoperability. Prepare lifecycle fixtures for deferred execution.
+
 ## Explicit live multiplayer and output start
 
 Solo Play shall remain the default automatic audio path. An explicit live-only
