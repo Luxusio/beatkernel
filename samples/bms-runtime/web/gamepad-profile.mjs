@@ -139,7 +139,7 @@ export function snapshotGamepadSetup(value) {
       throw new Error("Gamepad binding rows require unique valid lanes, sources and controls.");
     }
     rows.add(key);
-    if (type === 0) lanes.add(lane); // Other physical kinds do not prove press coverage.
+    if (type === 0 || type === 3) lanes.add(lane); // Both emit Button; axes do not prove press coverage.
     physicalWords.set([lane, 1, low, high, 1, BACKEND, type * 0x10000 + index], offset / 5 * 7);
   }
   return Object.freeze({ devices: Object.freeze(devices), bindingWords, physicalWords,
