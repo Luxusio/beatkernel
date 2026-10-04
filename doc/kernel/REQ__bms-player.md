@@ -192,7 +192,8 @@ timing options remain advanced overrides; omitted device IDs use the solo
 automatic preparation policy below. No in-session device substitution occurs.
 Bound drafts to 128 fields, 4096 UTF-8 bytes per value and 64 KiB total value
 bytes. Keep values intact as flag/value pairs rather than parsing shell text.
-Cursor movement and deletion honor UTF-8 scalar boundaries; reject controls and
+Committed cursor movement and deletion honor extended grapheme boundaries;
+public positions remain UTF-8 byte offsets. Reject controls and
 newlines. Native IME search/settings input is owned by the active screen and
 selected field, including profile paths. Bounded preedit previews never modify
 the draft, search projection or persisted arguments; commits use the existing
@@ -323,7 +324,7 @@ apply only to the focused editable field while UI is ready; active IME
 composition retains keyboard ownership. Search, native settings values/profile,
 display options, practice start/end and record-directory drafts share this model.
 
-Selections use ordered UTF-8 byte boundaries and scalar movement. Reversing
+Selections use ordered UTF-8 byte boundaries and extended grapheme movement. Reversing
 direction retains the starting anchor until collapse. Ordinary Left/Right
 collapse selection to its start/end without another step. Insertion replaces
 selection once; Backspace/Delete remove it once. Validate control characters and
@@ -332,13 +333,25 @@ editor on failure. IME preview replaces the base selection in a clone; cancel
 preserves the base and commit replaces it once. Empty preedit clears composition
 without deleting the selected base text. Native cursor visibility stays intact.
 
+Use full-string extended grapheme segmentation for committed edits, including
+combining marks, decomposed Hangul, emoji modifiers, ZWJ sequences and regional
+indicator pairs. After insertion or deletion joins neighboring clusters, move
+the committed caret forward to the next whole-cluster boundary. Selection
+endpoints must remain whole-cluster boundaries. Native preedit cursor/selection
+keeps the platform's original ordered scalar byte endpoints, even inside a
+cluster; ordinary edits of such a preview normalize endpoints before mutation.
+Keep the 4096-byte field bound and atomic validation. Segmentation runs only on
+editor commands, without per-frame caches or work in gameplay/audio callbacks.
+Visible windows and font decorations retain scalar metrics in this phase;
+grapheme-safe clipping and complex-script shaping remain separate work.
+
 The borrowed visible projection clips selected ranges to scalar columns and the
 existing focused text-field renderer highlights them. Equality changes repaint
 the relevant retained field; identical updates stay idle. Each retained editor
 keeps its selection across focus changes until that draft is reset/replaced;
 unfocused fields hide it. Held modifiers reset when UI becomes unavailable,
 including focus loss, occlusion, suspend, pending work and closing. Ordinary
-field changes retain held modifiers. Mouse/word/grapheme selection and
+field changes retain held modifiers. Mouse/word selection and
 IME in additional dialogs remain separate work. Regression fixtures cover model,
 scene geometry, retained invalidation and actual desktop event routing; execution
 and native keyboard/IME acceptance remain deferred.
@@ -478,7 +491,7 @@ Native filesystem/window/device/performance acceptance remains unverified.
   batch are rendered per frame (65,536 UI rectangles). Note overlap and geometry
   capacity overflow report an error — revise admission for denser layouts.
 - Supplied fonts render catalog titles/artists and editable fields; remaining
-  labels and noneditable metadata use bitmap glyphs. Shaping, grapheme editing
+  labels and noneditable metadata use bitmap glyphs. Shaping, grapheme-safe clipping
   and fallback fonts remain pending; native visual acceptance is deferred.
 - Full-song completion now has source integration; native presentation and
   full-queue admission behavior remain unexecuted — verify these boundaries,
@@ -896,7 +909,7 @@ the 1024-scalar draw window even for long or zero-advance input. Font-generation
 changes invalidate input nodes; cached identical updates leave retained nodes
 idle. Full renderer recovery uploads the latest CPU atlas, creates a new texture
 identity and rebinds fields/rebuilds Selection; surface-only recovery retains it.
-Font fallback, shaping, grapheme editing and native visual acceptance remain
+Font fallback, shaping, grapheme-safe clipping and native visual acceptance remain
 unfinished. Source fixtures cover these boundaries for later execution.
 
 Portable font preparation accepts caller-provided TrueType/OpenType bytes and
