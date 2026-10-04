@@ -190,7 +190,8 @@ Selection supports PageUp/Down by fifteen rows and Home/End within search
 results. Wheel over a chart row moves through those results, with fractional
 trackpad movement accumulated and at most one page admitted per event.
 Focused search Home/End moves its text cursor.
-Native IME input supports search, settings values and profile paths. Focused
+Native IME input supports search, settings values/profile, display options,
+practice start/end and the record directory. Focused
 fields underline the composition and highlight the IME's selected range, clipped
 to the visible text window. An absent IME cursor range hides the caret;
 an explicitly collapsed range keeps it visible. Range-only changes update the retained field.
@@ -286,8 +287,9 @@ configuration can be overridden there before starting; device selection is optio
 output metadata on the settings worker; select an entry and Use Device to copy
 its exact ID into the draft. Apply remains separate. ASIO discovery requires an
 explicit registry view. Keyboard metadata discovery is source-integrated for
-automatic preparation and Linux per-player assignment. Search, native settings
-and profile fields support IME previews with composition ranges. All existing
+automatic preparation and Linux per-player assignment. Search, native settings,
+profile, display, practice and record-directory fields support IME previews with
+composition ranges. All existing
 text fields support Shift+Left/Right/Home/End selection and Ctrl+A (Command+A on
 macOS). Typing or deleting replaces/removes the selection; IME cancellation
 preserves it. Ctrl+C/X/V (Command+C/X/V on macOS) copies/cuts the selection or

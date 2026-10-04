@@ -194,15 +194,19 @@ Bound drafts to 128 fields, 4096 UTF-8 bytes per value and 64 KiB total value
 bytes. Keep values intact as flag/value pairs rather than parsing shell text.
 Committed cursor movement and deletion honor extended grapheme boundaries;
 public positions remain UTF-8 byte offsets. Reject controls and
-newlines. Native IME search/settings input is owned by the active screen and
-selected field, including profile paths. Bounded preedit previews never modify
+newlines. Native IME input in all existing editable fields is owned by the active
+screen and selected field: search, settings/profile, display options, practice
+start/end and record directory. Reuse the ordinary editing target and its
+screen instance instead of a second, narrower focus model. Record-directory
+publication through IME or clipboard clears stale catalog/selection/preview only
+when its committed path changes, matching ordinary text editing. Bounded preedit previews never modify
 the draft, search projection or persisted arguments; commits use the existing
 transactional editor. Switching fields/screens or losing active UI admission
 clears composition and native enable acknowledgement. Active composition
 suppresses ordinary keyboard text and shortcuts. The native event API carries
 no composition generation ID; ordered enable/disable and current-target guards
-are used without an absolute stale-event guarantee. Focused search, settings and
-profile previews retain the complete composition and optional native selection
+are used without an absolute stale-event guarantee. All admitted focused field
+previews retain the complete composition and optional native selection
 as UTF-8 byte ranges. Underline the composition and highlight a nonempty selected
 range inside the visible scalar window; clip both to the text field. Keep the
 caret position in view and show the whole composition when it fits. A missing
@@ -365,7 +369,7 @@ keeps its selection across focus changes until that draft is reset/replaced;
 unfocused fields hide it. Held modifiers reset when UI becomes unavailable,
 including focus loss, occlusion, suspend, pending work and closing. Ordinary
 field changes retain held modifiers. Mouse/word selection and
-IME in additional dialogs remain separate work. Regression fixtures cover model,
+IME in future dialogs requires the same common target. Regression fixtures cover model,
 scene geometry, retained invalidation and actual desktop event routing; execution
 and native keyboard/IME acceptance remain deferred.
 
