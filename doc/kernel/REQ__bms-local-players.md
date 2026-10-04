@@ -38,9 +38,8 @@ unavailable indicators inside their own reserved rows so the labels do not hide
 healthy saved or peer content. None of these passive presentation operations
 advances judgment, transport, audio or replay capture. The corresponding native
 geometry helper is shared with browser touch and rendering. The browser Worker
-and page still reject local network play until the actual connection and common
-start coordination are connected; binding availability is source groundwork,
-not playable network acceptance.
+and Page have actual group launch/start source paths; physical/browser/network
+and performance acceptance remain deferred.
 
 ### Whole-cohort network progress boundary
 
@@ -132,7 +131,8 @@ assign distinct input devices to prevent one physical event from playing every
 chart. Support a collection of players, including three and four; do not encode
 only P1/P2, fixed two-player fields or a four-player array. A caller-supplied
 resource capacity limits the roster (up to 64), independently of game layout.
-This is same-host local play, separate from existing network peer competition.
+Each cohort shares one host/output; optional network competition connects the
+whole cohort to a remote roster through the common group session.
 
 ### Resolved source plan shared by native and browser hosts
 
@@ -315,8 +315,8 @@ cohort complete. Save separate .p<ID>.bkr recordings after native cleanup.
 
 This integration starts with Linux terminal play and its graphical publication.
 Graphical roster assignment and native multiple-input composition have Linux,
-Windows and macOS source integration. Combined local-network sessions currently fail explicitly
-before resource acquisition rather than claim partial support.
+Windows and macOS source integration. Native local-network composition uses one
+common group owner and the native committed-output start path.
 Native execution and file/recording acceptance remain deferred.
 
 ## Known ceiling
@@ -387,7 +387,7 @@ space still permits retaining/shrinking existing u32::MAX IDs; growth fails
 atomically rather than reusing retired IDs.
 
 ### Native finite local cohort endpoints
-WASAPI shared/exclusive and CoreAudio local 2..64 sessions accept --end-ns with one shared immutable audio/logical end. Finish only after actual native presentation, every acquisition source drained, real globally committed input frontier past the terminal boundary, all members at logical end and pending resume reconciliation complete. Preserve per-player original-input prefixes and independent captures/scores; do not force unfinished notes. ASIO/network finite integration remains pending. Fixtures must be prepared for later execution; source compilation is not native acceptance.
+WASAPI shared/exclusive and CoreAudio local 2..64 sessions accept --end-ns with one shared immutable audio/logical end. Finish only after actual native presentation, every acquisition source drained, real globally committed input frontier past the terminal boundary, all members at logical end and pending resume reconciliation complete. Preserve per-player original-input prefixes and independent captures/scores; do not force unfinished notes. SDK-enabled ASIO and network cohorts retain the same common finite prefix/start policy; native SDK/transport and physical execution acceptance remain pending. Fixtures must be prepared for later execution; source compilation is not native acceptance.
 
 ### Browser page local assignment and records
 
@@ -453,9 +453,9 @@ the comparison target. Select only that exact remote PlayerId from a complete
 matching validated group prefix; do not aggregate rows, match by coincidental
 local ID or substitute a different row on missing/malformed data. Retain
 remote identity and original song time for terminal reporting. Remote reports
-never enter the local judge. Cohort network application integration remains
-required and must use one shared owner for all local members, rather than
-opening one connection per member. Compilation and deferred fixtures do not
+never enter the local judge. Cohort network application integration uses one shared owner for all local
+members, rather than opening one connection per member; platform execution
+acceptance remains deferred. Compilation and deferred fixtures do not
 prove native/browser interoperability or performance acceptance.
 
 ### Shared native cohort network owner
@@ -488,3 +488,22 @@ skips terminal progress/ACK publication and still joins the shared owner.
 Initialized setup counters are not a committed gameplay prefix. Preserve a
 failed startup lifecycle through cleanup. Malformed final state cannot skip
 worker join or independent capture publication attempts.
+
+### Windows and macOS cohort application composition
+
+Windows Raw Input and macOS IOHID local cohorts use the same prepared
+NativeGroupCompetition and NativeStartAgreement as Linux. Output is gated
+before startup; retain only original selected-device events after arming.
+Windows output adapters preserve their actual WASAPI point or ASIO interval
+startup evidence when seeding finite-end and presentation observers. CoreAudio
+uses its original host/output pair. Never replace interval bounds with a
+fabricated point or use a scalar/per-member network connection.
+
+NativeCohortSession owns the optional shared comparison reference through the
+common report pump. Whole-cohort terminal delivery and join occur after output
+stop and acquisition close have both been attempted; retain their errors and
+still attempt every independent recording publication. Use common cohort
+network finalization, including worker join on malformed terminal snapshots.
+Local network pause follows the solo restriction. Remove a platform admission
+guard only together with its actual gated-start/observation/finalization path.
+Device/cross-target execution and physical timing acceptance remain deferred.

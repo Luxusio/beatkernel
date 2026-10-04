@@ -277,8 +277,9 @@ IORegistry keyboard identities. The game owner polls one IOHID acquisition owner
 and preserves normalized Mach timestamps through the bounded merger. Each member
 keeps independent judgment, score, ghost and replay state over a shared transport,
 CoreAudio output and BGM. Missing, ambiguous or removed assignments and HID queue
-loss fail the cohort without automatic retargeting. Group plus network admission
-is rejected before native resources. Output stop and HID close precede every
+loss fail the cohort without automatic retargeting. Network cohorts use one
+common NativeGroupCompetition and committed gated-output start. Output stop
+and HID close precede shared network finalization and every
 member replay save attempt. Native execution acceptance remains deferred.
 
 ## Fresh practice preparation

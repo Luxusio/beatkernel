@@ -456,7 +456,8 @@ per-player judging/replay using the shared output and graphical assignment UI.
 Windows uses simultaneous Raw Input acquisition with the same group; macOS
 uses IOHID acquisition and one CoreAudio output.
 Linux local-input mode now publishes independent members to the graphical player;
-network competition with a local group still fails before device acquisition.
+network competition with a local group uses the same common group owner and
+committed native output-start path, with execution acceptance deferred.
 
 ## Collection-based local display
 
@@ -1177,9 +1178,10 @@ Each Scene owns one initially empty scratch vector, filled lazily and shared seq
 
 ## Finite solo network sections
 
-Solo native network competition admits an optional original-song `--end-ns`, strictly after the recorded start. Both peers exchange an exact versioned finite-section identity containing that endpoint and the existing normalized chart/rules/profile/source-seed/start/runtime identity. Different endpoints, finite versus full-song setups, or incompatible seeds/starts/rules/profiles/runtime versions cannot connect as compatible opponents. Full-song identity bytes remain unchanged. Invalid endpoints reject before ghost asset/file or socket acquisition. This section supersedes earlier finite-network rejection notes; local groups of 2..64 still reject networking before resource acquisition.
+Solo native network competition admits an optional original-song `--end-ns`, strictly after the recorded start. Both peers exchange an exact versioned finite-section identity containing that endpoint and the existing normalized chart/rules/profile/source-seed/start/runtime identity. Different endpoints, finite versus full-song setups, or incompatible seeds/starts/rules/profiles/runtime versions cannot connect as compatible opponents. Full-song identity bytes remain unchanged. Invalid endpoints reject before ghost asset/file or socket acquisition. This section supersedes earlier finite-network rejection notes; local groups of 2..64 use one shared group session and the same finite endpoint
+identity and native completion contract.
 
-Linux ALSA, Windows WASAPI/SDK-enabled ASIO and macOS CoreAudio solo owners pass the endpoint to shared competition preparation and retain their existing immutable PCM fence, logical judging prefix, actual native presentation and drained input frontier. Networking stays on its owned worker; remote summaries never enter local judging or determine completion. Each peer starts and finishes independently. Cleanup joins the socket worker after native cleanup; no synchronized start, authenticated score, authoritative ranking or guaranteed final packet is implied. Ghost comparison and captured replay headers/codecs remain unchanged, so a matching full recording may be compared over the local section prefix. Network pause and automatic network practice-loop repetition remain unsupported; a single finite network session is admitted. Pure identity and native argument fixtures must be prepared for later execution; native/socket/full acceptance remains pending.
+Linux ALSA, Windows WASAPI/SDK-enabled ASIO and macOS CoreAudio solo owners pass the endpoint to shared competition preparation and retain their existing immutable PCM fence, logical judging prefix, actual native presentation and drained input frontier. Networking stays on its owned worker; remote summaries never enter local judging or determine completion. Peers share a software start commitment while native output intervals and completion remain independently observed. Cleanup joins the socket worker after native cleanup; the committed frame does not establish physical synchronization, authenticated score, authoritative ranking or guaranteed final delivery. Ghost comparison and captured replay headers/codecs remain unchanged, so a matching full recording may be compared over the local section prefix. Network pause and automatic network practice-loop repetition remain unsupported; a single finite network session is admitted. Pure identity and native argument fixtures must be prepared for later execution; native/socket/full acceptance remains pending.
 
 ## Authoritative object presentation
 
