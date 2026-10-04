@@ -2473,6 +2473,248 @@ test("touch capture preserves original samples and shared keyboard order without
   await h.close();
 });
 
+test("coalesced touch movement forwards original ordered samples from the parent anchor and keeps absent or empty fallback", async () => {
+  const h = await harness({ touchSupported: true }); await h.preview();
+  const session = await h.launch(), worker = h.workers[0], surface = h.get("canvas");
+  h.window.devicePixelRatio = 1.5; h.resize(480, 360); h.setNow(1301);
+  const pointer = (kind, fields = {}) => surface.emit(kind, { pointerType: "touch", pointerId: -2,
+    isPrimary: true, offsetX: 120.25, offsetY: 180.5, clientX: 100, clientY: 200,
+    pressure: 0.5, timeStamp: 1300, ...fields });
+  const ack = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+    songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+  let acquired = 0, predictions = 0;
+  const noPredictions = () => { predictions++; assert.fail("predicted input cannot enter acquisition"); };
+  const notMovement = () => { assert.fail("only Move may request a coalesced list"); };
+  const display = watchPlayDisplay(h), reads = h.layoutReads, renders = worker.messages("play-render").length;
+  pointer("pointerdown", { getCoalescedEvents: notMovement, getPredictedEvents: noPredictions });
+  const down = worker.last("play-step");
+  const children = [
+    { pointerType: "touch", pointerId: -2, isPrimary: true, timeStamp: 1300.125, clientX: 99.5, clientY: 198.25, pressure: 0.125 },
+    { pointerType: "touch", pointerId: -2, isPrimary: true, timeStamp: 1300.125, clientX: 102.75, clientY: 200.5, pressure: 0.875 },
+    { pointerType: "touch", pointerId: -2, isPrimary: true, timeStamp: 1300.25, clientX: 105, clientY: 205, pressure: 1.25 },
+  ];
+  for (const child of children) {
+    Object.defineProperty(child, "offsetX", { get() { assert.fail("undispatched child offset is not the canvas coordinate"); } });
+    Object.defineProperty(child, "offsetY", { get() { return NaN; } });
+  }
+  pointer("pointermove", { timeStamp: 1300.5, pressure: 9, getPredictedEvents: noPredictions,
+    getCoalescedEvents() { acquired++; assert.equal(this.target, surface); return children; } });
+  assert.equal(acquired, 1); assert.equal(worker.last("play-step"), down);
+  children[0].clientX = 10000; children[0].pressure = 0; children[0].timeStamp = 9999;
+  h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300.375 });
+  assert.equal(h.layoutReads, reads);
+  h.resize(960, 720); const resizedReads = h.layoutReads;
+  pointer("pointerup", { timeStamp: 1300.75, offsetX: -10.25, pressure: 0, getCoalescedEvents: notMovement });
+  await ack(down);
+  const batch = worker.last("play-step");
+  assert.deepEqual(batch.events, [
+    { kind: "touch", hostNs: 1300125000n, sequence: 2n, contact: 1n, phase: 1, code: 4294967294,
+      x: 119.75, y: 178.75, pressure: 0.125, width: 480, height: 360, surfaceWidth: 720, surfaceHeight: 540 },
+    { kind: "touch", hostNs: 1300125000n, sequence: 3n, contact: 1n, phase: 1, code: 4294967294,
+      x: 123, y: 181, pressure: 0.875, width: 480, height: 360, surfaceWidth: 720, surfaceHeight: 540 },
+    { kind: "touch", hostNs: 1300250000n, sequence: 4n, contact: 1n, phase: 1, code: 4294967294,
+      x: 125.25, y: 185.5, pressure: 1.25, width: 480, height: 360, surfaceWidth: 720, surfaceHeight: 540 },
+    { hostNs: 1300375000n, key: 2, down: true, sequence: 5n },
+    { kind: "touch", hostNs: 1300750000n, sequence: 6n, contact: 1n, phase: 2, code: 4294967294,
+      x: -10.25, y: 180.5, pressure: 0, width: 960, height: 720, surfaceWidth: 1440, surfaceHeight: 1080 },
+  ]);
+  assert.equal(h.releases.length, 1); assert.equal(h.layoutReads, resizedReads);
+  await ack(batch);
+  h.setNow(1302);
+  pointer("pointerdown", { timeStamp: 1302 }); const held = worker.last("play-step");
+  pointer("pointermove", { timeStamp: 1302.125, offsetX: 400, offsetY: -20, clientX: undefined, clientY: undefined });
+  pointer("pointermove", { timeStamp: 1302.25, offsetX: 500, offsetY: 600, pressure: 0.625,
+    clientX: NaN, clientY: undefined, isPrimary: undefined,
+    getCoalescedEvents() { acquired++; return []; }, getPredictedEvents: noPredictions });
+  pointer("pointermove", { timeStamp: 1302.375, offsetX: 550, offsetY: -25, pressure: 0.75,
+    clientX: undefined, clientY: undefined, getCoalescedEvents: null });
+  pointer("pointercancel", { timeStamp: 1302.5, getCoalescedEvents: notMovement });
+  await ack(held);
+  const fallback = worker.last("play-step");
+  assert.deepEqual(fallback.events.map(event => [event.phase, event.x, event.y, event.pressure, event.hostNs, event.sequence, event.contact]), [
+    [1, 400, -20, 0.5, 1302125000n, 8n, 2n],
+    [1, 500, 600, 0.625, 1302250000n, 9n, 2n],
+    [1, 550, -25, 0.75, 1302375000n, 10n, 2n],
+    [3, 120.25, 180.5, 0.5, 1302500000n, 11n, 2n],
+  ]);
+  assert.equal(acquired, 2); assert.equal(predictions, 0); assert.equal(h.releases.length, 2);
+  assert.deepEqual(display, []); assert.equal(h.layoutReads, resizedReads);
+  assert.equal(worker.messages("play-render").length, renders); assert.equal(h.audio.polls, 0);
+  await ack(fallback);
+  h.click("stop"); await flush(); await h.receive(finalScore(session.id)); await h.close();
+});
+
+test("a malformed coalesced list refuses its whole prefix before publication or a second contact lifecycle", async () => {
+  for (const fault of ["method", "throw", "not-array", "sparse", "257", "identity", "type", "primary", "missing-primary",
+    "pressure", "client", "overflow", "parent-anchor", "parent-offset", "parent-time", "parent-primary", "descending", "raw-descending", "after-parent", "watermark"]) {
+    const h = await harness({ touchSupported: true }); await h.preview();
+    const session = await h.launch(), worker = h.workers[0], surface = h.get("canvas"); h.setNow(1301);
+    const pointer = (kind, fields = {}) => surface.emit(kind, { pointerType: "touch", pointerId: 7, isPrimary: true,
+      offsetX: 120.25, offsetY: 180.5, clientX: 100, clientY: 200, pressure: 0.5, timeStamp: 1300, ...fields });
+    pointer("pointerdown"); const down = worker.last("play-step");
+    await h.receive({ kind: "play-step-done", playId: session.id, tickId: down.tickId,
+      songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+    const first = { pointerType: "touch", pointerId: 7, isPrimary: true, timeStamp: 1300.125, clientX: 101, clientY: 201, pressure: 0.25 };
+    const last = { ...first, timeStamp: 1300.25, clientX: 102, pressure: 0.75 };
+    const parent = { timeStamp: 1300.5, getCoalescedEvents: () => [first, last] };
+    switch (fault) {
+      case "method": parent.getCoalescedEvents = 1; break;
+      case "throw": parent.getCoalescedEvents = () => { throw new Error("coalesced acquisition refused"); }; break;
+      case "not-array": parent.getCoalescedEvents = () => ({ 0: first, length: 1 }); break;
+      case "sparse": parent.getCoalescedEvents = () => [first, , last]; break;
+      case "257": parent.getCoalescedEvents = () => Array.from({ length: 257 }, () => ({ ...first })); break;
+      case "identity": last.pointerId = 8; break;
+      case "type": last.pointerType = "pen"; break;
+      case "primary": last.isPrimary = false; break;
+      case "missing-primary": delete last.isPrimary; break;
+      case "pressure": last.pressure = NaN; break;
+      case "client": last.clientX = Infinity; break;
+      case "overflow": last.clientY = 1e40; break;
+      case "parent-anchor": parent.clientX = undefined; break;
+      case "parent-offset": parent.offsetY = NaN; break;
+      case "parent-time": parent.timeStamp = NaN; break;
+      case "parent-primary": parent.isPrimary = "true"; break;
+      case "descending": last.timeStamp = 1300.0625; break;
+      case "raw-descending": first.timeStamp = 1300.0000002; last.timeStamp = 1300.0000001; break;
+      case "after-parent": last.timeStamp = 1300.75; break;
+      case "watermark": first.timeStamp = 1299.875; break;
+    }
+    const reads = h.layoutReads, before = worker.messages("play-step").length;
+    pointer("pointermove", parent); await flush();
+    assert.equal(worker.messages("play-step").length, before, fault);
+    assert.equal(worker.last("play-stop").playId, session.id, fault);
+    assert.equal(worker.last("play-stop").completed, false);
+    assert.equal(h.captures.length, 1); assert.equal(h.releases.length, 1);
+    assert.equal(h.releases[0].id, 7); assert.equal(h.layoutReads, reads);
+    pointer("pointerup", { timeStamp: 1301.125 });
+    pointer("lostpointercapture", { timeStamp: 1301.25 });
+    assert.equal(worker.messages("play-step").length, before, "failure publishes neither a valid prefix nor a synthetic release");
+    await h.receive(finalScore(session.id));
+    assert.equal(h.audio.stopStarts, 1); assert.equal(surface.dataset.touchInput, undefined);
+    await h.close();
+  }
+});
+
+test("256 coalesced samples share the exact 1024 pending boundary with keyboard input and cannot admit a capacity prefix", async () => {
+  for (const overflow of [false, true]) {
+    const h = await harness({ touchSupported: true }); await h.preview();
+    const session = await h.launch(), worker = h.workers[0], surface = h.get("canvas"); h.setNow(1301);
+    const pointer = (kind, fields = {}) => surface.emit(kind, { pointerType: "touch", pointerId: 11, isPrimary: true,
+      timeStamp: 1300, offsetX: 120.25, offsetY: 180.5, clientX: 100, clientY: 200, pressure: 0.5, ...fields });
+    const ack = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+      songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+    pointer("pointerdown"); const down = worker.last("play-step"), reads = h.layoutReads;
+    for (let batch = 0; batch < 3; batch++) {
+      const children = Array.from({ length: 256 }, (_, index) => ({ pointerType: "touch", pointerId: 11,
+        isPrimary: true, timeStamp: 1300.125, clientX: 100 + index / 4, clientY: 200, pressure: index / 256 }));
+      pointer("pointermove", { timeStamp: 1301, getCoalescedEvents: () => children });
+    }
+    for (let index = 0; index < (overflow ? 255 : 256); index++) {
+      h.window.emit(index % 2 ? "keyup" : "keydown", { code: "KeyZ", repeat: false, timeStamp: 1300.5 });
+    }
+    assert.equal(worker.messages("play-step").length, 1);
+    assert.equal(worker.messages("play-stop").length, 0);
+    assert.equal(h.layoutReads, reads);
+    if (overflow) {
+      // 768 Moves plus 255 keyboard events leave one slot. Neither of these
+      // two original samples may be accepted, and the existing queue is not truncated.
+      const children = [1300.75, 1300.875].map(timeStamp => ({ pointerType: "touch", pointerId: 11,
+        isPrimary: true, timeStamp, clientX: 101, clientY: 201, pressure: 0.25 }));
+      pointer("pointermove", { timeStamp: 1301, getCoalescedEvents: () => children }); await flush();
+      assert.equal(worker.messages("play-step").length, 1);
+      assert.equal(worker.last("play-stop").completed, false);
+      assert.equal(h.captures.length, 1); assert.equal(h.releases.length, 1);
+      await ack(down);
+      assert.equal(worker.messages("play-step").length, 1, "a late old ACK cannot publish the rejected acquisition or queued suffix");
+      await h.receive(finalScore(session.id));
+      assert.match(h.get("status").textContent, /capacity/i);
+    } else {
+      await ack(down);
+      const admitted = [];
+      for (let index = 0; index < 4; index++) {
+        const request = worker.last("play-step");
+        assert.equal(request.events.length, 256);
+        assert.equal(request.events[0].sequence, [2n, 258n, 514n, 770n][index]);
+        assert.equal(request.events.at(-1).sequence, [257n, 513n, 769n, 1025n][index]);
+        assert.equal(request.watermark, index === 3 ? 1300500000n : null);
+        admitted.push(...request.events);
+        await ack(request);
+      }
+      assert.equal(admitted.length, 1024);
+      assert.equal(admitted.filter(event => event.kind === "touch").length, 768);
+      assert.ok(admitted.slice(0, 768).every(event => event.phase === 1 && event.contact === 1n && event.hostNs === 1300125000n));
+      assert.deepEqual([admitted[0].x, admitted[255].x, admitted[255].pressure], [120.25, 184, 0.99609375]);
+      assert.ok(admitted.slice(768).every(event => event.key === 2 && event.hostNs === 1300500000n));
+      assert.equal(worker.messages("play-stop").length, 0);
+      pointer("pointerup", { timeStamp: 1301.25 });
+      const released = worker.last("play-step");
+      assert.equal(released.events.length, 1); assert.equal(released.events[0].sequence, 1026n);
+      assert.equal(released.events[0].contact, 1n); assert.equal(released.events[0].phase, 2);
+      await ack(released);
+      h.click("stop"); await flush(); await h.receive(finalScore(session.id));
+    }
+    assert.equal(h.audio.stopStarts, 1); await h.close();
+  }
+});
+
+test("coalesced movement retains held contact through paging and lost capture while cancellation fences a reentrant old acquisition", async () => {
+  const { h, session, worker, surface } = await pagedTouchSession();
+  const pointer = (kind, fields = {}) => surface.emit(kind, { pointerType: "touch", pointerId: -2, isPrimary: true,
+    timeStamp: 1300, offsetX: 120.25, offsetY: 180.5, clientX: 100, clientY: 200, pressure: 0.5, ...fields });
+  const ack = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+    songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+  pointer("pointerdown"); const down = worker.last("play-step"), original = down.events.find(event => event.kind === "touch");
+  pointer("pointermove", { timeStamp: 1300.5, getCoalescedEvents: () => [
+    { pointerType: "touch", pointerId: -2, isPrimary: true, timeStamp: 1300.125, clientX: 101, clientY: 202, pressure: 0.25 },
+    { pointerType: "touch", pointerId: -2, isPrimary: true, timeStamp: 1300.25, clientX: 104, clientY: 203, pressure: 0.75 },
+  ] });
+  h.get("local-page").value = "1"; h.get("local-page").emit("change"); await flush();
+  const captured = h.captures.length;
+  pointer("pointerdown", { pointerId: 91, timeStamp: 1300.5 });
+  assert.equal(h.captures.length, captured); assert.equal(worker.messages("play-page").length, 0);
+  await ack(down);
+  const moves = worker.last("play-step"), touches = moves.events.filter(event => event.kind === "touch");
+  assert.deepEqual(touches.map(event => [event.phase, event.hostNs, event.contact, event.x, event.y, event.pressure]), [
+    [1, 1300125000n, original.contact, 121.25, 182.5, 0.25],
+    [1, 1300250000n, original.contact, 124.25, 183.5, 0.75],
+  ]);
+  assert.equal(worker.messages("play-page").length, 0);
+  await ack(moves); const page = worker.last("play-page"); assert.equal(page.page, 1);
+  await h.reply(page, { kind: "local-page", page: 1, touchVisible: false });
+  assert.equal(h.releases.length, 0, "page adoption preserves the actual held contact");
+  h.resize(0, 0);
+  pointer("lostpointercapture", { timeStamp: 1300.75, offsetX: NaN, offsetY: undefined, pressure: undefined,
+    getCoalescedEvents() { assert.fail("lost capture remains a single original terminal sample"); } });
+  const cancelled = worker.last("play-step"), terminal = cancelled.events.find(event => event.kind === "touch");
+  assert.deepEqual([terminal.phase, terminal.contact, terminal.x, terminal.y, terminal.pressure], [3, original.contact, 124.25, 183.5, 0.75]);
+  assert.deepEqual([terminal.width, terminal.height, terminal.surfaceWidth, terminal.surfaceHeight],
+    [original.width, original.height, original.surfaceWidth, original.surfaceHeight]);
+  await ack(cancelled);
+  h.resize(960, 720); h.setNow(1301);
+  pointer("pointerdown", { timeStamp: 1301 }); const held = worker.last("play-step");
+  const before = worker.messages("play-step").length;
+  pointer("pointermove", { timeStamp: 1301.5, getCoalescedEvents() {
+    h.click("stop");
+    return [{ pointerType: "touch", pointerId: -2, isPrimary: true, timeStamp: 1301.25,
+      clientX: 105, clientY: 206, pressure: 0.875 }];
+  } });
+  await flush();
+  assert.equal(worker.messages("play-step").length, before);
+  assert.equal(worker.last("play-stop").playId, session.id);
+  assert.equal(h.releases.filter(release => release.id === -2).length, 1);
+  await ack(held); await h.receive(localFinal(session.start));
+  await localCount(h, 1);
+  const replacement = await h.launch(); h.setNow(1400);
+  pointer("pointermove", { timeStamp: 1400, getCoalescedEvents() { assert.fail("an old unowned native pointer cannot acquire movement"); } });
+  const previousPosts = worker.messages("play-step").length;
+  await ack(held);
+  assert.equal(worker.messages("play-step").length, previousPosts);
+  pointer("pointerdown", { timeStamp: 1400 }); const fresh = worker.last("play-step").events.find(event => event.kind === "touch");
+  assert.equal(fresh.phase, 0); assert.equal(fresh.contact, 1n);
+  assert.equal(worker.last("play-step").playId, replacement.id);
+  h.click("stop"); await flush(); await h.receive(finalScore(replacement.id)); await h.close();
+});
+
 test("touch capability and preparation refusals precede PCM while bounded capture failure and replay keep separate owners", async () => {
   for (const faults of [{}, { touchSupported: true, missingPointerCapture: true }, { touchSupported: true, missingPointerRelease: true }]) {
     const h = await harness(faults); await h.preview();

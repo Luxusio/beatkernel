@@ -1397,53 +1397,133 @@ function touch(event, phase, surface, lost = false) {
   if (!session || session.phase !== "playing" || !session.touchInput || session.mode !== "live"
     || surface !== canvas || surface !== session.canvas || session.owner !== owner) return;
   if (session.localSources && !session.localSources.has(2n)) return;
-  if (!lost && event.pointerType !== "touch") return;
-  if (phase === 0 && session.pageChanging && !session.contacts.has(event.pointerId)) return;
-  const id = event.pointerId;
-  const previous = session.contacts.get(id);
-  if (lost && !previous) return;
-  if ((phase === 0 && previous) || (phase !== 0 && !previous)) return;
-  event.preventDefault();
   try {
+    if (!lost && event.pointerType !== "touch") return;
+    const id = event.pointerId;
+    const previous = session.contacts.get(id);
+    if (phase === 0 && session.pageChanging && !previous) return;
+    if ((phase === 0 && previous) || (phase !== 0 && !previous)) return;
+    const owned = () => activePlay === session && session.phase === "playing" && session.owner === owner
+      && surface === canvas && surface === session.canvas;
+    const current = () => owned() && session.contacts.get(id) === previous;
+    if (!current()) return;
+    event.preventDefault();
+    if (!current()) return;
     if (!Number.isInteger(id) || id < -2147483648 || id > 2147483647) throw new Error("Touch pointer identity exceeds signed 32 bits.");
     if (session.events.length >= 1024) throw new Error("Pending input capacity exceeded.");
     if (phase === 0 && session.contacts.size >= 256) throw new Error("Touch contact capacity exceeded.");
-    const hostNs = millisecondsToNanos(event.timeStamp);
+    const timeStamp = event.timeStamp;
+    const hostNs = millisecondsToNanos(timeStamp);
     if (hostNs < session.lastHost) throw new Error("Touch input arrived behind the accepted gameplay watermark.");
-    const x = lost && !finiteTouchSample(event.offsetX) ? previous.x : event.offsetX;
-    const y = lost && !finiteTouchSample(event.offsetY) ? previous.y : event.offsetY;
-    const pressure = lost && !finiteTouchSample(event.pressure) ? previous.pressure : event.pressure;
-    const geometryAvailable = cssExtent.every(value => Number.isFinite(value) && value > 0)
-      && surfaceExtent.every(value => Number.isInteger(value) && value > 0 && value <= 0xffffffff);
-    const width = lost && !geometryAvailable ? previous.width : cssExtent[0];
-    const height = lost && !geometryAvailable ? previous.height : cssExtent[1];
-    const surfaceWidth = lost && !geometryAvailable ? previous.surfaceWidth : surfaceExtent[0];
-    const surfaceHeight = lost && !geometryAvailable ? previous.surfaceHeight : surfaceExtent[1];
-    if (!finiteTouchSample(x) || !finiteTouchSample(y) || !finiteTouchSample(pressure)
-      || !Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0
+    const [cssWidth, cssHeight] = cssExtent;
+    const [backingWidth, backingHeight] = surfaceExtent;
+    const geometryAvailable = Number.isFinite(cssWidth) && cssWidth > 0 && Number.isFinite(cssHeight) && cssHeight > 0
+      && Number.isInteger(backingWidth) && backingWidth > 0 && backingWidth <= 0xffffffff
+      && Number.isInteger(backingHeight) && backingHeight > 0 && backingHeight <= 0xffffffff;
+    const width = lost && !geometryAvailable ? previous.width : cssWidth;
+    const height = lost && !geometryAvailable ? previous.height : cssHeight;
+    const surfaceWidth = lost && !geometryAvailable ? previous.surfaceWidth : backingWidth;
+    const surfaceHeight = lost && !geometryAvailable ? previous.surfaceHeight : backingHeight;
+    if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0
       || !Number.isInteger(surfaceWidth) || surfaceWidth <= 0 || surfaceWidth > 0xffffffff
       || !Number.isInteger(surfaceHeight) || surfaceHeight <= 0 || surfaceHeight > 0xffffffff) {
       throw new Error("Touch input requires finite coordinates, pressure and positive CSS and backing extents.");
     }
+    if (phase === 1) {
+      const coalesced = event.getCoalescedEvents;
+      if (!current()) return;
+      if (coalesced != null && typeof coalesced !== "function") throw new Error("Invalid coalesced touch acquisition method.");
+      const samples = coalesced == null ? [] : coalesced.call(event);
+      if (!current()) return;
+      const count = Array.isArray(samples) ? samples.length : -1;
+      if (!current()) return;
+      if (!Number.isInteger(count) || count < 0 || count > 256) throw new Error("Coalesced touch sample capacity exceeded or malformed list.");
+      if (count > 0) {
+        if (count > 1024 - session.events.length) throw new Error("Pending input capacity exceeded.");
+        const offsetX = event.offsetX, offsetY = event.offsetY;
+        const clientX = event.clientX, clientY = event.clientY;
+        const primary = event.isPrimary;
+        if (!current()) return;
+        if (!finiteTouchSample(offsetX) || !finiteTouchSample(offsetY)
+          || !finiteTouchSample(clientX) || !finiteTouchSample(clientY) || typeof primary !== "boolean") {
+          throw new Error("Coalesced touch input requires a finite dispatched coordinate anchor.");
+        }
+        const snapshots = [];
+        let previousTime = -Infinity;
+        for (let index = 0; index < count; index++) {
+          const sample = samples[index];
+          const pointerId = sample?.pointerId, pointerType = sample?.pointerType, isPrimary = sample?.isPrimary;
+          const sampleTime = sample?.timeStamp, sampleX = sample?.clientX, sampleY = sample?.clientY;
+          const pressure = sample?.pressure;
+          if (!current()) return;
+          if (pointerId !== id || pointerType !== "touch" || isPrimary !== primary
+            || !finiteTouchSample(sampleX) || !finiteTouchSample(sampleY) || !finiteTouchSample(pressure)) {
+            throw new Error("Coalesced touch input changed its pointer identity or finite sample fields.");
+          }
+          const sampleNs = millisecondsToNanos(sampleTime);
+          if (sampleTime < previousTime || sampleTime > timeStamp || sampleNs < session.lastHost) {
+            throw new Error("Coalesced touch input has invalid acquisition chronology.");
+          }
+          // Children were not dispatched on canvas: use the parent's CSS anchor.
+          const x = offsetX + (sampleX - clientX), y = offsetY + (sampleY - clientY);
+          if (!finiteTouchSample(x) || !finiteTouchSample(y)) throw new Error("Coalesced touch coordinates exceed the physical input range.");
+          snapshots.push(Object.freeze({ hostNs: sampleNs, x, y, pressure, width, height, surfaceWidth, surfaceHeight }));
+          previousTime = sampleTime;
+        }
+        Object.freeze(snapshots);
+        if (!current()) return;
+        if (count > 1024 - session.events.length || snapshots[0].hostNs < session.lastHost) {
+          throw new Error("Coalesced touch prefix no longer fits the current input frontier.");
+        }
+        const sequence = session.sequence;
+        const lastSequence = sequence + BigInt(count);
+        if (lastSequence > 18446744073709551615n) throw new Error("Input acquisition sequence exhausted.");
+        const contact = previous.contact;
+        const batch = snapshots.map((sample, index) => Object.freeze({ ...sample,
+          kind: "touch", sequence: sequence + BigInt(index + 1), contact, phase, code: id >>> 0 }));
+        const last = snapshots[count - 1];
+        session.sequence = lastSequence;
+        session.events.push(...batch);
+        session.contacts.set(id, Object.freeze({ contact, x: last.x, y: last.y, pressure: last.pressure,
+          width, height, surfaceWidth, surfaceHeight }));
+        session.completionReady = false;
+        pumpInput(session);
+        return;
+      }
+    }
+    const offsetX = event.offsetX, offsetY = event.offsetY, sampledPressure = event.pressure;
+    if (!current()) return;
+    const x = lost && !finiteTouchSample(offsetX) ? previous.x : offsetX;
+    const y = lost && !finiteTouchSample(offsetY) ? previous.y : offsetY;
+    const pressure = lost && !finiteTouchSample(sampledPressure) ? previous.pressure : sampledPressure;
+    if (!finiteTouchSample(x) || !finiteTouchSample(y) || !finiteTouchSample(pressure)) {
+      throw new Error("Touch input requires finite coordinates and pressure.");
+    }
     const contact = previous?.contact ?? session.nextContact + 1n;
     if (contact > 18446744073709551615n) throw new Error("Touch acquisition identity exhausted.");
-    const current = { contact, x, y, pressure, width, height, surfaceWidth, surfaceHeight };
+    const sample = { contact, x, y, pressure, width, height, surfaceWidth, surfaceHeight };
     if (phase === 0) {
       // Capture belongs to this contact before any event can reach the Worker.
       surface.setPointerCapture(id);
-      session.contacts.set(id, current);
+      if (!current()) { try { surface.releasePointerCapture(id); } catch {} return; }
+      session.contacts.set(id, sample);
       session.nextContact = contact;
     } else if (phase === 2 || phase === 3) {
       session.contacts.delete(id);
       // Native release may emit lost capture; the removed owner cannot cancel twice.
       if (!lost) surface.releasePointerCapture(id);
-    } else session.contacts.set(id, current);
+      if (!owned()) return;
+    } else session.contacts.set(id, sample);
     const sequence = nextInputSequence(session);
     session.events.push({ kind: "touch", hostNs, sequence, contact, phase, code: id >>> 0,
       x, y, pressure, width, height, surfaceWidth, surfaceHeight });
     session.completionReady = false;
     pumpInput(session);
-  } catch (error) { void stopPlay(`Playback failed: ${String(error.message).slice(0, 4096)}`, true); }
+  } catch (error) {
+    if (activePlay === session && session.owner === owner && session.phase === "playing") {
+      void stopPlay(`Playback failed: ${String(error?.message ?? error).slice(0, 4096)}`, true);
+    }
+  }
 }
 
 function releaseTouches(session) {
