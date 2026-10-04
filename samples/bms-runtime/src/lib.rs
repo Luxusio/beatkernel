@@ -214,6 +214,8 @@ mod source_preparation_fixtures;
 pub mod step_gameplay;
 #[cfg(test)]
 mod step_gameplay_fixtures;
+#[cfg(test)]
+mod step_local_gameplay_fixtures;
 /// Nonblocking recorded-operation presentation and bounded remote audio batches.
 pub mod step_replay;
 #[cfg(test)]
