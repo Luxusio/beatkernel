@@ -196,6 +196,11 @@ async function workerHarness(options = {}) {
       static open() { throw new Error("Preview fixtures must not open multiplayer connections"); }
     });
   }, { context });
+  const room = new SyntheticModule(["BrowserRoomOwner"], function () {
+    this.setExport("BrowserRoomOwner", class {
+      static open() { throw new Error("Preview fixtures must not open room connections"); }
+    });
+  }, { context });
   const helpers = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
   const playHelpers = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const opponentHelpers = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
@@ -210,6 +215,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./host_model.mjs") return helpers;
     if (specifier === "./play-model.mjs") return playHelpers;
     if (specifier === "./multiplayer-owner.mjs") return network;
+    if (specifier === "./room-owner.mjs") return room;
     if (specifier === "./saved-opponents.mjs") return opponentHelpers;
     if (specifier === "./physical-input.mjs") return physicalHelpers;
     if (specifier === "./local-play-model.mjs") return localHelpers;

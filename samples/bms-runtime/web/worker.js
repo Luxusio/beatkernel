@@ -2,13 +2,14 @@ import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
 import { PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, renderedCursor } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
+import { BrowserRoomOwner } from "./room-owner.mjs";
 import { validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
 import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, projectTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
 import { snapshotHidDevices, hidSetupFromProfile } from "./hid-profile.mjs";
 import { AudioCommandClient } from "./audio-command-client.mjs";
 import { snapshotGamepadSetup, snapshotGamepadDevices, automaticGamepadSetup, gamepadSetupFromProfile, GamepadAdapter } from "./gamepad-profile.mjs";
 import { snapshotLocalPlan, localBindingWords } from "./local-play-model.mjs";
-const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
+const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserView } = runtime;
 let ready = null;
 let view = null;
 let library = null;
@@ -376,9 +377,9 @@ function retainFinalGroup(state) {
   catch (error) { state.network.failure ??= error; }
 }
 
-function groupIdentity(state) {
+function localCompetitionIdentity(state, players) {
   let identity = null;
-  for (const player of state.network.localPlayers) {
+  for (const player of players) {
     const bytes = state.game.competition_identity(player);
     if (!(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer)
       || bytes.buffer.resizable === true || !integer(bytes.byteLength, 1, 65536)) {
@@ -534,7 +535,7 @@ async function networkReady(state, request) {
     network.controller = new AbortController();
     session = network.localPlayers === null
       ? new BrowserMultiplayer(state.game.competition_identity(), network.host, 100000000n)
-      : BrowserMultiplayer.new_group(groupIdentity(state), network.localPlayers, network.host, 100000000n);
+      : BrowserMultiplayer.new_group(localCompetitionIdentity(state, network.localPlayers), network.localPlayers, network.host, 100000000n);
     const opening = BrowserMultiplayerOwner.open(network.url, { session, now: networkNow,
       ...(network.localPlayers === null ? {} : { group: true }),
       signal: network.controller.signal,
@@ -609,6 +610,187 @@ async function drainNetwork(state, score) {
   return multiplayerOutcome(network);
 }
 
+function roomAudioReady(state) {
+  return state.prepared && state.game && state.mode === "live" && state.localPlan !== null
+    && !state.active && !state.network && state.samplesEnded && state.commandsDrained
+    && !commandsPending(state) && !state.audioPumping && state.audioRpcId === null
+    && state.commandClient !== null && state.commandClient.state === "ready";
+}
+
+function closeRoomOwner(room) {
+  if (room.owner === null) return null;
+  if (room.ownerClosing === null) {
+    try { room.ownerClosing = Promise.resolve(room.owner.close()); }
+    catch (error) { room.ownerClosing = Promise.reject(error); }
+    room.ownerClosing.catch(() => {});
+  }
+  return room.ownerClosing;
+}
+
+function closeRoom(room) {
+  if (!room) return Promise.resolve(null);
+  if (room.closing !== null) return room.closing;
+  room.disposed = true; // Fence callbacks before abort can synchronously notify.
+  try { room.controller.abort(); } catch {}
+  closeRoomOwner(room);
+  room.closing = (async () => {
+    // A rejected open joins its own continuations. A late successful open is
+    // assigned below and closed here without touching the released game.
+    try { await room.opening; } catch {}
+    try { await closeRoomOwner(room); return room.cleanupError; }
+    catch (error) { return error; }
+  })();
+  return room.closing;
+}
+
+function roomClosed(state, room, error) {
+  if (play !== state || state.room !== room || room.closedReported) return;
+  room.closedReported = true;
+  report("play-room", { playId: state.id, event: { kind: "closed", error: message(error) } });
+}
+
+function roomFailure(state, room, error) {
+  if (play !== state || state.room !== room || room.disposed) return;
+  roomClosed(state, room, error);
+  failPlay(state, error);
+}
+
+function openRoom(state, request) {
+  if (!roomAudioReady(state) || state.room !== null) {
+    throw new Error("Room admission requires one pristine local game with completed audio preparation and no existing network.");
+  }
+  const url = request.url;
+  if (typeof url !== "string" || url.length === 0 || url.length > 4096) {
+    throw new Error("Room admission requires a canonical HTTPS room URL.");
+  }
+  let address;
+  try { address = new URL(url); } catch {}
+  if (!address || address.href !== url
+    || address.protocol !== "https:" || !address.hostname || address.port === "0"
+    || address.username || address.password || address.search || address.hash
+    || !/^\/rooms\/[A-Za-z0-9_-]{1,1024}$/.test(address.pathname)) {
+    throw new Error("Room admission requires a canonical HTTPS room URL.");
+  }
+  const methods = ["request_seal", "request_ready", "request_leave", "needed_bytes", "frame_pending",
+    "receive_bytes", "next_write", "written", "participant_id", "revision", "has_snapshot", "leave_written", "snapshot", "close", "free"];
+  if (typeof BrowserRoomClient !== "function" || typeof AbortController !== "function"
+    || methods.some(name => typeof BrowserRoomClient.prototype?.[name] !== "function")
+    || typeof state.game.competition_identity !== "function") {
+    throw new Error("The gameplay binding does not provide actual room admission ownership.");
+  }
+  const players = networkWords(state.game.players, 1, 64, 1, "actual room roster");
+  if (players.length !== state.localPlan.members.length
+    || players.some((player, index) => player !== state.localPlan.members[index].player)) {
+    throw new Error("Actual room players differ from the frozen local plan.");
+  }
+  const identity = localCompetitionIdentity(state, players);
+  const controller = new AbortController();
+  let session = new BrowserRoomClient(identity, players);
+  // Configuration validation in Owner.open precedes its ownership transfer.
+  // Validate the real instance too so a refused configuration stays local.
+  try {
+    if (methods.some(name => typeof session?.[name] !== "function")) throw new Error("Malformed room client binding.");
+  } catch (error) {
+    const refused = session;
+    session = null;
+    try { refused?.close(); } catch {}
+    try { refused?.free(); } catch {}
+    throw error;
+  }
+  const room = { owner: null, ownerClosing: null, controller, opening: null, closing: null,
+    rpcId: request.rpcId, disposed: false, leaving: false, closedReported: false, cleanupError: null };
+  const client = session;
+  state.room = room; // One attempt per play; this slot is never reset or reused.
+  // Install the joining promise before callbacks can fail reentrantly in open.
+  room.opening = Promise.resolve().then(async () => {
+    if (room.disposed || play !== state) {
+      const abandoned = session;
+      session = null;
+      try { abandoned.close(); } catch (error) { room.cleanupError ??= error; }
+      try { abandoned.free(); } catch (error) { room.cleanupError ??= error; }
+      return;
+    }
+    const opening = BrowserRoomOwner.open(url, { session, signal: controller.signal,
+      onSnapshot: snapshot => {
+        if (play !== state || state.room !== room || room.disposed || room.leaving) return;
+        // Accepted callbacks can run before open returns the owner. The actual
+        // session provides the participant; no roster position is substituted.
+        const participant = room.owner?.participant ?? client.participant_id();
+        if (!unsigned(participant) || participant === 0n) throw new Error("Room snapshot has no admitted participant.");
+        report("play-room", { playId: state.id, event: { kind: "snapshot", participant, snapshot } });
+      },
+      onClose: error => {
+        if (!room.leaving) roomFailure(state, room, error);
+      } });
+    session = null; // Accepted Owner.open owns and frees its actual client once.
+    let owner;
+    try { owner = await opening; }
+    catch (error) {
+      // Only configuration validation precedes Owner.open's ownership transfer.
+      // Core/transport failures already close and free the consumed client.
+      if (error?.code === "validation") session = client;
+      throw error;
+    }
+    room.owner = owner;
+    if (room.disposed || play !== state) { await closeRoomOwner(room); return; }
+    if (owner.closed) throw new Error("Room closed before acquisition completed.");
+    const rpcId = room.rpcId;
+    room.rpcId = null;
+    report("play-reply", { playId: state.id, rpcId, result: { kind: "room-opened" } });
+  }).catch(error => {
+    if (session !== null) {
+      const local = session;
+      session = null;
+      try { local.close(); } catch (failure) { room.cleanupError ??= failure; }
+      try { local.free(); } catch (failure) { room.cleanupError ??= failure; }
+    }
+    roomFailure(state, room, error);
+  });
+}
+
+function roomRequest(state, request) {
+  try {
+    if (request.kind === "play-room-open") { openRoom(state, request); return; }
+    const room = state.room;
+    if (!room || room.disposed || room.leaving || room.rpcId !== null || !room.owner || room.owner.closed) {
+      throw new Error("Wait for the current room owner before requesting a room action.");
+    }
+    if (request.kind === "play-room-leave") {
+      room.leaving = true; // Its expected onClose is not a gameplay failure.
+      room.rpcId = request.rpcId;
+      void (async () => {
+        try {
+          await room.owner.leave();
+          const cleanupError = await closeRoom(room);
+          if (cleanupError) throw cleanupError;
+          if (play !== state || room.rpcId !== request.rpcId) return;
+          room.rpcId = null;
+          reply(state, request, { kind: "room-left", leaveWritten: true });
+          roomClosed(state, room, "Room leave was written.");
+        } catch (error) {
+          if (play !== state || room.rpcId !== request.rpcId) return;
+          if (error?.code === "state" && !room.owner.closed) {
+            room.leaving = false;
+            room.rpcId = null;
+            report("play-reply", { playId: state.id, rpcId: request.rpcId, error: message(error) });
+          } else {
+            roomClosed(state, room, error);
+            failPlay(state, error);
+          }
+        }
+      })();
+      return;
+    }
+    if (!roomAudioReady(state)) throw new Error("Room requests require completed local audio preparation.");
+    const operation = request.kind === "play-room-seal" ? "seal" : "ready";
+    if (operation === "seal") room.owner.requestSeal();
+    else room.owner.requestReady();
+    reply(state, request, { kind: "room-requested", operation });
+  } catch (error) {
+    if (play === state) report("play-reply", { playId: state.id, rpcId: request.rpcId, error: message(error) });
+  }
+}
+
 function disposeGame(state) {
   const client = state.commandClient;
   state.commandClient = null;
@@ -670,17 +852,23 @@ function failPlay(state, error, request = null) {
   play = null; // Invalidates a still-awaiting preparation before releasing owners.
   stopRedraw();
   closeNetwork(state.network);
+  const roomClosing = state.room ? closeRoom(state.room) : null;
   const { cleanupError, replay, replayError, replays } = disposeGame(state);
   const text = message(cleanupError ? `${message(error)}; cleanup: ${message(cleanupError)}` : error);
-  const pending = new Set([request?.rpcId, state.startRpcId, state.audioRpcId, state.network?.rpcId]);
+  const pending = new Set([request?.rpcId, state.startRpcId, state.audioRpcId, state.network?.rpcId, state.room?.rpcId]);
   state.startRpcId = null;
   state.audioRpcId = null;
   if (state.network) state.network.rpcId = null;
+  if (state.room) state.room.rpcId = null;
   for (const rpcId of pending) if (identity(rpcId)) report("play-reply", { playId: state.id, rpcId, error: text });
-  report("play-error", { playId: state.id, message: text, released: cleanupError === null,
+  const finished = roomError => report("play-error", { playId: state.id,
+    message: roomError ? message(`${text}; room cleanup: ${message(roomError)}`) : text,
+    released: cleanupError === null && roomError === null,
     replay, replayComplete: false, replayError, ...score, ...(replays ? { replays } : {}),
     ...(state.network ? { multiplayer: multiplayerOutcome(state.network) } : {}),
     ...(savedOpponents ? { savedOpponents } : {}) }, replayTransfers(replay, replays));
+  if (roomClosing) void roomClosing.then(finished).catch(fatal);
+  else finished(null);
   scheduleDraw();
 }
 
@@ -698,19 +886,22 @@ function stopPlay(state, request) {
     state.network.stopping = true;
     clearRemoteProgress(state.network);
   }
+  const roomClosing = state.room ? closeRoom(state.room) : null;
   const { cleanupError, replay, replayError, replays } = disposeGame(state);
-  const pending = new Set([state.startRpcId, state.audioRpcId, state.network?.rpcId]);
+  const pending = new Set([state.startRpcId, state.audioRpcId, state.network?.rpcId, state.room?.rpcId]);
   state.startRpcId = null;
   state.audioRpcId = null;
   if (state.network) state.network.rpcId = null;
+  if (state.room) state.room.rpcId = null;
   for (const rpcId of pending) if (identity(rpcId)) {
     report("play-reply", { playId: state.id, rpcId, error: "Gameplay setup was stopped." });
   }
-  const stopped = multiplayer => {
-    if (replays) for (const row of replays) row.replayComplete = !cleanupError && completed && row.replay !== null && row.replayError === null;
+  const stopped = (multiplayer, roomError = null) => {
+    const cleanupFailure = cleanupError ?? roomError;
+    if (replays) for (const row of replays) row.replayComplete = !cleanupFailure && completed && row.replay !== null && row.replayError === null;
     const result = { replay, replayError, ...score, ...(multiplayer ? { multiplayer } : {}),
       ...(savedOpponents ? { savedOpponents } : {}), ...(replays ? { replays } : {}) };
-    if (cleanupError) report("play-error", { playId: state.id, message: message(cleanupError), released: false,
+    if (cleanupFailure) report("play-error", { playId: state.id, message: message(cleanupFailure), released: false,
       ...result, replayComplete: false }, replayTransfers(replay, replays));
     else report("play-stopped", { playId: state.id, ...result,
       replayComplete: completed && replay !== null }, replayTransfers(replay, replays));
@@ -718,7 +909,8 @@ function stopPlay(state, request) {
   scheduleDraw();
   // The game and samples are already released. Network disposal cannot delay
   // local ownership release or turn its failure into an incomplete replay.
-  if (state.network) void drainNetwork(state, score).then(stopped).catch(fatal);
+  if (roomClosing) void roomClosing.then(error => stopped(null, error)).catch(fatal);
+  else if (state.network) void drainNetwork(state, score).then(stopped).catch(fatal);
   else stopped(null);
 }
 
@@ -1458,7 +1650,7 @@ function handlePlay(request) {
       localPlan: null, localPage: 0, touchPlayer: null, recordLimits: null,
       mode: "live", physicalInput: false, touchInput: false, touchWidth: null, touchHeight: null,
       hidSources: null, gamepadAdapter: null,
-      rate: null, network: null, samplesEnded: false, commandsDrained: false,
+      rate: null, network: null, room: null, samplesEnded: false, commandsDrained: false,
       prepared: false, opponentCount: 0, opponentsFailed: false, opponentError: null, lastOpponents: null,
     };
     play = state; // Reserve before the ready await so stop cannot race a late owner.
@@ -1472,9 +1664,11 @@ function handlePlay(request) {
   try {
     if (request.kind === "play-stop") { stopPlay(state, request); return; }
     if (request.kind === "play-start") throw new Error("Gameplay setup is already owned by this identity.");
-    const requiresRpc = ["play-sample", "play-audio", "play-commands", "play-activate", "play-network-ready", "play-page"].includes(request.kind);
+    const roomRpc = ["play-room-open", "play-room-seal", "play-room-ready", "play-room-leave"].includes(request.kind);
+    const requiresRpc = roomRpc || ["play-sample", "play-audio", "play-commands", "play-activate", "play-network-ready", "play-page"].includes(request.kind);
     if (request.rpcId !== undefined && !requiresRpc && request.kind !== "play-ack") throw new Error("Unexpected gameplay RPC identity.");
     rpc(state, request, requiresRpc);
+    if (roomRpc) { roomRequest(state, request); return; }
     if (request.kind === "play-page") {
       let reason = null;
       if (!state.localPlan || !state.game || !state.prepared) reason = "Wait for actual local player preparation before paging.";
@@ -1498,7 +1692,7 @@ function handlePlay(request) {
     if (request.kind === "play-sample") samplePlay(state, request);
     else if (request.kind === "play-audio") { audioHandled = true; attachAudio(state, request); }
     else if (request.kind === "play-network-ready") {
-      if (!state.network || state.network.requested || state.active || !state.samplesEnded
+      if (state.room !== null || !state.network || state.network.requested || state.active || !state.samplesEnded
         || !state.commandsDrained || commandsPending(state)) throw new Error("Multiplayer readiness requires completed sample and command preparation.");
       void networkReady(state, request);
     } else if (request.kind === "play-commands") {
@@ -1515,6 +1709,7 @@ function handlePlay(request) {
       if (request.rpcId !== undefined) reply(state, request, null);
       pumpAudio(state);
     } else if (request.kind === "play-activate") {
+      if (state.room !== null) throw new Error("Room preparation has no shared playback start; activation is unavailable for this play owner.");
       if (state.active || !hostTime(request.hostNs) || !unsigned(request.startFrame)) throw new Error("Invalid or repeated gameplay activation.");
       if (state.commandClient !== null && (!state.samplesEnded || !state.commandsDrained || commandsPending(state)
         || state.audioRpcId !== null || state.commandClient.state !== "ready")) throw new Error("Direct audio preparation is not fully acknowledged.");
