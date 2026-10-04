@@ -242,7 +242,12 @@ async function harness(faults = {}) {
       assert.equal(this.terminations, 0, "posting after Worker termination");
       // The fake canvas has no native transferable. Other data follows the real
       // structured-clone shape, including BigInt and typed event arrays.
-      const posted = structuredClone(value);
+      const posted = value.kind === "play-audio" ? { ...structuredClone({ ...value, port: undefined }), port: value.port }
+        : structuredClone(value);
+      if (value.kind === "play-audio") {
+        assert.deepEqual(Array.from(transfer), [value.port]);
+        value.port.transfers++;
+      }
       // Node versions may clone File as Blob. Preserve the selected immutable
       // File endpoint here; this fake Worker never acquires its bytes.
       if (value.replayFile instanceof File) posted.replayFile = value.replayFile;
@@ -250,7 +255,7 @@ async function harness(faults = {}) {
       if (Array.isArray(value.opponents)) posted.opponents = value.opponents.map((entry, index) => ({
         ...posted.opponents[index], file: entry.file,
       }));
-      this.posts.push({ value: posted, transferCount: transfer.length });
+      this.posts.push({ value: posted, transferCount: transfer.length, transfer: [...transfer] });
     }
     terminate() { this.terminations++; traces.push(["terminate"]); }
     messages(kind) { return this.posts.map(entry => entry.value).filter(value => value.kind === kind); }
@@ -270,6 +275,7 @@ async function harness(faults = {}) {
     sampleRate: faults.actualRate ?? 48000,
     samples: [], commandsSeen: [], arms: [], polls: 0, finishes: 0, finishArgs: [], outputReads: 0,
     stopCalls: 0, stopStarts: 0, stopping: null,
+    commandPorts: [], attachments: 0, configuration: null,
     get currentFrame() {
       const frames = faults.actualRate === undefined ? now * 48 : now * faults.actualRate / 1000;
       return BigInt(Math.floor(frames));
@@ -292,12 +298,17 @@ async function harness(faults = {}) {
       if (faults.finishFailure) throw faults.finishFailure;
     },
     async arm(frame) { this.arms.push(frame); traces.push(["arm", frame]); },
-    async commands(commands) {
-      this.commandsSeen.push(structuredClone(commands));
-      traces.push(["commands", commands.length]);
-      if (faults.commandFailure) throw faults.commandFailure;
-      if (faults.commandGate) await faults.commandGate.promise;
-      return { admitted: commands.length };
+    commands() { assert.fail("Window must never copy commands or relay their per-batch ACK"); },
+    async openCommandPort() {
+      this.attachments++; traces.push(["open-command-port"]);
+      if (faults.commandPortFailure) throw faults.commandPortFailure;
+      const port = { closes: 0, transfers: 0, start() {}, postMessage() { assert.fail("Window must not post audio commands"); },
+        close() { this.closes++; } };
+      this.commandPorts.push(port);
+      const descriptor = { port, generation: this.configuration.generation,
+        queueCapacity: this.configuration.audioLimits.queueCapacity, timeoutMs: 50 };
+      if (faults.commandPortGate) await faults.commandPortGate.promise;
+      return faults.commandDescriptor ? faults.commandDescriptor(descriptor) : descriptor;
     },
     async poll() {
       this.polls++;
@@ -328,6 +339,8 @@ async function harness(faults = {}) {
     static open(options) {
       if (audioOpened) audio = createAudio();
       audioOpened = true;
+      audio.configuration = options;
+      if (faults.missingCommandPort) audio.openCommandPort = undefined;
       opens.push({ options, gesture });
       traces.push(["open", gesture]);
       return faults.openGate?.promise ?? Promise.resolve(audio);
@@ -446,11 +459,16 @@ async function harness(faults = {}) {
     try { element.emit("click"); } finally { gesture = false; }
   }
   async function receive(value, target = workers.at(-1)) {
+    if (value.kind === "play-render-done" || value.kind === "play-step-done") {
+      value = { commandsPending: false,
+        ...(value.kind === "play-render-done" ? { observedTick: target.last("play-step")?.tickId ?? 0 } : {}), ...value };
+    }
     target.emit("message", { data: structuredClone(value) });
     await flush();
   }
   async function reply(request, result, echoInputMode = true) {
     assert.ok(request, "expected an actual setup request");
+    if (request.kind === "play-audio" && result === null) result = { kind: "audio-ready", commandsPending: false };
     // Normal controlled setup replies echo the admitted route. Negative route
     // fixtures can explicitly retain missing metadata with echoInputMode=false.
     if (echoInputMode && request.kind === "play-start" && ["physical", "physical-contact"].includes(request.inputMode)
@@ -494,7 +512,7 @@ async function harness(faults = {}) {
         channels: 2, pcm: new Float32Array([0.25, -0.25, 0.5, -0.5]) });
     }
     await reply(worker.last("play-sample"), { kind: "samples-end" });
-    return worker.last("play-commands");
+    return worker.last("play-audio");
   }
   async function launch(sampleCount = 0, mode = "live") {
     const worker = workers.at(-1);
@@ -537,6 +555,148 @@ async function harness(faults = {}) {
     },
   };
 }
+
+test("live and replay transfer one real command descriptor after PCM finish and wait for initial Worker drain before arm", async () => {
+  for (const mode of ["live", "replay"]) {
+    const stopGate = deferred(), h = await harness({ stopGate });
+    const preview = await h.preview();
+    if (mode === "replay") chooseRecording(h, [selectedRecording().file]);
+    const start = await h.begin(mode), worker = h.workers[0];
+    const attachment = await h.prepared(start, 2), audio = h.audio;
+    assert.equal(h.opens[0].gesture, true);
+    assert.equal(attachment.kind, "play-audio");
+    assert.equal(attachment.generation, start.playId);
+    assert.equal(attachment.queueCapacity, h.opens[0].options.audioLimits.queueCapacity);
+    assert.equal(attachment.timeoutMs, 50);
+    assert.equal(attachment.port, audio.commandPorts[0]);
+    assert.equal(attachment.port.transfers, 1); assert.equal(audio.attachments, 1);
+    const transfer = worker.posts.find(entry => entry.value === attachment);
+    assert.deepEqual(transfer.transfer, [attachment.port]);
+    assert.equal(transfer.transferCount, 1);
+    assert.equal(audio.samples.length, 2); assert.deepEqual(audio.finishArgs, [[]]);
+    const finishIndex = h.traces.findIndex(row => row[0] === "finish");
+    const attachIndex = h.traces.findIndex(row => row[0] === "open-command-port");
+    const postIndex = h.traces.findIndex(row => row[0] === "post" && row[1] === "play-audio");
+    assert.ok(finishIndex < attachIndex && attachIndex < postIndex);
+    assert.deepEqual(audio.arms, []); assert.equal(worker.messages("play-activate").length, 0);
+    await h.reply(attachment, { kind: "audio-ready", commandsPending: false });
+    const activation = worker.last("play-activate");
+    assert.equal(audio.arms.length, 1); assert.equal(activation.startFrame, audio.arms[0]);
+    await h.reply(activation, null);
+    h.setNow(1300); await h.advance(8);
+    assert.equal(audio.polls, 1); assert.ok(worker.last("play-render"));
+    assert.equal(worker.messages("play-step").length, mode === "live" ? 1 : 0);
+    assert.equal(worker.messages("play-commands").length, 0);
+    assert.equal(worker.messages("play-ack").length, 0); assert.deepEqual(audio.commandsSeen, []);
+    h.click("stop"); await flush();
+    await h.receive(finalScore(start.playId));
+    assert.equal(h.get("play").disabled, true, "Worker release does not prove host cleanup");
+    stopGate.resolve(); await flush();
+    assert.equal(h.get("play").disabled, false);
+    assert.equal(h.get("title").textContent, preview.title);
+    assert.equal(h.get("position").value, preview.position);
+    assert.equal(audio.stopStarts, 1); assert.equal(audio.attachments, 1);
+    await h.close();
+  }
+});
+
+test("unavailable or refused direct handoff and late cancelled endpoints never fall back to Window command ownership", async () => {
+  for (const failure of ["missing", "open", "generation", "capacity", "transfer", "ready"]) {
+    const faults = failure === "missing" ? { missingCommandPort: true }
+      : failure === "open" ? { commandPortFailure: new Error("actual attachment refused") }
+      : failure === "generation" ? { commandDescriptor: value => ({ ...value, generation: value.generation + 1 }) }
+      : failure === "capacity" ? { commandDescriptor: value => ({ ...value, queueCapacity: value.queueCapacity - 1 }) } : {};
+    const h = await harness(faults); await h.preview();
+    const start = await h.begin(), worker = h.workers[0];
+    if (failure === "transfer") worker.failKind = "play-audio";
+    const attachment = await h.prepared(start);
+    if (failure === "ready") await h.reply(attachment, { kind: "audio-ready", commandsPending: true });
+    assert.equal(worker.messages("play-commands").length, 0);
+    assert.equal(worker.messages("play-ack").length, 0); assert.deepEqual(h.audio.commandsSeen, []);
+    assert.equal(worker.messages("play-activate").length, 0); assert.deepEqual(h.audio.arms, []);
+    assert.equal(worker.last("play-stop").playId, start.playId);
+    if (h.audio.commandPorts.length) assert.equal(h.audio.commandPorts[0].closes, 1);
+    await h.receive(finalScore(start.playId));
+    assert.equal(h.get("play").disabled, false);
+    assert.equal(h.audio.stopStarts, 1);
+    await h.close();
+  }
+  const gate = deferred(), h = await harness({ commandPortGate: gate }); await h.preview();
+  const start = await h.begin(), worker = h.workers[0];
+  await h.prepared(start);
+  const oldAudio = h.audio, port = oldAudio.commandPorts[0];
+  assert.equal(port.transfers, 0);
+  h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+  // A late descriptor belongs to its cancelled setup even after a new play owns the page.
+  delete h.faults.commandPortGate;
+  const next = await h.begin(); assert.ok(next.playId > start.playId);
+  gate.resolve(); await flush();
+  assert.equal(port.closes, 1); assert.equal(port.transfers, 0);
+  assert.equal(worker.messages("play-audio").length, 0);
+  assert.equal(worker.messages("play-activate").length, 0);
+  const nextAttachment = await h.prepared(next);
+  await h.reply(nextAttachment, null); await h.reply(worker.last("play-activate"), null);
+  assert.equal(h.audio.attachments, 1); assert.equal(h.audio.commandPorts[0].transfers, 1);
+  assert.equal(oldAudio.stopStarts, 1);
+  h.click("stop"); await flush(); await h.receive(finalScore(next.playId));
+  await h.close();
+});
+
+test("natural completion requires the latest issued tick and settled direct commands without receiving a Window batch", async () => {
+  const stopGate = deferred(), h = await harness({ stopGate }); await h.preview();
+  const session = await h.launch(), worker = h.workers[0];
+  h.setNow(1300); await h.advance(8);
+  const done = (request, commandsPending = false) => h.receive({ kind: "play-step-done", playId: session.id,
+    tickId: request.tickId, commandsPending, songNs: 0n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+  const firstTick = worker.last("play-step"), firstRender = worker.last("play-render");
+  await h.receive({ kind: "play-render-done", playId: session.id, renderId: firstRender.renderId,
+    completed: true, commandsPending: false, observedTick: 0 });
+  await done(firstTick);
+  assert.equal(worker.messages("play-stop").length, 0, "earlier completion cannot cover even a newer empty watermark");
+  await h.advance(8);
+  const pendingTick = worker.last("play-step"), pendingRender = worker.last("play-render");
+  await h.receive({ kind: "play-render-done", playId: session.id, renderId: pendingRender.renderId,
+    completed: false, commandsPending: true, observedTick: pendingTick.tickId });
+  await done(pendingTick, true);
+  assert.equal(worker.messages("play-stop").length, 0);
+  await h.advance(8);
+  const beforeInput = worker.last("play-step"), beforeInputRender = worker.last("play-render");
+  await h.receive({ kind: "play-render-done", playId: session.id, renderId: beforeInputRender.renderId,
+    completed: true, commandsPending: false, observedTick: beforeInput.tickId });
+  h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1324 });
+  await done(beforeInput);
+  const captured = worker.last("play-step");
+  assert.ok(captured.tickId > beforeInput.tickId); assert.equal(captured.events.length, 1);
+  await done(captured);
+  assert.equal(worker.messages("play-stop").length, 0, "issuing input invalidates the retained completion");
+  await h.advance(8);
+  const finalTick = worker.last("play-step"), finalRender = worker.last("play-render");
+  await h.receive({ kind: "play-render-done", playId: session.id, renderId: finalRender.renderId,
+    completed: true, commandsPending: false, observedTick: finalTick.tickId });
+  assert.equal(worker.messages("play-stop").length, 0, "the correlated input receipt still has to join");
+  await done(finalTick);
+  assert.equal(worker.last("play-stop").completed, true);
+  assert.equal(worker.messages("play-commands").length, 0);
+  assert.equal(worker.messages("play-ack").length, 0); assert.deepEqual(h.audio.commandsSeen, []);
+  await h.receive(finalScore(session.id)); assert.equal(h.get("play").disabled, true);
+  stopGate.resolve(); await flush();
+  assert.match(h.get("status").textContent, /Song completed/);
+  await h.close();
+
+  for (const malformed of [{ commandsPending: null, observedTick: 0 },
+    { commandsPending: false, observedTick: 1 }, { commandsPending: true, observedTick: 0 }]) {
+    const replay = await harness(); await replay.preview(); chooseRecording(replay, [selectedRecording().file]);
+    const playing = await replay.launch(0, "replay"); await replay.advance(8);
+    const endpoint = replay.workers[0];
+    await replay.receive({ kind: "play-render-done", playId: playing.id, renderId: endpoint.last("play-render").renderId,
+      completed: true, ...malformed });
+    assert.equal(endpoint.last("play-stop").completed, false);
+    assert.equal(endpoint.messages("play-step").length, 0);
+    await replay.receive(finalScore(playing.id));
+    assert.match(replay.get("status").textContent, /malformed/);
+    await replay.close();
+  }
+});
 
 test("HID permission remains an explicit gesture, retains profile metadata only and joins cancelled native ownership without stale page updates", async () => {
   const unsupported = await harness(); await unsupported.preview();
@@ -941,7 +1101,7 @@ test("finite replay metadata snapshots the actual output grid before samples and
   await h.reply(worker.last("play-sample"), { kind: "samples-end" });
   assert.deepEqual(h.audio.finishArgs, [[4411n]]);
   assert.equal(h.audio.samples[0].rate, 96000, "sample source rate does not change the output endpoint grid");
-  await h.reply(worker.last("play-commands"), null);
+  await h.reply(worker.last("play-audio"), null);
   await h.reply(worker.last("play-activate"), null);
   assert.deepEqual(reads, { end: 1, frame: 1 });
   assert.match(h.get("details").textContent, /recorded end 1\.000000001 s/);
@@ -1071,21 +1231,15 @@ test("replay preparation cancellation, mode mismatch and rejected audio prefixes
   assert.equal(file.reads, 0);
   await cancelled.close();
 
-  const failure = Object.assign(new Error("actual replay output queue rejected prefix"), { admitted: 1 });
-  const rejected = await harness({ commandFailure: failure });
+  const rejected = await harness();
   await rejected.preview();
   chooseRecording(rejected, [selectedRecording().file]);
   const replay = await rejected.launch(0, "replay");
   const worker = rejected.workers[0];
-  await rejected.receive({ kind: "play-commands", playId: replay.id,
-    batch: { sequence: 91n, commands: [command(8n), command(9n)] } });
-  assert.equal(worker.last("play-ack").sequence, 91n);
-  assert.equal(worker.last("play-ack").admitted, 1);
-  assert.equal(worker.last("play-ack").success, false);
-  assert.equal(worker.messages("play-ack").length, 1);
-  assert.equal(rejected.audio.commandsSeen.length, 1);
   await rejected.receive(finalScore(replay.id, { kind: "play-error", released: true,
-    message: "retained rejected replay commands", replay: null, replayComplete: false, replayError: null }));
+    message: "actual replay output queue rejected prefix", replay: null, replayComplete: false, replayError: null }));
+  assert.equal(worker.messages("play-ack").length, 0);
+  assert.equal(rejected.audio.commandsSeen.length, 0);
   assert.match(rejected.get("status").textContent, /actual replay output queue rejected prefix/);
   assert.equal(rejected.get("export").disabled, true);
   assert.equal(worker.messages("play-step").length, 0);
@@ -1402,13 +1556,11 @@ test("Window explicitly negotiates physical input before PCM and preserves nativ
   assert.deepEqual(Array.from(start.keyPairs).slice(0, 4), [0x16, 1, 0x11, 19]);
   const initial = await h.prepared(start, 1);
   assert.equal(h.audio.samples.length, 1);
-  await h.reply(initial, { sequence: 9007199254740993n, commands: [command(8n)] });
-  const acknowledged = worker.last("play-ack");
-  assert.equal(acknowledged.sequence, 9007199254740993n);
-  assert.equal(acknowledged.admitted, 1);
-  assert.equal(acknowledged.success, true);
-  await h.reply(acknowledged, null);
-  await h.reply(worker.last("play-commands"), null);
+  assert.equal(initial.kind, "play-audio");
+  assert.equal(h.audio.arms.length, 0, "the physical session still waits for initial core command admission");
+  await h.reply(initial, null);
+  assert.equal(worker.messages("play-commands").length, 0);
+  assert.equal(worker.messages("play-ack").length, 0);
   await h.reply(worker.last("play-activate"), null);
   h.setNow(1300);
   h.window.emit("keydown", { code: "KeyA", repeat: false, timeStamp: 1300 });
@@ -1833,35 +1985,31 @@ test("input and render reports each have one in-flight request and watermarks ca
   await h.close();
 });
 
-test("setup and active command rejection forward the exact admitted prefix once and preserve original failure", async () => {
+test("setup and active command rejection preserve the actual Worker failure without a Window command retry", async () => {
   for (const setup of [true, false]) {
-    const failure = Object.assign(new Error("original audio admission failure"), { admitted: 1 });
-    const h = await harness({ commandFailure: failure });
+    const h = await harness();
     await h.preview();
     const worker = h.workers[0];
     let playId;
-    const batch = { sequence: 9n, commands: [command(3n), command(4n)] };
     if (setup) {
       const start = await h.begin();
       playId = start.playId;
       const requested = await h.prepared(start);
-      await h.reply(requested, batch);
-      const acknowledgement = worker.last("play-ack");
-      assert.ok(acknowledgement.rpcId, "setup waits for rejection evidence to reach the real game owner");
-      await h.receive({ kind: "play-reply", playId, rpcId: acknowledgement.rpcId, error: "secondary Worker rejection" });
+      assert.equal(requested.kind, "play-audio");
+      await h.receive({ kind: "play-reply", playId, rpcId: requested.rpcId, error: "original audio admission failure" });
     } else {
       const session = await h.launch();
       playId = session.id;
-      await h.receive({ kind: "play-commands", playId, batch });
+      await h.receive(finalScore(playId, { kind: "play-error", released: true,
+        message: "original audio admission failure", hits: 2n }));
     }
-    const acknowledgement = worker.last("play-ack");
-    assert.equal(acknowledgement.sequence, 9n);
-    assert.equal(acknowledgement.admitted, 1);
-    assert.equal(acknowledgement.success, false);
-    assert.equal(worker.messages("play-ack").length, 1);
-    assert.equal(h.audio.commandsSeen.length, 1, "neither admitted prefix nor remainder is retried");
-    assert.ok(worker.last("play-stop"));
-    await h.receive(finalScore(playId, { kind: "play-error", released: true, message: "Worker retained exact rejected batch", hits: 2n }));
+    assert.equal(worker.messages("play-ack").length, 0);
+    assert.equal(worker.messages("play-commands").length, 0);
+    assert.equal(h.audio.commandsSeen.length, 0, "prefix acknowledgment belongs only to the actual Worker/core path");
+    if (setup) {
+      assert.ok(worker.last("play-stop"));
+      await h.receive(finalScore(playId, { kind: "play-error", released: true, message: "secondary Worker rejection", hits: 2n }));
+    }
     assert.match(h.get("status").textContent, /original audio admission failure/);
     assert.doesNotMatch(h.get("status").textContent, /secondary Worker rejection/);
     assert.match(h.get("status").textContent, /Hits 2/);
@@ -1870,9 +2018,8 @@ test("setup and active command rejection forward the exact admitted prefix once 
 });
 
 test("natural completion joins captured input and command admission before the normal release handshake", async () => {
-  const commandGate = deferred();
   const stopGate = deferred();
-  const h = await harness({ commandGate, stopGate, outputEvidence: { contextTime: 1.3, performanceTime: 1300 } });
+  const h = await harness({ stopGate, outputEvidence: { contextTime: 1.3, performanceTime: 1300 } });
   const saved = await h.preview();
   const session = await h.launch();
   h.setNow(1300);
@@ -1885,23 +2032,17 @@ test("natural completion joins captured input and command admission before the n
     renderId: firstReport.renderId, completed: true });
   assert.equal(worker.messages("play-stop").length, 0, "captured input and its earlier watermark must join");
   h.window.emit("keyup", { code: "KeyZ", repeat: false, timeStamp: 1308 });
-  const stepDone = request => h.receive({ kind: "play-step-done", playId: session.id,
-    tickId: request.tickId, songNs: 58000000n, hits: 4n, misses: 1n, combo: 3n, preOriginInputs: 0 });
+  const stepDone = (request, commandsPending = false) => h.receive({ kind: "play-step-done", playId: session.id,
+    tickId: request.tickId, commandsPending, songNs: 58000000n, hits: 4n, misses: 1n, combo: 3n, preOriginInputs: 0 });
   await stepDone(firstTick);
   const captured = worker.last("play-step");
   assert.deepEqual(captured.events, [
     { hostNs: 1308000000n, key: 2, down: true, sequence: 1n },
     { hostNs: 1308000000n, key: 2, down: false, sequence: 2n },
   ]);
-  await h.receive({ kind: "play-commands", playId: session.id,
-    batch: { sequence: 9n, commands: [command(3n)] } });
-  await stepDone(captured);
+  await stepDone(captured, true);
   assert.equal(worker.messages("play-stop").length, 0);
-  assert.equal(worker.messages("play-ack").length, 0, "ordinary audio work is still pending");
-  commandGate.resolve();
-  await flush();
-  assert.equal(worker.last("play-ack").sequence, 9n);
-  assert.equal(worker.last("play-ack").admitted, 1);
+  assert.equal(worker.messages("play-ack").length, 0, "direct audio work is owned by the Worker");
   assert.equal(worker.messages("play-stop").length, 0, "new input/audio invalidated the older completion receipt");
   await h.advance(8);
   const finalReport = worker.last("play-render");
@@ -2410,8 +2551,8 @@ test("finite live controls capture one pre-gesture section and join input, outpu
   assert.match(html, /<input\b(?=[^>]*\bid="live-end")(?=[^>]*\btype="text")(?=[^>]*\bvalue="")(?=[^>]*\bmaxlength="20")[^>]*>/);
   assert.match(html, /original song positions with a short preroll/);
   assert.match(html, /Leave the end blank[^<]*Replay uses its recorded section/);
-  const opening = deferred(), stopping = deferred(), commands = deferred();
-  const h = await harness({ openGate: opening, stopGate: stopping, commandGate: commands, actualRate: 44100,
+  const opening = deferred(), stopping = deferred();
+  const h = await harness({ openGate: opening, stopGate: stopping, actualRate: 44100,
     outputEvidence: { contextTime: 1.4, performanceTime: 1400 } });
   await h.preview();
   const startField = h.get("live-start"), endField = h.get("live-end"), worker = h.workers[0];
@@ -2445,7 +2586,7 @@ test("finite live controls capture one pre-gesture section and join input, outpu
     pcm: new Float32Array([0.25, -0.25]) });
   await h.reply(worker.last("play-sample"), { kind: "samples-end" });
   assert.deepEqual(h.audio.finishArgs, [[4411n]], "the endpoint uses actual output rate while PCM retains its source rate");
-  await h.reply(worker.last("play-commands"), null);
+  await h.reply(worker.last("play-audio"), null);
   assert.equal(worker.last("play-activate").startFrame, 55125n);
   assert.equal(worker.last("play-activate").hostNs, 1250000000n);
   await h.reply(worker.last("play-activate"), null);
@@ -2457,21 +2598,17 @@ test("finite live controls capture one pre-gesture section and join input, outpu
   h.window.emit("keyup", { code: "KeyZ", repeat: false, timeStamp: 1408 });
   await h.receive({ kind: "play-render-done", playId: start.playId, renderId: firstReport.renderId, completed: true });
   assert.equal(worker.messages("play-stop").length, 0);
-  const stepDone = request => h.receive({ kind: "play-step-done", playId: start.playId, tickId: request.tickId,
-    songNs: 1000000001n, hits: 4n, misses: 1n, combo: 3n, preOriginInputs: 0 });
+  const stepDone = (request, commandsPending = false) => h.receive({ kind: "play-step-done", playId: start.playId, tickId: request.tickId,
+    commandsPending, songNs: 1000000001n, hits: 4n, misses: 1n, combo: 3n, preOriginInputs: 0 });
   await stepDone(firstTick);
   const captured = worker.last("play-step");
   assert.deepEqual(captured.events, [
     { hostNs: 1408000000n, key: 2, down: true, sequence: 1n },
     { hostNs: 1408000000n, key: 2, down: false, sequence: 2n },
   ]);
-  await h.receive({ kind: "play-commands", playId: start.playId, batch: { sequence: 9n, commands: [command(3n)] } });
-  await stepDone(captured);
+  await stepDone(captured, true);
   assert.equal(worker.messages("play-stop").length, 0);
   assert.equal(worker.messages("play-ack").length, 0);
-  commands.resolve(); await flush();
-  assert.equal(worker.last("play-ack").sequence, 9n);
-  assert.equal(worker.last("play-ack").admitted, 1);
   assert.equal(worker.messages("play-stop").length, 0, "new input and commands invalidate the earlier completion receipt");
   await h.advance(8);
   await h.receive({ kind: "play-render-done", playId: start.playId, renderId: worker.last("play-render").renderId, completed: true });
@@ -2526,7 +2663,7 @@ test("invalid or mismatched live ends preserve drafts for retry and manual prefi
     lanes: [0x11], opponentCount: 0, startNs: 1000000000n, endNs: 2000000000n, endFrame: 52800n });
   await h.reply(worker.last("play-sample"), { kind: "samples-end" });
   assert.deepEqual(h.audio.finishArgs, [[52800n]]);
-  await h.reply(worker.last("play-commands"), null);
+  await h.reply(worker.last("play-audio"), null);
   await h.reply(worker.last("play-activate"), null);
   h.click("stop"); await flush();
   assert.equal(worker.last("play-stop").completed, false);
@@ -2548,7 +2685,7 @@ test("invalid or mismatched live ends preserve drafts for retry and manual prefi
     lanes: [0x11], opponentCount: 0, startNs: 9000000000n, endNs: 9000000001n, endFrame: 4801n });
   await h.reply(worker.last("play-sample"), { kind: "samples-end" });
   assert.deepEqual(h.audio.finishArgs, [[4801n]]);
-  await h.reply(worker.last("play-commands"), null);
+  await h.reply(worker.last("play-audio"), null);
   await h.reply(worker.last("play-activate"), null);
   assert.match(h.get("details").textContent, /start 9 s · recorded end 9\.000000001 s/);
   h.click("stop"); await flush(); await h.receive(finalScore(replay.playId));
@@ -2795,24 +2932,13 @@ test("audio capacity drafts snapshot before the live gesture await and retain ex
   const worker = h.workers[0], start = worker.last("play-start");
   assert.equal(start.commandBatchLimit, 3);
   assert.equal(captured.queueCapacity, 3);
-  const first = { sequence: 9007199254740993n, commands: [command(1n), command(2n), command(3n)] };
-  await h.reply(await h.prepared(start), first);
-  assert.deepEqual(h.audio.commandsSeen, [first.commands]);
-  let acknowledgement = worker.last("play-ack");
-  assert.equal(acknowledgement.sequence, first.sequence);
-  assert.equal(acknowledgement.admitted, 3);
-  assert.equal(acknowledgement.success, true);
-  assert.equal(worker.messages("play-commands").length, 1, "the next pull waits for the correlated setup ACK");
-  await h.reply(acknowledgement, null);
-  await h.reply(worker.last("play-commands"), null);
+  const attachment = await h.prepared(start);
+  assert.equal(attachment.kind, "play-audio"); assert.equal(attachment.queueCapacity, 3);
+  assert.equal(h.audio.arms.length, 0, "actual initial command draining remains a setup barrier");
+  await h.reply(attachment, null);
   await h.reply(worker.last("play-activate"), null);
-  const next = { sequence: first.sequence + 1n, commands: [command(4n)] };
-  await h.receive({ kind: "play-commands", playId: start.playId, batch: next });
-  acknowledgement = worker.last("play-ack");
-  assert.equal(acknowledgement.sequence, next.sequence);
-  assert.equal(acknowledgement.admitted, 1);
-  assert.equal(acknowledgement.success, true);
-  assert.deepEqual(h.audio.commandsSeen, [first.commands, next.commands]);
+  assert.equal(h.audio.attachments, 1); assert.deepEqual(h.audio.commandsSeen, []);
+  assert.equal(worker.messages("play-commands").length, 0); assert.equal(worker.messages("play-ack").length, 0);
   h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
   assert.ok(fields.every(field => field.disabled), "the audio cleanup owner still holds the draft controls");
   stopping.resolve(); await flush();
@@ -2975,8 +3101,7 @@ test("both playback modes refuse invalid output drafts before opening and replay
 });
 
 test("multiplayer readiness follows real audio setup and one committed grid arms both game and output", async () => {
-  const commandGate = deferred();
-  const h = await harness({ commandGate });
+  const h = await harness();
   await h.preview();
   assert.equal(h.get("multiplayer").checked, false);
   chooseMultiplayer(h);
@@ -2989,11 +3114,9 @@ test("multiplayer readiness follows real audio setup and one committed grid arms
   const commands = await h.prepared(start, 1);
   assert.equal(h.audio.finishes, 1);
   assert.equal(worker.messages("play-network-ready").length, 0);
-  await h.reply(commands, { sequence: 41n, commands: [command()] });
   assert.equal(worker.messages("play-network-ready").length, 0, "pending actual PCM command write is not readiness");
-  commandGate.resolve(); await flush();
-  await h.reply(worker.last("play-ack"), null);
-  await h.reply(worker.last("play-commands"), null);
+  assert.equal(commands.kind, "play-audio");
+  await h.reply(commands, null);
   const ready = worker.last("play-network-ready");
   assert.ok(ready);
   assert.equal(worker.messages("play-network-ready").length, 1);

@@ -325,6 +325,7 @@ async function workerHarness(options = {}) {
       if (options.stopError) throw new Error(options.stopError);
     }
     free() {
+      options.beforeFree?.(this);
       assert.equal(this.stops, 1);
       assert.equal(++this.frees, 1);
       this.disposals.push("free");
@@ -445,6 +446,7 @@ async function workerHarness(options = {}) {
   const opponentHelper = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
   const physicalHelper = new SourceTextModule(await readFile(new URL("./physical-input.mjs", import.meta.url), "utf8"), { context });
   const hidProfileHelper = new SourceTextModule(await readFile(new URL("./hid-profile.mjs", import.meta.url), "utf8"), { context });
+  const commandClient = new SourceTextModule(await readFile(new URL("./audio-command-client.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
@@ -454,6 +456,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./saved-opponents.mjs") return opponentHelper;
     if (specifier === "./physical-input.mjs") return physicalHelper;
     if (specifier === "./hid-profile.mjs") return hidProfileHelper;
+    if (specifier === "./audio-command-client.mjs") return commandClient;
     throw new Error(`Unexpected import: ${specifier}`);
   });
   await worker.evaluate();
@@ -552,6 +555,156 @@ function touchEvent(fields = {}) {
   return { kind: "touch", hostNs: ORIGIN, sequence: 1n, contact: 18446744073709551615n,
     phase: 0, code: 0xfffffffe, x: 120, y: 90, pressure: 0.5, width: 480, height: 360, ...fields };
 }
+
+// Platform endpoint only: the actual AudioCommandClient owns validation,
+// sequencing, pending promises and timers inside the Worker module.
+function commandPort() {
+  return {
+    posts: [], starts: 0, closes: 0, onmessage: null, onmessageerror: null,
+    start() { this.starts++; },
+    postMessage(value) { this.posts.push(structuredClone(value)); },
+    close() { this.closes++; },
+    async acknowledge(fields = {}) {
+      const request = this.posts.at(-1);
+      assert.ok(request);
+      this.onmessage?.({ data: { kind: "ack", generation: request.generation, sequence: request.sequence,
+        operation: "commands", status: 0, admitted: request.commands.length, error: null, report: null, ...fields } });
+      await flushJobs();
+    },
+  };
+}
+
+async function attachCommands(h, port, fields = {}) {
+  for (let count = 0; count < 3; count++) {
+    if ((await h.rpc("play-sample")).result.kind === "samples-end") break;
+    assert.ok(count < 2, "bounded generated sample owner");
+  }
+  const rpcId = ++h.rpcId;
+  await h.send({ kind: "play-audio", playId: 7, rpcId, port, generation: 7,
+    queueCapacity: 4096, timeoutMs: 50, ...fields });
+  return rpcId;
+}
+
+test("direct live and replay commands wait for actual client ACKs using core identities independent of port sequence", async () => {
+  for (const mode of ["live", "replay"]) {
+    const port = commandPort();
+    const coreSequence = 18446744073709551614n;
+    const original = { sequence: coreSequence, commands: [
+      { ...command(), voice: 18446744073709551615n, sample: 18446744073709551615n, at: -9223372036854775808n,
+        value: 9223372036854775807n, denominator: 18446744073709551615n }, command(23n),
+    ] };
+    let complete = false;
+    const h = await started({ batches: [original], observeOutput: () => complete,
+      beforeFree() { assert.equal(port.closes, 1, "client closes before generated owner disposal"); },
+      ...(mode === "replay" ? { startRequest: replayRequest(replayFile().file) } : {}) });
+    const game = h.replays[0] ?? h.games[0];
+    const rpcId = await attachCommands(h, port);
+    assert.equal(port.starts, 1); assert.equal(port.posts.length, 1);
+    assert.deepEqual(port.posts[0], { kind: "commands", generation: 7, sequence: 1, commands: original.commands });
+    assert.equal(h.of("play-reply").some(value => value.rpcId === rpcId), false);
+    assert.deepEqual(game.calls.filter(row => row[0] === "ack"), []);
+    await port.acknowledge({ generation: 8 });
+    assert.deepEqual(game.calls.filter(row => row[0] === "ack"), [], "foreign generation is never execution evidence");
+    await port.acknowledge();
+    assert.deepEqual(game.calls.filter(row => row[0] === "ack"), [["ack", coreSequence, 2, true]]);
+    assert.deepEqual(h.of("play-reply").find(value => value.rpcId === rpcId).result,
+      { kind: "audio-ready", commandsPending: false });
+    await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START });
+    game.batches.push({ sequence: coreSequence + 1n, commands: [command(31n)] });
+    if (mode === "live") await h.send(step({ events: [
+      { hostNs: ORIGIN, key: 2, down: true, sequence: 1n },
+    ] }));
+    else await h.send({ kind: "play-render", playId: 7, renderId: 1,
+      report: renderReport(), presentedNs: null });
+    const receipt = h.of(mode === "live" ? "play-step-done" : "play-render-done").at(-1);
+    assert.equal(receipt.commandsPending, true);
+    if (mode === "replay") assert.equal(receipt.observedTick, 0);
+    assert.equal(port.posts.length, 2); assert.equal(port.posts[1].sequence, 2);
+    assert.equal(h.of("play-commands").length, 0, "no batch returns through Window");
+    await port.acknowledge();
+    assert.deepEqual(game.calls.filter(row => row[0] === "ack").at(-1), ["ack", coreSequence + 1n, 1, true]);
+    complete = true;
+    await h.send({ kind: "play-render", playId: 7, renderId: 2,
+      report: renderReport(), presentedNs: null, presentedHostNs: null });
+    const final = h.of("play-render-done").at(-1);
+    assert.equal(final.completed, true); assert.equal(final.commandsPending, false);
+    assert.equal(final.observedTick, mode === "live" ? 1 : 0);
+    await h.send({ kind: "play-stop", playId: 7, completed: true });
+    assertReleased(h); assert.equal(port.closes, 1);
+    assert.equal(port.onmessage, null); assert.equal(port.onmessageerror, null);
+  }
+});
+
+test("direct command rejection retains the real core prefix while timeout, malformed ACK and cancelled late ACK never invent admissions", async () => {
+  for (const failure of ["prefix", "timeout", "malformed", "cancel"]) {
+    const port = commandPort();
+    const h = await started({ batches: [batch(9007199254740995n)],
+      ack(_game, args) { if (args[2] === false) throw new Error("secondary core refusal"); },
+      beforeFree() { assert.equal(port.closes, 1); } });
+    const game = h.games[0], rpcId = await attachCommands(h, port);
+    const lateListener = port.onmessage;
+    if (failure === "prefix") await port.acknowledge({ status: 3, admitted: 1, error: "actual queue prefix" });
+    else if (failure === "timeout") await h.runTimer(50);
+    else if (failure === "malformed") await port.acknowledge({ admitted: 1 });
+    else await h.send({ kind: "play-stop", playId: 7 });
+    const reply = h.of("play-reply").find(value => value.rpcId === rpcId);
+    assert.ok(reply.error); assert.equal(reply.result, undefined);
+    assert.deepEqual(game.calls.filter(row => row[0] === "ack"), failure === "prefix"
+      ? [["ack", 9007199254740995n, 1, false]] : []);
+    if (failure === "prefix") {
+      assert.match(h.of("play-error").at(-1).message, /actual queue prefix/);
+      assert.doesNotMatch(h.of("play-error").at(-1).message, /secondary core refusal/);
+    }
+    assertReleased(h); assert.equal(port.posts.length, 1);
+    await h.send(startRequest({ playId: 8 }));
+    const count = h.messages.length, oldCalls = game.calls.length;
+    lateListener({ data: { kind: "ack", generation: 7, sequence: 1, operation: "commands",
+      status: 0, admitted: 2, error: null, report: null } });
+    await flushJobs();
+    assert.equal(game.calls.length, oldCalls); assert.equal(h.messages.length, count);
+    assert.equal(h.games[1].stops, 0); assert.equal(port.posts.length, 1);
+    // This new owner never owned the old port.
+    await h.send({ kind: "play-stop", playId: 8 });
+  }
+});
+
+test("direct audio admission closes refused endpoints and excludes legacy pulls or ACKs after handoff", async () => {
+  for (const scenario of ["before-samples", "generation", "capacity", "already-drained", "active", "repeat", "pull", "ack"]) {
+    const h = await started(); const port = commandPort();
+    let owned = null;
+    if (scenario === "before-samples") {
+      await h.send({ kind: "play-audio", playId: 7, rpcId: ++h.rpcId, port,
+        generation: 7, queueCapacity: 4096, timeoutMs: 50 });
+    } else if (["repeat", "pull", "ack"].includes(scenario)) {
+      owned = commandPort(); await attachCommands(h, owned);
+      assert.equal(owned.starts, 1);
+      if (scenario === "repeat") await h.send({ kind: "play-audio", playId: 7, rpcId: ++h.rpcId,
+        port, generation: 7, queueCapacity: 4096, timeoutMs: 50 });
+      else if (scenario === "pull") await h.rpc("play-commands");
+      else await h.send({ kind: "play-ack", playId: 7, sequence: 1n, admitted: 0, success: true });
+    } else if (scenario === "active") {
+      for (let count = 0; count < 3; count++) await h.rpc("play-sample");
+      await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START });
+      await h.send({ kind: "play-audio", playId: 7, rpcId: ++h.rpcId, port,
+        generation: 7, queueCapacity: 4096, timeoutMs: 50 });
+    } else {
+      if (scenario === "already-drained") await h.rpc("play-commands");
+      await attachCommands(h, port, scenario === "generation" ? { generation: 8 }
+        : scenario === "capacity" ? { queueCapacity: 2 } : {});
+    }
+    assert.equal(h.of("play-error").length, 1); assertReleased(h);
+    assert.deepEqual(h.games[0].calls.filter(row => row[0] === "ack"), []);
+    assert.equal(port.starts, 0); assert.equal(port.posts.length, 0);
+    assert.equal(port.closes, ["pull", "ack"].includes(scenario) ? 0 : 1);
+    if (owned) assert.equal(owned.closes, 1);
+  }
+  const h = await started(), stale = commandPort();
+  await h.send({ kind: "play-audio", playId: 6, rpcId: 2, port: stale,
+    generation: 6, queueCapacity: 4096, timeoutMs: 50 });
+  assert.equal(stale.closes, 1); assert.equal(stale.starts, 0);
+  assert.equal(h.games[0].stops, 0); assert.equal(h.of("play-error").length, 0);
+  await h.send({ kind: "play-stop", playId: 7 });
+});
 
 test("saved prefixes refresh the Worker HUD at most four times per second and export one final full-width snapshot before disposal", async () => {
   const first = replayFile(), second = replayFile();
@@ -1425,7 +1578,8 @@ test("Window input provenance, pre-origin count and actual rendered cursor survi
   const unavailable = renderReport({ available: false });
   await h.send({ kind: "play-render", playId: 7, renderId: 1, report: unavailable, presentedNs: null, presentedHostNs: null });
   assert.deepEqual(game.calls.find(value => value[0] === "output"), ["output", unavailable.words, null]);
-  assert.deepEqual(h.of("play-render-done")[0], { kind: "play-render-done", playId: 7, renderId: 1, completed: false });
+  assert.deepEqual(h.of("play-render-done")[0], { kind: "play-render-done", playId: 7, renderId: 1,
+    completed: false, commandsPending: true, observedTick: 1 });
   const actual = renderReport();
   await h.send({ kind: "play-render", playId: 7, renderId: 2, report: actual,
     presentedNs: 9007199254742999n, presentedHostNs: ORIGIN });
@@ -1611,7 +1765,8 @@ test("actual completion result is correlated without disposing gameplay before i
   const report = renderReport();
   await h.send({ kind: "play-render", playId: 7, renderId: 1, report,
     presentedNs: 9223372036854775807n, presentedHostNs: ORIGIN });
-  assert.deepEqual(h.of("play-render-done")[0], { kind: "play-render-done", playId: 7, renderId: 1, completed: true });
+  assert.deepEqual(h.of("play-render-done")[0], { kind: "play-render-done", playId: 7, renderId: 1,
+    completed: true, commandsPending: false, observedTick: 0 });
   assert.equal(h.games[0].frees, 0);
   assert.equal(h.of("play-stopped").length, 0);
   await h.send(step({ events: [{ hostNs: ORIGIN, key: 2, down: false, sequence: 1n }] }));
