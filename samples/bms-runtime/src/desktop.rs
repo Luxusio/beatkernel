@@ -10,6 +10,9 @@ mod font_fixture;
 #[path = "desktop_room_fixtures.rs"]
 mod room_fixtures;
 #[cfg(test)]
+#[path = "desktop_room_results_fixtures.rs"]
+mod room_results_fixtures;
+#[cfg(test)]
 use beatkernel_bms_runtime::bga::BgaState;
 use beatkernel_bms_runtime::ui::{
     atoms::{rect, text},
@@ -242,12 +245,15 @@ struct Game {
 
 impl Game {
     fn room_action_allowed(&self, action: RoomUiAction) -> bool {
-        if self.replay
-            || self.joined
-            || self.cancelling
-            || self.prepared_retry.is_some()
-            || self.viewer.room_pending()
-        {
+        if self.replay || self.prepared_retry.is_some() {
+            return false;
+        }
+        if self.joined {
+            return matches!(action, RoomUiAction::Page(page) if self.snapshot.as_ref()
+                .and_then(|snapshot| snapshot.room_results.as_ref())
+                .is_some_and(|archive| !archive.failed() && page < archive.page_count()));
+        }
+        if self.cancelling || self.viewer.room_pending() {
             return false;
         }
         self.snapshot.as_ref().is_some_and(|snapshot| {
@@ -263,12 +269,26 @@ impl Game {
         })
     }
     fn request_room(&self, action: RoomUiAction) -> Result<u64, String> {
-        if !self.room_action_allowed(action) {
+        if self.joined || !self.room_action_allowed(action) {
             return Err("room control is unavailable".into());
         }
         self.viewer
             .request_room(action)
             .map_err(|error| error.to_string())
+    }
+    /// Results paging owns no command identity and never touches live controls.
+    fn select_room_result_page(&mut self, page: usize) -> Result<(), String> {
+        if !self.joined || !self.room_action_allowed(RoomUiAction::Page(page)) {
+            return Err("room Results page is unavailable".into());
+        }
+        let snapshot = self.snapshot.as_mut().ok_or("room Results are missing")?;
+        let archive = snapshot
+            .room_results
+            .as_ref()
+            .ok_or("room Results are missing")?;
+        let projected = Arc::new(archive.project(page)?);
+        snapshot.room = Some(projected);
+        Ok(())
     }
     fn pause_target(&self) -> Option<bool> {
         if self.joined || self.cancelling || self.prepared_retry.is_some() {
@@ -287,7 +307,19 @@ impl Game {
             _ => None,
         }
     }
-    fn accept_snapshot(&mut self, snapshot: player::PlayerSnapshot) {
+    fn accept_snapshot(&mut self, mut snapshot: player::PlayerSnapshot) {
+        // The archive belongs to this joined Game. A trailing final snapshot
+        // cannot reset local Results selection or install another owner.
+        if self.joined {
+            if let Some(current) = self
+                .snapshot
+                .as_ref()
+                .filter(|current| current.room_results.is_some())
+            {
+                snapshot.room_results = current.room_results.clone();
+                snapshot.room = current.room.clone();
+            }
+        }
         let count = snapshot.players.len();
         if count > 0 {
             self.local_page = self.local_page.min(
@@ -329,12 +361,7 @@ impl Game {
     }
     fn loop_controls_available(&self) -> bool {
         self.practice_position().is_some()
-            && !self.launch.args().chunks_exact(2).any(|pair| {
-                matches!(
-                    pair[0].as_str(),
-                    "--mp-host" | "--mp-join" | "--mp-webtransport"
-                )
-            })
+            && !self.network_launch()
             && self.snapshot.as_ref().is_some_and(|snapshot| {
                 matches!(
                     snapshot.pause,
@@ -343,6 +370,14 @@ impl Game {
                         | player::PauseState::Unavailable
                 )
             })
+    }
+    fn network_launch(&self) -> bool {
+        self.launch.args().chunks_exact(2).any(|pair| {
+            matches!(
+                pair[0].as_str(),
+                "--mp-host" | "--mp-join" | "--mp-webtransport" | "--mp-room"
+            )
+        })
     }
     fn mark_loop_end(&mut self) -> Result<(), String> {
         if !self.loop_controls_available() {
@@ -366,6 +401,7 @@ impl Game {
     }
     fn loop_due(&self) -> bool {
         self.loop_enabled
+            && !self.network_launch()
             && self.joined
             && self.worker.is_none()
             && !self.replay
@@ -2662,7 +2698,7 @@ impl Desktop {
                     ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
                 ) =>
             {
-                if let Some(game) = &self.game {
+                if let Some(game) = &mut self.game {
                     let page = game
                         .snapshot
                         .as_ref()
@@ -2675,7 +2711,15 @@ impl Desktop {
                         93 => RoomUiAction::Page(page.saturating_sub(1)),
                         _ => RoomUiAction::Page(page.saturating_add(1)),
                     };
-                    if let Err(error) = game.request_room(action) {
+                    let requested = if game.joined {
+                        match action {
+                            RoomUiAction::Page(page) => game.select_room_result_page(page),
+                            _ => Err("joined room controls are closed".into()),
+                        }
+                    } else {
+                        game.request_room(action).map(|_| ())
+                    };
+                    if let Err(error) = requested {
                         self.failure = Some(error);
                     }
                 }
@@ -4152,12 +4196,15 @@ impl Desktop {
                         molecules::button(pixels, bounds, label, false, false);
                     }
                 }
-                if let Some(notice) = game.viewer.room_notice() {
-                    let clip = beatkernel_bms_runtime::scene::ClipRect::new([300, 646, 300, 17])?;
-                    rect(pixels, 300, 646, 300, 17, 0x10151e);
-                    beatkernel_bms_runtime::ui::atoms::text_clipped(
-                        pixels, 312, 646, &notice, 1, 0x9bb1cf, clip,
-                    )?;
+                if !game.joined {
+                    if let Some(notice) = game.viewer.room_notice() {
+                        let clip =
+                            beatkernel_bms_runtime::scene::ClipRect::new([300, 646, 300, 17])?;
+                        rect(pixels, 300, 646, 300, 17, 0x10151e);
+                        beatkernel_bms_runtime::ui::atoms::text_clipped(
+                            pixels, 312, 646, &notice, 1, 0x9bb1cf, clip,
+                        )?;
+                    }
                 }
             }
             let count = game.snapshot.as_ref().map_or(0, |s| s.players.len());
