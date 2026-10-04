@@ -7,8 +7,8 @@ use crate::{
     audio::{AudioCommand, CommandProducer, CommandPushError, QueuePushError, SampleId, VoiceId},
     chart::ObjectId,
     input::{
-        BindingMap, DeviceId, GameInputEvent, PhysicalInputEvent, Position2, TouchRoute,
-        TouchRouter, TouchRoutingError,
+        BindingMap, DeviceId, GameInputEvent, PhysicalInputEvent, Position2, TouchRegion,
+        TouchRoute, TouchRouter, TouchRoutingError,
     },
     judge::{JudgeEngine, JudgeError, JudgeEvent, JudgeOutcome, JudgeStage},
     telemetry::{RuntimeCounters, RuntimeTelemetry},
@@ -84,6 +84,8 @@ pub enum RuntimeError {
     TouchRouting(TouchRoutingError),
     /// A touch router is already installed or the runtime has committed processing.
     TouchRoutingConfigurationLocked,
+    /// No touch router is installed for an explicit layout/policy change.
+    TouchRoutingUnavailable,
 }
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -256,6 +258,25 @@ impl Runtime {
     /// Read-only routing state for an explicitly paired gameplay checkpoint.
     pub fn touch_router(&self) -> Option<&TouchRouter> {
         self.touch_router.as_ref()
+    }
+
+    /// Changes only configured region bounds, preserving contact ownership and
+    /// all runtime clocks, sequence watermarks, judgments and audio state.
+    pub fn remap_touch_regions(&mut self, regions: Vec<TouchRegion>) -> Result<(), RuntimeError> {
+        self.touch_router
+            .as_mut()
+            .ok_or(RuntimeError::TouchRoutingUnavailable)?
+            .remap_regions(regions)
+            .map_err(RuntimeError::TouchRouting)
+    }
+
+    /// Controls fresh contact admission without releasing any held input.
+    pub fn set_touch_routing_enabled(&mut self, enabled: bool) -> Result<(), RuntimeError> {
+        self.touch_router
+            .as_mut()
+            .ok_or(RuntimeError::TouchRoutingUnavailable)?
+            .set_new_contacts_enabled(enabled);
+        Ok(())
     }
 
     /// Normalizes, binds, judges and publishes at an independently supplied output time.

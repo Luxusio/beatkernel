@@ -13,7 +13,8 @@ const MAX_CONTACTS: usize = 4096;
 /// A half-open touch rectangle in the acquisition adapter's coordinate units.
 ///
 /// Exact device/surface regions override `Any` regions for the entire surface,
-/// including gaps between exact regions. Bounds are fixed for the router's life.
+/// including gaps between exact regions. Explicit remapping may change bounds
+/// while retaining these identities and every existing contact's destination.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TouchRegion {
     /// The source selection policy.
@@ -66,6 +67,8 @@ pub enum TouchRoutingError {
         /// Later region's index in the supplied order.
         second: usize,
     },
+    /// A remap changed region count, order, source, surface or destination.
+    RegionIdentityChanged,
     /// A configured sample has a nonfinite coordinate or supplied pressure.
     NonFiniteSample,
     /// A new Down cannot fit; existing contacts may still move or release.
@@ -98,6 +101,10 @@ impl fmt::Display for TouchRoutingError {
             Self::OverlappingRegions { first, second } => {
                 write!(formatter, "touch regions {first} and {second} overlap")
             }
+            Self::RegionIdentityChanged => write!(
+                formatter,
+                "touch remapping must retain ordered region identities"
+            ),
             Self::NonFiniteSample => {
                 write!(formatter, "touch position and pressure must be finite")
             }
@@ -134,6 +141,7 @@ pub struct TouchRouter {
     regions: Vec<TouchRegion>,
     max_contacts: usize,
     contacts: Vec<ActiveContact>,
+    new_contacts_enabled: bool,
 }
 
 impl TouchRouter {
@@ -156,6 +164,7 @@ impl TouchRouter {
             regions,
             max_contacts: self.max_contacts,
             contacts,
+            new_contacts_enabled: self.new_contacts_enabled,
         })
     }
 
@@ -171,29 +180,7 @@ impl TouchRouter {
         if !(1..=MAX_CONTACTS).contains(&max_contacts) {
             return Err(TouchRoutingError::InvalidContactLimit { max_contacts });
         }
-        for (index, region) in regions.iter().enumerate() {
-            if !finite(region.min)
-                || !finite(region.max)
-                || region.min.x >= region.max.x
-                || region.min.y >= region.max.y
-            {
-                return Err(TouchRoutingError::InvalidRegion { index });
-            }
-            for (first, other) in regions[..index].iter().enumerate() {
-                if region.device == other.device
-                    && region.physical == other.physical
-                    && region.min.x < other.max.x
-                    && other.min.x < region.max.x
-                    && region.min.y < other.max.y
-                    && other.min.y < region.max.y
-                {
-                    return Err(TouchRoutingError::OverlappingRegions {
-                        first,
-                        second: index,
-                    });
-                }
-            }
-        }
+        validate_bounds(&regions)?;
         let mut contacts = Vec::new();
         contacts
             .try_reserve_exact(max_contacts)
@@ -202,7 +189,36 @@ impl TouchRouter {
             regions,
             max_contacts,
             contacts,
+            new_contacts_enabled: true,
         })
+    }
+
+    /// Changes only bounds after complete validation. Held bound and unbound
+    /// contacts, their storage and the new-contact policy remain unchanged.
+    pub fn remap_regions(&mut self, regions: Vec<TouchRegion>) -> Result<(), TouchRoutingError> {
+        if regions.len() != self.regions.len()
+            || regions.iter().zip(&self.regions).any(|(next, prior)| {
+                next.device != prior.device
+                    || next.physical != prior.physical
+                    || next.game_control != prior.game_control
+            })
+        {
+            return Err(TouchRoutingError::RegionIdentityChanged);
+        }
+        validate_bounds(&regions)?;
+        self.regions = regions;
+        Ok(())
+    }
+
+    /// Disabled fresh Downs retain an unbound contact until its real release;
+    /// existing contacts keep their destinations and never fall through bindings.
+    pub fn set_new_contacts_enabled(&mut self, enabled: bool) {
+        self.new_contacts_enabled = enabled;
+    }
+
+    /// Whether a fresh Down may select a configured region.
+    pub const fn new_contacts_enabled(&self) -> bool {
+        self.new_contacts_enabled
     }
 
     /// Routes one sample, preserving first-Down ownership and the full payload.
@@ -269,18 +285,21 @@ impl TouchRouter {
                 if self.contacts.len() == self.max_contacts {
                     return Err(TouchRoutingError::ContactCapacity);
                 }
-                let destination = self
-                    .regions
-                    .iter()
-                    .find(|region| {
-                        region.device == selector
-                            && region.physical == touch.control
-                            && position.x >= region.min.x
-                            && position.x < region.max.x
-                            && position.y >= region.min.y
-                            && position.y < region.max.y
-                    })
-                    .map(|region| region.game_control);
+                let destination = if self.new_contacts_enabled {
+                    self.regions
+                        .iter()
+                        .find(|region| {
+                            region.device == selector
+                                && region.physical == touch.control
+                                && position.x >= region.min.x
+                                && position.x < region.max.x
+                                && position.y >= region.min.y
+                                && position.y < region.max.y
+                        })
+                        .map(|region| region.game_control)
+                } else {
+                    None
+                };
                 self.contacts.push(ActiveContact {
                     source: touch.meta.source,
                     physical: touch.control,
@@ -331,4 +350,31 @@ impl TouchRouter {
 
 fn finite(position: Position2) -> bool {
     position.x.is_finite() && position.y.is_finite()
+}
+
+fn validate_bounds(regions: &[TouchRegion]) -> Result<(), TouchRoutingError> {
+    for (index, region) in regions.iter().enumerate() {
+        if !finite(region.min)
+            || !finite(region.max)
+            || region.min.x >= region.max.x
+            || region.min.y >= region.max.y
+        {
+            return Err(TouchRoutingError::InvalidRegion { index });
+        }
+        for (first, other) in regions[..index].iter().enumerate() {
+            if region.device == other.device
+                && region.physical == other.physical
+                && region.min.x < other.max.x
+                && other.min.x < region.max.x
+                && region.min.y < other.max.y
+                && other.min.y < region.max.y
+            {
+                return Err(TouchRoutingError::OverlappingRegions {
+                    first,
+                    second: index,
+                });
+            }
+        }
+    }
+    Ok(())
 }
