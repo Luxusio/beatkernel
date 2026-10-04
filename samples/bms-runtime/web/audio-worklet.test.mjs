@@ -89,6 +89,7 @@ async function harness(faults = {}) {
     report_word(index, high) {
       assert.equal(inProcess, false, "polling must stay outside process");
       this.calls.reports.push([index, high]);
+      if (this.calls.reports.length === faults.reportThrowAt) throw new Error("actual report binding failed");
       return this.words[index * 2 + Number(high)];
     }
     free() {
@@ -201,7 +202,7 @@ test("command endpoint refusal and actual partial admission fence both lanes onc
   const cases = [
     { fields: { generation: 16 }, status: 102 }, { fields: { sequence: 2 }, status: 101 },
     { fields: { sequence: Number.MAX_SAFE_INTEGER + 1 }, status: 101 },
-    { fields: { kind: "stop" }, status: 100 }, { fields: { kind: "poll" }, status: 100 },
+    { fields: { kind: "stop" }, status: 100 }, { fields: { kind: "finish" }, status: 100 },
     { fields: { commands: [command(), command({ extra: true })] }, status: 100 },
     { fields: { commands: [command(), command({ gain: NaN })] }, status: 100 },
     { fields: { commands: Array.from({ length: 5 }, () => command()) }, status: 100 },
@@ -234,6 +235,104 @@ test("command endpoint refusal and actual partial admission fence both lanes onc
     h.send(processor, "stop", 20);
     assert.equal(owner.frees, 1); assert.equal(port.closes, 1); assert.equal(processor.port.closed, true);
     assert.deepEqual(port.messages.at(-1), { kind: "closed", generation: 17 });
+  }
+});
+
+test("host and direct polling read the same actual report words outside process with independent lane sequences", async () => {
+  const h = await harness(), processor = h.create(), owner = h.owners[0], port = h.commandPort();
+  h.send(processor, "finish", 1); h.send(processor, "attach-commands", 2, { port });
+  port.send({ kind: "poll", generation: 17, sequence: 1 });
+  const empty = port.messages.at(-1);
+  assert.equal(empty.operation, "poll"); assert.equal(empty.sequence, 1);
+  assert.equal(empty.status, 0); assert.equal(empty.admitted, 0); assert.equal(empty.error, null);
+  assert.equal(empty.report.available, false);
+  assert.deepEqual(Array.from(empty.report.words), Array(56).fill(0));
+  const hostEmpty = h.send(processor, "poll", 3);
+  assert.deepEqual(Array.from(hostEmpty.report.words), Array.from(empty.report.words));
+  assert.equal(hostEmpty.sequence, 3); assert.equal(owner.calls.render.length, 0);
+  assert.equal(owner.calls.reports.length, 112);
+  assert.equal(empty.report.words.byteOffset, 0); assert.equal(empty.report.words.buffer.byteLength, 224);
+  const values = [command(), command({ kind: 1 })];
+  port.send({ kind: "commands", generation: 17, sequence: 2, commands: values });
+  assert.equal(port.messages.at(-1).admitted, 2); assert.equal(port.messages.at(-1).report, null);
+  assert.equal(h.send(processor, "arm", 4, { frame: 9007199254740993n }).status, 0);
+
+  owner.pcm = new Float32Array([0.25, -0.25, 0.5, -0.5, 1, -1]);
+  const readCount = owner.calls.reports.length, messages = port.messages.length;
+  assert.equal(h.process(processor, 3 * 4294967296 + 7, planar(3)), true);
+  assert.equal(owner.calls.reports.length, readCount, "process never allocates or reads the control report");
+  assert.equal(port.messages.length, messages);
+  // Opaque binding values exercise exact word transport, not fake Mixer physics.
+  owner.words.set([1, 0, 0xffffffff, 0x80000000, 3, 0, 0xffffffff, 0xffffffff]);
+  owner.words[48] = 0x89abcdef; owner.words[49] = 0xfedcba98;
+  owner.words[54] = 0xffffffff; owner.words[55] = 0xffffffff;
+  port.send({ kind: "poll", generation: 17, sequence: 3 });
+  const direct = port.messages.at(-1), host = h.send(processor, "poll", 5);
+  assert.equal(direct.operation, "poll"); assert.equal(direct.sequence, 3);
+  assert.equal(direct.admitted, 0); assert.equal(direct.report.available, true);
+  assert.deepEqual(Array.from(direct.report.words), Array.from(owner.words));
+  assert.deepEqual(Array.from(host.report.words), Array.from(direct.report.words));
+  assert.equal(owner.calls.reports.length, readCount + 112);
+  assert.deepEqual(owner.calls.reports.slice(readCount, readCount + 56),
+    Array.from({ length: 28 }, (_, index) => [[index, false], [index, true]]).flat());
+  const retained = direct.report.words.slice();
+  owner.words[2] = 17;
+  port.send({ kind: "commands", generation: 17, sequence: 4, commands: [command({ kind: 3 })] });
+  assert.equal(port.messages.at(-1).admitted, 1); assert.equal(port.messages.at(-1).report, null);
+  port.send({ kind: "poll", generation: 17, sequence: 5 });
+  assert.equal(port.messages.at(-1).report.words[2], 17);
+  assert.deepEqual(Array.from(direct.report.words), Array.from(retained), "later polls cannot replace an already sent report");
+  assert.equal(owner.calls.enqueue.length, 3);
+  assert.equal(notices(processor, "ack").length, 5, "direct command and report ACKs stay off the host lane");
+  h.send(processor, "stop", 6);
+  assert.equal(owner.frees, 1); assert.equal(port.closes, 1);
+});
+
+test("direct report faults preserve zero admission, fence both lanes once and cannot read a freed or replacement owner", async () => {
+  const scenarios = [
+    { fields: { generation: 16 }, status: 102 },
+    { fields: { sequence: 2 }, status: 101 },
+    { fields: { kind: "arm" }, status: 100 },
+    { faults: { reportThrowAt: 17 }, status: 106, reads: 17 },
+    { priorCommand: true, fields: { sequence: 1 }, status: 101 },
+    { renderFailure: true, faults: { renderStatus: 9 }, status: 103 },
+  ];
+  for (const scenario of scenarios) {
+    const h = await harness(scenario.faults), processor = h.create(), owner = h.owners[0], port = h.commandPort();
+    h.send(processor, "finish", 1); h.send(processor, "attach-commands", 2, { port });
+    const stale = port.onmessage;
+    if (scenario.priorCommand) {
+      port.send({ kind: "commands", generation: 17, sequence: 1, commands: [command()] });
+      assert.equal(port.messages.at(-1).admitted, 1);
+    }
+    if (scenario.renderFailure) {
+      const output = planar(1); assert.equal(h.process(processor, 0, output), false); assertSilent(output);
+    }
+    const before = port.messages.length;
+    port.send({ kind: "poll", generation: 17, sequence: scenario.priorCommand ? 2 : 1, ...scenario.fields });
+    const ack = port.messages.slice(before).find(message => message.kind === "ack");
+    assert.ok(ack); assert.equal(ack.status, scenario.status); assert.equal(ack.admitted, 0);
+    assert.equal(ack.report, null, "a partial report read never becomes output evidence");
+    assert.equal(owner.calls.reports.length, scenario.reads ?? 0);
+    assert.equal(owner.calls.enqueue.length, scenario.priorCommand ? 1 : 0);
+    assert.equal(port.messages.filter(message => message.kind === "terminal").length, 1);
+    assert.equal(notices(processor, "terminal").length, 1);
+    assert.equal(owner.frees, 0); assert.equal(port.closes, 0);
+    const reads = owner.calls.reports.length;
+    port.send({ kind: "poll", generation: 17, sequence: 2 });
+    assert.equal(owner.calls.reports.length, reads);
+    assert.equal(port.messages.filter(message => message.kind === "terminal").length, 1);
+    h.send(processor, "stop", 20);
+    assert.equal(owner.frees, 1); assert.equal(port.closes, 1);
+    assert.deepEqual(port.messages.at(-1), { kind: "closed", generation: 17 });
+    assert.equal(port.onmessage, null); assert.equal(port.onmessageerror, null);
+    const count = port.messages.length;
+    stale({ data: { kind: "poll", generation: 17, sequence: 3 } });
+    assert.equal(owner.calls.reports.length, reads); assert.equal(port.messages.length, count);
+    const replacement = h.create(); h.send(replacement, "finish", 1);
+    stale({ data: { kind: "poll", generation: 17, sequence: 4 } });
+    assert.equal(h.owners[1].calls.reports.length, 0);
+    h.send(replacement, "stop", 2); assert.equal(h.owners[1].frees, 1);
   }
 });
 
