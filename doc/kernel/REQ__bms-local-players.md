@@ -93,8 +93,9 @@ per-member peer HUDs as specified by the [browser contract](REQ__bms-browser.md)
 The Page launches admitted local cohorts using the same committed audio/start
 handshake and reports bounded per-member final results. Network solo uses one
 automatic Any-source member without device selection; non-network solo keeps
-its existing route. Native group callers and multi-host room integration remain
-required follow-on work.
+its existing route. Native solo LiveCompetition uses the same group owner
+with its actual one-member roster. Native cohort callers and multi-host room
+integration remain required follow-on work.
 No group codec call creates a connection, start receipt or final acknowledgement.
 Complete browser/native callers remain unfinished; tests authored and compile checks
 cannot prove network acceptance.
@@ -438,3 +439,21 @@ Reserve each member's comparison space after admission and before contact setup.
 Rendering and touch routing use the same shifted field bounds. Keep that space
 after a HUD failure; a disappearing comparison must never move a live touch lane.
 Actual browser/device/runtime acceptance remains deferred.
+
+### Native application group competition
+
+Native solo LiveCompetition uses GroupMultiplayer with its actual stable
+PlayerId as a one-member roster, including QUIC and WebTransport constructors.
+Every ordinary and terminal publication carries that actual MemberProgress;
+start, host-clock bracketing, readiness and final-ACK delivery retain the shared
+owner behavior. Local saved opponents remain independent.
+
+For this sole local member, the accepted remote roster fixes ordinal zero as
+the comparison target. Select only that exact remote PlayerId from a complete
+matching validated group prefix; do not aggregate rows, match by coincidental
+local ID or substitute a different row on missing/malformed data. Retain
+remote identity and original song time for terminal reporting. Remote reports
+never enter the local judge. Cohort network application integration remains
+required and must use one shared owner for all local members, rather than
+opening one connection per member. Compilation and deferred fixtures do not
+prove native/browser interoperability or performance acceptance.
