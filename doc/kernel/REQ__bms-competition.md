@@ -1,5 +1,47 @@
 # Unified BMS application and competition
 
+## Room progress relay and actual server acknowledgement ownership
+
+Use one portable RoomProgressRelay over the immutable Prepared roster, composed
+by the actual WebTransport PreparedRoom actor. Admission order fixes 2..64 hosts
+and each host's exact local roster. Upload source is the actor's actual admitted
+lease, never a payload field. Sender sequences begin at one and advance exactly
+once per accepted upload; member counters/frontiers use common monotonic
+validation. Final progress is irreversible. Coalesced peer delivery may skip
+intermediate upload sequences while retaining an already in-flight frame.
+
+Retain one shared latest prefix per source, a bounded dirty-source bitset and
+round-robin cursor per recipient, and at most one in-flight relay frame per
+recipient. Never fan out to the source itself. Use actual complete-write IDs,
+not queue success, to credit final delivery. One matching early recipient ACK
+may be held while that exact final relay frame is in flight; it grants no
+delivery or acknowledgement credit until the corresponding full write completes.
+Reject unknown/self/nonfinal/wrong-sequence/duplicate acknowledgements atomically.
+Bound final-delivery and genuine-ACK matrices to the fixed roster.
+
+Only after all other admitted recipients genuinely acknowledge a source's exact
+final prefix, send that source one aggregate FinalAck with its own participant
+ID and original final sequence. Track its actual full write separately. Room
+completion requires every host's final prefix, every required recipient ACK and
+every aggregate ACK full write. This is application receipt evidence, not score
+verification or physical audio synchronization. Completion does not synthesize
+Leave or dispose caller-owned streams.
+
+The server activates relay fanout only after all actual Commit writes complete.
+Legitimate uploads captured after their own Commit was admitted may be staged
+boundedly while another Commit write receipt is pending; no fanout or ACK credit
+is possible during staging. Validate original capture times against that exact
+peer's Commit admission before staging, preserving later receipt barriers.
+For recipient acknowledgements, retain a bounded final-relay admission time per
+source/recipient pair and require the original ACK read capture to be at or after
+that exact final frame's admission. A later actor processing time cannot validate
+an ACK captured before the frame could have been delivered. Retain this floor
+after the frame's full write as well as while it is in flight.
+Existing opaque per-peer write IDs span control and relay frames. Queue failure,
+invalid/stale traffic and disconnect retain whole-room exact-lease cleanup;
+other rooms survive. Client/Worker/native gameplay publication, remote HUD and
+joined final-drain integration remain required before claiming full multiplayer.
+
 ## Participant-scoped room progress wire
 
 Extend BKMR v2 with bounded progress upload (tag 13), participant-labelled peer
@@ -805,8 +847,9 @@ its complete read/write uses the configured I/O deadline. Waiting expiry,
 disconnect and server stop close exact owned resources and join their tasks;
 late task completions cannot revive or remove a replacement same-key room.
 
-The server additionally composes software clock/start controls as specified
-below. Gameplay progress/fanout, final ACKs and native/browser gameplay callers
+The server additionally composes software clock/start controls and the common
+participant progress relay/final acknowledgement owner specified above.
+Native/browser gameplay publication, presentation and final-drain callers
 remain required. Source/compile-only evidence cannot prove endpoint,
 TLS, browser interoperability, physical sync or performance acceptance. Author
 deterministic I/O, ownership and refusal fixtures for deferred execution.
@@ -1026,9 +1069,11 @@ the exact whole room until all actual Commit writes complete; a committed room
 no longer uses this handshake timer. Shutdown still closes sessions, fences
 controls, and joins setup/peer tasks before disposing retained resources.
 
-This source integration establishes server software-start handling, not playable
-room acceptance. Admission-only browser/native adapters still need migration to
-RoomPlayClient, actual committed output activation and progress/final ACKs. TLS,
+The server now also composes the participant progress relay specified above.
+Browser room adapters and the native timed stream connector use RoomPlayClient;
+browser Page/Worker committed activation is source-integrated. Client progress
+publication, peer presentation, final drain and native app room activation still
+require integration before playable multi-host acceptance. TLS,
 browser/native interoperability, physical synchronization and performance remain
 unverified under the user's execution deferral.
 
@@ -1073,7 +1118,7 @@ genuine future output-frame-aligned host start, within the existing one-frame
 rounding bound. Reuse the existing direct-audio ACK/preparation and common game
 activation checks. Preserve original Window input/output clock provenance and
 Worker rendering ownership. An absent, stale, mismatched or already-used start
-is a refusal. This adds synchronized start source integration; Page lobby,
-participant progress/final ACKs, native timed drivers and actual browser/audio
-interoperability remain required. No performance/runtime acceptance is inferred
+is a refusal. Page lobby and native timed drivers now have source integrations;
+client participant progress/final ACKs, native app room activation and actual
+browser/audio interoperability remain required. No performance/runtime acceptance is inferred
 from JavaScript fixtures or source compilation.
