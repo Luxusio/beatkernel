@@ -85,6 +85,46 @@ recording identities and voice order must be preserved. This common prepared
 member layer precedes browser group ownership and is not a playable browser
 multi-player claim.
 
+### Nonblocking shared local gameplay owner
+
+StepLocalGameplay consumes actual PreparedBms, the resolved source plan,
+ordered BindingMaps, StepGameplayConfig, immutable section start/end and
+BmsInputMode. Use the existing common member preparation and RuntimeGroup.
+Return one original PCM bank to the host. Share StepGameplay's BGM scheduler,
+output clock discipline, command consumer, pending batch/ACK, finite endpoint
+and real output completion implementation; do not create another output queue,
+copy the producer, sample a host clock or implement a second evaluator.
+Existing public solo constructors, reports, replay bytes and command order stay
+compatible, including original solo SoundBinding voice IDs. A newly constructed
+local owner, even with one member, uses the common prepared-member namespace;
+semantic PCM and replay do not require its numeric voices to match legacy solo.
+A private shared controller must not expose scalar solo gameplay
+operations for a multi-member runtime.
+
+Retain stable member order, independent score, last logical song time and
+optional replay capture. Route original input, including projected contact, to
+its exact member and expose actual InputResult/PlayerReports. Unknown sources
+remain ignored without changing setup readiness. One deadline advance uses
+the same host/output points for all members. Preserve all committed reports
+on core, scoring or capture failure, including later reports already committed
+by the same group operation; fence the entire owner without rollback/retry.
+
+Configure per-member capture, competition identity and contact routing against
+the actual pristine judge. Identity/capture uses the same section/input-mode
+codec as solo; export each capture once only after explicit stop/failure.
+One output-clock correction applies to the group's shared Transport after a
+successful common advance. Setup refusal does not corrupt accepted state.
+
+Completion always validates genuine output evidence. Unlimited play requires
+every member's actual chart interactions complete as well as existing shared
+audio drain/presentation barriers. Finite play requires each member's logical
+position at the immutable endpoint, genuine configured Mixer fence, resolved
+queue/BGM credits/ACK and exact executed acknowledged command counts.
+Pending ACK never stops judging; partial or rejected ACK fences the whole owner
+and retains the real admitted prefix without replaying its tail. Source/compile
+and authored fixtures are not runtime acceptance. Browser bindings, assignment
+and renderer integration remain subsequent requirements.
+
 Player IDs survive roster growth and shrink for retained members. A solo roster
 uses automatic input and clears previous explicit assignments. Each member of
 an N>=2 roster must have a unique nonempty bounded native input identity before
