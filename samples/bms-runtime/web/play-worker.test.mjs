@@ -795,6 +795,7 @@ async function workerHarness(options = {}) {
   }, { context });
   const helper = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
   const playHelper = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
+  const settingsHelper = new SourceTextModule(await readFile(new URL("./settings-profile.mjs", import.meta.url), "utf8"), { context });
   const opponentHelper = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
   const physicalHelper = new SourceTextModule(await readFile(new URL("./physical-input.mjs", import.meta.url), "utf8"), { context });
   const hidProfileHelper = new SourceTextModule(await readFile(new URL("./hid-profile.mjs", import.meta.url), "utf8"), { context });
@@ -811,6 +812,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./host_model.mjs") return helper;
     if (specifier === "./play-model.mjs") return playHelper;
+    if (specifier === "./settings-profile.mjs") return settingsHelper;
     if (specifier === "./multiplayer-owner.mjs") return network;
     if (specifier === "./saved-opponents.mjs") return opponentHelper;
     if (specifier === "./physical-input.mjs") return physicalHelper;
@@ -848,6 +850,125 @@ async function workerHarness(options = {}) {
     of(kind) { return messages.filter(value => value.kind === kind); },
   };
 }
+
+function workerSettings() {
+  return { kind: "beatkernel-browser-settings", version: 1,
+    timing: { earlyMs: "12.345678", lateMs: "87.654321", offsetMs: "-0.000001" },
+    output: { latency: "balanced", latencyMs: "10.000001", rate: "44100" },
+    capacities: { queueCapacity: "257", maxVoices: "17", pendingCapacity: "31", maxFrames: "257", maxCommandsPerRender: "7" },
+    section: { startSeconds: "604800.000000001", endSeconds: "604800.000000002" },
+    bindings: [[17, "KeyA"], [18, ""], [19, ""], [20, ""], [21, ""], [22, ""], [23, ""], [24, ""], [25, ""],
+      [33, ""], [34, ""], [35, ""], [36, ""], [37, ""], [38, ""], [39, ""], [40, ""], [41, ""]] };
+}
+function settingsFile(data, acquire) {
+  const selected = new FileType([data], "settings.json", { type: "application/json" });
+  let reads = 0;
+  selected.arrayBuffer = () => { reads++; return acquire ? acquire() : Promise.resolve(data.slice().buffer); };
+  return { file: selected, get reads() { return reads; } };
+}
+
+test("actual Worker settings codec reads and transfers bounded files without preparing assets or mutating the selected runtime", async () => {
+  const h = await catalogWorker();
+  const original = { libraries: h.libraries.length, prepared: h.preparedOwners.length,
+    previews: h.views[0].current, preparations: h.libraries[0].preparations.length,
+    extents: h.views[0].extents.length, draws: h.views[0].draws };
+  const supplied = workerSettings(); supplied.bindings.reverse();
+  await h.send({ kind: "settings-profile-save", id: 100, settings: supplied });
+  const saved = h.of("settings-profile-saved").at(-1);
+  assert.equal(saved.id, 100);
+  assert.ok(saved.bytes instanceof Uint8Array);
+  assert.ok(saved.bytes.byteLength > 0 && saved.bytes.byteLength <= 16384);
+  assert.deepEqual(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(saved.bytes)), workerSettings());
+  const transferred = h.transfers[h.messages.indexOf(saved)];
+  assert.equal(transferred.length, 1);
+  assert.equal(transferred[0].byteLength, 0, "actual postMessage transfer relinquishes Worker encoded storage");
+  const selected = settingsFile(saved.bytes);
+  await h.send({ kind: "settings-profile-load", id: 101, file: selected.file });
+  assert.equal(selected.reads, 1);
+  assert.deepEqual(h.of("settings-profile-loaded").at(-1), { kind: "settings-profile-loaded", id: 101, settings: workerSettings() });
+  let id = 102;
+  for (const fault of ["metadata", "actual-size", "utf8", "foreign", "read-error"]) {
+    const valid = new TextEncoder().encode(JSON.stringify(workerSettings()));
+    const foreign = workerSettings(); foreign.kind = "native-profile";
+    const actual = fault === "actual-size" ? new Uint8Array(16385)
+      : fault === "utf8" ? new Uint8Array(valid.length).fill(0xff)
+      : fault === "foreign" ? new TextEncoder().encode(JSON.stringify(foreign)) : valid;
+    const file = settingsFile(fault === "foreign" ? actual : valid, async () => {
+      if (fault === "read-error") throw new Error("actual settings File rejected");
+      return actual.buffer;
+    });
+    if (fault === "metadata") Object.defineProperty(file.file, "size", { value: 16385 });
+    await h.send({ kind: "settings-profile-load", id, file: file.file });
+    assert.equal(h.of("settings-profile-error").at(-1).id, id++);
+    assert.equal(file.reads, fault === "metadata" ? 0 : 1);
+    assert.equal(h.of("settings-profile-loaded").length, 1);
+  }
+  assert.equal(h.libraries.length, original.libraries);
+  assert.equal(h.preparedOwners.length, original.prepared);
+  assert.equal(h.libraries[0].preparations.length, original.preparations);
+  assert.equal(h.views[0].current, original.previews);
+  assert.equal(h.views[0].extents.length, original.extents);
+  assert.equal(h.views[0].draws, original.draws);
+  assert.equal(h.games.length + h.locals.length + h.replays.length, 0);
+  assert.equal(h.of("fatal").length, 0);
+  await h.send({ kind: "settings-profile-save", id, settings: workerSettings() });
+  assert.equal(h.of("settings-profile-saved").at(-1).id, id, "local file errors leave settings retry available");
+});
+
+test("Worker settings ownership remains exclusive through actual read settlement and late completion cannot revive a failed owner", async () => {
+  const initializing = deferred(), fresh = await workerHarness({ viewGate: initializing });
+  const bytes = new TextEncoder().encode(JSON.stringify(workerSettings()));
+  const unread = settingsFile(bytes);
+  await fresh.send({ kind: "settings-profile-load", id: 1, file: unread.file });
+  assert.equal(unread.reads, 0); assert.equal(fresh.of("settings-profile-error").length, 1);
+  assert.equal(fresh.of("fatal").length, 0);
+  await fresh.send({ kind: "init", canvas: {} });
+  await fresh.send({ kind: "settings-profile-load", id: 2, file: unread.file });
+  assert.equal(unread.reads, 0);
+  initializing.resolve(); await flushJobs();
+  await fresh.send({ kind: "settings-profile-load", id: 3, file: unread.file });
+  assert.equal(unread.reads, 1); assert.equal(fresh.of("settings-profile-loaded").at(-1).id, 3);
+
+  const h = await catalogWorker(), reading = deferred();
+  const selected = settingsFile(bytes, () => reading.promise);
+  await h.send({ kind: "settings-profile-load", id: 100, file: selected.file });
+  assert.equal(selected.reads, 1); assert.equal(h.of("settings-profile-loaded").length, 0);
+  const blocked = settingsFile(bytes);
+  await h.send({ kind: "settings-profile-load", id: 101, file: blocked.file });
+  await h.send({ kind: "settings-profile-save", id: 102, settings: workerSettings() });
+  assert.equal(blocked.reads, 0);
+  assert.deepEqual(h.of("settings-profile-error").map(reply => reply.id), [101, 102]);
+  await h.send(startRequest());
+  assert.equal(h.of("play-error").at(-1).playId, 7);
+  assert.equal(h.of("play-error").at(-1).released, true);
+  assert.equal(h.games.length, 0);
+  await h.send({ kind: "import", id: 4, files: [selectedFile("other/chart.bms")] });
+  await h.send({ kind: "select", id: 5, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "0" });
+  assert.equal(h.of("import-error").at(-1).id, 4);
+  assert.equal(h.of("selection-error").at(-1).id, 5);
+  assert.equal(h.libraries.length, 1);
+  assert.equal(h.libraries[0].preparations.length, 1);
+  await h.send({ kind: "settings-profile-load", id: 100, file: blocked.file });
+  assert.equal(blocked.reads, 0, "stale identity cannot replace the outstanding read");
+  reading.resolve(bytes.slice().buffer); await flushJobs();
+  assert.equal(h.of("settings-profile-loaded").length, 1);
+  assert.equal(h.of("settings-profile-loaded")[0].id, 100);
+  await h.send(startRequest({ playId: 8 }));
+  assert.equal(h.of("play-reply").at(-1).result.kind, "prepared");
+  await h.send({ kind: "settings-profile-load", id: 103, file: blocked.file });
+  assert.equal(blocked.reads, 0, "a prepared game retains its exclusive owner");
+  assert.equal(h.games[0].frees, 0); assert.equal(h.of("fatal").length, 0);
+  await h.send({ kind: "play-stop", playId: 8, completed: false });
+
+  const obsolete = deferred(), late = settingsFile(bytes, () => obsolete.promise);
+  await fresh.send({ kind: "settings-profile-load", id: 4, file: late.file });
+  await fresh.send(null); // Actual fatal owner boundary; never a fabricated cancellation receipt.
+  assert.equal(fresh.of("fatal").length, 1);
+  obsolete.resolve(bytes.slice().buffer); await flushJobs();
+  assert.equal(fresh.of("settings-profile-loaded").length, 1);
+  assert.equal(fresh.of("settings-profile-error").filter(reply => reply.id === 4).length, 0);
+  assert.equal(fresh.games.length, 0);
+});
 
 function startRequest(fields = {}) {
   return { kind: "play-start", playId: 7, rpcId: 1, libraryId: 1, path: "song/chart.bms", rate: 48000,

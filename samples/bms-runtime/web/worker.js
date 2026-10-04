@@ -10,6 +10,7 @@ import { AudioCommandClient } from "./audio-command-client.mjs";
 import { AudioSampleClient } from "./audio-sample-client.mjs";
 import { snapshotGamepadSetup, snapshotGamepadDevices, automaticGamepadSetup, gamepadSetupFromProfile, GamepadAdapter } from "./gamepad-profile.mjs";
 import { snapshotLocalPlan, localBindingWords } from "./local-play-model.mjs";
+import { encodeBrowserSettings, decodeBrowserSettings } from "./settings-profile.mjs";
 const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserRoomResults, BrowserView } = runtime;
 let ready = null;
 let view = null;
@@ -30,6 +31,8 @@ let roomFinalization = null;
 let roomResults = null;
 let roomResultsEpoch = {};
 let lastPlayId = 0;
+let settingsOperation = null;
+let lastSettingsId = 0;
 const I64_MAX = 9223372036854775807n;
 const U64_MAX = 18446744073709551615n;
 const PROGRESS_INTERVAL_NS = 250000000n;
@@ -37,6 +40,35 @@ const NO_OPPONENTS = Object.freeze([]);
 
 function report(kind, fields = {}, transfer = []) { self.postMessage({ kind, ...fields }, transfer); }
 function message(error) { return String(error?.message ?? error).slice(0, 4096); }
+async function settingsProfile(request) {
+  const id = request.id;
+  if (!identity(id)) {
+    report("settings-profile-error", { id, message: "Settings request identity must be a positive safe integer." });
+    return;
+  }
+  if (id <= lastSettingsId) return;
+  lastSettingsId = id;
+  if (!view || settingsOperation || play || roomFinalization || importing || stagedLibrary) {
+    report("settings-profile-error", { id, message: "Wait for an initialized idle Worker before processing settings." });
+    return;
+  }
+  const operation = { id };
+  settingsOperation = operation;
+  try {
+    if (request.kind === "settings-profile-save") {
+      const bytes = encodeBrowserSettings(request.settings);
+      if (!failed && settingsOperation === operation) report("settings-profile-saved", { id, bytes }, [bytes.buffer]);
+    } else {
+      const settings = await decodeBrowserSettings(request.file);
+      if (!failed && settingsOperation === operation) report("settings-profile-loaded", { id, settings });
+    }
+  } catch (error) {
+    if (!failed && settingsOperation === operation) report("settings-profile-error", { id, message: message(error) });
+  } finally {
+    // An obsolete Window deadline never releases an unabortable File read.
+    if (settingsOperation === operation) settingsOperation = null;
+  }
+}
 function discardRoomResults() {
   roomResultsEpoch = {};
   const previous = roomResults;
@@ -2291,7 +2323,26 @@ self.addEventListener("message", event => {
     ready.catch(fatal);
     return;
   }
+  if (request.kind === "settings-profile-save" || request.kind === "settings-profile-load") {
+    void settingsProfile(request).catch(() => { /* An unavailable response port leaves Window's bounded deadline authoritative. */ });
+    return;
+  }
   if (!ready) { closeAudioHandoff(request); return fatal(new Error("Initialize graphics before sending commands.")); }
+  if (settingsOperation && request.kind !== "resize") {
+    closeAudioHandoff(request);
+    if (request.kind === "play-start") {
+      report("play-error", { playId: request.playId, rpcId: request.rpcId, released: true, message: "Wait for settings processing before starting gameplay." });
+    } else if (request.kind.startsWith("play-") && identity(request.playId) && identity(request.rpcId)) {
+      report("play-reply", { playId: request.playId, rpcId: request.rpcId, error: "Wait for settings processing before sending gameplay requests." });
+    } else if (request.kind === "import" || request.kind === "accept-library") {
+      report("import-error", { id: request.id, message: "Wait for settings processing before importing files." });
+    } else if (request.kind === "select") {
+      report("selection-error", { id: request.id, message: "Wait for settings processing before preparing a chart." });
+    } else if (request.kind === "seek") {
+      report("seek-error", { id: request.id, selectedId, message: "Wait for settings processing before changing the preview." });
+    }
+    return;
+  }
   if (request.kind.startsWith("play-")) { handlePlay(request); return; }
   if (request.kind === "import" || request.kind === "accept-library") {
     if (play) report("import-error", { id: request.id, message: "Stop gameplay before changing the selected library." });

@@ -58,6 +58,9 @@
         <button id="bindings-reset" type="button" disabled>Reset keyboard defaults</button>
         <p class="hint">Choose physical key positions for each lane. Unbound lanes need matching HID or Gamepad button bindings or must be absent from the chart; one key can belong to only one lane. These page-local settings affect live play. Replay uses recorded inputs, and Escape always stops playback. Browser or system shortcuts may prevent some keys from reaching the game.</p>
       </details>
+      <div class="replay-controls"><button id="settings-save" type="button" disabled>Save settings</button>
+        <label>Load settings file <input id="settings-load" type="file" accept=".json,application/json" disabled></label></div>
+      <p id="settings-status" class="hint" role="status">Portable settings include timing, output, capacities, section and keyboard bindings. Loading replaces the complete draft; devices and selected files stay separate.</p>
       <label><input id="touch-input" type="checkbox" disabled> Touch lanes with keyboard controls</label>
       <p class="hint">Enabled automatically on touch-capable browsers. A contact keeps its first lane until release; leaving the page stops playback. Use the same input mode for multiplayer and saved comparisons. Replay uses recorded input.</p>
       <div class="replay-controls"><label><input id="hid-input" type="checkbox" disabled> Use HID profile for live play</label>

@@ -5,6 +5,7 @@ import { HidInputOwner } from "./hid-input.mjs";
 import { GamepadInputOwner } from "./gamepad-input.mjs";
 import { LocalRoster, validateLocalPrepared, localReplayReceipt } from "./local-play-host.mjs";
 import { snapshotHidDevices } from "./hid-profile.mjs";
+import { snapshotBrowserSettings } from "./settings-profile.mjs";
 import { SavedOpponentSelection, opponentLabel, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
 import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
 
@@ -12,6 +13,7 @@ const byId = id => document.getElementById(id);
 const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input", "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status", "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear"].map(id => [id, byId(id)]));
 for (const id of ["local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay"]) ui[id] = byId(id);
 for (const id of ["multiplayer-mode", "room-seal", "room-ready", "room-leave", "room-score-prev", "room-score-next", "room-score-page"]) ui[id] = byId(id);
+for (const id of ["settings-save", "settings-load", "settings-status"]) ui[id] = byId(id);
 let canvas = byId("canvas");
 let cssExtent = [0, 0];
 let surfaceExtent = [0, 0];
@@ -33,6 +35,148 @@ let hasPreview = false;
 let audioModule = null;
 let activePlay = null;
 let roomResults = null;
+let settingsOperation = null;
+let settingsURL = null;
+let settingsURLTimer = null;
+let seeking = false;
+const settingsFields = Object.freeze([
+  ["timing", "earlyMs", "judge-early", 21], ["timing", "lateMs", "judge-late", 21], ["timing", "offsetMs", "judge-offset", 21],
+  ["output", "latency", "output-latency", 16], ["output", "latencyMs", "output-latency-ms", 21], ["output", "rate", "output-rate", 10],
+  ["capacities", "queueCapacity", "audio-queue", 5], ["capacities", "maxVoices", "audio-voices", 5],
+  ["capacities", "pendingCapacity", "audio-pending", 5], ["capacities", "maxFrames", "audio-frames", 5],
+  ["capacities", "maxCommandsPerRender", "audio-commands", 5],
+  ["section", "startSeconds", "live-start", 20], ["section", "endSeconds", "live-end", 20],
+].map(row => Object.freeze(row)));
+
+function settingsStatus(text, error = false) {
+  ui["settings-status"].textContent = text;
+  ui["settings-status"].dataset.error = String(error);
+}
+function settingsIdle() {
+  return initialized && worker !== null && !importing && !preparing && !seeking && !activePlay
+    && !recordsOperation && !hidPermission && !hidOwnershipFailed && !localSetup && !localCleanup && !localDiscovery
+    && !roomResults?.rpc && !roomResults?.scoreChanging;
+}
+function settingsCurrent(operation) {
+  return settingsOperation === operation && operation.owner === owner && operation.worker === worker;
+}
+function captureSettingsDraft() {
+  const draft = { kind: "beatkernel-browser-settings", version: 1, timing: {}, output: {}, capacities: {}, section: {} };
+  for (const [group, name, id, maximum] of settingsFields) {
+    const value = ui[id].value;
+    if (typeof value !== "string" || value.length > maximum) throw new Error(`Settings ${name} exceeds its field limit.`);
+    draft[group][name] = value;
+  }
+  draft.bindings = Object.freeze(bindingFields.map(([lane, field]) => {
+    const code = field.value;
+    if (typeof code !== "string" || code.length > 32) throw new Error("Keyboard settings exceed their field limit.");
+    return Object.freeze([lane, code]);
+  }));
+  for (const group of ["timing", "output", "capacities", "section"]) Object.freeze(draft[group]);
+  return Object.freeze(draft);
+}
+function sameSettingsDraft(left, right) {
+  return settingsFields.every(([group, name]) => left[group][name] === right[group][name])
+    && left.bindings.length === right.bindings.length
+    && left.bindings.every((row, index) => row[0] === right.bindings[index][0] && row[1] === right.bindings[index][1]);
+}
+function revokeSettingsURL() {
+  clearTimeout(settingsURLTimer);
+  settingsURLTimer = null;
+  if (settingsURL !== null) URL.revokeObjectURL(settingsURL);
+  settingsURL = null;
+}
+function cancelSettings(reason) {
+  const operation = settingsOperation;
+  if (!operation) return;
+  settingsOperation = null;
+  clearTimeout(operation.timer);
+  settingsStatus(reason, true);
+  controls();
+}
+function requestSettings(kind, file = null) {
+  if (settingsOperation || !settingsIdle()) return;
+  const generation = owner, target = worker;
+  let operation = null;
+  try {
+    const draft = captureSettingsDraft();
+    if (kind === "settings-profile-load" && (!(file instanceof File) || !Number.isSafeInteger(file.size)
+      || file.size < 1 || file.size > 16384)) throw new Error("Choose one nonempty settings file no larger than 16 KiB.");
+    if (generation !== owner || target !== worker || settingsOperation || !settingsIdle()) return;
+    if (!Number.isSafeInteger(serial + 1)) throw new Error("Settings request identity exhausted.");
+    operation = { id: ++serial, owner, worker, kind, draft, timer: null };
+    settingsOperation = operation;
+    operation.timer = setTimeout(() => {
+      if (settingsOperation === operation) cancelSettings("Settings request timed out; the previous draft is retained.");
+    }, 10000);
+    controls();
+    settingsStatus(kind === "settings-profile-save" ? "Saving settings…" : "Loading settings…");
+    operation.worker.postMessage(kind === "settings-profile-save"
+      ? { kind, id: operation.id, settings: draft } : { kind, id: operation.id, file });
+  } catch (error) {
+    if (generation !== owner || target !== worker) return;
+    if (operation && settingsOperation !== operation) return;
+    if (operation) { settingsOperation = null; clearTimeout(operation.timer); }
+    settingsStatus(String(error?.message ?? error).slice(0, 4096), true);
+    controls();
+  }
+}
+function receiveSettings(data) {
+  const operation = settingsOperation;
+  if (!operation || data.id !== operation.id || !settingsCurrent(operation)) return;
+  let link = null;
+  try {
+    const draft = captureSettingsDraft();
+    if (!settingsCurrent(operation) || !settingsIdle() || !sameSettingsDraft(operation.draft, draft)) throw new Error("Settings draft or ownership changed; nothing was applied.");
+    if (data.kind === "settings-profile-error") {
+      if (typeof data.message !== "string" || !data.message.length || data.message.length > 4096) throw new Error("Invalid settings error response.");
+      throw new Error(data.message);
+    }
+    if (operation.kind === "settings-profile-load" && data.kind === "settings-profile-loaded") {
+      const settings = snapshotBrowserSettings(data.settings);
+      const bindings = new Map(settings.bindings);
+      const currentDraft = captureSettingsDraft();
+      if (!settingsCurrent(operation) || !settingsIdle() || !sameSettingsDraft(operation.draft, currentDraft)) throw new Error("Settings draft or ownership changed; nothing was applied.");
+      // All values and the unchanged owner/draft are checked before native DOM setters.
+      for (const [group, name, id] of settingsFields) ui[id].value = settings[group][name];
+      for (const [lane, field] of bindingFields) field.value = bindings.get(lane);
+    } else if (operation.kind === "settings-profile-save" && data.kind === "settings-profile-saved") {
+      const bytes = data.bytes;
+      if (!(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer) || bytes.buffer.resizable
+        || bytes.byteOffset !== 0 || bytes.byteLength < 1 || bytes.byteLength > 16384 || bytes.byteLength !== bytes.buffer.byteLength) {
+        throw new Error("Invalid settings download bytes.");
+      }
+      const currentDraft = captureSettingsDraft();
+      if (!settingsCurrent(operation) || !settingsIdle() || !sameSettingsDraft(operation.draft, currentDraft)) throw new Error("Settings draft or ownership changed; nothing was downloaded.");
+      revokeSettingsURL();
+      const url = URL.createObjectURL(new Blob([bytes], { type: "application/json" }));
+      if (settingsOperation !== operation || operation.owner !== owner || operation.worker !== worker) {
+        URL.revokeObjectURL(url);
+        return;
+      }
+      settingsURL = url;
+      settingsURLTimer = setTimeout(() => { if (settingsURL === url) revokeSettingsURL(); }, 60000);
+      link = document.createElement("a");
+      link.href = url;
+      link.download = "beatkernel-browser-settings.json";
+      document.body.appendChild(link);
+      link.click();
+    } else throw new Error("Unexpected settings response.");
+    if (settingsOperation === operation) settingsStatus(operation.kind === "settings-profile-save" ? "Settings downloaded." : "Settings loaded. The complete draft was replaced.");
+  } catch (error) {
+    if (settingsOperation === operation) {
+      if (operation.kind === "settings-profile-save") revokeSettingsURL();
+      settingsStatus(String(error?.message ?? error).slice(0, 4096), true);
+    }
+  } finally {
+    link?.remove();
+    if (settingsOperation === operation) {
+      clearTimeout(operation.timer);
+      settingsOperation = null;
+      controls();
+    }
+  }
+}
 
 function clearRoomResults() {
   const previous = roomResults;
@@ -102,7 +246,7 @@ function showLocalRoster() {
     for (const row of localSetup?.inventory ?? []) select.append(new Option(row.label, row.source.toString()));
     select.value = localRoster.selected(player)?.toString() ?? "";
     select.addEventListener("change", () => {
-      if (activePlay || localSetup?.phase !== "ready") return;
+      if (settingsOperation || activePlay || localSetup?.phase !== "ready") return;
       try {
         const source = select.value === "" ? null : BigInt(select.value);
         if (source !== null && !localSetup.inventory.some(row => row.source === source)) throw new Error("Choose an acquired source.");
@@ -156,7 +300,7 @@ function releaseLocalSources(reason = "Discover sources again before local play.
 }
 
 async function discoverLocalSources() {
-  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || localCleanup || localDiscovery
+  if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || localCleanup || localDiscovery
     || localRoster.players.length === 1) return;
   const operation = { owner, players: localRoster.players, hid: ui["hid-input"].checked,
     hidProfile: selectedHidProfile, gamepadProfile: selectedGamepadProfile, touch: ui["touch-input"].checked };
@@ -246,7 +390,7 @@ function cancelHidPermission() {
 }
 
 async function authorizeHid() {
-  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || localSetup || localDiscovery || localCleanup) return;
+  if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || localSetup || localDiscovery || localCleanup) return;
   const operation = { owner, input: null, cancelled: false, failure: null };
   hidPermission = operation;
   controls();
@@ -382,7 +526,8 @@ function createSessionHid(session) {
 
 function controls() {
   const playing = activePlay !== null;
-  const busy = recordsOperation !== null || hidPermission !== null || hidOwnershipFailed || localCleanup !== null || localDiscovery !== null;
+  const busy = settingsOperation !== null || recordsOperation !== null || hidPermission !== null || hidOwnershipFailed || localCleanup !== null || localDiscovery !== null;
+  ui["settings-save"].disabled = ui["settings-load"].disabled = settingsOperation !== null || !settingsIdle();
   ui.folder.disabled = !initialized || preparing || playing || busy || !("webkitdirectory" in ui.folder);
   ui.files.disabled = !initialized || preparing || playing || busy;
   for (const field of [ui.chart, ui.rate, ui.seed, ui.prepare]) field.disabled = !initialized || !libraryId || importing || preparing || playing || busy;
@@ -444,6 +589,9 @@ function controls() {
   for (const button of opponentButtons) button.disabled = recordsDisabled;
 }
 function stop() {
+  cancelSettings("Settings request cancelled with the page.");
+  revokeSettingsURL();
+  seeking = false;
   clearRoomResults();
   revokeReplayURL();
   closeRecords();
@@ -494,7 +642,7 @@ function densityChanged() {
 }
 
 function prepare() {
-  if (!worker || !libraryId || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  if (settingsOperation || !worker || !libraryId || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   try {
     const rate = Number(ui.rate.value);
     const seed = ui.seed.value;
@@ -502,6 +650,7 @@ function prepare() {
     if (!/^\d{1,20}$/.test(seed) || BigInt(seed) > 0xffffffffffffffffn) throw new Error("Chart seed must fit an unsigned 64-bit integer.");
     if (!ui.chart.value) throw new Error("Select a chart first.");
     selectId = ++serial;
+    seeking = false;
     clearRoomResults();
     preparing = true;
     canvas.hidden = true;
@@ -512,6 +661,8 @@ function prepare() {
 }
 
 function received(data) {
+  if ((settingsOperation && data?.id === settingsOperation.id)
+    || (typeof data?.kind === "string" && data.kind.startsWith("settings-profile-"))) { receiveSettings(data); return; }
   if (data.kind.startsWith("play-")) { receivePlay(data); return; }
   if (data.kind === "ready") {
     initialized = true;
@@ -556,9 +707,15 @@ function received(data) {
     controls();
     status(`${data.message} ${hasPreview ? "The previous preview is retained." : "No chart has been prepared."}`, true);
   } else if (data.kind === "position" && data.id === seekId && data.selectedId === selectedId) {
+    seeking = false;
+    controls();
     ui.position.value = seconds(data.ns);
     status(`Preview position: ${seconds(data.ns)} seconds.`);
-  } else if (data.kind === "seek-error" && data.id === seekId && data.selectedId === selectedId) status(data.message, true);
+  } else if (data.kind === "seek-error" && data.id === seekId && data.selectedId === selectedId) {
+    seeking = false;
+    controls();
+    status(data.message, true);
+  }
   else if (data.kind === "render-wait" && data.selectedId === selectedId) status("The graphics surface is not ready. Resize the view or choose Show position to retry.", true);
 }
 
@@ -566,7 +723,7 @@ function start() {
   stop();
   if (hidOwnershipFailed) { status("Input cleanup failed. Reload the page before playing again.", true); return; }
   libraryId = importId = selectId = selectedId = seekId = 0;
-  importing = preparing = hasPreview = false;
+  importing = preparing = hasPreview = seeking = false;
   audioModule = null;
   selectedReplay = null;
   ui["replay-file"].value = "";
@@ -620,12 +777,13 @@ function start() {
 }
 
 function choose(event) {
-  if (!initialized || preparing || !worker || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  if (settingsOperation || !initialized || preparing || !worker || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   const files = event.target.files;
   if (!files?.length) return;
   if (files.length > 32768) return status("Select no more than 32,768 files.", true);
   void releaseLocalSources("Song library changed. Discover local sources again.");
   importId = ++serial;
+  seeking = false;
   clearRoomResults();
   importing = true;
   controls();
@@ -640,22 +798,34 @@ ui.files.addEventListener("change", choose);
 byId("prepare-form").addEventListener("submit", event => { event.preventDefault(); prepare(); });
 byId("seek-form").addEventListener("submit", event => {
   event.preventDefault();
-  if (!worker || !hasPreview || preparing || importing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  if (settingsOperation || !worker || !hasPreview || preparing || importing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   try {
     const ns = nanoseconds(ui.position.value);
     seekId = ++serial;
+    seeking = true;
     clearRoomResults();
     controls();
     worker.postMessage({ kind: "seek", id: seekId, selectedId, ns });
-  } catch (error) { status(error.message, true); }
+  } catch (error) { seeking = false; controls(); status(error.message, true); }
 });
 window.addEventListener("pagehide", stop);
 window.addEventListener("pageshow", event => { if (event.persisted) start(); });
 window.addEventListener("resize", resize);
 ui.play.addEventListener("click", () => { void play("live"); });
 ui["replay-play"].addEventListener("click", () => { void play("replay"); });
+ui["settings-save"].addEventListener("click", () => requestSettings("settings-profile-save"));
+ui["settings-load"].addEventListener("change", event => {
+  if (settingsOperation || !settingsIdle()) return;
+  try {
+    const files = event.target.files;
+    if (!files?.length) return;
+    if (files.length !== 1) throw new Error("Choose one settings file.");
+    requestSettings("settings-profile-load", files[0]);
+  } catch (error) { settingsStatus(String(error?.message ?? error).slice(0, 4096), true); }
+  finally { event.target.value = ""; }
+});
 ui["local-count"].addEventListener("change", () => {
-  if (activePlay) return;
+  if (settingsOperation || activePlay) return;
   try {
     if (!/^[0-9]{1,2}$/.test(ui["local-count"].value)) throw new Error("Choose one to 64 local players.");
     localRoster.setCount(Number(ui["local-count"].value));
@@ -667,16 +837,16 @@ ui["local-count"].addEventListener("change", () => {
   } catch (error) { ui["local-count"].value = String(localRoster.players.length); status(error.message, true); }
 });
 ui["local-discover"].addEventListener("click", () => { void discoverLocalSources(); });
-ui["local-release"].addEventListener("click", () => { if (!activePlay) void releaseLocalSources(); });
+ui["local-release"].addEventListener("click", () => { if (!settingsOperation && !activePlay) void releaseLocalSources(); });
 ui["local-page"].addEventListener("change", () => { void changeLocalPage(); });
 ui["captured-replay"].addEventListener("change", () => {
-  if (activePlay || recordsOperation) return;
+  if (settingsOperation || activePlay || recordsOperation) return;
   lastReplay = capturedReplays.find(record => String(record.player ?? "solo") === ui["captured-replay"].value) ?? null;
   ui.export.textContent = lastReplay ? `Download ${lastReplay.player === undefined ? "last replay" : `player ${lastReplay.player} replay`} (${lastReplay.complete ? "complete" : "prefix"})` : "Choose a captured replay";
   controls();
 });
 function multiplayerSelectionChanged() {
-  if (activePlay) return;
+  if (settingsOperation || activePlay) return;
   controls();
   ui["multiplayer-status"].textContent = ui.multiplayer.checked
     ? ui["multiplayer-mode"].value === "room"
@@ -690,7 +860,7 @@ for (const operation of ["seal", "ready", "leave"]) ui[`room-${operation}`].addE
 ui["room-score-prev"].addEventListener("click", () => { void changeRoomScorePage(-1); });
 ui["room-score-next"].addEventListener("click", () => { void changeRoomScorePage(1); });
 ui["replay-file"].addEventListener("change", event => {
-  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   try {
     const files = event.target.files;
     if (!files?.length) return;
@@ -711,7 +881,7 @@ ui["replay-file"].addEventListener("change", event => {
 });
 ui["hid-authorize"].addEventListener("click", () => { void authorizeHid(); });
 ui["hid-profile"].addEventListener("change", event => {
-  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   try {
     if (!hidCapable()) throw new Error("WebHID is unavailable in this browser.");
     const files = event.target.files;
@@ -728,7 +898,7 @@ ui["hid-profile"].addEventListener("change", event => {
   finally { event.target.value = ""; }
 });
 ui["gamepad-profile"].addEventListener("change", event => {
-  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   try {
     const file = event.target.files?.[0];
     if (typeof navigator.getGamepads !== "function" || !(file instanceof File) || !Number.isSafeInteger(file.size)
@@ -740,7 +910,7 @@ ui["gamepad-profile"].addEventListener("change", event => {
   finally { event.target.value = ""; }
 });
 ui["gamepad-profile-clear"].addEventListener("click", () => {
-  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   selectedGamepadProfile = null;
   ui["gamepad-profile"].value = "";
   ui["gamepad-profile-name"].textContent = "Automatic standard Gamepad bindings; choose an optional version 1 profile to customize.";
@@ -748,7 +918,7 @@ ui["gamepad-profile-clear"].addEventListener("click", () => {
 });
 ui.stop.addEventListener("click", () => { void stopPlay("Playback stopped."); });
 ui["bindings-reset"].addEventListener("click", () => {
-  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   for (let index = 0; index < bindingFields.length; index++) bindingFields[index][1].value = KEY_BINDINGS[index][1];
   status("Keyboard bindings reset to defaults.");
 });
@@ -759,12 +929,12 @@ for (const [id, action] of [["records-refresh", "refresh"], ["records-save", "sa
   ui[id].addEventListener("click", () => { void recordAction(action); });
 }
 ui["opponents-add"].addEventListener("click", () => {
-  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || !selectedReplay) return;
+  if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || !selectedReplay) return;
   try { addOpponent(selectedReplay, selectedReplayKey, opponentChoice()); }
   catch (error) { opponentStatus(String(error.message).slice(0, 4096), true); }
 });
 ui["opponents-clear"].addEventListener("click", () => {
-  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   opponents.clear();
   showOpponentSelection();
   clearOpponentResults("No saved opponents selected.");
@@ -929,6 +1099,7 @@ function roomControl(operation) {
 }
 
 async function changeRoomScorePage(delta) {
+  if (settingsOperation) return;
   const session = activePlay;
   if (!session) {
     const results = roomResults;
@@ -1034,7 +1205,7 @@ async function changeLocalPage() {
 }
 
 async function play(mode = "live") {
-  if (!initialized || !hasPreview || !audioModule || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || localDiscovery || localCleanup) return;
+  if (settingsOperation || !initialized || !hasPreview || !audioModule || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || localDiscovery || localCleanup) return;
   if (mode === "replay" && selectedReplay === null) return;
   if (mode === "live" && localRoster.players.length === 1) {
     try { validateOpponentTargets(opponents.snapshot()); }
@@ -2168,7 +2339,7 @@ function revokeReplayURL() {
   replayURL = null;
 }
 function downloadReplay() {
-  if (activePlay !== null || recordsOperation !== null || hidPermission || hidOwnershipFailed || lastReplay === null) return;
+  if (settingsOperation || activePlay !== null || recordsOperation !== null || hidPermission || hidOwnershipFailed || lastReplay === null) return;
   let link = null;
   try {
     revokeReplayURL();
@@ -2216,7 +2387,7 @@ function showOpponentSelection() {
     button.type = "button";
     button.textContent = "Remove";
     button.addEventListener("click", () => {
-      if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+      if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
       opponents.remove(entry.sourceKey);
       showOpponentSelection();
       clearOpponentResults(opponents.size ? `${opponents.size} saved opponent(s) selected.` : "No saved opponents selected.");
@@ -2231,7 +2402,7 @@ function showOpponentSelection() {
     if (entry.player != null && !localRoster.players.includes(entry.player)) target.append(new Option(`Removed player ${entry.player}`, String(entry.player)));
     target.value = entry.player == null ? "" : String(entry.player);
     target.addEventListener("change", () => {
-      if (activePlay || recordsOperation || importing || preparing || hidPermission || hidOwnershipFailed) return;
+      if (settingsOperation || activePlay || recordsOperation || importing || preparing || hidPermission || hidOwnershipFailed) return;
       try {
         const player = target.value === "" ? null : Number(target.value);
         if (player !== null && (localRoster.players.length === 1 || !localRoster.players.includes(player))) throw new Error("Choose a current local player.");
@@ -2339,7 +2510,7 @@ function showRecords(entries) {
   else if (entries.some(record => String(record.id) === previous)) ui.records.value = previous;
 }
 async function recordAction(action) {
-  if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
+  if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   const captured = lastReplay;
   if (action === "save" && captured === null) return;
   const id = Number(ui.records.value);

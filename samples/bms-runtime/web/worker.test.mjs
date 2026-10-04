@@ -203,6 +203,7 @@ async function workerHarness(options = {}) {
   }, { context });
   const helpers = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
   const playHelpers = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
+  const settingsHelpers = new SourceTextModule(await readFile(new URL("./settings-profile.mjs", import.meta.url), "utf8"), { context });
   const opponentHelpers = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
   const physicalHelpers = new SourceTextModule(await readFile(new URL("./physical-input.mjs", import.meta.url), "utf8"), { context });
   const localHelpers = new SourceTextModule(await readFile(new URL("./local-play-model.mjs", import.meta.url), "utf8"), { context });
@@ -215,6 +216,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./host_model.mjs") return helpers;
     if (specifier === "./play-model.mjs") return playHelpers;
+    if (specifier === "./settings-profile.mjs") return settingsHelpers;
     if (specifier === "./multiplayer-owner.mjs") return network;
     if (specifier === "./room-owner.mjs") return room;
     if (specifier === "./saved-opponents.mjs") return opponentHelpers;

@@ -75,6 +75,37 @@ function savedRecord(fields = {}) {
     hits: 18446744073709551615n, misses: 2n, combo: null, createdAt: 1234567890, byteLength: 4, ...fields };
 }
 
+function portableSettings() {
+  return { kind: "beatkernel-browser-settings", version: 1,
+    timing: { earlyMs: "12.345678", lateMs: "87.654321", offsetMs: "-12.500001" },
+    output: { latency: "custom", latencyMs: "10.000001", rate: "44100" },
+    capacities: { queueCapacity: "257", maxVoices: "17", pendingCapacity: "31", maxFrames: "257", maxCommandsPerRender: "7" },
+    section: { startSeconds: "1.000000001", endSeconds: "2.000000002" },
+    bindings: [[17, "KeyA"], [18, ""], [19, "KeyX"], [20, "KeyD"], [21, "KeyC"],
+      [22, "ShiftLeft"], [23, "Space"], [24, "KeyF"], [25, "KeyV"], [33, "KeyN"],
+      [34, "KeyJ"], [35, "KeyM"], [36, "KeyK"], [37, "Comma"], [38, "ShiftRight"],
+      [39, "Slash"], [40, "KeyL"], [41, "Period"]] };
+}
+const settingsFields = [
+  ["timing", "earlyMs", "judge-early"], ["timing", "lateMs", "judge-late"], ["timing", "offsetMs", "judge-offset"],
+  ["output", "latency", "output-latency"], ["output", "latencyMs", "output-latency-ms"], ["output", "rate", "output-rate"],
+  ["capacities", "queueCapacity", "audio-queue"], ["capacities", "maxVoices", "audio-voices"],
+  ["capacities", "pendingCapacity", "audio-pending"], ["capacities", "maxFrames", "audio-frames"],
+  ["capacities", "maxCommandsPerRender", "audio-commands"],
+  ["section", "startSeconds", "live-start"], ["section", "endSeconds", "live-end"],
+];
+function settingsDraft(h) {
+  return [...settingsFields.map(([, , id]) => [id, h.get(id).value]),
+    ...portableSettings().bindings.map(([lane]) => [`binding-${lane.toString(16)}`, h.get(`binding-${lane.toString(16)}`).value])];
+}
+function chooseSettings(h, size = 128) {
+  const file = new File(["settings bytes remain Worker-owned"], "portable-settings.json");
+  Object.defineProperty(file, "size", { value: size });
+  file.arrayBuffer = () => { assert.fail("Window must not read the selected settings File"); };
+  h.get("settings-load").files = [file]; h.get("settings-load").emit("change");
+  return file;
+}
+
 async function harness(faults = {}) {
   const elements = new Map();
   const workers = [];
@@ -211,7 +242,7 @@ async function harness(faults = {}) {
     "room-seal", "room-ready", "room-leave", "room-score-prev", "room-score-next", "room-score-page",
     "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
     "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end",
-    "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate",
+    "bindings", "bindings-reset", "settings-save", "settings-load", "settings-status", "output-latency", "output-latency-ms", "output-rate",
     "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input",
     "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status",
     "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear",
@@ -275,6 +306,7 @@ async function harness(faults = {}) {
       if (value.replayFile instanceof File) posted.replayFile = value.replayFile;
       if (value.hidProfileFile instanceof File) posted.hidProfileFile = value.hidProfileFile;
       if (value.gamepadProfileFile instanceof File) posted.gamepadProfileFile = value.gamepadProfileFile;
+      if (value.kind === "settings-profile-load" && value.file instanceof File) posted.file = value.file;
       if (Array.isArray(value.opponents)) posted.opponents = value.opponents.map((entry, index) => ({
         ...posted.opponents[index], file: entry.file,
       }));
@@ -405,8 +437,12 @@ async function harness(faults = {}) {
   const context = createContext({
     document, window, Worker, ResizeObserver, Option,
     navigator: browserNavigator,
-    AbortController, AbortSignal, URL: ControlledURL, Blob, TextEncoder, File, Uint8Array, Uint32Array, Float32Array, DataView,
+    AbortController, AbortSignal, URL: ControlledURL, Blob, TextEncoder, TextDecoder, File, Uint8Array, Uint32Array, Float32Array, DataView,
     ArrayBuffer, structuredClone, performance: { timeOrigin: 9000, now: () => now },
+    JSON: faults.noWindowSettingsJson ? {
+      parse() { assert.fail("Window must not parse settings JSON"); },
+      stringify() { assert.fail("Window must not encode settings JSON"); },
+    } : JSON,
     WebAssembly: { compile: async binary => {
       assert.deepEqual(Array.from(binary), [0, 97, 115, 109, 1, 0, 0, 0]);
       return moduleToken;
@@ -481,7 +517,7 @@ async function harness(faults = {}) {
     this.setExport("RecordsStore", RecordsStore);
   }, { context });
   const modules = new Map();
-  for (const name of ["host_model.mjs", "play-model.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "local-play-host.mjs", "main.js"]) {
+  for (const name of ["host_model.mjs", "play-model.mjs", "settings-profile.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "local-play-host.mjs", "main.js"]) {
     const url = new URL(name, import.meta.url);
     modules.set(name, new SourceTextModule(await readFile(url, "utf8"), {
       context, identifier: url.href, initializeImportMeta(meta) { meta.url = url.href; },
@@ -644,6 +680,146 @@ async function pagedTouchSession() {
   h.setNow(1300);
   return { h, session, worker: h.workers[0], surface: h.get("canvas") };
 }
+
+test("portable settings save downloads exact Worker bytes and a correlated load governs the next actual launch", async () => {
+  const h = await harness({ noWindowSettingsJson: true, actualRate: 44100 });
+  await h.preview();
+  const worker = h.workers[0], original = settingsDraft(h);
+  h.click("settings-save"); await flush();
+  const saved = worker.last("settings-profile-save");
+  assert.ok(Number.isSafeInteger(saved.id) && saved.id > 0);
+  assert.equal(saved.settings.kind, "beatkernel-browser-settings");
+  assert.equal(saved.settings.version, 1);
+  assert.deepEqual(saved.settings.timing, { earlyMs: "50", lateMs: "50", offsetMs: "0" });
+  assert.equal(saved.settings.bindings.length, 18);
+  assert.deepEqual(Object.keys(saved.settings).sort(), ["bindings", "capacities", "kind", "output", "section", "timing", "version"]);
+  assert.equal(h.get("play").disabled, true);
+  assert.equal(h.get("settings-load").disabled, true);
+  const encoded = Uint8Array.from([123, 10, 32, 34, 111, 107, 34, 58, 49, 125]);
+  await h.receive({ kind: "settings-profile-saved", id: saved.id, bytes: encoded });
+  assert.equal(h.downloads.length, 1);
+  assert.equal(h.downloads[0].filename, "beatkernel-browser-settings.json");
+  assert.equal(h.urls[0].blob.type, "application/json");
+  assert.deepEqual(Array.from(new Uint8Array(await h.urls[0].blob.arrayBuffer())), Array.from(encoded));
+  assert.deepEqual(settingsDraft(h), original);
+  assert.equal(h.get("play").disabled, false);
+  h.click("settings-save"); await flush();
+  const second = worker.last("settings-profile-save");
+  await h.receive({ kind: "settings-profile-saved", id: second.id, bytes: Uint8Array.from([123, 125]) });
+  assert.equal(h.revoked.filter(url => url === h.urls[0].url).length, 1);
+  await h.advance(60000);
+  assert.equal(h.revoked.filter(url => url === h.urls[1].url).length, 1, "download ownership has a bounded expiry");
+  h.click("settings-save"); await flush();
+  const third = worker.last("settings-profile-save");
+  await h.receive({ kind: "settings-profile-saved", id: third.id, bytes: Uint8Array.from([123, 125]) });
+
+  const selected = chooseSettings(h); await flush();
+  const load = worker.last("settings-profile-load");
+  assert.equal(load.file, selected);
+  assert.ok(load.id > third.id);
+  assert.deepEqual(settingsDraft(h), original, "no optimistic draft assignment");
+  const loaded = portableSettings();
+  await h.receive({ kind: "settings-profile-loaded", id: load.id, settings: loaded });
+  for (const [group, key, id] of settingsFields) assert.equal(h.get(id).value, loaded[group][key]);
+  for (const [lane, code] of loaded.bindings) assert.equal(h.get(`binding-${lane.toString(16)}`).value, code);
+  assert.equal(h.get("chart").value, "chart.bms");
+  assert.equal(h.get("seed").value, "7");
+  assert.equal(h.get("multiplayer-url").value, "");
+  const start = await h.begin();
+  assert.deepEqual(start.timing, { earlyNs: 12345678n, lateNs: 87654321n, offsetNs: -12500001n });
+  assert.equal(start.startNs, 1000000001n); assert.equal(start.endNs, 2000000002n);
+  assert.ok(Array.from(start.keyPairs).some((value, index, words) => index % 2 === 0 && value === 17 && words[index + 1] === 19));
+  assert.ok(!Array.from(start.keyPairs).some((value, index) => index % 2 === 0 && value === 18));
+  assert.deepEqual(structuredClone(h.opens[0].options.contextOptions), { latencyHint: 0.010000001, sampleRate: 44100 });
+  assert.deepEqual(structuredClone(h.audio.configuration.audioLimits), {
+    queueCapacity: 257, maxVoices: 17, pendingCapacity: 31, maxFrames: 257, maxCommandsPerRender: 7,
+  });
+  h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+  await h.close();
+  assert.equal(h.revoked.filter(url => url === h.urls[2].url).length, 1);
+});
+
+test("malformed settings responses and timeouts preserve the whole draft without disturbing the live preview owner", async () => {
+  for (const fault of ["missing-binding", "foreign-kind", "unknown-field", "wrong-type", "worker-error", "malformed-error", "timeout", "draft-change", "bad-save-bytes"]) {
+    const h = await harness({ noWindowSettingsJson: true }); await h.preview();
+    const worker = h.workers[0];
+    if (fault === "bad-save-bytes") h.click("settings-save");
+    else chooseSettings(h);
+    await flush();
+    const request = worker.last(fault === "bad-save-bytes" ? "settings-profile-save" : "settings-profile-load");
+    assert.ok(request);
+    const payload = portableSettings();
+    if (fault === "missing-binding") payload.bindings.pop();
+    if (fault === "foreign-kind") payload.kind = "native-settings";
+    if (fault === "unknown-field") payload.output.token = "must not apply";
+    if (fault === "wrong-type") payload.capacities.maxVoices = 17;
+    if (fault === "draft-change") h.get("judge-early").value = "51";
+    const before = settingsDraft(h);
+    if (fault === "timeout") await h.advance(10000);
+    else if (fault === "worker-error") await h.receive({ kind: "settings-profile-error", id: request.id, message: "strict settings decode failed" });
+    else if (fault === "malformed-error") await h.receive({ kind: "settings-profile-error", id: request.id, message: [] });
+    else if (fault === "bad-save-bytes") await h.receive({ kind: "settings-profile-saved", id: request.id, bytes: new Uint8Array(16385) });
+    else await h.receive({ kind: "settings-profile-loaded", id: request.id, settings: payload });
+    assert.deepEqual(settingsDraft(h), before, fault);
+    assert.equal(h.get("settings-save").disabled, false);
+    assert.equal(h.get("play").disabled, false);
+    assert.equal(worker.terminations, 0);
+    assert.equal(worker.messages("play-stop").length, 0);
+    assert.equal(h.opens.length, 0);
+    assert.equal(h.downloads.length, 0);
+    assert.ok(h.get("settings-status").textContent.length > 0);
+    assert.equal(h.get("settings-status").dataset.error, "true");
+    if (fault === "timeout") {
+      await h.receive({ kind: "settings-profile-loaded", id: request.id, settings: portableSettings() });
+      assert.deepEqual(settingsDraft(h), before, "late read completion cannot revive a timed-out draft");
+    }
+    await h.close();
+  }
+});
+
+test("settings pending ownership blocks overlapping actions and stale responses cannot clear deadlines or apply after shutdown", async () => {
+  const h = await harness({ noWindowSettingsJson: true }); await h.preview();
+  const worker = h.workers[0], before = settingsDraft(h);
+  chooseSettings(h); await flush();
+  const first = worker.last("settings-profile-load");
+  for (const [, , id] of settingsFields) assert.equal(h.get(id).disabled, true, id);
+  h.click("settings-save"); chooseSettings(h); h.click("play");
+  h.get("prepare-form").emit("submit"); h.get("seek-form").emit("submit"); await flush();
+  assert.equal(worker.messages("settings-profile-load").length, 1);
+  assert.equal(worker.messages("settings-profile-save").length, 0);
+  assert.equal(h.opens.length, 0);
+  assert.equal(worker.messages("select").length, 1);
+  assert.equal(worker.messages("seek").length, 1);
+  await h.receive({ kind: "settings-profile-loaded", id: first.id + 1, settings: portableSettings() });
+  assert.equal(h.get("settings-save").disabled, true);
+  await h.advance(9999); assert.equal(h.get("settings-save").disabled, true);
+  await h.advance(1); assert.equal(h.get("settings-save").disabled, false);
+  assert.deepEqual(settingsDraft(h), before);
+  chooseSettings(h); await flush(); const second = worker.last("settings-profile-load");
+  assert.ok(second.id > first.id);
+  await h.receive({ kind: "settings-profile-loaded", id: first.id, settings: portableSettings() });
+  assert.equal(h.get("settings-save").disabled, true);
+  assert.deepEqual(settingsDraft(h), before);
+  await h.close();
+  await h.receive({ kind: "settings-profile-loaded", id: second.id, settings: portableSettings() }, worker);
+  assert.deepEqual(settingsDraft(h), before);
+  assert.equal(worker.terminations, 1);
+  assert.equal(h.downloads.length, 0);
+  const replacement = await harness({ noWindowSettingsJson: true }); await replacement.preview();
+  assert.deepEqual(settingsDraft(replacement), before);
+  await replacement.close();
+
+  const local = await harness({ gamepads: [nativeGamepad()] }); await local.preview();
+  await localCount(local, 2); local.click("local-discover"); await flush();
+  assert.equal(local.get("settings-save").disabled, true);
+  assert.equal(local.get("settings-load").disabled, true);
+  local.get("settings-save").emit("click"); chooseSettings(local); await flush();
+  assert.equal(local.workers[0].messages("settings-profile-save").length, 0);
+  assert.equal(local.workers[0].messages("settings-profile-load").length, 0);
+  local.click("local-release"); await flush();
+  assert.equal(local.get("settings-save").disabled, false);
+  await local.close();
+});
 
 test("touch paging waits for the acquired input prefix while retaining held releases and original sample metadata", async () => {
   const { h, session, worker, surface } = await pagedTouchSession();
