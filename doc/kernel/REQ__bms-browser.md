@@ -1221,9 +1221,9 @@ identifiers. This API supplies snapshots, so polling cannot recover transitions
 that occurred between observations. Browser exposure/permission and lifecycle
 behavior require actual browser/device checks.
 
-Known ceiling: The acquisition component has no page session caller yet.
-Worker profile/canonical ingestion has a separate source implementation below.
-This does not establish playable page gamepad support, capture/replay acceptance,
+Known ceiling: Window acquisition and Worker canonical forwarding have source
+implementations, including the automatic solo session described below. This
+does not establish actual browser gamepad execution or capture/replay acceptance,
 perfect reconnect identity when browser lifecycle evidence is missing, or
 measured latency. Deferred fixtures are source only; execution remains pending.
 
@@ -1265,9 +1265,55 @@ must not produce a synthetic later Down. Count pre-origin input once per
 original sample, independent of fanout. Keep setup, timing, input and lifetime ownership on
 Worker; Window remains responsible for browser-required acquisition only.
 
-Known ceiling: Window session forwarding and device/profile selection remain
-unconnected. This Worker integration does not prove playable page gamepad
-support or browser/device/capture/replay acceptance. Axis/touched bindings do
+Known ceiling: Automatic standard solo Window forwarding is implemented in
+source as described below. Explicit nonstandard page profile selection remains
+work. This does not prove browser/device/capture/replay acceptance. Axis/touched bindings do
 not imply support by ordinary press judgment. Late sampled changes are refused
 by the existing committed-prefix contract; polling cannot recover unobserved
 intermediate transitions. Browser input latency needs actual measurement.
+
+
+## Automatic solo Gamepad page acquisition
+
+For live solo play, discover browser-exposed Gamepads automatically when
+`getGamepads` is available. Replay acquires no Gamepads. Window snapshots
+connection descriptors and forwards them as optional `gamepadDevices`; this
+is exclusive with explicit lower-level `gamepadSetup`. Worker validates at
+most sixteen descriptors and admits standard mapping devices with at least
+nine buttons. Default pressed-button indices 0–8 map to solo lanes 0x11–0x19.
+Unrecognized layouts have no inferred bindings; explicit lower-level setup
+remains available. This default does not implement local multiplayer device
+assignment or claim support for every controller layout.
+
+HID and Gamepad acquisition share a session source allocator starting at three.
+The optional HID allocator preserves the old standalone sequential default.
+All accepted identities are bounded increasing u64 values and allocations are
+burned on failed setup. Keyboard remains source one, touch source two. Validate
+Worker-admitted Gamepad sources against actual owned eligible descriptors
+before output activation. New connections wait for a fresh session setup;
+a participating disconnection stops the current session. Preserve native
+sample timestamps and the common acquisition sequence, without Main-thread
+control interpretation or additional render/poll timers. Poll as part of the
+existing available live input pump. Pending input remains bounded at 1024
+samples. Stop detaches owners before joining Worker/audio release; failed
+cleanup requires reload. Constructor-time acquisition failure retains actual
+cleanupError evidence if listener removal also fails, so Window can apply the
+reload fence even before it receives the owner instance. Operational failure
+remains distinct from cleanupFailure. Late callbacks cannot revive old sessions.
+
+Mixed sources preserve their original acquisition identities and source order.
+The shared core validates sequence per device, not across unrelated devices.
+Worker preflights device-specific sample chronology, then stably orders actual
+nonempty inputs by original acquisition timestamp within a step. Equal-time
+inputs retain captured order. Source sequences and native provenance are never
+rewritten by sorting. The committed global timestamp frontier still applies,
+so changed late input fails explicitly; unchanged Gamepad samples do not move
+that frontier. Commit bounded draft source/adapter state only after complete
+validation. Main pending cursor/watermark must use the bounded batch's maximum
+original time and prior cursor, never a stale last Gamepad sample.
+
+Known ceiling: Actual browser/device execution and measured latency remain
+unverified. Snapshot polling cannot recover intermediate transitions.
+Nonstandard automatic bindings and local multiplayer assignment remain work;
+explicit configured axis events do not imply ordinary press-chart judgment.
+The existing late-input refusal remains observable at the committed frontier.
