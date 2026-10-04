@@ -103,6 +103,76 @@ impl BrowserCanvas {
         )
     }
 
+    pub(crate) fn present_local_game(
+        &mut self,
+        game: &crate::browser_local_game::BrowserLocalGame,
+        lookahead: i64,
+        page: usize,
+    ) -> Result<(), String> {
+        let count = game.members.len();
+        let page_size = organisms::LOCAL_PLAYERS_PER_PAGE;
+        if lookahead <= 0
+            || !(1..=crate::local_players::MAX_LOCAL_PLAYERS).contains(&count)
+            || page >= count.div_ceil(page_size)
+        {
+            return Err("invalid browser local roster, page or lookahead".into());
+        }
+        let first = page * page_size;
+        let visible = first..(first + page_size).min(count);
+        // Borrow actual state, including full-prefix note progress and score maps.
+        // This stack-only roster never copies per-note arrays or recent results.
+        let member_view = |index: usize| {
+            let member = &game.members[index];
+            organisms::LocalPlayerView {
+                player: member.player,
+                chart: Some(&game.chart),
+                song_time: game.game.member_song_time(member.player),
+                score: game
+                    .game
+                    .score(member.player)
+                    .expect("prepared local member"),
+                last_judge: member.recent.last(),
+                recent_results: &member.recent,
+                pressed_lanes: member.pressed,
+                note_progress: Some(&member.progress),
+                competition: None,
+            }
+        };
+        let mut views = [member_view(0); crate::local_players::MAX_LOCAL_PLAYERS];
+        for (index, destination) in views[..count].iter_mut().enumerate() {
+            *destination = member_view(index);
+        }
+        let mut presentations = [crate::poor_background::BgaPresentation::default(); 4];
+        for (destination, index) in presentations.iter_mut().zip(visible.clone()) {
+            let view = views[index];
+            let song = view.song_time.ok_or("local member has no song frontier")?;
+            *destination =
+                PoorBackgroundPolicy::default().select(&game.chart, song, view.note_progress)?;
+        }
+        if self.renderer.needs_surface_recreation() {
+            let surface = self
+                .instance
+                .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(self.canvas.clone()))
+                .map_err(|error| format!("recreate browser canvas surface: {error}"))?;
+            self.renderer.replace_surface(surface)?;
+        }
+        let frames = self.backgrounds.sync_presentations(
+            Some(&game.images),
+            &presentations[..visible.len()],
+            &mut self.renderer,
+        )?;
+        self.scene.clear();
+        organisms::local_player_views_with_background(
+            &mut self.scene,
+            &views[..count],
+            lookahead,
+            page,
+            false,
+            &frames,
+        )?;
+        self.renderer.render(&self.scene)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn present(
         &mut self,

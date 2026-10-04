@@ -329,6 +329,18 @@ impl BrowserView {
             .map_err(js_error)
     }
 
+    /// Draw a bounded page of actual local members on the Worker-owned canvas.
+    /// The page changes presentation only; every member continues on the same owner.
+    pub fn draw_local_game(
+        &mut self,
+        game: &crate::browser_local_game::BrowserLocalGame,
+        page: u32,
+    ) -> Result<(), JsValue> {
+        self.canvas
+            .present_local_game(game, LOOKAHEAD_NS, page as usize)
+            .map_err(js_error)
+    }
+
     pub fn draw_replay(
         &mut self,
         replay: &crate::browser_replay::BrowserReplay,

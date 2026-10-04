@@ -464,10 +464,64 @@ pub fn local_players_with_competition(
     )
 }
 
+/// Borrowed presentation state; composing a frame never clones chart-sized progress.
+#[derive(Clone, Copy)]
+pub struct LocalPlayerView<'a> {
+    pub player: crate::local_players::PlayerId,
+    pub chart: Option<&'a PlayerChart>,
+    pub song_time: Option<Timestamp>,
+    pub score: &'a ScoreSummary,
+    pub last_judge: Option<&'a JudgeEvent>,
+    pub recent_results: &'a [JudgeEvent],
+    pub pressed_lanes: u32,
+    pub note_progress: Option<&'a crate::note_progress::NoteProgress>,
+    pub competition: Option<&'a CompetitionSnapshot>,
+}
+impl<'a> From<&'a LocalPlayerSnapshot> for LocalPlayerView<'a> {
+    fn from(player: &'a LocalPlayerSnapshot) -> Self {
+        Self {
+            player: player.player,
+            chart: player.chart.as_deref(),
+            song_time: player.song_time,
+            score: &player.score,
+            last_judge: player.last_judge.as_ref(),
+            recent_results: &player.recent_results,
+            pressed_lanes: player.pressed_lanes,
+            note_progress: player.note_progress.as_ref(),
+            competition: player.competition.as_ref(),
+        }
+    }
+}
+
 /// Visible member slots share the bounded image cache without mixing clocks.
 pub fn local_players_with_background(
     scene: &mut Scene,
     players: &[LocalPlayerSnapshot],
+    lookahead: i64,
+    page: usize,
+    show: bool,
+    frames: &[crate::bga_render::BgaFrame; 4],
+) -> Result<(), String> {
+    // Preflight the bounded roster before making the stack-only borrowed bridge.
+    page_range(players.len(), page)?;
+    let mut views = [LocalPlayerView::from(&players[0]); crate::local_players::MAX_LOCAL_PLAYERS];
+    for (destination, player) in views.iter_mut().zip(players) {
+        *destination = LocalPlayerView::from(player);
+    }
+    local_player_views_with_background(
+        scene,
+        &views[..players.len()],
+        lookahead,
+        page,
+        show,
+        frames,
+    )
+}
+
+/// The common field composer accepts retained owners without copying their state.
+pub fn local_player_views_with_background(
+    scene: &mut Scene,
+    players: &[LocalPlayerView<'_>],
     lookahead: i64,
     page: usize,
     show: bool,
@@ -493,15 +547,14 @@ pub fn local_players_with_background(
         frame.validate()?;
     }
     for player in &players[visible.clone()] {
-        if let (Some(chart), Some(now)) = (&player.chart, player.song_time) {
+        if let (Some(chart), Some(now)) = (player.chart, player.song_time) {
             if player
                 .note_progress
-                .as_ref()
                 .is_some_and(|state| !state.matches_chart(chart))
             {
                 return Err("local note progress belongs to another prepared chart".into());
             }
-            crate::judge_feedback::project(chart, now, &player.recent_results)?;
+            crate::judge_feedback::project(chart, now, player.recent_results)?;
         }
     }
     for (index, player) in players[visible].iter().enumerate() {
@@ -517,10 +570,7 @@ pub fn local_players_with_background(
         let title = format!(
             "P{} {}",
             player.player.0,
-            player
-                .chart
-                .as_ref()
-                .map_or("LOADING", |chart| chart.title.as_str())
+            player.chart.map_or("LOADING", |chart| chart.title.as_str())
         );
         let line = |dy: i64, height: i64| Bounds {
             x: bounds.x + 10,
@@ -546,19 +596,11 @@ pub fn local_players_with_background(
             1,
             0x9bb1cf,
         );
-        if let Some(event) = player
-            .last_judge
-            .as_ref()
-            .or_else(|| player.recent_results.last())
-        {
+        if let Some(event) = player.last_judge.or_else(|| player.recent_results.last()) {
             let (label, color) = crate::timing_display::judge_label(event);
             clipped_text(scene, line(56, 7), &label, 1, color);
         }
-        let comparisons = if show {
-            player.competition.as_ref()
-        } else {
-            None
-        };
+        let comparisons = if show { player.competition } else { None };
         let summary_height = comparisons
             .map(|snapshot| competition_height(snapshot, bounds.width - 20))
             .transpose()?
@@ -567,7 +609,7 @@ pub fn local_players_with_background(
             competition_summary(scene, snapshot, line(72, summary_height))?;
         }
         let field_offset = 72 + summary_height;
-        match (player.chart.as_ref(), player.song_time) {
+        match (player.chart, player.song_time) {
             (Some(chart), Some(now)) => playfield_in_with_background(
                 scene,
                 chart,
@@ -579,9 +621,9 @@ pub fn local_players_with_background(
                     width: bounds.width - 20,
                     height: bounds.height - field_offset - 8,
                 },
-                &player.recent_results,
+                player.recent_results,
                 player.pressed_lanes,
-                player.note_progress.as_ref(),
+                player.note_progress,
                 frames[index],
             )?,
             _ => clipped_text(
