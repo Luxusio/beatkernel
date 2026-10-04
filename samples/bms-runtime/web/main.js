@@ -11,7 +11,7 @@ import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindings
 const byId = id => document.getElementById(id);
 const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input", "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status", "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear"].map(id => [id, byId(id)]));
 for (const id of ["local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay"]) ui[id] = byId(id);
-for (const id of ["multiplayer-mode", "room-seal", "room-ready", "room-leave"]) ui[id] = byId(id);
+for (const id of ["multiplayer-mode", "room-seal", "room-ready", "room-leave", "room-score-prev", "room-score-next", "room-score-page"]) ui[id] = byId(id);
 let canvas = byId("canvas");
 let cssExtent = [0, 0];
 ui["touch-input"].checked = typeof window.PointerEvent === "function" && globalThis.navigator?.maxTouchPoints > 0;
@@ -370,6 +370,13 @@ function controls() {
     || room.snapshot.members[0].participant !== room.participant || room.sealRequested;
   ui["room-ready"].disabled = roomBusy || room.snapshot?.phase !== 1 || !ownMember || ownMember.prepared || room.readyRequested;
   ui["room-leave"].disabled = roomBusy;
+  const scoresVisible = room && (room.scorePages > 0 || room.scoreFailed) && activePlay.phase !== "closing";
+  for (const id of ["room-score-prev", "room-score-next", "room-score-page"]) ui[id].hidden = !scoresVisible;
+  const scoresBusy = !scoresVisible || room.scoreFailed || activePlay.rpc !== null || room.scoreChanging || room.leaving;
+  ui["room-score-prev"].disabled = scoresBusy || room.scorePage === 0;
+  ui["room-score-next"].disabled = scoresBusy || room.scorePage + 1 >= room.scorePages;
+  ui["room-score-page"].textContent = scoresVisible
+    ? room.scoreFailed ? "Room scores unavailable." : `Room scores ${room.scorePage + 1} / ${room.scorePages}` : "";
   ui.export.disabled = playing || busy || lastReplay === null;
   ui["replay-file"].disabled = !initialized || importing || preparing || playing || busy;
   ui["replay-play"].disabled = ui.play.disabled || selectedReplay === null;
@@ -639,6 +646,8 @@ function multiplayerSelectionChanged() {
 ui.multiplayer.addEventListener("change", multiplayerSelectionChanged);
 ui["multiplayer-mode"].addEventListener("change", multiplayerSelectionChanged);
 for (const operation of ["seal", "ready", "leave"]) ui[`room-${operation}`].addEventListener("click", () => { void roomControl(operation); });
+ui["room-score-prev"].addEventListener("click", () => { void changeRoomScorePage(-1); });
+ui["room-score-next"].addEventListener("click", () => { void changeRoomScorePage(1); });
 ui["replay-file"].addEventListener("change", event => {
   if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   try {
@@ -872,6 +881,32 @@ function roomControl(operation) {
   return room.control;
 }
 
+async function changeRoomScorePage(delta) {
+  const session = activePlay;
+  const room = session?.room;
+  if (!room || session.owner !== owner || session.phase === "closing" || room.leaving || room.scoreFailed
+    || room.scoreChanging || session.rpc || !room.scorePages) return;
+  const page = room.scorePage + delta;
+  if (!Number.isInteger(page) || page < 0 || page >= room.scorePages) return;
+  room.scoreChanging = true;
+  try {
+    const result = await playRpc(session, "play-room-page", { page });
+    if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
+    if (result?.kind !== "room-page" || result.page !== page || result.pages !== room.scorePages) {
+      throw new Error("Room score page response did not match its request.");
+    }
+    room.scorePage = page;
+  } catch (error) {
+    if (activePlay === session && session.owner === owner && session.phase !== "closing") {
+      room.scoreFailed = true;
+      ui["multiplayer-status"].textContent = `Room score display unavailable: ${String(error.message).slice(0, 4096)} Local play continues.`;
+    }
+  } finally {
+    room.scoreChanging = false;
+    if (activePlay === session && session.owner === owner) controls();
+  }
+}
+
 async function changeLocalPage() {
   const session = activePlay;
   if (!session) return;
@@ -1007,7 +1042,8 @@ async function play(mode = "live") {
     session.multiplayer = connection?.mode === "peer" ? connection.config : null;
     session.room = connection?.mode === "room" ? { ...connection.config, opened: false, opening: false, closed: false,
       participant: null, snapshot: null, start: null, waiter: null, control: null,
-      sealRequested: false, readyRequested: false, leaving: false } : null;
+      sealRequested: false, readyRequested: false, leaving: false,
+      scorePages: 0, scorePage: 0, scoreFailed: false, scoreChanging: false } : null;
     controls();
     ui["multiplayer-status"].textContent = session.multiplayer || session.room ? "Preparing local audio before connecting…"
       : mode === "replay" ? "Local replay · no multiplayer connection."
@@ -1210,7 +1246,7 @@ async function play(mode = "live") {
     if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
     if (millisecondsToNanos(performance.now()) >= session.origin) throw new Error("Playback activation missed its chosen start. Start a fresh session.");
     session.phase = "playing";
-    if (session.room) ui["multiplayer-status"].textContent = "Room software start activated · progress publication and coordinated final drain enabled. Multi-host score display is not yet available.";
+    if (session.room) ui["multiplayer-status"].textContent = "Room software start activated · reported scores appear below the playfields. Coordinated final drain is enabled.";
     ui.rate.value = String(session.audio.sampleRate);
     controls();
     ui.stop.focus();
@@ -1386,7 +1422,8 @@ function pumpPresentation(session) {
 
 function receiveRoom(session, event) {
   const room = session.room;
-  if (!room || session.owner !== owner || session.phase === "closing" || room.leaving || room.closed) return;
+  if (!room || session.owner !== owner || session.phase === "closing" || room.leaving
+    || (room.closed && event?.kind !== "display-unavailable")) return;
   try {
     if (!room.opening || !event || typeof event !== "object" || Array.isArray(event)) throw new Error("Invalid room event.");
     if (event.kind === "snapshot") {
@@ -1430,6 +1467,21 @@ function receiveRoom(session, event) {
       ui["multiplayer-status"].textContent = `${phase}. You are host ${participant}. `
         + members.map(member => `Host ${member.participant}: players ${member.players.join(", ")} · ${member.prepared ? "ready" : "not ready"}`).join("; ");
       controls();
+    } else if (event.kind === "score-pages") {
+      const remote = room.snapshot?.members.filter(member => member.participant !== room.participant)
+        .reduce((sum, member) => sum + member.players.length, 0);
+      if (room.snapshot?.phase !== 2 || room.scorePages !== 0 || event.page !== 0
+        || !Number.isInteger(event.pages) || event.pages < 1 || event.pages > 1008
+        || event.pages !== Math.ceil(remote / 4)) throw new Error("Invalid room score page metadata.");
+      room.scorePage = 0; room.scorePages = event.pages;
+      controls();
+    } else if (event.kind === "display-unavailable") {
+      if (typeof event.error !== "string" || event.error.length < 1 || event.error.length > 4096) throw new Error("Invalid room display failure notice.");
+      if (!room.scoreFailed) {
+        room.scoreFailed = true;
+        ui["multiplayer-status"].textContent = `Room score display unavailable: ${event.error} Local play continues.`;
+        controls();
+      }
     } else if (event.kind === "start") {
       if (room.start !== null || !room.waiter || session.phase !== "preparing" || room.snapshot?.phase !== 2
         || typeof event.targetHostNs !== "bigint" || event.targetHostNs < 0n || event.targetHostNs > 9223372036854775807n
@@ -1454,6 +1506,12 @@ function receiveRoom(session, event) {
       throw new Error(`Room closed: ${event.error}`);
     } else throw new Error("Unknown room event.");
   } catch (error) {
+    if (event?.kind === "score-pages" || event?.kind === "display-unavailable") {
+      room.scoreFailed = true;
+      ui["multiplayer-status"].textContent = `Room score display unavailable: ${String(error.message).slice(0, 4096)} Local play continues.`;
+      controls();
+      return;
+    }
     room.error = String(error.message).slice(0, 4096);
     void stopPlay(room.error, true);
   }

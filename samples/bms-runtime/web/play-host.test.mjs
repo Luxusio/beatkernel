@@ -208,7 +208,7 @@ async function harness(faults = {}) {
     "title", "details", "status", "viewport", "play", "stop", "record", "export", "keys", "canvas", "prepare-form", "seek-form",
     "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete",
     "multiplayer", "multiplayer-mode", "multiplayer-url", "multiplayer-role", "multiplayer-status",
-    "room-seal", "room-ready", "room-leave",
+    "room-seal", "room-ready", "room-leave", "room-score-prev", "room-score-next", "room-score-page",
     "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
     "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end",
     "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate",
@@ -4807,6 +4807,100 @@ test("an early committed room event survives the open reply and activates one ex
   pending.click("stop"); await flush(); await pending.receive(localFinal(queued.start)); await pending.close();
 });
 
+test("room score controls page the Worker HUD through one correlated choice while live score receipts leave Window presentation untouched", async () => {
+  const markup = await readFile(new URL("./index.html", import.meta.url), "utf8");
+  for (const id of ["room-score-prev", "room-score-next"])
+    assert.match(markup, new RegExp(`<button[^>]*id="${id}"[^>]*type="button"[^>]*hidden[^>]*disabled`));
+  assert.match(markup, /id="room-score-page"[^>]*role="status"[^>]*hidden/);
+  for (const count of [4, 64]) {
+    const stopping = deferred(), h = await harness({ touchSupported: true, stopGate: stopping });
+    await h.preview();
+    if (count === 4) await discoverLocalPeers(h);
+    const { start, worker, opening } = await openRoomLobby(h, { completeOpen: false });
+    const roster = roomRoster(start, { phase: 2, count });
+    if (count === 64) for (const member of roster.snapshot.members)
+      if (member.participant !== ROOM_PARTICIPANT) member.players = Uint32Array.from({ length: 64 }, (_, index) => 0xffffffff - index);
+    const pages = count === 64 ? 1008 : 2;
+    await roomEvent(h, start, roster);
+    await roomEvent(h, start, { kind: "score-pages", page: 0, pages });
+    assert.equal(h.get("room-score-page").textContent, `Room scores 1 / ${pages}`);
+    assert.equal(h.get("room-score-page").children.length, 0, "page count is bounded text, not thousands of DOM rows/options");
+    assert.equal(h.get("room-score-prev").disabled, true); assert.equal(h.get("room-score-next").disabled, true);
+    h.click("room-score-next"); assert.equal(worker.messages("play-room-page").length, 0);
+    await h.reply(opening, { kind: "room-opened" });
+    assert.equal(h.get("room-score-next").disabled, false);
+    h.click("room-score-next"); await flush();
+    const request = worker.last("play-room-page");
+    assert.equal(request.page, 1); assert.equal(request.playId, start.playId);
+    assert.equal(h.get("room-score-prev").disabled, true); assert.equal(h.get("room-score-next").disabled, true);
+    h.click("room-score-prev"); h.click("room-score-next");
+    assert.equal(worker.messages("play-room-page").length, 1);
+    assert.equal(h.get("room-score-page").textContent, `Room scores 1 / ${pages}`, "queued request is not the correlated page receipt");
+    await h.reply(request, { kind: "room-page", page: 1, pages });
+    assert.equal(h.get("room-score-page").textContent, `Room scores 2 / ${pages}`);
+    assert.equal(h.get("room-score-next").disabled, pages === 2);
+    h.click("room-score-prev"); await flush();
+    await h.reply(worker.last("play-room-page"), { kind: "room-page", page: 0, pages });
+    await roomEvent(h, start, roomStart()); await h.reply(worker.last("play-activate"), null);
+    const writes = watchPlayDisplay(h), pageWrites = [], field = h.get("room-score-page");
+    let pageText = field.textContent;
+    Object.defineProperty(field, "textContent", { configurable: true, get: () => pageText,
+      set(value) { pageWrites.push(value); pageText = value; } });
+    const layout = h.layoutReads, status = h.get("multiplayer-status").textContent;
+    h.setNow(1700);
+    for (let index = 0; index < 4; index++) {
+      await h.advance(8);
+      const tick = worker.last("play-step"), render = worker.last("play-render");
+      await h.receive({ kind: "play-step-done", playId: start.playId, tickId: tick.tickId,
+        songNs: BigInt(index), hits: 18446744073709551615n, misses: 0n, combo: 1n, preOriginInputs: 0 });
+      await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
+        songNs: BigInt(index), hits: 18446744073709551615n, misses: 0n, combo: 1n, completed: false });
+    }
+    assert.deepEqual(writes, []); assert.deepEqual(pageWrites, []);
+    assert.equal(h.layoutReads, layout); assert.equal(h.get("multiplayer-status").textContent, status);
+    await roomEvent(h, start, { kind: "closed", error: "retained disconnected scores" });
+    assert.equal(worker.messages("play-stop").length, 0);
+    h.click("room-score-next"); await flush();
+    assert.equal(worker.last("play-room-page").page, 1, "retained disconnected pages remain inspectable");
+    const pendingPage = worker.last("play-room-page");
+    h.click("stop"); await flush();
+    for (const id of ["room-score-prev", "room-score-next"]) {
+      assert.equal(h.get(id).hidden, true); assert.equal(h.get(id).disabled, true);
+    }
+    const closingText = pageText, requests = worker.messages("play-room-page").length;
+    await h.reply(pendingPage, { kind: "room-page", page: 1, pages });
+    assert.equal(pageText, closingText);
+    h.click("room-score-next"); assert.equal(worker.messages("play-room-page").length, requests);
+    await h.receive(localFinal(start)); stopping.resolve(); await flush();
+    await roomEvent(h, start, { kind: "score-pages", page: 0, pages });
+    assert.equal(h.get("room-score-page").hidden, true); assert.equal(h.audio.stopStarts, 1);
+    await h.close();
+  }
+
+  for (const fault of ["pages", "notice", "response", "refusal"]) {
+    const h = await harness(); await h.preview();
+    const { start, worker } = await openRoomLobby(h);
+    await roomEvent(h, start, roomRoster(start, { phase: 2, count: 4 }));
+    await roomEvent(h, start, { kind: "score-pages", page: 0, pages: 2 });
+    await roomEvent(h, start, roomStart()); await h.reply(worker.last("play-activate"), null);
+    if (fault === "pages") await roomEvent(h, start, { kind: "score-pages", page: 0, pages: 1009 });
+    else if (fault === "notice") await roomEvent(h, start, { kind: "display-unavailable", error: null });
+    else {
+      h.click("room-score-next"); await flush(); const request = worker.last("play-room-page");
+      if (fault === "response") await h.reply(request, { kind: "room-page", page: 0, pages: 2 });
+      else await h.receive({ kind: "play-reply", playId: start.playId, rpcId: request.rpcId, error: "display page refused" });
+    }
+    assert.match(h.get("room-score-page").textContent, /unavailable/i);
+    assert.match(h.get("multiplayer-status").textContent, /Local play continues/);
+    assert.equal(h.get("room-score-prev").disabled, true); assert.equal(h.get("room-score-next").disabled, true);
+    assert.equal(worker.messages("play-stop").length, 0); assert.equal(h.audio.stopStarts, 0);
+    const choices = worker.messages("play-room-page").length;
+    await roomEvent(h, start, { kind: "display-unavailable", error: "already disabled display" });
+    h.click("room-score-next"); assert.equal(worker.messages("play-room-page").length, choices);
+    h.click("stop"); await flush(); await h.receive(localFinal(start)); await h.close();
+  }
+});
+
 test("a valid playing room closure preserves Window input and output while final status distinguishes queued, written and acknowledged prefixes", async () => {
   for (const [written, acknowledged, expected] of [
     [false, false, /queued · full write unconfirmed/],
@@ -4818,7 +4912,7 @@ test("a valid playing room closure preserves Window input and output while final
     await roomEvent(h, start, roomRoster(start, { phase: 2 }));
     await roomEvent(h, start, roomStart());
     await h.reply(worker.last("play-activate"), null);
-    assert.match(h.get("multiplayer-status").textContent, /progress publication enabled/);
+    assert.match(h.get("multiplayer-status").textContent, /reported scores appear below the playfields/);
     const display = watchPlayDisplay(h), layout = h.layoutReads;
     await roomEvent(h, start, { kind: "closed", error: "room stream lost after activation" });
     const disconnected = h.get("multiplayer-status").textContent;

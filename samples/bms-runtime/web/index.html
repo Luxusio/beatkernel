@@ -87,7 +87,10 @@
       <div class="replay-controls"><button id="room-seal" type="button" hidden disabled>Seal room roster</button>
         <button id="room-ready" type="button" hidden disabled>Ready this host</button>
         <button id="room-leave" type="button" hidden disabled>Leave room</button></div>
-      <p class="hint">Hosts need the same chart, seed and output setup, and a compatible WebTransport server. Rooms use an HTTPS address ending in /rooms/key (letters, digits, - or _). The first host seals the roster after at least two hosts join, then every host selects Ready. The lobby waits up to 60 seconds. Rooms support admission and a shared software start; remote score progress and final score acknowledgements are not yet available. Replay stays local.</p>
+      <div class="replay-controls"><button id="room-score-prev" type="button" hidden disabled>Previous room scores</button>
+        <span id="room-score-page" class="hint" role="status" hidden></span>
+        <button id="room-score-next" type="button" hidden disabled>Next room scores</button></div>
+      <p class="hint">Hosts need the same chart, seed and output setup, and a compatible WebTransport server. Rooms use an HTTPS address ending in /rooms/key (letters, digits, - or _). The first host seals the roster after at least two hosts join, then every host selects Ready. The lobby waits up to 60 seconds. Rooms share a software start, reported scores, final acknowledgements and coordinated drain. The canvas shows four remote players per score page, identified by host and player; reported scores are not ranked results. Replay stays local.</p>
       <p id="multiplayer-status" class="hint" role="status" aria-live="polite">Solo play selected.</p>
       <div class="replay-controls"><label><input id="record" type="checkbox" disabled> Record replay</label>
         <label>Captured replay <select id="captured-replay" disabled><option value="">No captured replay selected</option></select></label>
