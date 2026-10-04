@@ -34,10 +34,27 @@ the other Complete writes. Earlier disconnect/Leave remains whole-room
 cancellation. Do not wire automatic application closure before this server
 ownership rule and common/client binding integration exist.
 
-Known ceiling: Common drain wire/state components do not prove transport close
-semantics. Actual server expected-close handling, RoomPlay/I/O and browser
-bindings/Worker final drain integration, native application activation and live
-interoperability remain required. Remote scores remain self-reported display
+The actual server routes DrainReady through the relay's timed APIs using the
+original read capture and aggregate admission. Retire only an exact recipient
+whose Complete notice was admitted after the all-host readiness barrier. This
+retirement may race its write callback and must never credit a missing full
+write. Keep the immutable registry membership and remaining output queues until
+every resource is actually retired. A local Complete full write is not proof
+of remote receipt and must not immediately close remaining connections; allow
+clients to receive their notices and close independently. Ignore late events
+from retired leases; release the original room once every resource has retired.
+Explicit Leave and invalid controls still cancel the room. Bound the
+final drain stage with a deadline, separate from the initial start deadline.
+Start that deadline on the first accepted DrainReady, including an early Ready
+held behind its aggregate write. Refused controls do not advance the deadline.
+Process already queued controls before transport-terminal retirement so a
+received Leave or invalid control keeps cancellation authority. Deadline expiry
+remains independent of transport-terminal ordering.
+
+Known ceiling: Common drain wire/state components and the actual server's
+retirement handling do not prove live transport close semantics. RoomPlay/I/O
+and browser bindings/Worker final drain integration, native application
+activation and live interoperability remain required. Remote scores remain self-reported display
 data, not ranked score authority.
 
 ## Common client progress and local final-receipt boundary
