@@ -1,12 +1,15 @@
-//! WASM access to the common room start client, without transport or clock acquisition.
+//! WASM access to common room start/progress owners, without transport or clock acquisition.
 
 use crate::browser_multiplayer::BrowserMultiplayerWrite;
 use crate::local_players::{PlayerId, MAX_LOCAL_PLAYERS};
+use crate::multiplayer_group::{decode_words, encode_words};
 use crate::multiplayer_group_rooms::GroupRoomPhase;
 use crate::multiplayer_protocol::WriteStep;
 use crate::multiplayer_room_client::RoomClientError;
 use crate::multiplayer_room_play::{RoomPlayClient, RoomPlayError};
+use crate::multiplayer_room_progress_client::RoomProgressClientError;
 use crate::multiplayer_room_wire::{RoomFrameDecoder, RoomMessage, RoomWireError};
+use crate::multiplayer_rooms::ParticipantId;
 use crate::multiplayer_start::StartPolicy;
 use wasm_bindgen::prelude::*;
 
@@ -66,6 +69,7 @@ pub struct BrowserRoomClient {
     decoder: Option<RoomFrameDecoder>,
     failure: Option<RoomPlayError>,
     revision: u64,
+    pending_peer: Option<ParticipantId>,
 }
 
 impl BrowserRoomClient {
@@ -92,6 +96,7 @@ impl BrowserRoomClient {
                     failure,
                     RoomPlayError::InvalidState
                         | RoomPlayError::Admission(RoomClientError::InvalidState)
+                        | RoomPlayError::Progress(RoomProgressClientError::InvalidState)
                 )
             {
                 self.failure = Some(failure.clone());
@@ -144,6 +149,7 @@ impl BrowserRoomClient {
             decoder: Some(RoomFrameDecoder::new()),
             failure: None,
             revision: 0,
+            pending_peer: None,
         })
     }
 
@@ -156,6 +162,38 @@ impl BrowserRoomClient {
     }
     pub fn request_leave(&mut self) -> Result<(), JsValue> {
         self.operate(false, |owner| owner.session()?.request_leave())
+    }
+
+    /// The Worker bounds and owns complete eleven-word rows before WASM copies
+    /// them. Common validation retains counter, roster and finality authority.
+    pub fn publish_progress(&mut self, words: Vec<u32>, final_prefix: bool) -> Result<(), JsValue> {
+        let result = self.operate(false, |owner| {
+            let members = decode_words(&words)
+                .map_err(|_| RoomPlayError::Progress(RoomProgressClientError::InvalidProgress))?;
+            owner.session()?.publish_progress(&members, final_prefix)
+        });
+        if let Err(value) = &result {
+            if self.failure.is_none() {
+                // The JS owner must distinguish a local phase refusal from a
+                // malformed common prefix that permanently failed this facade.
+                match js_sys::Reflect::set(
+                    value,
+                    &JsValue::from_str("code"),
+                    &JsValue::from_str("state"),
+                ) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        self.close();
+                        return Err(error("room error property assignment refused"));
+                    }
+                    Err(failure) => {
+                        self.close();
+                        return Err(failure);
+                    }
+                }
+            }
+        }
+        result
     }
 
     pub fn needed_bytes(&mut self) -> Result<u32, JsValue> {
@@ -185,6 +223,13 @@ impl BrowserRoomClient {
             }
             let consumed = owner.decoder()?.push(&bytes)?;
             if let Some(message) = owner.decoder()?.take()? {
+                let peer = match &message {
+                    RoomMessage::PeerProgress { participant, .. } => Some(*participant),
+                    _ => None,
+                };
+                if peer.is_some() && owner.pending_peer.is_some() {
+                    return Err(RoomPlayError::InvalidState);
+                }
                 let revision = if matches!(
                     &message,
                     RoomMessage::Admitted { .. } | RoomMessage::Snapshot { .. }
@@ -198,6 +243,9 @@ impl BrowserRoomClient {
                 };
                 owner.session()?.receive_at(message, captured_ns, now_ns)?;
                 owner.revision = revision;
+                if peer.is_some() {
+                    owner.pending_peer = peer;
+                }
             }
             Ok(consumed as u32)
         })
@@ -217,6 +265,77 @@ impl BrowserRoomClient {
         self.operate(true, |owner| {
             owner.session()?.written_at(id, completed_ns, now_ns)
         })
+    }
+
+    /// Consume one accepted participant token, materializing only its latest
+    /// borrowed prefix. Metadata revision is independent of progress traffic.
+    pub fn take_peer_progress(&mut self) -> Result<JsValue, JsValue> {
+        self.ensure_live().map_err(error)?;
+        let Some(participant) = self.pending_peer else {
+            return Ok(JsValue::NULL);
+        };
+        let result = (|| {
+            let prefix = self
+                .session
+                .as_ref()
+                .and_then(|session| session.peer_progress(participant))
+                .ok_or_else(|| error("missing accepted room peer prefix"))?;
+            let words = encode_words(&prefix.members).map_err(error)?;
+            let value = js_sys::Object::new();
+            field(
+                &value,
+                "participant",
+                js_sys::BigInt::from(participant.0).into(),
+            )?;
+            field(
+                &value,
+                "sequence",
+                js_sys::BigInt::from(prefix.sequence).into(),
+            )?;
+            field(
+                &value,
+                "finalPrefix",
+                JsValue::from_bool(prefix.final_prefix),
+            )?;
+            field(
+                &value,
+                "words",
+                js_sys::Uint32Array::from(words.as_slice()).into(),
+            )?;
+            Ok(value.into())
+        })();
+        if result.is_err() {
+            self.close();
+        } else {
+            self.pending_peer = None;
+        }
+        result
+    }
+
+    pub fn local_final_written(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(RoomPlayClient::local_final_written)
+    }
+
+    pub fn local_final_acknowledged(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(RoomPlayClient::local_final_acknowledged)
+    }
+
+    pub fn peer_final_ack_written(&self, participant: u64) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.peer_final_ack_written(ParticipantId(participant)))
+    }
+
+    pub fn progress_complete(&self) -> bool {
+        self.failure.is_none()
+            && self
+                .session
+                .as_ref()
+                .is_some_and(RoomPlayClient::progress_complete)
     }
 
     /// Consumes only a genuine committed common schedule. All values retain
@@ -295,6 +414,7 @@ impl BrowserRoomClient {
         }
         self.session = None;
         self.decoder = None;
+        self.pending_peer = None;
         if self.failure.is_none() {
             self.failure = Some(RoomPlayError::Stopped);
         }
