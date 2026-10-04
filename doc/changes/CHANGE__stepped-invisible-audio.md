@@ -25,9 +25,10 @@ before that guard is removed. These typed-path changes do not prove browser,
 physical-device/audio execution, latency or complete BMS support. Independent
 fixtures are prepared for deferred execution; formal reviews/QA remain deferred.
 
-Presentation lane metadata and derived touch regions also need to include
-invisible-only lanes: the current PlayerChart layout derives lanes from visible
-objects. Adding a keysound lane must not create a rendered or judged note.
+The subsequent [invisible lane presentation change](CHANGE__invisible-lane-presentation.md)
+includes invisible-only lanes in PlayerChart metadata and derived touch regions,
+without creating rendered or judged notes. Source assets and legacy native
+callers still require integration before source admission is enabled.
 
 ## Deferred verification preparation
 

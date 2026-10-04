@@ -119,3 +119,25 @@ result. Calibration extent also includes referenced invisible PCM duration at
 each selection. Actual output drain still decides audible completion after
 accepted inputs; no automatic Play is emitted at an invisible marker. Finite
 sections retain their explicit endpoint and rounded frame policy.
+
+## Presentation lanes
+
+PlayerChart::from_compiled includes the union of original visible-object lanes
+and validated invisible selection lanes, in the existing left-to-right
+scratch/key order. Invisible-only charts therefore retain actual playable lane
+geometry and touch regions. Repeated selections and shared visible/invisible
+lanes produce one lane. An invisible selection never creates a PlayerNote,
+ObjectId, judged result or note render instance. Existing visible objects retain
+their compiled identity/time and map through the resulting ordered lane list.
+Presentation duration includes the last original invisible selection timestamp,
+but does not imply PCM completion or replace SongCompletion/output drain.
+Validate nonempty invisible timing through compile_invisible before using lane
+metadata; malformed typed sources return PlayerChartError. Empty invisible
+sources preserve the existing presentation data and query behavior. Practice
+retains original lane availability without synthesizing section notes.
+
+Prepare deferred fixtures against actual chart projection, touch-region routing
+and playfield geometry, including invisible-only, mixed scratch/double-side,
+practice, exact timing and malformed source cases. These fixtures do not prove
+native/browser rendering or input-device execution. Source preparation remains
+guarded until asset and native caller integration is complete.
