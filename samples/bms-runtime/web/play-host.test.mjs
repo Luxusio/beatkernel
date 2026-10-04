@@ -2824,6 +2824,129 @@ function comparison(playId, fields = {}) {
   }] };
 }
 
+test("local saved targets freeze before audio acquisition and member comparisons appear only after joined cleanup", async () => {
+  const opening = deferred(), stopping = deferred();
+  const h = await harness({ touchSupported: true, openGate: opening, stopGate: stopping });
+  await h.preview(); await localCount(h, 2);
+  const own = selectedRecording(), other = selectedRecording();
+  selectOpponent(h, own, { own: true, label: "Own prefix" });
+  selectOpponent(h, other, { own: false, label: "<Other prefix>" });
+  const assignTarget = (key, player) => {
+    const field = h.get(`opponent-player-${key}`); field.value = String(player); field.emit("change");
+  };
+  assignTarget("file:1", 1); assignTarget("file:2", 2);
+  h.click("local-discover"); await flush(); localAssign(h, 1, 1n); localAssign(h, 2, 2n);
+  h.get("record").checked = true;
+  h.click("play"); assert.equal(h.opens.length, 1); assert.equal(h.opens[0].gesture, true);
+  assert.equal(h.get("opponent-player-file:1").disabled, true);
+  assert.equal(h.get("opponent-player-file:2").disabled, true);
+  assignTarget("file:1", 2);
+  opening.resolve(h.audio); await flush();
+  const worker = h.workers[0], start = worker.last("play-start");
+  assert.deepEqual(start.opponents.map(row => [row.player, row.own, row.label]), [[1, true, "Own prefix"], [2, false, "<Other prefix>"]]);
+  assert.equal(start.opponents[0].file, own.file); assert.equal(start.opponents[1].file, other.file);
+  assert.equal(own.reads, 0); assert.equal(other.reads, 0);
+  const handoff = await h.prepared(start, 1); await h.reply(handoff, null); await h.reply(worker.last("play-activate"), null);
+  const rows = h.get("opponents-results"), writes = [], originalReplace = rows.replaceChildren.bind(rows);
+  rows.replaceChildren = (...children) => { writes.push(children.length); return originalReplace(...children); };
+  for (let index = 0; index < 8; index++) {
+    await h.receive({ kind: "play-opponents", playId: start.playId, player: 1,
+      opponents: comparison(start.playId, { kind: "own", label: "Own prefix", hits: 100n + BigInt(index) }).opponents, error: null });
+  }
+  assert.deepEqual(writes, []); assert.equal(rows.children.length, 0);
+  await h.receive({ kind: "play-opponents", playId: start.playId, player: 2, opponents: null, error: "only second comparison stopped" });
+  assert.match(h.get("opponents-status").textContent, /Player 2.*Other members continue/);
+  assert.equal(h.get("stop").disabled, false); assert.equal(worker.messages("play-stop").length, 0);
+  h.setNow(1300); h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300 });
+  const input = worker.last("play-step"); assert.equal(input.events[0].down, true);
+  await h.receive({ kind: "play-step-done", playId: start.playId, tickId: input.tickId,
+    songNs: 1n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
+  h.click("stop"); await flush();
+  const prefix = Uint8Array.from([66, 75, 82, 1]);
+  const receipt = localFinal(start, {
+    replays: [{ player: 1, replay: prefix, replayError: null, replayComplete: false },
+      { player: 2, replay: null, replayError: "second recording export failed", replayComplete: false }],
+    savedOpponents: { opponents: null, error: null, localOpponents: [
+      { player: 1, opponents: comparison(start.playId, { kind: "own", label: "Own prefix", songNs: -9223372036854775808n,
+        hits: 18446744073709551615n, combo: 0n, maxCombo: 18446744073709551615n }).opponents, error: null },
+      { player: 2, opponents: null, error: "only second comparison stopped" },
+    ] },
+  });
+  await h.receive(receipt); assert.deepEqual(writes, []); assert.equal(h.get("export").disabled, true);
+  stopping.resolve(); await flush();
+  assert.equal(writes.length, 1); assert.equal(rows.children.length, 2);
+  assert.match(rows.children[0].textContent, /Player 1.*Own prefix.*18446744073709551615/);
+  assert.match(rows.children[1].textContent, /Player 2.*only second comparison stopped/);
+  assert.match(h.get("local-results").children[1].textContent, /second recording export failed/);
+  assert.equal(h.get("play").disabled, false); assert.equal(h.get("opponent-player-file:1").disabled, false);
+  h.get("captured-replay").value = "1"; h.get("captured-replay").emit("change");
+  assert.equal(h.get("export").disabled, false);
+  h.click("export"); await flush();
+  assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), prefix);
+  assert.equal(h.downloads.at(-1).filename, `beatkernel-${start.playId}-player-1-prefix.bkr`);
+  await h.receive(receipt); await h.receive({ kind: "play-opponents", playId: start.playId, player: 2, opponents: null, error: "late old failure" });
+  assert.equal(writes.length, 1); assert.match(rows.children[1].textContent, /only second comparison stopped/);
+  assert.equal(own.reads, 0); assert.equal(other.reads, 0);
+  await h.close();
+});
+
+test("retired targets and malformed member comparison receipts cannot be reassigned silently or change local captures", async () => {
+  const retired = await harness({ touchSupported: true }); await retired.preview(); await localCount(retired, 3);
+  selectOpponent(retired, selectedRecording(), { label: "retired target" });
+  let target = retired.get("opponent-player-file:1"); target.value = "3"; target.emit("change");
+  await localCount(retired, 2);
+  target = retired.get("opponent-player-file:1"); assert.equal(target.value, "3");
+  assert.ok(target.children.some(option => option.value === "3" && /Removed player/.test(option.textContent)));
+  retired.click("local-discover"); await flush(); localAssign(retired, 1, 1n); localAssign(retired, 2, 2n);
+  retired.click("play"); await flush(); assert.equal(retired.opens.length, 0);
+  assert.equal(retired.workers[0].messages("play-start").length, 0);
+  await localCount(retired, 3);
+  assert.ok(retired.get("opponent-player-file:1").children.some(option => option.value === "4"));
+  assert.equal(retired.get("opponent-player-file:1").value, "3", "a new roster row never inherits a retired comparison target");
+  await retired.close();
+
+  for (const failure of ["owned-row", "ownership-envelope"]) {
+    const h = await harness({ touchSupported: true }); await h.preview(); await localCount(h, 2);
+    selectOpponent(h, selectedRecording(), { own: true, label: "first record" });
+    selectOpponent(h, selectedRecording(), { own: false, label: "second record" });
+    for (const player of [1, 2]) {
+      const field = h.get(`opponent-player-file:${player}`); field.value = String(player); field.emit("change");
+    }
+    h.click("local-discover"); await flush(); localAssign(h, 1, 1n); localAssign(h, 2, 2n); h.get("record").checked = true;
+    const session = await h.launch();
+    const groups = [
+      { player: 1, opponents: comparison(session.id, { kind: "own", label: "first record" }).opponents, error: null },
+      { player: 2, opponents: comparison(session.id, { label: "second record", hits: "not a counter" }).opponents, error: null },
+    ];
+    if (failure === "ownership-envelope") groups.reverse();
+    h.click("stop"); await flush();
+    const receipt = localFinal(session.start, {
+      savedOpponents: { localOpponents: groups, opponents: null, error: null },
+      replays: [1, 2].map(player => ({ player, replay: Uint8Array.from([66, 75, 82, player]), replayError: null, replayComplete: false })),
+    });
+    await h.receive(receipt);
+    if (failure === "owned-row") {
+      assert.equal(h.get("opponents-results").children.length, 2);
+      assert.match(h.get("opponents-results").children[0].textContent, /Player 1.*first record.*Hits 7/);
+      assert.match(h.get("opponents-results").children[1].textContent, /Player 2.*unavailable/i);
+    } else {
+      assert.equal(h.get("opponents-results").children.length, 0);
+      assert.match(h.get("opponents-status").textContent, /ownership changed.*Local result unchanged/);
+    }
+    assert.equal(h.get("captured-replay").children.filter(option => option.value !== "").length, 2);
+    assert.equal(h.get("local-results").children.length, 2); assert.equal(h.get("play").disabled, false);
+    await localCount(h, 1);
+    h.click("play"); await flush(); assert.equal(h.opens.length, 1, "solo refuses the still-targeted records before another audio owner");
+    const replay = await h.launch(0, "replay");
+    assert.equal(replay.start.opponents?.length ?? 0, 0); assert.equal(Object.hasOwn(replay.start, "localPlanWords"), false);
+    const display = h.get("opponents-status").textContent;
+    await h.receive(receipt); assert.equal(h.get("opponents-status").textContent, display);
+    h.click("stop"); await flush(); await h.receive(finalScore(replay.id));
+    assert.equal(h.get("opponents-results").children.length, 0);
+    await h.close();
+  }
+});
+
 test("Window ignores periodic comparison counters and displays the exact final prefix only after both owners join", async () => {
   const stopping = deferred();
   const h = await harness({ stopGate: stopping }); const preview = await h.preview();

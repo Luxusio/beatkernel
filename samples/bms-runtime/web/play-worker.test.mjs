@@ -361,6 +361,8 @@ async function workerHarness(options = {}) {
       this.memberScores = new Map(this.memberIds.map((player, index) => [player,
         options.localScore?.(player, index) ?? { ...SCORE, hits: SCORE.hits + BigInt(index), max_combo: SCORE.max_combo + BigInt(index) }]));
       this.memberCaptures = new Set(); this.memberReplayTakes = new Map(); this.memberReplayBytes = new Map();
+      this.memberSaved = new Map(this.memberIds.map(player => [player, []]));
+      this.memberHudDisables = new Map();
     }
     get players() { this.live(); return options.localPlayers ?? new Uint32Array(this.memberIds); }
     memberValue(player, field) {
@@ -373,6 +375,28 @@ async function workerHarness(options = {}) {
     combo(player) { return this.memberValue(player, "combo"); }
     max_combo(player) { return this.memberValue(player, "max_combo"); }
     member_song_ns(player) { return this.memberValue(player, "song_ns"); }
+    add_saved_opponent(player, bytes, own, label) {
+      this.live(); assert.ok(this.memberSaved.has(player));
+      this.calls.push(["local-add-opponent", player, bytes.slice(), own, label]);
+      if (options.localAddSavedError?.(player, label)) throw new Error("actual member replay admission refused");
+      const rows = this.memberSaved.get(player); rows.push({ own, label });
+      return options.localSavedIndex?.(player, rows.length - 1) ?? rows.length - 1;
+    }
+    saved_opponents() {
+      this.live(); assert.equal(this.stops, 0, "member prefixes must be read before disposal");
+      this.savedReads++; this.calls.push(["local-saved-opponents"]); this.disposals.push("opponents");
+      const groups = this.memberIds.map(player => ({ player, error: null,
+        opponents: this.memberSaved.get(player).map(value => ({ kind: value.own ? "own" : "other", label: value.label,
+          songNs: this.memberScores.get(player).song_ns, recordedUntilNs: -1n,
+          hits: 1n, misses: 0n, combo: 1n, maxCombo: 1n })) }));
+      return options.localSavedSnapshot?.(this, groups) ?? groups;
+    }
+    disable_saved_opponent_hud(player) {
+      this.live(); assert.ok(this.memberSaved.has(player));
+      this.calls.push(["local-disable-opponent-hud", player]);
+      this.memberHudDisables.set(player, (this.memberHudDisables.get(player) ?? 0) + 1);
+      if (options.localDisableSavedError?.(player)) throw new Error("member HUD disable failed");
+    }
     touch_bounds(player, page) {
       this.live(); this.calls.push(["local-touch-bounds", player, page]);
       return options.localTouchBounds ?? new Float32Array([34, 176, 249, 356, 249, 176, 464, 356]);
@@ -399,6 +423,7 @@ async function workerHarness(options = {}) {
   }
   if (options.missingLocalConstructor) BrowserLocalGame.new_physical = undefined;
   if (options.missingLocalInputBlob) BrowserLocalGame.prototype.input_blob = undefined;
+  if (options.missingLocalSavedHud) BrowserLocalGame.prototype.disable_saved_opponent_hud = undefined;
   class BrowserReplay extends BrowserGame {
     constructor(prepared, ...args) {
       super(prepared, ...args);
@@ -654,6 +679,89 @@ function localRequest(fields = {}) {
   return startRequest({ inputMode: "physical-contact",
     localPlanWords: localPlan([[99, HID_SOURCE], [7, 1n], [31, 2n]]), hidSetup: hidSetup(), ...fields });
 }
+
+test("local saved records admit per member before touch setup and isolate one failed HUD through final capture", async () => {
+  const files = [replayFile(), replayFile(), replayFile()];
+  const opponents = files.map((selected, index) => ({ file: selected.file, sourceKey: `file:local-${index}`,
+    player: [99, 31, 99][index], own: index !== 1, label: ["first own", "touch other", "second own"][index] }));
+  const maximum = 18446744073709551615n;
+  const h = await active({ allowNetworkClock: true, startRequest: localRequest({ opponents, recordReplay: true }),
+    localSavedSnapshot(game, rows) {
+      rows[0].opponents[0] = { ...rows[0].opponents[0], songNs: -9223372036854775808n,
+        hits: maximum, misses: maximum, combo: maximum, maxCombo: maximum };
+      if (game.savedReads === 2) rows[2] = { player: 31, opponents: null, error: "actual member comparison failed" };
+      return rows;
+    } });
+  const game = h.locals[0], admitted = game.calls.filter(call => call[0] === "local-add-opponent");
+  assert.equal(h.of("play-reply")[0].result.opponentCount, 3);
+  assert.deepEqual(admitted.map(call => [call[1], call[3], call[4]]), [[99, true, "first own"], [31, false, "touch other"], [99, true, "second own"]]);
+  assert.deepEqual(admitted.map(call => Array.from(call[2])), files.map(file => Array.from(file.bytes)));
+  assert.deepEqual(files.map(file => file.reads), [1, 1, 1]);
+  assert.equal(game.memberSaved.get(99).length, 2); assert.equal(game.memberSaved.get(7).length, 0);
+  assert.ok(game.calls.findLastIndex(call => call[0] === "local-add-opponent") < game.calls.findIndex(call => call[0] === "local-touch-bounds"),
+    "actual admitted comparisons reserve touch geometry before the binding is queried");
+  assert.ok(game.calls.findIndex(call => call[0] === "local-touch") < game.calls.findIndex(call => call[0] === "member-capture"));
+  await h.send(step());
+  h.setNetworkNow(1249); await h.send(step({ tickId: 2, watermark: ORIGIN + 1n }));
+  assert.equal(game.savedReads, 1); assert.equal(h.of("play-opponents").length, 0);
+  h.setNetworkNow(1250); await h.send(step({ tickId: 3, watermark: ORIGIN + 2n }));
+  assert.deepEqual(h.of("play-opponents").map(row => [row.player, row.opponents, row.error]), [[31, null, "actual member comparison failed"]]);
+  assert.deepEqual([...game.memberHudDisables], [[31, 1]]);
+  assert.equal(h.of("play-error").length, 0); assert.equal(game.stops, 0);
+  await h.send({ kind: "play-stop", playId: 7 });
+  const stopped = h.of("play-stopped").at(-1), groups = stopped.savedOpponents.localOpponents;
+  assert.equal(stopped.savedOpponents.opponents, null); assert.equal(stopped.savedOpponents.error, null);
+  assert.deepEqual(groups.map(row => row.player), [99, 7, 31]);
+  assert.equal(groups[0].opponents[0].songNs, -9223372036854775808n);
+  assert.equal(groups[0].opponents[0].hits, maximum); assert.equal(groups[0].opponents[1].label, "second own");
+  assert.equal(groups[1].opponents.length, 0); assert.equal(groups[1].error, null);
+  assert.equal(groups[2].opponents, null); assert.equal(groups[2].error, "actual member comparison failed");
+  assert.equal(game.savedReads, 3); assert.deepEqual([...game.memberHudDisables], [[31, 1]]);
+  assert.deepEqual(game.disposals.slice(-6), ["opponents", "stop", "take:99", "take:7", "take:31", "free"]);
+  assert.ok(stopped.replays.every(row => row.replay instanceof Uint8Array && row.replayError === null && row.replayComplete === false));
+  assert.equal(stopped.localScores.length, 3); assert.equal(game.stops, 1); assert.equal(game.frees, 1);
+  const reads = game.savedReads;
+  await h.send(step({ tickId: 4 })); await h.send({ kind: "play-stop", playId: 7 });
+  assert.equal(game.savedReads, reads); assert.equal(h.of("play-opponents").length, 1);
+});
+
+test("local saved setup refuses wrong targets and binding failures without fallback or late file-read resurrection", async () => {
+  const entry = (file, player) => ({ file, sourceKey: "file:target", own: true, label: "chosen", player });
+  for (const request of [localRequest({ opponents: [entry(replayFile().file, undefined)] }),
+    localRequest({ opponents: [entry(replayFile().file, 123)] }),
+    startRequest({ opponents: [entry(replayFile().file, 99)] })]) {
+    const h = await catalogWorker(); await h.send(request);
+    assert.ok(h.of("play-reply").at(-1).error); assert.equal(h.locals.length, 0); assert.equal(h.games.length, 0);
+    assert.equal(h.preparedOwners.length, 0);
+  }
+  const missing = await catalogWorker({ missingLocalSavedHud: true });
+  await missing.send(localRequest({ opponents: [entry(replayFile().file, 99)] }));
+  assert.match(missing.of("play-reply").at(-1).error, /saved comparison/);
+  assert.equal(missing.localConstructions.length, 0); assert.equal(missing.preparedOwners.at(-1).frees, 1);
+  for (const options of [{ localAddSavedError: player => player === 31 },
+    { localSavedIndex: (player, index) => player === 31 ? index + 1 : index }]) {
+    const h = await catalogWorker(options), first = replayFile(), refused = replayFile();
+    await h.send(localRequest({ recordReplay: true, opponents: [entry(first.file, 99),
+      { ...entry(refused.file, 31), sourceKey: "file:second" }] }));
+    const game = h.locals[0]; assert.equal(game.stops, 1); assert.equal(game.frees, 1);
+    assert.equal(game.calls.some(call => call[0] === "member-capture" || call[0] === "local-touch" || call[0] === "sample"), false);
+    assert.equal(game.memberSaved.get(99).length, 1);
+    assert.equal(h.of("play-reply").some(reply => reply.result?.kind === "prepared"), false);
+    assert.match(h.of("play-error").at(-1).message, /member replay admission|admission count/);
+  }
+  const waiting = deferred(), delayed = replayFile(() => waiting.promise);
+  const h = await catalogWorker(); h.post(localRequest({ opponents: [entry(delayed.file, 31)] })); await flushJobs();
+  const game = h.locals[0]; assert.equal(delayed.reads, 1);
+  await h.send({ kind: "play-stop", playId: 7 });
+  assert.equal(game.stops, 1); assert.equal(game.frees, 1);
+  const previous = h.messages.length;
+  waiting.resolve(delayed.bytes.slice().buffer); await flushJobs();
+  assert.equal(game.calls.some(call => call[0] === "local-add-opponent"), false);
+  assert.equal(h.messages.length, previous);
+  await h.send(startRequest({ playId: 8 }));
+  assert.equal(h.of("play-reply").at(-1).result.opponentCount, 0);
+  await h.send({ kind: "play-stop", playId: 8 });
+});
 
 test("local players snapshot exact sources and share one PCM, command and report owner while retaining every member score", async () => {
   const high = 9007199254740993n;

@@ -145,3 +145,64 @@ test("comparison snapshots preserve signed prefix evidence and reject malformed 
     { combo: 3n }, { maxCombo: 3n },
   ]) assert.throws(() => validateOpponentSnapshot([summary(patch)], 1));
 });
+
+test("saved targets use stable u32 member IDs without acquiring Files or changing count and byte charges", async () => {
+  const { SavedOpponentSelection, validateSelections, validateOpponentTargets } = await model();
+  const selected = new SavedOpponentSelection(), original = descriptor();
+  selected.add(original); selected.add({ ...descriptor("file:2"), player: 0xffffffff });
+  const before = selected.snapshot();
+  assert.equal(Object.hasOwn(before[0], "player"), false);
+  selected.setPlayer(original.sourceKey, 7);
+  assert.equal(selected.snapshot()[0].player, 7); assert.equal(Object.hasOwn(before[0], "player"), false);
+  assert.equal(selected.snapshot()[0].file, original.file); assert.equal(selected.byteLength, 8); assert.equal(selected.size, 2);
+  assert.doesNotThrow(() => validateOpponentTargets(selected.snapshot(), [7, 91, 0xffffffff]));
+  assert.throws(() => validateOpponentTargets(selected.snapshot(), [1, 2, 3]));
+  assert.throws(() => validateOpponentTargets(selected.snapshot()));
+  for (const target of [0, -1, 4294967296, 1.5, "7", 7n, NaN]) {
+    assert.throws(() => selected.setPlayer(original.sourceKey, target));
+    assert.equal(selected.snapshot()[0].player, 7); assert.equal(selected.byteLength, 8);
+    assert.throws(() => validateSelections([{ ...original, player: target }]));
+  }
+  assert.throws(() => selected.setPlayer("retired-source", 7));
+  selected.setPlayer(original.sourceKey, null); selected.setPlayer("file:2", undefined);
+  assert.ok(selected.snapshot().every(row => !Object.hasOwn(row, "player")));
+  assert.doesNotThrow(() => validateOpponentTargets(selected.snapshot()));
+  assert.throws(() => validateOpponentTargets(selected.snapshot(), [7, 91]));
+  assert.equal(selected.snapshot()[0].file, original.file); assert.equal(selected.byteLength, 8);
+});
+
+test("local comparison snapshots require exact member ownership but isolate malformed rows from healthy and empty member prefixes", async () => {
+  const { validateLocalOpponentSnapshot } = await model();
+  const players = [7, 0xffffffff, 91], selections = [
+    { ...descriptor(), label: "<untrusted display>", player: 7 },
+    { ...descriptor("file:2"), own: false, label: "<untrusted display>", player: 0xffffffff },
+  ];
+  const fresh = () => [
+    { player: 7, opponents: [summary({ songNs: -9223372036854775808n })], error: null },
+    { player: 0xffffffff, opponents: [summary({ kind: "other", hits: 18446744073709551615n, misses: 0n, combo: 0n, maxCombo: 18446744073709551615n })], error: null },
+    { player: 91, opponents: [], error: null },
+  ];
+  const input = fresh(), saved = validateLocalOpponentSnapshot(input, players, selections);
+  assert.equal(saved[0].opponents[0].songNs, -9223372036854775808n);
+  assert.equal(saved[1].opponents[0].hits, 18446744073709551615n); assert.equal(saved[2].opponents.length, 0);
+  assert.ok(Object.isFrozen(saved) && saved.every(Object.isFrozen));
+  input[0].opponents[0].label = "changed caller"; assert.equal(saved[0].opponents[0].label, "<untrusted display>");
+  for (const bad of [null, [], new Array(3), fresh().reverse(), [...fresh().slice(0, 2), { player: 7, opponents: [], error: null }]]) {
+    assert.throws(() => validateLocalOpponentSnapshot(bad, players, selections));
+  }
+  for (const bad of [{ player: 0xffffffff, opponents: [], error: null },
+    { player: 0xffffffff, opponents: [summary({ hits: 1 })], error: null },
+    { player: 0xffffffff, opponents: [summary({ kind: "other", label: "wrong record" })], error: null },
+    { player: 0xffffffff, opponents: [summary()], error: null },
+    { player: 0xffffffff, opponents: null, error: "" },
+    { player: 0xffffffff, opponents: [], error: "actual failure" },
+    { player: 0xffffffff, opponents: null, error: "x".repeat(4097) }]) {
+    const rows = fresh(); rows[1] = bad;
+    const result = validateLocalOpponentSnapshot(rows, players, selections);
+    assert.equal(result[0].error, null); assert.equal(result[0].opponents.length, 1);
+    assert.equal(result[1].opponents, null); assert.equal(typeof result[1].error, "string");
+    assert.equal(result[2].error, null); assert.equal(result[2].opponents.length, 0);
+  }
+  const failed = fresh(); failed[1] = { player: 0xffffffff, opponents: null, error: "member HUD unavailable" };
+  assert.equal(validateLocalOpponentSnapshot(failed, players, selections)[1].error, "member HUD unavailable");
+});
