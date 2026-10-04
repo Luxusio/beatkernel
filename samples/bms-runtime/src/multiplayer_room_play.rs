@@ -261,6 +261,37 @@ impl RoomPlayClient {
                 .is_some_and(RoomProgressClient::local_complete)
     }
 
+    /// Request coordinated drain after genuine local receipt completion.
+    /// Premature or repeated local requests leave this owner available; this
+    /// does not queue Leave or close the caller's transport.
+    pub fn request_drain(&mut self) -> Result<(), RoomPlayError> {
+        if self.stopped {
+            return Err(RoomPlayError::Stopped);
+        }
+        if self.leaving || !self.start.committed() {
+            return Err(RoomPlayError::InvalidState);
+        }
+        self.progress
+            .as_mut()
+            .ok_or(RoomPlayError::InvalidState)?
+            .request_drain()
+            .map_err(|error| match error {
+                RoomProgressClientError::InvalidDrain => RoomPlayError::InvalidState,
+                error => RoomPlayError::Progress(error),
+            })
+    }
+
+    /// Actual Ready full write and matching server Complete, until Stop/Leave.
+    pub fn drain_complete(&self) -> bool {
+        !self.stopped
+            && !self.leaving
+            && self.start.committed()
+            && self
+                .progress
+                .as_ref()
+                .is_some_and(RoomProgressClient::drain_complete)
+    }
+
     // Called after the candidate's genuine start transition succeeds and before
     // its infallible adoption. A preflighted pending Commit does not call this.
     fn activate_progress(&mut self, start: &StartAgreement) -> Result<(), RoomPlayError> {
@@ -471,7 +502,7 @@ impl RoomPlayClient {
                     .ok_or(RoomPlayError::InvalidState)?
                     .receive(&message, captured_ns)?;
             }
-            RoomMessage::FinalAck { .. } => {
+            RoomMessage::FinalAck { .. } | RoomMessage::DrainComplete { .. } => {
                 if self.leaving || !self.start.committed() {
                     return Err(RoomPlayError::InvalidState);
                 }

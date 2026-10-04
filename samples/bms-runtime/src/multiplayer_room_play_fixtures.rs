@@ -1133,3 +1133,323 @@ fn matching_pending_commit_stages_real_relay_prefix_until_accept_write_then_leav
     assert!(!client.local_final_written());
     assert!(!client.progress_complete());
 }
+
+fn completed_progress(count: usize) -> (Cohort, RoomProgressRelay, Vec<u64>, i64) {
+    let (mut cohort, _) = committed(count);
+    let room = cohort.registry.room("room").unwrap();
+    let mut relay = RoomProgressRelay::new(room).unwrap();
+    relay.activate().unwrap();
+    let mut last_ids = Vec::new();
+    for index in 0..count {
+        let client = &mut cohort.clients[index];
+        let before = client.clone();
+        assert!(client.request_drain().is_err());
+        assert_eq!(*client, before);
+        client
+            .publish_progress(&progress_rows(&room.members[index].players, 2), true)
+            .unwrap();
+        let upload = client.poll_write(12_000 + offset(index)).unwrap().unwrap();
+        assert_eq!(upload.id, if index == 0 { 22 } else { 21 });
+        relay
+            .receive_at(cohort.ids[index], &wire(&upload), 12_010)
+            .unwrap();
+        client.written(upload.id, 12_001 + offset(index)).unwrap();
+        last_ids.push(upload.id);
+    }
+    for turn in 0..count + 2 {
+        let at = 13_000 + turn as i64 * 100;
+        for index in 0..count {
+            if let Some(frame) = relay.poll_write_at(cohort.ids[index], at).unwrap() {
+                let message = decode_message(&frame.bytes).unwrap();
+                assert!(matches!(
+                    message,
+                    RoomMessage::PeerProgress { .. } | RoomMessage::FinalAck { .. }
+                ));
+                cohort.clients[index]
+                    .receive_at(message, at + offset(index) + 10, at + offset(index) + 20)
+                    .unwrap();
+                relay.written(cohort.ids[index], frame.id).unwrap();
+            }
+        }
+        for index in 0..count {
+            let client = &mut cohort.clients[index];
+            if let Some(frame) = client.poll_write(at + offset(index) + 30).unwrap() {
+                assert_eq!(frame.id, last_ids[index] + 1);
+                last_ids[index] = frame.id;
+                assert!(matches!(wire(&frame), RoomMessage::FinalAck { .. }));
+                relay
+                    .receive_at(cohort.ids[index], &wire(&frame), at + 40)
+                    .unwrap();
+                client
+                    .written_at(frame.id, at + offset(index) + 31, at + offset(index) + 32)
+                    .unwrap();
+            }
+        }
+        if relay.complete() && cohort.clients.iter().all(RoomPlayClient::progress_complete) {
+            assert!(cohort.clients.iter().all(|client| !client.drain_complete()));
+            return (cohort, relay, last_ids, at + 100);
+        }
+    }
+    panic!("the bounded actual final/ACK exchange did not complete");
+}
+
+#[test]
+fn genuine_cohorts_drain_only_after_all_ready_frames_and_each_exact_external_write_receipt() {
+    for count in [2usize, 3, 4, 64] {
+        let (mut cohort, mut relay, last_ids, at) = completed_progress(count);
+        let mut ready_frames = Vec::new();
+        for index in 0..count {
+            let client = &mut cohort.clients[index];
+            assert!(client.poll_write(at + offset(index)).unwrap().is_none());
+            client.request_drain().unwrap();
+            let before = client.clone();
+            assert!(client.request_drain().is_err());
+            assert_eq!(*client, before);
+            let ready = client.poll_write(at + offset(index)).unwrap().unwrap();
+            assert_eq!(ready.id, last_ids[index] + 1);
+            assert_eq!(
+                wire(&ready),
+                RoomMessage::DrainReady {
+                    participant: cohort.ids[index],
+                    sequence: 1,
+                }
+            );
+            assert!(client.poll_write(at + offset(index) + 1).unwrap().is_none());
+            relay
+                .receive_at(cohort.ids[index], &wire(&ready), at + 2)
+                .unwrap();
+            if index + 1 < count {
+                assert!(
+                    relay
+                        .poll_write_at(cohort.ids[0], at + 2)
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            if index != 0 {
+                client
+                    .written_at(ready.id, at + offset(index) + 2, at + offset(index) + 3)
+                    .unwrap();
+            }
+            ready_frames.push(ready);
+        }
+        assert!(!relay.drained());
+        for index in 0..count {
+            let notice = relay
+                .poll_write_at(cohort.ids[index], at + 4)
+                .unwrap()
+                .unwrap();
+            let message = decode_message(&notice.bytes).unwrap();
+            assert_eq!(
+                message,
+                RoomMessage::DrainComplete {
+                    participant: cohort.ids[index],
+                    sequence: 1,
+                }
+            );
+            let client = &mut cohort.clients[index];
+            client
+                .receive_at(
+                    message.clone(),
+                    at + offset(index) + 5,
+                    at + offset(index) + 20,
+                )
+                .unwrap();
+            if index == 0 {
+                assert!(
+                    !client.drain_complete(),
+                    "received bytes do not credit the retained Ready write"
+                );
+                let pending = client.clone();
+                assert!(
+                    client
+                        .receive_at(message, at + offset(index) + 6, at + offset(index) + 21)
+                        .is_err()
+                );
+                assert!(
+                    client
+                        .written_at(
+                            last_ids[index],
+                            at + offset(index) + 2,
+                            at + offset(index) + 21
+                        )
+                        .is_err()
+                );
+                assert!(
+                    client
+                        .written_at(
+                            ready_frames[index].id + 1,
+                            at + offset(index) + 2,
+                            at + offset(index) + 21
+                        )
+                        .is_err()
+                );
+                assert_eq!(*client, pending);
+                client
+                    .written_at(
+                        ready_frames[index].id,
+                        at + offset(index) + 2,
+                        at + offset(index) + 22,
+                    )
+                    .unwrap();
+            }
+            assert!(client.drain_complete() && client.progress_complete());
+            assert!(!client.leave_written());
+            assert!(
+                !relay.drained(),
+                "client receipt is not the relay's own Complete write credit"
+            );
+            relay.written(cohort.ids[index], notice.id).unwrap();
+            assert_eq!(relay.drained(), index + 1 == count);
+            let complete = client.clone();
+            assert!(
+                client
+                    .written(ready_frames[index].id, at + offset(index) + 23)
+                    .is_err()
+            );
+            assert!(client.request_drain().is_err());
+            assert_eq!(*client, complete);
+            assert!(
+                client
+                    .poll_write(at + offset(index) + 24)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(relay.drained());
+        assert_eq!(
+            cohort.registry.room("room").unwrap().members.len(),
+            count,
+            "receipt completion does not release caller-owned membership"
+        );
+    }
+}
+
+#[test]
+fn drain_capture_floor_and_identity_refusals_are_atomic_and_leave_or_stop_revokes_authority() {
+    let mut preparing = prepared(2);
+    let before = preparing.clients[0].clone();
+    assert!(preparing.clients[0].request_drain().is_err());
+    assert_eq!(preparing.clients[0], before);
+
+    let (mut cohort, mut relay, last_ids, at) = completed_progress(2);
+    let own = cohort.ids[0];
+    let other = cohort.ids[1];
+    let client = &mut cohort.clients[0];
+    client.request_drain().unwrap();
+    let notice = RoomMessage::DrainComplete {
+        participant: own,
+        sequence: 1,
+    };
+    let before = client.clone();
+    assert!(
+        client
+            .receive_at(notice.clone(), at + offset(0), at + offset(0))
+            .is_err()
+    );
+    assert_eq!(
+        *client, before,
+        "a queued request has no Ready admission floor"
+    );
+    let admitted = at + offset(0) + 100;
+    let ready = client.poll_write(admitted).unwrap().unwrap();
+    assert_eq!(ready.id, last_ids[0] + 1);
+    for (message, captured) in [
+        (notice.clone(), admitted - 1),
+        (notice.clone(), admitted + 201),
+        (
+            RoomMessage::DrainComplete {
+                participant: other,
+                sequence: 1,
+            },
+            admitted,
+        ),
+        (
+            RoomMessage::DrainComplete {
+                participant: ParticipantId(u64::MAX),
+                sequence: 1,
+            },
+            admitted,
+        ),
+        (
+            RoomMessage::DrainComplete {
+                participant: own,
+                sequence: 2,
+            },
+            admitted,
+        ),
+        (
+            RoomMessage::DrainReady {
+                participant: own,
+                sequence: 1,
+            },
+            admitted,
+        ),
+    ] {
+        let before = client.clone();
+        assert!(
+            client
+                .receive_at(message, captured, admitted + 200)
+                .is_err()
+        );
+        assert_eq!(*client, before);
+    }
+    let mut leaving = client.clone();
+    leaving.request_leave().unwrap();
+    let fenced = leaving.clone();
+    assert!(leaving.request_drain().is_err());
+    assert!(
+        leaving
+            .receive_at(notice.clone(), admitted + 1, admitted + 2)
+            .is_err()
+    );
+    assert_eq!(leaving, fenced);
+    leaving
+        .written_at(ready.id, admitted + 1, admitted + 2)
+        .unwrap();
+    assert!(!leaving.drain_complete() && !leaving.progress_complete());
+    let leave = leaving.poll_write(admitted + 3).unwrap().unwrap();
+    assert_eq!((leave.id, wire(&leave)), (ready.id + 1, RoomMessage::Leave));
+    leaving.written(leave.id, admitted + 4).unwrap();
+    assert!(leaving.leave_written());
+    assert!(!leaving.drain_complete());
+
+    relay.receive_at(own, &wire(&ready), at + 110).unwrap();
+    cohort.clients[1].request_drain().unwrap();
+    let other_ready = cohort.clients[1]
+        .poll_write(at + offset(1) + 100)
+        .unwrap()
+        .unwrap();
+    relay
+        .receive_at(other, &wire(&other_ready), at + 110)
+        .unwrap();
+    let complete = relay.poll_write_at(own, at + 120).unwrap().unwrap();
+    let client = &mut cohort.clients[0];
+    client
+        .receive_at(
+            decode_message(&complete.bytes).unwrap(),
+            admitted + 21,
+            admitted + 50,
+        )
+        .unwrap();
+    let mut stopped_pending = client.clone();
+    stopped_pending.stop();
+    let stopped = stopped_pending.clone();
+    assert!(
+        stopped_pending
+            .written_at(ready.id, admitted + 1, admitted + 51)
+            .is_err()
+    );
+    assert!(stopped_pending.request_drain().is_err());
+    assert_eq!(stopped_pending, stopped);
+    assert!(!stopped_pending.drain_complete());
+    client
+        .written_at(ready.id, admitted + 1, admitted + 51)
+        .unwrap();
+    assert!(client.drain_complete());
+    client.stop();
+    assert!(!client.drain_complete() && !client.progress_complete());
+    assert!(client.local_final_written() && client.local_final_acknowledged());
+    assert!(client.peer_final_ack_written(other));
+    assert_eq!(client.peer_progress(other).unwrap().sequence, 1);
+}

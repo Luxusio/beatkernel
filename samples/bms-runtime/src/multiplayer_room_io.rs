@@ -90,6 +90,14 @@ impl<S: Read + Write> RoomPlayIo<S> {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
     }
 
+    /// Opt in to coordinated drain without closing the caller-owned stream.
+    pub fn request_drain(&mut self) -> io::Result<()> {
+        self.ensure_live()?;
+        self.session
+            .request_drain()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+    }
+
     /// Queue actual committed member progress; local admission refusals retain
     /// the healthy stream and do not manufacture a transport write receipt.
     pub fn publish_progress(
@@ -119,6 +127,10 @@ impl<S: Read + Write> RoomPlayIo<S> {
     /// Local completion is not permission to close the entire room.
     pub fn progress_complete(&self) -> bool {
         self.session.progress_complete()
+    }
+
+    pub fn drain_complete(&self) -> bool {
+        self.session.drain_complete()
     }
 
     /// Return only the common owner's once-only committed software schedule.
@@ -157,8 +169,12 @@ impl<S: Read + Write> RoomPlayIo<S> {
     /// immediately; complete-frame processing takes a separate observation.
     /// WouldBlock/Interrupted retain offsets without an internal retry. Any
     /// other clock, stream or protocol error permanently fences this owner.
+    /// Completed drain returns false without observing the clock or stream.
     pub fn step<F: FnMut() -> io::Result<i64>>(&mut self, mut now: F) -> io::Result<bool> {
         self.ensure_live()?;
+        if self.session.drain_complete() {
+            return Ok(false);
+        }
         let result = self.step_live(&mut now);
         if let Err(error) = &result {
             self.failure = Some((error.kind(), error.to_string()));
@@ -204,6 +220,12 @@ impl<S: Read + Write> RoomPlayIo<S> {
                         self.offset = 0;
                         if self.session.leave_written() {
                             self.stop();
+                            return Ok(true);
+                        }
+                        if self.session.drain_complete() {
+                            // An early Complete may become authoritative on
+                            // this exact Ready receipt. Preserve success rather
+                            // than performing a subsequent read that can EOF.
                             return Ok(true);
                         }
                     }

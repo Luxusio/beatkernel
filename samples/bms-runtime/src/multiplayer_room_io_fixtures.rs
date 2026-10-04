@@ -2,12 +2,15 @@
 //! output-clock acceptance; every room/clock/start transition uses real owners.
 use crate::{
     local_players::PlayerId,
+    multiplayer_group::MemberProgress,
     multiplayer_group_rooms::{
         GroupRoomMember, GroupRoomPhase, GroupRoomPolicy, GroupRoomRegistry,
     },
     multiplayer_room_clock::RoomClockExchange,
     multiplayer_room_io::RoomPlayIo,
     multiplayer_room_play::RoomPlayClient,
+    multiplayer_room_progress::RoomProgressRelay,
+    multiplayer_protocol::Progress,
     multiplayer_room_start::RoomStartCoordinator,
     multiplayer_room_wire::{RoomMessage, decode_message, encode_message},
     multiplayer_rooms::ParticipantId,
@@ -778,5 +781,325 @@ fn stop_and_actual_leave_withhold_unconsumed_schedules_and_return_stream_cleanup
         );
         drop(stream);
         assert_eq!(script.borrow().drops, 1);
+    }
+}
+
+fn completed_progress(count: usize) -> (Cohort, RoomProgressRelay, i64) {
+    let (mut cohort, _) = committed(count);
+    let room = cohort.registry.room("room").unwrap();
+    let mut relay = RoomProgressRelay::new(room).unwrap();
+    relay.activate().unwrap();
+    for index in 0..count {
+        let client = &mut cohort.clients[index];
+        let before = client.io.session().clone();
+        assert_eq!(
+            client.io.request_drain().unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(*client.io.session(), before);
+        let rows = room.members[index]
+            .players
+            .iter()
+            .copied()
+            .map(|player| MemberProgress {
+                player,
+                progress: Progress {
+                    song_ns: 604_800_000_000_000,
+                    hits: u64::MAX,
+                    misses: 0,
+                    combo: u64::MAX,
+                    max_combo: u64::MAX,
+                },
+            })
+            .collect::<Vec<_>>();
+        client.io.publish_progress(&rows, true).unwrap();
+        assert!(step(client, 12_000 + offset(index)));
+        let upload = emitted(client);
+        assert!(matches!(upload, RoomMessage::Progress(_)));
+        relay
+            .receive_at(cohort.ids[index], &upload, 12_010)
+            .unwrap();
+        assert!(client.io.local_final_written());
+    }
+    for turn in 0..count + 2 {
+        let at = 13_000 + turn as i64 * 100;
+        for index in 0..count {
+            if let Some(frame) = relay.poll_write_at(cohort.ids[index], at).unwrap() {
+                let message = decode_message(&frame.bytes).unwrap();
+                assert!(matches!(
+                    message,
+                    RoomMessage::PeerProgress { .. } | RoomMessage::FinalAck { .. }
+                ));
+                deliver(
+                    &mut cohort.clients[index],
+                    &message,
+                    at + offset(index) + 10,
+                );
+                assert!(cohort.clients[index].script.borrow().output.is_empty());
+                relay.written(cohort.ids[index], frame.id).unwrap();
+            }
+        }
+        for index in 0..count {
+            let client = &mut cohort.clients[index];
+            step(client, at + offset(index) + 20);
+            if !client.script.borrow().output.is_empty() {
+                let ack = emitted(client);
+                assert!(matches!(ack, RoomMessage::FinalAck { .. }));
+                relay.receive_at(cohort.ids[index], &ack, at + 30).unwrap();
+            }
+        }
+        if relay.complete()
+            && cohort
+                .clients
+                .iter()
+                .all(|client| client.io.progress_complete())
+        {
+            assert!(
+                cohort
+                    .clients
+                    .iter()
+                    .all(|client| !client.io.drain_complete())
+            );
+            return (cohort, relay, at + 100);
+        }
+    }
+    panic!("bounded real driver final/ACK exchange did not complete");
+}
+
+#[test]
+fn actual_stream_ready_prefixes_and_complete_fragments_finish_without_automatic_leave_or_further_io()
+ {
+    for count in [2usize, 3, 4] {
+        let (mut cohort, mut relay, at) = completed_progress(count);
+        for index in 0..count {
+            let client = &mut cohort.clients[index];
+            client.io.request_drain().unwrap();
+            let requested = client.io.session().clone();
+            assert_eq!(
+                client.io.request_drain().unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(*client.io.session(), requested);
+            client.script.borrow_mut().writes.extend([
+                Action::Limit(5),
+                Action::Error(io::ErrorKind::WouldBlock),
+                Action::Error(io::ErrorKind::Interrupted),
+                Action::Limit(usize::MAX),
+            ]);
+            let local = at + offset(index);
+            assert!(timed_step(client, &[local, local + 1]));
+            assert_eq!(client.script.borrow().output.as_slice(), b"BKMR\x02");
+            assert!(!timed_step(client, &[local + 2]));
+            assert!(!timed_step(client, &[local + 3]));
+            assert!(!client.io.drain_complete());
+            assert!(timed_step(client, &[local + 4, local + 5, local + 6]));
+            let ready = emitted(client);
+            assert_eq!(
+                ready,
+                RoomMessage::DrainReady {
+                    participant: cohort.ids[index],
+                    sequence: 1,
+                }
+            );
+            relay
+                .receive_at(cohort.ids[index], &ready, at + 10)
+                .unwrap();
+            if index + 1 < count {
+                assert!(
+                    relay
+                        .poll_write_at(cohort.ids[0], at + 10)
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+        for index in 0..count {
+            let frame = relay
+                .poll_write_at(cohort.ids[index], at + 11)
+                .unwrap()
+                .unwrap();
+            let complete = decode_message(&frame.bytes).unwrap();
+            assert_eq!(
+                complete,
+                RoomMessage::DrainComplete {
+                    participant: cohort.ids[index],
+                    sequence: 1,
+                }
+            );
+            let client = &mut cohort.clients[index];
+            queue(client, &complete);
+            client.script.borrow_mut().reads.extend([
+                Action::Limit(3),
+                Action::Error(io::ErrorKind::WouldBlock),
+                Action::Limit(8),
+                Action::Limit(1),
+                Action::Error(io::ErrorKind::Interrupted),
+                Action::Limit(usize::MAX),
+                Action::Limit(0),
+            ]);
+            let local = at + offset(index) + 20;
+            assert!(timed_step(client, &[local, local + 1]));
+            assert!(!timed_step(client, &[local + 2]));
+            assert!(timed_step(client, &[local + 3, local + 4]));
+            assert!(timed_step(client, &[local + 5, local + 6]));
+            assert!(!timed_step(client, &[local + 7]));
+            assert!(!client.io.drain_complete());
+            assert!(timed_step(client, &[local + 8, local + 9, local + 10]));
+            assert!(client.io.drain_complete() && client.io.progress_complete());
+            assert!(client.io.local_final_written() && client.io.local_final_acknowledged());
+            assert!(!client.io.session().leave_written());
+            let before = {
+                let s = client.script.borrow();
+                (s.read_calls, s.write_calls, s.output.clone(), s.reads.len())
+            };
+            for _ in 0..3 {
+                assert!(
+                    !client
+                        .io
+                        .step(|| panic!("completed drain must not acquire time"))
+                        .unwrap()
+                );
+            }
+            let s = client.script.borrow();
+            assert_eq!(
+                (s.read_calls, s.write_calls, &s.output, s.reads.len()),
+                (before.0, before.1, &before.2, before.3)
+            );
+            assert_eq!(
+                s.reads.len(),
+                1,
+                "the queued EOF remains unobserved after completion"
+            );
+            assert_eq!(s.drops, 0);
+            drop(s);
+            assert!(!relay.drained());
+            relay.written(cohort.ids[index], frame.id).unwrap();
+        }
+        assert!(relay.drained());
+        assert_eq!(cohort.registry.room("room").unwrap().members.len(), count);
+        for client in cohort.clients {
+            let Endpoint { io, script } = client;
+            assert!(io.drain_complete());
+            let stream = io.into_stream();
+            assert_eq!(script.borrow().drops, 0);
+            drop(stream);
+            assert_eq!(
+                script.borrow().drops,
+                1,
+                "only the caller disposes the stream"
+            );
+        }
+    }
+}
+
+#[test]
+fn completed_client_handoff_is_idle_immediately_while_stop_and_leave_cancel_partial_drain() {
+    let (mut cohort, mut relay, at) = completed_progress(2);
+    for index in 0..2 {
+        let client = &mut cohort.clients[index];
+        client.io.request_drain().unwrap();
+        assert!(step(client, at + offset(index)));
+        relay
+            .receive_at(cohort.ids[index], &emitted(client), at + 1)
+            .unwrap();
+    }
+    for index in 0..2 {
+        let complete = relay
+            .poll_write_at(cohort.ids[index], at + 2)
+            .unwrap()
+            .unwrap();
+        deliver(
+            &mut cohort.clients[index],
+            &decode_message(&complete.bytes).unwrap(),
+            at + offset(index) + 3,
+        );
+        relay.written(cohort.ids[index], complete.id).unwrap();
+    }
+    assert!(relay.drained());
+    // This public handoff has no outstanding frame: the original owner reached
+    // completion through actual Ready writes and real relay-generated notices.
+    let completed = cohort.clients[0].io.session().clone();
+    assert!(completed.drain_complete());
+    let script = Rc::new(RefCell::new(Script::default()));
+    script.borrow_mut().reads.push_back(Action::Limit(0));
+    script
+        .borrow_mut()
+        .writes
+        .push_back(Action::Error(io::ErrorKind::BrokenPipe));
+    let mut handoff = RoomPlayIo::new(completed, Stream(script.clone()));
+    assert!(
+        !handoff
+            .step(|| panic!("already completed client must be idle at construction"))
+            .unwrap()
+    );
+    assert_eq!(
+        (script.borrow().read_calls, script.borrow().write_calls),
+        (0, 0)
+    );
+    assert!(handoff.drain_complete());
+    assert_eq!(
+        handoff.request_drain().unwrap_err().kind(),
+        io::ErrorKind::InvalidInput
+    );
+    handoff.stop();
+    assert!(!handoff.drain_complete() && !handoff.progress_complete());
+    assert!(handoff.local_final_written() && handoff.local_final_acknowledged());
+    assert_eq!(
+        handoff
+            .step(|| panic!("explicit stop must not acquire time"))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotConnected
+    );
+    assert_eq!(
+        (script.borrow().read_calls, script.borrow().write_calls),
+        (0, 0)
+    );
+    let stream = handoff.into_stream();
+    assert_eq!(script.borrow().drops, 0);
+    drop(stream);
+    assert_eq!(script.borrow().drops, 1);
+
+    for leave in [false, true] {
+        let (mut cohort, _, at) = completed_progress(2);
+        let client = &mut cohort.clients[0];
+        client.io.request_drain().unwrap();
+        client
+            .script
+            .borrow_mut()
+            .writes
+            .push_back(Action::Limit(5));
+        assert!(step(client, at + offset(0)));
+        assert!(!client.io.drain_complete());
+        if leave {
+            client.io.request_leave().unwrap();
+            assert_eq!(
+                client.io.request_drain().unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert!(step(client, at + offset(0) + 1));
+            assert_eq!(
+                emitted(client),
+                RoomMessage::DrainReady {
+                    participant: cohort.ids[0],
+                    sequence: 1,
+                }
+            );
+            assert!(!client.io.drain_complete() && !client.io.progress_complete());
+            let reads = client.script.borrow().read_calls;
+            client.script.borrow_mut().reads.push_back(Action::Limit(0));
+            assert!(step(client, at + offset(0) + 2));
+            assert_eq!(emitted(client), RoomMessage::Leave);
+            assert_eq!(client.script.borrow().read_calls, reads);
+            assert!(client.io.session().leave_written());
+        } else {
+            client.io.stop();
+            assert_eq!(client.script.borrow().output.as_slice(), b"BKMR\x02");
+        }
+        assert!(!client.io.drain_complete());
+        assert!(client.io.local_final_written() && client.io.local_final_acknowledged());
+        let error = client.io.request_drain().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotConnected);
+        fenced(client, error);
     }
 }
