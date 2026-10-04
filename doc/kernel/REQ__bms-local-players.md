@@ -51,9 +51,10 @@ shared plan does not open, close or roll back host devices. RuntimeGroup still
 requires exact member binding selectors and disjoint voice ownership. Source
 validation belongs to setup and adds no per-input or audio-callback work.
 
-This shared bridge is a prerequisite for browser local play. It does not make
-the current solo browser owner, device-assignment UI or multi-field rendering
-complete. Actual browser/device/runtime acceptance remains deferred.
+Browser local bindings and the Worker now use this shared bridge, including
+paged multi-field rendering. The actual browser page remains solo pending
+device assignment and per-member record storage. Actual browser/device/runtime
+acceptance remains deferred.
 
 ### Common prepared members
 
@@ -81,9 +82,9 @@ Allocation/namespace failure exposes no partially prepared cohort.
 Native cohort preparation uses this same builder with ButtonOnly rules and
 its existing keyboard maps. Host-owned capture/completion/opponent loading
 remains outside the common builder. Existing native source/device constraints,
-recording identities and voice order must be preserved. This common prepared
-member layer precedes browser group ownership and is not a playable browser
-multi-player claim.
+recording identities and voice order must be preserved. Browser group ownership
+now uses this common prepared member layer. A playable browser multi-player
+page still requires assignment and per-member storage integration.
 
 ### Nonblocking shared local gameplay owner
 
@@ -122,8 +123,9 @@ position at the immutable endpoint, genuine configured Mixer fence, resolved
 queue/BGM credits/ACK and exact executed acknowledged command counts.
 Pending ACK never stops judging; partial or rejected ACK fences the whole owner
 and retains the real admitted prefix without replaying its tail. Source/compile
-and authored fixtures are not runtime acceptance. Browser bindings, assignment
-and renderer integration remain subsequent requirements.
+and authored fixtures are not runtime acceptance. Browser bindings and Worker
+renderer integration are implemented in source; page assignment, per-member
+records and comparisons, and active-contact page remapping remain requirements.
 
 Player IDs survive roster growth and shrink for retained members. A solo roster
 uses automatic input and clears previous explicit assignments. Each member of
@@ -172,7 +174,7 @@ same group through an adapter. Linux terminal local sessions compose multiple
 devices with this group and publishes the same member reports to graphical
 panels. Settings Players supplies the native roster; Windows and macOS source
 paths likewise acquire multiple exact inputs as described above. Native
-execution acceptance and browser group integration remain pending.
+execution acceptance and actual browser page assignment remain pending.
 
 Group telemetry retention is limited to 65536 samples per member and 1048576
 samples in aggregate; zero retains counters only. Each member's judge/history

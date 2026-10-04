@@ -24,14 +24,60 @@ bounded image cache; select backgrounds from each visible member's own frontier.
 Drawing neither advances judgment nor creates output evidence. Invalid page
 requests refuse before surface recreation or resource synchronization.
 
-Known ceiling: The current browser page remains solo until the Worker and actual
-device assignment flow consume this binding and local canvas entry point. Rust binding
+Known ceiling: The current browser page remains solo until its device assignment
+flow starts the new local Worker caller and handles per-member records. Rust binding
 availability does not prove browser execution, generated JS bindings, device
 coverage, shared audio completion or performance acceptance.
 The 64-member roster bound and 256 combined binding-row bound are independent:
 a chart requiring many lanes can reach the binding budget before the roster
 bound. Refuse incomplete member coverage rather than silently sharing sources
 or truncating mappings.
+
+## Local Worker caller
+
+Live physical preparation optionally carries localPlanWords in the existing
+four-word resolved-plan schema and an initial localPage. Snapshot numeric setup
+before asynchronous reads. Build the eight-word per-player maps from actual
+physical profiles, with source one representing the browser keyboard aggregate
+and source two the touch aggregate. Do not split either aggregate into fictional
+devices. Exact members receive only their assigned source's rows, and every
+member must cover actual prepared lanes. Automatic solo needs no source choice.
+Bound complete setup and preserve all original source bits. Refuse unsupported
+profile/assignment combinations explicitly before consuming preparation.
+Return only assigned Gamepad sources to the host for input/disconnect admission.
+The host must filter unassigned samples before enqueueing a local input step.
+An explicitly submitted unassigned changed sample still belongs to the Worker's
+original acquisition chronology, even though the common runtime ignores its
+source. It can therefore cause late-input refusal; never retimestamp it or invent
+a separate deadline to conceal the caller's admission error.
+
+The Worker uses one BrowserLocalGame, original sample stream, command endpoint,
+report/ACK lane and completion barrier. Drawing calls the local canvas with the
+current bounded page. Page changes are presentation operations, not game-clock
+operations. Configure a selected touch member against its actual visible field
+before activation; do not use solo full-size bounds. Keep original pointer
+payload separate from projected routing coordinates. A touch member must be on
+the initial page; until active router remapping exists, refuse changing pages
+when a configured touch member's field would move.
+Page choices use a correlated RPC. An invalid page or a currently unavailable
+touch-layout change returns a page-choice error while preserving the running
+game. Malformed owner/RPC identities retain the existing protocol failure fence.
+
+Replies preserve each member's actual score/frontier independently, with null
+for unreadable fields. Legacy top-level score fields identify the first member,
+never a synthetic cohort total. Stop/failure exports each actual recording once
+before free, with independent recording errors and transferred buffers. Bound
+aggregate recording allocation/export budgets, preserve readable member prefixes
+after other export failures, and claim complete captures only after genuine
+shared completion. Direct port ownership, chronology, stale callbacks and joined
+cleanup keep their existing barriers.
+
+Known ceiling: This caller protocol needs the actual page device-assignment and
+multi-record storage flows. Local saved/network comparisons require additional
+per-member ownership; selecting those unsupported combinations refuses explicitly
+and does not alter existing solo comparison behavior. Browser execution,
+generated bindings, physical devices/audio and performance acceptance remain
+unverified.
 
 ## Performance-first browser thread ownership
 
@@ -1401,6 +1447,8 @@ work, and polling/committed-frontier limits remain as specified above.
 The portable resolved local source plan is specified in
 [local input ownership](REQ__bms-local-players.md). Its owned numeric routes
 retain full-width acquired sources without using native settings hosts or
-browser product descriptions as identities. The current browser gameplay owner
-is still solo; multi-player device assignment, shared nonblocking ownership and
-multi-field rendering remain required integration work.
+browser product descriptions as identities. The Worker now accepts an optional
+local plan through the shared nonblocking owner and renders paged local fields.
+The actual browser page remains solo until device assignment calls that path
+and stores per-member records. Per-member opponent integration and actual
+browser/device/runtime acceptance remain pending.

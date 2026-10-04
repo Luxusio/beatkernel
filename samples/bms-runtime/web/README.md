@@ -982,3 +982,27 @@ actual controller's layout and matchers. Ambiguity, invalid rows, no matching
 source and out-of-range controls are refused. Bounds and lifecycle rules are
 in `doc/kernel/REQ__bms-browser.md`. Profile tests and browser/device execution
 remain deferred; no physical timing acceptance is claimed.
+
+The low-level Worker live physical protocol also accepts `localPlanWords` and
+an optional `localPage` (default zero). Each four-u32 plan row is player ID,
+selector (zero automatic or one exact), source low word and source high word.
+Automatic routing is solo-only; multiple players require distinct actual
+acquired sources. Keyboard source one and touch source two are browser
+aggregates, not separate physical devices. Setup derives bounded per-member
+bindings on Worker and reports actual ordered `localPlayers`, `localPage` and,
+when recording, each member's divided `recordLimits`. The current page has no
+local device-assignment controls and continues using solo setup.
+
+Local replies include `localScores`; legacy top-level counters describe
+`primaryPlayer`, the first member. Stop/error receipts carry independent
+`replays` rows with player, replay bytes, replay error and completeness. Every
+admitted buffer transfers once. A `play-page` RPC changes display only and
+returns `local-page`; invalid choices preserve the running game. Moving a
+configured touch field during play is currently refused. Saved/network
+comparisons with this local caller require further per-member integration.
+
+Actual hosts must validate source admission and filter Gamepad samples to the
+returned assigned sources before enqueueing input. The existing chronology
+checks still apply to explicitly submitted unassigned samples. Page assignment,
+multi-record storage, generated bindings, browser/device/audio execution and
+measured performance remain unverified.
