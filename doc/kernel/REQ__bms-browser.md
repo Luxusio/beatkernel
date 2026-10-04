@@ -96,7 +96,10 @@ and original clock provenance; Worker arrival time cannot replace event time.
 Permission refusal, cancellation, disconnect, focus loss and released contacts
 must have explicit lifecycle behavior. An unavailable source is not silently
 replaced with keyboard input. Keyboard-only implementation does not satisfy this
-input scope.
+input scope. The user's main-thread input restriction applies to keyboard,
+touch/pointer, HID and Gamepad acquisition together; it does not narrow supported
+input to keyboards. Each source follows the same acquisition/Worker ownership
+boundary.
 
 The kernel already defines physical touch, pointer and raw-HID events with
 device/contact metadata. Browser adapters must preserve those semantics and
