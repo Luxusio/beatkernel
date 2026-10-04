@@ -526,7 +526,7 @@ async function workerHarness(options = {}) {
       this.credits = []; this.received = []; this.requests = [];
       this.receiveTimes = []; this.writeTimes = []; this.pollTimes = []; this.schedules = [];
       this.publications = []; this.peerProgress = [];
-      this.finalWritten = false; this.finalAcknowledged = false; this.progressComplete = false;
+      this.finalWritten = false; this.finalAcknowledged = false; this.progressComplete = false; this.drainComplete = false;
       this.frames = [{ kind: 1, id: 1n, bytes: new Uint8Array(11) }];
       roomSessions.push(this);
       if (options.roomConstructError) throw new Error(options.roomConstructError);
@@ -540,6 +540,7 @@ async function workerHarness(options = {}) {
     request_seal() { this.request("seal"); }
     request_ready() { this.request("ready"); }
     request_leave() { this.request("leave"); }
+    request_drain() { this.request("drain"); }
     needed_bytes() { this.live(); return this.need; }
     frame_pending() { this.live(); return this.partial; }
     revision() { this.live(); return this.revisionValue; }
@@ -587,6 +588,7 @@ async function workerHarness(options = {}) {
     local_final_acknowledged() { this.live(); return this.finalAcknowledged; }
     peer_final_ack_written() { this.live(); return false; }
     progress_complete() { this.live(); return this.progressComplete; }
+    drain_complete() { this.live(); return this.drainComplete; }
     close() { this.live(); assert.equal(++this.closes, 1); }
     free() { this.live(); assert.equal(++this.frees, 1); }
   }
@@ -620,6 +622,7 @@ async function workerHarness(options = {}) {
       if (!options.roomHoldAfterClose) {
         for (const entry of [...this.reads, ...this.writes]) entry.gate.reject(new Error("room channel closed"));
       }
+      if (options.roomCloseError) throw new Error(options.roomCloseError);
     }
   }
   class BrowserMultiplayerOwner {
@@ -977,7 +980,8 @@ test("room acquisition uses every actual local identity only after samples and d
 test("room mode, capability, URL and complete member identity refusals stay before acquisition and preserve local preparation", async () => {
   for (const options of [
     { missingRoomExport: true }, { missingRoomMethod: "receive_bytes" }, { missingRoomMethod: "take_start" },
-    { missingRoomMethod: "publish_progress" }, { missingLocalProgress: true },
+    { missingRoomMethod: "publish_progress" }, { missingRoomMethod: "request_drain" },
+    { missingRoomMethod: "drain_complete" }, { missingLocalProgress: true },
     { missingRoomStartConstructor: true }, { missingLocalIdentity: true },
     { roomConstructError: "actual room constructor refused" },
     { localIdentityError: player => player === 7 },
@@ -1311,9 +1315,9 @@ test("a completed output publishes one final room prefix outside cadence while a
   const session = h.roomSessions[0], channel = h.roomChannels[0];
   session.onPublish = (_, finalPrefix) => {
     assert.equal(game.stops, 0); assert.equal(game.frees, 0);
-    if (finalPrefix) session.frames.push({ kind: 1, id: 18446744073709551615n, bytes: new Uint8Array(11) });
+    if (finalPrefix) session.frames.push({ kind: 1, id: 18446744073709551614n, bytes: new Uint8Array(11) });
   };
-  session.onWritten = id => { if (id === 18446744073709551615n) session.finalWritten = true; };
+  session.onWritten = id => { if (id === 18446744073709551614n) session.finalWritten = true; };
   await h.send(step({ watermark: event.targetHostNs }));
   assert.deepEqual(session.publications.map(row => row.finalPrefix), [false]);
   h.setNetworkNow(1001); complete = true;
@@ -1333,10 +1337,16 @@ test("a completed output publishes one final room prefix outside cadence while a
   assert.equal(h.messages.length, posted, "receipt changes are retained without periodic Window messages");
   assert.equal(channel.closes, 0); assert.equal(game.stops, 0);
   assert.equal(session.requests.includes("leave"), false, "local completion is not whole-room closure authority");
+  session.onRequest = kind => {
+    assert.equal(kind, "drain"); session.frames.push({ kind: 1, id: 18446744073709551615n, bytes: new Uint8Array(11) });
+  };
   await h.send({ kind: "play-stop", playId: 7, completed: true });
+  assert.equal(game.frees, 1); assert.equal(h.of("play-stopped").length, 0);
+  channel.writes.at(-1).gate.resolve(); await flushJobs();
+  await roomReceive(h, () => { session.drainComplete = true; });
   const final = h.of("play-stopped").at(-1);
   assert.deepEqual(final.room, { participant: 18446744073709551615n, finalQueued: true,
-    finalWritten: true, finalAcknowledged: true, localComplete: true, finalDrain: "cancelled", error: null, peers: [] });
+    finalWritten: true, finalAcknowledged: true, localComplete: true, finalDrain: "complete", error: null, peers: [] });
   assert.equal(session.publications.length, 2, "Stop cannot publish the already accepted final twice");
   assert.ok(game.disposals.indexOf("group-progress") < game.disposals.indexOf("stop"));
   assert.equal(final.replays[0].replayComplete, true); assert.equal(session.frees, 1);
@@ -1395,7 +1405,7 @@ test("an activated room fault fences only publication and joins stale continuati
   channel.writes.at(-1).gate.resolve(); await flushJobs();
   assert.deepEqual(session.credits, credits); assert.equal(h.of("play-room").length, oldEvents);
   const final = h.of("play-stopped").at(-1);
-  assert.match(final.room.error, /actual room read failed after activation/);
+  assert.match(final.room.error, /Room read failed/);
   assert.equal(final.room.finalQueued, false); assert.equal(final.room.finalWritten, false);
   assert.equal(final.room.finalAcknowledged, false); assert.equal(final.room.finalDrain, "cancelled");
   assert.ok(final.replays[0].replay instanceof Uint8Array); assert.equal(h.games[0].frees, 0);
@@ -1412,6 +1422,150 @@ test("an activated room fault fences only publication and joins stale continuati
     assert.equal(refused.locals[0].frees, 0); assert.equal(refused.of("play-error").length, 0);
     await refused.send({ kind: "play-stop", playId: 7 });
     assert.ok(refused.of("play-stopped")[0].replays[0].replay instanceof Uint8Array);
+  }
+});
+
+async function naturalRoomDrain(options = {}) {
+  const h = await roomPrepared({ ...options, observeOutput: () => true });
+  const game = h.locals[0], event = await committedRoom(h);
+  await h.rpc("play-activate", { hostNs: event.targetHostNs, targetHostNs: event.targetHostNs, startFrame: START });
+  const session = h.roomSessions[0], channel = h.roomChannels[0];
+  session.onPublish = (_, finalPrefix) => {
+    assert.equal(finalPrefix, true); assert.equal(game.stops, 0); assert.equal(game.frees, 0);
+    session.frames.push({ kind: 1, id: 51n, bytes: new Uint8Array(11) });
+  };
+  session.onWritten = id => { if (id === 51n) session.finalWritten = true; };
+  session.onRequest = kind => {
+    assert.equal(kind, "drain"); session.frames.push({ kind: 1, id: 52n, bytes: new Uint8Array(11) });
+  };
+  await h.send(directObservation());
+  assert.deepEqual(session.publications, []);
+  await h.roomPort.acknowledge({ report: renderReport() });
+  assert.equal(h.of("play-render-done").at(-1).completed, true);
+  assert.equal(session.publications.length, 1);
+  await h.send({ kind: "play-stop", playId: 7, completed: true });
+  assert.equal(game.stops, 1); assert.equal(game.frees, 1); assert.equal(h.roomPort.closes, 1);
+  assert.equal(h.of("play-stopped").length, 0);
+  assert.equal(h.of("play-error").length, 0);
+  return { h, game, session, channel };
+}
+
+test("natural room drain retains peer and receipt callbacks after gameplay disposal and joins before publishing complete replay", async () => {
+  const { h, game, session, channel } = await naturalRoomDrain({ roomHoldAfterClose: true });
+  assert.equal(game.groupProgressReads, 1); assert.deepEqual(session.requests, ["ready"]);
+  const calls = game.calls.length, messages = h.messages.length;
+  const words = new Uint32Array([
+    800, 0xffffffff, 0x7fffffff, 0xffffffff, 0xffffffff, 0, 0, 1, 0, 0xffffffff, 0xffffffff,
+    4, 0, 0, 2, 0, 0, 0, 2, 0, 2, 0,
+    0xffffffff, 0xffffffff, 0xffffffff, 0, 0, 0, 0, 0, 0, 0, 0,
+  ]);
+  const original = words.slice();
+  await roomReceive(h, () => session.peerProgress.push({ participant: 9007199254740993n,
+    sequence: 18446744073709551615n, finalPrefix: true, words }));
+  words.fill(0);
+  assert.equal(h.messages.length, messages, "retained drain observations do not publish periodic Window rows");
+  assert.equal(session.finalWritten, false); assert.equal(channel.closes, 0);
+  channel.writes.at(-1).gate.resolve(); await flushJobs();
+  await roomReceive(h, () => { session.finalAcknowledged = true; session.progressComplete = true; });
+  assert.deepEqual(session.requests, ["ready", "drain"]);
+  let pendingComplete = false;
+  session.onWritten = id => { if (id === 52n && pendingComplete) session.drainComplete = true; };
+  await roomReceive(h, () => { pendingComplete = true; });
+  assert.equal(session.drainComplete, false); assert.equal(h.of("play-stopped").length, 0);
+  channel.writes.at(-1).gate.resolve(); await flushJobs();
+  assert.equal(session.drainComplete, true); assert.equal(channel.closes, 1); assert.equal(session.frees, 1);
+  assert.equal(h.of("play-stopped").length, 0, "the already acquired read still belongs to joined cleanup");
+  const credited = [...session.credits], received = session.received.length;
+  channel.reads.at(-1).gate.resolve(Uint8Array.of(17)); await flushJobs();
+  const final = h.of("play-stopped").at(-1);
+  assert.equal(final.room.finalDrain, "complete"); assert.equal(final.room.error, null);
+  assert.equal(final.room.finalQueued, true); assert.equal(final.room.finalWritten, true);
+  assert.equal(final.room.finalAcknowledged, true); assert.equal(final.room.localComplete, true);
+  assert.deepEqual(final.room.peers, [{ participant: 9007199254740993n,
+    sequence: 18446744073709551615n, finalPrefix: true, words: original }]);
+  assert.equal(final.replays[0].replayComplete, true); assert.ok(final.replays[0].replay instanceof Uint8Array);
+  assert.deepEqual(game.disposals, ["group-progress", "stop", "take:4294967295", "free"]);
+  assert.equal(game.calls.length, calls); assert.equal(session.publications.length, 1);
+  assert.deepEqual(session.credits, credited); assert.equal(session.received.length, received);
+  assert.equal(session.requests.includes("leave"), false);
+  assert.equal(h.of("play-stopped").length, 1); assert.equal(h.of("play-error").length, 0);
+});
+
+test("room drain failure preserves genuine local completion while actual gameplay cleanup failure remains separate", async () => {
+  for (const mode of ["timeout", "transport", "cleanup"]) {
+    const { h, game, session, channel } = await naturalRoomDrain(mode === "cleanup" ? { roomCloseError: "actual channel cleanup failed" } : {});
+    if (mode !== "transport") await h.runTimer(10000);
+    else { channel.writes.at(-1).gate.reject(new Error("final room write failed")); await flushJobs(); }
+    const final = h.of(mode === "cleanup" ? "play-error" : "play-stopped").at(-1);
+    assert.ok(final); assert.equal(final.room.finalDrain, "failed");
+    assert.match(final.room.error, mode === "transport" ? /Room write failed/ : /timed out/i);
+    assert.equal(final.room.finalQueued, true); assert.equal(final.room.finalWritten, false);
+    assert.equal(final.room.finalAcknowledged, false); assert.equal(final.room.localComplete, false);
+    assert.equal(final.replays[0].replayComplete, mode !== "cleanup"); assert.ok(final.replays[0].replay instanceof Uint8Array);
+    assert.equal(h.of("play-error").length, mode === "cleanup" ? 1 : 0); assert.equal(game.frees, 1); assert.equal(session.frees, 1);
+    if (mode === "cleanup") { assert.equal(final.released, false); assert.match(final.message, /actual channel cleanup failed/); }
+    assert.equal(channel.closes, 1); assert.equal(h.roomPort.closes, 1);
+  }
+  const h = await roomPrepared({ observeOutput: () => true, freeError: "actual gameplay free failed" });
+  const event = await committedRoom(h);
+  await h.rpc("play-activate", { hostNs: event.targetHostNs, targetHostNs: event.targetHostNs, startFrame: START });
+  const session = h.roomSessions[0], channel = h.roomChannels[0];
+  session.onPublish = () => session.frames.push({ kind: 1, id: 51n, bytes: new Uint8Array(11) });
+  await h.send(directObservation()); await h.roomPort.acknowledge({ report: renderReport() });
+  await h.send({ kind: "play-stop", playId: 7, completed: true });
+  if (h.of("play-error").length === 0) await h.runTimer(10000);
+  const failed = h.of("play-error").at(-1);
+  assert.match(failed.message, /actual gameplay free failed/); assert.equal(failed.released, false);
+  assert.equal(failed.replays[0].replayComplete, false); assert.ok(failed.replays[0].replay instanceof Uint8Array);
+  assert.equal(h.of("play-stopped").length, 0); assert.equal(channel.closes, 1); assert.equal(session.frees, 1);
+});
+
+test("explicit cancellation and replacement fence retained room drains without late writes into newer gameplay", async () => {
+  for (const mode of ["stop", "replacement", "replacement-cleanup", "fatal", "leave"]) {
+    const replacing = mode.startsWith("replacement"), cleanupFailure = mode === "replacement-cleanup";
+    const { h, game, session, channel } = await naturalRoomDrain({ roomHoldAfterClose: true,
+      ...(cleanupFailure ? { roomCloseError: "old room cleanup failed" } : {}) });
+    const received = session.received.length, credits = [...session.credits], roomEvents = h.of("play-room").length;
+    for (const completed of [null, "true", 1, true]) {
+      await h.send({ kind: "play-stop", playId: 7, completed });
+      assert.equal(channel.closes, 0); assert.equal(session.frees, 0);
+      assert.equal(h.of("play-stopped").length, 0);
+      assert.deepEqual(session.credits, credits); assert.equal(session.received.length, received);
+    }
+    let leaveRpc;
+    if (replacing) h.post(startRequest({ playId: 8, rpcId: 1 }));
+    else if (mode === "fatal") h.post(null);
+    else if (mode === "leave") { leaveRpc = ++h.rpcId; h.post({ kind: "play-room-leave", playId: 7, rpcId: leaveRpc }); }
+    else h.post({ kind: "play-stop", playId: 7 });
+    await flushJobs();
+    assert.equal(game.frees, 1); assert.equal(channel.closes, 1); assert.equal(session.frees, 1);
+    if (mode === "leave") {
+      assert.match(roomReply(h, leaveRpc).error, /drain cancelled.*gameplay already stopped/i);
+      assert.equal(roomReply(h, leaveRpc).result, undefined);
+      assert.equal(session.requests.includes("leave"), false);
+    }
+    assert.equal(h.of("play-stopped").length, 0);
+    if (replacing) assert.equal(h.games.length, 0, "replacement joins the old retained transport first");
+    session.peerProgress.push({ participant: 9007199254740993n, sequence: 1n, finalPrefix: true, words: new Uint32Array(33) });
+    channel.writes.at(-1).gate.resolve(); await flushJobs();
+    assert.equal(h.of("play-stopped").length, 0, "the retained read has not joined yet");
+    channel.reads.at(-1).gate.resolve(Uint8Array.of(17)); await flushJobs();
+    const old = h.of(cleanupFailure ? "play-error" : "play-stopped").find(row => row.playId === 7);
+    assert.ok(old); assert.equal(old.room.finalDrain, "cancelled");
+    assert.equal(old.room.finalWritten, false); assert.equal(old.room.finalAcknowledged, false);
+    assert.deepEqual(old.room.peers, []); assert.equal(old.replays[0].replayComplete, !cleanupFailure);
+    if (cleanupFailure) { assert.equal(old.released, false); assert.match(old.message, /old room cleanup failed/); }
+    assert.deepEqual(session.credits, credits); assert.equal(session.received.length, received);
+    assert.equal(h.of("play-room").length, roomEvents); assert.equal(session.publications.length, 1);
+    if (cleanupFailure) {
+      assert.equal(h.games.length, 0, "failed old cleanup cannot construct a replacement game");
+      assert.equal(h.of("play-reply").some(row => row.playId === 8 && row.result?.kind === "prepared"), false);
+      assert.match(h.of("fatal").at(-1).message, /Previous room cleanup failed/);
+    } else if (replacing) {
+      assert.equal(h.games.length, 1); assert.equal(h.games[0].frees, 0);
+      assert.equal(h.of("play-reply").filter(row => row.playId === 8 && row.result?.kind === "prepared").length, 1);
+      await h.send({ kind: "play-stop", playId: 8 });
+    }
   }
 });
 

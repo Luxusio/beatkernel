@@ -25,6 +25,7 @@ let retries = 0;
 let failed = false;
 let extent = [0, 0];
 let play = null;
+let roomFinalization = null;
 let lastPlayId = 0;
 const I64_MAX = 9223372036854775807n;
 const U64_MAX = 18446744073709551615n;
@@ -42,6 +43,7 @@ function stopRedraw() {
 function fatal(error) {
   if (failed) return;
   failed = true;
+  cancelRoomFinalization();
   if (play) failPlay(play, error);
   stopRedraw();
   report("fatal", { message: message(error) });
@@ -626,10 +628,12 @@ function roomProgressWords(value, players, name) {
 function retainRoomReceipts(room, receipts) {
   if (!receipts || typeof receipts.localFinalWritten !== "boolean"
     || typeof receipts.localFinalAcknowledged !== "boolean" || typeof receipts.complete !== "boolean"
+    || typeof receipts.drainComplete !== "boolean" || (receipts.drainComplete && !receipts.complete)
     || (receipts.localFinalAcknowledged && !receipts.localFinalWritten)
     || (receipts.complete && !receipts.localFinalAcknowledged)) throw new Error("Invalid actual room receipts.");
   room.receipts = Object.freeze({ localFinalWritten: receipts.localFinalWritten,
-    localFinalAcknowledged: receipts.localFinalAcknowledged, complete: receipts.complete });
+    localFinalAcknowledged: receipts.localFinalAcknowledged, complete: receipts.complete,
+    drainComplete: receipts.drainComplete });
 }
 
 function retainRoomSnapshot(room, snapshot, participant) {
@@ -669,7 +673,7 @@ function roomOutcome(room) {
     .map(value => message(value) || "Room failure.");
   return { participant: room.participant, finalQueued: room.finalQueued,
     finalWritten: room.receipts.localFinalWritten, finalAcknowledged: room.receipts.localFinalAcknowledged,
-    localComplete: room.receipts.complete, finalDrain: "cancelled",
+    localComplete: room.receipts.complete, finalDrain: room.finalDrain,
     error: errors.length ? message(errors.join("; cleanup: ")) : null, peers };
 }
 
@@ -724,6 +728,53 @@ function closeRoom(room) {
   return room.closing;
 }
 
+function roomCallbacksCurrent(state, room) {
+  return state.room === room && !room.disposed && !room.leaving
+    && (play === state || (roomFinalization?.state === state && room.draining));
+}
+
+function cancelRoomFinalization() {
+  const pending = roomFinalization;
+  if (!pending) return null;
+  pending.room.draining = false;
+  pending.room.finalDrain = "cancelled";
+  void closeRoom(pending.room);
+  return pending.promise;
+}
+
+function finishRoom(state, natural) {
+  const room = state.room;
+  const pending = { state, room, promise: null };
+  room.draining = natural;
+  roomFinalization = pending;
+  // Reserve the exact old owner before drain can invoke callbacks. No game
+  // access occurs here; the caller releases it before this continuation runs.
+  pending.promise = Promise.resolve().then(async () => {
+    if (room.draining) {
+      try {
+        if (room.failure !== null || room.disposed || room.leaving || !room.finalQueued
+          || !room.owner || room.owner.closed) throw room.failure ?? new Error("Room final drain is unavailable.");
+        const receipts = await room.owner.drain();
+        if (room.draining) {
+          retainRoomReceipts(room, receipts);
+          if (!room.receipts.drainComplete) throw new Error("Room drain returned without actual completion.");
+          room.finalDrain = "complete";
+        }
+      } catch (error) {
+        if (room.draining) {
+          room.failure ??= error;
+          room.finalDrain = "failed";
+        }
+      }
+    }
+    const cleanupError = await closeRoom(room);
+    if ((cleanupError || room.failure !== null) && room.finalDrain === "complete") room.finalDrain = "failed";
+    room.draining = false;
+    return cleanupError;
+  }).finally(() => { if (roomFinalization === pending) roomFinalization = null; });
+  return pending.promise;
+}
+
 function roomClosed(state, room, error) {
   if (play !== state || state.room !== room || room.closedReported) return;
   room.closedReported = true;
@@ -731,8 +782,13 @@ function roomClosed(state, room, error) {
 }
 
 function roomFailure(state, room, error) {
-  if (play !== state || state.room !== room || room.disposed) return;
+  if (!roomCallbacksCurrent(state, room)) return;
   room.failure ??= error;
+  if (roomFinalization?.state === state && room.draining) {
+    room.finalDrain = "failed";
+    void closeRoom(room);
+    return;
+  }
   roomClosed(state, room, error);
   if (!state.active) failPlay(state, error);
   else {
@@ -763,7 +819,8 @@ function openRoom(state, request) {
   }
   const methods = ["request_seal", "request_ready", "request_leave", "needed_bytes", "frame_pending",
     "receive_bytes", "next_write", "written", "participant_id", "revision", "has_snapshot", "leave_written", "snapshot", "take_start",
-    "publish_progress", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written", "progress_complete", "close", "free"];
+    "publish_progress", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written", "progress_complete",
+    "request_drain", "drain_complete", "close", "free"];
   if (typeof BrowserRoomClient !== "function" || typeof AbortController !== "function"
     || typeof BrowserRoomClient.new_with_start !== "function"
     || methods.some(name => typeof BrowserRoomClient.prototype?.[name] !== "function")
@@ -793,8 +850,8 @@ function openRoom(state, request) {
     rpcId: request.rpcId, disposed: false, leaving: false, closedReported: false, cleanupError: null,
     windowOriginNs, originNs: null, start: null, failure: null, participant: null,
     localPlayers: Object.freeze(Array.from(players)), peerPlayers: null, peers: new Map(),
-    lastProgress: null, finalQueued: false,
-    receipts: Object.freeze({ localFinalWritten: false, localFinalAcknowledged: false, complete: false }) };
+    lastProgress: null, finalQueued: false, draining: false, finalDrain: "cancelled",
+    receipts: Object.freeze({ localFinalWritten: false, localFinalAcknowledged: false, complete: false, drainComplete: false }) };
   const client = session;
   state.room = room; // One attempt per play; this slot is never reset or reused.
   // Install the joining promise before callbacks can fail reentrantly in open.
@@ -816,7 +873,7 @@ function openRoom(state, request) {
         report("play-room", { playId: state.id, event: { kind: "snapshot", participant, snapshot } });
       },
       onProgress: prefix => {
-        if (play !== state || state.room !== room || room.disposed || room.leaving) return;
+        if (!roomCallbacksCurrent(state, room)) return;
         if (!prefix || !unsigned(prefix.participant) || prefix.participant === 0n || prefix.participant === room.participant
           || !unsigned(prefix.sequence) || prefix.sequence === 0n || typeof prefix.finalPrefix !== "boolean"
           || !room.peerPlayers?.has(prefix.participant)) throw new Error("Invalid accepted room peer prefix.");
@@ -825,7 +882,7 @@ function openRoom(state, request) {
           sequence: prefix.sequence, finalPrefix: prefix.finalPrefix, words }));
       },
       onReceipts: receipts => {
-        if (play !== state || state.room !== room || room.disposed || room.leaving) return;
+        if (!roomCallbacksCurrent(state, room)) return;
         retainRoomReceipts(room, receipts);
       },
       onStart: (schedule, originNs) => {
@@ -871,6 +928,7 @@ function openRoom(state, request) {
     room.rpcId = null;
     report("play-reply", { playId: state.id, rpcId, result: { kind: "room-opened" } });
   }).catch(error => {
+    if (error?.cleanupError) room.cleanupError ??= error.cleanupError;
     if (session !== null) {
       const local = session;
       session = null;
@@ -993,7 +1051,7 @@ function failPlay(state, error, request = null) {
   play = null; // Invalidates a still-awaiting preparation before releasing owners.
   stopRedraw();
   closeNetwork(state.network);
-  const roomClosing = state.room ? closeRoom(state.room) : null;
+  const roomClosing = state.room ? finishRoom(state, false) : null;
   const { cleanupError, replay, replayError, replays } = disposeGame(state);
   const text = message(cleanupError ? `${message(error)}; cleanup: ${message(cleanupError)}` : error);
   const pending = new Set([request?.rpcId, state.startRpcId, state.audioRpcId, state.network?.rpcId, state.room?.rpcId]);
@@ -1029,7 +1087,7 @@ function stopPlay(state, request) {
     state.network.stopping = true;
     clearRemoteProgress(state.network);
   }
-  const roomClosing = state.room ? closeRoom(state.room) : null;
+  const roomClosing = state.room ? finishRoom(state, completed) : null;
   const { cleanupError, replay, replayError, replays } = disposeGame(state);
   const pending = new Set([state.startRpcId, state.audioRpcId, state.network?.rpcId, state.room?.rpcId]);
   state.startRpcId = null;
@@ -1785,6 +1843,7 @@ function handlePlay(request) {
   }
   if (request.kind === "play-start" && play === null) {
     if (request.playId <= lastPlayId) return;
+    const priorRoom = cancelRoomFinalization();
     const state = {
       id: request.playId, startRpcId: identity(request.rpcId) ? request.rpcId : null,
       game: null, keys: null, active: false, origin: null, startFrame: null,
@@ -1801,7 +1860,31 @@ function handlePlay(request) {
     };
     play = state; // Reserve before the ready await so stop cannot race a late owner.
     lastPlayId = state.id;
-    void preparePlay(state, request).catch(fatal);
+    void (async () => {
+      if (priorRoom) {
+        const cleanupError = await priorRoom;
+        if (play !== state) return;
+        if (cleanupError) throw new Error("Previous room cleanup failed; reload before playing again.", { cause: cleanupError });
+      }
+      if (play === state) await preparePlay(state, request);
+    })().catch(fatal);
+    return;
+  }
+  if (request.kind === "play-stop" && roomFinalization?.state.id === request.playId) {
+    if (request.completed !== undefined && typeof request.completed !== "boolean") return;
+    if (request.completed !== true) cancelRoomFinalization();
+    return;
+  }
+  if (request.kind === "play-room-leave" && roomFinalization?.state.id === request.playId) {
+    const previous = roomFinalization.state;
+    try {
+      rpc(previous, request, true);
+      cancelRoomFinalization();
+      report("play-reply", { playId: previous.id, rpcId: request.rpcId,
+        error: "Room drain cancelled; gameplay already stopped." });
+    } catch (error) {
+      report("play-reply", { playId: previous.id, rpcId: request.rpcId, error: message(error) });
+    }
     return;
   }
   const state = play;
