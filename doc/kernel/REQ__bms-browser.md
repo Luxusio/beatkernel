@@ -2027,3 +2027,39 @@ metadata bounds, valid and empty buffers, ACK accounting and stop/deallocation.
 Source inspection does not prove browser responsiveness or measured latency.
 This removes the Window value scan; setup PCM messages still pass through Window,
 and direct Worker-to-Worklet sample upload remains a later ownership migration.
+
+## Dedicated setup sample transport component
+
+AudioHost.openSamplePort transfers one MessageChannel endpoint to AudioWorklet
+in empty setup only (no previous host sample). Its frozen descriptor carries
+port, generation, channels, pcmLimits and timeoutMs. Adoption permanently
+removes host sample authority, including on ambiguous transfer failure; no
+fallback producer. Host activation/output clock/finish/arm/stop remain host-owned.
+
+AudioSampleClient on Worker provides sample(input), end(), close() and state.
+It keeps one pending request, independent safe-integer sequence and bounded
+ACK-only identity/byte accounting. Validate unsigned identities, sample format,
+exclusive full nonresizable/non-detached buffers and configurable count/byte
+limits before transfer. Do not scan PCM values on Window or copy entire buffers.
+Samples consume their transferable PCM backing. Error/stale generation/correlation,
+timeout/message/send/start failure and local close cannot revive ownership.
+End sends exact admitted count/bytes and succeeds only on the matching ACK;
+close/end fences the local producer only; it does not prove endpoint resource
+release or processor deallocation.
+
+Worklet accepts sample and end-samples only on the transferred endpoint, with
+independent generation/sequence and actual shared PCM validation/insertion.
+Host samples then reject. End must match actual sampleIds.size/pcmBytes, closes
+the sample endpoint and permits subsequent host finish; finish before genuine
+end refuses and fences. Reject malformed/duplicate/mismatched/over-limit/nonfinite
+uploads before Rust insertion where appropriate. Terminal failures notify the
+sample endpoint too. Fresh host stop closes both transferred endpoints and owns
+actual free; stale saved sample callbacks after close must not mutate later
+owners. Preserve legacy host-only upload and dedicated command behavior.
+
+Implement component source and independent deferred endpoint/client/lifecycle
+fixtures first, then migrate actual live/local/replay caller upload in a dependent
+step. Until that migration is implemented, PCM still passes through Window in the
+application. No direct-upload/performance/browser acceptance from component
+source. No JS parsing, tests, apps, browser/audio/generated bindings or ordered
+formal review/QA execution under the standing deferral.
