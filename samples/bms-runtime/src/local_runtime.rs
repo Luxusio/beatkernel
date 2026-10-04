@@ -581,6 +581,29 @@ impl VoiceAllocator {
         self.next = next;
         Ok(())
     }
+
+    /// Remaps distinct fallback voices, preserving each lane's replacement
+    /// aliases. Exhaustion leaves every marker and the allocator unchanged.
+    pub fn remap_input_sounds(
+        &mut self,
+        markers: &mut [beatkernel::runtime::input_sound::InputSoundMarker],
+    ) -> Result<(), String> {
+        let mut mapping = BTreeMap::new();
+        let mut next = self.next;
+        for marker in markers.iter() {
+            if let std::collections::btree_map::Entry::Vacant(entry) = mapping.entry(marker.voice.0)
+            {
+                let id = next.ok_or("voice identity namespace exhausted")?;
+                entry.insert(VoiceId(id));
+                next = id.checked_add(1);
+            }
+        }
+        for marker in markers {
+            marker.voice = mapping[&marker.voice.0];
+        }
+        self.next = next;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

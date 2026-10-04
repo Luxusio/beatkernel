@@ -100,6 +100,10 @@ mod image_base_fixtures;
 pub mod image_crop;
 /// Bounded raster decoding during preparation, independent of GPU ownership.
 pub mod image_decode;
+/// Pure BMS input-sound timing and dedicated reusable voice preparation.
+pub mod input_sounds;
+#[cfg(test)]
+mod input_sounds_fixtures;
 #[cfg(test)]
 mod invisible_admission_fixtures;
 /// Fixed-capacity lane feedback from actual local judge results and song time.
