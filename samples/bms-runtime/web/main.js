@@ -503,7 +503,7 @@ function multiplayerConfiguration() {
   return { url: url.href, host: role === "host", windowOriginNs: millisecondsToNanos(performance.timeOrigin) };
 }
 
-function playRpc(session, kind, fields = {}) {
+function playRpc(session, kind, fields = {}, transfer = []) {
   if (activePlay !== session || session.phase === "closing" || !worker) return Promise.reject(new Error("Playback owner is closed."));
   if (session.rpc) return Promise.reject(new Error("A playback setup operation is already pending."));
   const rpcId = ++serial;
@@ -515,7 +515,7 @@ function playRpc(session, kind, fields = {}) {
       reject(new Error("Playback Worker operation timed out."));
     }, 10000);
     session.rpc = { rpcId, timer, resolve, reject };
-    try { worker.postMessage({ kind, playId: session.id, rpcId, ...fields }); }
+    try { worker.postMessage({ kind, playId: session.id, rpcId, ...fields }, transfer); }
     catch (error) { clearTimeout(timer); session.rpc = null; reject(error); }
   });
 }
@@ -527,10 +527,10 @@ async function play(mode = "live") {
     rpc: null, timer: null, events: [], pressed: new Set(), bindings: [], sequence: 0n,
     canvas, touchInput: false, contacts: new Map(), nextContact: 0n,
     hidOwner: null, hidConnecting: null, hidDevices: null, hidSources: null, hidProfileFile: null,
-    tickId: 0, tickPending: null, audioBusy: false, batch: null, startFrame: null,
+    tickId: 0, tickPending: null, audioBusy: false, commandsPending: true, startFrame: null,
     origin: null, lastHost: 0n, stopping: null, renderId: 0, renderPending: null,
     workerStarted: false, workerReleased: false, workerStop: null, finalScore: null,
-    completionReady: false, lastPresentation: null, cleanupError: null, peerDisplayFailed: false,
+    completionReady: false, completionTick: null, lastPresentation: null, cleanupError: null, peerDisplayFailed: false,
     recordReplay: mode === "live" && ui.record.checked === true, replay: null, replayError: null, naturalFinishRequested: false,
     replayFile: mode === "replay" ? selectedReplay : null,
     opponentSelection: mode === "live" && opponents.size ? opponents.snapshot() : null,
@@ -651,19 +651,26 @@ async function play(mode = "live") {
     if (end?.kind !== "samples-end") throw new Error("Prepared audio assets exceeded their declared count.");
     if (session.endFrame === undefined) await session.audio.finish();
     else await session.audio.finish(session.endFrame);
-    for (;;) {
-      const batch = await playRpc(session, "play-commands");
-      if (batch === null) break;
-      let ack;
-      try { ack = await session.audio.commands(batch.commands); }
-      catch (error) {
-        if (session.phase !== "closing" && Number.isInteger(error.admitted)) {
-          try { await playRpc(session, "play-ack", { sequence: batch.sequence, admitted: error.admitted, success: false }); }
-          catch { /* Actual rejection fences the core; preserve the original audio error. */ }
-        }
-        throw error;
+    const descriptor = await session.audio.openCommandPort();
+    try {
+      if (activePlay !== session || session.owner !== owner || session.phase === "closing") {
+        descriptor?.port?.close();
+        return;
       }
-      await playRpc(session, "play-ack", { sequence: batch.sequence, admitted: ack.admitted, success: true });
+      if (!descriptor?.port || descriptor.generation !== session.id
+        || descriptor.queueCapacity !== session.audioLimits.queueCapacity
+        || !Number.isSafeInteger(descriptor.timeoutMs) || descriptor.timeoutMs < 1 || descriptor.timeoutMs > 60000) {
+        throw new Error("Audio command handoff did not preserve its owner configuration.");
+      }
+      const ready = await playRpc(session, "play-audio", descriptor, [descriptor.port]);
+      if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
+      if (ready?.kind !== "audio-ready" || ready.commandsPending !== false) throw new Error("Direct audio commands were not fully acknowledged.");
+      session.commandsPending = false;
+    } catch (error) {
+      // A throwing transfer may still leave this endpoint locally owned. After
+      // a successful transfer its detached wrapper cannot close the Worker port.
+      try { descriptor?.port?.close(); } catch {}
+      throw error;
     }
     if (session.multiplayer) {
       ui["multiplayer-status"].textContent = "Audio ready · waiting for the peer and committed start…";
@@ -804,7 +811,7 @@ function presentedPoint(session) {
 function finishPlay(session) {
   if (activePlay === session && session.phase === "playing" && session.completionReady
     && session.events.length === 0 && session.tickPending === null && session.renderPending === null
-    && session.batch === null && !session.audioBusy) {
+    && !session.commandsPending && session.completionTick === session.tickId && !session.audioBusy) {
     void stopPlay(session.mode === "replay" ? "Recorded replay ended."
       : session.endNs === undefined ? "Song completed." : "Section completed.", false, true);
   }
@@ -821,6 +828,7 @@ function pumpInput(session) {
     }
     const tickId = ++session.tickId;
     if (!Number.isSafeInteger(tickId)) throw new Error("Gameplay step identity exhausted.");
+    session.completionReady = false;
     const timer = setTimeout(() => { if (session.tickPending?.tickId === tickId) void stopPlay("Gameplay Worker stopped responding.", true); }, 10000);
     session.tickPending = { tickId, timer, watermark, lastInput: events.at(-1)?.hostNs ?? session.lastHost };
     worker.postMessage({ kind: "play-step", playId: session.id, tickId, events, watermark, audioNs: audioSchedule(session) });
@@ -829,40 +837,23 @@ function pumpInput(session) {
 
 async function pumpAudio(session) {
   if (activePlay !== session || session.phase !== "playing" || session.audioBusy) return;
-  if (session.renderPending && !session.batch) return;
+  if (session.renderPending) return;
   session.audioBusy = true;
-  let batch = null;
   try {
-    if (session.batch) {
-      batch = session.batch;
-      session.batch = null;
-      const ack = await session.audio.commands(batch.commands);
-      if (session.phase !== "playing") return;
-      worker.postMessage({ kind: "play-ack", playId: session.id, sequence: batch.sequence, admitted: ack.admitted, success: true });
-    } else {
-      const report = await session.audio.poll();
-      if (session.phase === "playing") {
-        const renderId = ++session.renderId;
-        if (!Number.isSafeInteger(renderId)) throw new Error("Audio report identity exhausted.");
-        const timer = setTimeout(() => { if (session.renderPending?.renderId === renderId) void stopPlay("Audio report Worker stopped responding.", true); }, 10000);
-        session.renderPending = { renderId, timer };
-        const presentation = presentedPoint(session);
-        worker.postMessage({ kind: "play-render", playId: session.id, renderId, report,
-          presentedNs: presentation?.outputNs ?? null, presentedHostNs: presentation?.hostNs ?? null });
-      }
+    const report = await session.audio.poll();
+    if (session.phase === "playing") {
+      const renderId = ++session.renderId;
+      if (!Number.isSafeInteger(renderId)) throw new Error("Audio report identity exhausted.");
+      const timer = setTimeout(() => { if (session.renderPending?.renderId === renderId) void stopPlay("Audio report Worker stopped responding.", true); }, 10000);
+      session.renderPending = { renderId, timer };
+      const presentation = presentedPoint(session);
+      worker.postMessage({ kind: "play-render", playId: session.id, renderId, report,
+        presentedNs: presentation?.outputNs ?? null, presentedHostNs: presentation?.hostNs ?? null });
     }
   } catch (error) {
-    if (session.phase === "playing") {
-      let reason = `Playback failed: ${String(error.message).slice(0, 4096)}`;
-      try {
-        if (batch && Number.isInteger(error.admitted)) worker.postMessage({ kind: "play-ack", playId: session.id,
-          sequence: batch.sequence, admitted: error.admitted, success: false });
-      } catch { reason += " The rejected audio prefix could not reach the gameplay Worker."; }
-      void stopPlay(reason, true);
-    }
+    if (session.phase === "playing") void stopPlay(`Playback failed: ${String(error.message).slice(0, 4096)}`, true);
   } finally {
     session.audioBusy = false;
-    if (session.batch && session.phase === "playing") void pumpAudio(session);
     finishPlay(session);
   }
 }
@@ -939,24 +930,28 @@ function receivePlay(data) {
       stop();
     } else releasePlayWorker(session);
     void stopPlay(`Playback failed: ${data.message} · Hits ${data.hits}, misses ${data.misses}`, true);
-  } else if (data.kind === "play-commands" && session.phase === "playing") {
-    if (session.batch) { void stopPlay("More than one outgoing audio batch was published.", true); return; }
-    session.batch = data.batch;
-    session.completionReady = false;
-    void pumpAudio(session);
+  } else if (data.kind === "play-commands" && session.phase !== "closing") {
+    void stopPlay("Unexpected Window command relay after direct audio handoff.", true);
   } else if (data.kind === "play-render-done" && session.phase === "playing") {
     if (!session.renderPending || data.renderId !== session.renderPending.renderId) { void stopPlay("Audio report response was not correlated.", true); return; }
-    if (typeof data.completed !== "boolean") { void stopPlay("Song completion evidence was malformed.", true); return; }
+    if (typeof data.completed !== "boolean" || typeof data.commandsPending !== "boolean"
+      || !Number.isSafeInteger(data.observedTick) || data.observedTick < 0 || data.observedTick > session.tickId
+      || (data.completed && data.commandsPending)) { void stopPlay("Song completion evidence was malformed.", true); return; }
     clearTimeout(session.renderPending.timer);
     session.renderPending = null;
-    session.completionReady = data.completed;
+    session.commandsPending = data.commandsPending;
+    session.completionTick = data.observedTick;
+    session.completionReady = data.completed && data.observedTick === session.tickId && !data.commandsPending;
     finishPlay(session);
   } else if (data.kind === "play-step-done" && session.phase === "playing") {
     const pending = session.tickPending;
     if (!pending || data.tickId !== pending.tickId) { void stopPlay("Gameplay step response was not correlated.", true); return; }
+    if (typeof data.commandsPending !== "boolean") { void stopPlay("Gameplay command ownership was malformed.", true); return; }
     clearTimeout(pending.timer);
     session.tickPending = null;
     session.lastHost = pending.watermark ?? pending.lastInput;
+    session.commandsPending = data.commandsPending;
+    if (data.commandsPending) session.completionReady = false;
     if (session.events.length) pumpInput(session);
     finishPlay(session);
   }
@@ -998,7 +993,6 @@ function stopPlay(reason, failed = false, completed = false) {
   session.events.length = 0;
   session.pressed.clear();
   releaseTouches(session);
-  session.batch = null;
   let workerStopped = Promise.resolve();
   if (session.workerStarted && !session.workerReleased && worker) {
     workerStopped = new Promise(resolve => {

@@ -5,6 +5,7 @@ import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { validateSelections, validateOpponentSnapshot } from "./saved-opponents.mjs";
 import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, projectTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
 import { snapshotHidDevices, hidSetupFromProfile } from "./hid-profile.mjs";
+import { AudioCommandClient } from "./audio-command-client.mjs";
 const { BrowserGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
 let ready = null;
 let view = null;
@@ -441,6 +442,10 @@ async function drainNetwork(state, score) {
 }
 
 function disposeGame(state) {
+  const client = state.commandClient;
+  state.commandClient = null;
+  state.commandPumping = false;
+  client?.close();
   const game = state.game;
   state.game = null;
   const result = { cleanupError: null, replay: null, replayError: null };
@@ -469,8 +474,9 @@ function failPlay(state, error, request = null) {
   closeNetwork(state.network);
   const { cleanupError, replay, replayError } = disposeGame(state);
   const text = message(cleanupError ? `${message(error)}; cleanup: ${message(cleanupError)}` : error);
-  const pending = new Set([request?.rpcId, state.startRpcId, state.network?.rpcId]);
+  const pending = new Set([request?.rpcId, state.startRpcId, state.audioRpcId, state.network?.rpcId]);
   state.startRpcId = null;
+  state.audioRpcId = null;
   if (state.network) state.network.rpcId = null;
   for (const rpcId of pending) if (identity(rpcId)) report("play-reply", { playId: state.id, rpcId, error: text });
   report("play-error", { playId: state.id, message: text, released: cleanupError === null,
@@ -483,7 +489,7 @@ function failPlay(state, error, request = null) {
 function stopPlay(state, request) {
   if (request.completed !== undefined && typeof request.completed !== "boolean") throw new Error("Invalid stopped-play completion choice.");
   const completed = request.completed === true;
-  if (completed && (!state.completed || state.batch !== null)) throw new Error("Natural stop has no current completion evidence.");
+  if (completed && (!state.completed || commandsPending(state))) throw new Error("Natural stop has no current completion evidence.");
   const score = statistics(state);
   const savedOpponents = finalOpponents(state);
   play = null;
@@ -493,8 +499,9 @@ function stopPlay(state, request) {
     clearRemoteProgress(state.network);
   }
   const { cleanupError, replay, replayError } = disposeGame(state);
-  const pending = new Set([state.startRpcId, state.network?.rpcId]);
+  const pending = new Set([state.startRpcId, state.audioRpcId, state.network?.rpcId]);
   state.startRpcId = null;
+  state.audioRpcId = null;
   if (state.network) state.network.rpcId = null;
   for (const rpcId of pending) if (identity(rpcId)) {
     report("play-reply", { playId: state.id, rpcId, error: "Gameplay setup was stopped." });
@@ -758,7 +765,7 @@ async function preparePlay(state, request) {
 }
 
 function samplePlay(state, request) {
-  if (state.active) throw new Error("Samples are setup-only resources.");
+  if (state.active || state.commandClient !== null) throw new Error("Samples are setup-only resources before command handoff.");
   const sample = state.game.next_sample();
   if (sample == null) { state.samplesEnded = true; reply(state, request, { kind: "samples-end" }); return; }
   let result = null;
@@ -798,7 +805,84 @@ function commandBatch(state) {
   return batch;
 }
 
+function commandsPending(state) {
+  return state.batch !== null || state.commandPumping;
+}
+
+function closeAudioHandoff(request) {
+  if (request?.kind === "play-audio") {
+    try { request.port?.close(); } catch {}
+  }
+}
+
+function attachAudio(state, request) {
+  let adopted = false;
+  try {
+    if (state.active || !state.samplesEnded || state.commandClient !== null || state.audioRpcId !== null
+      || state.batch !== null || state.commandPumping || state.commandsDrained
+      || request.generation !== state.id || !integer(request.queueCapacity, 1, 65536)
+      || Math.min(256, request.queueCapacity) !== state.commandBatchLimit
+      || !integer(request.timeoutMs, 1, 60000) || !request.port
+      || !["postMessage", "start", "close"].every(name => typeof request.port[name] === "function")) {
+      throw new Error("Direct audio requires one matching bounded endpoint after sample preparation.");
+    }
+    // Valid constructor admission owns cleanup even when starting the port fails.
+    adopted = true;
+    state.commandClient = new AudioCommandClient({ port: request.port, generation: request.generation,
+      queueCapacity: request.queueCapacity, timeoutMs: request.timeoutMs });
+    state.audioRpcId = request.rpcId;
+    pumpCommands(state);
+  } catch (error) {
+    if (!adopted) closeAudioHandoff(request);
+    throw error;
+  }
+}
+
+async function drainCommands(state) {
+  const game = state.game;
+  const client = state.commandClient;
+  const current = () => play === state && state.game === game && state.commandClient === client;
+  try {
+    while (current()) {
+      if (client.state !== "ready") throw new Error("Direct audio command owner is unavailable.");
+      const batch = commandBatch(state);
+      if (batch === null) break;
+      let ack;
+      try { ack = await client.commands(batch.commands); }
+      catch (error) {
+        if (!current()) return;
+        if (integer(error?.admitted, 0, batch.commands.length)) {
+          try { game.acknowledge(batch.sequence, error.admitted, false); }
+          catch { /* Retain the original processor rejection and its admitted prefix. */ }
+        }
+        throw error;
+      }
+      if (!current()) return;
+      // Transport sequence is independent; acknowledge the genuine core batch.
+      game.acknowledge(batch.sequence, ack.admitted, true);
+      state.batch = null;
+    }
+    if (!current()) return;
+    state.commandPumping = false;
+    if (state.audioRpcId !== null) {
+      const rpcId = state.audioRpcId;
+      state.audioRpcId = null;
+      report("play-reply", { playId: state.id, rpcId, result: { kind: "audio-ready", commandsPending: false } });
+    }
+  } catch (error) {
+    if (current()) failPlay(state, error);
+  } finally {
+    if (current()) state.commandPumping = false;
+  }
+}
+
 function pumpCommands(state) {
+  if (state.commandClient !== null) {
+    if (state.commandPumping || (!state.active && state.audioRpcId === null)) return;
+    state.commandPumping = true;
+    void drainCommands(state);
+    return;
+  }
   if (!state.active || state.batch !== null) return;
   const batch = commandBatch(state);
   if (batch !== null) report("play-commands", { playId: state.id, batch });
@@ -873,7 +957,7 @@ function stepPlay(state, request) {
   if (request.watermark !== null && host !== null && request.watermark < host) throw new Error("Gameplay watermark precedes its input prefix.");
   if (!Number.isSafeInteger(state.preOriginInputs + ignored)) throw new Error("Pre-origin input count overflow.");
   state.lastTick = request.tickId;
-  if (request.events.length !== 0) state.completed = false;
+  state.completed = false;
   for (let index = 0; index < request.events.length; index++) {
     const event = request.events[index];
     if (event.hostNs < state.origin) state.preOriginInputs++;
@@ -891,15 +975,17 @@ function stepPlay(state, request) {
     state.lastHost = request.watermark;
   }
   const score = statistics(state);
-  report("play-step-done", { playId: state.id, tickId: request.tickId, ...score });
-  scheduleDraw();
   pumpCommands(state);
+  if (play !== state) return;
+  report("play-step-done", { playId: state.id, tickId: request.tickId, commandsPending: commandsPending(state), ...score });
+  scheduleDraw();
   sendProgress(state, score);
   publishOpponents(state);
 }
 
 function handlePlay(request) {
   if (!identity(request.playId)) {
+    closeAudioHandoff(request);
     if (play) failPlay(play, new Error("Invalid gameplay identity."), request);
     return;
   }
@@ -908,7 +994,8 @@ function handlePlay(request) {
     const state = {
       id: request.playId, startRpcId: identity(request.rpcId) ? request.rpcId : null,
       game: null, keys: null, active: false, origin: null, startFrame: null,
-      batch: null, lastRpc: 0, lastTick: 0, lastRender: 0,
+      batch: null, commandClient: null, commandPumping: false, audioRpcId: null,
+      lastRpc: 0, lastTick: 0, lastRender: 0,
       lastHost: null, lastSequence: null, preOriginInputs: 0,
       recordReplay: false, completed: false,
       mode: "live", physicalInput: false, touchInput: false, touchWidth: null, touchHeight: null,
@@ -922,23 +1009,27 @@ function handlePlay(request) {
     return;
   }
   const state = play;
-  if (!state || request.playId !== state.id) return;
+  if (!state || request.playId !== state.id) { closeAudioHandoff(request); return; }
+  let audioHandled = false;
   try {
     if (request.kind === "play-stop") { stopPlay(state, request); return; }
     if (request.kind === "play-start") throw new Error("Gameplay setup is already owned by this identity.");
-    const requiresRpc = ["play-sample", "play-commands", "play-activate", "play-network-ready"].includes(request.kind);
+    const requiresRpc = ["play-sample", "play-audio", "play-commands", "play-activate", "play-network-ready"].includes(request.kind);
     if (request.rpcId !== undefined && !requiresRpc && request.kind !== "play-ack") throw new Error("Unexpected gameplay RPC identity.");
     rpc(state, request, requiresRpc);
     if (!state.game || !state.prepared) throw new Error("Wait for actual gameplay preparation.");
     if (request.kind === "play-sample") samplePlay(state, request);
+    else if (request.kind === "play-audio") { audioHandled = true; attachAudio(state, request); }
     else if (request.kind === "play-network-ready") {
       if (!state.network || state.network.requested || state.active || !state.samplesEnded
-        || !state.commandsDrained || state.batch !== null) throw new Error("Multiplayer readiness requires completed sample and command preparation.");
+        || !state.commandsDrained || commandsPending(state)) throw new Error("Multiplayer readiness requires completed sample and command preparation.");
       void networkReady(state, request);
     } else if (request.kind === "play-commands") {
+      if (state.commandClient !== null) throw new Error("Commands belong to the direct audio endpoint.");
       if (state.batch !== null) throw new Error("An actual audio batch is still awaiting acknowledgement.");
       reply(state, request, commandBatch(state));
     } else if (request.kind === "play-ack") {
+      if (state.commandClient !== null) throw new Error("Audio acknowledgements belong to the direct endpoint.");
       if (!unsigned(request.sequence) || !integer(request.admitted, 0, 0xffffffff) || typeof request.success !== "boolean") throw new Error("Invalid audio acknowledgement fields.");
       // The actual core validates correlation/full success/rejected prefix and
       // retains its original batch on error. Never substitute or replay a prefix.
@@ -948,6 +1039,8 @@ function handlePlay(request) {
       pumpCommands(state);
     } else if (request.kind === "play-activate") {
       if (state.active || !hostTime(request.hostNs) || !unsigned(request.startFrame)) throw new Error("Invalid or repeated gameplay activation.");
+      if (state.commandClient !== null && (!state.samplesEnded || !state.commandsDrained || commandsPending(state)
+        || state.audioRpcId !== null || state.commandClient.state !== "ready")) throw new Error("Direct audio preparation is not fully acknowledged.");
       if (state.network) {
         const network = state.network;
         const target = network.start?.targetHostNs;
@@ -971,21 +1064,27 @@ function handlePlay(request) {
         && !(hostTime(request.presentedNs) && hostTime(request.presentedHostNs))) throw new Error("Invalid output presentation pair.");
       renderedCursor(request.report, state.startFrame);
       const completed = state.game.observe_output(request.report.words, request.presentedNs);
-      if (typeof completed !== "boolean" || (completed && state.batch !== null)) throw new Error("Invalid completion with outstanding gameplay commands.");
+      if (typeof completed !== "boolean" || (completed && commandsPending(state))) throw new Error("Invalid completion with outstanding gameplay commands.");
       if (state.mode === "live" && request.presentedNs !== null) state.game.observe_presentation(request.presentedNs, request.presentedHostNs);
       state.completed = completed;
       state.lastRender = request.renderId;
+      pumpCommands(state);
+      if (play !== state) return;
+      if (completed && commandsPending(state)) throw new Error("Completion produced outstanding gameplay commands.");
       report("play-render-done", { playId: state.id, renderId: request.renderId, completed,
+        commandsPending: commandsPending(state), observedTick: state.lastTick,
         ...(state.mode === "replay" ? statistics(state) : {}) });
       if (state.mode === "replay") scheduleDraw();
-      pumpCommands(state);
     } else throw new Error("Unknown gameplay request.");
-  } catch (error) { failPlay(state, error, request); }
+  } catch (error) {
+    if (!audioHandled) closeAudioHandoff(request);
+    failPlay(state, error, request);
+  }
 }
 
 self.addEventListener("message", event => {
-  if (failed) return;
   const request = event.data;
+  if (failed) { closeAudioHandoff(request); return; }
   if (!request || typeof request !== "object" || typeof request.kind !== "string") {
     if (play) failPlay(play, new Error("Malformed Worker request."));
     else fatal(new Error("Malformed Worker request."));
@@ -1003,7 +1102,7 @@ self.addEventListener("message", event => {
     ready.catch(fatal);
     return;
   }
-  if (!ready) return fatal(new Error("Initialize graphics before sending commands."));
+  if (!ready) { closeAudioHandoff(request); return fatal(new Error("Initialize graphics before sending commands.")); }
   if (request.kind.startsWith("play-")) { handlePlay(request); return; }
   if (request.kind === "import" || request.kind === "accept-library") {
     if (play) report("import-error", { id: request.id, message: "Stop gameplay before changing the selected library." });
