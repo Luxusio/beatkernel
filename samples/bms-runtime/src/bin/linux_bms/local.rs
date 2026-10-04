@@ -465,22 +465,11 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     if let Err(error) = stop {
         failures.push(format!("output cleanup: {error}"));
     }
-    if let Some(network) = network.as_mut() {
-        match beatkernel_bms_runtime::native_cohort::member_progress(&states) {
-            Ok(members) => {
-                if let Err(error) = network.finish(&members) {
-                    failures.push(format!("shared network cleanup: {error}"));
-                }
-            }
-            Err(error) => {
-                failures.push(format!("terminal cohort snapshot: {error}"));
-                // Even malformed retained state must join before recording publication.
-                if let Err(cleanup) = network.finish(&[]) {
-                    failures.push(format!("shared network cleanup: {cleanup}"));
-                }
-            }
-        }
-    }
+    beatkernel_bms_runtime::native_cohort_setup::finish_cohort_network(
+        network.as_mut(),
+        &states,
+        &mut failures,
+    );
     finish_cohort(states, save_paths, failures, save_capture)
 }
 
@@ -778,10 +767,12 @@ mod fixtures {
         }
     }
     #[test]
-    fn unsupported_local_modes_reject_before_resource_preparation() {
+    fn local_roster_bounds_are_shared_by_offline_and_network_modes() {
         assert!(admit_mode(2, false).is_ok());
         assert!(admit_mode(64, false).is_ok());
-        for (count, network) in [(1, false), (65, false), (2, true)] {
+        assert!(admit_mode(2, true).is_ok());
+        assert!(admit_mode(64, true).is_ok());
+        for (count, network) in [(1, false), (65, false), (1, true), (65, true)] {
             assert!(admit_mode(count, network).is_err());
         }
     }

@@ -8,7 +8,7 @@ use crate::{
     local_players::{MAX_LOCAL_PLAYERS, PlayerId, ResolvedInputPlan},
     local_preparation::{PreparedLocalMembers, prepare_local_members},
     local_runtime::{MemberConfig, RuntimeGroup},
-    native_cohort::{PlayerState, replay_path},
+    native_cohort::{PlayerState, member_progress, replay_path},
     native_group_competition::NativeGroupCompetition,
     native_gameplay::NativeGameplayResult,
     native_judge::{NativeJudgeConfig, capture_limits, prepare_capture},
@@ -25,12 +25,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub fn admit_cohort(count: usize, network: bool) -> NativeGameplayResult<()> {
+pub fn admit_cohort(count: usize, _network: bool) -> NativeGameplayResult<()> {
     if !(2..=MAX_LOCAL_PLAYERS).contains(&count) {
         return Err("local play requires 2..64 assigned inputs".into());
-    }
-    if network {
-        return Err("network competition currently supports one local participant only".into());
     }
     Ok(())
 }
@@ -233,6 +230,42 @@ pub fn activate_cohort(
     }
     Ok((group, merger))
 }
+/// Call after both output and acquisition cleanup, before independent saves.
+/// A malformed terminal snapshot still invokes owner cleanup and retains errors.
+pub fn finish_cohort_network(
+    network: Option<&mut NativeGroupCompetition>,
+    states: &[PlayerState],
+    failures: &mut Vec<String>,
+) {
+    if let Some(network) = network {
+        finalize_network(states, failures, |members| network.finish(members));
+    }
+}
+
+fn finalize_network(
+    states: &[PlayerState],
+    failures: &mut Vec<String>,
+    mut finish: impl FnMut(&[crate::multiplayer_group::MemberProgress]) -> NativeGameplayResult<()>,
+) {
+    match member_progress(states) {
+        Ok(members) => {
+            if let Err(error) = finish(&members) {
+                failures.push(format!("shared network cleanup: {error}"));
+            }
+        }
+        Err(error) => {
+            failures.push(format!("terminal cohort snapshot: {error}"));
+            if let Err(error) = finish(&[]) {
+                failures.push(format!("shared network cleanup: {error}"));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "native_cohort_network_fixtures.rs"]
+mod network_fixtures;
+
 /// Call after every native cleanup attempt. Match by ID, never positional zip.
 /// Ambiguous destinations are rejected rather than publishing a capture twice.
 pub fn finish_cohort(
@@ -548,7 +581,7 @@ mod fixtures {
             .to_string()
             .contains("missing --bind")
         );
-        assert!(admit_cohort(2, true).is_err());
+        assert!(admit_cohort(2, true).is_ok());
         assert!(admit_cohort(1, false).is_err());
         assert!(admit_cohort(65, false).is_err());
     }
