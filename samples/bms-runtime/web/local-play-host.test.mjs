@@ -68,6 +68,32 @@ test("invalid counts assignments inventories and pages cannot replace a retained
   assert.equal(large.roster.snapshot([1n, 2n, 3n, 4n, 5n], 1).page, 1);
 });
 
+test("explicit solo inclusion owns one stable automatic Any plan without changing exact multi-player admission", () => {
+  const roster = new LocalRoster();
+  assert.equal(roster.snapshot([]), null); assert.equal(roster.snapshot([], 0, false), null);
+  roster.assign(1, MAX);
+  const automatic = roster.snapshot([], 0, true);
+  assert.deepEqual(automatic, { words: new Uint32Array([1, 0, 0, 0]), players: [1], sources: [], page: 0, automatic: true });
+  assert.ok(Object.isFrozen(automatic)); assert.ok(Object.isFrozen(automatic.players)); assert.ok(Object.isFrozen(automatic.sources));
+  assert.equal(roster.selected(1), MAX, "automatic scope does not mutate a retained draft assignment");
+  automatic.words.fill(0);
+  assert.deepEqual(Array.from(roster.snapshot([], 0, true).words), [1, 0, 0, 0]);
+  for (const includeSolo of [null, 0, 1, "true", {}, []]) assert.throws(() => roster.snapshot([], 0, includeSolo));
+  for (const page of [-1, 1, 0.5, "0", NaN]) assert.throws(() => roster.snapshot([], page, true));
+  const metadata = { localPlayers: [1], localPage: 0, recordLimits: { bytes: 67108864, records: 1000000 } };
+  assert.deepEqual(validateLocalPrepared(roster.snapshot([], 0, true), metadata, true),
+    { page: 0, recordLimits: { bytes: 67108864, records: 1000000 } });
+  roster.setCount(2); roster.assign(2, HIGH);
+  const exact = roster.snapshot([MAX, HIGH], 0, true);
+  assert.deepEqual(exact.players, [1, 2]); assert.deepEqual(exact.sources, [MAX, HIGH]);
+  assert.deepEqual(Array.from(exact.words), [1, 1, 0xffffffff, 0xffffffff, 2, 1, 1, 0x200000]);
+  assert.notEqual(exact.automatic, true);
+  assert.throws(() => roster.snapshot([], 0, true));
+  roster.setCount(1); roster.setCount(2); assert.deepEqual(roster.players, [1, 3]);
+  roster.setCount(1);
+  assert.deepEqual(roster.snapshot([], 0, true).players, [1]); assert.equal(roster.snapshot([]), null);
+});
+
 test("prepared receipts require the exact stable roster page and divided capture budget before PCM admission", () => {
   const { plan } = assigned();
   const metadata = { localPlayers: [...plan.players], localPage: 0,

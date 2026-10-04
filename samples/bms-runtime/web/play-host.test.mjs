@@ -534,7 +534,8 @@ async function harness(faults = {}) {
     const worker = workers.at(-1);
     const localPlayers = start.localPlanWords === undefined ? null
       : Array.from(start.localPlanWords).filter((_, index) => index % 4 === 0);
-    const localSources = start.localPlanWords === undefined ? null
+    const localSources = start.localPlanWords === undefined
+      || (start.localPlanWords.length === 4 && start.localPlanWords[1] === 0) ? null
       : Array.from({ length: start.localPlanWords.length / 4 }, (_, index) =>
         BigInt(start.localPlanWords[index * 4 + 2]) | BigInt(start.localPlanWords[index * 4 + 3]) << 32n);
     await reply(start, { kind: "prepared", title: "Actual runtime", artist: "Runtime artist",
@@ -3969,6 +3970,7 @@ test("multiplayer readiness follows real audio setup and one committed grid arms
   assert.equal(h.opens[0].gesture, true);
   assert.deepEqual(start.multiplayer, { url: "https://example.test:4433/competition", host: true,
     windowOriginNs: 9000000000n });
+  assert.deepEqual(Array.from(start.localPlanWords), [1, 0, 0, 0]);
   assert.equal(h.get("multiplayer").disabled, true);
   const commands = await h.prepared(start, 1);
   assert.equal(h.audio.finishes, 1);
@@ -4022,7 +4024,8 @@ test("remote summaries stay separate and active disconnect does not stop local p
   await h.advance(8);
   assert.ok(worker.messages("play-step").length > 0);
   h.click("stop"); await flush();
-  await h.receive(finalScore(start.playId, { multiplayer: { finalWritten: true, finalAcknowledged: false, error: "peer ACK timed out" } }));
+  await h.receive(localFinal(start, { multiplayer: { finalWritten: true, finalAcknowledged: false, error: "peer ACK timed out",
+    peers: [localPeer(1, 91, { status: "disconnected" })] } }));
   assert.equal(h.get("play").disabled, true, "network receipt does not release outstanding audio cleanup");
   stopGate.resolve(); await flush();
   assert.match(h.get("multiplayer-status").textContent, /written.*ACK unavailable.*timed out/);
@@ -4040,12 +4043,17 @@ test("remote summaries stay separate and active disconnect does not stop local p
 
 async function launchPeerSession(h) {
   chooseMultiplayer(h, false);
-  const start = await h.begin(), worker = h.workers.at(-1);
-  await h.reply(await h.prepared(start), null);
+  const start = await h.begin();
+  await activatePeerSession(h, start);
+  return start;
+}
+
+async function activatePeerSession(h, start, sampleCount = 0) {
+  const worker = h.workers.at(-1);
+  await h.reply(await h.prepared(start, sampleCount), null);
   await h.reply(worker.last("play-network-ready"), { kind: "multiplayer-start", targetHostNs: 1500000000n,
     songTargetHostNs: 1600000000n, uncertaintyNs: 0n });
   await h.reply(worker.last("play-activate"), null);
-  return start;
 }
 
 async function discoverLocalPeers(h, count = 2) {
@@ -4065,6 +4073,188 @@ async function launchLocalPeers(h, count = 2) {
 function localPeer(player, remotePlayer, overrides = {}) {
   return { player, remotePlayer, status: "stopped", progress: null, final: false, error: null, ...overrides };
 }
+
+test("automatic one-player networking retains every admitted input owner and native sample without source discovery", async () => {
+  const opening = deferred(), standard = nativeGamepad(0), ignored = nativeGamepad(1, { mapping: "" });
+  const h = await harness({ openGate: opening, touchSupported: true, gamepads: [standard, ignored],
+    hidSupported: true, hidAdmittedSources: [5n] });
+  await h.preview(); const profile = selectedControllerProfile(); chooseControllerProfile(h, profile.file); chooseMultiplayer(h);
+  assert.equal(h.get("local-count").value, "1"); assert.equal(h.get("local-discover").disabled, true);
+  h.click("play");
+  assert.equal(h.opens.length, 1); assert.equal(h.opens[0].gesture, true); assert.equal(h.gamepadReads, 1);
+  assert.ok(h.traces.findIndex(row => row[0] === "gamepad-poll") < h.traces.findIndex(row => row[0] === "open"));
+  assert.equal(h.hid.requests.length, 0);
+  h.get("multiplayer").checked = false; h.get("local-count").value = "2"; h.get("local-count").emit("change");
+  opening.resolve(h.audio); await flush();
+  const worker = h.workers[0], start = worker.last("play-start");
+  assert.deepEqual(Array.from(start.localPlanWords), [1, 0, 0, 0]); assert.equal(start.localPage, 0);
+  assert.equal(start.multiplayer.host, true); assert.equal(start.multiplayer.windowOriginNs, 9000000000n);
+  assert.equal(start.inputMode, "physical-contact"); assert.equal(start.hidProfileFile, profile.file);
+  assert.deepEqual(start.gamepadDevices.map(device => device.source), [3n, 4n]);
+  assert.deepEqual(start.hidDevices.map(device => device.source), [5n, 6n]);
+  assert.equal(h.hid.gets, 1); assert.ok(h.hidDevices.every(device => device.opens === 1));
+  await activatePeerSession(h, start, 1);
+  assert.equal(h.audio.samples.length, 1); assert.equal(h.audio.attachments, 1);
+  assert.equal(h.get("local-page").disabled, true);
+  h.get("local-page").value = "0"; h.get("local-page").emit("change"); await flush();
+  assert.equal(worker.messages("play-page").length, 0, "automatic scope does not expose a page transition");
+  const native = h.hidDevices[0], display = watchPlayDisplay(h), layout = h.layoutReads;
+  h.setNow(1700.125); standard.timestamp = 1700.0625;
+  standard.buttons[0] = { value: 0.12345678901234566, pressed: true, touched: false };
+  const backing = Uint8Array.from([99, 7, 255, 88]);
+  native.emit("inputreport", { device: native, reportId: 7, timeStamp: 1700.125, data: new DataView(backing.buffer, 1, 2) });
+  const first = worker.last("play-step");
+  assert.deepEqual(first.events.map(event => [event.kind, event.source]), [["hid", 5n], ["gamepad", 3n]]);
+  assert.deepEqual(first.events.map(event => event.hostNs), [1700125000n, 1700062500n]);
+  assert.equal(first.events[1].buttons[0].value, 0.12345678901234566);
+  backing.fill(0); assert.deepEqual(Array.from(first.events[0].data), [7, 255]);
+  h.setNow(1700.5);
+  h.get("canvas").emit("pointerdown", { pointerType: "touch", pointerId: -2, timeStamp: 1700.25,
+    offsetX: 120.25, offsetY: 180.5, pressure: 0.375 });
+  h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1700.5 });
+  await h.receive({ kind: "play-step-done", playId: start.playId, tickId: first.tickId,
+    songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+  const second = worker.last("play-step");
+  assert.equal(second.events[0].kind, "touch"); assert.equal(second.events[0].hostNs, 1700250000n);
+  assert.equal(second.events[0].code, 0xfffffffe); assert.equal(second.events[1].key, 2);
+  assert.equal(second.events[1].hostNs, 1700500000n); assert.equal(second.events[2].source, 3n);
+  assert.ok(first.events[0].sequence < first.events[1].sequence);
+  assert.ok(first.events[1].sequence < second.events[0].sequence && second.events[0].sequence < second.events[1].sequence);
+  assert.ok(second.events[1].sequence < second.events[2].sequence);
+  assert.deepEqual(display, []); assert.equal(h.layoutReads, layout); assert.equal(profile.reads, 0);
+  h.click("stop"); await flush(); await h.receive(localFinal(start, { multiplayer: { finalWritten: true,
+    finalAcknowledged: true, error: null, peers: [localPeer(1, 77)] } }));
+  assert.ok(h.hidDevices.every(device => device.closes === 1)); assert.equal(h.releases.length, 1);
+  assert.equal(h.window.listeners.get("gamepaddisconnected")?.size ?? 0, 0); await h.close();
+});
+
+test("automatic cohort source receipts preserve standard eligibility and custom owned subsets without guessing unsupported controls", async () => {
+  for (const kind of ["unavailable", "empty", "unsupported", "custom"]) {
+    const pads = kind === "empty" ? [] : kind === "unsupported"
+      ? [nativeGamepad(0, { mapping: "" }), nativeGamepad(1, { buttons: nativeGamepad().buttons.slice(0, 8) })]
+      : [nativeGamepad(0, { mapping: "" }), nativeGamepad(1, { mapping: "" })];
+    const h = await harness(kind === "unavailable" ? {} : { gamepads: pads,
+      ...(kind === "custom" ? { gamepadAdmittedSources: [4n] } : {}) });
+    await h.preview(); chooseMultiplayer(h, false);
+    const profile = kind === "custom" ? selectedGamepadProfile() : null;
+    if (profile) chooseGamepadProfile(h, profile.file);
+    const start = await h.begin();
+    assert.deepEqual(Array.from(start.localPlanWords), [1, 0, 0, 0]);
+    assert.equal(Object.hasOwn(start, "gamepadDevices"), kind !== "unavailable");
+    await activatePeerSession(h, start);
+    h.setNow(1700); await h.advance(8);
+    const worker = h.workers[0], tick = worker.last("play-step");
+    assert.deepEqual(tick.events.filter(event => event.kind === "gamepad").map(event => event.source), kind === "custom" ? [4n] : []);
+    if (profile) {
+      assert.equal(start.gamepadProfileFile, profile.file); assert.equal(profile.reads, 0);
+      pads[0].connected = false; h.window.emit("gamepaddisconnected", { gamepad: pads[0] }); await flush();
+      assert.equal(worker.messages("play-stop").length, 0, "unmatched custom devices remain outside the automatic member's admitted inputs");
+    }
+    h.click("stop"); await flush(); await h.receive(localFinal(start, { multiplayer: { finalWritten: false,
+      finalAcknowledged: false, error: null, peers: [localPeer(1, null)] } }));
+    const reads = h.gamepadReads; chooseRecording(h, [selectedRecording().file]);
+    const replay = await h.launch(0, "replay");
+    assert.equal(replay.start.localPlanWords, undefined); assert.equal(replay.start.multiplayer, undefined);
+    assert.equal(replay.start.gamepadDevices, undefined); assert.equal(h.gamepadReads, reads);
+    h.click("stop"); await flush(); await h.receive(finalScore(replay.id)); await h.close();
+  }
+});
+
+test("automatic network saved comparisons target the actual sole member without mutating retained solo selections", async () => {
+  const h = await harness(); await h.preview();
+  const own = selectedRecording(), other = selectedRecording();
+  selectOpponent(h, own, { own: true, label: "Own prefix" });
+  selectOpponent(h, other, { own: false, label: "Other prefix" });
+  assert.equal(h.get("opponent-player-file:1").value, ""); assert.equal(h.get("opponent-player-file:2").value, "");
+  const start = await launchPeerSession(h);
+  assert.deepEqual(start.opponents.map(row => [row.player, row.own, row.label]), [[1, true, "Own prefix"], [1, false, "Other prefix"]]);
+  assert.equal(start.opponents[0].file, own.file); assert.equal(start.opponents[1].file, other.file);
+  assert.equal(own.reads, 0); assert.equal(other.reads, 0);
+  h.click("stop"); await flush();
+  const opponents = [comparison(start.playId, { kind: "own", label: "Own prefix", hits: 7n, misses: 0n }).opponents[0],
+    comparison(start.playId, { kind: "other", label: "Other prefix", hits: 9n, misses: 0n }).opponents[0]];
+  await h.receive(localFinal(start, { savedOpponents: { opponents: null, error: null,
+    localOpponents: [{ player: 1, opponents, error: null }] }, multiplayer: { finalWritten: true,
+    finalAcknowledged: true, error: null, peers: [localPeer(1, 99)] } }));
+  assert.match(content(h.get("opponents-results")), /Player 1.*Own prefix.*Player 1.*Other prefix/);
+  assert.equal(h.get("opponent-player-file:1").value, ""); assert.equal(h.get("opponent-player-file:2").value, "");
+  h.get("multiplayer").checked = false;
+  const solo = await h.launch();
+  assert.equal(solo.start.localPlanWords, undefined);
+  assert.ok(solo.start.opponents.every(row => !Object.hasOwn(row, "player")), "session mapping never persists into the user's solo selection");
+  h.click("stop"); await flush(); await h.receive(finalScore(solo.id, { savedOpponents: { opponents, error: null } }));
+  chooseRecording(h, [selectedRecording().file]); h.get("multiplayer").checked = true;
+  const replay = await h.launch(0, "replay");
+  assert.equal(replay.start.opponents, undefined); assert.equal(replay.start.localPlanWords, undefined);
+  assert.equal(replay.start.multiplayer, undefined); assert.equal(own.reads, 0); assert.equal(other.reads, 0);
+  h.click("stop"); await flush(); await h.receive(finalScore(replay.id)); await h.close();
+});
+
+test("one automatic member records and saves its actual cohort row while an independently sized peer contributes only its assigned prefix", async () => {
+  const stopping = deferred(), h = await harness({ stopGate: stopping }); await h.preview(); h.get("record").checked = true;
+  const start = await launchPeerSession(h), worker = h.workers[0];
+  assert.deepEqual(Array.from(start.localPlanWords), [1, 0, 0, 0]); assert.equal(start.recordReplay, true);
+  h.setNow(1700); await h.advance(8);
+  const tick = worker.last("play-step"), render = worker.last("play-render");
+  await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
+    completed: true, commandsPending: false, observedTick: tick.tickId });
+  assert.equal(worker.messages("play-stop").length, 0);
+  await h.receive({ kind: "play-step-done", playId: start.playId, tickId: tick.tickId,
+    songNs: 2350000000n, hits: 9007199254740993n, misses: 1n, combo: 2n, preOriginInputs: 0 });
+  assert.equal(worker.last("play-stop").completed, true);
+  const bytes = Uint8Array.from([66, 75, 82, 1, 255]);
+  const receipt = localFinal(start, { hits: 777n, misses: 777n, combo: 777n,
+    localScores: [{ player: 1, songNs: 2350000000n, hits: 9007199254740993n, misses: 1n, combo: 2n, maxCombo: 3n }],
+    replays: [{ player: 1, replay: bytes, replayError: null, replayComplete: true }],
+    multiplayer: { finalWritten: true, finalAcknowledged: true, error: null,
+      peers: [localPeer(1, 0xffffffff, { final: true, progress: { songNs: 604800000000001n,
+        hits: 18446744073709551615n, misses: 0n, combo: 4n, maxCombo: 5n } })] } });
+  await h.receive(receipt);
+  assert.equal(h.get("captured-replay").disabled, true); assert.equal(h.get("export").disabled, true);
+  stopping.resolve(); await flush();
+  assert.match(content(h.get("local-results")), /Player 1.*9007199254740993.*Complete recording/);
+  assert.doesNotMatch(content(h.get("local-results")), /777|18446744073709551615/);
+  assert.match(h.get("multiplayer-status").textContent, /Player 1.*remote Player 4294967295.*604800\.000000001.*18446744073709551615/);
+  assert.equal(h.get("export").disabled, true, "the one-member cohort still selects the actual recording explicitly");
+  h.get("captured-replay").value = "1"; h.get("captured-replay").emit("change");
+  h.click("export"); await flush();
+  assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), bytes);
+  assert.equal(h.downloads.at(-1).filename, `beatkernel-${start.playId}-player-1-complete.bkr`);
+  h.click("records-save"); await flush();
+  const saved = h.recordCalls.find(call => call.method === "save");
+  assert.deepEqual(saved.value.bytes, bytes); assert.equal(saved.value.complete, true);
+  assert.equal(saved.value.hits, 9007199254740993n); assert.equal(saved.value.misses, 1n); assert.equal(saved.value.combo, 2n);
+  await h.close();
+});
+
+test("automatic cohort metadata refusal and failed prefixes release for retry without discovery or stale member results", async () => {
+  for (const changed of [{ localPlayers: undefined }, { localPlayers: [2] }, { localPage: 1 },
+    { recordLimits: { bytes: 67108863, records: 1000000 } }]) {
+    const h = await harness(); await h.preview(); h.get("record").checked = true; chooseMultiplayer(h);
+    const start = await h.begin(), worker = h.workers[0];
+    await h.reply(start, { kind: "prepared", title: "Contradictory automatic metadata", samples: 1, lanes: [0x11],
+      startNs: 0n, opponentCount: 0, localPlayers: [1], localPage: 0,
+      recordLimits: { bytes: 67108864, records: 1000000 }, ...changed });
+    assert.equal(worker.messages("play-sample").length, 0); assert.equal(worker.messages("play-network-ready").length, 0);
+    assert.deepEqual(h.audio.arms, []); assert.equal(worker.last("play-stop").playId, start.playId);
+    await h.receive(localFinal(start)); assert.equal(h.get("play").disabled, false);
+    const retry = await launchPeerSession(h); assert.deepEqual(Array.from(retry.localPlanWords), [1, 0, 0, 0]);
+    h.click("stop"); await flush(); await h.receive(localFinal(retry)); await h.close();
+  }
+  const h = await harness(); await h.preview(); h.get("record").checked = true;
+  const failed = await launchPeerSession(h), prefix = Uint8Array.from([66, 75, 82, 9]);
+  const failure = localFinal(failed, { kind: "play-error", message: "actual member input failure", released: true,
+    replays: [{ player: 1, replay: prefix, replayError: null, replayComplete: false }],
+    multiplayer: { finalWritten: false, finalAcknowledged: false, error: "group disconnected", peers: [localPeer(1, null, { status: "disconnected" })] } });
+  await h.receive(failure); assert.match(h.get("status").textContent, /actual member input failure/);
+  h.get("captured-replay").value = "1"; h.get("captured-replay").emit("change"); h.click("export"); await flush();
+  assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), prefix);
+  assert.equal(h.downloads.at(-1).filename, `beatkernel-${failed.playId}-player-1-prefix.bkr`);
+  const retry = await launchPeerSession(h), before = h.get("multiplayer-status").textContent;
+  await h.receive(failure); assert.equal(h.get("multiplayer-status").textContent, before);
+  assert.equal(h.get("stop").disabled, false); assert.equal(h.get("local-discover").disabled, true);
+  h.click("stop"); await flush(); await h.receive(localFinal(retry)); await h.close();
+});
 
 test("discovered local sources and network settings freeze together before audio and share one committed start", async () => {
   const opening = deferred(), pad = nativeGamepad();
@@ -4269,7 +4459,7 @@ test("malformed local peer envelopes reject the entire comparison without scalar
   }
 });
 
-test("cancelled group readiness and late final receipts cannot arm or overwrite a new page, scalar session or replay", async () => {
+test("cancelled group readiness and late final receipts cannot arm or overwrite a new page, automatic member or replay", async () => {
   const cancelled = await harness({ touchSupported: true }); await cancelled.preview(); await discoverLocalPeers(cancelled);
   chooseMultiplayer(cancelled);
   const start = await cancelled.begin(), firstWorker = cancelled.workers[0];
@@ -4294,12 +4484,12 @@ test("cancelled group readiness and late final receipts cannot arm or overwrite 
   stopping.resolve(); await flush();
   assert.equal(h.get("multiplayer-status").textContent, freshStatus); assert.equal(content(h.get("local-results")), freshResults);
   delete h.faults.stopGate; await h.preview(); await localCount(h, 1);
-  const scalar = await launchPeerSession(h); assert.equal(scalar.localPlanWords, undefined);
-  const scalarStatus = h.get("multiplayer-status").textContent;
-  await h.receive(receipt); assert.equal(h.get("multiplayer-status").textContent, scalarStatus);
+  const automatic = await launchPeerSession(h); assert.deepEqual(Array.from(automatic.localPlanWords), [1, 0, 0, 0]);
+  const automaticStatus = h.get("multiplayer-status").textContent;
+  await h.receive(receipt); assert.equal(h.get("multiplayer-status").textContent, automaticStatus);
   h.click("stop"); await flush();
-  await h.receive(finalScore(scalar.playId, { multiplayer: { finalWritten: true, finalAcknowledged: true, error: null,
-    peer: localPeer(1, 91, { progress: { songNs: 0n, hits: 9n, misses: 0n, combo: 1n, maxCombo: 2n } }) } }));
+  await h.receive(localFinal(automatic, { multiplayer: { finalWritten: true, finalAcknowledged: true, error: null,
+    peers: [localPeer(1, 91, { progress: { songNs: 0n, hits: 9n, misses: 0n, combo: 1n, maxCombo: 2n } })] } }));
   assert.match(h.get("multiplayer-status").textContent, /Hits 9/); assert.doesNotMatch(h.get("multiplayer-status").textContent, /777777/);
   await localCount(h, 2); chooseRecording(h, [selectedRecording().file]);
   h.get("multiplayer-url").value = "invalid live draft";
@@ -4327,8 +4517,8 @@ test("Window leaves all periodic and final peer counters to the Worker and shows
   await h.receive({ kind: "play-multiplayer", playId: start.playId, event: { kind: "progress", hits: "bad" } });
   assert.deepEqual(writes, []); assert.equal(h.audio.stopStarts, 0);
   h.click("stop"); await flush();
-  const final = finalScore(start.playId, { multiplayer: { finalWritten: true, finalAcknowledged: false,
-    error: "actual ACK timeout", peer: { status: "disconnected", progress: peer, final: true, error: null } } });
+  const final = localFinal(start, { multiplayer: { finalWritten: true, finalAcknowledged: false,
+    error: "actual ACK timeout", peers: [localPeer(1, 91, { status: "disconnected", progress: peer, final: true })] } });
   await h.receive(final);
   assert.deepEqual(writes, []); assert.equal(h.get("play").disabled, true);
   stopping.resolve(); await flush();
@@ -4336,7 +4526,7 @@ test("Window leaves all periodic and final peer counters to the Worker and shows
   assert.match(field.textContent, /ACK.*unavailable.*actual ACK timeout/i);
   assert.match(field.textContent, /reported/i); assert.match(field.textContent, /final/i);
   assert.equal(h.get("title").textContent, preview.title); assert.equal(h.get("position").value, preview.position);
-  assert.match(h.get("status").textContent, /Hits 3.*Misses 1/);
+  assert.match(content(h.get("local-results")), /Player 1.*Hits 1.*Misses 0/);
   const count = writes.length;
   await h.receive(final); await h.receive({ kind: "play-multiplayer", playId: start.playId,
     event: { kind: "final-progress", ...peer, songNs: 604800000000001n } });
@@ -4369,14 +4559,15 @@ test("peer display errors and malformed or absent final prefixes never change lo
     const start = await launchPeerSession(h);
     if (index === 0) {
       await h.receive({ kind: "play-multiplayer", playId: start.playId,
-        event: { kind: "peer-display-unavailable", error: "actual HUD unavailable" } });
+        event: { kind: "peer-display-unavailable", player: 1, error: "actual HUD unavailable" } });
       assert.match(h.get("multiplayer-status").textContent, /actual HUD unavailable/);
       assert.equal(h.audio.stopStarts, 0); assert.equal(h.workers[0].messages("play-stop").length, 0);
     }
     h.click("stop"); await flush();
-    await h.receive(finalScore(start.playId, { replay: Uint8Array.from([66, 75, 82]), replayComplete: false, replayError: null,
-      multiplayer: { finalWritten: true, finalAcknowledged: true, error: null, peer } }));
-    assert.match(h.get("status").textContent, /Hits 3.*Misses 1/);
+    await h.receive(localFinal(start, { replays: [{ player: 1, replay: Uint8Array.from([66, 75, 82]), replayComplete: false, replayError: null }],
+      multiplayer: { finalWritten: true, finalAcknowledged: true, error: null, peers: [localPeer(1, 91, peer)] } }));
+    assert.match(content(h.get("local-results")), /Player 1.*Hits 1.*Misses 0/);
+    h.get("captured-replay").value = "1"; h.get("captured-replay").emit("change");
     assert.equal(h.get("export").disabled, false); assert.match(h.get("export").textContent, /prefix/);
     assert.doesNotMatch(h.get("status").textContent, /Replay export failed|Gameplay cleanup failed/);
     const display = h.get("multiplayer-status").textContent;
@@ -4389,8 +4580,8 @@ test("peer display errors and malformed or absent final prefixes never change lo
   const stopping = deferred(), h = await harness({ stopGate: stopping });
   await h.preview(); const prior = await launchPeerSession(h);
   h.click("stop"); await flush();
-  const receipt = finalScore(prior.playId, { multiplayer: { finalWritten: true, finalAcknowledged: true, error: null,
-    peer: { status: "stopped", progress: valid, final: true, error: null } } });
+  const receipt = localFinal(prior, { multiplayer: { finalWritten: true, finalAcknowledged: true, error: null,
+    peers: [localPeer(1, 91, { progress: valid, final: true })] } });
   await h.receive(receipt);
   h.window.emit("pagehide"); await flush(); h.window.emit("pageshow", { persisted: true }); await flush();
   const resetText = h.get("multiplayer-status").textContent;
@@ -4416,7 +4607,8 @@ test("invalid committed schedules and cancelled readiness never arm or revive a 
     assert.deepEqual(h.audio.arms, []);
     assert.equal(worker.messages("play-activate").length, 0);
     assert.equal(worker.last("play-stop").playId, start.playId);
-    await h.receive(finalScore(start.playId, { multiplayer: { finalWritten: false, finalAcknowledged: false, error: "setup refused" } }));
+    await h.receive(localFinal(start, { multiplayer: { finalWritten: false, finalAcknowledged: false, error: "setup refused",
+      peers: [localPeer(1, null)] } }));
     await h.close();
   }
   const h = await harness(); await h.preview(); chooseMultiplayer(h);
@@ -4429,7 +4621,8 @@ test("invalid committed schedules and cancelled readiness never arm or revive a 
   await h.reply(pending, { kind: "multiplayer-start", targetHostNs: 1500000000n,
     songTargetHostNs: 1600000000n, uncertaintyNs: 0n });
   assert.deepEqual(h.audio.arms, []);
-  await h.receive(finalScore(start.playId, { multiplayer: { finalWritten: false, finalAcknowledged: false, error: "cancelled" } }));
+  await h.receive(localFinal(start, { multiplayer: { finalWritten: false, finalAcknowledged: false, error: "cancelled",
+    peers: [localPeer(1, null)] } }));
   assert.equal(h.get("play").disabled, false);
   await h.close();
 });
