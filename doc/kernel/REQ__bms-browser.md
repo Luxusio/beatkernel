@@ -2397,3 +2397,32 @@ predicted input, pressure and tilt remain future work.
 
 The [W3C coalesced-events contract](https://www.w3.org/TR/pointerevents3/#coalesced-events)
 provides the native history ordering and identity requirements.
+
+## Atomic Window keyboard acquisition ownership
+
+The actual Window key handler must fence each native event against its original
+active session, owner generation and live playing phase. Escape may stop current
+preparing/live/replay play without creating gameplay input. Other replay events
+must not read gameplay fields or enter live acquisition. Ignore keyboard sources
+unassigned to a local player. Snapshot code once; for mapped live input snapshot
+repeat once and the original timestamp once only when acquisition is needed.
+Ignore repeats, duplicate Down and unmatched Up without changing pressed state,
+sequence or queues. Never add layout, rendering or periodic work to this path.
+
+Native property getters and preventDefault can synchronously retire the owner.
+Fence synchronous nested keyboard callbacks with a per-session acquisition
+guard: discard the nested event before reading fields or allocating identity,
+and release the guard in finally. Replacement sessions have independent guards.
+Recheck ownership after each such boundary; discard an obsolete event without
+mutating either the old or replacement session. A failure belonging to a retired
+owner must not stop replacement play. Validate pending capacity, original HOST
+time/global frontier and freshly allocated full-u64 sequence before committing
+pressed state, the immutable queued DTO and completion status together. Sequence
+allocation may consume its identity on a later refusal, but no invalid event may
+change pressed state or publish a prefix. Check acquisition ownership after
+allocation and before commit. Pump once through the existing mixed input path.
+
+Independent actual Host fixture sources cover getter/callback cancellation and
+replacement, shared sequence refusal, repeats/duplicates, replay and original
+fields. Preserve existing valid keyboard forwarding and mixed-input behavior.
+Test execution, actual browser/device and performance acceptance remain deferred.
