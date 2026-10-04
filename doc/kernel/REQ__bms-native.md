@@ -2,6 +2,28 @@
 
 ## Shared native multi-host room network owner
 
+### Native room competition and output-start adapter
+
+The game-owned native room adapter must implement `NativeStartAgreement` over
+the actual `NativeRoomNetwork` committed schedule and original elapsed clock.
+Awaiting commitment services native acquisition/cancellation; it cannot invent
+Ready, seal a room from a guessed role, or release output from a membership
+snapshot alone. Explicit lobby commands preserve correlated refusals. Prepared
+membership initializes the existing portable `RoomOpponentHud`; accepted peer
+prefixes update it on sequence changes with full host/player identity. HUD
+failure disables only presentation and preserves local judgment/networking.
+
+Observe validates and retains actual ordered local member progress before
+optional bounded publication. A post-commit network failure preserves local
+gameplay and the last accepted comparison data. Only caller-proven natural
+completion may send one actual final prefix and request coordinated drain;
+unplayed setup, cancellation and invalid local progress cannot fabricate a
+final. Successful completion requires the common final/drain receipts and joined
+cleanup, while protocol and cleanup failures remain separately inspectable.
+The adapter reuses the network thread and common native output-start machinery.
+Platform app selection, interactive lobby, native HUD bridge and actual finite
+completion callers remain required until their concrete integration is saved.
+
 Native multi-host room networking must reuse `RoomPlayClient` and `RoomPlayIo`
 on one dedicated network thread, independent of Windows/macOS/Linux adapters.
 Transport connection, reads/writes and final stream cleanup must not execute on
