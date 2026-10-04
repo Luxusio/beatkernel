@@ -3,15 +3,18 @@ use std::{collections::VecDeque, sync::Arc};
 
 use crate::{
     browser::BrowserPrepared,
-    browser_game::{BrowserSample, OUTPUT, encode_batch},
+    browser_game::{BrowserSample, OUTPUT, encode_batch, encode_saved_opponents},
     browser_hid_input::BrowserHidSetup,
     browser_input::{LocalPhysicalInputSetup, TouchInputSetup, decode_input},
+    competition::OpponentKind,
     image_assets::ImageAssets,
     local_players::PlayerId,
     local_runtime::{InputResult, PlayerReport},
     note_progress::NoteProgress,
     player_chart::PlayerChart,
     pressed_keys::PressedKeys,
+    saved_opponent_hud::SavedOpponentHud,
+    saved_opponents::SavedOpponents,
     step_gameplay::{
         StepGameplayConfig, StepGameplayError, StepLocalGameplay, StepLocalGameplayError,
     },
@@ -55,8 +58,21 @@ pub(crate) struct BrowserLocalMember {
     pub(crate) progress: NoteProgress,
     pub(crate) recent: Vec<JudgeEvent>,
     pub(crate) pressed: u32,
+    pub(crate) saved_hud: SavedOpponentHud,
+    opponents: Option<SavedOpponents>,
+    opponent_error: Option<String>,
     source: Option<DeviceId>,
     pressed_owners: PressedKeys,
+}
+
+impl BrowserLocalMember {
+    /// Admission is setup-only. Failed presentation keeps this reserved space
+    /// so a configured touch field never moves during gameplay.
+    pub(crate) fn comparison_height(&self) -> i64 {
+        self.opponents
+            .as_ref()
+            .map_or(0, |opponents| opponents.count() as i64 * 14)
+    }
 }
 
 /// Owns one original prepared bank and the actual shared local runtime. Input
@@ -75,6 +91,9 @@ pub struct BrowserLocalGame {
     output_start: Option<u64>,
     output_context: Option<u64>,
     chart_seed: u64,
+    opponent_source: Option<beatkernel_bms::BmsChart>,
+    opponent_count: usize,
+    opponent_bytes: usize,
 }
 
 #[wasm_bindgen]
@@ -131,6 +150,9 @@ impl BrowserLocalGame {
                 progress: NoteProgress::new(chart.clone()).map_err(error)?,
                 recent,
                 pressed: 0,
+                saved_hud: SavedOpponentHud::default(),
+                opponents: None,
+                opponent_error: None,
                 pressed_owners: PressedKeys::default(),
             });
         }
@@ -151,6 +173,7 @@ impl BrowserLocalGame {
         } else {
             BmsInputMode::ButtonOnly
         };
+        let opponent_source = prepared.prepared.source.clone();
         let (mut game, bank) = StepLocalGameplay::new_section(
             prepared.prepared,
             config,
@@ -179,6 +202,9 @@ impl BrowserLocalGame {
             output_start: None,
             output_context: None,
             chart_seed: prepared.chart_seed,
+            opponent_source: Some(opponent_source),
+            opponent_count: 0,
+            opponent_bytes: 0,
         })
     }
 
@@ -265,6 +291,124 @@ impl BrowserLocalGame {
             .competition_identity(PlayerId(player), limits, self.chart_seed)
             .map_err(error)
     }
+    /// Adds one genuine recorded prefix for one member before activation.
+    /// The eight-record and 64 MiB quotas belong to the entire local owner.
+    pub fn add_saved_opponent(
+        &mut self,
+        player: u32,
+        encoded: Vec<u8>,
+        own: bool,
+        label: String,
+    ) -> Result<usize, JsValue> {
+        let index = self
+            .members
+            .iter()
+            .position(|member| member.player == PlayerId(player))
+            .ok_or_else(|| error("unknown local player"))?;
+        let source = self
+            .opponent_source
+            .as_ref()
+            .ok_or_else(|| error("saved opponents must be admitted before activation"))?;
+        if self.opponent_count >= 8 {
+            return Err(error("local saved opponent capacity reached"));
+        }
+        let charged = self
+            .opponent_bytes
+            .checked_add(encoded.len())
+            .filter(|bytes| *bytes <= 64 * 1024 * 1024)
+            .ok_or_else(|| error("local saved opponent encoded-byte quota exceeded"))?;
+        if self.members[index].saved_hud.failed() {
+            return Err(error("saved opponent presentation is disabled"));
+        }
+        let limits = crate::competition_live::replay_limits().map_err(error)?;
+        let header = self
+            .game
+            .competition_header(PlayerId(player), limits, self.chart_seed)
+            .map_err(error)?;
+        let kind = if own {
+            OpponentKind::Own
+        } else {
+            OpponentKind::Other
+        };
+        let member = &mut self.members[index];
+        let admitted = if let Some(opponents) = &mut member.opponents {
+            opponents
+                .add(source, &encoded, kind, &label)
+                .map_err(error)?
+        } else {
+            let mut opponents =
+                SavedOpponents::new(header, limits, 8, 64 * 1024 * 1024).map_err(error)?;
+            let admitted = opponents
+                .add(source, &encoded, kind, &label)
+                .map_err(error)?;
+            member.opponents = Some(opponents);
+            admitted
+        };
+        self.opponent_count += 1;
+        self.opponent_bytes = charged;
+        Ok(admitted)
+    }
+
+    /// Refresh each member at its own committed song frontier. A comparison
+    /// failure only disables that member's retained display, never gameplay.
+    pub fn saved_opponents(&mut self) -> Result<JsValue, JsValue> {
+        let array = js_sys::Array::new();
+        for member in &mut self.members {
+            let result = (|| -> Result<JsValue, String> {
+                if member.saved_hud.failed() {
+                    return Err(member
+                        .opponent_error
+                        .clone()
+                        .unwrap_or_else(|| "saved opponent presentation is disabled".into()));
+                }
+                let Some(opponents) = &mut member.opponents else {
+                    return Ok(js_sys::Array::new().into());
+                };
+                let song = self
+                    .game
+                    .member_song_time(member.player)
+                    .ok_or("local member has no song frontier")?;
+                opponents
+                    .advance_to(song)
+                    .map_err(|failure| failure.to_string())?;
+                member.saved_hud.update(opponents)?;
+                encode_saved_opponents(opponents)
+                    .map_err(|_| "saved opponent snapshot encoding failed".to_string())
+            })();
+            let (opponents, failure) = match result {
+                Ok(opponents) => (opponents, JsValue::NULL),
+                Err(failure) => {
+                    member.saved_hud.mark_failed();
+                    let retained: String = failure.chars().take(2048).collect();
+                    member.opponent_error = Some(retained.clone());
+                    (JsValue::NULL, JsValue::from_str(&retained))
+                }
+            };
+            let row = js_sys::Object::new();
+            for (name, value) in [
+                ("player", JsValue::from_f64(f64::from(member.player.0))),
+                ("opponents", opponents),
+                ("error", failure),
+            ] {
+                js_sys::Reflect::set(&row, &JsValue::from_str(name), &value)?;
+            }
+            array.push(&row);
+        }
+        Ok(array.into())
+    }
+
+    pub fn disable_saved_opponent_hud(&mut self, player: u32) -> Result<(), JsValue> {
+        let member = self
+            .members
+            .iter_mut()
+            .find(|member| member.player == PlayerId(player))
+            .ok_or_else(|| error("unknown local player"))?;
+        member.saved_hud.mark_failed();
+        member
+            .opponent_error
+            .get_or_insert_with(|| "saved opponent presentation is disabled".into());
+        Ok(())
+    }
     pub fn configure_touch_regions(
         &mut self,
         player: u32,
@@ -312,8 +456,13 @@ impl BrowserLocalGame {
         if index < first || index >= first + visible {
             return Err(error("touch player is not on the visible local page"));
         }
-        crate::playfield_layout::local_touch_bounds(&self.chart.lanes, visible, index - first)
-            .map_err(error)
+        crate::playfield_layout::local_touch_bounds_with_comparison_space(
+            &self.chart.lanes,
+            visible,
+            index - first,
+            self.members[index].comparison_height(),
+        )
+        .map_err(error)
     }
 
     #[wasm_bindgen(getter)]
@@ -351,7 +500,9 @@ impl BrowserLocalGame {
         Ok(())
     }
     pub fn activate(&mut self, host_ns: i64) -> Result<(), JsValue> {
-        self.game.activate(point(HOST, host_ns)).map_err(error)
+        self.game.activate(point(HOST, host_ns)).map_err(error)?;
+        self.opponent_source = None;
+        Ok(())
     }
     pub fn input_blob(&mut self, bytes: Vec<u8>, audio_ns: i64) -> Result<(), JsValue> {
         let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
@@ -522,6 +673,7 @@ impl BrowserLocalGame {
     }
     pub fn stop(&mut self) {
         self.game.fail();
+        self.opponent_source = None;
         self.samples.clear();
         self.hid_setup = None;
         self.hid_events.clear();

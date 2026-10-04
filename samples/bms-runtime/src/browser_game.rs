@@ -464,51 +464,12 @@ impl BrowserGame {
             return Err(error("saved opponent presentation is disabled"));
         }
         let result = (|| {
-            let array = js_sys::Array::new();
             let Some(opponents) = &mut self.opponents else {
-                return Ok(array.into());
+                return Ok(js_sys::Array::new().into());
             };
             opponents.advance_to(self.game.song_time()).map_err(error)?;
             self.saved_hud.update(opponents).map_err(error)?;
-            for opponent in opponents.opponents() {
-                let object = js_sys::Object::new();
-                field(
-                    &object,
-                    "kind",
-                    JsValue::from_str(match opponent.kind() {
-                        OpponentKind::Own => "own",
-                        OpponentKind::Other => "other",
-                    }),
-                )?;
-                field(&object, "label", JsValue::from_str(opponent.label()))?;
-                field(
-                    &object,
-                    "songNs",
-                    opponent
-                        .song_time()
-                        .map(|time| signed(time.as_nanos()))
-                        .unwrap_or(JsValue::NULL),
-                )?;
-                field(
-                    &object,
-                    "recordedUntilNs",
-                    opponent
-                        .recorded_until()
-                        .map(|time| signed(time.as_nanos()))
-                        .unwrap_or(JsValue::NULL),
-                )?;
-                let score = opponent.score();
-                for (name, value) in [
-                    ("hits", score.hits),
-                    ("misses", score.misses),
-                    ("combo", score.combo),
-                    ("maxCombo", score.max_combo),
-                ] {
-                    field(&object, name, unsigned(value))?;
-                }
-                array.push(&object);
-            }
-            Ok(array.into())
+            encode_saved_opponents(opponents)
         })();
         if result.is_err() {
             self.saved_hud.mark_failed();
@@ -909,6 +870,50 @@ impl BrowserGame {
         self.pressed = self.pressed_owners.mask();
         Ok(())
     }
+}
+
+/// One actual saved-prefix DTO for the solo and local browser owners.
+pub(crate) fn encode_saved_opponents(opponents: &SavedOpponents) -> Result<JsValue, JsValue> {
+    let array = js_sys::Array::new();
+    for opponent in opponents.opponents() {
+        let object = js_sys::Object::new();
+        field(
+            &object,
+            "kind",
+            JsValue::from_str(match opponent.kind() {
+                OpponentKind::Own => "own",
+                OpponentKind::Other => "other",
+            }),
+        )?;
+        field(&object, "label", JsValue::from_str(opponent.label()))?;
+        field(
+            &object,
+            "songNs",
+            opponent
+                .song_time()
+                .map(|time| signed(time.as_nanos()))
+                .unwrap_or(JsValue::NULL),
+        )?;
+        field(
+            &object,
+            "recordedUntilNs",
+            opponent
+                .recorded_until()
+                .map(|time| signed(time.as_nanos()))
+                .unwrap_or(JsValue::NULL),
+        )?;
+        let score = opponent.score();
+        for (name, value) in [
+            ("hits", score.hits),
+            ("misses", score.misses),
+            ("combo", score.combo),
+            ("maxCombo", score.max_combo),
+        ] {
+            field(&object, name, unsigned(value))?;
+        }
+        array.push(&object);
+    }
+    Ok(array.into())
 }
 
 /// Single scalar command ABI used by both live and replay owners.

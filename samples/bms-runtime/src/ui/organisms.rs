@@ -525,6 +525,44 @@ pub fn local_player_views_with_background(
     show: bool,
     frames: &[crate::bga_render::BgaFrame; 4],
 ) -> Result<(), String> {
+    local_player_views_with_background_impl(scene, players, lookahead, page, show, frames, None)
+}
+
+/// Fixed saved-comparison reservations preserve contact geometry across HUD failure.
+#[allow(clippy::too_many_arguments)]
+pub fn local_player_views_with_reserved_comparison_space(
+    scene: &mut Scene,
+    players: &[LocalPlayerView<'_>],
+    lookahead: i64,
+    page: usize,
+    show: bool,
+    frames: &[crate::bga_render::BgaFrame; 4],
+    reserved: &[i64],
+) -> Result<(), String> {
+    if reserved.len() != players.len() {
+        return Err("local comparison reservations differ from the roster".into());
+    }
+    local_player_views_with_background_impl(
+        scene,
+        players,
+        lookahead,
+        page,
+        show,
+        frames,
+        Some(reserved),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn local_player_views_with_background_impl(
+    scene: &mut Scene,
+    players: &[LocalPlayerView<'_>],
+    lookahead: i64,
+    page: usize,
+    show: bool,
+    frames: &[crate::bga_render::BgaFrame; 4],
+    reserved: Option<&[i64]>,
+) -> Result<(), String> {
     let visible = page_range(players.len(), page)?;
     if lookahead <= 0 {
         return Err("local playfield lookahead must be positive".into());
@@ -544,7 +582,25 @@ pub fn local_player_views_with_background(
     for frame in &frames[..count] {
         frame.validate()?;
     }
-    for player in &players[visible.clone()] {
+    for (slot, player) in players[visible.clone()].iter().enumerate() {
+        if let Some(reserved) = reserved {
+            let space = reserved[visible.start + slot];
+            let field = crate::playfield_layout::local_field_bounds_with_comparison_space(
+                count, slot, space,
+            )?;
+            let required = if show {
+                player
+                    .competition
+                    .map(|snapshot| competition_height(snapshot, field[2]))
+                    .transpose()?
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            if required > space {
+                return Err("saved comparison exceeds its fixed reservation".into());
+            }
+        }
         if let (Some(chart), Some(now)) = (player.chart, player.song_time) {
             if player
                 .note_progress
@@ -555,7 +611,7 @@ pub fn local_player_views_with_background(
             crate::judge_feedback::project(chart, now, player.recent_results)?;
         }
     }
-    for (index, player) in players[visible].iter().enumerate() {
+    for (index, player) in players[visible.clone()].iter().enumerate() {
         let bounds = panel_bounds(index, count);
         rect(
             scene,
@@ -603,6 +659,8 @@ pub fn local_player_views_with_background(
             .map(|snapshot| competition_height(snapshot, bounds.width - 20))
             .transpose()?
             .unwrap_or(0);
+        let summary_height =
+            reserved.map_or(summary_height, |spaces| spaces[visible.start + index]);
         if let Some(snapshot) = comparisons {
             competition_summary(scene, snapshot, line(72, summary_height))?;
         }

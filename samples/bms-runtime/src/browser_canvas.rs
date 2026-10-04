@@ -135,12 +135,14 @@ impl BrowserCanvas {
                 recent_results: &member.recent,
                 pressed_lanes: member.pressed,
                 note_progress: Some(&member.progress),
-                competition: None,
+                competition: member.saved_hud.snapshot(),
             }
         };
         let mut views = [member_view(0); crate::local_players::MAX_LOCAL_PLAYERS];
+        let mut comparison_space = [0; crate::local_players::MAX_LOCAL_PLAYERS];
         for (index, destination) in views[..count].iter_mut().enumerate() {
             *destination = member_view(index);
+            comparison_space[index] = game.members[index].comparison_height();
         }
         let mut presentations = [crate::poor_background::BgaPresentation::default(); 4];
         for (destination, index) in presentations.iter_mut().zip(visible.clone()) {
@@ -162,14 +164,32 @@ impl BrowserCanvas {
             &mut self.renderer,
         )?;
         self.scene.clear();
-        organisms::local_player_views_with_background(
+        organisms::local_player_views_with_reserved_comparison_space(
             &mut self.scene,
             &views[..count],
             lookahead,
             page,
-            false,
+            true,
             &frames,
+            &comparison_space[..count],
         )?;
+        for (slot, index) in visible.enumerate() {
+            let member = &game.members[index];
+            if member.saved_hud.failed() && member.comparison_height() > 0 {
+                let [x, y, _, _] = crate::playfield_layout::local_panel_bounds(
+                    (count - first).min(page_size),
+                    slot,
+                )?;
+                atoms::text(
+                    &mut self.scene,
+                    (x + 10) as usize,
+                    (y + 72) as usize,
+                    "SAVED COMPARISONS UNAVAILABLE",
+                    1,
+                    0xff8e8e,
+                );
+            }
+        }
         self.renderer.render(&self.scene)
     }
 

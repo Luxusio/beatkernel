@@ -49,6 +49,32 @@ pub fn local_touch_bounds(lanes: &[u8], count: usize, slot: usize) -> Result<Vec
     touch_bounds(lanes, local_field_bounds(count, slot)?)
 }
 
+/// Keep admitted comparison space fixed even when its display becomes unavailable.
+pub fn local_field_bounds_with_comparison_space(
+    count: usize,
+    slot: usize,
+    space: i64,
+) -> Result<[i64; 4], String> {
+    let [x, y, width, height] = local_field_bounds(count, slot)?;
+    if space < 0 || space > 112 || space >= height {
+        return Err("invalid reserved local saved comparison space".into());
+    }
+    Ok([x, y + space, width, height - space])
+}
+
+/// Touch partitions use the same immutable comparison reservation as rendering.
+pub fn local_touch_bounds_with_comparison_space(
+    lanes: &[u8],
+    count: usize,
+    slot: usize,
+    space: i64,
+) -> Result<Vec<f32>, String> {
+    touch_bounds(
+        lanes,
+        local_field_bounds_with_comparison_space(count, slot, space)?,
+    )
+}
+
 fn touch_bounds(lanes: &[u8], field: [i64; 4]) -> Result<Vec<f32>, String> {
     if lanes.len() > 18 {
         return Err("touch layout exceeds eighteen lanes".into());
