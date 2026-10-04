@@ -68,6 +68,7 @@ function preparedSnapshot() {
 
 async function harness(faults = {}) {
   const trace = [], opens = [], wrappers = [], callbacks = [], closures = [], starts = [];
+  const progress = [], receipts = [];
   const timers = new Map();
   let now = 0, nextTimer = 0;
   let clockValue = null, clockReads = [];
@@ -96,6 +97,8 @@ async function harness(faults = {}) {
     participant: 0n, revisionValue: 0n, hasSnapshot: false, leaveDone: false, dto: null,
     controls: [frame()], receives: [], credits: [], requests: [], nextCalls: 0,
     receiveTimes: [], writeTimes: [], pollTimes: [], schedules: [], startCalls: 0,
+    publications: [], peerUpdates: [], finalWritten: false, finalAcknowledged: false,
+    progressComplete: false, peerAcks: new Set(), peerAckQueries: [],
     alive() { assert.equal(this.freed, false, "WASM called after free"); },
     request_seal() { this.request("seal"); },
     request_ready() { this.request("ready"); },
@@ -132,6 +135,17 @@ async function harness(faults = {}) {
     leave_written() { this.alive(); return this.leaveDone; },
     snapshot() { this.alive(); trace.push(["snapshot"]); return this.dto; },
     take_start() { this.alive(); this.startCalls++; return this.schedules.shift() ?? null; },
+    publish_progress(words, finalPrefix) {
+      this.alive();
+      if (this.publishError) throw this.publishError;
+      this.publications.push({ words, finalPrefix });
+      this.onPublish?.(words, finalPrefix);
+    },
+    take_peer_progress() { this.alive(); return this.peerUpdates.shift() ?? null; },
+    local_final_written() { this.alive(); return this.finalWritten; },
+    local_final_acknowledged() { this.alive(); return this.finalAcknowledged; },
+    peer_final_ack_written(participant) { this.alive(); this.peerAckQueries.push(participant); return this.peerAcks.has(participant); },
+    progress_complete() { this.alive(); return this.progressComplete; },
     close() { this.alive(); this.closes++; trace.push(["session-close"]); if (faults.sessionCloseError) throw faults.sessionCloseError; },
     free() { this.alive(); this.frees++; this.freed = true; trace.push(["session-free"]); },
   };
@@ -186,6 +200,8 @@ async function harness(faults = {}) {
       session, channelFactory, now: clock, setupTimeoutMs: 50, ioTimeoutMs: 10,
       onSnapshot: value => { callbacks.push(value); trace.push(["on-snapshot"]); },
       onStart: (value, origin) => { starts.push({ value, origin }); trace.push(["on-start"]); },
+      onProgress: value => { progress.push(value); trace.push(["on-progress"]); },
+      onReceipts: value => { receipts.push(value); trace.push(["on-receipts"]); },
       onClose: error => { closures.push(error); trace.push(["on-close"]); },
       ...options,
     }));
@@ -216,7 +232,7 @@ async function harness(faults = {}) {
     });
   }
   return {
-    session, opens, wrappers, callbacks, closures, starts, timers, trace,
+    session, opens, wrappers, callbacks, closures, starts, progress, receipts, timers, trace,
     BrowserRoomOwner, BrowserRoomOwnerError, opening, opened, channel, receive, observe,
     setClock(value, reads = []) { clockValue = value; clockReads = [...reads]; },
     async elapse(milliseconds) {
@@ -255,14 +271,14 @@ test("configuration retains caller ownership; actual frames preserve u64 IDs and
   for (const options of [
     { setupTimeoutMs: 0 }, { setupTimeoutMs: 60001 }, { ioTimeoutMs: 0 },
     { ioTimeoutMs: 60001 }, { channelFactory: 1 }, { onSnapshot: 1 }, { onClose: 1 },
-    { now: undefined }, { now: 1 }, { onStart: 1 },
+    { now: undefined }, { now: 1 }, { onStart: 1 }, { onProgress: 1 }, { onReceipts: 1 },
   ]) {
     const h = await harness();
     assert.ok(await failure(h.opening(options), "validation") instanceof h.BrowserRoomOwnerError);
     assert.equal(h.opens.length, 0);
     assert.equal(h.session.closes, 0); assert.equal(h.session.frees, 0);
   }
-  for (const method of ["needed_bytes", "frame_pending", "receive_bytes", "next_write", "written", "revision", "snapshot", "take_start", "free"]) {
+  for (const method of ["needed_bytes", "frame_pending", "receive_bytes", "next_write", "written", "revision", "snapshot", "take_start", "publish_progress", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written", "progress_complete", "free"]) {
     const h = await harness(); delete h.session[method];
     await failure(h.opening(), "validation");
     assert.equal(h.opens.length, 0); assert.equal(h.session.frees, 0);
@@ -664,4 +680,233 @@ test("Prepared has one fixed handshake deadline and cancellation joins controls 
   await success(closing);
   assert.deepEqual(late.session.credits, credits); assert.equal(late.session.receives.length, reads);
   assert.deepEqual(late.starts, []); await cleaned(late, opened.owner, opened.io);
+});
+
+function progressWords(players = snapshot().members[0].players) {
+  const words = new Uint32Array(players.length * 11);
+  for (let index = 0; index < players.length; index++) {
+    // Signed song -2; hits/max-combo u64MAX; combo u64MAX-1; zero misses.
+    words.set([players[index], 0xfffffffe, 0xffffffff, 0xffffffff, 0xffffffff,
+      0, 0, 0xfffffffe, 0xffffffff, 0xffffffff, 0xffffffff], index * 11);
+  }
+  return words;
+}
+function peerUpdate(overrides = {}) {
+  return { participant: MAX_U64 - 1n, sequence: MAX_U64, finalPrefix: true,
+    words: progressWords(), ...overrides };
+}
+async function progressOwner(h, options = {}, channelOptions = {}) {
+  const opened = await h.opened(options, channelOptions);
+  opened.io.writes[0].gate.resolve(); await flush();
+  await h.observe(opened.io, preparedSnapshot());
+  await h.receive(opened.io, () => h.session.schedules.push({
+    targetNs: 1000000000n, songTargetNs: 1100000000n, uncertaintyNs: 40n,
+  }));
+  assert.equal(h.starts.length, options.onStart ? 0 : 1);
+  return opened;
+}
+
+test("progress publication snapshots exact full-width member words and wakes existing writes without invented credit", async () => {
+  const h = await harness(); const { owner, io } = await h.opened();
+  const words = progressWords();
+  assert.throws(() => owner.publishProgress(words), error => error.code === "state");
+  io.writes[0].gate.resolve(); await flush();
+  await h.observe(io, preparedSnapshot());
+  h.session.publishError = Object.assign(new Error("actual common start has not committed"), { code: "state" });
+  assert.throws(() => owner.publishProgress(words), error => error.code === "state");
+  assert.equal(owner.closed, false); assert.equal(h.session.publications.length, 0);
+  await h.receive(io, () => h.session.schedules.push({ targetNs: 1000000000n,
+    songTargetNs: 1100000000n, uncertaintyNs: 0n }));
+  h.session.publishError = null;
+  const invalid = [null, [], new Uint8Array(44), new Uint32Array(0), new Uint32Array(10),
+    new Uint32Array(705), new Uint32Array(new SharedArrayBuffer(704 * 4)), progressWords(Uint32Array.of(1))];
+  const zero = words.slice(); zero[0] = 0; invalid.push(zero);
+  const reordered = words.slice(); [reordered[0], reordered[11]] = [reordered[11], reordered[0]]; invalid.push(reordered);
+  const detached = words.slice(); structuredClone(detached.buffer, { transfer: [detached.buffer] }); invalid.push(detached);
+  for (const value of invalid) {
+    assert.throws(() => owner.publishProgress(value), error => error.code === "validation");
+    assert.equal(h.session.publications.length, 0);
+    assert.equal(owner.closed, false);
+  }
+  assert.throws(() => owner.publishProgress(words, 1), error => error.code === "validation");
+  h.session.onPublish = () => {
+    if (h.session.publications.length === 1) h.session.controls.push(frame(20n, frameBytes(13)));
+    // These are scripted common-client outputs, not a JavaScript coalescer.
+    if (h.session.publications.length === 3) h.session.controls.push(frame(21n, frameBytes(14)));
+  };
+  owner.publishProgress(words); words.fill(0); await flush();
+  assert.deepEqual([...h.session.publications[0].words], [...progressWords()]);
+  assert.equal(h.session.publications[0].finalPrefix, false);
+  assert.equal(io.writes.length, 2); assert.equal(io.activeWrites, 1);
+  owner.publishProgress(progressWords(), false);
+  owner.publishProgress(progressWords(), true); await flush();
+  assert.equal(h.session.publications.length, 3); assert.equal(io.writes.length, 2);
+  assert.deepEqual(h.session.credits, [MAX_U64]);
+  assert.equal(owner.receipts.localFinalWritten, false);
+  io.writes[1].gate.resolve(); await flush();
+  assert.deepEqual(h.session.credits, [MAX_U64, 20n]); assert.equal(io.writes.length, 3);
+  assert.equal(owner.receipts.localFinalWritten, false);
+  h.session.onWritten = id => { if (id === 21n) h.session.finalWritten = true; };
+  io.writes[2].gate.resolve(); await flush();
+  assert.equal(owner.receipts.localFinalWritten, true);
+  assert.equal(owner.receipts.localFinalAcknowledged, false);
+  const polls = h.session.nextCalls;
+  await h.elapse(100);
+  assert.equal(h.session.nextCalls, polls, "publication adds no timer-based network polling");
+  await cleaned(h, owner, io);
+});
+
+test("accepted pending-start peer DTOs retain exact participant and member words independently of callback mutation", async () => {
+  const h = await harness(); const { owner, io } = await h.opened();
+  io.writes[0].gate.resolve(); await flush();
+  await h.observe(io, preparedSnapshot());
+  assert.deepEqual(h.starts, []);
+  // Mutation by a setup callback cannot rewrite the frozen roster used at the
+  // progress boundary. The binding remains authority for accepting the prefix.
+  h.callbacks[0].members[1].players[0] = 7;
+  const update = peerUpdate(); const originalWords = update.words.slice();
+  await h.receive(io, () => h.session.peerUpdates.push(update));
+  assert.equal(owner.closed, false); assert.equal(h.progress.length, 1);
+  const delivered = h.progress[0];
+  assert.equal(delivered.participant, MAX_U64 - 1n);
+  assert.equal(delivered.sequence, MAX_U64); assert.equal(delivered.finalPrefix, true);
+  assert.deepEqual([...delivered.words], [...originalWords]);
+  assert.ok(Object.isFrozen(delivered));
+  update.words.fill(0);
+  assert.deepEqual([...delivered.words], [...originalWords]);
+  assert.deepEqual(h.session.peerAckQueries, [], "ordinary receipt observation does not scan every peer through WASM");
+  assert.equal(owner.peerFinalAckWritten(MAX_U64 - 1n), false);
+  const calls = h.session.nextCalls;
+  await flush(); assert.equal(h.session.nextCalls, calls);
+  await h.receive(io, () => {});
+  assert.equal(h.progress.length, 1, "one accepted pending update is drained once");
+  assert.deepEqual(h.starts, [], "a peer prefix cannot fabricate the local start receipt");
+  h.session.peerAcks.add(MAX_U64 - 1n);
+  assert.equal(owner.peerFinalAckWritten(MAX_U64 - 1n), true);
+  for (const id of [0n, MAX_U64, 1n, MAX_U64 + 1n, 1]) {
+    assert.throws(() => owner.peerFinalAckWritten(id));
+    assert.equal(owner.closed, false);
+  }
+  assert.deepEqual(h.session.peerAckQueries, [MAX_U64 - 1n, MAX_U64 - 1n]);
+  await cleaned(h, owner, io);
+});
+
+test("local completion waits for actual changed receipt booleans and never sends Leave or closes the room", async () => {
+  const h = await harness(); const { owner, io } = await progressOwner(h);
+  assert.deepEqual({ ...owner.receipts }, { localFinalWritten: false, localFinalAcknowledged: false, complete: false });
+  assert.equal(h.receipts.length, 0, "unchanged initial booleans do not generate callbacks");
+  const promise = owner.waitForLocalCompletion();
+  assert.equal(owner.waitForLocalCompletion(), promise);
+  const waiting = attempt(() => promise);
+  h.session.onPublish = () => h.session.controls.push(frame(31n, frameBytes(13)));
+  owner.publishProgress(progressWords(), true); await flush();
+  await h.receive(io, () => {}); // Early aggregate acceptance has no written credit yet.
+  assert.equal(waiting.state, "pending"); assert.equal(h.receipts.length, 0);
+  h.session.onWritten = id => {
+    if (id === 31n) { h.session.finalWritten = true; h.session.finalAcknowledged = true; }
+    if (id === 32n) { h.session.peerAcks.add(MAX_U64 - 1n); h.session.progressComplete = true; }
+  };
+  io.writes.at(-1).gate.resolve(); await flush();
+  assert.deepEqual({ ...owner.receipts }, { localFinalWritten: true, localFinalAcknowledged: true, complete: false });
+  assert.equal(waiting.state, "pending"); assert.equal(h.receipts.length, 1);
+  await h.receive(io, () => {});
+  assert.equal(h.receipts.length, 1);
+  await h.receive(io, () => h.session.controls.push(frame(32n, frameBytes(15))));
+  assert.equal(waiting.state, "pending");
+  assert.equal(owner.peerFinalAckWritten(MAX_U64 - 1n), false);
+  io.writes.at(-1).gate.resolve();
+  const completed = await success(waiting); await flush();
+  assert.equal(completed, owner.receipts); assert.ok(Object.isFrozen(completed));
+  assert.deepEqual({ ...completed }, { localFinalWritten: true, localFinalAcknowledged: true, complete: true });
+  assert.equal(owner.peerFinalAckWritten(MAX_U64 - 1n), true);
+  assert.equal(h.receipts.length, 2); assert.equal(owner.closed, false);
+  assert.deepEqual(h.session.requests, []); assert.equal(h.session.frees, 0); assert.equal(io.closes, 0);
+  await h.elapse(100);
+  assert.equal(owner.closed, false); assert.equal(h.receipts.length, 2);
+  await cleaned(h, owner, io);
+});
+
+test("malformed progress and receipt boundaries or callbacks fence before publishing partial metadata", async () => {
+  const invalid = [
+    undefined, {}, peerUpdate({ participant: 0n }), peerUpdate({ participant: MAX_U64 }),
+    peerUpdate({ participant: 1n }), peerUpdate({ sequence: 0n }), peerUpdate({ sequence: 1 }),
+    peerUpdate({ sequence: MAX_U64 + 1n }), peerUpdate({ finalPrefix: 1 }),
+    peerUpdate({ words: new Uint32Array(10) }), peerUpdate({ words: new Uint32Array(715) }),
+    peerUpdate({ words: new Uint32Array(new SharedArrayBuffer(704 * 4)) }),
+  ];
+  const wrongRoster = progressWords(); wrongRoster[11] = wrongRoster[0];
+  invalid.push(peerUpdate({ words: wrongRoster }));
+  for (const dto of invalid) {
+    const h = await harness(); const { owner, io } = await progressOwner(h);
+    h.session.take_peer_progress = function () { this.alive(); return dto; };
+    await h.receive(io, () => {});
+    assert.equal(owner.closed, true); assert.equal(h.closures[0].code, "protocol");
+    assert.deepEqual(h.progress, []); await cleaned(h, owner, io);
+  }
+  for (const method of ["local_final_written", "local_final_acknowledged", "progress_complete"]) {
+    const h = await harness(); const { owner, io } = await progressOwner(h);
+    h.session[method] = function () { this.alive(); return 1; };
+    await h.receive(io, () => {});
+    assert.equal(owner.closed, true); assert.equal(h.closures[0].code, "protocol");
+    assert.deepEqual(h.receipts, []); await cleaned(h, owner, io);
+  }
+  for (const status of [
+    { finalAcknowledged: true },
+    { finalWritten: true, progressComplete: true },
+  ]) {
+    const h = await harness(); const { owner, io } = await progressOwner(h);
+    await h.receive(io, () => Object.assign(h.session, status));
+    assert.equal(owner.closed, true); assert.equal(h.closures[0].code, "protocol");
+    assert.deepEqual(h.receipts, []); await cleaned(h, owner, io);
+  }
+  for (const callback of ["progress", "receipts"]) {
+    const h = await harness();
+    const options = callback === "progress"
+      ? { onProgress() { throw new Error("progress callback failed"); } }
+      : { onReceipts() { return Promise.reject(new Error("receipt callback failed")); } };
+    const { owner, io } = await progressOwner(h, options);
+    await h.receive(io, () => {
+      if (callback === "progress") h.session.peerUpdates.push(peerUpdate());
+      else h.session.finalWritten = true;
+    });
+    assert.equal(owner.closed, true); assert.equal(h.closures[0].code, "callback");
+    await cleaned(h, owner, io);
+  }
+  const faults = {}, h = await harness(faults), opened = await progressOwner(h);
+  faults.receiveError = new Error("Rust rejected duplicate or regressed peer prefix");
+  h.session.peerUpdates.push(peerUpdate());
+  await h.receive(opened.io, () => {});
+  assert.equal(h.closures[0].code, "core"); assert.deepEqual(h.progress, []);
+  await cleaned(h, opened.owner, opened.io);
+  const publication = await harness(), active = await progressOwner(publication);
+  publication.session.publishError = new Error("fatal common-client failure");
+  assert.throws(() => active.owner.publishProgress(progressWords()), error => error.code === "core");
+  assert.equal(active.owner.closed, true); assert.equal(publication.session.publications.length, 0);
+  await cleaned(publication, active.owner, active.io);
+});
+
+test("completion cancellation rejects once while close joins late channel operations without post-free progress", async () => {
+  for (const abort of [false, true]) {
+    const h = await harness(), signal = new AbortController();
+    const { owner, io } = await progressOwner(h, { signal: signal.signal }, { holdAfterClose: true });
+    h.session.onPublish = () => h.session.controls.push(frame(41n, frameBytes(13)));
+    owner.publishProgress(progressWords(), true); await flush();
+    const waiting = attempt(() => owner.waitForLocalCompletion());
+    const written = [...h.session.credits], receives = h.session.receives.length;
+    h.session.onWritten = () => { h.session.finalWritten = true; h.session.finalAcknowledged = true; h.session.progressComplete = true; };
+    if (abort) signal.abort();
+    const closing = attempt(() => owner.close()); await flush();
+    await failure(waiting, abort ? "aborted" : "closed");
+    assert.equal(closing.state, "pending"); assert.equal(h.session.frees, 1);
+    assert.throws(() => owner.publishProgress(progressWords()), error => error.code === (abort ? "aborted" : "closed"));
+    io.writes.at(-1).gate.resolve(); await flush();
+    assert.equal(closing.state, "pending");
+    h.session.peerUpdates.push(peerUpdate());
+    io.reads.at(-1).gate.resolve(Uint8Array.of(1));
+    await success(closing);
+    assert.deepEqual(h.session.credits, written); assert.equal(h.session.receives.length, receives);
+    assert.deepEqual(h.progress, []); assert.deepEqual(h.receipts, []);
+    assert.deepEqual(h.session.requests, []);
+    await cleaned(h, owner, io);
+  }
 });

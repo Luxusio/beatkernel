@@ -7,7 +7,9 @@ const U64_MAX = 18446744073709551615n;
 const I64_MAX = 9223372036854775807n;
 const METHODS = ["request_seal", "request_ready", "request_leave", "needed_bytes",
   "frame_pending", "receive_bytes", "next_write", "written", "participant_id",
-  "revision", "has_snapshot", "leave_written", "snapshot", "take_start", "close", "free"];
+  "revision", "has_snapshot", "leave_written", "snapshot", "take_start", "publish_progress",
+  "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written",
+  "progress_complete", "close", "free"];
 
 export class BrowserRoomOwnerError extends Error {
   constructor(code, operation, message, cause) {
@@ -29,11 +31,14 @@ function u64(value, min = 0n) { return typeof value === "bigint" && value >= min
 function quiet(owner, method) { try { Promise.resolve(owner?.[method]()).catch(() => {}); } catch {} }
 function configuration(url, options) {
   const { session, now, signal, setupTimeoutMs = 10000, ioTimeoutMs = 10000,
-    channelFactory = (address, config) => WebTransportChannel.open(address, config), onSnapshot, onStart, onClose } = options ?? {};
+    channelFactory = (address, config) => WebTransportChannel.open(address, config),
+    onSnapshot, onStart, onProgress, onReceipts, onClose } = options ?? {};
   if (typeof AbortController !== "function" || !session || METHODS.some(name => typeof session[name] !== "function")
     || typeof now !== "function" || typeof channelFactory !== "function" || !integer(setupTimeoutMs, 1, 60000) || !integer(ioTimeoutMs, 1, 60000)
     || (onSnapshot !== undefined && typeof onSnapshot !== "function") || (onClose !== undefined && typeof onClose !== "function")
     || (onStart !== undefined && typeof onStart !== "function")
+    || (onProgress !== undefined && typeof onProgress !== "function")
+    || (onReceipts !== undefined && typeof onReceipts !== "function")
     || (signal !== undefined && (!signal || typeof signal.aborted !== "boolean"
       || typeof signal.addEventListener !== "function" || typeof signal.removeEventListener !== "function"))) {
     throw new BrowserRoomOwnerError("validation", "open", "Invalid room owner configuration.");
@@ -49,7 +54,23 @@ function configuration(url, options) {
     || !/^\/rooms\/[A-Za-z0-9_-]{1,1024}$/.test(address.pathname)) {
     throw new BrowserRoomOwnerError("validation", "open", "Room requires a canonical HTTPS room URL.");
   }
-  return { session, now, signal, setupTimeoutMs, ioTimeoutMs, channelFactory, onSnapshot, onStart, onClose };
+  return { session, now, signal, setupTimeoutMs, ioTimeoutMs, channelFactory, onSnapshot, onStart, onProgress, onReceipts, onClose };
+}
+
+function progressWords(value, players = null) {
+  if (!(value instanceof Uint32Array) || !(value.buffer instanceof ArrayBuffer)
+    || value.buffer.resizable === true || !integer(value.length, 11, 704) || value.length % 11 !== 0
+    || value.byteLength !== value.length * 4 || value.buffer.byteLength > 2816) {
+    throw new Error("Room progress requires 1..64 bounded eleven-word rows.");
+  }
+  const view = new Uint32Array(value.buffer, value.byteOffset, value.length);
+  if (players !== null && (view.length !== players.length * 11
+    || players.some((player, index) => view[index * 11] !== player))) {
+    throw new Error("Room progress must preserve the prepared local roster.");
+  }
+  const copy = new Uint32Array(view.length);
+  copy.set(view);
+  return copy;
 }
 
 function validSnapshot(snapshot, participant) {
@@ -77,7 +98,7 @@ function validSnapshot(snapshot, participant) {
 
 // Worker-owned lifecycle component. Rust retains all room semantics; this
 // adapter moves bounded bytes, retains actual observation times and publishes
-// validated metadata/schedules from the common owner.
+// validated metadata, schedules and accepted progress from the common owner.
 export class BrowserRoomOwner {
   #config;
   #session;
@@ -87,6 +108,7 @@ export class BrowserRoomOwner {
   #closedGate = gate();
   #wakeGate = null;
   #leaveGate = null;
+  #completionGate = null;
   #setupTimer = null;
   #frameTimer = null;
   #handshakeTimer = null;
@@ -101,6 +123,8 @@ export class BrowserRoomOwner {
   #revision = 0n;
   #participant = 0n;
   #snapshot = null;
+  #roster = null;
+  #receipts = Object.freeze({ localFinalWritten: false, localFinalAcknowledged: false, complete: false });
 
   constructor(token, config) {
     if (token !== TOKEN) throw new TypeError("Use BrowserRoomOwner.open().");
@@ -111,6 +135,7 @@ export class BrowserRoomOwner {
   get participant() { return this.#participant; }
   get snapshot() { return this.#snapshot; }
   get origin() { return this.#origin; }
+  get receipts() { return this.#receipts; }
 
   static async open(url, options) {
     const config = configuration(url, options);
@@ -129,7 +154,10 @@ export class BrowserRoomOwner {
         || owner.#core("initial", session => session.participant_id()) !== 0n
         || owner.#core("initial", session => session.has_snapshot()) !== false
         || owner.#core("initial", session => session.frame_pending()) !== false
-        || owner.#core("initial", session => session.leave_written()) !== false) {
+        || owner.#core("initial", session => session.leave_written()) !== false
+        || owner.#core("initial", session => session.local_final_written()) !== false
+        || owner.#core("initial", session => session.local_final_acknowledged()) !== false
+        || owner.#core("initial", session => session.progress_complete()) !== false) {
         throw new BrowserRoomOwnerError("protocol", "open", "Room session is already in use.");
       }
       const opening = owner.#track(() => config.channelFactory(url, { signal: owner.#controller.signal,
@@ -217,6 +245,7 @@ export class BrowserRoomOwner {
     }
     this.#closedGate.reject(error);
     this.#leaveGate?.reject(error); this.#leaveGate = null;
+    this.#completionGate?.reject(error);
     this.#wake();
     try { this.#controller.abort(); } catch {}
     quiet(this.#channel, "close"); this.#channel = null;
@@ -234,6 +263,48 @@ export class BrowserRoomOwner {
   }
   requestSeal() { this.#request("request_seal"); }
   requestReady() { this.#request("request_ready"); }
+
+  publishProgress(words, finalPrefix = false) {
+    this.#ensure();
+    let owned;
+    try {
+      if (typeof finalPrefix !== "boolean") throw new Error("Room final prefix flag must be boolean.");
+      owned = progressWords(words, this.#roster?.get(this.#participant) ?? null);
+    } catch (cause) {
+      throw new BrowserRoomOwnerError("validation", "publish_progress", "Invalid room progress publication.", cause);
+    }
+    if (this.#roster === null || this.#leaveGate !== null) {
+      throw new BrowserRoomOwnerError("state", "publish_progress", "Room progress publication is unavailable.");
+    }
+    try { this.#session.publish_progress(owned, finalPrefix); }
+    catch (cause) {
+      if (cause?.code === "state") {
+        throw new BrowserRoomOwnerError("state", "publish_progress", "Room progress publication is unavailable.", cause);
+      }
+      throw this.#fatal(cause, "core", "publish_progress");
+    }
+    this.#wake();
+  }
+
+  peerFinalAckWritten(participant) {
+    this.#ensure();
+    if (!u64(participant, 1n) || participant === this.#participant || !this.#roster?.has(participant)) {
+      throw new BrowserRoomOwnerError("validation", "peer_final_ack_written", "Unknown prepared room peer.");
+    }
+    const value = this.#core("peer_final_ack_written", session => session.peer_final_ack_written(participant));
+    if (typeof value !== "boolean") {
+      throw this.#fatal(new BrowserRoomOwnerError("protocol", "peer_final_ack_written", "Invalid room peer receipt."));
+    }
+    return value;
+  }
+
+  waitForLocalCompletion() {
+    if (this.closed) return Promise.reject(this.#failure);
+    this.#completionGate ??= gate();
+    if (this.#receipts.complete) this.#completionGate.resolve(this.#receipts);
+    return this.#completionGate.promise;
+  }
+
   leave() {
     if (this.#leaveGate !== null) return this.#leaveGate.promise;
     try { this.#request("request_leave"); } catch (cause) { return Promise.reject(cause); }
@@ -270,6 +341,9 @@ export class BrowserRoomOwner {
     this.#snapshot = snapshot;
     clearTimeout(this.#setupTimer); this.#setupTimer = null;
     if (snapshot.phase === 2 && !this.#prepared) {
+      // Snapshot DTOs are exposed to consumers; preserve independent roster
+      // identities before their callback can mutate those arrays or objects.
+      this.#roster = new Map(snapshot.members.map(member => [member.participant, Object.freeze(Array.from(member.players))]));
       this.#prepared = true;
       this.#handshakeTimer = setTimeout(() => this.#fail(new BrowserRoomOwnerError(
         "timeout", "prepared", "Room start handshake timed out.")), this.#config.setupTimeoutMs);
@@ -295,6 +369,43 @@ export class BrowserRoomOwner {
     clearTimeout(this.#handshakeTimer); this.#handshakeTimer = null;
     try { Promise.resolve(this.#config.onStart?.(this.#start, this.#origin)).catch(cause => this.#fatal(cause, "callback", "start")); }
     catch (cause) { throw this.#fatal(cause, "callback", "start"); }
+  }
+
+  #observeProgress() {
+    const value = this.#core("take_peer_progress", session => session.take_peer_progress());
+    if (value === null) return;
+    let update;
+    try {
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Missing room peer prefix.");
+      const { participant, sequence, finalPrefix, words } = value;
+      if (!u64(participant, 1n) || participant === this.#participant || !u64(sequence, 1n)
+        || typeof finalPrefix !== "boolean" || !this.#roster?.has(participant)) {
+        throw new Error("Invalid room peer prefix metadata.");
+      }
+      update = Object.freeze({ participant, sequence, finalPrefix, words: progressWords(words, this.#roster.get(participant)) });
+    } catch (cause) {
+      throw new BrowserRoomOwnerError("protocol", "progress", "Malformed accepted room peer prefix.", cause);
+    }
+    // A genuine pending Commit can admit a prefix before local Accept finishes;
+    // only the common owner decides that barrier. Do not require onStart here.
+    try { Promise.resolve(this.#config.onProgress?.(update)).catch(cause => this.#fatal(cause, "callback", "progress")); }
+    catch (cause) { throw this.#fatal(cause, "callback", "progress"); }
+  }
+
+  #observeReceipts() {
+    const localFinalWritten = this.#core("local_final_written", session => session.local_final_written());
+    const localFinalAcknowledged = this.#core("local_final_acknowledged", session => session.local_final_acknowledged());
+    const complete = this.#core("progress_complete", session => session.progress_complete());
+    if (typeof localFinalWritten !== "boolean" || typeof localFinalAcknowledged !== "boolean" || typeof complete !== "boolean"
+      || (localFinalAcknowledged && !localFinalWritten) || (complete && !localFinalAcknowledged)) {
+      throw new BrowserRoomOwnerError("protocol", "receipts", "Malformed room progress receipts.");
+    }
+    if (this.#receipts.localFinalWritten === localFinalWritten
+      && this.#receipts.localFinalAcknowledged === localFinalAcknowledged && this.#receipts.complete === complete) return;
+    this.#receipts = Object.freeze({ localFinalWritten, localFinalAcknowledged, complete });
+    try { Promise.resolve(this.#config.onReceipts?.(this.#receipts)).catch(cause => this.#fatal(cause, "callback", "receipts")); }
+    catch (cause) { throw this.#fatal(cause, "callback", "receipts"); }
+    if (!this.closed && complete) this.#completionGate?.resolve(this.#receipts);
   }
 
   async #readLoop() {
@@ -323,7 +434,9 @@ export class BrowserRoomOwner {
         this.#frameTimer = setTimeout(() => this.#fail(new BrowserRoomOwnerError("timeout", "frame", "Incomplete room frame timed out.")), this.#config.ioTimeoutMs);
       } else if (!remains) { clearTimeout(this.#frameTimer); this.#frameTimer = null; }
       this.#observe();
+      this.#observeProgress();
       this.#observeStart();
+      this.#observeReceipts();
       this.#wake();
     }
   }
@@ -363,6 +476,7 @@ export class BrowserRoomOwner {
         this.#fail(new BrowserRoomOwnerError("closed", "leave", "Room leave was written."));
       } else {
         this.#observeStart();
+        this.#observeReceipts();
         this.#wake();
       }
     }

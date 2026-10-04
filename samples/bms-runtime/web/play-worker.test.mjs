@@ -570,6 +570,12 @@ async function workerHarness(options = {}) {
       this.live(); this.credits.push(id); this.writeTimes.push({ id, completed, processing }); this.onWritten?.(id);
     }
     take_start() { this.live(); return this.schedules.shift() ?? null; }
+    publish_progress() { this.live(); throw new Error("Worker gameplay progress caller is not integrated in these fixtures"); }
+    take_peer_progress() { this.live(); return null; }
+    local_final_written() { this.live(); return false; }
+    local_final_acknowledged() { this.live(); return false; }
+    peer_final_ack_written() { this.live(); return false; }
+    progress_complete() { this.live(); return false; }
     close() { this.live(); assert.equal(++this.closes, 1); }
     free() { this.live(); assert.equal(++this.frees, 1); }
   }
