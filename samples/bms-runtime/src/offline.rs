@@ -1,5 +1,5 @@
 //! Bounded chronological synthetic BMS rendering through the shared runtime.
-use crate::PreparedBms;
+use crate::{PreparedBms, input_sounds::InputSoundPlan};
 use beatkernel::{
     audio::{
         command_queue, AudioCommand, AudioFormat, AudioLimits, CommandPushError, Mixer,
@@ -199,6 +199,22 @@ pub fn render_offline(
         .and_then(|samples| samples.checked_mul(4))
         .ok_or("offline output byte extent overflow")?;
     let encoded = DeviceFormat::new(rate, format.channels(), SampleEncoding::Float32, None)?;
+    let input_sounds = if prepared.source.invisible.is_empty() {
+        None
+    } else {
+        let plan = InputSoundPlan::prepare(
+            &prepared.source,
+            &prepared.sounds,
+            &prepared.bgm_commands,
+            beatkernel_bms::ParseOptions::default().max_objects,
+        )?;
+        for &sample in plan.samples() {
+            if prepared.bank.get(sample).is_none() {
+                return Err("offline input sound sample is missing from PCM bank".into());
+            }
+        }
+        Some(plan.timeline())
+    };
     let count = options
         .block_frames
         .checked_mul(channels)
@@ -229,6 +245,9 @@ pub fn render_offline(
     let mut records = Vec::new();
     records.try_reserve_exact(schedule_len)?;
     let mut lanes = BTreeMap::new();
+    for event in &prepared.source.invisible {
+        lanes.insert(event.lane.channel(), event.lane.control());
+    }
     for (ordinal, note) in prepared.source.notes.iter().enumerate() {
         let time = objects
             .get(&note.object)
@@ -299,6 +318,9 @@ pub fn render_offline(
         prepared.sounds,
         256,
     )?;
+    if let Some(timeline) = input_sounds {
+        runtime.configure_input_sounds(timeline)?;
+    }
     let mut mixer = Mixer::new(
         MixerConfig::new(format, DOMAIN, Timestamp::ZERO, limits),
         prepared.bank,

@@ -101,23 +101,40 @@ fn assert_no_assets(assets: &Assets, decoder: &Decoder) {
 }
 
 #[test]
-fn nonempty_invisible_admission_refuses_before_replay_validation_or_any_asset_boundary() {
+fn nonempty_invisible_admission_loads_real_references_and_replay_refusal_precedes_assets() {
     let replay = invalid_replay();
     for row in [
         "#00031:01",
         "#00049:01",
         "#00031:000100",
-        "#00031:zz\n#WAVzz invisible.pcm\n#BASE 62",
+        "#00031:zz\n#WAVzz sample.pcm\n#BASE 62",
     ] {
         let text = format!("#BPM 60\n#WAV01 sample.pcm\n#00011:01\n#00001:0001\n{row}");
-        for recording in [None, Some(&replay)] {
-            let assets = Assets::default();
-            let decoder = Decoder::default();
-            let error = prepare(&text, &assets, &decoder, recording).unwrap_err();
-            assert!(error.to_string().contains("invisible"), "{error}");
-            assert!(error.downcast_ref::<PlaybackError>().is_none());
-            assert_no_assets(&assets, &decoder);
-        }
+        let assets = Assets::default();
+        let decoder = Decoder::default();
+        let prepared = prepare(&text, &assets, &decoder, None).unwrap();
+        let sample = if row.contains("zz") { 3843 } else { 1 };
+        assert_eq!(prepared.source.invisible.len(), 1);
+        assert_eq!(prepared.source.invisible[0].sample, SampleId(sample));
+        assert_eq!(prepared.bank.len(), if sample == 1 { 1 } else { 2 });
+        assert_eq!(
+            prepared.bank.get(SampleId(sample)).unwrap().samples(),
+            [0.25, -0.5]
+        );
+        assert_eq!(
+            (decoder.calls.get(), assets.reads.get()),
+            (1, 1),
+            "identical resolved keys decode once"
+        );
+        assert_eq!(assets.resolved.borrow().len(), prepared.bank.len());
+        assert_eq!(prepared.compiled.chart.objects().len(), 1);
+        assert_eq!(prepared.sounds.len(), 1);
+        assert_eq!(prepared.bgm_commands.len(), 1);
+        let assets = Assets::default();
+        let decoder = Decoder::default();
+        let error = prepare(&text, &assets, &decoder, Some(&replay)).unwrap_err();
+        assert!(error.downcast_ref::<PlaybackError>().is_some());
+        assert_no_assets(&assets, &decoder);
     }
     let assets = Assets::default();
     let decoder = Decoder::default();
@@ -130,7 +147,7 @@ fn nonempty_invisible_admission_refuses_before_replay_validation_or_any_asset_bo
     .unwrap_err();
     let error = error
         .downcast_ref::<BmsError>()
-        .expect("the complete parser runs before the admission guard");
+        .expect("the complete parser runs before replay validation and resources");
     assert_eq!(
         (error.line, &error.kind),
         (
@@ -192,4 +209,18 @@ fn rest_only_and_unselected_invisible_rows_retain_actual_supported_preparation_w
         assert_eq!(*assets.resolved.borrow(), ["sample.pcm"]);
         assert_eq!((assets.reads.get(), decoder.calls.get()), (1, 1));
     }
+    let assets = Assets::default();
+    let decoder = Decoder::default();
+    let empty = prepare(
+        "#WAV01 sample.pcm\n#00031:000000\n#00049:00",
+        &assets,
+        &decoder,
+        None,
+    )
+    .unwrap();
+    assert!(empty.source.invisible.is_empty() && empty.source.notes.is_empty());
+    assert!(empty.compiled.chart.objects().is_empty());
+    assert_eq!(empty.bank.len(), 0);
+    assert!(empty.sounds.is_empty() && empty.bgm_commands.is_empty());
+    assert_no_assets(&assets, &decoder);
 }

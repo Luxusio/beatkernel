@@ -114,6 +114,8 @@ mod invisible_contact_fixtures;
 mod invisible_identity_fixtures;
 #[cfg(test)]
 mod invisible_lane_fixtures;
+#[cfg(test)]
+mod invisible_source_fixtures;
 /// Fixed-capacity lane feedback from actual local judge results and song time.
 pub mod judge_feedback;
 pub mod live_pause;
@@ -555,8 +557,8 @@ fn prepare_seeded(
 }
 
 /// Prepares the same chart and assets from bounded bytes and a scoped resource source.
-/// Unsupported invisible timelines are refused before replay setup; replay
-/// setup is then validated before any resource acquisition.
+/// WAV gain and invisible timing are validated before replay setup; replay setup
+/// is then validated before acquiring the unique visible/BGM/invisible resources.
 /// Equal resolved keys reuse decoding within this call; source bytes and the
 /// decoder must remain stable during preparation. Each sample ID owns its PCM.
 pub fn prepare_from_source(
@@ -577,10 +579,12 @@ pub fn prepare_from_source(
         options.max_bytes,
     )?;
     let source = parse_seeded(&text, options, seed)?;
-    if !source.invisible.is_empty() {
-        return Err("invisible keysound playback is not supported during preparation".into());
-    }
     let wav_gain = source.wav_gain()?;
+    let invisible = if source.invisible.is_empty() {
+        Vec::new()
+    } else {
+        source.compile_invisible()?
+    };
     if let Some((file, limits)) = replay {
         replay_playback::validate_setup(&source, file, limits)?;
     }
@@ -590,6 +594,7 @@ pub fn prepare_from_source(
         .iter()
         .map(|note| note.sample)
         .chain(compiled.bgm.iter().map(|event| event.sample))
+        .chain(invisible.iter().map(|event| event.sample))
         .collect();
     if referenced.len() > pcm_limits.max_samples() {
         return Err("referenced asset count exceeds PCM limits".into());
