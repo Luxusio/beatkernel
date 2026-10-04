@@ -58,6 +58,8 @@ async function workerHarness(options = {}) {
   const sectionConstructions = [];
   const physicalConstructions = [];
   const contactConstructions = [];
+  const localConstructions = [];
+  const locals = [];
   const preparedOwners = [];
   const timers = new Map();
   const timerDelays = new Map();
@@ -124,6 +126,7 @@ async function workerHarness(options = {}) {
     draws = 0;
     gameDraws = [];
     replayDraws = [];
+    localDraws = [];
     resize(...extent) { this.extents.push(extent); }
     set_chart(prepared) {
       assert.equal(prepared.moved, false);
@@ -134,6 +137,7 @@ async function workerHarness(options = {}) {
     draw() { this.draws++; }
     draw_game(game) { assert.equal(game.frees, 0); this.gameDraws.push(game); }
     draw_replay(replay) { assert.equal(replay.frees, 0); this.replayDraws.push(replay); }
+    draw_local_game(game, page) { assert.equal(game.frees, 0); this.localDraws.push({ game, page }); }
     needs_redraw() { return false; }
   }
   class BrowserGame {
@@ -343,6 +347,58 @@ async function workerHarness(options = {}) {
   if (options.missingInputBlobAt) BrowserGame.prototype.input_blob_at = undefined;
   if (options.missingHidSetup) BrowserGame.prototype.configure_hid_devices = undefined;
   if (options.missingInputHidBlob) BrowserGame.prototype.input_hid_blob = undefined;
+  class BrowserLocalGame extends BrowserGame {
+    static new_physical(prepared, ...args) {
+      localConstructions.push({ prepared, args });
+      if (options.localConstructError) { prepared.moved = true; throw new Error(options.localConstructError); }
+      return new BrowserLocalGame(prepared, ...args);
+    }
+    constructor(prepared, ...args) {
+      super(prepared, ...args);
+      assert.equal(games.pop(), this); locals.push(this);
+      this.physical = true; this.contact = args[8];
+      this.memberIds = Array.from(args[5]).filter((_, index) => index % 4 === 0);
+      this.memberScores = new Map(this.memberIds.map((player, index) => [player,
+        options.localScore?.(player, index) ?? { ...SCORE, hits: SCORE.hits + BigInt(index), max_combo: SCORE.max_combo + BigInt(index) }]));
+      this.memberCaptures = new Set(); this.memberReplayTakes = new Map(); this.memberReplayBytes = new Map();
+    }
+    get players() { this.live(); return options.localPlayers ?? new Uint32Array(this.memberIds); }
+    memberValue(player, field) {
+      this.live(); assert.ok(this.memberScores.has(player));
+      this.calls.push(["member-score", player, field]);
+      return options.localValue ? options.localValue(this, player, field) : this.memberScores.get(player)[field];
+    }
+    hits(player) { return this.memberValue(player, "hits"); }
+    misses(player) { return this.memberValue(player, "misses"); }
+    combo(player) { return this.memberValue(player, "combo"); }
+    max_combo(player) { return this.memberValue(player, "max_combo"); }
+    member_song_ns(player) { return this.memberValue(player, "song_ns"); }
+    touch_bounds(player, page) {
+      this.live(); this.calls.push(["local-touch-bounds", player, page]);
+      return options.localTouchBounds ?? new Float32Array([34, 176, 249, 356, 249, 176, 464, 356]);
+    }
+    configure_touch_regions(player, words, bounds, maximum) {
+      this.live(); assert.equal(this.contact, true); assert.ok(this.memberIds.includes(player));
+      this.calls.push(["local-touch", player, words.slice(), bounds.slice(), maximum]);
+      if (options.localTouchSetupError) throw new Error(options.localTouchSetupError);
+    }
+    configure_capture(player, ...limits) {
+      this.live(); assert.ok(this.memberIds.includes(player));
+      this.calls.push(["member-capture", player, ...limits]);
+      if (options.localCaptureError?.(player)) throw new Error("selected member capture setup refused");
+      this.memberCaptures.add(player);
+    }
+    take_replay(player) {
+      this.live(); assert.equal(this.stops, 1);
+      assert.equal(this.memberReplayTakes.has(player), false); this.memberReplayTakes.set(player, 1);
+      this.disposals.push(`take:${player}`);
+      if (!this.memberCaptures.has(player)) return null;
+      const bytes = options.localReplayBytes ? options.localReplayBytes(player) : Uint8Array.from([66, 75, 82, player & 255]);
+      this.memberReplayBytes.set(player, bytes); return bytes;
+    }
+  }
+  if (options.missingLocalConstructor) BrowserLocalGame.new_physical = undefined;
+  if (options.missingLocalInputBlob) BrowserLocalGame.prototype.input_blob = undefined;
   class BrowserReplay extends BrowserGame {
     constructor(prepared, ...args) {
       super(prepared, ...args);
@@ -430,13 +486,14 @@ async function workerHarness(options = {}) {
     clearTimeout(id) { timers.delete(id); timerDelays.delete(id); },
   });
   self.performance = context.performance;
-  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView", "BrowserGame", "BrowserReplay", "BrowserMultiplayer"], function () {
+  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView", "BrowserGame", "BrowserReplay", "BrowserMultiplayer", "BrowserLocalGame"], function () {
     this.setExport("default", async () => { if (options.initGate) await options.initGate.promise; });
     this.setExport("BrowserLibrary", BrowserLibrary);
     this.setExport("BrowserView", BrowserView);
     this.setExport("BrowserGame", BrowserGame);
     this.setExport("BrowserReplay", BrowserReplay);
     this.setExport("BrowserMultiplayer", BrowserMultiplayer);
+    this.setExport("BrowserLocalGame", options.missingLocalExport ? undefined : BrowserLocalGame);
   }, { context });
   const network = new SyntheticModule(["BrowserMultiplayerOwner"], function () {
     this.setExport("BrowserMultiplayerOwner", BrowserMultiplayerOwner);
@@ -448,6 +505,7 @@ async function workerHarness(options = {}) {
   const hidProfileHelper = new SourceTextModule(await readFile(new URL("./hid-profile.mjs", import.meta.url), "utf8"), { context });
   const gamepadProfileHelper = new SourceTextModule(await readFile(new URL("./gamepad-profile.mjs", import.meta.url), "utf8"), { context });
   const commandClient = new SourceTextModule(await readFile(new URL("./audio-command-client.mjs", import.meta.url), "utf8"), { context });
+  const localHelper = new SourceTextModule(await readFile(new URL("./local-play-model.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
@@ -459,11 +517,12 @@ async function workerHarness(options = {}) {
     if (specifier === "./hid-profile.mjs") return hidProfileHelper;
     if (specifier === "./gamepad-profile.mjs") return gamepadProfileHelper;
     if (specifier === "./audio-command-client.mjs") return commandClient;
+    if (specifier === "./local-play-model.mjs") return localHelper;
     throw new Error(`Unexpected import: ${specifier}`);
   });
   await worker.evaluate();
   return {
-    messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, contactConstructions, timers, networks, networkSessions,
+    messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, contactConstructions, localConstructions, locals, timers, networks, networkSessions,
     setNetworkNow(value) { assert.ok(value >= networkNow); networkNow = value; },
     post(request) { receive({ data: request }); },
     async send(request) { receive({ data: request }); await flushJobs(); },
@@ -586,6 +645,204 @@ async function attachCommands(h, port, fields = {}) {
     queueCapacity: 4096, timeoutMs: 50, ...fields });
   return rpcId;
 }
+
+function localPlan(rows) {
+  return new Uint32Array(rows.flatMap(([player, source]) => source === null
+    ? [player, 0, 0, 0] : [player, 1, Number(source & 0xffffffffn), Number(source >> 32n)]));
+}
+function localRequest(fields = {}) {
+  return startRequest({ inputMode: "physical-contact",
+    localPlanWords: localPlan([[99, HID_SOURCE], [7, 1n], [31, 2n]]), hidSetup: hidSetup(), ...fields });
+}
+
+test("local players snapshot exact sources and share one PCM, command and report owner while retaining every member score", async () => {
+  const high = 9007199254740993n;
+  const roster = [[99, HID_SOURCE], [7, 1n], [31, 2n], [0xffffffff, high]];
+  const words = localPlan(roster), savedWords = Array.from(words);
+  const keys = pairs(), hid = hidSetup([HID_SOURCE, high]);
+  const timing = { earlyNs: 1n, lateNs: 2n, offsetNs: -3n };
+  const port = commandPort(), initial = batch(18446744073709551614n);
+  const following = { sequence: 18446744073709551615n, commands: [command(21n), command(22n)] };
+  let complete = false;
+  const h = await catalogWorker({ batches: [initial], gameEnd: 1n, gameEndFrame: 4801n,
+    observeOutput: () => complete,
+    localScore(player, index) { return index === 0
+      ? { song_ns: -9223372036854775808n, hits: 18446744073709551615n, misses: 0n, combo: 0n, max_combo: 18446744073709551615n }
+      : { ...SCORE, hits: BigInt(player) }; },
+    beforeFree() { assert.equal(port.closes, 1, "one direct client closes before the shared local owner"); },
+  });
+  h.post(localRequest({ localPlanWords: words, keyPairs: keys, hidSetup: hid, timing, endNs: 1n, recordReplay: true }));
+  words.fill(0); keys.fill(0); hid.bindingWords.fill(0); hid.deviceWords.fill(0); timing.offsetNs = 999n;
+  await flushJobs();
+  const prepared = h.of("play-reply").at(-1).result, game = h.locals[0];
+  assert.deepEqual(prepared.localPlayers, roster.map(([player]) => player));
+  assert.equal(prepared.localPage, 0); assert.equal(prepared.samples, 2);
+  assert.equal(prepared.endNs, 1n); assert.equal(prepared.endFrame, 4801n);
+  assert.deepEqual(prepared.recordLimits, { bytes: 16777216, records: 250000 });
+  assert.equal(h.games.length, 0); assert.equal(h.physicalConstructions.length, 0);
+  assert.equal(h.localConstructions.length, 1); assert.equal(game.prepared.moved, true);
+  const args = h.localConstructions[0].args;
+  assert.deepEqual(args.slice(0, 5), [0n, 100000000n, 1n, 2n, -3n]);
+  assert.deepEqual(Array.from(args[5]), savedWords);
+  assert.deepEqual(args.slice(7), [1n, true, 4096, 1024]);
+  const bindings = Array.from({ length: args[6].length / 8 }, (_, index) => Array.from(args[6].slice(index * 8, index * 8 + 8)));
+  assert.equal(bindings.length, 8);
+  for (const [player, source] of roster) {
+    const rows = bindings.filter(row => row[0] === player);
+    assert.deepEqual(rows.map(row => row[1]), [0x11, 0x12]);
+    assert.ok(rows.every(row => row[2] === 1 && (BigInt(row[3]) | BigInt(row[4]) << 32n) === source));
+  }
+  assert.deepEqual(game.calls.filter(row => row[0] === "local-touch-bounds"), [["local-touch-bounds", 31, 0]]);
+  assert.deepEqual(game.calls.filter(row => row[0] === "member-capture"), roster.map(([player]) => ["member-capture", player, 16777216, 250000]));
+  assert.ok(game.calls.findIndex(row => row[0] === "local-touch") < game.calls.findIndex(row => row[0] === "member-capture"));
+  h.rpcId = 1;
+  h.rpc = async (kind, fields = {}) => {
+    const rpcId = ++h.rpcId; await h.send({ kind, playId: 7, rpcId, ...fields });
+    return h.of("play-reply").find(value => value.rpcId === rpcId);
+  };
+  const audioRpc = await attachCommands(h, port);
+  assert.equal(game.samples.every(sample => sample.takes === 1 && sample.frees === 1), true);
+  assert.equal(h.of("play-reply").some(value => value.rpcId === audioRpc), false);
+  assert.deepEqual(port.posts.map(value => [value.kind, value.sequence]), [["commands", 1]]);
+  await port.acknowledge();
+  assert.deepEqual(game.calls.filter(row => row[0] === "ack"), [["ack", initial.sequence, 2, true]]);
+  assert.equal(h.of("play-reply").find(value => value.rpcId === audioRpc).result.kind, "audio-ready");
+  assert.equal((await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START })).result, null);
+  game.batches.push(following);
+  await h.send(step({ events: [
+    { hostNs: ORIGIN, key: 2, down: true, sequence: 1n },
+    touchEvent({ sequence: 2n }), hidEvent({ sequence: 3n }),
+  ] }));
+  const calls = game.calls.filter(row => ["blob", "touch", "hid"].includes(row[0]));
+  assert.deepEqual(calls.map(row => row[0]), ["blob", "touch", "hid"]);
+  assert.deepEqual(calls.map(row => new DataView(row[1].buffer).getBigUint64(7, true)), [1n, 2n, HID_SOURCE]);
+  assert.deepEqual(calls.map(row => new DataView(row[1].buffer).getBigInt64(15, true)), [ORIGIN, ORIGIN, ORIGIN]);
+  assert.equal(game.calls.some(row => row[0] === "input"), false);
+  const stepped = h.of("play-step-done").at(-1);
+  assert.equal(stepped.primaryPlayer, 99); assert.equal(stepped.hits, 18446744073709551615n);
+  assert.equal(stepped.songNs, -9223372036854775808n);
+  assert.deepEqual(stepped.localScores.map(row => [row.player, row.hits]), [[99, 18446744073709551615n], [7, 7n], [31, 31n], [0xffffffff, 4294967295n]]);
+  assert.equal(stepped.commandsPending, true);
+  await h.send({ kind: "play-render", playId: 7, renderId: 1, presentedNs: null, presentedHostNs: null });
+  assert.equal(port.posts.at(-1).kind, "commands"); assert.equal(h.of("play-render-done").length, 0);
+  await port.acknowledge();
+  assert.equal(port.posts.at(-1).kind, "poll"); assert.equal(port.posts.at(-1).sequence, 3);
+  complete = true;
+  await port.acknowledge({ report: renderReport() });
+  const rendered = h.of("play-render-done").at(-1);
+  assert.equal(rendered.completed, true); assert.equal(rendered.commandsPending, false); assert.equal(rendered.observedTick, 1);
+  assert.deepEqual(rendered.localScores, stepped.localScores);
+  await h.tick();
+  assert.equal(h.views[0].localDraws.at(-1).game, game); assert.equal(h.views[0].localDraws.at(-1).page, 0);
+  assert.equal(h.views[0].gameDraws.length, 0); assert.equal(h.views[0].replayDraws.length, 0);
+  await h.send({ kind: "play-stop", playId: 7, completed: true });
+  const stopped = h.of("play-stopped").at(-1);
+  assert.equal(stopped.replay, null); assert.equal(stopped.replayComplete, false);
+  assert.deepEqual(stopped.replays.map(row => [row.player, row.replayComplete]), roster.map(([player]) => [player, true]));
+  assert.equal(game.stops, 1); assert.equal(game.frees, 1); assert.equal(port.closes, 1);
+  assert.equal(h.of("play-commands").length, 0);
+});
+
+test("local capability and coverage refusals preserve prepared ownership while valid page changes and touch-page locks remain recoverable", async () => {
+  for (const request of [
+    localRequest({ inputMode: undefined }), replayRequest(replayFile().file, { localPlanWords: localPlan([[7, null]]) }),
+    localRequest({ multiplayer: multiplayer() }),
+    localRequest({ opponents: [{ file: replayFile().file, sourceKey: "file:local", own: false, label: "prior" }] }),
+    localRequest({ localPage: 1 }), localRequest({ localPlanWords: localPlan([[7, 3n], [8, 3n]]) }),
+  ]) {
+    const h = await catalogWorker(); const preparations = h.preparedOwners.length;
+    await h.send(request);
+    assert.equal(h.preparedOwners.length, preparations); assert.equal(h.locals.length, 0);
+    assert.equal(h.of("play-error").length, 1);
+  }
+  for (const options of [{ missingLocalExport: true }, { missingLocalConstructor: true }, { missingLocalInputBlob: true }]) {
+    const h = await catalogWorker(options); await h.send(localRequest());
+    assert.equal(h.preparedOwners.at(-1).moved, false); assert.equal(h.preparedOwners.at(-1).frees, 1);
+    assert.equal(h.locals.length, 0); assert.equal(h.games.length, 0); assert.equal(h.of("play-error").length, 1);
+  }
+  const uncovered = await catalogWorker();
+  await uncovered.send(localRequest({ inputMode: "physical", localPlanWords: localPlan([[7, 1n], [8, 4n]]), hidSetup: undefined }));
+  assert.equal(uncovered.preparedOwners.at(-1).frees, 1); assert.equal(uncovered.localConstructions.length, 0);
+  for (const options of [{ localConstructError: "actual local consuming refusal" },
+    { localPlayers: new Uint32Array([7, 99, 31]) }, { localTouchSetupError: "actual local touch refusal" }]) {
+    const h = await catalogWorker(options); await h.send(localRequest());
+    assert.equal(h.preparedOwners.at(-1).moved, true); assert.equal(h.preparedOwners.at(-1).frees, 0);
+    assert.equal(h.of("play-error").length, 1); assert.equal(h.of("play-reply").some(value => value.result?.kind === "prepared"), false);
+    assert.ok(h.locals.every(game => game.stops === 1 && game.frees === 1)); assert.equal(h.games.length, 0);
+  }
+  const sources = [3n, 4n, 5n, 6n, HID_SOURCE], players = [91, 2, 88, 7, 0xffffffff];
+  for (const contact of [false, true]) {
+    const roster = players.map((player, index) => [player, contact && index === 0 ? 2n : sources[index]]);
+    const h = await started({ startRequest: localRequest({ inputMode: contact ? "physical-contact" : "physical",
+      localPlanWords: localPlan(roster), keyPairs: new Uint32Array(), hidSetup: hidSetup(contact ? sources.slice(1) : sources) }) });
+    const game = h.locals[0];
+    assert.equal((await h.rpc("play-page", { page: 2 })).error.includes("page"), true);
+    assert.equal(h.of("play-error").length, 0); assert.equal(game.frees, 0);
+    const changed = await h.rpc("play-page", { page: 1 });
+    if (contact) assert.match(changed.error, /touch.*page/i);
+    else assert.deepEqual(changed.result, { kind: "local-page", page: 1 });
+    await h.tick(); assert.equal(h.views[0].localDraws.at(-1).page, contact ? 0 : 1);
+    assert.deepEqual((await h.rpc("play-page", { page: 0 })).result, { kind: "local-page", page: 0 });
+    assert.equal((await h.rpc("play-sample")).result.kind, "sample");
+    assert.equal(game.frees, 0); assert.equal(h.of("play-error").length, 0);
+    await h.send({ kind: "play-stop", playId: 7 });
+    assert.ok(h.of("play-stopped").at(-1).replays.every(row => row.replay === null && row.replayComplete === false));
+  }
+});
+
+test("local captures preserve independent member prefixes through setup, serialization, runtime and rejected-audio failures", async () => {
+  const setup = await catalogWorker({ localCaptureError: player => player === 7 });
+  await setup.send(localRequest({ recordReplay: true }));
+  const failedSetup = setup.of("play-error").at(-1), configured = setup.locals[0];
+  assert.match(failedSetup.message, /member capture setup/);
+  assert.deepEqual(failedSetup.replays.map(row => [row.player, row.replay !== null, row.replayComplete]), [[99, true, false], [7, false, false], [31, false, false]]);
+  assert.deepEqual(configured.disposals, ["stop", "take:99", "take:7", "take:31", "free"]);
+  assert.deepEqual(configured.calls.filter(row => row[0] === "member-capture").map(row => row[1]), [99, 7]);
+  assert.equal(failedSetup.replay, null); assert.equal(failedSetup.released, true);
+  const shared = Uint8Array.from([66, 75, 82, 9]);
+  for (const fault of ["serialize", "duplicate", "oversized"]) {
+    const h = await active({ startRequest: localRequest({ recordReplay: true }),
+      localReplayBytes(player) {
+        if (player === 7) {
+          if (fault === "serialize") throw new Error("member codec failure");
+          if (fault === "duplicate") return shared;
+          return new Uint8Array(Math.floor(64 * 1024 * 1024 / 3) + 1);
+        }
+        return player === 99 && fault === "duplicate" ? shared : Uint8Array.from([66, 75, 82, player]);
+      },
+      localValue(game, player, field) { if (player === 7 && field === "hits") throw new Error("member score unavailable"); return game.memberScores.get(player)[field]; },
+    });
+    await h.send({ kind: "play-stop", playId: 7 });
+    const receipt = h.of("play-stopped").at(-1), game = h.locals[0];
+    assert.equal(receipt.localScores[1].hits, null); assert.equal(receipt.localScores[1].misses, SCORE.misses);
+    assert.equal(receipt.hits, SCORE.hits); assert.equal(receipt.replay, null); assert.equal(receipt.replayError, null);
+    assert.deepEqual(receipt.replays.map(row => [row.player, row.replay !== null, row.replayComplete]), [[99, true, false], [7, false, false], [31, true, false]]);
+    assert.match(receipt.replays[1].replayError, /codec failure|transferable layout/);
+    assert.equal(receipt.replays[0].replayError, null); assert.equal(receipt.replays[2].replayError, null);
+    assert.equal(game.memberReplayTakes.size, 3); assert.equal(game.stops, 1); assert.equal(game.frees, 1);
+    const transfer = h.transfers.at(-1);
+    assert.equal(transfer.length, 2); assert.equal(new Set(transfer).size, 2);
+    assert.equal(transfer[0], game.memberReplayBytes.get(99).buffer); assert.equal(transfer[1], game.memberReplayBytes.get(31).buffer);
+    assert.equal(transfer.every(buffer => buffer.byteLength === 0), true);
+  }
+  const partial = await active({ startRequest: localRequest({ recordReplay: true }),
+    inputHidBlob(game) { game.memberScores.get(99).hits = 18n; throw new Error("actual committed member report failure"); },
+  });
+  await partial.send(step({ events: [{ hostNs: ORIGIN, key: 2, down: true, sequence: 1n }, hidEvent({ sequence: 2n }), touchEvent({ sequence: 3n })] }));
+  const failed = partial.of("play-error").at(-1), game = partial.locals[0];
+  assert.match(failed.message, /actual committed member report failure/); assert.equal(failed.hits, 18n);
+  assert.deepEqual(game.calls.filter(row => ["blob", "hid", "touch", "advance"].includes(row[0])).map(row => row[0]), ["blob", "hid"]);
+  assert.ok(failed.replays.every(row => row.replay !== null && row.replayComplete === false));
+  const trace = game.calls.length;
+  await partial.send(step({ tickId: 2 })); assert.equal(game.calls.length, trace); assert.equal(game.frees, 1);
+  const port = commandPort(), original = batch(9007199254740997n);
+  const rejected = await started({ batches: [original], startRequest: localRequest({ recordReplay: true }) });
+  await attachCommands(rejected, port);
+  await port.acknowledge({ status: 9, admitted: 1, error: "actual shared queue refused second command" });
+  assert.deepEqual(rejected.locals[0].calls.filter(row => row[0] === "ack"), [["ack", original.sequence, 1, false]]);
+  assert.equal(port.posts.length, 1); assert.equal(port.closes, 1);
+  assert.ok(rejected.of("play-error").at(-1).replays.every(row => row.replay !== null && row.replayComplete === false));
+});
 
 test("direct live and replay commands wait for actual client ACKs using core identities independent of port sequence", async () => {
   for (const mode of ["live", "replay"]) {

@@ -821,3 +821,173 @@ fn borrowed_local_views_retain_actual_prefix_references_and_match_owned_scene_pa
     assert_eq!(retained.geometry_stamp().1, stamp.1);
     retained.status().unwrap();
 }
+
+#[test]
+fn local_touch_regions_share_actual_three_and_four_field_boundaries_and_preserve_projected_input_payloads()
+ {
+    use crate::{
+        browser_input::TouchInputSetup,
+        playfield_layout::{local_panel_bounds, local_field_bounds, local_touch_bounds},
+    };
+    use beatkernel::input::TouchRoute;
+    let lanes = [0x13, 0x11, 0x12];
+    let panels = [
+        [24, 100, 450, 264],
+        [486, 100, 450, 264],
+        [24, 376, 450, 264],
+        [486, 376, 450, 264],
+    ];
+    let fields = [
+        [34, 172, 430, 184],
+        [496, 172, 430, 184],
+        [34, 448, 430, 184],
+        [496, 448, 430, 184],
+    ];
+    assert_eq!(local_panel_bounds(1, 0).unwrap(), [24, 100, 912, 540]);
+    assert_eq!(local_field_bounds(2, 1).unwrap(), [496, 172, 430, 460]);
+    assert_eq!(
+        local_touch_bounds(&lanes, 4, 0).unwrap(),
+        [
+            34.0, 176.0, 177.0, 356.0, 177.0, 176.0, 320.0, 356.0, 320.0, 176.0, 464.0, 356.0
+        ]
+    );
+    for count in [3, 4] {
+        for slot in 0..count {
+            assert_eq!(local_panel_bounds(count, slot).unwrap(), panels[slot]);
+            assert_eq!(local_field_bounds(count, slot).unwrap(), fields[slot]);
+            let bounds = local_touch_bounds(&lanes, count, slot).unwrap();
+            let words = lanes
+                .iter()
+                .flat_map(|lane| [u32::from(*lane), 1, 2, 0, 1, 0x5754_4f55, 0])
+                .collect::<Vec<_>>();
+            let mut router = TouchInputSetup::new(&words, &bounds, &lanes, 16)
+                .unwrap()
+                .router;
+            for (index, area) in bounds.chunks_exact(4).enumerate() {
+                let projected = Position2 {
+                    x: area[0],
+                    y: area[1],
+                };
+                let mut original = touch(2, ORIGIN, index as u64 + 1);
+                let PhysicalInputEvent::Touch(sample) = &mut original else {
+                    unreachable!()
+                };
+                sample.contact = ContactId(slot as u64 * 16 + index as u64);
+                sample.position = Position2 {
+                    x: projected.x * 2.0,
+                    y: projected.y * 2.0,
+                };
+                let TouchRoute::Bound(bound) = router.route_at(&original, projected).unwrap()
+                else {
+                    panic!("each drawn lane includes its projected left/top edge")
+                };
+                assert_eq!(bound.game_control, GameControlId(u32::from(lanes[index])));
+                assert_eq!(
+                    bound.physical, original,
+                    "logical hit projection never replaces canonical CSS samples or acquisition provenance"
+                );
+                if index > 0 {
+                    assert_eq!(bounds[(index - 1) * 4 + 2], area[0]);
+                }
+            }
+            for (index, position) in [
+                Position2 {
+                    x: fields[slot][0] as f32,
+                    y: (fields[slot][1] + fields[slot][3]) as f32,
+                },
+                Position2 {
+                    x: (fields[slot][0] + fields[slot][2]) as f32,
+                    y: (fields[slot][1] + 4) as f32,
+                },
+                Position2 {
+                    x: fields[(slot + 1) % count][0] as f32,
+                    y: (fields[(slot + 1) % count][1] + 4) as f32,
+                },
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let mut outside = touch(2, ORIGIN, 10 + index as u64);
+                let PhysicalInputEvent::Touch(sample) = &mut outside else {
+                    unreachable!()
+                };
+                sample.contact = ContactId(100 + index as u64);
+                assert_eq!(
+                    router.route_at(&outside, position).unwrap(),
+                    TouchRoute::Ignored
+                );
+            }
+            assert!(local_touch_bounds(&[], count, slot).unwrap().is_empty());
+        }
+        for first in 0..count {
+            for second in first + 1..count {
+                let a = fields[first];
+                let b = fields[second];
+                assert!(
+                    a[0] + a[2] <= b[0]
+                        || b[0] + b[2] <= a[0]
+                        || a[1] + a[3] <= b[1]
+                        || b[1] + b[3] <= a[1]
+                );
+            }
+        }
+    }
+    for (count, slot) in [(0, 0), (5, 0), (3, 3), (4, 4), (usize::MAX, usize::MAX)] {
+        assert!(local_panel_bounds(count, slot).is_err());
+        assert!(local_field_bounds(count, slot).is_err());
+        assert!(local_touch_bounds(&[], count, slot).is_err());
+    }
+    for invalid in [vec![0x11, 0x11], vec![0x10], vec![0x11; 19]] {
+        assert!(local_touch_bounds(&invalid, 4, 0).is_err());
+    }
+    #[cfg(feature = "graphics")]
+    {
+        use crate::{
+            competition::ScoreSummary, player::LocalPlayerSnapshot, player_chart::PlayerChart,
+            scene::Scene, ui::organisms::local_players_with_background, bga_render::BgaFrame,
+        };
+        let prepared = prepared();
+        let chart = std::sync::Arc::new(
+            PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart).unwrap(),
+        );
+        for count in [3, 4] {
+            let players = (0..count)
+                .map(|slot| LocalPlayerSnapshot {
+                    player: PlayerId(PLAYERS[slot]),
+                    chart: Some(chart.clone()),
+                    song_time: Some(Timestamp::ZERO),
+                    score: ScoreSummary::default(),
+                    last_judge: None,
+                    recent_results: Vec::new(),
+                    pressed_lanes: 0,
+                    note_progress: None,
+                    competition: None,
+                })
+                .collect::<Vec<_>>();
+            let mut scene = Scene::new(960, 720);
+            local_players_with_background(
+                &mut scene,
+                &players,
+                2_000_000_000,
+                0,
+                false,
+                &[BgaFrame::default(); 4],
+            )
+            .unwrap();
+            assert_eq!(scene.playfields().len(), count);
+            for (slot, frame) in scene.playfields().iter().enumerate() {
+                let field = local_field_bounds(count, slot).unwrap();
+                let touch = local_touch_bounds(&chart.lanes, count, slot).unwrap();
+                assert_eq!(frame.top, (field[1] + 4) as f32);
+                // Contact ownership includes the visible lane-label strip below the line.
+                assert!(frame.bottom <= touch[3]);
+                assert!(frame.bottom > frame.top);
+                for area in touch.chunks_exact(4) {
+                    assert!(area[0] >= field[0] as f32);
+                    assert!(area[2] <= (field[0] + field[2]) as f32);
+                }
+                assert!(scene.rectangles().iter().any(|rectangle| rectangle.bounds == panels[slot].map(|value| value as f32)));
+            }
+        }
+    }
+}

@@ -200,6 +200,7 @@ async function workerHarness(options = {}) {
   const playHelpers = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const opponentHelpers = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
   const physicalHelpers = new SourceTextModule(await readFile(new URL("./physical-input.mjs", import.meta.url), "utf8"), { context });
+  const localHelpers = new SourceTextModule(await readFile(new URL("./local-play-model.mjs", import.meta.url), "utf8"), { context });
   const hidProfileHelpers = new SourceTextModule(await readFile(new URL("./hid-profile.mjs", import.meta.url), "utf8"), { context });
   const gamepadProfileHelpers = new SourceTextModule(await readFile(new URL("./gamepad-profile.mjs", import.meta.url), "utf8"), { context });
   const commandClient = new SourceTextModule(await readFile(new URL("./audio-command-client.mjs", import.meta.url), "utf8"), { context });
@@ -211,6 +212,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./multiplayer-owner.mjs") return network;
     if (specifier === "./saved-opponents.mjs") return opponentHelpers;
     if (specifier === "./physical-input.mjs") return physicalHelpers;
+    if (specifier === "./local-play-model.mjs") return localHelpers;
     if (specifier === "./hid-profile.mjs") return hidProfileHelpers;
     if (specifier === "./gamepad-profile.mjs") return gamepadProfileHelpers;
     if (specifier === "./audio-command-client.mjs") return commandClient;
