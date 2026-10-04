@@ -103,3 +103,12 @@ The default tagged-gapless policy shall skip Xing/Info metadata frames and valid
 Compatible lookup shall add MP3 while retaining literal priority/error refusal, exact original Unicode stems and custom Exact APIs. Supported original extension family comes first, then remaining WAV, FLAC, OGG, MP3 families in that order; extensionless references use that order. The maximum is 36 unique ASCII extension-case combinations (mp3 has only two letters). Original chart/replay identity is unchanged. Original synthetic MPEG/metadata and actual shared preparation/offline PCM fixtures shall be authored for later execution.
 
 Known ceiling: MP3 metadata skipping accepts one initial ID3v2.3/v2.4 header/body (v2.4 footer must match) and a trailing ID3v1 block; metadata contents are not parsed or validated. ID3v2.2, APEv2, free-format streams, Layers I/II and unknown nonzero Xing encoder extensions are unsupported. Recognized LAME/Lavc extension fields and Xing audio-frame counts are validated, but encoder/tag checksum and optional byte-count/seek fields are not validated. TaggedGapless applies leading delay+529 and trailing padding−529 source frames, requiring padding≥529 and combined trim≤actual raw frames; RawFrames skips the metadata frame but ignores timing cuts. Protected Layer III frames validate CRC16 over header/side information; main data is outside that checksum and broader conformance remains unverified. A clipped beginning with unavailable reservoir returns a codec error instead of dropping frames. Scalar decoding uses fixed decoder and a scratch buffer for 2304 f32 samples, separately from capped retained PCM; timing without metadata cannot be inferred. Native/performance/acoustic acceptance remains pending.
+
+## Invisible keysound admission during staged integration
+
+The typed adapter invisible timeline is available separately. Until actual
+empty-key sound selection and replay identity consume it, prepare_from_source
+rejects nonempty invisible data immediately after parsing and before replay
+validation or resource resolution/read/decode. This shared guard covers native,
+browser, live and replay preparation. Empty/rest-only invisible rows retain
+ordinary preparation. No silent omission, BGM conversion or fake judged note.

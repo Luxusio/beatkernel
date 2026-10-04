@@ -2,7 +2,7 @@
 
 `beatkernel-bms` is a separate MIT crate depending only on the core `beatkernel` crate. It reads already-decoded UTF-8 BMS text, returns SourceChart plus adapter-owned lane/sample/audio mappings and BGM events, and creates existing builtin Instant/Hold rules. Platform acquisition, sample decoding, sound devices and judging remain outside parsing. The file-loading example bounds file reads and compiles actual parsed content; the parser performs no asset IO. Legacy Shift-JIS conversion belongs before this text boundary; the application shared decoder has an explicit UTF-8-first/strict-Shift-JIS fallback policy and explicit mode API.
 
-Directive names are case-insensitive; resource tokens use the selectable radix defined below (default base36): base BPM (default 130), WAVxx IDs/paths, direct hexadecimal BPM channel03, extended BPMxx/channel08, STOPxx/channel09, decimal measure-length channel02, layered BGM01, visible player channels11..19/21..29, paired LNTYPE1 and cell-span LNTYPE2 channels51..59/61..69, and LNOBJ endpoints on visible channels. Channel16/26 are scratch lanes; other channels keep their numeric lane identity rather than assuming a fixed key layout. LNTYPE1 holds pair successive nonzero markers per lane, including across measures; only the head sample is sounded, and the tail token is retained as metadata. Dangling/overlapping/malformed holds are rejected. Mines, invisible notes, unsupported timing/scroll/warp extensions, and unrecognized commands/channels fail with line diagnostics. Listed descriptive headers are preserved. BMPxx resource definitions and Base04/Poor06/Layer07 selections are retained and compiled separately; unsupported BGA crop directives remain explicit visual warnings.
+Directive names are case-insensitive; resource tokens use the selectable radix defined below (default base36): base BPM (default 130), WAVxx IDs/paths, direct hexadecimal BPM channel03, extended BPMxx/channel08, STOPxx/channel09, decimal measure-length channel02, layered BGM01, visible player channels11..19/21..29, paired LNTYPE1 and cell-span LNTYPE2 channels51..59/61..69, and LNOBJ endpoints on visible channels. Channel16/26 are scratch lanes; other channels keep their numeric lane identity rather than assuming a fixed key layout. LNTYPE1 holds pair successive nonzero markers per lane, including across measures; only the head sample is sounded, and the tail token is retained as metadata. Dangling/overlapping/malformed holds are rejected. Mines, unsupported timing/scroll/warp extensions, and unrecognized commands/channels fail with line diagnostics. Invisible channels have the separate staged timeline and player-admission contract below. Listed descriptive headers are preserved. BMPxx resource definitions and Base04/Poor06/Layer07 selections are retained and compiled separately; unsupported BGA crop directives remain explicit visual warnings.
 
 Measure duration is exactly four quarter beats times its rational length. Tokens divide that measure into equal rational positions; global quarter-beat positions use checked i128 arithmetic. The minimum integer beat-grid resolution is the LCM of reduced rational denominators, with an explicit caller cap and checked conversion to core u32/i64 ticks. Decimal values never pass through floats. STOP units are 1/48 of one quarter beat, independent of measure length; duration uses the tempo active at that beat, after a same-beat BPM change. STOP durations quantize to integer nanoseconds once. Notes/BGM at a STOP use its pre-STOP timestamp, matching the core chart compiler.
 
@@ -131,7 +131,7 @@ replay judge. No new timing or judging model is added. The policy follows the
 [original RDM/ruv-it developer documentation](https://nvyu.net/rdm/rby_ex.php)
 and the [format memo](https://saxxonpike.github.io/bms-command-memo/index.html#LNTYPE2).
 It does not claim conformity with every legacy implementation, extended
-MGQ keyboard channels, video, mines or invisible notes. Authored fixtures and
+MGQ keyboard channels, video or mines. Invisible channels follow the separate staged timeline contract below. Authored fixtures and
 compiler checks are not executed format/native/browser acceptance.
 
 ## Explicit physical input judging mode
@@ -170,3 +170,45 @@ or executed-test acceptance. The extension compatibility reference is the
 and its [radix definitions](https://github.com/j-son3/bms-library/blob/master/src/com/lmt/lib/bms/BmsInt.java).
 This describes our explicit strict compatibility policy, not universal BMS
 implementation behavior; implementation remains independently written MIT.
+
+## Invisible keysound timeline foundation
+
+Parse active channels `31..39` and `41..49` as typed `InvisibleEvent` changes,
+subtracting `0x20` to obtain their original visible lane identities. Selected resource
+radix, seeded conditional selection, nonzero-token/source caps and original-line
+diagnostics apply. 00 remains a rest, not deletion. Every nonzero token requires
+its selected WAV definition. Exact-position duplicate policy applies within the
+invisible namespace; visible and long-note channels remain independent.
+
+Store `invisible` events and their independent `invisible_ticks_per_beat` in `BmsChart`. Compute
+an exact grid encompassing the gameplay grid and invisible denominators within
+max_resolution. Invisible subdivisions must not change SourceChart gameplay/BGM
+resolution, compiled objects, rules, visual grid or note mappings when all other
+physical lines are fixed. Events preserve beat,lane,sample,ordinal,line and sort
+by beat/ordinal. Count them in the combined final source-items budget.
+
+Expose `compile_invisible()` returning `ScheduledInvisible` records with exact
+`at`, `lane`, `sample`, `ordinal` and `line`. Rescale original BPM/STOP beats with checked integer
+arithmetic into the independent grid and use the actual core compiler; equal-beat
+markers use pre-STOP timestamps. Validate fabricated grids, event/sample identity,
+duplicate lane/beat positions and source budget before compilation. Scheduled
+records are keysound-selection metadata, never automatic BGM, judged objects,
+score events or render notes. Existing compile() remains the playable visible
+chart/BGM/BGA API; callers use the explicit invisible timeline API.
+
+This foundation does not yet implement empty-key sound selection or its replay
+identity. Shared prepare_from_source must reject any nonempty invisible timeline
+immediately after parsing, before replay setup or any asset resolve/read/decode.
+Consequently current native/browser/live/replay preparation cannot silently
+accept a chart while omitting invisible sounds. Parser/timeline availability is
+not playable invisible-note support. Mines remain unsupported.
+
+Independent deferred parser/timing fixtures cover lane mapping, all radix modes,
+conditional selection, duplicate policies/rests, diagnostics/caps, variable
+measures and BPM/STOP timing, simultaneous layers and gameplay/grid identity.
+Shared preparation fixtures cover early explicit refusal without asset or decoder
+calls and unchanged supported charts. Runtime tests, browser/devices/audio and
+full invisible sound/replay integration remain pending.
+
+The [BMSE author help](https://hitkey.nekokan.dyndns.info/bmse_help_full/main.html)
+describes invisible objects as unjudged keysound changes.
