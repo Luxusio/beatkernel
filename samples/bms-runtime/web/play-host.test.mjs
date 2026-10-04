@@ -781,11 +781,11 @@ test("local preparation refuses stale or contradictory ownership before PCM and 
   await localCount(missing, 2); missing.click("play"); await flush();
   assert.equal(missing.opens.length, 0); assert.equal(missing.workers[0].messages("play-start").length, 0);
   await missing.close();
-  for (const conflict of ["network", "opponents"]) {
+  for (const conflict of ["invalid network", "opponents"]) {
     const h = await harness({ touchSupported: true }); await h.preview();
     await localCount(h, 2); h.click("local-discover"); await flush();
     localAssign(h, 1, 1n); localAssign(h, 2, 2n);
-    if (conflict === "network") { h.get("multiplayer").checked = true; h.get("multiplayer-url").value = "https://room.example/rooms/local"; }
+    if (conflict === "invalid network") { h.get("multiplayer").checked = true; h.get("multiplayer-url").value = "http://room.example/rooms/local"; }
     else selectOpponent(h, selectedRecording());
     h.click("play"); await flush();
     assert.equal(h.opens.length, 0); assert.equal(h.workers[0].messages("play-start").length, 0);
@@ -4047,6 +4047,270 @@ async function launchPeerSession(h) {
   await h.reply(worker.last("play-activate"), null);
   return start;
 }
+
+async function discoverLocalPeers(h, count = 2) {
+  await localCount(h, count); h.click("local-discover"); await flush();
+  localAssign(h, 1, 1n); localAssign(h, 2, 2n);
+  if (count === 3) {
+    const source = h.get("local-source-3").children.find(option => option.textContent.startsWith("Gamepad "));
+    assert.ok(source); localAssign(h, 3, BigInt(source.value));
+  }
+}
+
+async function launchLocalPeers(h, count = 2) {
+  await discoverLocalPeers(h, count);
+  return launchPeerSession(h);
+}
+
+function localPeer(player, remotePlayer, overrides = {}) {
+  return { player, remotePlayer, status: "stopped", progress: null, final: false, error: null, ...overrides };
+}
+
+test("discovered local sources and network settings freeze together before audio and share one committed start", async () => {
+  const opening = deferred(), pad = nativeGamepad();
+  const h = await harness({ touchSupported: true, gamepads: [pad], openGate: opening });
+  const preview = await h.preview();
+  await localCount(h, 3); await localCount(h, 2); await localCount(h, 3);
+  h.click("local-discover"); await flush();
+  const source = BigInt(h.get("local-source-4").children.find(option => option.textContent.startsWith("Gamepad ")).value);
+  localAssign(h, 1, 1n); localAssign(h, 2, 2n); localAssign(h, 4, source);
+  chooseMultiplayer(h);
+  const retainedDisconnect = [...h.window.listeners.get("gamepaddisconnected")][0];
+  h.click("play");
+  assert.equal(h.opens.length, 1); assert.equal(h.opens[0].gesture, true);
+  for (const id of ["local-count", "local-discover", "local-release", "local-source-1", "local-source-2", "local-source-4",
+    "multiplayer", "multiplayer-url", "multiplayer-role"]) assert.equal(h.get(id).disabled, true);
+  h.get("local-count").value = "2"; h.get("local-count").emit("change");
+  localAssign(h, 4, 1n);
+  h.get("multiplayer-url").value = "https://later.example/rooms/changed";
+  h.get("multiplayer-role").value = "join";
+  opening.resolve(h.audio); await flush();
+  const worker = h.workers[0], start = worker.last("play-start");
+  assert.deepEqual(Array.from(start.localPlanWords), [1, 1, 1, 0, 2, 1, 2, 0, 4, 1, Number(source), 0]);
+  assert.deepEqual(start.multiplayer, { url: "https://example.test:4433/competition", host: true, windowOriginNs: 9000000000n });
+  assert.equal(start.localPage, 0); assert.equal(start.inputMode, "physical-contact");
+  assert.equal([...h.window.listeners.get("gamepaddisconnected")][0], retainedDisconnect);
+  const handoff = await h.prepared(start, 1);
+  assert.equal(h.audio.samples.length, 1); assert.equal(h.audio.finishes, 1);
+  assert.equal(worker.messages("play-network-ready").length, 0); assert.deepEqual(h.audio.arms, []);
+  await h.reply(handoff, null);
+  const ready = worker.last("play-network-ready"); assert.ok(ready);
+  assert.equal(h.audio.attachments, 1); assert.equal(worker.messages("play-audio").length, 1);
+  await h.reply(ready, { kind: "multiplayer-start", targetHostNs: 1500000001n,
+    songTargetHostNs: 1600000001n, uncertaintyNs: 0n });
+  const activation = worker.last("play-activate");
+  assert.deepEqual(h.audio.arms, [72001n]); assert.equal(activation.startFrame, 72001n);
+  assert.equal(activation.targetHostNs, 1500000001n); assert.equal(activation.hostNs, 1500020833n);
+  await h.reply(activation, null);
+  h.setNow(1700);
+  h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1700 });
+  const tick = worker.last("play-step");
+  assert.ok(tick.events.some(event => event.key === 2 && event.down === true && event.hostNs === 1700000000n));
+  await h.receive({ kind: "play-step-done", playId: start.playId, tickId: tick.tickId,
+    songNs: 100000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
+  assert.equal(worker.messages("play-commands").length, 0); assert.equal(worker.messages("play-ack").length, 0);
+  assert.equal(h.audio.polls, 0);
+  h.click("stop"); await flush();
+  await h.receive(localFinal(start, { multiplayer: { finalWritten: true, finalAcknowledged: true, error: null,
+    peers: [localPeer(1, 91), localPeer(2, 92), localPeer(4, null)] } }));
+  assert.equal(h.audio.stopStarts, 1); assert.equal(h.window.listeners.get("gamepaddisconnected")?.size ?? 0, 0);
+  assert.equal(h.get("position").value, preview.position); assert.equal(h.get("play").disabled, false);
+  await h.close();
+});
+
+test("local network launch still requires owned distinct sources and exact prepared membership before any PCM", async () => {
+  for (const invalid of ["undiscovered", "unassigned", "duplicate", "unowned", "role"]) {
+    const h = await harness({ touchSupported: true }); await h.preview(); await localCount(h, 2);
+    chooseMultiplayer(h);
+    if (invalid !== "undiscovered") {
+      h.click("local-discover"); await flush(); localAssign(h, 1, 1n);
+      if (invalid === "duplicate") localAssign(h, 2, 1n);
+      if (invalid === "unowned") localAssign(h, 2, 18446744073709551615n);
+      if (invalid === "role") { localAssign(h, 2, 2n); h.get("multiplayer-role").value = "spectator"; }
+    }
+    h.click("play"); await flush();
+    assert.equal(h.opens.length, 0, invalid); assert.equal(h.workers[0].messages("play-start").length, 0, invalid);
+    await h.close();
+  }
+  const h = await harness({ touchSupported: true }); await h.preview(); await discoverLocalPeers(h);
+  chooseMultiplayer(h, false);
+  const start = await h.begin(), worker = h.workers[0];
+  await h.reply(start, { kind: "prepared", title: "Wrong group", samples: 1, lanes: [0x11],
+    startNs: 0n, opponentCount: 0, localPlayers: [2, 1], localPage: 0 });
+  assert.equal(worker.messages("play-sample").length, 0); assert.equal(h.audio.samples.length, 0);
+  assert.equal(worker.messages("play-network-ready").length, 0); assert.deepEqual(h.audio.arms, []);
+  assert.equal(worker.last("play-stop").playId, start.playId);
+  await h.receive(localFinal(start)); assert.match(h.get("status").textContent, /roster|page/);
+  await h.close();
+});
+
+test("local peer notifications never render periodic group counters and display failure is correlated once per admitted member", async () => {
+  const h = await harness({ touchSupported: true }); await h.preview();
+  const start = await launchLocalPeers(h), worker = h.workers[0];
+  const field = h.get("multiplayer-status"), writes = [], display = watchPlayDisplay(h);
+  let text = field.textContent;
+  Object.defineProperty(field, "textContent", { configurable: true, get: () => text, set(value) { writes.push(value); text = value; } });
+  const localRows = [...h.get("local-results").children], sources = [...h.get("local-sources").children];
+  for (let index = 0; index < 18; index++) {
+    await h.receive({ kind: "play-multiplayer", playId: start.playId, event: {
+      kind: ["roster", "group-progress", "group-final-progress"][index % 3],
+      players: new Uint32Array([91, 92]), sequence: BigInt(index), words: new Uint32Array([0xffffffff]),
+    } });
+  }
+  for (const player of [undefined, null, 0, 3, "1", 0x100000000]) {
+    await h.receive({ kind: "play-multiplayer", playId: start.playId,
+      event: { kind: "peer-display-unavailable", player, error: "unowned display notice" } });
+  }
+  assert.deepEqual(writes, []); assert.deepEqual(display, []);
+  assert.deepEqual(h.get("local-results").children, localRows); assert.deepEqual(h.get("local-sources").children, sources);
+  for (const player of [1, 1, 2, 2, 1]) {
+    await h.receive({ kind: "play-multiplayer", playId: start.playId,
+      event: { kind: "peer-display-unavailable", player, error: `member ${player} presentation failed` } });
+  }
+  assert.equal(writes.length, 2); assert.match(writes[0], /Player 1 peer.*member 1 presentation failed/);
+  assert.match(writes[1], /Player 2 peer.*member 2 presentation failed/);
+  assert.equal(worker.messages("play-stop").length, 0); assert.equal(h.audio.stopStarts, 0);
+  h.setNow(1700); await h.advance(8);
+  assert.ok(worker.last("play-step")); assert.ok(worker.last("play-render"));
+  assert.deepEqual(display, []);
+  h.click("stop"); await flush();
+  await h.receive(localFinal(start, { multiplayer: { finalWritten: false, finalAcknowledged: false, error: null,
+    peers: [localPeer(1, 91, { error: "member 1 presentation failed" }), localPeer(2, 92)] } }));
+  await h.close();
+});
+
+test("joined local network results retain separate full-width peer prefixes and independent member replay exports", async () => {
+  const stopping = deferred(), h = await harness({ touchSupported: true, gamepads: [nativeGamepad()], stopGate: stopping });
+  const preview = await h.preview(); h.get("record").checked = true;
+  const start = await launchLocalPeers(h, 3), worker = h.workers[0];
+  const field = h.get("multiplayer-status"), writes = [];
+  let text = field.textContent;
+  Object.defineProperty(field, "textContent", { configurable: true, get: () => text, set(value) { writes.push(value); text = value; } });
+  const first = Uint8Array.from([66, 75, 82, 1]), third = Uint8Array.from([66, 75, 82, 3]);
+  const peers = [
+    localPeer(1, 0xffffffff, { status: "disconnected", final: true, progress: {
+      songNs: -1n, hits: 18446744073709551615n, misses: 0n, combo: 7n, maxCombo: 99n } }),
+    localPeer(2, 7, { progress: { songNs: 604800000000001n, hits: 9007199254740993n, misses: 2n, combo: 3n, maxCombo: 4n },
+      error: "member 2 canvas unavailable" }),
+    localPeer(3, null),
+  ];
+  h.setNow(1700); await h.advance(8);
+  const tick = worker.last("play-step"), render = worker.last("play-render");
+  await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
+    completed: true, commandsPending: false, observedTick: tick.tickId });
+  assert.equal(worker.messages("play-stop").length, 0, "even a group final report cannot skip input acknowledgement");
+  await h.receive({ kind: "play-step-done", playId: start.playId, tickId: tick.tickId,
+    songNs: 2350000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
+  assert.equal(worker.last("play-stop").completed, true);
+  const final = localFinal(start, { replays: [
+    { player: 1, replay: first, replayError: null, replayComplete: true },
+    { player: 2, replay: null, replayError: "member 2 export refused", replayComplete: false },
+    { player: 3, replay: third, replayError: null, replayComplete: true },
+  ], multiplayer: { finalWritten: true, finalAcknowledged: false, error: "group ACK deadline", peers } });
+  await h.receive(final);
+  assert.deepEqual(writes, []); assert.equal(h.get("play").disabled, true);
+  assert.equal(h.get("captured-replay").disabled, true);
+  stopping.resolve(); await flush();
+  assert.equal(writes.length, 1); assert.match(text, /written.*ACK unavailable.*group ACK deadline/);
+  const one = text.slice(text.indexOf("Player 1 ·"), text.indexOf("Player 2 ·"));
+  const two = text.slice(text.indexOf("Player 2 ·"), text.indexOf("Player 3 ·"));
+  const three = text.slice(text.indexOf("Player 3 ·"));
+  assert.match(one, /remote Player 4294967295.*final prefix.*disconnected.*-0\.000000001.*18446744073709551615/);
+  assert.doesNotMatch(one, /9007199254740993|member 2/);
+  assert.match(two, /remote Player 7.*604800\.000000001.*9007199254740993.*member 2 canvas unavailable/);
+  assert.doesNotMatch(two, /18446744073709551615/);
+  assert.match(three, /unassigned remote player.*stopped.*no received score prefix/); assert.doesNotMatch(three, /Hits|final prefix/);
+  const local = content(h.get("local-results"));
+  assert.match(local, /member 2 export refused/); assert.doesNotMatch(local, /18446744073709551615|9007199254740993/);
+  assert.equal(h.get("title").textContent, preview.title); assert.equal(h.get("position").value, preview.position);
+  assert.equal(h.get("play").disabled, false); assert.equal(h.get("export").disabled, true);
+  h.get("captured-replay").value = "3"; h.get("captured-replay").emit("change"); h.click("export"); await flush();
+  assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), third);
+  assert.equal(h.downloads.at(-1).filename, `beatkernel-${start.playId}-player-3-complete.bkr`);
+  await h.receive(final); assert.equal(writes.length, 1);
+  await h.close();
+});
+
+test("malformed local peer envelopes reject the entire comparison without scalar fallback or loss of local replay evidence", async () => {
+  const valid = () => [localPeer(1, 91, { final: true, progress: {
+    songNs: 604800000000001n, hits: 9007199254740993n, misses: 1n, combo: 2n, maxCombo: 3n } }), localPeer(2, null)];
+  const cases = [
+    () => undefined, () => ({}), rows => rows.slice(0, 1), rows => rows.reverse(),
+    rows => [rows[0], { ...rows[1], player: 1 }], rows => [rows[0], { ...rows[1], player: 3 }],
+    rows => [rows[0], { ...rows[1], player: "2" }], rows => [rows[0], ,],
+    rows => [rows[0], { ...rows[1], remotePlayer: 0 }], rows => [rows[0], { ...rows[1], remotePlayer: "92" }],
+    rows => [rows[0], { ...rows[1], progress: rows[0].progress }], rows => [rows[0], { ...rows[1], final: true }],
+    rows => [rows[0], { ...localPeer(2, 92), final: 1 }],
+    rows => [rows[0], { ...localPeer(2, 92), status: "revived" }],
+    rows => [rows[0], { ...localPeer(2, 92), error: "" }],
+    rows => [rows[0], localPeer(2, 92, { progress: { ...rows[0].progress, hits: "9007199254740993" } })],
+    rows => [rows[0], localPeer(2, 92, { progress: { ...rows[0].progress, combo: 4n, maxCombo: 3n } })],
+    rows => [rows[0], localPeer(2, 92, { progress: { ...rows[0].progress, hits: 18446744073709551615n, misses: 1n } })],
+  ];
+  for (const malformed of cases) {
+    const h = await harness({ touchSupported: true }); await h.preview(); h.get("record").checked = true;
+    const start = await launchLocalPeers(h), first = Uint8Array.from([66, 75, 82, 1]), second = Uint8Array.from([66, 75, 82, 2]);
+    h.click("stop"); await flush();
+    await h.receive(localFinal(start, { replays: [
+      { player: 1, replay: first, replayError: null, replayComplete: false },
+      { player: 2, replay: second, replayError: null, replayComplete: false },
+    ], multiplayer: { finalWritten: true, finalAcknowledged: true, error: null, peers: malformed(valid()),
+      peer: { ...localPeer(1, 91), progress: { songNs: 0n, hits: 777777n, misses: 0n, combo: 0n, maxCombo: 0n } } } }));
+    const text = h.get("multiplayer-status").textContent;
+    assert.match(text, /acknowledged.*Final local peer summaries unavailable or malformed.*Local result unchanged/);
+    assert.doesNotMatch(text, /9007199254740993|777777|remote Player 91/);
+    assert.equal(h.get("play").disabled, false);
+    assert.doesNotMatch(h.get("status").textContent, /Replay export failed|cleanup failed/);
+    assert.doesNotMatch(content(h.get("local-results")), /unavailable|malformed/);
+    assert.deepEqual(h.get("captured-replay").children.filter(option => option.value !== "").map(option => option.value), ["1", "2"]);
+    h.get("captured-replay").value = "2"; h.get("captured-replay").emit("change"); h.click("export"); await flush();
+    assert.deepEqual(new Uint8Array(await h.urls.at(-1).blob.arrayBuffer()), second);
+    await h.close();
+  }
+});
+
+test("cancelled group readiness and late final receipts cannot arm or overwrite a new page, scalar session or replay", async () => {
+  const cancelled = await harness({ touchSupported: true }); await cancelled.preview(); await discoverLocalPeers(cancelled);
+  chooseMultiplayer(cancelled);
+  const start = await cancelled.begin(), firstWorker = cancelled.workers[0];
+  await cancelled.reply(await cancelled.prepared(start), null);
+  const ready = firstWorker.last("play-network-ready");
+  cancelled.window.emit("keydown", { code: "Escape", repeat: false, timeStamp: 1000 }); await flush();
+  await cancelled.reply(ready, { kind: "multiplayer-start", targetHostNs: 1500000000n,
+    songTargetHostNs: 1600000000n, uncertaintyNs: 0n });
+  assert.deepEqual(cancelled.audio.arms, []); assert.equal(firstWorker.messages("play-activate").length, 0);
+  await cancelled.receive(localFinal(start, { multiplayer: { finalWritten: false, finalAcknowledged: false,
+    error: "cancelled", peers: [localPeer(1, null), localPeer(2, null)] } }));
+  assert.equal(cancelled.get("play").disabled, false); await cancelled.close();
+
+  const stopping = deferred(), h = await harness({ touchSupported: true, stopGate: stopping });
+  await h.preview(); const prior = await launchLocalPeers(h);
+  h.click("stop"); await flush();
+  const receipt = localFinal(prior, { multiplayer: { finalWritten: true, finalAcknowledged: true, error: null,
+    peers: [localPeer(1, 91, { progress: { songNs: 0n, hits: 777777n, misses: 0n, combo: 0n, maxCombo: 0n } }), localPeer(2, null)] } });
+  await h.receive(receipt);
+  h.window.emit("pagehide"); await flush(); h.window.emit("pageshow", { persisted: true }); await flush();
+  const freshStatus = h.get("multiplayer-status").textContent, freshResults = content(h.get("local-results"));
+  stopping.resolve(); await flush();
+  assert.equal(h.get("multiplayer-status").textContent, freshStatus); assert.equal(content(h.get("local-results")), freshResults);
+  delete h.faults.stopGate; await h.preview(); await localCount(h, 1);
+  const scalar = await launchPeerSession(h); assert.equal(scalar.localPlanWords, undefined);
+  const scalarStatus = h.get("multiplayer-status").textContent;
+  await h.receive(receipt); assert.equal(h.get("multiplayer-status").textContent, scalarStatus);
+  h.click("stop"); await flush();
+  await h.receive(finalScore(scalar.playId, { multiplayer: { finalWritten: true, finalAcknowledged: true, error: null,
+    peer: localPeer(1, 91, { progress: { songNs: 0n, hits: 9n, misses: 0n, combo: 1n, maxCombo: 2n } }) } }));
+  assert.match(h.get("multiplayer-status").textContent, /Hits 9/); assert.doesNotMatch(h.get("multiplayer-status").textContent, /777777/);
+  await localCount(h, 2); chooseRecording(h, [selectedRecording().file]);
+  h.get("multiplayer-url").value = "invalid live draft";
+  const replay = await h.launch(0, "replay");
+  assert.equal(replay.start.localPlanWords, undefined); assert.equal(replay.start.multiplayer, undefined);
+  const replayStatus = h.get("multiplayer-status").textContent;
+  await h.receive(receipt); await h.receive({ kind: "play-multiplayer", playId: replay.id,
+    event: { kind: "peer-display-unavailable", player: 1, error: "no replay network owner" } });
+  assert.equal(h.get("multiplayer-status").textContent, replayStatus);
+  h.click("stop"); await flush(); await h.receive(finalScore(replay.id)); await h.close();
+});
 
 test("Window leaves all periodic and final peer counters to the Worker and shows one actual prefix after joined cleanup", async () => {
   const stopping = deferred(), h = await harness({ stopGate: stopping });
