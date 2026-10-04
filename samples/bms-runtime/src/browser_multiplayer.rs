@@ -1,7 +1,9 @@
 //! Browser bindings for the actual shared session; no transport or clock access.
 use crate::{
+    local_players::PlayerId,
+    multiplayer_group::{decode_words, encode_words},
     multiplayer_protocol::{
-        FrameDecoder, MultiplayerError, MultiplayerEvent, Progress, Session, WriteStep,
+        FrameDecoder, GroupEvent, MultiplayerError, MultiplayerEvent, Progress, Session, WriteStep,
     },
     multiplayer_start::{StartPolicy, StartRole},
 };
@@ -146,6 +148,36 @@ impl BrowserMultiplayer {
         })
     }
 
+    /// Explicit group mode retains one shared readiness/clock/start/write owner.
+    pub fn new_group(
+        identity: Vec<u8>,
+        players: Vec<u32>,
+        host: bool,
+        preroll_ns: i64,
+    ) -> Result<Self, JsValue> {
+        if !(1..=crate::local_players::MAX_LOCAL_PLAYERS).contains(&players.len()) {
+            return Err(error("group session requires 1..64 players"));
+        }
+        let mut roster = Vec::new();
+        roster
+            .try_reserve_exact(players.len())
+            .map_err(|_| error("group browser roster allocation failed"))?;
+        roster.extend(players.into_iter().map(PlayerId));
+        let role = if host {
+            StartRole::Host
+        } else {
+            StartRole::Join
+        };
+        let session =
+            Session::new_group(identity, roster, role, StartPolicy::default(), preroll_ns)
+                .map_err(error)?;
+        Ok(Self {
+            session: Some(session),
+            decoder: Some(FrameDecoder::new()),
+            failure: None,
+        })
+    }
+
     pub fn request_ready(&mut self) -> Result<(), JsValue> {
         self.operate(|owner| owner.session()?.request_ready())
     }
@@ -204,6 +236,66 @@ impl BrowserMultiplayer {
 
     pub fn written(&mut self, frame_id: u64, now_ns: i64) -> Result<(), JsValue> {
         self.operate(|owner| owner.session()?.written(frame_id, now_ns))
+    }
+
+    /// Submit exact member words only through a fresh real application slot.
+    pub fn send_group_progress(
+        &mut self,
+        words: Vec<u32>,
+        final_prefix: bool,
+        now_ns: i64,
+    ) -> Result<BrowserMultiplayerWrite, JsValue> {
+        self.operate(|owner| {
+            let members = decode_words(&words)?;
+            let frame = owner
+                .session()?
+                .send_group_progress(members, final_prefix, now_ns)?;
+            Ok(WriteStep::Frame(frame).into())
+        })
+    }
+
+    /// Group roster/prefix events stay separate from the compatible scalar DTO.
+    /// Already committed events remain drainable after session failure.
+    pub fn poll_group_event(&mut self) -> Result<JsValue, JsValue> {
+        let Some(event) = self.session.as_mut().and_then(Session::poll_group_event) else {
+            return Ok(JsValue::NULL);
+        };
+        let object = js_sys::Object::new();
+        let kind = match event {
+            GroupEvent::Roster(players) => {
+                let mut words = Vec::new();
+                words
+                    .try_reserve_exact(players.len())
+                    .map_err(|_| error("group browser event allocation failed"))?;
+                words.extend(players.into_iter().map(|player| player.0));
+                field(
+                    &object,
+                    "players",
+                    js_sys::Uint32Array::from(words.as_slice()).into(),
+                )?;
+                "roster"
+            }
+            GroupEvent::Progress(prefix) => {
+                let words = encode_words(&prefix.members).map_err(error)?;
+                field(
+                    &object,
+                    "sequence",
+                    js_sys::BigInt::from(prefix.sequence).into(),
+                )?;
+                field(
+                    &object,
+                    "words",
+                    js_sys::Uint32Array::from(words.as_slice()).into(),
+                )?;
+                if prefix.final_prefix {
+                    "group-final-progress"
+                } else {
+                    "group-progress"
+                }
+            }
+        };
+        field(&object, "kind", JsValue::from_str(kind))?;
+        Ok(object.into())
     }
 
     /// Already committed events remain drainable after a protocol/decoder fault.
