@@ -34,6 +34,8 @@ mod browser_input_fixtures;
 /// Worker bindings for the common nonblocking local gameplay owner.
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_local_game;
+#[cfg(test)]
+mod browser_local_input_fixtures;
 /// Browser bindings for the common multiplayer session and bounded framing.
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_multiplayer;
