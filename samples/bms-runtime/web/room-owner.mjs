@@ -9,7 +9,7 @@ const METHODS = ["request_seal", "request_ready", "request_leave", "needed_bytes
   "frame_pending", "receive_bytes", "next_write", "written", "participant_id",
   "revision", "has_snapshot", "leave_written", "snapshot", "take_start", "publish_progress",
   "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written",
-  "progress_complete", "close", "free"];
+  "progress_complete", "request_drain", "drain_complete", "close", "free"];
 
 export class BrowserRoomOwnerError extends Error {
   constructor(code, operation, message, cause) {
@@ -109,6 +109,9 @@ export class BrowserRoomOwner {
   #wakeGate = null;
   #leaveGate = null;
   #completionGate = null;
+  #drainGate = null;
+  #drainTimer = null;
+  #drainRequested = false;
   #setupTimer = null;
   #frameTimer = null;
   #handshakeTimer = null;
@@ -120,11 +123,13 @@ export class BrowserRoomOwner {
   #loops = [];
   #operations = new Set();
   #closing = null;
+  #channelClosing = null;
+  #cleanupError = null;
   #revision = 0n;
   #participant = 0n;
   #snapshot = null;
   #roster = null;
-  #receipts = Object.freeze({ localFinalWritten: false, localFinalAcknowledged: false, complete: false });
+  #receipts = Object.freeze({ localFinalWritten: false, localFinalAcknowledged: false, complete: false, drainComplete: false });
 
   constructor(token, config) {
     if (token !== TOKEN) throw new TypeError("Use BrowserRoomOwner.open().");
@@ -157,12 +162,13 @@ export class BrowserRoomOwner {
         || owner.#core("initial", session => session.leave_written()) !== false
         || owner.#core("initial", session => session.local_final_written()) !== false
         || owner.#core("initial", session => session.local_final_acknowledged()) !== false
-        || owner.#core("initial", session => session.progress_complete()) !== false) {
+        || owner.#core("initial", session => session.progress_complete()) !== false
+        || owner.#core("initial", session => session.drain_complete()) !== false) {
         throw new BrowserRoomOwnerError("protocol", "open", "Room session is already in use.");
       }
       const opening = owner.#track(() => config.channelFactory(url, { signal: owner.#controller.signal,
         setupTimeoutMs: config.setupTimeoutMs, ioTimeoutMs: config.ioTimeoutMs, maxPrefixBytes: MAX_FRAME }));
-      opening.then(channel => { if (owner.closed) quiet(channel, "close"); }, () => {});
+      opening.then(channel => { if (owner.closed) owner.#closeChannel(channel); }, () => {});
       const channel = await owner.#await(opening);
       owner.#ensure();
       owner.#channel = channel;
@@ -179,7 +185,7 @@ export class BrowserRoomOwner {
       const failure = owner.#fatal(cause, "transport", "open");
       // A failed opening returns no handle. Settle its acquired channel API
       // continuations here so callers can join ownership through open itself.
-      await owner.close();
+      try { await owner.close(); } catch (cleanupError) { failure.cleanupError = cleanupError; }
       throw failure;
     }
   }
@@ -234,10 +240,15 @@ export class BrowserRoomOwner {
     this.#ensure();
     try { return action(this.#session); } catch (cause) { throw this.#fatal(cause, "core", operation); }
   }
+  #closeChannel(channel) {
+    if (channel === null || channel === undefined) return;
+    try { this.#channelClosing = Promise.resolve(channel.close()).catch(cause => { this.#cleanupError ??= cause; }); }
+    catch (cause) { this.#cleanupError ??= cause; }
+  }
   #fail(error) {
     if (this.#failure) return this.#failure;
     this.#failure = error;
-    clearTimeout(this.#setupTimer); clearTimeout(this.#frameTimer); clearTimeout(this.#handshakeTimer);
+    clearTimeout(this.#setupTimer); clearTimeout(this.#frameTimer); clearTimeout(this.#handshakeTimer); clearTimeout(this.#drainTimer);
     this.#setupTimer = null; this.#frameTimer = null; this.#handshakeTimer = null;
     if (this.#abort !== null) {
       try { this.#config.signal.removeEventListener("abort", this.#abort); } catch {}
@@ -246,11 +257,14 @@ export class BrowserRoomOwner {
     this.#closedGate.reject(error);
     this.#leaveGate?.reject(error); this.#leaveGate = null;
     this.#completionGate?.reject(error);
+    this.#drainGate?.reject(error);
     this.#wake();
     try { this.#controller.abort(); } catch {}
-    quiet(this.#channel, "close"); this.#channel = null;
+    const channel = this.#channel; this.#channel = null;
+    this.#closeChannel(channel);
     const session = this.#session; this.#session = null;
-    quiet(session, "close"); quiet(session, "free");
+    try { session?.close(); } catch (cause) { this.#cleanupError ??= cause; }
+    try { session?.free(); } catch (cause) { this.#cleanupError ??= cause; }
     try { Promise.resolve(this.#config.onClose?.(error)).catch(() => {}); } catch {}
     return error;
   }
@@ -305,15 +319,57 @@ export class BrowserRoomOwner {
     return this.#completionGate.promise;
   }
 
+  drain() {
+    if (this.#drainGate !== null) return this.#drainGate.promise;
+    if (this.closed) return Promise.reject(this.#failure);
+    if (this.#leaveGate !== null) return Promise.reject(new BrowserRoomOwnerError("state", "drain", "Room is leaving."));
+    this.#drainGate = gate();
+    this.#drainTimer = setTimeout(() => this.#fail(new BrowserRoomOwnerError(
+      "timeout", "drain", "Room coordinated drain timed out.")), this.#config.ioTimeoutMs);
+    this.#advanceDrain();
+    return this.#drainGate.promise;
+  }
+
+  #advanceDrain() {
+    if (this.#drainGate === null || this.closed || this.#leaveGate !== null) return;
+    if (this.#receipts.complete && !this.#drainRequested) {
+      this.#drainRequested = true; // One attempt, even if a local request refuses.
+      try { this.#session.request_drain(); }
+      catch (cause) {
+        clearTimeout(this.#drainTimer); this.#drainTimer = null;
+        const error = cause?.code === "state"
+          ? new BrowserRoomOwnerError("state", "drain", "Room drain request is unavailable.", cause)
+          : this.#fatal(cause, "core", "drain");
+        this.#drainGate.reject(error);
+        return;
+      }
+      this.#wake();
+    }
+    if (this.#receipts.drainComplete && !this.closed) {
+      clearTimeout(this.#drainTimer); this.#drainTimer = null;
+      clearTimeout(this.#frameTimer); this.#frameTimer = null;
+      this.#drainGate.resolve(this.#receipts);
+      this.#wake();
+    }
+  }
+
   leave() {
     if (this.#leaveGate !== null) return this.#leaveGate.promise;
+    if (this.#receipts.drainComplete) return Promise.reject(new BrowserRoomOwnerError("state", "leave", "Room drain already completed."));
     try { this.#request("request_leave"); } catch (cause) { return Promise.reject(cause); }
     this.#leaveGate = gate();
+    clearTimeout(this.#drainTimer); this.#drainTimer = null;
+    this.#drainGate?.reject(new BrowserRoomOwnerError("closed", "leave", "Room drain cancelled by Leave."));
     return this.#leaveGate.promise;
   }
   close() {
     this.#fail(new BrowserRoomOwnerError("closed", "close", "Room owner closed."));
-    this.#closing ??= Promise.allSettled([...this.#loops, ...this.#operations]).then(() => undefined);
+    this.#closing ??= Promise.allSettled([...this.#loops, ...this.#operations]).then(async () => {
+      // Acquisition may have completed after close began. Its continuation
+      // installs the actual late channel cleanup before this join resumes.
+      await this.#channelClosing;
+      if (this.#cleanupError !== null) throw this.#cleanupError;
+    });
     return this.#closing;
   }
 
@@ -396,28 +452,37 @@ export class BrowserRoomOwner {
     const localFinalWritten = this.#core("local_final_written", session => session.local_final_written());
     const localFinalAcknowledged = this.#core("local_final_acknowledged", session => session.local_final_acknowledged());
     const complete = this.#core("progress_complete", session => session.progress_complete());
+    const drainComplete = this.#core("drain_complete", session => session.drain_complete());
     if (typeof localFinalWritten !== "boolean" || typeof localFinalAcknowledged !== "boolean" || typeof complete !== "boolean"
+      || typeof drainComplete !== "boolean" || (drainComplete && (!complete || !this.#drainRequested))
       || (localFinalAcknowledged && !localFinalWritten) || (complete && !localFinalAcknowledged)) {
       throw new BrowserRoomOwnerError("protocol", "receipts", "Malformed room progress receipts.");
     }
     if (this.#receipts.localFinalWritten === localFinalWritten
-      && this.#receipts.localFinalAcknowledged === localFinalAcknowledged && this.#receipts.complete === complete) return;
-    this.#receipts = Object.freeze({ localFinalWritten, localFinalAcknowledged, complete });
+      && this.#receipts.localFinalAcknowledged === localFinalAcknowledged && this.#receipts.complete === complete
+      && this.#receipts.drainComplete === drainComplete) return;
+    this.#receipts = Object.freeze({ localFinalWritten, localFinalAcknowledged, complete, drainComplete });
     try { Promise.resolve(this.#config.onReceipts?.(this.#receipts)).catch(cause => this.#fatal(cause, "callback", "receipts")); }
     catch (cause) { throw this.#fatal(cause, "callback", "receipts"); }
     if (!this.closed && complete) this.#completionGate?.resolve(this.#receipts);
+    this.#advanceDrain();
   }
 
   async #readLoop() {
-    while (!this.closed) {
+    while (!this.closed && !this.#receipts.drainComplete) {
       const needed = this.#core("needed_bytes", session => session.needed_bytes());
       const pending = this.#core("frame_pending", session => session.frame_pending());
       if (!integer(needed, 1, MAX_FRAME) || typeof pending !== "boolean") {
         throw new BrowserRoomOwnerError("protocol", "read", "Invalid room decoder need.");
       }
-      const { bytes, capturedNs } = await this.#await(this.#track(
-        () => this.#channel.readPrefix(needed, !pending),
-        bytes => ({ bytes, capturedNs: this.#elapsed() })));
+      let received;
+      try {
+        received = await this.#await(this.#track(
+          () => this.#channel.readPrefix(needed, !pending),
+          bytes => ({ bytes, capturedNs: this.#receipts.drainComplete ? null : this.#elapsed() })));
+      } catch (cause) { if (this.#receipts.drainComplete) return; throw cause; }
+      if (this.#receipts.drainComplete) return;
+      const { bytes, capturedNs } = received;
       this.#ensure();
       if (!(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer) || bytes.buffer.resizable === true
         || !integer(bytes.byteLength, 1, needed) || bytes.buffer.byteLength > MAX_CHUNK) {
@@ -442,7 +507,7 @@ export class BrowserRoomOwner {
   }
 
   async #writeLoop() {
-    while (!this.closed) {
+    while (!this.closed && !this.#receipts.drainComplete) {
       const processingNs = this.#elapsed();
       const frame = this.#core("next_write", session => session.next_write(processingNs));
       let kind, id, bytes;

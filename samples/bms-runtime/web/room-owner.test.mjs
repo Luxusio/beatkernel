@@ -71,8 +71,8 @@ async function harness(faults = {}) {
   const progress = [], receipts = [];
   const timers = new Map();
   let now = 0, nextTimer = 0;
-  let clockValue = null, clockReads = [];
-  const clock = () => clockReads.shift() ?? clockValue ?? CLOCK_ORIGIN + BigInt(now) * 1000000n;
+  let clockValue = null, clockReads = [], clockCalls = 0;
+  const clock = () => { clockCalls++; return clockReads.shift() ?? clockValue ?? CLOCK_ORIGIN + BigInt(now) * 1000000n; };
   function wrapper(descriptor) {
     let freed = false;
     const value = {
@@ -98,11 +98,12 @@ async function harness(faults = {}) {
     controls: [frame()], receives: [], credits: [], requests: [], nextCalls: 0,
     receiveTimes: [], writeTimes: [], pollTimes: [], schedules: [], startCalls: 0,
     publications: [], peerUpdates: [], finalWritten: false, finalAcknowledged: false,
-    progressComplete: false, peerAcks: new Set(), peerAckQueries: [],
+    progressComplete: false, drainComplete: false, peerAcks: new Set(), peerAckQueries: [],
     alive() { assert.equal(this.freed, false, "WASM called after free"); },
     request_seal() { this.request("seal"); },
     request_ready() { this.request("ready"); },
     request_leave() { this.request("leave"); },
+    request_drain() { this.request("drain"); },
     request(kind) {
       this.alive(); this.requests.push(kind); trace.push(["request", kind]);
       if (this.requestError) throw this.requestError;
@@ -146,6 +147,7 @@ async function harness(faults = {}) {
     local_final_acknowledged() { this.alive(); return this.finalAcknowledged; },
     peer_final_ack_written(participant) { this.alive(); this.peerAckQueries.push(participant); return this.peerAcks.has(participant); },
     progress_complete() { this.alive(); return this.progressComplete; },
+    drain_complete() { this.alive(); return this.drainComplete; },
     close() { this.alive(); this.closes++; trace.push(["session-close"]); if (faults.sessionCloseError) throw faults.sessionCloseError; },
     free() { this.alive(); this.frees++; this.freed = true; trace.push(["session-free"]); },
   };
@@ -234,6 +236,7 @@ async function harness(faults = {}) {
   return {
     session, opens, wrappers, callbacks, closures, starts, progress, receipts, timers, trace,
     BrowserRoomOwner, BrowserRoomOwnerError, opening, opened, channel, receive, observe,
+    get clockCalls() { return clockCalls; },
     setClock(value, reads = []) { clockValue = value; clockReads = [...reads]; },
     async elapse(milliseconds) {
       const target = now + milliseconds;
@@ -278,7 +281,7 @@ test("configuration retains caller ownership; actual frames preserve u64 IDs and
     assert.equal(h.opens.length, 0);
     assert.equal(h.session.closes, 0); assert.equal(h.session.frees, 0);
   }
-  for (const method of ["needed_bytes", "frame_pending", "receive_bytes", "next_write", "written", "revision", "snapshot", "take_start", "publish_progress", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written", "progress_complete", "free"]) {
+  for (const method of ["needed_bytes", "frame_pending", "receive_bytes", "next_write", "written", "revision", "snapshot", "take_start", "publish_progress", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written", "progress_complete", "request_drain", "drain_complete", "free"]) {
     const h = await harness(); delete h.session[method];
     await failure(h.opening(), "validation");
     assert.equal(h.opens.length, 0); assert.equal(h.session.frees, 0);
@@ -793,7 +796,7 @@ test("accepted pending-start peer DTOs retain exact participant and member words
 
 test("local completion waits for actual changed receipt booleans and never sends Leave or closes the room", async () => {
   const h = await harness(); const { owner, io } = await progressOwner(h);
-  assert.deepEqual({ ...owner.receipts }, { localFinalWritten: false, localFinalAcknowledged: false, complete: false });
+  assert.deepEqual({ ...owner.receipts }, { localFinalWritten: false, localFinalAcknowledged: false, complete: false, drainComplete: false });
   assert.equal(h.receipts.length, 0, "unchanged initial booleans do not generate callbacks");
   const promise = owner.waitForLocalCompletion();
   assert.equal(owner.waitForLocalCompletion(), promise);
@@ -807,7 +810,7 @@ test("local completion waits for actual changed receipt booleans and never sends
     if (id === 32n) { h.session.peerAcks.add(MAX_U64 - 1n); h.session.progressComplete = true; }
   };
   io.writes.at(-1).gate.resolve(); await flush();
-  assert.deepEqual({ ...owner.receipts }, { localFinalWritten: true, localFinalAcknowledged: true, complete: false });
+  assert.deepEqual({ ...owner.receipts }, { localFinalWritten: true, localFinalAcknowledged: true, complete: false, drainComplete: false });
   assert.equal(waiting.state, "pending"); assert.equal(h.receipts.length, 1);
   await h.receive(io, () => {});
   assert.equal(h.receipts.length, 1);
@@ -817,7 +820,7 @@ test("local completion waits for actual changed receipt booleans and never sends
   io.writes.at(-1).gate.resolve();
   const completed = await success(waiting); await flush();
   assert.equal(completed, owner.receipts); assert.ok(Object.isFrozen(completed));
-  assert.deepEqual({ ...completed }, { localFinalWritten: true, localFinalAcknowledged: true, complete: true });
+  assert.deepEqual({ ...completed }, { localFinalWritten: true, localFinalAcknowledged: true, complete: true, drainComplete: false });
   assert.equal(owner.peerFinalAckWritten(MAX_U64 - 1n), true);
   assert.equal(h.receipts.length, 2); assert.equal(owner.closed, false);
   assert.deepEqual(h.session.requests, []); assert.equal(h.session.frees, 0); assert.equal(io.closes, 0);
@@ -843,7 +846,7 @@ test("malformed progress and receipt boundaries or callbacks fence before publis
     assert.equal(owner.closed, true); assert.equal(h.closures[0].code, "protocol");
     assert.deepEqual(h.progress, []); await cleaned(h, owner, io);
   }
-  for (const method of ["local_final_written", "local_final_acknowledged", "progress_complete"]) {
+  for (const method of ["local_final_written", "local_final_acknowledged", "progress_complete", "drain_complete"]) {
     const h = await harness(); const { owner, io } = await progressOwner(h);
     h.session[method] = function () { this.alive(); return 1; };
     await h.receive(io, () => {});
@@ -853,6 +856,7 @@ test("malformed progress and receipt boundaries or callbacks fence before publis
   for (const status of [
     { finalAcknowledged: true },
     { finalWritten: true, progressComplete: true },
+    { drainComplete: true },
   ]) {
     const h = await harness(); const { owner, io } = await progressOwner(h);
     await h.receive(io, () => Object.assign(h.session, status));
@@ -907,6 +911,127 @@ test("completion cancellation rejects once while close joins late channel operat
     assert.deepEqual(h.session.credits, written); assert.equal(h.session.receives.length, receives);
     assert.deepEqual(h.progress, []); assert.deepEqual(h.receipts, []);
     assert.deepEqual(h.session.requests, []);
+    await cleaned(h, owner, io);
+  }
+});
+
+test("explicit drain shares one promise and waits for actual local completion and Ready write before accepting Complete", async () => {
+  const h = await harness(); const { owner, io } = await progressOwner(h, {}, { holdAfterClose: true });
+  let pendingNotice = false;
+  h.session.onPublish = () => h.session.controls.push(frame(51n, frameBytes(13)));
+  h.session.onRequest = kind => {
+    assert.equal(kind, "drain");
+    assert.equal(h.session.progressComplete, true);
+    h.session.controls.push(frame(52n, frameBytes(16)));
+  };
+  h.session.onWritten = id => {
+    if (id === 51n) h.session.finalWritten = true;
+    // Script the binding's receipt output only; Rust fixtures cover the actual
+    // matching early-notice admission and sequence/participant validation.
+    if (id === 52n && pendingNotice) h.session.drainComplete = true;
+  };
+  owner.publishProgress(progressWords(), true); await flush();
+  const promise = owner.drain(), waiting = attempt(() => promise);
+  assert.equal(owner.drain(), promise);
+  await flush();
+  assert.deepEqual(h.session.requests, []);
+  assert.equal(owner.receipts.complete, false); assert.equal(waiting.state, "pending");
+  io.writes.at(-1).gate.resolve(); await flush();
+  assert.equal(owner.receipts.localFinalWritten, true);
+  assert.deepEqual(h.session.requests, []);
+  await h.receive(io, () => { h.session.finalAcknowledged = true; h.session.progressComplete = true; });
+  assert.deepEqual(h.session.requests, ["drain"]);
+  assert.equal(owner.drain(), promise); assert.equal(io.activeWrites, 1);
+  await h.receive(io, () => { pendingNotice = true; });
+  assert.equal(waiting.state, "pending"); assert.equal(owner.receipts.drainComplete, false);
+  assert.deepEqual(h.session.credits, [MAX_U64, 51n]);
+  io.writes.at(-1).gate.resolve();
+  const receipt = await success(waiting); await flush();
+  assert.equal(receipt, owner.receipts);
+  assert.deepEqual({ ...receipt }, { localFinalWritten: true, localFinalAcknowledged: true, complete: true, drainComplete: true });
+  assert.ok(Object.isFrozen(receipt)); assert.equal(owner.drain(), promise);
+  assert.deepEqual(h.session.requests, ["drain"]); assert.equal(owner.closed, false);
+  assert.equal(io.closes, 0); assert.equal(h.session.frees, 0);
+  const before = { reads: io.reads.length, writes: io.writes.length, clocks: h.clockCalls, polls: h.session.nextCalls };
+  await h.elapse(100);
+  assert.deepEqual({ reads: io.reads.length, writes: io.writes.length, clocks: h.clockCalls, polls: h.session.nextCalls }, before);
+  const receives = h.session.receives.length, credits = [...h.session.credits];
+  const closing = attempt(() => owner.close()); await flush();
+  assert.equal(closing.state, "pending", "successful drain still joins the already owned read");
+  assert.equal(h.session.frees, 1);
+  io.reads.at(-1).gate.resolve(Uint8Array.of(17));
+  await success(closing);
+  assert.equal(h.session.receives.length, receives); assert.deepEqual(h.session.credits, credits);
+  assert.equal(owner.receipts.drainComplete, true, "the published receipt retains historical evidence");
+  await cleaned(h, owner, io);
+});
+
+test("one drain deadline spans local receipts Ready and Complete without renewal or automatic retry", async () => {
+  for (const stage of ["local", "ready", "complete"]) {
+    const h = await harness(); const { owner, io } = await progressOwner(h);
+    h.session.onRequest = kind => {
+      assert.equal(kind, "drain"); h.session.controls.push(frame(61n, frameBytes(16)));
+    };
+    const waiting = attempt(() => owner.drain());
+    await h.elapse(4);
+    if (stage !== "local") {
+      await h.receive(io, () => { h.session.finalWritten = true; h.session.finalAcknowledged = true; h.session.progressComplete = true; });
+      assert.deepEqual(h.session.requests, ["drain"]);
+      if (stage === "complete") { io.writes.at(-1).gate.resolve(); await flush(); }
+    } else {
+      await h.receive(io, () => {});
+      assert.deepEqual(h.session.requests, []);
+    }
+    await h.elapse(5);
+    assert.equal(waiting.state, "pending"); assert.equal(owner.closed, false);
+    await h.elapse(1);
+    const error = await failure(waiting, "timeout");
+    assert.equal(error.operation, "drain"); assert.equal(owner.closed, true);
+    assert.equal(owner.receipts.drainComplete, false);
+    assert.deepEqual(h.session.requests, stage === "local" ? [] : ["drain"]);
+    await cleaned(h, owner, io);
+  }
+});
+
+test("drain cancellation joins pending operations and local Ready refusal cannot fabricate completion", async () => {
+  const refused = await harness(), opened = await progressOwner(refused);
+  await refused.receive(opened.io, () => {
+    refused.session.finalWritten = true; refused.session.finalAcknowledged = true; refused.session.progressComplete = true;
+  });
+  refused.session.requestError = Object.assign(new Error("common drain phase refused"), { code: "state" });
+  await failure(attempt(() => opened.owner.drain()), "state");
+  assert.equal(opened.owner.closed, false); assert.equal(opened.owner.receipts.drainComplete, false);
+  assert.deepEqual(refused.session.requests, ["drain"]);
+  await cleaned(refused, opened.owner, opened.io);
+
+  for (const mode of ["close", "abort", "leave"]) {
+    const h = await harness(), controller = new AbortController();
+    const { owner, io } = await progressOwner(h, { signal: controller.signal }, { holdAfterClose: true });
+    await h.receive(io, () => { h.session.finalWritten = true; h.session.finalAcknowledged = true; h.session.progressComplete = true; });
+    h.session.onRequest = kind => h.session.controls.push(frame(kind === "drain" ? 71n : 72n, frameBytes(kind === "drain" ? 16 : 6)));
+    h.session.onWritten = id => { if (id === 72n) h.session.leaveDone = true; };
+    const waiting = attempt(() => owner.drain()); await flush();
+    const credits = [...h.session.credits], receives = h.session.receives.length;
+    let leaving;
+    if (mode === "leave") leaving = attempt(() => owner.leave());
+    else if (mode === "abort") controller.abort();
+    else void owner.close();
+    await flush();
+    await failure(waiting, mode === "abort" ? "aborted" : "closed");
+    if (mode === "leave") {
+      io.writes.at(-1).gate.resolve(); await flush();
+      assert.equal(leaving.state, "pending"); assert.equal(h.session.leaveDone, false);
+      io.writes.at(-1).gate.resolve(); await success(leaving); await flush();
+      assert.deepEqual(h.session.credits, [...credits, 71n, 72n]);
+    } else {
+      io.writes.at(-1).gate.resolve(); await flush();
+      assert.deepEqual(h.session.credits, credits);
+    }
+    const closing = attempt(() => owner.close()); await flush();
+    assert.equal(closing.state, "pending"); assert.equal(h.session.frees, 1);
+    io.reads.at(-1).gate.resolve(Uint8Array.of(17));
+    await success(closing);
+    assert.equal(h.session.receives.length, receives); assert.equal(owner.receipts.drainComplete, false);
     await cleaned(h, owner, io);
   }
 });
