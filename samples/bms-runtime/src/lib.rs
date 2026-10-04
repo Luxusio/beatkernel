@@ -195,6 +195,9 @@ pub mod native_gameplay;
 pub mod native_group_competition;
 /// Shared native profile, completion and optional capture configuration.
 pub mod native_judge;
+/// Dedicated native room network thread, bounded commands and retained real receipts.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native_room_network;
 /// Checked nominal session/host/output projection for future native frame startup.
 pub mod native_start;
 /// Full-prefix prepared-object presentation state.

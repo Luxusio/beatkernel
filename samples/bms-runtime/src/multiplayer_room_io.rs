@@ -55,6 +55,13 @@ impl<S: Read + Write> RoomPlayIo<S> {
         &self.session
     }
 
+    /// Native network-thread transport servicing; protocol writes and reads
+    /// remain exclusively owned by this driver.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn stream_mut(&mut self) -> &mut S {
+        &mut self.stream
+    }
+
     /// Consume the driver without accessing the stream. Final close/drop and
     /// any transport-specific cleanup remain the caller's responsibility.
     pub fn into_stream(self) -> S {
