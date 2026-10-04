@@ -4,6 +4,26 @@
 
 ### Native room competition and output-start adapter
 
+#### Native room UI bridge
+
+Room lobby/status, the selected four-entry score page and correlated command
+results must use the existing native player latest-state channel. Do not copy
+the entire 4,032-row HUD each frame. Native UI requests Seal, Ready, Leave and
+page changes through a bounded session-owned command channel; acceptance into
+this channel is not protocol admission. Controller replies preserve the UI
+request identity separately from the network command identity. Busy, refused,
+cancelled and terminated requests have explicit outcomes. Restart creates fresh
+channels so old controls cannot affect replacement gameplay. Cancellation wins
+over pending room actions, and no UI request changes input or audio timestamps.
+
+Native room controls and score presentation compose existing Scene primitives
+with nonoverlapping controls and clipped cached score text. Membership and score
+page changes must not change local note/input field geometry. The competition
+owner services this bridge during lobby/start waiting, gameplay polling and
+joined finalization. UI score or bridge failure must not change local judgment or
+network protocol authority. App mode selection and actual solo/cohort callers
+remain required until they instantiate the room adapter.
+
 The game-owned native room adapter must implement `NativeStartAgreement` over
 the actual `NativeRoomNetwork` committed schedule and original elapsed clock.
 Awaiting commitment services native acquisition/cancellation; it cannot invent
@@ -21,8 +41,9 @@ unplayed setup, cancellation and invalid local progress cannot fabricate a
 final. Successful completion requires the common final/drain receipts and joined
 cleanup, while protocol and cleanup failures remain separately inspectable.
 The adapter reuses the network thread and common native output-start machinery.
-Platform app selection, interactive lobby, native HUD bridge and actual finite
-completion callers remain required until their concrete integration is saved.
+The native player bridge, lobby controls and selected-page HUD have source
+implementations. Platform app room-mode selection, actual solo/cohort room-owner
+instantiation and finite completion callers still require concrete integration.
 
 Native multi-host room networking must reuse `RoomPlayClient` and `RoomPlayIo`
 on one dedicated network thread, independent of Windows/macOS/Linux adapters.
@@ -44,9 +65,11 @@ display data and cannot enter local judgment. Membership, command queues and
 progress storage retain existing bounds; do not clone full room state every tick.
 
 This source phase provides the shared network owner and actual WebTransport
-connector. Native app lobby, cohort activation, portable score HUD and natural
-finalization callers still require integration before native multi-host play is
-available. Runtime, generated bindings, live TLS/device and performance acceptance
+connector. Native lobby controls and score presentation now connect to the
+competition adapter through the existing player channel. Actual app selection,
+cohort activation and natural finalization callers still require room-owner
+integration before native multi-host play is available. Runtime, generated
+bindings, live TLS/device and performance acceptance
 remain deferred; compilation alone does not prove them.
 
 ## Local Windows groups
