@@ -77,13 +77,17 @@
           <label>Visible players <select id="local-page" disabled><option value="0">Player 1</option></select></label></div>
         <div id="local-sources" aria-label="Local player source assignments"></div>
         <p id="local-status" class="hint" role="status" aria-live="polite">One player uses inputs automatically. No source selection is needed.</p>
-        <p class="hint">For two to 64 players, discover inputs and assign a distinct acquired source to each player. Keyboard and touch each count as one source. HID and Gamepad profiles must cover each assigned player's chart lanes. Four players appear per page; held touches retain their lanes across page changes, and new contacts are unbound while their player is offscreen. Assign saved opponents to their comparison player in the selected list. Local network play remains unavailable. Sources are released after play; discover again for another local session.</p>
+        <p class="hint">For two to 64 players, discover inputs and assign a distinct acquired source to each player. Keyboard and touch each count as one source. HID and Gamepad profiles must cover each assigned player's chart lanes. Four players appear per page; held touches retain their lanes across page changes, and new contacts are unbound while their player is offscreen. Assign saved opponents to their comparison player in the selected list. Sources are released after play; discover again for another local session.</p>
       </details>
       <p><button id="play" type="button" disabled>Play live</button> <button id="stop" type="button" disabled>Stop</button></p>
       <div class="replay-controls"><label><input id="multiplayer" type="checkbox" disabled> Multiplayer live play</label>
+        <label>Connection <select id="multiplayer-mode" disabled><option value="peer">Two hosts</option><option value="room">Multi-host room</option></select></label>
         <label>Server <input id="multiplayer-url" type="url" placeholder="https://server.example/room" maxlength="4096" disabled></label>
-        <label>Start role <select id="multiplayer-role" disabled><option value="host">Propose start</option><option value="join">Join start</option></select></label></div>
-      <p class="hint">Both players need the same chart, seed and output setup, and a compatible WebTransport server. Replay stays local.</p>
+        <label>Two-host start role <select id="multiplayer-role" disabled><option value="host">Propose start</option><option value="join">Join start</option></select></label></div>
+      <div class="replay-controls"><button id="room-seal" type="button" hidden disabled>Seal room roster</button>
+        <button id="room-ready" type="button" hidden disabled>Ready this host</button>
+        <button id="room-leave" type="button" hidden disabled>Leave room</button></div>
+      <p class="hint">Hosts need the same chart, seed and output setup, and a compatible WebTransport server. Rooms use an HTTPS address ending in /rooms/key (letters, digits, - or _). The first host seals the roster after at least two hosts join, then every host selects Ready. The lobby waits up to 60 seconds. Rooms support admission and a shared software start; remote score progress and final score acknowledgements are not yet available. Replay stays local.</p>
       <p id="multiplayer-status" class="hint" role="status" aria-live="polite">Solo play selected.</p>
       <div class="replay-controls"><label><input id="record" type="checkbox" disabled> Record replay</label>
         <label>Captured replay <select id="captured-replay" disabled><option value="">No captured replay selected</option></select></label>

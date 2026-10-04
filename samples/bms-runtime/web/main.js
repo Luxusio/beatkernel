@@ -11,6 +11,7 @@ import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindings
 const byId = id => document.getElementById(id);
 const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input", "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status", "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear"].map(id => [id, byId(id)]));
 for (const id of ["local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay"]) ui[id] = byId(id);
+for (const id of ["multiplayer-mode", "room-seal", "room-ready", "room-leave"]) ui[id] = byId(id);
 let canvas = byId("canvas");
 let cssExtent = [0, 0];
 ui["touch-input"].checked = typeof window.PointerEvent === "function" && globalThis.navigator?.maxTouchPoints > 0;
@@ -358,7 +359,17 @@ function controls() {
   ui.stop.disabled = !playing || activePlay.phase === "closing";
   ui.record.disabled = ui.play.disabled;
   ui.multiplayer.disabled = ui.play.disabled;
-  ui["multiplayer-url"].disabled = ui["multiplayer-role"].disabled = ui.play.disabled || !ui.multiplayer.checked;
+  ui["multiplayer-url"].disabled = ui["multiplayer-mode"].disabled = ui.play.disabled || !ui.multiplayer.checked;
+  ui["multiplayer-role"].disabled = ui.play.disabled || !ui.multiplayer.checked || ui["multiplayer-mode"].value === "room";
+  const room = activePlay?.room;
+  const lobby = room && activePlay.mode === "live" && activePlay.phase === "preparing" && room.start === null;
+  const roomBusy = !lobby || !room.opened || room.leaving || activePlay.rpc !== null || room.control !== null;
+  const ownMember = room?.snapshot?.members.find(member => member.participant === room.participant);
+  for (const id of ["room-seal", "room-ready", "room-leave"]) ui[id].hidden = !lobby;
+  ui["room-seal"].disabled = roomBusy || room.snapshot?.phase !== 0 || room.snapshot.members.length < 2
+    || room.snapshot.members[0].participant !== room.participant || room.sealRequested;
+  ui["room-ready"].disabled = roomBusy || room.snapshot?.phase !== 1 || !ownMember || ownMember.prepared || room.readyRequested;
+  ui["room-leave"].disabled = roomBusy;
   ui.export.disabled = playing || busy || lastReplay === null;
   ui["replay-file"].disabled = !initialized || importing || preparing || playing || busy;
   ui["replay-play"].disabled = ui.play.disabled || selectedReplay === null;
@@ -616,13 +627,18 @@ ui["captured-replay"].addEventListener("change", () => {
   ui.export.textContent = lastReplay ? `Download ${lastReplay.player === undefined ? "last replay" : `player ${lastReplay.player} replay`} (${lastReplay.complete ? "complete" : "prefix"})` : "Choose a captured replay";
   controls();
 });
-ui.multiplayer.addEventListener("change", () => {
+function multiplayerSelectionChanged() {
   if (activePlay) return;
   controls();
   ui["multiplayer-status"].textContent = ui.multiplayer.checked
-    ? "Live Play will wait for the peer's compatible setup and committed start. Replay stays local."
+    ? ui["multiplayer-mode"].value === "room"
+      ? "Live Play opens a room lobby after audio preparation. Room score progress and final acknowledgements are not yet available."
+      : "Live Play will wait for the peer's compatible setup and committed start. Replay stays local."
     : "Solo play selected.";
-});
+}
+ui.multiplayer.addEventListener("change", multiplayerSelectionChanged);
+ui["multiplayer-mode"].addEventListener("change", multiplayerSelectionChanged);
+for (const operation of ["seal", "ready", "leave"]) ui[`room-${operation}`].addEventListener("click", () => { void roomControl(operation); });
 ui["replay-file"].addEventListener("change", event => {
   if (!initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   try {
@@ -750,14 +766,25 @@ async function loadAudio(generation) {
 
 function multiplayerConfiguration() {
   const raw = ui["multiplayer-url"].value;
+  const mode = ui["multiplayer-mode"].value;
   const role = ui["multiplayer-role"].value;
   if (typeof raw !== "string" || raw.length === 0 || raw.length > 4096
-    || !["host", "join"].includes(role)) throw new Error("Choose a multiplayer HTTPS server and start role.");
+    || !["peer", "room"].includes(mode) || (mode === "peer" && !["host", "join"].includes(role))) {
+    throw new Error("Choose a multiplayer HTTPS server and connection mode.");
+  }
   const url = new URL(raw);
   if (url.protocol !== "https:" || url.username || url.password || url.hash || url.href.length > 4096) {
     throw new Error("Multiplayer requires an HTTPS URL without credentials or a fragment.");
   }
-  return { url: url.href, host: role === "host", windowOriginNs: millisecondsToNanos(performance.timeOrigin) };
+  const windowOriginNs = millisecondsToNanos(performance.timeOrigin);
+  if (mode === "room") {
+    if (raw !== url.href || !url.hostname || url.port === "0" || raw.includes("?") || raw.includes("#")
+      || !/^\/rooms\/[A-Za-z0-9_-]{1,1024}$/.test(url.pathname)) {
+      throw new Error("Choose a canonical HTTPS /rooms/key URL without query, credentials or fragment.");
+    }
+    return { mode, config: { url: url.href, windowOriginNs } };
+  }
+  return { mode, config: { url: url.href, host: role === "host", windowOriginNs } };
 }
 
 function playRpc(session, kind, fields = {}, transfer = []) {
@@ -769,12 +796,80 @@ function playRpc(session, kind, fields = {}, transfer = []) {
     const timer = setTimeout(() => {
       if (session.rpc?.rpcId !== rpcId) return;
       session.rpc = null;
+      if (activePlay === session && session.owner === owner) controls();
       reject(new Error("Playback Worker operation timed out."));
     }, 10000);
     session.rpc = { rpcId, timer, resolve, reject };
+    controls();
     try { worker.postMessage({ kind, playId: session.id, rpcId, ...fields }, transfer); }
-    catch (error) { clearTimeout(timer); session.rpc = null; reject(error); }
+    catch (error) { clearTimeout(timer); session.rpc = null; controls(); reject(error); }
   });
+}
+
+function settleRoomStart(session, error, schedule) {
+  const waiter = session.room?.waiter;
+  if (!waiter) return;
+  session.room.waiter = null;
+  clearTimeout(waiter.timer);
+  if (error) waiter.reject(error);
+  else waiter.resolve(schedule);
+}
+
+function waitRoomStart(session) {
+  const promise = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (activePlay === session && session.owner === owner && session.phase !== "closing") {
+        void stopPlay("Room lobby timed out after 60 seconds. Start a fresh session.", true);
+      }
+    }, 60000);
+    session.room.waiter = { resolve, reject, timer };
+  });
+  // The start or failure may arrive while the open RPC is still pending.
+  promise.catch(() => {});
+  return promise;
+}
+
+function roomControl(operation) {
+  const session = activePlay;
+  const room = session?.room;
+  if (!room || session.owner !== owner || session.mode !== "live" || session.phase !== "preparing"
+    || !room.opened || room.leaving || room.start !== null || session.rpc || room.control) return;
+  const own = room.snapshot?.members.find(member => member.participant === room.participant);
+  if (operation === "seal" && (room.snapshot?.phase !== 0 || room.snapshot.members.length < 2
+    || room.snapshot.members[0].participant !== room.participant || room.sealRequested)) return;
+  if (operation === "ready" && (room.snapshot?.phase !== 1 || !own || own.prepared || room.readyRequested)) return;
+  if (!["seal", "ready", "leave"].includes(operation)) return;
+  if (operation === "leave") room.leaving = true;
+  const pending = playRpc(session, `play-room-${operation}`);
+  room.control = (async () => {
+    try {
+      let result;
+      try { result = await pending; }
+      catch (error) {
+        if (activePlay === session && session.owner === owner && session.phase !== "closing") {
+          if (error.playbackRefusal === true) ui["multiplayer-status"].textContent = `Room ${operation} refused: ${String(error.message).slice(0, 4096)}`;
+          else void stopPlay(`Room ${operation} failed: ${String(error.message).slice(0, 4096)}`, true);
+        }
+        return;
+      }
+      if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
+      if (operation === "leave" ? result?.kind !== "room-left" || result.leaveWritten !== true
+        : result?.kind !== "room-requested" || result.operation !== operation) {
+        void stopPlay("Room control response did not match its request.", true);
+        return;
+      }
+      if (operation === "seal") room.sealRequested = true;
+      if (operation === "ready") room.readyRequested = true;
+    } finally {
+      room.control = null;
+      if (activePlay === session && session.owner === owner && session.phase !== "closing") {
+        if (operation === "leave") await stopPlay("Left the room.");
+        else controls();
+      }
+    }
+  })();
+  controls();
+  return room.control;
 }
 
 async function changeLocalPage() {
@@ -908,8 +1003,13 @@ async function play(mode = "live") {
     session.startNs = section?.startNs ?? null;
     session.requestedEndNs = section?.endNs;
     session.bindingSelection = mode === "live" ? snapshotBindings(bindingFields.map(([lane, field]) => [lane, field.value])) : null;
-    session.multiplayer = mode === "live" && ui.multiplayer.checked === true ? multiplayerConfiguration() : null;
-    ui["multiplayer-status"].textContent = session.multiplayer ? "Preparing local audio before connecting…"
+    const connection = mode === "live" && ui.multiplayer.checked === true ? multiplayerConfiguration() : null;
+    session.multiplayer = connection?.mode === "peer" ? connection.config : null;
+    session.room = connection?.mode === "room" ? { ...connection.config, opened: false, opening: false,
+      participant: null, snapshot: null, start: null, waiter: null, control: null,
+      sealRequested: false, readyRequested: false, leaving: false } : null;
+    controls();
+    ui["multiplayer-status"].textContent = session.multiplayer || session.room ? "Preparing local audio before connecting…"
       : mode === "replay" ? "Local replay · no multiplayer connection."
         : session.localPlan ? "Local players · no network connection." : "Solo play selected.";
     clearOpponentResults(session.opponentSelection ? "Preparing selected saved opponents…"
@@ -1066,10 +1166,28 @@ async function play(mode = "live") {
       try { descriptor?.port?.close(); } catch {}
       throw error;
     }
-    if (session.multiplayer) {
-      ui["multiplayer-status"].textContent = "Audio ready · waiting for the peer and committed start…";
-      const schedule = await playRpc(session, "play-network-ready");
-      if (schedule?.kind !== "multiplayer-start" || typeof schedule.targetHostNs !== "bigint"
+    if (session.multiplayer || session.room) {
+      let schedule;
+      if (session.room) {
+        const room = session.room;
+        const start = waitRoomStart(session);
+        room.opening = true;
+        ui["multiplayer-status"].textContent = "Audio ready · opening the room lobby…";
+        const opened = await playRpc(session, "play-room-open", { url: room.url, windowOriginNs: room.windowOriginNs });
+        if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
+        if (opened?.kind !== "room-opened") throw new Error("Room opening was not acknowledged.");
+        room.opened = true;
+        controls();
+        schedule = await start;
+        // A genuine start may precede the queued Ready response. Finish that
+        // existing RPC before issuing activation on the same control lane.
+        await room.control;
+      } else {
+        ui["multiplayer-status"].textContent = "Audio ready · waiting for the peer and committed start…";
+        schedule = await playRpc(session, "play-network-ready");
+      }
+      if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
+      if ((!session.room && schedule?.kind !== "multiplayer-start") || typeof schedule?.targetHostNs !== "bigint"
         || typeof schedule.uncertaintyNs !== "bigint"
         || typeof schedule.songTargetHostNs !== "bigint" || schedule.songTargetHostNs > 9223372036854775807n
         || schedule.songTargetHostNs - schedule.targetHostNs !== 100000000n) throw new Error("Invalid committed multiplayer preroll schedule.");
@@ -1086,10 +1204,13 @@ async function play(mode = "live") {
       session.origin = startProjection(clock, session.startFrame);
     }
     await session.audio.arm(session.startFrame);
+    if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
     await playRpc(session, "play-activate", { hostNs: session.origin, startFrame: session.startFrame,
-      ...(session.multiplayer ? { targetHostNs: session.targetHostNs } : {}) });
+      ...(session.multiplayer || session.room ? { targetHostNs: session.targetHostNs } : {}) });
+    if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
     if (millisecondsToNanos(performance.now()) >= session.origin) throw new Error("Playback activation missed its chosen start. Start a fresh session.");
     session.phase = "playing";
+    if (session.room) ui["multiplayer-status"].textContent = "Room software start activated. Remote score progress and final acknowledgements are not yet available.";
     ui.rate.value = String(session.audio.sampleRate);
     controls();
     ui.stop.focus();
@@ -1263,6 +1384,74 @@ function pumpPresentation(session) {
   }
 }
 
+function receiveRoom(session, event) {
+  const room = session.room;
+  if (!room || session.owner !== owner || session.phase === "closing" || room.leaving) return;
+  try {
+    if (!room.opening || !event || typeof event !== "object" || Array.isArray(event)) throw new Error("Invalid room event.");
+    if (event.kind === "snapshot") {
+      const participant = event.participant;
+      const snapshot = event.snapshot;
+      if (typeof participant !== "bigint" || participant < 1n || participant > 18446744073709551615n
+        || (room.participant !== null && participant !== room.participant)
+        || !snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)
+        || !Number.isInteger(snapshot.phase) || snapshot.phase < 0 || snapshot.phase > 2
+        || (snapshot.phase === 2 ? snapshot.deadlineNs !== null
+          : typeof snapshot.deadlineNs !== "bigint" || snapshot.deadlineNs < 0n || snapshot.deadlineNs > 9223372036854775807n)
+        || !Array.isArray(snapshot.members) || snapshot.members.length < 1 || snapshot.members.length > 64) {
+        throw new Error("Invalid room roster metadata.");
+      }
+      const seen = new Set();
+      const members = [];
+      for (const member of snapshot.members) {
+        if (!member || typeof member !== "object" || Array.isArray(member)
+          || typeof member.participant !== "bigint" || member.participant < 1n || member.participant > 18446744073709551615n
+          || seen.has(member.participant) || typeof member.prepared !== "boolean"
+          || !(member.players instanceof Uint32Array) || !(member.players.buffer instanceof ArrayBuffer)
+          || member.players.buffer.resizable === true || member.players.buffer.byteLength > 256
+          || member.players.length < 1 || member.players.length > 64 || member.players.byteLength !== member.players.length * 4) {
+          throw new Error("Invalid room host or local player roster.");
+        }
+        const players = Array.from(member.players);
+        if (players.some(player => player === 0) || new Set(players).size !== players.length) throw new Error("Invalid room local player identities.");
+        seen.add(member.participant);
+        members.push(Object.freeze({ participant: member.participant, prepared: member.prepared, players: Object.freeze(players) }));
+      }
+      const own = members.find(member => member.participant === participant);
+      if (!own || own.players.length !== session.localPlan.players.length
+        || own.players.some((player, index) => player !== session.localPlan.players[index])
+        || (snapshot.phase === 0 ? members.some(member => member.prepared)
+          : members.length < 2 || (snapshot.phase === 1 ? members.every(member => member.prepared) : members.some(member => !member.prepared)))) {
+        throw new Error("Room roster does not match the prepared local players or phase.");
+      }
+      room.participant = participant;
+      room.snapshot = Object.freeze({ phase: snapshot.phase, deadlineNs: snapshot.deadlineNs, members: Object.freeze(members) });
+      const phase = ["Collecting hosts", "Roster sealed · select Ready for this host", "All hosts prepared · agreeing on the software start"][snapshot.phase];
+      ui["multiplayer-status"].textContent = `${phase}. You are host ${participant}. `
+        + members.map(member => `Host ${member.participant}: players ${member.players.join(", ")} · ${member.prepared ? "ready" : "not ready"}`).join("; ");
+      controls();
+    } else if (event.kind === "start") {
+      if (room.start !== null || !room.waiter || session.phase !== "preparing" || room.snapshot?.phase !== 2
+        || typeof event.targetHostNs !== "bigint" || event.targetHostNs < 0n || event.targetHostNs > 9223372036854775807n
+        || typeof event.songTargetHostNs !== "bigint" || event.songTargetHostNs < 0n || event.songTargetHostNs > 9223372036854775807n
+        || event.songTargetHostNs - event.targetHostNs !== 100000000n
+        || typeof event.uncertaintyNs !== "bigint" || event.uncertaintyNs < 0n || event.uncertaintyNs > 100000000n) {
+        throw new Error("Invalid or repeated committed room start.");
+      }
+      room.start = Object.freeze({ targetHostNs: event.targetHostNs, songTargetHostNs: event.songTargetHostNs, uncertaintyNs: event.uncertaintyNs });
+      settleRoomStart(session, null, room.start);
+      ui["multiplayer-status"].textContent = "Shared room software start committed · preparing output…";
+      controls();
+    } else if (event.kind === "closed") {
+      if (typeof event.error !== "string" || event.error.length < 1 || event.error.length > 4096) throw new Error("Invalid room closure notice.");
+      throw new Error(`Room closed: ${event.error}`);
+    } else throw new Error("Unknown room event.");
+  } catch (error) {
+    room.error = String(error.message).slice(0, 4096);
+    void stopPlay(room.error, true);
+  }
+}
+
 function receiveMultiplayer(session, event) {
   if (!session.multiplayer || session.phase === "closing" || session.owner !== owner || !event) return;
   const field = ui["multiplayer-status"];
@@ -1351,12 +1540,15 @@ function receivePlay(data) {
     receiveOpponents(session, data);
   } else if (data.kind === "play-multiplayer") {
     receiveMultiplayer(session, data.event);
+  } else if (data.kind === "play-room") {
+    receiveRoom(session, data.event);
   } else if (data.kind === "play-reply") {
     const request = session.rpc;
     if (!request || data.rpcId !== request.rpcId) return;
     session.rpc = null;
     clearTimeout(request.timer);
-    if (typeof data.error === "string") request.reject(new Error(data.error));
+    if (session.owner === owner) controls();
+    if (typeof data.error === "string") request.reject(Object.assign(new Error(data.error), { playbackRefusal: true }));
     else request.resolve(data.result);
   } else if (data.kind === "play-stopped") {
     session.finalScore = data;
@@ -1416,6 +1608,7 @@ function stopPlay(reason, failed = false, completed = false) {
   const hadHid = session.hidOwner !== null;
   session.naturalFinishRequested = completed;
   session.phase = "closing";
+  settleRoomStart(session, new Error("Room start wait cancelled."));
   let gamepadsStopped;
   try {
     session.gamepadOwner?.close();
@@ -1521,6 +1714,10 @@ function stopPlay(reason, failed = false, completed = false) {
               : `Multiplayer ended without a confirmed final score write${outcome?.error ? `: ${String(outcome.error).slice(0, 4096)}` : "."}`;
           ui["multiplayer-status"].textContent = localOutcome + (session.localPlan
             ? finalLocalPeerText(outcome?.peers, session.localPlan.players) : finalPeerText(outcome?.peer));
+        }
+        if (session.room && session.owner === owner) {
+          ui["multiplayer-status"].textContent = `Room session ended${session.room.error ? `: ${session.room.error}` : "."}`
+            + " Remote score progress and final acknowledgements are not yet available.";
         }
         const result = !session.localPlan && score && typeof score.hits === "bigint" && typeof score.misses === "bigint"
           ? ` Hits ${score.hits} · Misses ${score.misses} · Combo ${score.combo ?? "unavailable"}.` : "";

@@ -207,7 +207,8 @@ async function harness(faults = {}) {
   for (const id of ["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek",
     "title", "details", "status", "viewport", "play", "stop", "record", "export", "keys", "canvas", "prepare-form", "seek-form",
     "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete",
-    "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status",
+    "multiplayer", "multiplayer-mode", "multiplayer-url", "multiplayer-role", "multiplayer-status",
+    "room-seal", "room-ready", "room-leave",
     "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
     "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end",
     "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate",
@@ -215,12 +216,13 @@ async function harness(faults = {}) {
     "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status",
     "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear",
     "local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay"]) {
-    elements.set(id, new Element(["chart", "records", "local-page", "captured-replay"].includes(id) ? "select" : id, id));
+    elements.set(id, new Element(["chart", "records", "local-page", "captured-replay", "multiplayer-mode"].includes(id) ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
   elements.get("rate").value = "44100";
   elements.get("seed").value = "7";
   elements.get("multiplayer-role").value = "join";
+  elements.get("multiplayer-mode").value = "peer";
   elements.get("opponents-kind").value = "own";
   elements.get("judge-early").value = "50";
   elements.get("judge-late").value = "50";
@@ -591,6 +593,7 @@ async function harness(faults = {}) {
     resize(width, height) { viewport = { width, height }; resizeObservers.at(-1).callback(); },
     click, receive, reply, preview, begin, prepared, launch, advance,
     setNow(value) { assert.ok(value >= now); now = value; },
+    setTimeOrigin(value) { context.performance.timeOrigin = value; },
     async close() {
       window.emit("pagehide");
       await flush();
@@ -2921,9 +2924,44 @@ test("Window forwards coarse and regressing raw observations so the Worker owns 
 
 function chooseMultiplayer(h, host = true) {
   h.get("multiplayer").checked = true;
+  h.get("multiplayer-mode").value = "peer";
   h.get("multiplayer-url").value = "https://example.test:4433/competition";
   h.get("multiplayer-role").value = host ? "host" : "join";
   h.get("multiplayer").emit("change");
+}
+
+const ROOM_URL = "https://example.test:4433/rooms/source_fixture";
+const ROOM_PARTICIPANT = 18446744073709551615n;
+function chooseRoom(h, url = ROOM_URL) {
+  h.get("multiplayer").checked = true;
+  h.get("multiplayer-mode").value = "room";
+  h.get("multiplayer-url").value = url;
+  h.get("multiplayer-mode").emit("change");
+  h.get("multiplayer").emit("change");
+}
+function roomRoster(start, { count = 2, creator = true, phase = 0, ownReady = false } = {}) {
+  const players = Uint32Array.from(Array.from(start.localPlanWords).filter((_, index) => index % 4 === 0));
+  const members = Array.from({ length: count }, (_, index) => ({ participant: ROOM_PARTICIPANT - BigInt(index),
+    players: index === 0 ? players : Uint32Array.of(0xffffffff - index, 1),
+    prepared: phase === 2 || (index === 0 && ownReady) }));
+  if (!creator) [members[0], members[1]] = [members[1], members[0]];
+  return { kind: "snapshot", participant: ROOM_PARTICIPANT,
+    snapshot: { phase, deadlineNs: phase === 2 ? null : 604800000000001n, members } };
+}
+async function roomEvent(h, start, event) {
+  await h.receive({ kind: "play-room", playId: start.playId, event });
+}
+async function openRoomLobby(h, { completeOpen = true, samples = 0 } = {}) {
+  chooseRoom(h);
+  const start = await h.begin(), worker = h.workers.at(-1);
+  await h.reply(await h.prepared(start, samples), null);
+  const opening = worker.last("play-room-open");
+  assert.ok(opening);
+  if (completeOpen) await h.reply(opening, { kind: "room-opened" });
+  return { start, worker, opening };
+}
+function roomStart(fields = {}) {
+  return { kind: "start", targetHostNs: 1500000001n, songTargetHostNs: 1600000001n, uncertaintyNs: 0n, ...fields };
 }
 
 function content(element) {
@@ -4625,4 +4663,246 @@ test("invalid committed schedules and cancelled readiness never arm or revive a 
     peers: [localPeer(1, null)] } }));
   assert.equal(h.get("play").disabled, false);
   await h.close();
+});
+
+test("explicit room launch freezes the real local roster and Window origin before gesture audio and opens only after its direct ACK", async () => {
+  for (const local of [false, true]) {
+    const opening = deferred();
+    const h = await harness({ openGate: opening, touchSupported: local, ...(local ? { gamepads: [nativeGamepad()] } : {}) });
+    await h.preview();
+    assert.equal(h.get("multiplayer-mode").value, "peer");
+    if (local) await discoverLocalPeers(h, 3);
+    chooseRoom(h);
+    h.get("multiplayer-role").value = "ignored-room-role";
+    h.click("play");
+    assert.equal(h.opens.length, 1); assert.equal(h.opens[0].gesture, true);
+    const worker = h.workers[0];
+    assert.equal(worker.messages("play-room-open").length, 0);
+    for (const id of ["multiplayer", "multiplayer-mode", "multiplayer-url", "local-count"])
+      assert.equal(h.get(id).disabled, true);
+    h.get("multiplayer-mode").value = "peer"; h.get("multiplayer-mode").emit("change");
+    h.get("multiplayer-url").value = "https://later.example/rooms/replaced";
+    h.setTimeOrigin(12000);
+    opening.resolve(h.audio); await flush();
+    const start = worker.last("play-start");
+    assert.equal(start.multiplayer, undefined, "room admission does not construct the bilateral owner");
+    assert.equal(start.localPlanWords.length, local ? 12 : 4);
+    assert.deepEqual(Array.from(start.localPlanWords).filter((_, index) => index % 4 === 0), local ? [1, 2, 3] : [1]);
+    if (!local) assert.deepEqual(Array.from(start.localPlanWords), [1, 0, 0, 0]);
+    const audioReady = await h.prepared(start, 1);
+    assert.equal(h.audio.finishes, 1); assert.equal(h.audio.samples.length, 1);
+    assert.equal(worker.messages("play-room-open").length, 0); assert.deepEqual(h.audio.arms, []);
+    await h.reply(audioReady, null);
+    const room = worker.last("play-room-open");
+    assert.deepEqual({ url: room.url, windowOriginNs: room.windowOriginNs }, { url: ROOM_URL, windowOriginNs: 9000000000n });
+    assert.equal(worker.messages("play-network-ready").length, 0);
+    assert.equal(worker.messages("play-room-open").length, 1);
+    assert.equal(h.audio.attachments, 1); assert.equal(worker.messages("play-audio").length, 1);
+    assert.equal(worker.messages("play-activate").length, 0);
+    h.click("stop"); await flush();
+    await h.reply(room, { kind: "room-opened" });
+    assert.deepEqual(h.audio.arms, []);
+    await h.receive(localFinal(start));
+    assert.equal(h.audio.stopStarts, 1); assert.equal(worker.messages("play-stop").length, 1);
+    await h.close();
+  }
+  const replay = await harness(); await replay.preview();
+  chooseRecording(replay, [selectedRecording().file]); chooseRoom(replay, "invalid room draft");
+  const playing = await replay.launch(0, "replay");
+  assert.equal(playing.start.multiplayer, undefined); assert.equal(playing.start.localPlanWords, undefined);
+  assert.equal(replay.workers[0].messages("play-room-open").length, 0);
+  assert.equal(replay.get("room-seal").disabled, true); assert.equal(replay.get("room-ready").disabled, true);
+  replay.click("stop"); await flush(); await replay.receive(finalScore(playing.id)); await replay.close();
+});
+
+test("room lobby controls use the admitted creator and own frozen readiness while sharing one pending RPC slot", async () => {
+  for (const creator of [true, false]) {
+    const h = await harness(); await h.preview();
+    const { start, worker, opening } = await openRoomLobby(h, { completeOpen: false });
+    await roomEvent(h, start, roomRoster(start, { creator, count: creator ? 64 : 3 }));
+    for (const id of ["room-seal", "room-ready", "room-leave"]) assert.equal(h.get(id).disabled, true);
+    h.click("room-seal"); h.click("room-ready"); h.click("room-leave");
+    assert.equal(worker.messages("play-room-seal").length, 0); assert.equal(worker.messages("play-room-ready").length, 0);
+    assert.equal(worker.messages("play-room-leave").length, 0);
+    await h.reply(opening, { kind: "room-opened" });
+    assert.equal(h.get("room-seal").disabled, !creator);
+    assert.equal(h.get("room-ready").disabled, true); assert.equal(h.get("room-leave").disabled, false);
+    if (creator) {
+      h.click("room-seal"); await flush();
+      const seal = worker.last("play-room-seal"); assert.ok(seal);
+      for (const id of ["room-seal", "room-ready", "room-leave"]) assert.equal(h.get(id).disabled, true);
+      h.click("room-seal"); h.click("room-ready"); h.click("room-leave");
+      assert.equal(worker.messages("play-room-seal").length, 1);
+      assert.equal(worker.messages("play-room-ready").length, 0); assert.equal(worker.messages("play-room-leave").length, 0);
+      await h.reply(seal, { kind: "room-requested", operation: "seal" });
+      assert.equal(h.get("room-seal").disabled, true, "queue success cannot issue Seal twice against the same snapshot");
+    }
+    await roomEvent(h, start, roomRoster(start, { creator, phase: 1, count: creator ? 64 : 3 }));
+    assert.equal(h.get("room-seal").disabled, true); assert.equal(h.get("room-ready").disabled, false);
+    h.click("room-ready"); await flush();
+    const ready = worker.last("play-room-ready"); assert.ok(ready);
+    h.click("room-ready"); h.click("room-leave");
+    assert.equal(worker.messages("play-room-ready").length, 1); assert.equal(worker.messages("play-room-leave").length, 0);
+    await h.reply(ready, { kind: "room-requested", operation: "ready" });
+    assert.deepEqual(h.audio.arms, []); assert.equal(worker.messages("play-activate").length, 0);
+    assert.equal(h.get("room-ready").disabled, true);
+    await roomEvent(h, start, roomRoster(start, { creator, phase: 1, ownReady: true, count: creator ? 64 : 3 }));
+    assert.equal(h.get("room-ready").disabled, true); assert.equal(h.get("room-leave").disabled, false);
+    await roomEvent(h, start, roomRoster(start, { creator, phase: 2, count: creator ? 64 : 3 }));
+    assert.deepEqual(h.audio.arms, [], "all-ready metadata is still not a committed schedule");
+    assert.equal(worker.messages("play-step").length, 0); assert.equal(worker.messages("play-render").length, 0);
+    h.click("stop"); await flush(); await h.receive(localFinal(start)); await h.close();
+  }
+});
+
+test("an early committed room event survives the open reply and activates one exact output grid without Window gameplay HUD writes", async () => {
+  const h = await harness({ touchSupported: true }); await h.preview(); await discoverLocalPeers(h);
+  const { start, worker, opening } = await openRoomLobby(h, { completeOpen: false, samples: 1 });
+  await roomEvent(h, start, roomRoster(start, { phase: 2 }));
+  const schedule = roomStart();
+  await roomEvent(h, start, schedule);
+  assert.deepEqual(h.audio.arms, [], "an unresolved room-open RPC still owns the shared setup slot");
+  assert.equal(worker.messages("play-activate").length, 0);
+  for (const id of ["room-seal", "room-ready", "room-leave"]) assert.equal(h.get(id).disabled, true);
+  schedule.targetHostNs = 0n;
+  await h.reply(opening, { kind: "room-opened" });
+  assert.deepEqual(h.audio.arms, [72001n]);
+  const activation = worker.last("play-activate");
+  assert.equal(activation.targetHostNs, 1500000001n); assert.equal(activation.startFrame, 72001n);
+  assert.equal(activation.hostNs, 1500020833n);
+  await h.reply(activation, null);
+  assert.equal(h.get("stop").disabled, false);
+  const display = watchPlayDisplay(h), lobbyText = h.get("multiplayer-status").textContent;
+  const layout = h.layoutReads;
+  h.setNow(1700);
+  h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1699.125 });
+  const input = worker.last("play-step");
+  assert.ok(input.events.some(event => event.key === 2 && event.hostNs === 1699125000n));
+  await h.receive({ kind: "play-step-done", playId: start.playId, tickId: input.tickId,
+    songNs: 200000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
+  await h.advance(8);
+  const render = worker.last("play-render"); assert.ok(render);
+  await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
+    songNs: 200000000n, hits: 1n, misses: 0n, combo: 1n, completed: false });
+  assert.deepEqual(display, []); assert.equal(h.layoutReads, layout);
+  assert.equal(h.get("multiplayer-status").textContent, lobbyText);
+  assert.equal(worker.messages("play-activate").length, 1); assert.equal(h.audio.arms.length, 1);
+  assert.equal(worker.messages("play-network-ready").length, 0); assert.equal(h.audio.polls, 0);
+  assert.equal(worker.messages("play-commands").length, 0); assert.equal(worker.messages("play-ack").length, 0);
+  h.click("stop"); await flush(); await h.receive(localFinal(start));
+  assert.equal(h.audio.stopStarts, 1); await h.close();
+
+  const pending = await harness(); await pending.preview();
+  const queued = await openRoomLobby(pending);
+  await roomEvent(pending, queued.start, roomRoster(queued.start, { phase: 1 }));
+  pending.click("room-ready"); await flush();
+  const ready = queued.worker.last("play-room-ready"); assert.ok(ready);
+  await roomEvent(pending, queued.start, roomRoster(queued.start, { phase: 2 }));
+  await roomEvent(pending, queued.start, roomStart());
+  assert.deepEqual(pending.audio.arms, []);
+  assert.equal(queued.worker.messages("play-activate").length, 0, "the Ready RPC still owns the single setup slot");
+  await pending.reply(ready, { kind: "room-requested", operation: "ready" });
+  assert.deepEqual(pending.audio.arms, [72001n]);
+  await pending.reply(queued.worker.last("play-activate"), null);
+  pending.click("stop"); await flush(); await pending.receive(localFinal(queued.start)); await pending.close();
+});
+
+test("room URL, bounded roster and committed schedule refusals preserve cleanup and never reinterpret queue success as start", async () => {
+  for (const url of ["http://example.test/rooms/a", "https://example.test/competition",
+    "https://example.test/rooms/a?extra=1", "https://example.test/rooms/a#fragment",
+    "https://example.test/rooms/" + "a".repeat(1025)]) {
+    const h = await harness(); await h.preview(); chooseRoom(h, url);
+    h.click("play"); await flush();
+    assert.equal(h.opens.length, 0); assert.equal(h.workers[0].messages("play-start").length, 0);
+    assert.equal(h.get("play").disabled, false); await h.close();
+  }
+  const malformed = [
+    event => { event.participant = 0n; },
+    event => { event.snapshot.members[1].participant = event.snapshot.members[0].participant; },
+    event => { event.snapshot.members[1].players = Uint32Array.of(1, 1); },
+    event => { event.snapshot.members[0].players = Uint32Array.of(99); },
+    event => { event.snapshot.phase = 2; event.snapshot.deadlineNs = null; },
+    event => { event.snapshot.deadlineNs = -1n; },
+  ];
+  for (const mutate of malformed) {
+    const h = await harness(); await h.preview(); const { start, worker } = await openRoomLobby(h);
+    const event = roomRoster(start); mutate(event);
+    await roomEvent(h, start, event);
+    assert.equal(worker.messages("play-stop").length, 1); assert.deepEqual(h.audio.arms, []);
+    assert.equal(worker.messages("play-activate").length, 0);
+    await h.receive(localFinal(start)); assert.equal(h.audio.stopStarts, 1); await h.close();
+  }
+  for (const schedule of [roomStart({ targetHostNs: 1500000000 }),
+    roomStart({ songTargetHostNs: 1500000001n }), roomStart({ uncertaintyNs: 100000001n }),
+    roomStart({ targetHostNs: 1000000000n, songTargetHostNs: 1100000000n })]) {
+    const h = await harness(); await h.preview(); const { start, worker } = await openRoomLobby(h);
+    await roomEvent(h, start, roomRoster(start, { phase: 2 }));
+    await roomEvent(h, start, schedule);
+    assert.deepEqual(h.audio.arms, []); assert.equal(worker.messages("play-activate").length, 0);
+    assert.equal(worker.messages("play-stop").length, 1);
+    await h.receive(localFinal(start)); await h.close();
+  }
+  const refused = await harness(); await refused.preview();
+  const lobby = await openRoomLobby(refused);
+  await roomEvent(refused, lobby.start, roomRoster(lobby.start));
+  refused.click("room-seal"); await flush();
+  const seal = lobby.worker.last("play-room-seal");
+  await refused.receive({ kind: "play-reply", playId: lobby.start.playId, rpcId: seal.rpcId, error: "common state refused" });
+  assert.equal(lobby.worker.messages("play-stop").length, 0); assert.equal(refused.get("room-seal").disabled, false);
+  refused.click("room-seal"); await flush();
+  await refused.reply(lobby.worker.last("play-room-seal"), { kind: "room-requested", operation: "ready" });
+  assert.equal(lobby.worker.messages("play-stop").length, 1);
+  await refused.receive(localFinal(lobby.start)); await refused.close();
+
+  const duplicate = await harness(); await duplicate.preview();
+  const first = await openRoomLobby(duplicate);
+  await roomEvent(duplicate, first.start, roomRoster(first.start, { phase: 2 }));
+  await roomEvent(duplicate, first.start, roomStart());
+  await duplicate.reply(first.worker.last("play-activate"), null);
+  await roomEvent(duplicate, first.start, roomStart());
+  assert.equal(first.worker.messages("play-activate").length, 1); assert.equal(duplicate.audio.arms.length, 1);
+  assert.equal(first.worker.messages("play-stop").length, 1);
+  await duplicate.receive(localFinal(first.start)); await duplicate.close();
+});
+
+test("room Leave, closure, deadline and cancellation settle the schedule wait and join one current owner", async () => {
+  for (const rejected of [false, true]) {
+    const stopped = deferred(), h = await harness({ stopGate: stopped }); await h.preview();
+    const { start, worker } = await openRoomLobby(h);
+    await roomEvent(h, start, roomRoster(start));
+    h.click("room-leave"); await flush();
+    const leaving = worker.last("play-room-leave"); assert.ok(leaving);
+    for (const id of ["room-seal", "room-ready", "room-leave"]) assert.equal(h.get(id).disabled, true);
+    await roomEvent(h, start, { kind: "closed", error: "Room leave was written." });
+    assert.equal(worker.messages("play-stop").length, 0, "intentional closure is owned by the pending Leave RPC");
+    if (rejected) await h.receive({ kind: "play-reply", playId: start.playId, rpcId: leaving.rpcId, error: "leave write refused" });
+    else await h.reply(leaving, { kind: "room-left", leaveWritten: true });
+    assert.equal(worker.messages("play-stop").length, 1); assert.equal(h.audio.stopStarts, 1);
+    await h.receive(localFinal(start));
+    assert.equal(h.get("play").disabled, true);
+    stopped.resolve(); await flush();
+    assert.equal(h.get("play").disabled, false); assert.deepEqual(h.audio.arms, []);
+    await h.close();
+  }
+  const h = await harness(); await h.preview(); const prior = await openRoomLobby(h);
+  await roomEvent(h, prior.start, roomRoster(prior.start));
+  await roomEvent(h, prior.start, { kind: "closed", error: "actual room stream failed" });
+  assert.equal(prior.worker.messages("play-stop").length, 1);
+  await h.receive(localFinal(prior.start));
+  const next = await openRoomLobby(h), before = h.get("multiplayer-status").textContent;
+  for (const event of [roomStart(), roomRoster(prior.start), { kind: "closed", error: "late old stream" }])
+    await roomEvent(h, prior.start, event);
+  assert.equal(h.get("multiplayer-status").textContent, before); assert.deepEqual(h.audio.arms, []);
+  const escape = h.window.emit("keydown", { code: "Escape", repeat: false, timeStamp: 1000 });
+  assert.equal(escape.defaultPrevented, true); await flush();
+  await roomEvent(h, next.start, roomStart());
+  assert.deepEqual(h.audio.arms, []);
+  await h.receive(localFinal(next.start));
+  assert.equal(h.audio.stopStarts, 1); await h.close();
+
+  const deadline = await harness(); await deadline.preview(); const waiting = await openRoomLobby(deadline);
+  await roomEvent(deadline, waiting.start, roomRoster(waiting.start, { phase: 2 }));
+  await deadline.advance(60000);
+  assert.equal(waiting.worker.messages("play-stop").length, 1); assert.deepEqual(deadline.audio.arms, []);
+  await deadline.receive(localFinal(waiting.start)); await deadline.close();
 });
