@@ -130,6 +130,8 @@ pub mod multiplayer_protocol;
 mod multiplayer_protocol_fixtures;
 #[cfg(test)]
 mod multiplayer_room_fixtures;
+/// Distinct bounded BKMR room admission messages and incremental framing.
+pub mod multiplayer_room_wire;
 /// Bounded waiting and paired stream ownership, independent of transport I/O.
 pub mod multiplayer_rooms;
 #[cfg(test)]
