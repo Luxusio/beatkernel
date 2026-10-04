@@ -7,6 +7,18 @@ const integer = (value, min, max) => Number.isSafeInteger(value) && value >= min
 const unsigned = value => typeof value === "bigint" && value >= 0n && value <= U64_MAX;
 const signed = value => typeof value === "bigint" && value >= I64_MIN && value <= I64_MAX;
 
+function validReport(report) {
+  const words = report?.words;
+  if (typeof report?.available !== "boolean" || !(words instanceof Uint32Array)
+    || !(words.buffer instanceof ArrayBuffer) || words.buffer.resizable === true
+    || words.buffer.byteLength !== 224 || words.byteOffset !== 0
+    || words.byteLength !== 224 || words.length !== 56) return false;
+  // A detached or invalid backing must never become output evidence.
+  try { new Uint32Array(words.buffer, 0, 56); } catch { return false; }
+  return (words[0] === 0 || words[0] === 1) && words[1] === 0
+    && report.available === (words[0] === 1);
+}
+
 function failure(code, message, generation = null, details = {}) {
   const error = new Error(message, details.cause === undefined ? undefined : { cause: details.cause });
   Object.assign(error, { code, generation, sequence: null, status: null, admitted: null }, details);
@@ -51,14 +63,18 @@ export class AudioCommandClient {
     return failure(code, message, this.#generation, details);
   }
 
-  async commands(commands) {
+  #available() {
     if (this.#failure) throw this.#failure;
-    if (this.#pending) throw this.#error("busy", "A command batch is already pending.");
+    if (this.#pending) throw this.#error("busy", "An audio port operation is already pending.");
     if (this.#sequence === Number.MAX_SAFE_INTEGER) {
       const error = this.#error("state", "Command sequence exhausted.");
       this.#dispose(error);
       throw error;
     }
+  }
+
+  async commands(commands) {
+    this.#available();
     const count = Array.isArray(commands) ? commands.length : 0;
     if (!integer(count, 1, this.#capacity)) {
       throw this.#error("validation", "Command batch must be nonempty and bounded.");
@@ -79,24 +95,31 @@ export class AudioCommandClient {
       }
       snapshot.push(command);
     }
+    return this.#request("commands", snapshot.length, { commands: snapshot });
+  }
+
+  async poll() {
+    return this.#request("poll", 0);
+  }
+
+  #request(operation, count, fields = {}) {
     // Reading caller fields may run getters. Never revive an owner they closed
-    // or replace a batch admitted reentrantly during that snapshot.
-    if (this.#failure) throw this.#failure;
-    if (this.#pending) throw this.#error("busy", "A command batch is already pending.");
+    // or replace an operation admitted reentrantly during that snapshot.
+    this.#available();
     let resolve;
     let reject;
     const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
     promise.catch(() => {});
     const sequence = ++this.#sequence;
-    const pending = { sequence, count: snapshot.length, resolve, reject, timer: null };
+    const pending = { sequence, operation, count, resolve, reject, timer: null };
     this.#pending = pending;
     pending.timer = setTimeout(() => {
-      if (this.#pending === pending) this.#dispose(this.#error("timeout", "Command acknowledgement timed out.", { sequence }));
+      if (this.#pending === pending) this.#dispose(this.#error("timeout", "Audio port acknowledgement timed out.", { sequence }));
     }, this.#timeout);
     try {
-      this.#port.postMessage({ kind: "commands", generation: this.#generation, sequence, commands: snapshot });
+      this.#port.postMessage({ kind: operation, generation: this.#generation, sequence, ...fields });
     } catch (cause) {
-      this.#dispose(this.#error("transport", "Command batch could not be sent.", { sequence, cause }));
+      this.#dispose(this.#error("transport", "Audio port operation could not be sent.", { sequence, cause }));
     }
     return promise;
   }
@@ -117,22 +140,24 @@ export class AudioCommandClient {
       return;
     }
     const pending = this.#pending;
-    if (message.kind !== "ack" || pending === null || message.operation !== "commands"
+    if (message.kind !== "ack" || pending === null || message.operation !== pending.operation
       || message.sequence !== pending.sequence || !integer(message.status, 0, 0xffffffff)
-      || !integer(message.admitted, 0, pending.count) || message.report !== null
+      || !integer(message.admitted, 0, pending.count)
       || !(message.error === null || (typeof message.error === "string" && message.error.length <= 4096))
-      || (message.status === 0 && (message.admitted !== pending.count || message.error !== null))) {
+      || (message.status === 0 && (message.admitted !== pending.count || message.error !== null))
+      || (pending.operation === "poll" && message.status === 0
+        ? !validReport(message.report) : message.report !== null)) {
       malformed();
       return;
     }
     if (message.status !== 0) {
-      this.#dispose(this.#error("remote", `Audio processor rejected the command batch${message.error ? `: ${message.error}` : "."}`,
+      this.#dispose(this.#error("remote", `Audio processor rejected ${pending.operation}${message.error ? `: ${message.error}` : "."}`,
         { sequence: pending.sequence, status: message.status, admitted: message.admitted }));
       return;
     }
     this.#pending = null;
     clearTimeout(pending.timer);
-    pending.resolve(message);
+    pending.resolve(pending.operation === "poll" ? message.report : message);
   }
 
   #dispose(error, state = "failed") {

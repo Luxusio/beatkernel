@@ -203,11 +203,23 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     }
   }
 
+  poll(message, port) {
+    // Each pair is low/high u32 for the binding's documented report index.
+    // No report is synthesized before the first actual Mixer render.
+    const words = new Uint32Array(REPORT_FIELDS * 2);
+    for (let index = 0; index < REPORT_FIELDS; index++) {
+      words[index * 2] = this.owner.report_word(index, false);
+      words[index * 2 + 1] = this.owner.report_word(index, true);
+    }
+    this.ack(message, 0, 0, null, { available: words[0] !== 0, words }, port);
+  }
+
   commandControl(message) {
     const port = this.commandPort;
     if (port === null) return;
     try {
-      if (message === null || typeof message !== "object" || message.kind !== "commands") {
+      if (message === null || typeof message !== "object"
+        || (message.kind !== "commands" && message.kind !== "poll")) {
         this.reject(message, INVALID, "command-operation", 0, port);
         return;
       }
@@ -224,7 +236,8 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
         this.reject(message, STATE, "fenced", 0, port);
         return;
       }
-      this.commands(message, port);
+      if (message.kind === "commands") this.commands(message, port);
+      else this.poll(message, port);
     } catch {
       this.reject(message, EXCEPTION, "exception", 0, port);
     }
@@ -335,14 +348,7 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
         this.commands(message, this.port);
         return;
       } else if (message.kind === "poll") {
-        // Each pair is low/high u32 for the binding's documented report index.
-        // No report is synthesized before the first actual Mixer render.
-        const words = new Uint32Array(REPORT_FIELDS * 2);
-        for (let index = 0; index < REPORT_FIELDS; index++) {
-          words[index * 2] = this.owner.report_word(index, false);
-          words[index * 2 + 1] = this.owner.report_word(index, true);
-        }
-        this.ack(message, 0, 0, null, { available: words[0] !== 0, words });
+        this.poll(message, this.port);
         return;
       } else {
         this.reject(message, INVALID, "operation");
