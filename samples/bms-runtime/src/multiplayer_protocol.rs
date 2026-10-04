@@ -186,7 +186,7 @@ pub(crate) fn parse_start_frame(tag: u8, payload: &[u8]) -> Result<StartMessage,
 }
 
 /// Finite symmetric software probes over caller-supplied session timestamps.
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ClockProbes {
     pub(crate) completed: u64,
     pub(crate) pending_ping: Option<(u64, i64)>,
@@ -198,17 +198,26 @@ pub(crate) struct ClockProbes {
     pub(crate) emitted: bool,
 }
 impl ClockProbes {
-    pub(crate) fn next_ping(&mut self, now: i64) -> Result<Option<Vec<u8>>, MultiplayerError> {
+    pub(crate) fn next_ping_fields(
+        &mut self,
+        now: i64,
+    ) -> Result<Option<(u64, i64)>, MultiplayerError> {
         if self.pending_ping.is_some() || self.completed == CLOCK_PROBES {
             return Ok(None);
         }
         if now < self.last_receive {
             return Err(MultiplayerError::Protocol("probe clock regressed".into()));
         }
-        let mut payload = Vec::with_capacity(16);
-        payload.extend_from_slice(&self.completed.to_le_bytes());
-        payload.extend_from_slice(&now.to_le_bytes());
         self.pending_ping = Some((self.completed, now));
+        Ok(self.pending_ping)
+    }
+    pub(crate) fn next_ping(&mut self, now: i64) -> Result<Option<Vec<u8>>, MultiplayerError> {
+        let Some((sequence, sent)) = self.next_ping_fields(now)? else {
+            return Ok(None);
+        };
+        let mut payload = Vec::with_capacity(16);
+        payload.extend_from_slice(&sequence.to_le_bytes());
+        payload.extend_from_slice(&sent.to_le_bytes());
         Ok(Some(frame(6, &payload)))
     }
     pub(crate) fn receive_ping(
@@ -221,6 +230,14 @@ impl ClockProbes {
         }
         let sequence = u64::from_le_bytes(payload[..8].try_into().unwrap());
         let sent = i64::from_le_bytes(payload[8..].try_into().unwrap());
+        self.receive_ping_fields(sequence, sent, now)
+    }
+    pub(crate) fn receive_ping_fields(
+        &mut self,
+        sequence: u64,
+        sent: i64,
+        now: i64,
+    ) -> Result<(), MultiplayerError> {
         if sequence != self.peer_sequence
             || sequence >= CLOCK_PROBES
             || sent < 0
@@ -237,7 +254,10 @@ impl ClockProbes {
         self.peer_send = Some(sent);
         Ok(())
     }
-    pub(crate) fn next_pong(&mut self, now: i64) -> Result<Option<Vec<u8>>, MultiplayerError> {
+    pub(crate) fn next_pong_fields(
+        &mut self,
+        now: i64,
+    ) -> Result<Option<(u64, i64, i64, i64)>, MultiplayerError> {
         let Some((sequence, echo, received)) = self.pending_pong else {
             return Ok(None);
         };
@@ -246,12 +266,18 @@ impl ClockProbes {
                 "clock pong send precedes receipt".into(),
             ));
         }
+        self.pending_pong = None;
+        Ok(Some((sequence, echo, received, now)))
+    }
+    pub(crate) fn next_pong(&mut self, now: i64) -> Result<Option<Vec<u8>>, MultiplayerError> {
+        let Some((sequence, echo, received, replied)) = self.next_pong_fields(now)? else {
+            return Ok(None);
+        };
         let mut payload = Vec::with_capacity(32);
         payload.extend_from_slice(&sequence.to_le_bytes());
-        for timestamp in [echo, received, now] {
+        for timestamp in [echo, received, replied] {
             payload.extend_from_slice(&timestamp.to_le_bytes());
         }
-        self.pending_pong = None;
         Ok(Some(frame(7, &payload)))
     }
     pub(crate) fn receive_pong(
@@ -265,15 +291,25 @@ impl ClockProbes {
         let word =
             |offset: usize| i64::from_le_bytes(payload[offset..offset + 8].try_into().unwrap());
         let sequence = u64::from_le_bytes(payload[..8].try_into().unwrap());
+        self.receive_pong_fields(sequence, word(8), word(16), word(24), now)
+    }
+    pub(crate) fn receive_pong_fields(
+        &mut self,
+        sequence: u64,
+        echo: i64,
+        received: i64,
+        replied: i64,
+        now: i64,
+    ) -> Result<(), MultiplayerError> {
         let Some((expected, sent)) = self.pending_ping else {
             return Err(MultiplayerError::Protocol("unsolicited clock pong".into()));
         };
-        if sequence != expected || word(8) != sent {
+        if sequence != expected || echo != sent {
             return Err(MultiplayerError::Protocol(
                 "clock pong sequence/echo mismatch".into(),
             ));
         }
-        let sample = ClockSample::new(sent, word(16), word(24), now)
+        let sample = ClockSample::new(sent, received, replied, now)
             .map_err(|error| MultiplayerError::Protocol(error.to_string()))?;
         self.filter
             .observe(sample)

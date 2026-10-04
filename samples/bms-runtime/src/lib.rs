@@ -133,6 +133,10 @@ pub mod multiplayer_protocol;
 mod multiplayer_protocol_fixtures;
 /// Common room admission state and bounded explicit Read/Write driving.
 pub mod multiplayer_room_client;
+/// Shared prepared-room probes and complete-write clock barriers.
+pub mod multiplayer_room_clock;
+#[cfg(test)]
+mod multiplayer_room_clock_fixtures;
 #[cfg(test)]
 mod multiplayer_room_fixtures;
 /// Shared prepared multi-host software-start coordination.
