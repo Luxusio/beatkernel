@@ -27,8 +27,8 @@ impl CatalogControl {
     }
 }
 
-/// The preparation callback runs on the same thread as scanning. It may build
-/// CPU-only search/font data; native/UI/GPU handles remain with their owners.
+/// One owned CPU preparation thread, optionally including a library scan.
+/// Native/UI/GPU handles remain with their owners.
 pub struct NativeCatalog<T: Send + 'static> {
     control: CatalogControl,
     worker: Option<JoinHandle<Result<T, String>>>,
@@ -39,6 +39,23 @@ impl<T: Send + 'static> NativeCatalog<T> {
         root: PathBuf,
         prepare: impl FnOnce(ChartLibrary, &CatalogControl) -> Result<T, String> + Send + 'static,
     ) -> Result<Self, String> {
+        Self::spawn_prepared(move |control| {
+            let library = scan_library_with(&root, |progress| {
+                if let Ok(mut latest) = control.progress.lock() {
+                    *latest = progress;
+                }
+                !control.is_cancelled()
+            })
+            .map_err(|error| error.to_string())?;
+            control.checkpoint()?;
+            prepare(library, control)
+        })
+    }
+    /// Prepare CPU-owned data without scanning a directory, using the same
+    /// cancellation checkpoints and joined-result ownership as library startup.
+    pub fn spawn_prepared(
+        prepare: impl FnOnce(&CatalogControl) -> Result<T, String> + Send + 'static,
+    ) -> Result<Self, String> {
         let control = CatalogControl {
             cancelled: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(Mutex::new(ScanProgress::default())),
@@ -48,15 +65,7 @@ impl<T: Send + 'static> NativeCatalog<T> {
             .name("bms-catalog".into())
             .spawn(move || {
                 worker_control.checkpoint()?;
-                let library = scan_library_with(&root, |progress| {
-                    if let Ok(mut latest) = worker_control.progress.lock() {
-                        *latest = progress;
-                    }
-                    !worker_control.is_cancelled()
-                })
-                .map_err(|error| error.to_string())?;
-                worker_control.checkpoint()?;
-                let prepared = prepare(library, &worker_control)?;
+                let prepared = prepare(&worker_control)?;
                 worker_control.checkpoint()?;
                 Ok(prepared)
             })

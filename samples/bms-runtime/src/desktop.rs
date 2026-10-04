@@ -234,6 +234,19 @@ struct Entry {
     title: String,
     artist: String,
 }
+fn direct_entry(path: PathBuf) -> Entry {
+    let title = path
+        .file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned();
+    Entry {
+        path,
+        title,
+        artist: String::new(),
+    }
+}
+#[cfg(test)]
 fn prepare_title_font(bytes: Vec<u8>, items: &[SelectionItem]) -> Result<Arc<FontAtlas>, String> {
     prepare_title_font_with(bytes, items, || Ok(()))
 }
@@ -278,6 +291,28 @@ fn prepare_catalog(
             artist: entry.artist,
         })
         .collect();
+    prepare_catalog_parts(entries, library.diagnostics, font_path, control)
+}
+fn prepare_direct_catalog(
+    path: PathBuf,
+    font_path: PathBuf,
+    control: &CatalogControl,
+) -> Result<PreparedCatalog, String> {
+    control.checkpoint()?;
+    prepare_catalog_parts(
+        vec![direct_entry(path)],
+        Vec::new(),
+        Some(font_path),
+        control,
+    )
+}
+fn prepare_catalog_parts(
+    entries: Vec<Entry>,
+    diagnostics: Vec<String>,
+    font_path: Option<PathBuf>,
+    control: &CatalogControl,
+) -> Result<PreparedCatalog, String> {
+    control.checkpoint()?;
     let items: Arc<[SelectionItem]> = entries
         .iter()
         .map(|entry| SelectionItem {
@@ -308,9 +343,30 @@ fn prepare_catalog(
         entries,
         items,
         search,
-        diagnostics: library.diagnostics.into(),
+        diagnostics: diagnostics.into(),
         font,
     })
+}
+fn spawn_catalog(options: &Options) -> Result<Option<NativeCatalog<PreparedCatalog>>, String> {
+    if let Some(root) = &options.library {
+        let font_path = options.title_font.clone();
+        NativeCatalog::spawn(root.clone(), move |library, control| {
+            prepare_catalog(library, font_path, control)
+        })
+        .map(Some)
+    } else if let Some(font_path) = &options.title_font {
+        let path = options
+            .chart
+            .clone()
+            .ok_or("direct title font requires a chart")?;
+        let font_path = font_path.clone();
+        NativeCatalog::spawn_prepared(move |control| {
+            prepare_direct_catalog(path, font_path, control)
+        })
+        .map(Some)
+    } else {
+        Ok(None)
+    }
 }
 struct Game {
     viewer: player::PlayerViewer,
@@ -604,18 +660,22 @@ pub(super) fn run(
                 .apply_overrides(&options.display_overrides)?,
         );
     }
-    let (catalog, catalog_message) = if let Some(root) = &options.library {
-        let font_path = options.title_font.clone();
-        match NativeCatalog::spawn(root.clone(), move |library, control| {
-            prepare_catalog(library, font_path, control)
-        }) {
-            Ok(catalog) => (Some(catalog), Some("Loading library catalog…".into())),
-            Err(error) => (None, Some(format!("Catalog unavailable: {error}"))),
-        }
-    } else {
-        (None, None)
+    let (catalog, catalog_message) = match spawn_catalog(&options) {
+        Ok(Some(catalog)) => (
+            Some(catalog),
+            Some(if options.library.is_some() {
+                "Loading library catalog…".into()
+            } else {
+                "Preparing chart title font…".into()
+            }),
+        ),
+        Ok(None) => (None, None),
+        Err(error) => (
+            None,
+            Some(format!("Selection preparation unavailable: {error}")),
+        ),
     };
-    let (entries, diagnostics) = if options.library.is_some() {
+    let (entries, diagnostics) = if options.library.is_some() || options.title_font.is_some() {
         (Vec::new(), Vec::new())
     } else {
         let path = options
@@ -623,19 +683,7 @@ pub(super) fn run(
             .as_ref()
             .expect("validated chart selection")
             .clone();
-        let title = path
-            .file_name()
-            .unwrap_or(path.as_os_str())
-            .to_string_lossy()
-            .into_owned();
-        (
-            vec![Entry {
-                path,
-                title,
-                artist: String::new(),
-            }],
-            Vec::<String>::new(),
-        )
+        (vec![direct_entry(path)], Vec::<String>::new())
     };
     let selection_items: Arc<[SelectionItem]> = entries
         .iter()
@@ -648,17 +696,6 @@ pub(super) fn run(
     let selection_diagnostics = diagnostics.into();
     let catalog_search = CatalogSearch::new(&selection_items)?;
     let search_editor = LineEditor::new("", 256)?;
-    let title_font = if options.library.is_some() {
-        None
-    } else if let Some(path) = &options.title_font {
-        let mut bytes = Vec::new();
-        std::fs::File::open(path)?
-            .take(32 * 1024 * 1024 + 1)
-            .read_to_end(&mut bytes)?;
-        Some(prepare_title_font(bytes, &selection_items)?)
-    } else {
-        None
-    };
     let event_loop = EventLoop::new()?;
     let active_backend = options.backend;
     let mut app = Desktop {
@@ -696,7 +733,7 @@ pub(super) fn run(
         modifiers: ModifiersState::empty(),
         clipboard: None,
         pending_clipboard: None,
-        title_font,
+        title_font: None,
         font_text: None,
         input_font: None,
         input_font_error: None,
@@ -1210,17 +1247,21 @@ impl Desktop {
         let changed = progress != self.catalog_progress;
         if changed {
             self.catalog_progress = progress;
-            self.catalog_message = Some(format!(
-                "{} - {} charts, {} entries, {} bytes",
-                if progress.stage == player_chart::ScanStage::Complete {
-                    "Preparing search and title font"
-                } else {
-                    "Loading library catalog"
-                },
-                progress.charts,
-                progress.entries,
-                progress.bytes
-            ));
+            self.catalog_message = Some(if self.options.library.is_some() {
+                format!(
+                    "{} - {} charts, {} entries, {} bytes",
+                    if progress.stage == player_chart::ScanStage::Complete {
+                        "Preparing search and title font"
+                    } else {
+                        "Loading library catalog"
+                    },
+                    progress.charts,
+                    progress.entries,
+                    progress.bytes
+                )
+            } else {
+                "Preparing chart title font…".into()
+            });
         }
         // A hidden/suspended Selection does not receive another panel's draft
         // or reactive bindings. The finished thread retains its owned result.
@@ -4003,7 +4044,11 @@ impl Desktop {
     }
     fn start(&mut self) -> Result<(), String> {
         if self.catalog.is_some() {
-            return Err("wait for the library catalog to finish loading".into());
+            return Err(if self.options.library.is_some() {
+                "wait for the library catalog to finish loading".into()
+            } else {
+                "wait for chart title font preparation to finish".into()
+            });
         }
         if !self.ui_ready() || self.navigator.route() != ScreenRoute::Selection {
             return Err("chart selection is not active".into());
@@ -4056,6 +4101,7 @@ impl Desktop {
     }
     fn draw_selection(&mut self) -> Result<(), String> {
         if self.catalog.is_some() {
+            let library = self.options.library.is_some();
             self.selection_view = None;
             self.painted_reactive = None;
             self.scene.clear();
@@ -4069,14 +4115,27 @@ impl Desktop {
                 3,
                 0xf0f4ff,
             );
-            text(&mut self.scene, 24, 140, "LOADING LIBRARY", 2, 0xf0f4ff);
+            text(
+                &mut self.scene,
+                24,
+                140,
+                if library {
+                    "LOADING LIBRARY"
+                } else {
+                    "PREPARING CHART"
+                },
+                2,
+                0xf0f4ff,
+            );
             text(
                 &mut self.scene,
                 24,
                 180,
-                self.catalog_message
-                    .as_deref()
-                    .unwrap_or("Preparing library catalog"),
+                self.catalog_message.as_deref().unwrap_or(if library {
+                    "Preparing library catalog"
+                } else {
+                    "Preparing chart title font"
+                }),
                 1,
                 0x9bb1cf,
             );
@@ -6164,7 +6223,7 @@ mod tests {
             Err("fixture must not query devices".into())
         }
         Desktop {
-            options: Options::parse(&[]).unwrap(),
+            options: Options::parse(&["--chart".into(), "fixture.bms".into()]).unwrap(),
             active_backend: BackendChoice::Auto,
             display: None,
             display_view: None,

@@ -167,3 +167,122 @@ fn cancellation_errors_and_drop_release_the_actual_worker_without_a_late_success
     tail.recv_timeout(WAIT).unwrap();
     assert!(control.checkpoint().is_err());
 }
+
+#[test]
+fn direct_preparation_runs_on_the_owned_thread_without_scan_progress_or_early_publication() {
+    let original = PathBuf::from("literal-parent/../ÉTOILE 曲.bms");
+    let supplied = original.clone();
+    let caller = thread::current().id();
+    let (entered, ready) = mpsc::sync_channel(1);
+    let (release, gate) = mpsc::sync_channel(1);
+    let mut job = NativeCatalog::spawn_prepared(move |control| {
+        control.checkpoint()?;
+        entered.send(thread::current().id()).unwrap();
+        gate.recv_timeout(WAIT).map_err(|error| error.to_string())?;
+        control.checkpoint()?;
+        // This constructor has no root to scan. Preserve arbitrary CPU-owned
+        // input literally, without requiring the path or its parent to exist.
+        Ok((supplied, String::from("prepared on worker")))
+    })
+    .unwrap();
+    assert_ne!(ready.recv_timeout(WAIT).unwrap(), caller);
+    let no_scan = ScanProgress {
+        stage: ScanStage::Traversal,
+        directories: 0,
+        entries: 0,
+        charts: 0,
+        bytes: 0,
+    };
+    for _ in 0..8 {
+        assert!(!job.is_finished());
+        assert!(job.poll().is_none());
+        assert_eq!(job.progress(), no_scan);
+    }
+    let progress_slot = job.control.progress.clone();
+    let held = progress_slot.lock().unwrap();
+    assert_eq!(job.progress(), no_scan);
+    assert!(job.poll().is_none());
+    drop(held);
+    release.send(()).unwrap();
+    let deadline = std::time::Instant::now() + WAIT;
+    while !job.is_finished() {
+        assert!(std::time::Instant::now() < deadline);
+        thread::yield_now();
+    }
+    let prepared = job.poll().unwrap().unwrap();
+    assert_eq!(prepared.0, original);
+    assert_eq!(prepared.1, "prepared on worker");
+    assert_eq!(job.progress(), no_scan);
+    assert!(job.poll().is_none());
+    assert!(job.join().is_none());
+    drop(job);
+    assert_eq!(prepared.0, PathBuf::from("literal-parent/../ÉTOILE 曲.bms"));
+}
+
+#[test]
+fn direct_preparation_cancellation_errors_and_drop_join_the_same_worker_once() {
+    struct Dropped(Arc<AtomicUsize>);
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let discarded = Arc::new(AtomicUsize::new(0));
+    let value = discarded.clone();
+    let (entered, ready) = mpsc::sync_channel(1);
+    let (release, gate) = mpsc::sync_channel(1);
+    let mut job = NativeCatalog::spawn_prepared(move |control| {
+        entered.send(()).unwrap();
+        gate.recv_timeout(WAIT).map_err(|error| error.to_string())?;
+        assert!(control.is_cancelled());
+        assert!(control.checkpoint().is_err());
+        Ok(Dropped(value))
+    })
+    .unwrap();
+    ready.recv_timeout(WAIT).unwrap();
+    job.cancel();
+    job.cancel();
+    assert!(job.poll().is_none());
+    release.send(()).unwrap();
+    assert!(job.join().unwrap().err().unwrap().contains("cancel"));
+    assert_eq!(discarded.load(Ordering::SeqCst), 1);
+    assert_eq!(job.progress(), ScanProgress::default());
+    assert!(job.poll().is_none());
+    assert!(job.join().is_none());
+
+    let mut refused = NativeCatalog::<()>::spawn_prepared(|control| {
+        control.checkpoint()?;
+        Err("direct title font rejected".into())
+    })
+    .unwrap();
+    assert_eq!(
+        refused.join().unwrap().unwrap_err(),
+        "direct title font rejected"
+    );
+    assert!(refused.poll().is_none());
+    let mut panicked =
+        NativeCatalog::<()>::spawn_prepared(|_| panic!("controlled direct preparation panic"))
+            .unwrap();
+    assert!(panicked.join().unwrap().unwrap_err().contains("panicked"));
+    assert!(panicked.join().is_none());
+
+    let worker_tail = Arc::new(AtomicUsize::new(0));
+    let tail = Dropped(worker_tail.clone());
+    let (entered, ready) = mpsc::sync_channel(1);
+    let (release, gate) = mpsc::sync_channel(1);
+    let owner = NativeCatalog::spawn_prepared(move |_| {
+        let _tail = tail;
+        entered.send(()).unwrap();
+        gate.recv_timeout(WAIT).map_err(|error| error.to_string())?;
+        Ok(())
+    })
+    .unwrap();
+    ready.recv_timeout(WAIT).unwrap();
+    let control = owner.control.clone();
+    assert_eq!(worker_tail.load(Ordering::SeqCst), 0);
+    release.send(()).unwrap();
+    drop(owner);
+    assert!(control.is_cancelled());
+    assert!(control.checkpoint().is_err());
+    assert_eq!(worker_tail.load(Ordering::SeqCst), 1);
+}
