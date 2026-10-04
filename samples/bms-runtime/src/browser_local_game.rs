@@ -59,6 +59,7 @@ pub(crate) struct BrowserLocalMember {
     pub(crate) recent: Vec<JudgeEvent>,
     pub(crate) pressed: u32,
     pub(crate) saved_hud: SavedOpponentHud,
+    pub(crate) peer_admitted: bool,
     opponents: Option<SavedOpponents>,
     opponent_error: Option<String>,
     source: Option<DeviceId>,
@@ -70,6 +71,10 @@ impl BrowserLocalMember {
     /// Admission is setup-only. Failed presentation keeps this reserved space
     /// so a configured touch field never moves during gameplay.
     pub(crate) fn comparison_height(&self) -> i64 {
+        self.saved_comparison_height() + if self.peer_admitted { 28 } else { 0 }
+    }
+
+    pub(crate) fn saved_comparison_height(&self) -> i64 {
         self.opponents
             .as_ref()
             .map_or(0, |opponents| opponents.count() as i64 * 14)
@@ -152,6 +157,7 @@ impl BrowserLocalGame {
                 recent,
                 pressed: 0,
                 saved_hud: SavedOpponentHud::default(),
+                peer_admitted: false,
                 opponents: None,
                 opponent_error: None,
                 pressed_owners: PressedKeys::default(),
@@ -307,6 +313,11 @@ impl BrowserLocalGame {
             .iter()
             .position(|member| member.player == PlayerId(player))
             .ok_or_else(|| error("unknown local player"))?;
+        if self.members[index].touch_regions.is_some() {
+            return Err(error(
+                "saved opponents must be admitted before touch configuration",
+            ));
+        }
         let source = self
             .opponent_source
             .as_ref()
@@ -411,6 +422,65 @@ impl BrowserLocalGame {
             .get_or_insert_with(|| "saved opponent presentation is disabled".into());
         Ok(())
     }
+
+    /// Reserve one peer display before the member's touch geometry is fixed.
+    /// Admission does not create a network connection or advance gameplay.
+    pub fn configure_peer_hud(&mut self, player: u32) -> Result<(), JsValue> {
+        let member = self
+            .members
+            .iter_mut()
+            .find(|member| member.player == PlayerId(player))
+            .ok_or_else(|| error("unknown local player"))?;
+        if !self.game.input_setup_available() || self.opponent_source.is_none() {
+            return Err(error(
+                "peer display must be admitted before activation or gameplay",
+            ));
+        }
+        if member.touch_regions.is_some() {
+            return Err(error(
+                "peer display must be admitted before touch configuration",
+            ));
+        }
+        if member.peer_admitted || member.saved_hud.peer_failed() {
+            return Err(error("peer display is already admitted or disabled"));
+        }
+        member.saved_hud.update_peer(0, &[]).map_err(error)?;
+        member.peer_admitted = true;
+        Ok(())
+    }
+
+    /// Update only the named member using the common peer-prefix validation.
+    pub fn update_peer_hud(
+        &mut self,
+        player: u32,
+        status: u32,
+        words: Vec<u32>,
+    ) -> Result<(), JsValue> {
+        let member = self
+            .members
+            .iter_mut()
+            .find(|member| member.player == PlayerId(player))
+            .ok_or_else(|| error("unknown local player"))?;
+        if !member.peer_admitted {
+            return Err(error("local player's peer display has not been admitted"));
+        }
+        member.saved_hud.update_peer(status, &words).map_err(error)
+    }
+
+    /// Hide only this member's peer prefix while retaining its reserved space.
+    pub fn disable_peer_hud(&mut self, player: u32) -> Result<(), JsValue> {
+        let member = self
+            .members
+            .iter_mut()
+            .find(|member| member.player == PlayerId(player))
+            .ok_or_else(|| error("unknown local player"))?;
+        if !member.peer_admitted {
+            return Err(error("local player's peer display has not been admitted"));
+        }
+        member.saved_hud.mark_peer_failed();
+        Ok(())
+    }
+
     pub fn configure_touch_regions(
         &mut self,
         player: u32,

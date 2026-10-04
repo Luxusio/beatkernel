@@ -56,8 +56,8 @@ pub fn local_field_bounds_with_comparison_space(
     space: i64,
 ) -> Result<[i64; 4], String> {
     let [x, y, width, height] = local_field_bounds(count, slot)?;
-    if space < 0 || space > 112 || space >= height {
-        return Err("invalid reserved local saved comparison space".into());
+    if space < 0 || space > 140 || space >= height {
+        return Err("invalid reserved local comparison space".into());
     }
     Ok([x, y + space, width, height - space])
 }

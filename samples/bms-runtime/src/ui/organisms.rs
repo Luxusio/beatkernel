@@ -352,7 +352,26 @@ pub fn competition_summary(
     snapshot: &CompetitionSnapshot,
     bounds: Bounds,
 ) -> Result<(), String> {
+    competition_summary_with_peer_offset(scene, snapshot, bounds, None)
+}
+
+fn competition_summary_with_peer_offset(
+    scene: &mut Scene,
+    snapshot: &CompetitionSnapshot,
+    bounds: Bounds,
+    peer_offset: Option<i64>,
+) -> Result<(), String> {
     let required = competition_height(snapshot, bounds.width)?;
+    let required = if let Some(offset) = peer_offset {
+        if offset < required - 28 {
+            return Err("peer display overlaps recorded opponent rows".into());
+        }
+        offset
+            .checked_add(28)
+            .ok_or("peer display row extent overflow")?
+    } else {
+        required
+    };
     let [width, height] = scene.dimensions();
     if bounds.x < 0
         || bounds.y < 0
@@ -364,12 +383,20 @@ pub fn competition_summary(
         return Err("competition summary bounds do not fit all opponent rows".into());
     }
     let wide = bounds.width >= 44 * 6;
-    let mut y = bounds.y;
+    let ghost_rows = snapshot.ghosts.len() as i64 * if wide { 2 } else { 3 };
+    let mut row_index = 0;
     let mut row = |value: &str, color| {
+        let offset = if row_index >= ghost_rows {
+            peer_offset.map_or(row_index * 7, |offset| {
+                offset + (row_index - ghost_rows) * 7
+            })
+        } else {
+            row_index * 7
+        };
         clipped_text(
             scene,
             Bounds {
-                y,
+                y: bounds.y + offset,
                 height: 7,
                 ..bounds
             },
@@ -377,7 +404,7 @@ pub fn competition_summary(
             1,
             color,
         );
-        y += 7;
+        row_index += 1;
     };
     for ghost in &snapshot.ghosts {
         let kind = match ghost.kind {
@@ -528,7 +555,7 @@ pub fn local_player_views_with_background(
     local_player_views_with_background_impl(scene, players, lookahead, page, show, frames, None)
 }
 
-/// Fixed saved-comparison reservations preserve contact geometry across HUD failure.
+/// Fixed comparison reservations preserve contact geometry across HUD failure.
 #[allow(clippy::too_many_arguments)]
 pub fn local_player_views_with_reserved_comparison_space(
     scene: &mut Scene,
@@ -598,7 +625,7 @@ fn local_player_views_with_background_impl(
                 0
             };
             if required > space {
-                return Err("saved comparison exceeds its fixed reservation".into());
+                return Err("comparison exceeds its fixed reservation".into());
             }
         }
         if let (Some(chart), Some(now)) = (player.chart, player.song_time) {
@@ -662,7 +689,17 @@ fn local_player_views_with_background_impl(
         let summary_height =
             reserved.map_or(summary_height, |spaces| spaces[visible.start + index]);
         if let Some(snapshot) = comparisons {
-            competition_summary(scene, snapshot, line(72, summary_height))?;
+            // A failed saved display clears its rows, but the admitted peer
+            // remains below their immutable reservation.
+            let peer_offset = reserved
+                .filter(|_| snapshot.network.is_some())
+                .map(|_| summary_height - 28);
+            competition_summary_with_peer_offset(
+                scene,
+                snapshot,
+                line(72, summary_height),
+                peer_offset,
+            )?;
         }
         let field_offset = 72 + summary_height;
         let [field_x, field_y, field_width, field_height] =

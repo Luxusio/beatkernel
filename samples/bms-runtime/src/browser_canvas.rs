@@ -175,19 +175,34 @@ impl BrowserCanvas {
         )?;
         for (slot, index) in visible.enumerate() {
             let member = &game.members[index];
-            if member.saved_hud.failed() && member.comparison_height() > 0 {
+            let saved_space = member.saved_comparison_height();
+            let saved_failed = member.saved_hud.failed() && saved_space > 0;
+            let peer_failed = member.peer_admitted && member.saved_hud.peer_failed();
+            if saved_failed || peer_failed {
                 let [x, y, _, _] = crate::playfield_layout::local_panel_bounds(
                     (count - first).min(page_size),
                     slot,
                 )?;
-                atoms::text(
-                    &mut self.scene,
-                    (x + 10) as usize,
-                    (y + 72) as usize,
-                    "SAVED COMPARISONS UNAVAILABLE",
-                    1,
-                    0xff8e8e,
-                );
+                if saved_failed {
+                    atoms::text(
+                        &mut self.scene,
+                        (x + 10) as usize,
+                        (y + 72) as usize,
+                        "SAVED COMPARISONS UNAVAILABLE",
+                        1,
+                        0xff8e8e,
+                    );
+                }
+                if peer_failed {
+                    atoms::text(
+                        &mut self.scene,
+                        (x + 10) as usize,
+                        (y + 72 + saved_space) as usize,
+                        "PEER DISPLAY UNAVAILABLE",
+                        1,
+                        0xff8e8e,
+                    );
+                }
             }
         }
         self.renderer.render(&self.scene)
