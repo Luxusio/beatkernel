@@ -2229,3 +2229,46 @@ ingestion and live/replay/competition integration remain separate required
 work. Independent deferred fixtures pin literal core-layout packets, full-width
 identities, modes/button states, distinct namespaces, immutable snapshots and
 refusals. Execution and end-to-end input acceptance remain deferred.
+
+## Worker pointer setup and canonical ingestion
+
+Add `pointer-profile.mjs` export `snapshotPointerSetup` for explicit numeric
+live physical `play-start.pointerSetup`. Snapshot one to 64 unique device
+descriptors `{source, pointerType}` (mouse/pen, full u64 source at least 3) and
+one to 256 complete four-word `bindingWords` rows in fixed ordinary Uint32
+storage: lane, source low word, source high word, native control. Control 0 is
+position/displacement; controls 1 through 32 are pointer buttons. Require valid
+lanes, an owned descriptor, and no repeated source/control identity (one physical
+control cannot target multiple lanes). Reject detached/resizable/foreign storage
+and preserve full source bits. Return owned bindingWords and seven-word exact
+Native physicalWords, frozen descriptors/sources, and press-capable lane coverage
+derived only from nonzero button controls. Position bindings do not prove press
+coverage. Devices and arrays in the caller cannot alter the snapshot.
+
+Worker accepts this setup only for live physical/physical-contact play, validates
+before consuming a prepared chart, checks source disjointness with actual HID
+and Gamepad admission, and includes rows in the existing combined 256-binding
+budget. Add exact physical rows to the existing solo/local constructors. Each
+local player's press coverage must be checked without pointer position rows;
+unassigned configured pointer sources must not gain local admission. Report
+only actually admitted `{source,pointerType}` descriptors as `pointerDevices`
+in the correlated prepared receipt. Replay must refuse live pointer setup.
+
+The existing bounded mixed batch accepts kind pointer or pointer-button only
+from an admitted source with its exact registered pointerType. Position events
+require control 0; button events require a mapped control 1 through 32. Use the
+actual canonical encoders, retain original HOST time/source/sequence/mode and
+independent native event code, and apply existing whole-batch validation,
+per-source chronology, global watermark and 256-event fanout rules before the
+first Runtime call. Dispatch through the same `input_blob` method as other
+canonical events for solo and local ownership. Disposal clears pointer admission.
+No OS-specific judgment, replay, saved-opponent or room protocol is added.
+
+This step establishes the actual Worker boundary; Window acquisition, source
+allocation, UI/profile selection and launch forwarding still need integration.
+Position samples retain their real type; ordinary BMS tap notes do not acquire
+position-based judgment automatically. Only events routed by actual bindings
+enter the existing capture path. Independent deferred fixtures cover model
+limits/ownership, solo and exact local construction, actual packet dispatch,
+whole-batch refusals, source collisions, replay refusal and cleanup. Browser,
+device, replay execution and latency acceptance remain deferred.
