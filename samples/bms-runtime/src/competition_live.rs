@@ -1,6 +1,7 @@
 //! Shared native application flags and observation outside the audio callback.
 use crate::{
     competition::{Competition, OpponentKind},
+    input_sounds::InputSoundIdentity,
     local_players::PlayerId,
     multiplayer::{
         MultiplayerEvent, MultiplayerNotice, MultiplayerOptions, Progress,
@@ -20,7 +21,7 @@ use beatkernel::{
     runtime::RuntimeReport,
     time::{ClockDomainId, Timestamp},
 };
-use beatkernel_bms::{BmsChart, ParseOptions, parse_seeded};
+use beatkernel_bms::{BmsChart, BmsInputMode, ParseOptions, parse_seeded};
 use std::{
     fs::File,
     net::SocketAddr,
@@ -496,8 +497,17 @@ impl LiveCompetition {
             return Ok(None);
         }
         let limits = replay_limits()?;
-        let capture =
-            LiveReplayCapture::new_at_with_chart_seed(judge, domain, limits, start, chart_seed)?;
+        let input_sounds = InputSoundIdentity::from_source(source)?;
+        let capture = LiveReplayCapture::new_with_input_sounds(
+            judge,
+            domain,
+            limits,
+            start,
+            chart_seed,
+            None,
+            BmsInputMode::ButtonOnly,
+            input_sounds,
+        )?;
         let header = capture.header().clone();
         let network_end = if options.network.is_some() { end } else { None };
         let identity = competition_identity_for_section(

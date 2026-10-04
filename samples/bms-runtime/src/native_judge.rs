@@ -1,7 +1,7 @@
 //! Stage-separated native judge, completion and optional capture policy.
 use crate::{
-    PreparedBms, completion::SongCompletion, native_gameplay::NativeGameplayResult,
-    replay_capture::LiveReplayCapture,
+    PreparedBms, completion::SongCompletion, input_sounds::InputSoundIdentity,
+    native_gameplay::NativeGameplayResult, replay_capture::LiveReplayCapture,
 };
 use beatkernel::{
     input::CodecLimits,
@@ -9,6 +9,7 @@ use beatkernel::{
     replay::codec::ReplayCodecLimits,
     time::{ClockDomainId, Duration, Timestamp},
 };
+use beatkernel_bms::{BmsChart, BmsInputMode};
 
 pub struct NativeJudgeConfig {
     pub early: i64,
@@ -78,6 +79,32 @@ pub fn prepare_capture(
             )?)
         })
         .transpose()
+}
+
+/// Captures the actual selected source identity at the same native setup stage.
+/// Disabled recording does not validate unused invisible source metadata.
+pub fn prepare_capture_for_source(
+    source: &BmsChart,
+    judge: &JudgeEngine,
+    domain: ClockDomainId,
+    start: Timestamp,
+    chart_seed: u64,
+    limits: Option<ReplayCodecLimits>,
+) -> NativeGameplayResult<Option<LiveReplayCapture>> {
+    let Some(limits) = limits else {
+        return Ok(None);
+    };
+    let identity = InputSoundIdentity::from_source(source)?;
+    Ok(Some(LiveReplayCapture::new_with_input_sounds(
+        judge,
+        domain,
+        limits,
+        start,
+        chart_seed,
+        None,
+        BmsInputMode::ButtonOnly,
+        identity,
+    )?))
 }
 
 #[cfg(test)]

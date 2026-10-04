@@ -3,6 +3,7 @@
 
 use crate::{
     competition_live::{CompetitionOptions, replay_limits},
+    input_sounds::InputSoundIdentity,
     local_players::PlayerId,
     local_runtime::MemberConfig,
     multiplayer::{
@@ -16,7 +17,7 @@ use crate::{
     replay_capture::LiveReplayCapture,
 };
 use beatkernel::time::{ClockDomainId, ClockPoint, Timestamp};
-use beatkernel_bms::BmsChart;
+use beatkernel_bms::{BmsChart, BmsInputMode};
 use std::time::{Duration, Instant};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -382,7 +383,7 @@ fn member_roster(
     Ok(players)
 }
 
-fn canonical_identity(
+pub(crate) fn canonical_identity(
     options: &CompetitionOptions,
     source: &BmsChart,
     members: &[MemberConfig],
@@ -395,14 +396,18 @@ fn canonical_identity(
     member_roster(members, start, end, preroll)?;
     options.start_policy.validate()?;
     let limits = replay_limits()?;
+    let input_sounds = InputSoundIdentity::from_source(source)?;
     let mut identity = None;
     for member in members {
-        let capture = LiveReplayCapture::new_at_with_chart_seed(
+        let capture = LiveReplayCapture::new_with_input_sounds(
             &member.judge,
             domain,
             limits,
             start,
             chart_seed,
+            None,
+            BmsInputMode::ButtonOnly,
+            input_sounds,
         )?;
         let current = competition_identity_for_section(
             capture.header(),

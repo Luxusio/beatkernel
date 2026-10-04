@@ -495,7 +495,7 @@ mod native {
     use beatkernel_bms_runtime::{
         ChannelPolicy,
         native_chart::{NativeChartConfig, prepare_chart},
-        native_judge::{NativeJudgeConfig, capture_limits, prepare_capture},
+        native_judge::{NativeJudgeConfig, capture_limits, prepare_capture_for_source},
         playback_pause::NativePause,
         player::{self},
     };
@@ -864,7 +864,8 @@ mod native {
         let mut capture = None;
         let mut startup_inputs = VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
         let outcome = (|| -> Result<()> {
-            capture = prepare_capture(
+            capture = prepare_capture_for_source(
+                &prepared.source,
                 &judge,
                 HOST,
                 Timestamp::from_nanos(options.start_ns),

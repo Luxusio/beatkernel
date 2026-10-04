@@ -744,7 +744,7 @@ mod native {
     use beatkernel_bms_runtime::{
         ChannelPolicy,
         native_chart::{NativeChartConfig, prepare_chart},
-        native_judge::{NativeJudgeConfig, capture_limits, prepare_capture},
+        native_judge::{NativeJudgeConfig, capture_limits, prepare_capture_for_source},
     };
     use beatkernel_bms_runtime::{
         playback_pause::NativePause,
@@ -1497,7 +1497,8 @@ mod native {
         let startup_selection =
             selected.map(|(id, handle)| (beatkernel::input::DeviceId(id), handle));
         let outcome = (|| -> Result<()> {
-            capture = prepare_capture(
+            capture = prepare_capture_for_source(
+                &prepared.source,
                 &judge,
                 HOST,
                 Timestamp::from_nanos(options.start_ns),

@@ -11,7 +11,7 @@ use crate::{
     native_cohort::{PlayerState, member_progress, replay_path},
     native_group_competition::NativeGroupCompetition,
     native_gameplay::NativeGameplayResult,
-    native_judge::{NativeJudgeConfig, capture_limits, prepare_capture},
+    native_judge::{NativeJudgeConfig, capture_limits, prepare_capture_for_source},
     replay_capture::LiveReplayCapture,
 };
 use beatkernel::{
@@ -140,7 +140,8 @@ pub fn prepare_cohort(
             .record_replay
             .map(|path| replay_path(path, player))
             .transpose()?;
-        let capture = prepare_capture(
+        let capture = prepare_capture_for_source(
+            &prepared.source,
             &member.judge,
             config.host,
             config.start,
