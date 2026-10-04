@@ -1392,7 +1392,7 @@ async function play(mode = "live") {
     pointerOwner: retained.pointerOwner, pointerDevices: retained.pointerDevices, pointerSelection: retained.pointerSelection,
     hidOwner: retained.hidOwner, hidDevices: retained.hidDevices } : {};
   const session = Object.assign(retained ?? {}, { id: ++serial, owner, mode, phase: "preparing", controller: new AbortController(), audio: null, opening: null,
-    rpc: null, timer: null, events: [], pressed: new Set(), bindings: [], sequence: 0n, nextSource: 3n, inputPumping: false,
+    rpc: null, timer: null, events: [], pressed: new Set(), bindings: [], sequence: 0n, nextSource: 3n, inputPumping: false, keyAcquiring: false,
     canvas, touchInput: false, contacts: new Map(), nextContact: 0n,
     hidOwner: null, hidConnecting: null, hidDevices: null, hidSources: null, hidProfileFile: null,
     gamepadOwner: null, gamepadDevices: null, gamepadSources: null, gamepadProfileFile: null,
@@ -1729,23 +1729,58 @@ async function play(mode = "live") {
 
 function key(event, down) {
   const session = activePlay;
-  if (!session || session.phase === "closing") return;
-  if (event.code === "Escape" && down) { event.preventDefault(); void stopPlay("Playback stopped."); return; }
-  if (session.localSources && !session.localSources.has(1n)) return;
-  if (session.phase !== "playing") return;
-  const binding = session.bindings.find(row => row[1] === event.code);
-  if (!binding) return;
-  event.preventDefault();
-  if (event.repeat || (down && session.pressed.has(event.code)) || (!down && !session.pressed.has(event.code))) return;
+  if (!session || session.owner !== owner || session.phase === "closing" || session.keyAcquiring) return;
+  const current = () => activePlay === session && session.owner === owner && session.phase !== "closing";
+  const live = () => current() && session.mode === "live" && session.phase === "playing"
+    && (!session.localSources || session.localSources.has(1n));
+  // Native getters/callbacks may synchronously dispatch another key before the
+  // outer pressed-state commit. Ignore that nested event for this owner only.
+  session.keyAcquiring = true;
   try {
+    const code = event.code;
+    if (!current()) return;
+    if (code === "Escape" && down) {
+      const preventDefault = event.preventDefault;
+      if (!current()) return;
+      if (typeof preventDefault !== "function") throw new Error("Keyboard event cannot prevent its default action.");
+      preventDefault.call(event);
+      if (current()) void stopPlay("Playback stopped.");
+      return;
+    }
+    if (!live()) return;
+    const binding = session.bindings.find(row => row[1] === code);
+    if (!binding) return;
+    const preventDefault = event.preventDefault;
+    if (!live()) return;
+    if (typeof preventDefault !== "function") throw new Error("Keyboard event cannot prevent its default action.");
+    preventDefault.call(event);
+    if (!live()) return;
+    const repeat = event.repeat;
+    if (!live()) return;
+    if (repeat || (down && session.pressed.has(code)) || (!down && !session.pressed.has(code))) return;
     if (session.events.length >= 1024) throw new Error("Pending keyboard input capacity exceeded.");
-    const hostNs = millisecondsToNanos(event.timeStamp);
+    const timestamp = event.timeStamp;
+    if (!live()) return;
+    const hostNs = millisecondsToNanos(timestamp);
     if (hostNs < session.lastHost) throw new Error("Keyboard input arrived behind the accepted gameplay watermark.");
-    if (down) session.pressed.add(event.code); else session.pressed.delete(event.code);
-    session.events.push({ hostNs, key: binding[2], down, sequence: nextInputSequence(session) });
+    const sequence = nextInputSequence(session);
+    if (!live()) return;
+    if (typeof sequence !== "bigint" || sequence <= 0n || sequence > 18446744073709551615n) throw new Error("Invalid keyboard acquisition sequence.");
+    // Reentrant acquisition by other sources may have filled the shared queue
+    // or advanced its frontier at an earlier native boundary.
+    if (session.events.length >= 1024) throw new Error("Pending keyboard input capacity exceeded.");
+    if (hostNs < session.lastHost) throw new Error("Keyboard input arrived behind the accepted gameplay watermark.");
+    const sample = Object.freeze({ hostNs, key: binding[2], down, sequence });
+    if (down) session.pressed.add(code); else session.pressed.delete(code);
+    session.events.push(sample);
     session.completionReady = false;
     pumpInput(session);
-  } catch (error) { void stopPlay(`Playback failed: ${error.message}`, true); }
+  } catch (error) {
+    if (!current()) return;
+    let detail = "Keyboard acquisition failed.";
+    try { detail = String(error?.message ?? error).slice(0, 4096); } catch {}
+    if (current()) void stopPlay(`Playback failed: ${detail}`, true);
+  } finally { session.keyAcquiring = false; }
 }
 
 function finiteTouchSample(value) {

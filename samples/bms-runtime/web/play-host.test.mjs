@@ -98,6 +98,30 @@ function settingsDraft(h) {
   return [...settingsFields.map(([, , id]) => [id, h.get(id).value]),
     ...portableSettings().bindings.map(([lane]) => [`binding-${lane.toString(16)}`, h.get(`binding-${lane.toString(16)}`).value])];
 }
+function dispatchKeyboard(h, type, event) {
+  // Events.emit spreads its fields; call the actual registered handler so native
+  // accessor side effects happen inside acquisition, not in the DOM fixture.
+  const handlers = [...(h.window.listeners.get(type) ?? [])];
+  assert.equal(handlers.length, 1);
+  handlers[0].call(h.window, event);
+}
+function observedKeyboard(values = {}, effects = {}) {
+  const fields = { code: "KeyZ", repeat: false, timeStamp: 1300.125, ...values };
+  const reads = { code: 0, repeat: 0, timeStamp: 0, preventDefault: 0 };
+  let calls = 0;
+  const event = {};
+  for (const field of ["code", "repeat", "timeStamp"]) Object.defineProperty(event, field, { get() {
+    assert.equal(++reads[field], 1, `${field} is acquired once`);
+    const value = fields[field]; effects[field]?.(); return value;
+  } });
+  Object.defineProperty(event, "preventDefault", { get() {
+    assert.equal(++reads.preventDefault, 1);
+    effects.preventDefault?.();
+    return function () { assert.equal(this, event); assert.equal(++calls, 1); effects.call?.(); };
+  } });
+  Object.defineProperty(event, "key", { get() { assert.fail("physical binding does not read the layout-dependent key"); } });
+  return { event, fields, reads, get calls() { return calls; } };
+}
 function chooseSettings(h, size = 128) {
   const file = new File(["settings bytes remain Worker-owned"], "portable-settings.json");
   Object.defineProperty(file, "size", { value: size });
@@ -4665,6 +4689,137 @@ test("section draft and preparation errors stay recoverable while replay uses on
   assert.equal(draft.value, "invalid live start");
   assert.equal(draft.disabled, false);
   await h.close();
+});
+
+test("keyboard acquisition snapshots native fields once and ignored or reentrant keys consume no shared input sequence", async () => {
+  const h = await harness({ pointerSupported: true }); await h.preview(); enablePointers(h);
+  const session = await h.launch(), worker = h.workers[0]; h.setNow(1301);
+  const display = watchPlayDisplay(h), layout = h.layoutReads;
+  const ignoredTimestamp = () => { assert.fail("ignored keyboard input must not acquire a timestamp"); };
+  const unbound = observedKeyboard({ code: "F24" }, {
+    repeat() { assert.fail("unbound code has no repeat acquisition"); }, timeStamp: ignoredTimestamp,
+    preventDefault() { assert.fail("unbound code retains browser behavior"); },
+  });
+  dispatchKeyboard(h, "keydown", unbound.event);
+  assert.deepEqual(unbound.reads, { code: 1, repeat: 0, timeStamp: 0, preventDefault: 0 });
+  const repeat = observedKeyboard({ repeat: true }, { timeStamp: ignoredTimestamp });
+  const unmatched = observedKeyboard({}, { timeStamp: ignoredTimestamp });
+  dispatchKeyboard(h, "keydown", repeat.event); dispatchKeyboard(h, "keyup", unmatched.event);
+  assert.equal(repeat.reads.repeat, 1); assert.equal(unmatched.reads.repeat, 1);
+  assert.equal(worker.messages("play-step").length, 0);
+  const down = observedKeyboard({}, { repeat() {
+    down.fields.code = "KeyX"; // Changing the native object cannot redirect the acquired code.
+    dispatchKeyboard(h, "keydown", { get code() { assert.fail("same-owner synchronous key reentry is ignored before reading fields"); } });
+  }, timeStamp() { down.fields.timeStamp = 9999; } });
+  dispatchKeyboard(h, "keydown", down.event);
+  assert.deepEqual(down.reads, { code: 1, repeat: 1, timeStamp: 1, preventDefault: 1 }); assert.equal(down.calls, 1);
+  const first = worker.last("play-step");
+  assert.deepEqual(first.events, [{ hostNs: 1300125000n, key: 2, down: true, sequence: 1n }]);
+  const duplicate = observedKeyboard({}, { timeStamp: ignoredTimestamp });
+  dispatchKeyboard(h, "keydown", duplicate.event);
+  h.get("canvas").emit("pointerdown", nativePointer({ timeStamp: 1300.25 }));
+  const up = observedKeyboard({ timeStamp: 1300.5 }, { call() {
+    dispatchKeyboard(h, "keyup", { get code() { assert.fail("preventDefault cannot recursively release the same pressed key"); } });
+  } });
+  dispatchKeyboard(h, "keyup", up.event);
+  dispatchKeyboard(h, "keyup", observedKeyboard({}, { timeStamp: ignoredTimestamp }).event);
+  assert.deepEqual(up.reads, { code: 1, repeat: 1, timeStamp: 1, preventDefault: 1 });
+  assert.equal(worker.messages("play-step").length, 1);
+  await pointerStepDone(h, first);
+  const mixed = worker.last("play-step");
+  assert.deepEqual(mixed.events.map(row => [row.kind ?? "keyboard", row.sequence, row.hostNs]), [
+    ["pointer", 2n, 1300250000n], ["pointer-button", 3n, 1300250000n], ["keyboard", 4n, 1300500000n],
+  ]);
+  assert.deepEqual(mixed.events[2], { hostNs: 1300500000n, key: 2, down: false, sequence: 4n });
+  await pointerStepDone(h, mixed);
+  dispatchKeyboard(h, "keydown", observedKeyboard({ timeStamp: 1300.75 }).event);
+  const again = worker.last("play-step");
+  assert.deepEqual(again.events, [{ hostNs: 1300750000n, key: 2, down: true, sequence: 5n }]);
+  await pointerStepDone(h, again);
+  assert.equal(h.layoutReads, layout); assert.deepEqual(display, []);
+  h.click("stop"); await flush(); await h.receive(finalScore(session.id)); await h.close();
+});
+
+test("keyboard getter and preventDefault retirement discards the old event and cannot poison a replacement pressed state", async () => {
+  for (const boundary of ["code", "preventDefault", "call", "repeat", "timeStamp"]) {
+    const h = await harness(); await h.preview(); const old = await h.launch(), worker = h.workers[0]; h.setNow(1301);
+    const probe = observedKeyboard({}, { [boundary]() { h.click("stop"); } });
+    dispatchKeyboard(h, "keydown", probe.event); await flush();
+    assert.equal(worker.messages("play-step").length, 0, `${boundary} cancellation admits no old input`);
+    assert.equal(worker.messages("play-stop").length, 1); assert.equal(worker.last("play-stop").playId, old.id);
+    assert.equal(probe.reads.code, 1);
+    if (boundary === "code") assert.equal(probe.reads.preventDefault, 0);
+    if (boundary === "preventDefault") assert.equal(probe.calls, 0, "a getter that retires the owner cannot authorize its returned callback");
+    if (boundary !== "timeStamp") assert.equal(probe.reads.timeStamp, 0);
+    await h.receive(finalScore(old.id));
+    const fresh = await h.launch();
+    const unmatched = observedKeyboard({}, { timeStamp() { assert.fail("old cancelled Down did not become a replacement press"); } });
+    dispatchKeyboard(h, "keyup", unmatched.event);
+    dispatchKeyboard(h, "keydown", observedKeyboard({ timeStamp: 1301 }).event);
+    const first = worker.last("play-step");
+    assert.equal(first.playId, fresh.id);
+    assert.deepEqual(first.events, [{ hostNs: 1301000000n, key: 2, down: true, sequence: 1n }]);
+    await pointerStepDone(h, first);
+    h.click("stop"); await flush(); await h.receive(finalScore(fresh.id)); await h.close();
+  }
+  for (const boundary of ["code", "call"]) {
+    const h = await harness(); await h.preview(); const old = await h.launch(), oldWorker = h.workers[0];
+    let formatted = 0;
+    const retiredError = { get message() { formatted++; return "obsolete native failure"; } };
+    const probe = observedKeyboard({}, { [boundary]() {
+      h.window.emit("pagehide"); h.window.emit("pageshow", { persisted: true }); throw retiredError;
+    } });
+    dispatchKeyboard(h, "keydown", probe.event); await flush();
+    assert.equal(formatted, 0, "a retired native exception cannot invoke diagnostics against replacement ownership");
+    assert.equal(oldWorker.messages("play-step").length, 0); assert.equal(oldWorker.terminations, 1);
+    assert.equal(h.workers.length, 2); await h.preview(); const fresh = await h.launch(), current = h.workers[1];
+    await h.receive(finalScore(old.id), oldWorker);
+    assert.equal(current.messages("play-stop").length, 0);
+    dispatchKeyboard(h, "keydown", observedKeyboard().event);
+    assert.deepEqual(current.last("play-step").events, [{ hostNs: 1300125000n, key: 2, down: true, sequence: 1n }]);
+    h.click("stop"); await flush(); await h.receive(finalScore(fresh.id)); await h.close();
+  }
+});
+
+test("keyboard mode and source gates avoid gameplay fields while malformed current acquisition stops without a partial event", async () => {
+  const denied = () => { assert.fail("ineligible keyboard event must not read gameplay or prevention fields"); };
+  for (const mode of ["preparing", "replay", "unassigned"]) {
+    const h = await harness({ pointerSupported: true }); await h.preview();
+    if (mode === "replay") chooseRecording(h, [selectedRecording().file]);
+    if (mode === "unassigned") {
+      enablePointers(h); await localCount(h, 2); h.click("local-discover"); await flush();
+      const choices = h.get("local-source-1").children;
+      localAssign(h, 1, BigInt(choices.find(row => /mouse/i.test(row.textContent)).value));
+      localAssign(h, 2, BigInt(choices.find(row => /pen/i.test(row.textContent)).value));
+    }
+    const start = mode === "preparing" ? await h.begin() : (await h.launch(0, mode === "replay" ? "replay" : "live")).start;
+    const worker = h.workers[0];
+    for (const type of ["keydown", "keyup"]) {
+      const event = observedKeyboard({}, { repeat: denied, timeStamp: denied, preventDefault: denied });
+      dispatchKeyboard(h, type, event.event);
+      assert.deepEqual(event.reads, { code: 1, repeat: 0, timeStamp: 0, preventDefault: 0 });
+    }
+    assert.equal(worker.messages("play-step").length, 0);
+    const escape = observedKeyboard({ code: "Escape" }, { repeat: denied, timeStamp: denied });
+    dispatchKeyboard(h, "keydown", escape.event); await flush();
+    assert.equal(escape.calls, 1); assert.equal(escape.reads.code, 1); assert.equal(worker.last("play-stop").playId, start.playId);
+    await h.receive(mode === "unassigned" ? localFinal(start) : finalScore(start.playId)); await h.close();
+  }
+  for (const failure of ["code", "repeat", "timeStamp", "preventDefault", "call", "negative", "nonfinite", "behind"]) {
+    const h = await harness(); await h.preview(); const session = await h.launch(), worker = h.workers[0]; h.setNow(1301);
+    if (failure === "behind") {
+      dispatchKeyboard(h, "keydown", observedKeyboard({ timeStamp: 1301 }).event);
+      await pointerStepDone(h, worker.last("play-step"));
+    }
+    const before = worker.messages("play-step").length;
+    const fields = { timeStamp: failure === "negative" ? -1 : failure === "nonfinite" ? NaN : 1300.125 };
+    const effects = ["code", "repeat", "timeStamp", "preventDefault", "call"].includes(failure)
+      ? { [failure]() { throw new Error(`native ${failure} refused`); } } : {};
+    dispatchKeyboard(h, failure === "behind" ? "keyup" : "keydown", observedKeyboard(fields, effects).event); await flush();
+    assert.equal(worker.messages("play-step").length, before); assert.equal(worker.messages("play-stop").length, 1);
+    assert.equal(worker.last("play-stop").playId, session.id);
+    await h.receive(finalScore(session.id)); await h.close();
+  }
 });
 
 test("one pre-audio binding snapshot supplies Worker pairs, displayed keys and physical Down Up events", async () => {
