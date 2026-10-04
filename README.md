@@ -1075,6 +1075,15 @@ final-prefix flags remain distinct from verified rankings. See the
 [retained Results contract](doc/changes/CHANGE__native-room-results.md).
 Results GUI interaction remains unverified.
 
+Browser room Results uses the same portable archive model after actual room
+drain/close joins. Its gameplay binding is freed through the existing stop path;
+the Worker retains a separate Results binding and draws the selected score page
+on OffscreenCanvas. Window receives page metadata and correlated button replies
+only. New play, import or preview selection releases the previous archive and
+fences old replies, while display failure preserves the actual cleanup/replay
+outcome. See the [browser Results contract](doc/changes/CHANGE__browser-room-results.md).
+Generated bindings, browser interaction and performance acceptance are pending.
+
 
 Browser saved-opponent competition uses the common replay judge and a bounded
 portable owner. The page selects local stored or imported recordings as Own/Other

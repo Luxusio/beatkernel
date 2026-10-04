@@ -1,5 +1,33 @@
 # Browser host and shared selected-file preparation
 
+## Worker-owned retained room Results
+
+After actual room drain/close joins, retain at most one bounded immutable archive
+of the prepared qualified remote roster and its last accepted reported prefixes.
+Reuse the portable native Results model and original full-width identities,
+missing values, final-prefix flags and error/cancellation evidence. Construct the
+archive after joined room cleanup from the actual retained owner state; do not
+retain or call the freed gameplay object. Retention cannot invent final/drain
+receipts, change replay completeness or hide cleanup failure.
+
+The Worker owns this Results binding and renders the selected cached score page
+through the existing OffscreenCanvas renderer on user events or required surface
+redraw. It must not reconstruct the complete archive per page or frame. Window
+retains only bounded page metadata and correlated requests, with no periodic
+score transfer or DOM game rendering. The existing previous/next controls browse
+Results locally after stop; Seal/Ready/Leave remain closed. Preserve the last
+live page, refuse invalid/stale requests atomically, and fence pending page
+requests from replacement play. Release the old archive exactly once on new
+play/import/preview replacement or terminal Worker failure; a retained result
+must not retain network/game/audio ownership.
+
+Binding/archive/render presentation failure is explicitly unavailable and does
+not change the already joined play outcome. Deferred fixture source covers
+portable word validation/freeze semantics, actual Worker disposal and late
+accepted prefix retention, correlated Window paging and replacement isolation.
+Browser/generated bindings/live TLS/device/performance acceptance remains
+unverified.
+
 ## Worker-owned multi-host score HUD
 
 Show accepted multi-host reported scores through the existing OffscreenCanvas
