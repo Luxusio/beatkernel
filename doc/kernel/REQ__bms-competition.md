@@ -702,7 +702,7 @@ execution; source compilation cannot establish acceptance.
 
 ## Multi-host room admission wire
 
-Room admission uses distinct BKMR version 1 frames; bilateral BKMP frames must
+Room admission and bounded clock/start control use distinct BKMR version 2 frames; bilateral BKMP frames must
 never be accepted as room messages. The bounded codec is shared by native QUIC
 and browser WebTransport adapters and carries canonical identity plus ordered
 local roster, assigned participant admission, ordered membership snapshots,
@@ -833,3 +833,38 @@ Actual probe/wire/server/client/Worker/page composition, genuine participant
 progress/final ACKs and native/browser interoperability remain required follow-up
 work. The component must not weaken the existing gameplay activation fence
 until a real committed schedule is composed into the output owner.
+
+
+## BKMR clock and software-start control framing
+
+BKMR version 2 retains the existing 11-byte header, admission tags 1..6 and
+65808-byte maximum frame. Reject version 1 explicitly; never reinterpret a
+bilateral BKMP frame as a room message. Control frames carry no caller-chosen
+participant or room key. Their stream's actual admitted lease owns that context.
+
+Tag 7 ClockPing has exactly 16 payload bytes: positive full-width u64 sequence
+and nonnegative i64 original local send time, little-endian. Tag 8 ClockPong has
+exactly 32 payload bytes: the same sequence, echoed send time, remote receive
+time and remote reply time. Remote receive must not exceed remote reply; all
+three timestamps are nonnegative. Do not compare local send and remote receive
+as though they belong to one clock. Correlation, complete writes, probe count,
+chronology at actual local receipt and ClockFilter admission belong to the real
+session owner, rather than the codec.
+
+Tags 9/10/11/12 carry ClockReady/Propose/Accept/Commit through the existing
+StartMessage type. Each has exactly one nonnegative i64 little-endian value:
+actual preroll for ClockReady, exact server song target for the other three.
+Zero is syntactically valid; the actual StartAgreement validates readiness,
+future margin, offset conversion, phase and exact echo. Encoding must validate
+a whole message before allocation. Decoding validates exact header tag/size
+before body allocation, rejects trailing bytes and retains malformed incremental
+state. Existing admission bounds, prefix ownership and coalesced remainder
+behavior remain intact.
+
+These frames establish a portable wire boundary for the common multi-host
+coordinator. They do not enable software start on their own. Admission-only
+server/client owners shall refuse them until real probe/start handling is
+composed; unexpected controls must not grant readiness, consume a different
+lease, or bypass the Worker's output activation fence. No remote ACK, physical
+synchronization, progress/final-ACK support or interoperability is inferred from
+codec or compile-only evidence.
