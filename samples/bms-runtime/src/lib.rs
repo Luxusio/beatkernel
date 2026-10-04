@@ -114,6 +114,10 @@ mod mp3_fixture;
 pub mod multiplayer;
 /// Checked software peer-clock offset intervals and deadline conversion.
 pub mod multiplayer_clock;
+/// Bounded exact whole-cohort progress payloads, independent of stream ownership.
+pub mod multiplayer_group;
+#[cfg(test)]
+mod multiplayer_group_fixtures;
 #[cfg(test)]
 mod multiplayer_identity_fixtures;
 /// Shared framed multiplayer data and state, independent of transport I/O.
