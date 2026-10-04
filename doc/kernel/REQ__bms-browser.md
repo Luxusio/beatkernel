@@ -1221,7 +1221,53 @@ identifiers. This API supplies snapshots, so polling cannot recover transitions
 that occurred between observations. Browser exposure/permission and lifecycle
 behavior require actual browser/device checks.
 
-Known ceiling: This acquisition component has no page/Worker gameplay caller
-yet. It does not establish playable gamepad support, capture/replay integration,
+Known ceiling: The acquisition component has no page session caller yet.
+Worker profile/canonical ingestion has a separate source implementation below.
+This does not establish playable page gamepad support, capture/replay acceptance,
 perfect reconnect identity when browser lifecycle evidence is missing, or
 measured latency. Deferred fixtures are source only; execution remains pending.
+
+
+## Worker Gamepad profile and canonical ingestion
+
+Optional live physical setup accepts `gamepadSetup` with at most sixteen
+connection-scoped device descriptors (`source`, `buttons`, `axes`) and at most
+256 five-word binding rows: lane, source low word, source high word, control
+type and index. Types are pressed button (0), absolute stick axis (1), analog
+button value (2) and touched button (3). Sources are distinct u64 identities
+at least three and must not overlap admitted HID sources. Controls must fit
+the configured device's button/axis counts. Worker snapshots setup before
+asynchronous acquisition and uses exact source native bindings in backend
+`0x57475044`, with control codes respectively index, `0x10000 + index`,
+`0x20000 + index` and `0x30000 + index`. Only pressed-button bindings satisfy
+ordinary press-chart lane coverage. No implicit axis-to-key threshold exists.
+
+Worker retains bound control levels per source and emits canonical BKPI Button
+and absolute Axis events through the existing Rust `input_blob` entry point.
+Pressed/touched transitions remain buttons in their own native namespace.
+Analog values remain Axis events. Acquisition snapshots retain browser doubles;
+canonical axes use the shared core's explicit float32 representation. Initial
+false button levels emit no release; initially true levels emit Down. Changed
+values at equal sample timestamps remain valid. One sample's fanout shares the
+original source, Window time/domain, native provenance and acquisition sequence.
+
+Preflight the entire step into bounded draft adapter state before calling
+Runtime. Limit original samples and Worker-generated canonical packets to 256 per step;
+raw HID report field expansion remains subject to its existing profile limits. Invalid
+source identity, counts, values, setup or fanout fail explicitly with no partial
+preflight mutation. Repeated state emits no events and may retain a sample's
+old timestamp after the global watermark has advanced. A changed sample older
+than that committed global prefix must fail instead of being retimestamped.
+The source's original timestamp and sequence must still advance according to
+its acquisition rules. A validated pre-origin sample updates retained source
+levels but its events are not submitted to Runtime; a held pre-origin control
+must not produce a synthetic later Down. Count pre-origin input once per
+original sample, independent of fanout. Keep setup, timing, input and lifetime ownership on
+Worker; Window remains responsible for browser-required acquisition only.
+
+Known ceiling: Window session forwarding and device/profile selection remain
+unconnected. This Worker integration does not prove playable page gamepad
+support or browser/device/capture/replay acceptance. Axis/touched bindings do
+not imply support by ordinary press judgment. Late sampled changes are refused
+by the existing committed-prefix contract; polling cannot recover unobserved
+intermediate transitions. Browser input latency needs actual measurement.

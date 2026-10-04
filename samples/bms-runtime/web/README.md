@@ -928,6 +928,15 @@ fixtures have not been exercised with a browser or physical HID device.
 `gamepad-input.mjs` adds an optional bounded acquisition component for Window
 Gamepad samples. It preserves the browser's sample timestamp and normalized
 button/axis values; source IDs come from the caller's shared allocator. It has
-no polling timer or rendering. Page/Worker binding and playable gamepad support
-remain pending. `gamepad-input.test.mjs` contains deferred controlled-endpoint
+no polling timer or rendering. Worker profile and canonical input forwarding have a source implementation;
+page session forwarding and playable gamepad support remain pending. `gamepad-input.test.mjs` contains deferred controlled-endpoint
 fixtures; no execution or device acceptance is claimed.
+
+Worker live physical setup optionally accepts `gamepadSetup`: devices with
+connection-scoped `source` (BigInt), button/axis counts, and a Uint32Array of
+five-word rows (lane, source low/high, type, index). Pressed-button bindings
+provide normal note coverage; axes remain physical axes. `gamepad-profile.mjs`
+preflights samples and emits bounded changed canonical packets into the actual
+Rust input API. The browser contract specifies types, limits, pre-origin state
+and original-time late-input refusal. No Window gamepad launch or runtime
+acceptance is claimed. Profile and Worker fixtures are authored but unexecuted.
