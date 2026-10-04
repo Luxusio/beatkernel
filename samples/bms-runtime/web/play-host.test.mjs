@@ -263,9 +263,10 @@ async function harness(faults = {}) {
       assert.equal(this.terminations, 0, "posting after Worker termination");
       // The fake canvas has no native transferable. Other data follows the real
       // structured-clone shape, including BigInt and typed event arrays.
-      const posted = value.kind === "play-audio" ? { ...structuredClone({ ...value, port: undefined }), port: value.port }
+      const portHandoff = ["play-audio", "play-samples-upload"].includes(value.kind);
+      const posted = portHandoff ? { ...structuredClone({ ...value, port: undefined }), port: value.port }
         : structuredClone(value);
-      if (value.kind === "play-audio") {
+      if (portHandoff) {
         assert.deepEqual(Array.from(transfer), [value.port]);
         value.port.transfers++;
       }
@@ -307,7 +308,8 @@ async function harness(faults = {}) {
     sampleRate: faults.actualRate ?? 48000,
     samples: [], commandsSeen: [], arms: [], polls: 0, finishes: 0, finishArgs: [], outputReads: 0, frameReads: 0,
     stopCalls: 0, stopStarts: 0, stopping: null,
-    commandPorts: [], attachments: 0, configuration: null,
+    commandPorts: [], attachments: 0, samplePorts: [], sampleAttachments: 0, configuration: null,
+    get channels() { return this.configuration.channels; },
     get currentFrame() {
       this.frameReads++;
       if (faults.frameFailure) throw faults.frameFailure;
@@ -325,9 +327,18 @@ async function harness(faults = {}) {
       throw Object.assign(new Error("output evidence is not available"), { code: "unavailable" });
     },
     async sample(value) {
-      this.samples.push(value);
-      traces.push(["sample", value.id]);
-      return { admitted: 0 };
+      assert.fail("Window must never acquire or relay a PCM sample");
+    },
+    async openSamplePort() {
+      this.sampleAttachments++; traces.push(["open-sample-port"]);
+      if (faults.samplePortFailure) throw faults.samplePortFailure;
+      const port = { closes: 0, transfers: 0, start() {}, postMessage() { assert.fail("Window must not send PCM"); },
+        close() { this.closes++; } };
+      this.samplePorts.push(port);
+      const descriptor = { port, generation: this.configuration.generation, channels: this.configuration.channels,
+        pcmLimits: { ...this.configuration.pcmLimits }, timeoutMs: this.configuration.timeoutMs };
+      if (faults.samplePortGate) await faults.samplePortGate.promise;
+      return faults.sampleDescriptor ? faults.sampleDescriptor(descriptor) : descriptor;
     },
     async finish(...args) {
       this.finishes++; this.finishArgs.push(args); traces.push(["finish", ...args]);
@@ -366,6 +377,7 @@ async function harness(faults = {}) {
       audioOpened = true;
       audio.configuration = options;
       if (faults.missingCommandPort) audio.openCommandPort = undefined;
+      if (faults.missingSamplePort) audio.openSamplePort = undefined;
       opens.push({ options, gesture });
       traces.push(["open", gesture]);
       return faults.openGate?.promise ?? Promise.resolve(audio);
@@ -532,7 +544,7 @@ async function harness(faults = {}) {
     await flush();
     return workers.at(-1).last("play-start");
   }
-  async function prepared(start, sampleCount = 0) {
+  async function prepared(start, sampleCount = 0, completeUpload = true) {
     const worker = workers.at(-1);
     const localPlayers = start.localPlanWords === undefined ? null
       : Array.from(start.localPlanWords).filter((_, index) => index % 4 === 0);
@@ -552,11 +564,8 @@ async function harness(faults = {}) {
         ...(start.recordReplay ? { recordLimits: { bytes: Math.floor(64 * 1024 * 1024 / localPlayers.length),
           records: Math.floor(1000000 / localPlayers.length) } } : {}) }),
       ...(start.mode === "replay" ? { mode: "replay", recordedUntilNs: 2350000000n } : {}) });
-    for (let index = 0; index < sampleCount; index++) {
-      await reply(worker.last("play-sample"), { kind: "sample", id: BigInt(index + 1), rate: 44100,
-        channels: 2, pcm: new Float32Array([0.25, -0.25, 0.5, -0.5]) });
-    }
-    await reply(worker.last("play-sample"), { kind: "samples-end" });
+    if (!completeUpload) return worker.last("play-samples-upload");
+    await reply(worker.last("play-samples-upload"), { kind: "samples-uploaded", count: sampleCount, bytes: sampleCount * 16 });
     return worker.last("play-audio");
   }
   async function launch(sampleCount = 0, mode = "live") {
@@ -771,7 +780,7 @@ test("local discovery retains actual mixed-device owners through one synchronous
   assert.deepEqual(input.events.map(event => [event.kind, event.source]), [["hid", hidSource], ["gamepad", padSources[0]]]);
   assert.equal(input.events[0].hostNs, 1300125000n); assert.equal(input.events[1].hostNs, 1300062500n);
   assert.equal(h.layoutReads, layout); assert.deepEqual(display, []);
-  assert.equal(profile.reads, 0); assert.equal(h.audio.samples.length, 1);
+  assert.equal(profile.reads, 0); assert.equal(h.audio.samples.length, 0); assert.equal(h.audio.sampleAttachments, 1);
   h.click("stop"); await flush(); await h.receive(localFinal(start));
   assert.equal(native.closes, 1); assert.equal(h.window.listeners.get("gamepaddisconnected")?.size ?? 0, 0);
   assert.equal(h.get("position").value, preview.position);
@@ -804,7 +813,7 @@ test("local preparation refuses stale or contradictory ownership before PCM and 
     await h.reply(start, { kind: "prepared", title: "Contradictory local preparation", samples: 1, lanes: [0x11],
       startNs: 0n, opponentCount: 0, localPlayers: [1, 2], localPage: 0,
       recordLimits: { bytes: 33554432, records: 500000 }, ...changed });
-    assert.equal(worker.messages("play-sample").length, 0); assert.equal(h.audio.samples.length, 0);
+    assert.equal(worker.messages("play-samples-upload").length, 0); assert.equal(h.audio.samples.length, 0);
     assert.equal(worker.last("play-stop").playId, start.playId);
     await h.receive(localFinal(start)); assert.equal(h.get("play").disabled, false);
     await h.close();
@@ -880,6 +889,89 @@ test("joined local capture retains each valid member prefix for explicit downloa
   h.click("stop"); await flush(); await h.receive(finalScore(replay.id)); await h.close();
 });
 
+test("Window transfers one bounded sample descriptor and waits beyond a whole-bank timeout before exact upload receipt and finish", async () => {
+  for (const mode of ["live", "replay"]) for (const count of [0, 2]) {
+    const h = await harness(); await h.preview();
+    if (mode === "replay") chooseRecording(h, [selectedRecording().file]);
+    const start = await h.begin(mode), worker = h.workers[0];
+    const upload = await h.prepared(start, count, false), audio = h.audio;
+    assert.equal(upload.kind, "play-samples-upload"); assert.equal(upload.playId, start.playId);
+    assert.equal(upload.generation, start.playId); assert.equal(upload.channels, 2);
+    assert.equal(upload.timeoutMs, 10000);
+    assert.deepEqual(upload.pcmLimits, { maxAssetBytes: 67108864, maxTotalBytes: 268435456, maxSamples: 7940 });
+    assert.equal(upload.port, audio.samplePorts[0]); assert.equal(upload.port.transfers, 1);
+    assert.equal(audio.sampleAttachments, 1); assert.deepEqual(worker.posts.find(row => row.value === upload).transfer, [upload.port]);
+    assert.equal(Object.hasOwn(upload, "pcm"), false); assert.equal(worker.messages("play-sample").length, 0);
+    assert.equal(audio.samples.length, 0); assert.equal(audio.finishes, 0); assert.equal(audio.attachments, 0);
+    await h.advance(10001);
+    assert.equal(worker.messages("play-stop").length, 0, "individual Worklet ACK deadlines do not become a whole-bank Window timer");
+    assert.equal(audio.stopStarts, 0); assert.equal(audio.finishes, 0); assert.deepEqual(audio.arms, []);
+    await h.reply(upload, { kind: "samples-uploaded", count, bytes: count ? 24 : 0 });
+    assert.equal(audio.finishes, 1); assert.equal(audio.attachments, 1);
+    assert.equal(worker.messages("play-samples-upload").length, 1);
+    const kinds = h.traces.filter(row => ["open-sample-port", "finish", "open-command-port"].includes(row[0])).map(row => row[0]);
+    assert.deepEqual(kinds, ["open-sample-port", "finish", "open-command-port"]);
+    await h.reply(worker.last("play-audio"), null); await h.reply(worker.last("play-activate"), null);
+    assert.equal(audio.arms.length, 1); assert.equal(audio.samples.length, 0);
+    h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+    assert.equal(audio.stopStarts, 1); await h.close();
+  }
+});
+
+test("Window refuses malformed sample handoff and aggregate count or byte evidence without PCM fallback or premature finish", async () => {
+  const cases = [
+    { missingSamplePort: true }, { samplePortFailure: new Error("actual sample handoff failed") },
+    { sampleDescriptor: value => ({ ...value, generation: value.generation + 1 }) },
+    { sampleDescriptor: value => ({ ...value, channels: 1 }) },
+    { sampleDescriptor: value => ({ ...value, timeoutMs: 0 }) },
+    { sampleDescriptor: value => ({ ...value, pcmLimits: { ...value.pcmLimits, maxSamples: 7939 } }) },
+    { transferFailure: true },
+    ...[null, { kind: "sample", count: 2, bytes: 24 }, { kind: "samples-uploaded", count: 1, bytes: 24 },
+      { kind: "samples-uploaded", count: 2.5, bytes: 24 }, { kind: "samples-uploaded", count: 2, bytes: -1 },
+      { kind: "samples-uploaded", count: 2, bytes: 1 }, { kind: "samples-uploaded", count: 2, bytes: 134217736 },
+      { kind: "samples-uploaded", count: 2, bytes: 268435457 }, { kind: "samples-uploaded", count: 2, bytes: NaN },
+      { kind: "samples-uploaded", count: 2 }].map(receipt => ({ receipt })),
+    { remoteFailure: true },
+  ];
+  for (const faults of cases) {
+    const h = await harness(faults); await h.preview(); const start = await h.begin(), worker = h.workers[0];
+    if (faults.transferFailure) worker.failKind = "play-samples-upload";
+    const upload = await h.prepared(start, 2, false);
+    if (Object.hasOwn(faults, "receipt")) await h.reply(upload, faults.receipt);
+    if (faults.remoteFailure) await h.receive({ kind: "play-reply", playId: start.playId,
+      rpcId: upload.rpcId, error: "actual sample ACK timed out" });
+    assert.equal(h.audio.finishes, 0); assert.equal(h.audio.attachments, 0); assert.deepEqual(h.audio.arms, []);
+    assert.equal(h.audio.samples.length, 0); assert.equal(worker.messages("play-sample").length, 0);
+    assert.equal(worker.messages("play-activate").length, 0); assert.equal(worker.last("play-stop").playId, start.playId);
+    const port = h.audio.samplePorts[0];
+    if (port && port.transfers === 0) assert.equal(port.closes, 1, "untransferred endpoint is still Window-owned cleanup");
+    await h.receive(finalScore(start.playId)); assert.equal(h.audio.stopStarts, 1);
+    assert.equal(h.get("play").disabled, false); await h.close();
+  }
+});
+
+test("cancelled sample acquisition or pending upload cannot let late descriptors and receipts finish a replacement owner", async () => {
+  for (const phase of ["acquire", "upload"]) {
+    const gate = deferred(), h = await harness(phase === "acquire" ? { samplePortGate: gate } : {});
+    await h.preview(); const start = await h.begin(), worker = h.workers[0];
+    const upload = await h.prepared(start, 2, false), oldAudio = h.audio, port = oldAudio.samplePorts[0];
+    assert.equal(port.transfers, phase === "acquire" ? 0 : 1);
+    h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+    assert.equal(oldAudio.stopStarts, 1); assert.equal(oldAudio.finishes, 0);
+    delete h.faults.samplePortGate;
+    const next = await h.begin(); assert.ok(next.playId > start.playId);
+    if (phase === "acquire") { gate.resolve(); await flush(); assert.equal(port.closes, 1); assert.equal(port.transfers, 0); }
+    else await h.reply(upload, { kind: "samples-uploaded", count: 2, bytes: 24 });
+    assert.equal(oldAudio.finishes, 0); assert.equal(h.audio.finishes, 0); assert.equal(h.audio.sampleAttachments, 0);
+    assert.equal(worker.messages("play-audio").length, 0); assert.equal(worker.messages("play-activate").length, 0);
+    const handoff = await h.prepared(next, 0);
+    await h.reply(handoff, null); await h.reply(worker.last("play-activate"), null);
+    assert.equal(h.audio.sampleAttachments, 1); assert.equal(h.audio.finishes, 1);
+    assert.equal(worker.messages("play-sample").length, 0); assert.equal(oldAudio.stopStarts, 1);
+    h.click("stop"); await flush(); await h.receive(finalScore(next.playId)); await h.close();
+  }
+});
+
 test("live and replay transfer one real command descriptor after PCM finish and wait for initial Worker drain before arm", async () => {
   for (const mode of ["live", "replay"]) {
     const stopGate = deferred(), h = await harness({ stopGate });
@@ -897,7 +989,7 @@ test("live and replay transfer one real command descriptor after PCM finish and 
     const transfer = worker.posts.find(entry => entry.value === attachment);
     assert.deepEqual(transfer.transfer, [attachment.port]);
     assert.equal(transfer.transferCount, 1);
-    assert.equal(audio.samples.length, 2); assert.deepEqual(audio.finishArgs, [[]]);
+    assert.equal(audio.samples.length, 0); assert.equal(audio.sampleAttachments, 1); assert.deepEqual(audio.finishArgs, [[]]);
     const finishIndex = h.traces.findIndex(row => row[0] === "finish");
     const attachIndex = h.traces.findIndex(row => row[0] === "open-command-port");
     const postIndex = h.traces.findIndex(row => row[0] === "post" && row[1] === "play-audio");
@@ -1299,7 +1391,7 @@ test("Gamepad source admission, disconnection, reentrant cancellation and failed
     const start = await h.begin(), worker = h.workers[0];
     await h.reply(start, { kind: "prepared", title: "Bad Gamepad source receipt", samples: 1, lanes: [0x11],
       startNs: 0n, opponentCount: 0, ...(sources === undefined ? {} : { gamepadSources: sources }) });
-    assert.equal(worker.messages("play-sample").length, 0); assert.equal(h.audio.samples.length, 0);
+    assert.equal(worker.messages("play-samples-upload").length, 0); assert.equal(h.audio.samples.length, 0);
     assert.equal(worker.last("play-stop").playId, start.playId);
     await h.receive(finalScore(start.playId)); assert.equal(h.get("play").disabled, false); await h.close();
   }
@@ -1417,7 +1509,7 @@ test("custom Gamepad admission refuses missing source proof before PCM and joins
     const start = await h.begin(), worker = h.workers[0];
     await h.reply(start, { kind: "prepared", title: "Invalid custom source proof", samples: 1, lanes: [0x11],
       startNs: 0n, opponentCount: 0, ...(sources === undefined ? {} : { gamepadSources: sources }) });
-    assert.equal(worker.messages("play-sample").length, 0); assert.equal(h.audio.samples.length, 0);
+    assert.equal(worker.messages("play-samples-upload").length, 0); assert.equal(h.audio.samples.length, 0);
     assert.equal(worker.last("play-stop").playId, start.playId);
     await h.receive(finalScore(start.playId)); assert.equal(h.get("play").disabled, false);
     assert.match(h.get("gamepad-profile-name").textContent, /nonstandard-gamepad/); assert.equal(selected.reads, 0); await h.close();
@@ -1426,14 +1518,14 @@ test("custom Gamepad admission refuses missing source proof before PCM and joins
   await h.preview(); const selected = selectedGamepadProfile(); chooseGamepadProfile(h, selected.file);
   const worker = h.workers[0], refused = await h.begin();
   await h.receive({ kind: "play-reply", playId: refused.playId, rpcId: refused.rpcId, error: "No Gamepad profile matched the actual device." });
-  assert.equal(worker.messages("play-start").length, 1); assert.equal(worker.messages("play-sample").length, 0);
+  assert.equal(worker.messages("play-start").length, 1); assert.equal(worker.messages("play-samples-upload").length, 0);
   await h.receive(finalScore(refused.playId));
   const pending = await h.begin(), stale = [...h.window.listeners.get("gamepaddisconnected")][0];
   assert.equal(pending.gamepadProfileFile, selected.file, "a refused profile remains selected for an explicit retry");
   first.connected = false; h.window.emit("gamepaddisconnected", { gamepad: first }); await flush();
   assert.equal(worker.last("play-stop").playId, pending.playId, "a nonstandard candidate still owns preparation before matching returns");
   await h.reply(pending, { kind: "prepared", inputMode: "physical", startNs: 0n, samples: 1, lanes: [0x11], gamepadSources: [3n] });
-  assert.equal(worker.messages("play-sample").length, 0, "late preparation cannot resurrect the cancelled owner");
+  assert.equal(worker.messages("play-samples-upload").length, 0, "late preparation cannot resurrect the cancelled owner");
   await h.receive(finalScore(pending.playId));
   const nextPad = custom(0), nextIgnored = custom(1); h.faults.gamepads = [nextPad, nextIgnored];
   const next = await h.launch(), messages = worker.posts.length;
@@ -1533,7 +1625,7 @@ test("HID source receipts precede PCM and matched disconnect or failed cleanup f
     const h = await harness({ hidSupported: true }); await h.preview(); chooseControllerProfile(h, selectedControllerProfile().file);
     const start = await h.begin(), worker = h.workers[0];
     await h.reply(start, { kind: "prepared", title: "Bad sources", samples: 1, lanes: [0x11], startNs: 0n, opponentCount: 0, ...metadata });
-    assert.equal(worker.messages("play-sample").length, 0); assert.equal(h.audio.samples.length, 0);
+    assert.equal(worker.messages("play-samples-upload").length, 0); assert.equal(h.audio.samples.length, 0);
     assert.equal(worker.last("play-stop").playId, start.playId);
     await h.receive(finalScore(start.playId)); assert.ok(h.hidDevices.every(device => device.closes === 1)); await h.close();
   }
@@ -1789,7 +1881,7 @@ test("replay selection retains bounded File metadata, opens in the gesture and p
   assert.equal(activation.startFrame, 60000n);
   assert.deepEqual(h.audio.arms, [60000n]);
   await h.reply(activation, null);
-  assert.equal(h.audio.samples[0].rate, 44100);
+  assert.equal(h.audio.samples.length, 0); assert.equal(h.audio.sampleAttachments, 1);
   assert.match(h.get("keys").textContent, /Recorded input playback/);
   const retainedDisplay = { status: h.get("status").textContent, position: h.get("position").value };
   h.setNow(1300);
@@ -1843,13 +1935,12 @@ test("finite replay metadata snapshots the actual output grid before samples and
   assert.deepEqual(reads, { end: 1, frame: 1 });
   assert.equal(h.audio.samples.length, 0);
   assert.equal(h.audio.finishes, 0);
-  const sampleRequest = worker.last("play-sample");
+  const sampleRequest = worker.last("play-samples-upload");
   assert.ok(sampleRequest);
   endNs = null; endFrame = 0n;
-  await h.reply(sampleRequest, { kind: "sample", id: 1n, rate: 96000, channels: 2, pcm: new Float32Array([0.25, -0.25]) });
-  await h.reply(worker.last("play-sample"), { kind: "samples-end" });
+  await h.reply(sampleRequest, { kind: "samples-uploaded", count: 1, bytes: 8 });
   assert.deepEqual(h.audio.finishArgs, [[4411n]]);
-  assert.equal(h.audio.samples[0].rate, 96000, "sample source rate does not change the output endpoint grid");
+  assert.equal(h.audio.samples.length, 0, "Window receives only aggregate sample completion");
   await h.reply(worker.last("play-audio"), null);
   await h.reply(worker.last("play-activate"), null);
   assert.deepEqual(reads, { end: 1, frame: 1 });
@@ -1876,7 +1967,7 @@ test("finite replay admission and finish failures clean up without transferring 
     const start = await h.begin(fields.mode), worker = h.workers[0];
     await h.reply(start, { kind: "prepared", title: "Invalid endpoint", notes: 1, samples: 1,
       lanes: [0x11], opponentCount: 0, startNs: 0n, ...fields });
-    assert.equal(worker.messages("play-sample").length, 0);
+    assert.equal(worker.messages("play-samples-upload").length, 0);
     assert.equal(h.audio.samples.length, 0);
     assert.deepEqual(h.audio.finishArgs, []);
     assert.deepEqual(h.audio.arms, []);
@@ -1893,7 +1984,7 @@ test("finite replay admission and finish failures clean up without transferring 
   const start = await h.begin("replay"), worker = h.workers[0];
   await h.reply(start, { kind: "prepared", mode: "replay", title: "Finite endpoint", notes: 1, samples: 0,
     lanes: [0x11], opponentCount: 0, startNs: 0n, endNs: 1000000000n, endFrame: 52800n });
-  await h.reply(worker.last("play-sample"), { kind: "samples-end" });
+  await h.reply(worker.last("play-samples-upload"), { kind: "samples-uploaded", count: 0, bytes: 0 });
   assert.deepEqual(h.audio.finishArgs, [[52800n]]);
   assert.equal(h.audio.finishes, 1);
   assert.equal(worker.messages("play-commands").length, 0);
@@ -1957,7 +2048,7 @@ test("replay preparation cancellation, mode mismatch and rejected audio prefixes
     chooseRecording(h, [selectedRecording().file]);
     const start = await h.begin("replay");
     await h.reply(start, { kind: "prepared", mode, startNs: 0n, title: "Wrong mode", notes: 1, samples: 1, lanes: [0x11] });
-    assert.equal(h.workers[0].messages("play-sample").length, 0);
+    assert.equal(h.workers[0].messages("play-samples-upload").length, 0);
     assert.equal(h.audio.samples.length, 0);
     assert.equal(h.audio.arms.length, 0);
     await h.receive(finalScore(start.playId));
@@ -1973,7 +2064,7 @@ test("replay preparation cancellation, mode mismatch and rejected audio prefixes
   cancelled.click("stop");
   await flush();
   await cancelled.reply(start, { kind: "prepared", mode: "replay", samples: 2, lanes: [] });
-  assert.equal(cancelled.workers[0].messages("play-sample").length, 0);
+  assert.equal(cancelled.workers[0].messages("play-samples-upload").length, 0);
   assert.equal(cancelled.get("play").disabled, true);
   await cancelled.receive(finalScore(start.playId, { songNs: null, hits: null, misses: null, combo: null }));
   assert.equal(cancelled.get("play").disabled, false);
@@ -2317,7 +2408,7 @@ test("touch capability and preparation refusals precede PCM while bounded captur
     assert.equal(start.inputMode, "physical-contact");
     await h.reply(start, { kind: "prepared", startNs: 0n, opponentCount: 0,
       title: "Wrong route", notes: 1, samples: 1, lanes: [0x11], inputMode }, false);
-    assert.equal(worker.messages("play-sample").length, 0);
+    assert.equal(worker.messages("play-samples-upload").length, 0);
     assert.equal(h.audio.samples.length, 0);
     assert.deepEqual(h.audio.finishArgs, []);
     assert.deepEqual(h.audio.arms, []);
@@ -2354,10 +2445,10 @@ test("Window explicitly negotiates physical input before PCM and preserves nativ
   assert.equal(start.inputMode, "physical");
   assert.equal(start.recordReplay, true);
   assert.equal(h.opens[0].gesture, true);
-  assert.equal(worker.messages("play-sample").length, 0);
+  assert.equal(worker.messages("play-samples-upload").length, 0);
   assert.deepEqual(Array.from(start.keyPairs).slice(0, 4), [0x16, 1, 0x11, 19]);
   const initial = await h.prepared(start, 1);
-  assert.equal(h.audio.samples.length, 1);
+  assert.equal(h.audio.samples.length, 0); assert.equal(h.audio.sampleAttachments, 1);
   assert.equal(initial.kind, "play-audio");
   assert.equal(h.audio.arms.length, 0, "the physical session still waits for initial core command admission");
   await h.reply(initial, null);
@@ -2399,7 +2490,7 @@ test("missing or changed physical-route metadata refuses all sample acquisition 
     assert.equal(start.inputMode, "physical");
     await h.reply(start, { kind: "prepared", title: "Unadmitted route", notes: 1, samples: 1,
       lanes: [0x11], opponentCount: 0, startNs: 0n, ...(inputMode === undefined ? {} : { inputMode }) }, false);
-    assert.equal(worker.messages("play-sample").length, 0);
+    assert.equal(worker.messages("play-samples-upload").length, 0);
     assert.equal(h.audio.samples.length, 0);
     assert.deepEqual(h.audio.finishArgs, []);
     assert.deepEqual(h.audio.arms, []);
@@ -2432,7 +2523,7 @@ test("missing or changed physical-route metadata refuses all sample acquisition 
   await h.close();
 });
 
-test("user gesture opens real host boundary before awaits, then transfers source PCM and arms after setup", async () => {
+test("user gesture opens real host boundary before awaits, then transfers sample authority and arms after setup", async () => {
   const h = await harness();
   await h.preview();
   h.click("play");
@@ -2449,8 +2540,9 @@ test("user gesture opens real host boundary before awaits, then transfers source
   assert.equal(worker.messages("play-network-ready").length, 0);
   assert.ok(start.keyPairs instanceof Uint32Array);
   const commands = await h.prepared(start, 1);
-  assert.equal(h.audio.samples[0].rate, 44100, "original source rate survives transfer");
-  assert.deepEqual(Array.from(h.audio.samples[0].pcm), [0.25, -0.25, 0.5, -0.5]);
+  assert.equal(h.audio.samples.length, 0); assert.equal(h.audio.sampleAttachments, 1);
+  assert.equal(worker.messages("play-sample").length, 0);
+  assert.equal(worker.last("play-samples-upload").port, h.audio.samplePorts[0]);
   assert.equal(h.audio.finishes, 1);
   assert.deepEqual(h.audio.arms, []);
   await h.reply(commands, null);
@@ -2556,7 +2648,7 @@ test("pending Worker preparation cancels without inventing score and ignores lat
   await h.reply(start, { kind: "prepared", title: "stale prepared title", artist: "stale", notes: 2, samples: 1, lanes: [0x11] });
   assert.equal(h.get("title").textContent, saved.title);
   assert.equal(h.get("position").value, saved.position);
-  assert.equal(h.workers[0].messages("play-sample").length, 0);
+  assert.equal(h.workers[0].messages("play-samples-upload").length, 0);
   await h.close();
 });
 
@@ -3533,10 +3625,8 @@ test("finite live controls capture one pre-gesture section and join input, outpu
   await flush();
   assert.deepEqual(reads, { end: 1, frame: 1 });
   actualEnd = undefined; actualFrame = undefined;
-  await h.reply(worker.last("play-sample"), { kind: "sample", id: 1n, rate: 96000, channels: 2,
-    pcm: new Float32Array([0.25, -0.25]) });
-  await h.reply(worker.last("play-sample"), { kind: "samples-end" });
-  assert.deepEqual(h.audio.finishArgs, [[4411n]], "the endpoint uses actual output rate while PCM retains its source rate");
+  await h.reply(worker.last("play-samples-upload"), { kind: "samples-uploaded", count: 1, bytes: 8 });
+  assert.deepEqual(h.audio.finishArgs, [[4411n]], "the endpoint uses actual output rate without a Window sample relay");
   await h.reply(worker.last("play-audio"), null);
   assert.equal(worker.last("play-activate").startFrame, 55125n);
   assert.equal(worker.last("play-activate").hostNs, 1250000000n);
@@ -3599,7 +3689,7 @@ test("invalid or mismatched live ends preserve drafts for retry and manual prefi
     const start = await h.begin();
     await h.reply(start, { kind: "prepared", title: "Wrong finite metadata", samples: 1, notes: 1,
       lanes: [0x11], opponentCount: 0, startNs: 1000000000n, ...endpoint });
-    assert.equal(worker.messages("play-sample").length, 0);
+    assert.equal(worker.messages("play-samples-upload").length, 0);
     assert.deepEqual(h.audio.finishArgs, []);
     assert.deepEqual(h.audio.arms, []);
     assert.equal(worker.last("play-stop").completed, false);
@@ -3612,7 +3702,7 @@ test("invalid or mismatched live ends preserve drafts for retry and manual prefi
   assert.equal(start.endNs, 2000000000n);
   await h.reply(start, { kind: "prepared", title: "Retried finite section", samples: 0, notes: 1,
     lanes: [0x11], opponentCount: 0, startNs: 1000000000n, endNs: 2000000000n, endFrame: 52800n });
-  await h.reply(worker.last("play-sample"), { kind: "samples-end" });
+  await h.reply(worker.last("play-samples-upload"), { kind: "samples-uploaded", count: 0, bytes: 0 });
   assert.deepEqual(h.audio.finishArgs, [[52800n]]);
   await h.reply(worker.last("play-audio"), null);
   await h.reply(worker.last("play-activate"), null);
@@ -3634,7 +3724,7 @@ test("invalid or mismatched live ends preserve drafts for retry and manual prefi
   assert.equal(file.reads, 0);
   await h.reply(replay, { kind: "prepared", mode: "replay", title: "Recorded finite section", samples: 0, notes: 1,
     lanes: [0x11], opponentCount: 0, startNs: 9000000000n, endNs: 9000000001n, endFrame: 4801n });
-  await h.reply(worker.last("play-sample"), { kind: "samples-end" });
+  await h.reply(worker.last("play-samples-upload"), { kind: "samples-uploaded", count: 0, bytes: 0 });
   assert.deepEqual(h.audio.finishArgs, [[4801n]]);
   await h.reply(worker.last("play-audio"), null);
   await h.reply(worker.last("play-activate"), null);
@@ -3709,7 +3799,7 @@ test("section draft and preparation errors stay recoverable while replay uses on
     const start = await h.begin();
     await h.reply(start, { kind: "prepared", title: "Wrong section", notes: 1, samples: 1,
       lanes: [0x11], opponentCount: 0, ...(startNs === undefined ? {} : { startNs }) });
-    assert.equal(worker.messages("play-sample").length, 0);
+    assert.equal(worker.messages("play-samples-upload").length, 0);
     assert.deepEqual(h.audio.arms, []);
     assert.equal(worker.last("play-stop").playId, start.playId);
     await h.receive(finalScore(start.playId));
@@ -3836,7 +3926,7 @@ test("missing actual lane coverage refuses setup and replay ignores invalid live
   const worker = h.workers[0];
   await h.reply(start, { kind: "prepared", title: "Actual lane", notes: 1, samples: 1,
     lanes: [0x11], opponentCount: 0, startNs: 0n });
-  assert.equal(worker.messages("play-sample").length, 0);
+  assert.equal(worker.messages("play-samples-upload").length, 0);
   assert.deepEqual(h.audio.arms, []);
   assert.equal(worker.last("play-stop").playId, start.playId);
   await h.receive(finalScore(start.playId));
@@ -3988,7 +4078,7 @@ test("output preferences are captured inside the live gesture while busy control
   assert.deepEqual(structuredClone(captured), { latencyHint: 0.010125001, sampleRate: 96000 });
   await h.reply(await h.prepared(start, 1), null);
   await h.reply(worker.last("play-activate"), null);
-  assert.equal(h.audio.samples[0].rate, 44100, "asset sample rates remain independent too");
+  assert.equal(h.audio.samples.length, 0, "asset samples remain in the Worker-to-Worklet lane");
   h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
   assert.ok([latency, ms, rate].every(field => field.disabled));
   stopping.resolve(); await flush();
@@ -4185,7 +4275,7 @@ test("automatic one-player networking retains every admitted input owner and nat
   assert.deepEqual(start.hidDevices.map(device => device.source), [5n, 6n]);
   assert.equal(h.hid.gets, 1); assert.ok(h.hidDevices.every(device => device.opens === 1));
   await activatePeerSession(h, start, 1);
-  assert.equal(h.audio.samples.length, 1); assert.equal(h.audio.attachments, 1);
+  assert.equal(h.audio.samples.length, 0); assert.equal(h.audio.sampleAttachments, 1); assert.equal(h.audio.attachments, 1);
   assert.equal(h.get("local-page").disabled, true);
   h.get("local-page").value = "0"; h.get("local-page").emit("change"); await flush();
   assert.equal(worker.messages("play-page").length, 0, "automatic scope does not expose a page transition");
@@ -4326,7 +4416,7 @@ test("automatic cohort metadata refusal and failed prefixes release for retry wi
     await h.reply(start, { kind: "prepared", title: "Contradictory automatic metadata", samples: 1, lanes: [0x11],
       startNs: 0n, opponentCount: 0, localPlayers: [1], localPage: 0,
       recordLimits: { bytes: 67108864, records: 1000000 }, ...changed });
-    assert.equal(worker.messages("play-sample").length, 0); assert.equal(worker.messages("play-network-ready").length, 0);
+    assert.equal(worker.messages("play-samples-upload").length, 0); assert.equal(worker.messages("play-network-ready").length, 0);
     assert.deepEqual(h.audio.arms, []); assert.equal(worker.last("play-stop").playId, start.playId);
     await h.receive(localFinal(start)); assert.equal(h.get("play").disabled, false);
     const retry = await launchPeerSession(h); assert.deepEqual(Array.from(retry.localPlanWords), [1, 0, 0, 0]);
@@ -4372,7 +4462,7 @@ test("discovered local sources and network settings freeze together before audio
   assert.equal(start.localPage, 0); assert.equal(start.inputMode, "physical-contact");
   assert.equal([...h.window.listeners.get("gamepaddisconnected")][0], retainedDisconnect);
   const handoff = await h.prepared(start, 1);
-  assert.equal(h.audio.samples.length, 1); assert.equal(h.audio.finishes, 1);
+  assert.equal(h.audio.samples.length, 0); assert.equal(h.audio.sampleAttachments, 1); assert.equal(h.audio.finishes, 1);
   assert.equal(worker.messages("play-network-ready").length, 0); assert.deepEqual(h.audio.arms, []);
   await h.reply(handoff, null);
   const ready = worker.last("play-network-ready"); assert.ok(ready);
@@ -4418,7 +4508,7 @@ test("local network launch still requires owned distinct sources and exact prepa
   const start = await h.begin(), worker = h.workers[0];
   await h.reply(start, { kind: "prepared", title: "Wrong group", samples: 1, lanes: [0x11],
     startNs: 0n, opponentCount: 0, localPlayers: [2, 1], localPage: 0 });
-  assert.equal(worker.messages("play-sample").length, 0); assert.equal(h.audio.samples.length, 0);
+  assert.equal(worker.messages("play-samples-upload").length, 0); assert.equal(h.audio.samples.length, 0);
   assert.equal(worker.messages("play-network-ready").length, 0); assert.deepEqual(h.audio.arms, []);
   assert.equal(worker.last("play-stop").playId, start.playId);
   await h.receive(localFinal(start)); assert.match(h.get("status").textContent, /roster|page/);
@@ -4743,7 +4833,7 @@ test("explicit room launch freezes the real local roster and Window origin befor
     assert.deepEqual(Array.from(start.localPlanWords).filter((_, index) => index % 4 === 0), local ? [1, 2, 3] : [1]);
     if (!local) assert.deepEqual(Array.from(start.localPlanWords), [1, 0, 0, 0]);
     const audioReady = await h.prepared(start, 1);
-    assert.equal(h.audio.finishes, 1); assert.equal(h.audio.samples.length, 1);
+    assert.equal(h.audio.finishes, 1); assert.equal(h.audio.samples.length, 0); assert.equal(h.audio.sampleAttachments, 1);
     assert.equal(worker.messages("play-room-open").length, 0); assert.deepEqual(h.audio.arms, []);
     await h.reply(audioReady, null);
     const room = worker.last("play-room-open");

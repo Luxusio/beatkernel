@@ -242,10 +242,10 @@ async function workerHarness(options = {}) {
       this.hudDisables = 0;
       this.peerUpdates = [];
       this.peerDisables = 0;
-      this.samples = [
+      this.samples = (options.samples ?? [
         { id: 19n, rate: 44100, pcm: new Float32Array([0.25, -0.25, 0.5, -0.5]) },
         { id: 18446744073709551615n, rate: 96000, pcm: new Float32Array([1, -1]) },
-      ].map(value => ({
+      ]).map(value => ({
         ...value, channels: 2, takes: 0, frees: 0,
         take_pcm() {
           assert.equal(++this.takes, 1);
@@ -320,7 +320,7 @@ async function workerHarness(options = {}) {
       this.live(); this.peerDisables++;
       if (options.disablePeerError) throw new Error(options.disablePeerError);
     }
-    sample_count() { this.live(); return this.samples.length; }
+    sample_count() { this.live(); return options.sampleCount ?? this.samples.length; }
     configure_capture(...limits) {
       this.live();
       this.calls.push(["capture", ...limits]);
@@ -800,6 +800,7 @@ async function workerHarness(options = {}) {
   const hidProfileHelper = new SourceTextModule(await readFile(new URL("./hid-profile.mjs", import.meta.url), "utf8"), { context });
   const gamepadProfileHelper = new SourceTextModule(await readFile(new URL("./gamepad-profile.mjs", import.meta.url), "utf8"), { context });
   const commandClient = new SourceTextModule(await readFile(new URL("./audio-command-client.mjs", import.meta.url), "utf8"), { context });
+  const sampleClient = new SourceTextModule(await readFile(new URL("./audio-sample-client.mjs", import.meta.url), "utf8"), { context });
   const localHelper = new SourceTextModule(await readFile(new URL("./local-play-model.mjs", import.meta.url), "utf8"), { context });
   const roomOwner = new SourceTextModule(await readFile(new URL("./room-owner.mjs", import.meta.url), "utf8"), { context });
   const roomTransport = new SyntheticModule(["WebTransportChannel"], function () {
@@ -816,6 +817,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./hid-profile.mjs") return hidProfileHelper;
     if (specifier === "./gamepad-profile.mjs") return gamepadProfileHelper;
     if (specifier === "./audio-command-client.mjs") return commandClient;
+    if (specifier === "./audio-sample-client.mjs") return sampleClient;
     if (specifier === "./local-play-model.mjs") return localHelper;
     if (specifier === "./room-owner.mjs") return roomOwner;
     if (specifier === "./multiplayer-transport.mjs") return roomTransport;
@@ -941,6 +943,192 @@ function commandPort() {
     },
   };
 }
+
+// Actual AudioSampleClient performs all sequencing/accounting; this port only
+// transfers bytes and supplies explicitly controlled Worklet acknowledgements.
+function samplePort() {
+  return {
+    posts: [], transfers: [], starts: 0, closes: 0, onmessage: null, onmessageerror: null,
+    start() { this.starts++; },
+    postMessage(value, transfer = []) {
+      assert.equal(this.closes, 0);
+      this.posts.push(structuredClone(value, { transfer })); this.transfers.push([...transfer]);
+    },
+    close() { this.closes++; },
+    async acknowledge(fields = {}) {
+      const request = this.posts.at(-1); assert.ok(request);
+      this.onmessage?.({ data: { kind: "ack", generation: request.generation, sequence: request.sequence,
+        operation: request.kind, status: 0, admitted: 0, error: null, report: null, ...fields } });
+      await flushJobs();
+    },
+  };
+}
+
+async function uploadSamples(h, port, fields = {}) {
+  const rpcId = ++h.rpcId;
+  await h.send({ kind: "play-samples-upload", playId: 7, rpcId, port, generation: 7, channels: 2,
+    pcmLimits: { maxAssetBytes: 67108864, maxTotalBytes: 268435456, maxSamples: 7940 }, timeoutMs: 50, ...fields });
+  return rpcId;
+}
+
+test("direct solo local and replay sample upload waits for every real client ACK and EOS without returning PCM to Window", async () => {
+  for (const mode of ["live", "local", "replay", "empty"]) {
+    const h = await started(mode === "local" ? { startRequest: localRequest() }
+      : mode === "replay" ? { startRequest: replayRequest(replayFile().file) }
+      : mode === "empty" ? { samples: [] } : {});
+    const game = h.locals[0] ?? h.replays[0] ?? h.games[0], port = samplePort();
+    const rpcId = await uploadSamples(h, port), count = mode === "empty" ? 0 : 2;
+    assert.equal(port.starts, 1); assert.equal(port.posts.length, 1);
+    assert.equal(h.of("play-reply").some(value => value.rpcId === rpcId), false);
+    if (count !== 0) {
+      assert.deepEqual(port.posts[0], { kind: "sample", generation: 7, sequence: 1, id: 19n, rate: 44100, channels: 2,
+        pcm: new Float32Array([0.25, -0.25, 0.5, -0.5]) });
+      assert.equal(game.samples[0].frees, 1); assert.equal(game.samples[0].takes, 1);
+      assert.equal(game.samples[0].pcm.byteLength, 0); assert.equal(game.samples[1].frees, 0);
+      assert.equal(game.calls.filter(row => row[0] === "sample").length, 1);
+      await port.acknowledge({ generation: 8 }); assert.equal(port.posts.length, 1);
+      await port.acknowledge();
+      assert.equal(port.posts.length, 2); assert.equal(port.posts[1].id, 18446744073709551615n);
+      assert.equal(port.posts[1].rate, 96000); assert.equal(port.posts[1].sequence, 2);
+      assert.deepEqual(Array.from(port.posts[1].pcm), [1, -1]);
+      assert.equal(game.samples[1].frees, 1); assert.equal(game.samples[1].takes, 1);
+      assert.equal(game.samples[1].pcm.byteLength, 0);
+      await port.acknowledge();
+    }
+    assert.deepEqual(port.posts.at(-1), { kind: "end-samples", generation: 7, sequence: count + 1, count, bytes: count ? 24 : 0 });
+    assert.equal(game.calls.filter(row => row[0] === "sample").length, count + 1, "actual null terminator is checked");
+    assert.equal(h.of("play-reply").some(value => value.rpcId === rpcId), false);
+    assert.equal(game.calls.some(row => row[0] === "activate"), false);
+    await port.acknowledge();
+    assert.deepEqual(h.of("play-reply").find(value => value.rpcId === rpcId).result,
+      { kind: "samples-uploaded", count, bytes: count ? 24 : 0 });
+    assert.equal(port.closes, 1); assert.equal(port.onmessage, null);
+    assert.equal(h.of("play-reply").some(value => value.result?.kind === "sample" || value.result?.pcm), false);
+    const commands = commandPort();
+    const ready = await h.rpc("play-audio", { port: commands, generation: 7, queueCapacity: 4096, timeoutMs: 50 });
+    assert.equal(ready.result.kind, "audio-ready");
+    await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START });
+    assert.equal(game.calls.filter(row => row[0] === "activate").length, mode === "replay" ? 0 : 1);
+    await h.send({ kind: "play-stop", playId: 7 });
+    assert.equal(game.frees, 1); assert.equal(game.stops, 1); assert.equal(port.closes, 1); assert.equal(commands.closes, 1);
+  }
+});
+
+test("direct sample enumeration, wrapper and remote failures preserve exact prefixes and never acknowledge incomplete setup", async () => {
+  const scenarios = [
+    { options: { sampleCount: 3 }, acks: 2, reads: 3, takes: [1, 1] },
+    { options: { sampleCount: 1 }, acks: 1, reads: 2, takes: [1, 0] },
+    { options: { takeError: "original take failed", sampleFreeError: "secondary release failed" }, acks: 0, reads: 1, takes: [1, 0], message: /original take failed/ },
+    { options: { samples: [{ id: -1n, rate: 44100, pcm: new Float32Array(2) }] }, acks: 0, reads: 1, takes: [1] },
+    { options: {}, reject: "sample", acks: 0, reads: 1, takes: [1, 0] },
+    { options: {}, reject: "end", acks: 2, reads: 3, takes: [1, 1] },
+    { options: {}, timeout: true, acks: 0, reads: 1, takes: [1, 0] },
+  ];
+  for (const scenario of scenarios) {
+    const h = await started(scenario.options), game = h.games[0], port = samplePort();
+    const rpcId = await uploadSamples(h, port);
+    for (let index = 0; index < scenario.acks; index++) await port.acknowledge();
+    if (scenario.reject) await port.acknowledge({ status: 100, error: scenario.reject === "end" ? "actual EOS totals refused" : "actual PCM refused" });
+    if (scenario.timeout) await h.runTimer(50);
+    const reply = h.of("play-reply").find(value => value.rpcId === rpcId);
+    assert.equal(typeof reply.error, "string"); assert.equal(reply.result, undefined);
+    if (scenario.message) { assert.match(reply.error, scenario.message); assert.doesNotMatch(reply.error, /secondary release/); }
+    assert.equal(game.calls.filter(row => row[0] === "sample").length, scenario.reads);
+    assert.deepEqual(game.samples.map(value => value.takes), scenario.takes);
+    for (const value of game.samples) assert.ok(value.frees <= 1);
+    assert.equal(game.samples[0].frees, 1);
+    if (scenario.options.sampleCount === 1) assert.equal(game.samples[1].frees, 1, "extra acquired wrapper is released without taking PCM");
+    assert.equal(game.frees, 1); assert.equal(game.stops, 1); assert.equal(port.closes, 1);
+    assert.equal(h.of("play-reply").filter(value => value.rpcId === rpcId).length, 1);
+    assert.equal(h.of("play-reply").some(value => value.result?.kind === "samples-uploaded"), false);
+    assert.equal(game.calls.some(row => row[0] === "activate" || row[0] === "commands"), false);
+  }
+  for (const method of ["take_pcm", "free"]) for (const cause of [null, false]) {
+    const h = await started(), game = h.games[0], wrapper = game.samples[0], port = samplePort();
+    wrapper[method] = function () {
+      if (method === "take_pcm") assert.equal(++this.takes, 1);
+      else assert.equal(++this.frees, 1);
+      throw cause;
+    };
+    const rpcId = await uploadSamples(h, port);
+    const response = h.of("play-reply").find(value => value.rpcId === rpcId);
+    assert.equal(typeof response.error, "string"); assert.equal(response.result, undefined);
+    assert.equal(wrapper.takes, 1); assert.equal(wrapper.frees, 1);
+    assert.equal(wrapper.pcm.byteLength, 16, "falsy extraction/release failure never transfers the retained PCM");
+    assert.equal(game.samples[1].takes, 0); assert.equal(port.posts.length, 0);
+    assert.equal(port.closes, 1); assert.equal(game.frees, 1);
+    assert.equal(h.of("play-reply").filter(value => value.rpcId === rpcId).length, 1);
+    assert.equal(h.of("play-reply").some(value => value.result?.kind === "samples-uploaded"), false);
+  }
+  for (const count of [-1, 1.5, 7941, Number.MAX_SAFE_INTEGER]) {
+    const h = await catalogWorker({ sampleCount: count }); await h.send(startRequest());
+    assert.equal(h.of("play-reply").some(value => value.result?.kind === "prepared"), false);
+    assert.equal(h.games[0].calls.some(row => row[0] === "sample"), false); assert.equal(h.games[0].frees, 1);
+  }
+});
+
+test("stop awaiting a direct sample or EOS settles its RPC once before late ACKs can touch a freed or replacement game", async () => {
+  for (const phase of ["sample", "end"]) {
+    const port = samplePort();
+    const h = await started({ beforeFree() { assert.equal(port.closes, 1, "producer closes before game disposal"); } });
+    const game = h.games[0], rpcId = await uploadSamples(h, port);
+    if (phase === "end") { await port.acknowledge(); await port.acknowledge(); }
+    const stale = port.onmessage, last = port.posts.at(-1);
+    assert.equal(last.kind, phase === "sample" ? "sample" : "end-samples");
+    await h.send({ kind: "play-stop", playId: 7 });
+    assert.equal(game.frees, 1); assert.equal(game.stops, 1); assert.equal(port.closes, 1);
+    const cancelled = h.of("play-reply").filter(value => value.rpcId === rpcId);
+    assert.equal(cancelled.length, 1); assert.equal(typeof cancelled[0].error, "string");
+    const calls = game.calls.length, receipts = h.of("play-reply").length;
+    await h.send(startRequest({ playId: 8 })); assert.equal(h.games.length, 2);
+    stale({ data: { kind: "ack", generation: 7, sequence: last.sequence, operation: last.kind,
+      status: 0, admitted: 0, error: null, report: null } });
+    await flushJobs();
+    assert.equal(game.calls.length, calls); assert.equal(game.frees, 1);
+    assert.equal(h.of("play-reply").length, receipts + 1);
+    assert.equal(h.games[1].calls.some(row => row[0] === "sample"), false);
+    assert.equal(h.games[1].frees, 0);
+    await h.send({ kind: "play-stop", playId: 8 }); assert.equal(h.games[1].frees, 1);
+  }
+});
+
+test("direct sample adoption closes refused endpoints and excludes legacy reads or premature command and activation bypasses", async () => {
+  const invalid = [{ generation: 8 }, { channels: 1 }, { timeoutMs: 0 }, { timeoutMs: 60001 },
+    { pcmLimits: { maxAssetBytes: 67108863, maxTotalBytes: 268435456, maxSamples: 7940 } },
+    { pcmLimits: { maxAssetBytes: 67108864, maxTotalBytes: 268435456, maxSamples: 7939 } }];
+  for (const fields of invalid) {
+    const h = await started(), port = samplePort(); await uploadSamples(h, port, fields);
+    assert.equal(port.closes, 1); assert.equal(port.posts.length, 0);
+    assert.equal(h.games[0].calls.some(row => row[0] === "sample"), false);
+    assert.equal(h.of("play-reply").some(value => value.result?.kind === "samples-uploaded"), false);
+  }
+  for (const kind of ["play-sample", "play-commands", "play-activate", "play-audio"]) {
+    const h = await started(), port = samplePort(), pending = await uploadSamples(h, port);
+    const commandEndpoint = kind === "play-audio" ? commandPort() : null;
+    await h.rpc(kind, kind === "play-activate" ? { hostNs: ORIGIN, startFrame: START }
+      : commandEndpoint ? { port: commandEndpoint, generation: 7, queueCapacity: 4096, timeoutMs: 50 } : {});
+    const game = h.games[0]; assert.equal(game.calls.filter(row => row[0] === "sample").length, 1);
+    assert.equal(game.calls.some(row => row[0] === "commands" || row[0] === "activate"), false);
+    assert.equal(h.of("play-reply").some(value => value.result?.kind === "audio-ready"), false);
+    assert.equal(h.of("play-reply").find(value => value.rpcId === pending).result, undefined);
+    if (commandEndpoint) assert.equal(commandEndpoint.closes, 1);
+    await h.send({ kind: "play-stop", playId: 7 }); assert.equal(port.closes, 1); assert.equal(game.frees, 1);
+  }
+  const legacy = await started(); assert.equal((await legacy.rpc("play-sample")).result.kind, "sample");
+  const refused = samplePort(); await uploadSamples(legacy, refused);
+  assert.equal(refused.closes, 1); assert.equal(refused.posts.length, 0);
+  assert.equal(legacy.games[0].calls.filter(row => row[0] === "sample").length, 1);
+  const ended = await started(), completed = samplePort(); await uploadSamples(ended, completed);
+  await completed.acknowledge(); await completed.acknowledge(); await completed.acknowledge();
+  const reads = ended.games[0].calls.filter(row => row[0] === "sample").length;
+  assert.equal(typeof (await ended.rpc("play-sample")).error, "string");
+  assert.equal(ended.games[0].calls.filter(row => row[0] === "sample").length, reads);
+  assert.equal(completed.closes, 1); assert.equal(ended.games[0].frees, 1);
+  const stale = await started(), old = samplePort(); await uploadSamples(stale, old, { playId: 6 });
+  assert.equal(old.closes, 1); assert.equal(stale.games[0].frees, 0);
+  assert.equal(stale.games[0].calls.some(row => row[0] === "sample"), false);
+  await stale.send({ kind: "play-stop", playId: 7 });
+});
 
 async function attachCommands(h, port, fields = {}) {
   for (let count = 0; count < 3; count++) {

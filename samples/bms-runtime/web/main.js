@@ -843,7 +843,9 @@ function playRpc(session, kind, fields = {}, transfer = []) {
   const rpcId = ++serial;
   if (!Number.isSafeInteger(rpcId)) return Promise.reject(new Error("Playback request identity exhausted."));
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    // The bounded upload client times each sample and EOS independently.
+    // A whole-bank deadline would reject a valid sequence of admitted uploads.
+    const timer = kind === "play-samples-upload" ? null : setTimeout(() => {
       if (session.rpc?.rpcId !== rpcId) return;
       session.rpc = null;
       if (activePlay === session && session.owner === owner) controls();
@@ -1251,15 +1253,39 @@ async function play(mode = "live") {
         + (session.touchInput && (!session.localSources || session.localSources.has(2n)) ? " · Touch lanes enabled" : "")
         + (session.hidSources ? ` · ${session.hidSources.size} HID interface(s)` : "")
         + (session.gamepadSources ? ` · ${session.gamepadSources.size} ${session.gamepadProfileFile ? "profile-configured" : "automatic standard"} Gamepad(s); ${session.gamepadDevices.length - session.gamepadSources.size} unmatched device(s) ignored` : "");
-    for (let index = 0; index < prepared.samples; index++) {
-      const sample = await playRpc(session, "play-sample");
-      if (sample?.kind !== "sample") throw new Error("Prepared audio asset count changed.");
-      await session.audio.sample(sample);
+    if (!Number.isSafeInteger(prepared.samples) || prepared.samples < 0 || prepared.samples > PLAY_PCM_SAMPLES) {
+      throw new Error("Prepared audio asset count exceeds the bounded section capacity.");
     }
-    const end = await playRpc(session, "play-sample");
-    if (end?.kind !== "samples-end") throw new Error("Prepared audio assets exceeded their declared count.");
+    const sampleDescriptor = await session.audio.openSamplePort();
+    try {
+      if (activePlay !== session || session.owner !== owner || session.phase === "closing") {
+        sampleDescriptor?.port?.close();
+        return;
+      }
+      const limits = sampleDescriptor?.pcmLimits;
+      if (!sampleDescriptor?.port
+        || !["postMessage", "start", "close"].every(name => typeof sampleDescriptor.port[name] === "function")
+        || sampleDescriptor.generation !== session.id || sampleDescriptor.channels !== session.audio.channels
+        || sampleDescriptor.channels !== 2 || limits?.maxAssetBytes !== 64 * 1024 * 1024
+        || limits?.maxTotalBytes !== 256 * 1024 * 1024 || limits?.maxSamples !== PLAY_PCM_SAMPLES
+        || !Number.isSafeInteger(sampleDescriptor.timeoutMs) || sampleDescriptor.timeoutMs < 1 || sampleDescriptor.timeoutMs > 60000) {
+        throw new Error("Audio sample handoff did not preserve its owner configuration.");
+      }
+      const uploaded = await playRpc(session, "play-samples-upload", sampleDescriptor, [sampleDescriptor.port]);
+      if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
+      if (uploaded?.kind !== "samples-uploaded" || uploaded.count !== prepared.samples
+        || !Number.isSafeInteger(uploaded.bytes) || uploaded.bytes < 0
+        || uploaded.bytes > limits.maxTotalBytes || uploaded.bytes % (2 * 4) !== 0
+        || uploaded.bytes > uploaded.count * limits.maxAssetBytes) {
+        throw new Error("Direct audio upload did not acknowledge the exact bounded prepared bank.");
+      }
+    } catch (error) {
+      try { sampleDescriptor?.port?.close(); } catch {}
+      throw error;
+    }
     if (session.endFrame === undefined) await session.audio.finish();
     else await session.audio.finish(session.endFrame);
+    if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
     const descriptor = await session.audio.openCommandPort();
     try {
       if (activePlay !== session || session.owner !== owner || session.phase === "closing") {

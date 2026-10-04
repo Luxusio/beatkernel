@@ -209,6 +209,7 @@ async function workerHarness(options = {}) {
   const hidProfileHelpers = new SourceTextModule(await readFile(new URL("./hid-profile.mjs", import.meta.url), "utf8"), { context });
   const gamepadProfileHelpers = new SourceTextModule(await readFile(new URL("./gamepad-profile.mjs", import.meta.url), "utf8"), { context });
   const commandClient = new SourceTextModule(await readFile(new URL("./audio-command-client.mjs", import.meta.url), "utf8"), { context });
+  const sampleClient = new SourceTextModule(await readFile(new URL("./audio-sample-client.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
@@ -222,6 +223,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./hid-profile.mjs") return hidProfileHelpers;
     if (specifier === "./gamepad-profile.mjs") return gamepadProfileHelpers;
     if (specifier === "./audio-command-client.mjs") return commandClient;
+    if (specifier === "./audio-sample-client.mjs") return sampleClient;
     throw new Error(`Unexpected Worker import: ${specifier}`);
   });
   await worker.evaluate();

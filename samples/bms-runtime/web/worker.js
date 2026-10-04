@@ -7,6 +7,7 @@ import { validateSelections, validateOpponentSnapshot, validateOpponentTargets, 
 import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
 import { snapshotHidDevices, hidSetupFromProfile } from "./hid-profile.mjs";
 import { AudioCommandClient } from "./audio-command-client.mjs";
+import { AudioSampleClient } from "./audio-sample-client.mjs";
 import { snapshotGamepadSetup, snapshotGamepadDevices, automaticGamepadSetup, gamepadSetupFromProfile, GamepadAdapter } from "./gamepad-profile.mjs";
 import { snapshotLocalPlan, localBindingWords } from "./local-play-model.mjs";
 const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserRoomResults, BrowserView } = runtime;
@@ -1129,6 +1130,9 @@ function roomRequest(state, request) {
 }
 
 function disposeGame(state) {
+  const sampleClient = state.sampleClient;
+  state.sampleClient = null;
+  sampleClient?.close();
   const client = state.commandClient;
   state.commandClient = null;
   state.commandPumping = false;
@@ -1193,8 +1197,9 @@ function failPlay(state, error, request = null) {
   const roomClosing = state.room ? finishRoom(state, false) : null;
   const { cleanupError, replay, replayError, replays } = disposeGame(state);
   const text = message(cleanupError ? `${message(error)}; cleanup: ${message(cleanupError)}` : error);
-  const pending = new Set([request?.rpcId, state.startRpcId, state.audioRpcId, state.network?.rpcId, state.room?.rpcId]);
+  const pending = new Set([request?.rpcId, state.startRpcId, state.sampleRpcId, state.audioRpcId, state.network?.rpcId, state.room?.rpcId]);
   state.startRpcId = null;
+  state.sampleRpcId = null;
   state.audioRpcId = null;
   if (state.network) state.network.rpcId = null;
   if (state.room) state.room.rpcId = null;
@@ -1228,8 +1233,9 @@ function stopPlay(state, request) {
   }
   const roomClosing = state.room ? finishRoom(state, completed) : null;
   const { cleanupError, replay, replayError, replays } = disposeGame(state);
-  const pending = new Set([state.startRpcId, state.audioRpcId, state.network?.rpcId, state.room?.rpcId]);
+  const pending = new Set([state.startRpcId, state.sampleRpcId, state.audioRpcId, state.network?.rpcId, state.room?.rpcId]);
   state.startRpcId = null;
+  state.sampleRpcId = null;
   state.audioRpcId = null;
   if (state.network) state.network.rpcId = null;
   if (state.room) state.room.rpcId = null;
@@ -1610,6 +1616,7 @@ async function preparePlay(state, request) {
     state.prepared = true;
     const samples = state.game.sample_count();
     if (!integer(samples, 0, PLAY_PCM_SAMPLES)) throw new Error("Prepared PCM sample count exceeds the bounded section capacity.");
+    state.sampleCount = samples;
     reply(state, request, { kind: "prepared", samples, opponentCount: state.opponentCount, ...metadata });
     state.startRpcId = null;
     scheduleDraw();
@@ -1618,10 +1625,9 @@ async function preparePlay(state, request) {
   } finally { prepared?.free(); }
 }
 
-function samplePlay(state, request) {
-  if (state.active || state.commandClient !== null) throw new Error("Samples are setup-only resources before command handoff.");
-  const sample = state.game.next_sample();
-  if (sample == null) { state.samplesEnded = true; reply(state, request, { kind: "samples-end" }); return; }
+function nextSample(game) {
+  const sample = game.next_sample();
+  if (sample == null) return null;
   let result = null;
   let failure = null;
   try {
@@ -1631,17 +1637,31 @@ function samplePlay(state, request) {
     const pcm = sample.take_pcm();
     if (!unsigned(id) || !integer(rate, 1, 0xffffffff) || channels !== 2
       || !(pcm instanceof Float32Array) || !(pcm.buffer instanceof ArrayBuffer)
-      || pcm.byteOffset !== 0 || pcm.byteLength !== pcm.buffer.byteLength || pcm.length % channels !== 0) {
+      || pcm.buffer.resizable === true || pcm.byteOffset !== 0
+      || pcm.byteLength !== pcm.buffer.byteLength || pcm.length % channels !== 0) {
       throw new Error("Prepared sample has an invalid transferable layout.");
     }
     result = { kind: "sample", id, rate, channels, pcm };
-  } catch (error) { failure = error; }
-  try { sample.free(); } catch (error) { failure ??= error; }
-  if (failure) throw failure;
+  } catch (error) { failure = { cause: error }; }
+  try { sample.free(); } catch (error) { failure ??= { cause: error }; }
+  if (failure !== null) throw failure.cause;
+  return result;
+}
+
+function samplePlay(state, request) {
+  if (state.active || state.commandClient !== null || state.sampleMode === "direct") {
+    throw new Error("Samples belong to one setup producer before command handoff.");
+  }
+  state.sampleMode = "legacy";
+  const game = state.game;
+  const result = nextSample(game);
+  if (failed || play !== state || state.game !== game) return;
+  if (result === null) { state.samplesEnded = true; reply(state, request, { kind: "samples-end" }); return; }
   reply(state, request, result, [result.pcm.buffer]);
 }
 
 function commandBatch(state) {
+  state.commandStarted = true;
   const batch = state.game.commands(state.commandBatchLimit);
   state.commandsDrained = batch === null;
   if (batch === null) return null;
@@ -1665,8 +1685,81 @@ function commandsPending(state) {
 }
 
 function closeAudioHandoff(request) {
-  if (request?.kind === "play-audio") {
+  if (request?.kind === "play-audio" || request?.kind === "play-samples-upload") {
     try { request.port?.close(); } catch {}
+  }
+}
+
+function uploadSamples(state, request) {
+  let adopted = false;
+  try {
+    const port = request.port;
+    const generation = request.generation;
+    const channels = request.channels;
+    const timeoutMs = request.timeoutMs;
+    const suppliedLimits = request.pcmLimits;
+    const limits = { maxAssetBytes: suppliedLimits?.maxAssetBytes,
+      maxTotalBytes: suppliedLimits?.maxTotalBytes, maxSamples: suppliedLimits?.maxSamples };
+    if (state.active || state.sampleMode !== null || state.samplesEnded || state.sampleClient !== null
+      || state.sampleRpcId !== null || state.commandStarted || state.commandClient !== null
+      || state.audioRpcId !== null || state.batch !== null || state.audioPumping
+      || state.commandPumping || state.commandsDrained || !integer(state.sampleCount, 0, PLAY_PCM_SAMPLES)
+      || generation !== state.id || channels !== 2
+      || limits.maxAssetBytes !== 64 * 1024 * 1024 || limits.maxTotalBytes !== 256 * 1024 * 1024
+      || limits.maxSamples !== PLAY_PCM_SAMPLES || !integer(timeoutMs, 1, 60000)
+      || !port || !["postMessage", "start", "close"].every(name => typeof port[name] === "function")) {
+      throw new Error("Direct samples require one matching bounded endpoint in pristine gameplay setup.");
+    }
+    if (failed || play !== state || state.game === null) { closeAudioHandoff(request); return; }
+    const game = state.game;
+    const expected = state.sampleCount;
+    state.sampleMode = "direct";
+    state.sampleRpcId = request.rpcId;
+    // Valid constructor admission owns the endpoint even when port.start fails.
+    adopted = true;
+    const client = new AudioSampleClient({ port, generation, channels, pcmLimits: limits, timeoutMs });
+    if (failed || play !== state || state.game !== game) { client.close(); return; }
+    state.sampleClient = client;
+    const current = () => !failed && play === state && state.game === game
+      && state.sampleClient === client && state.sampleRpcId === request.rpcId;
+    void (async () => {
+      let count = 0;
+      let bytes = 0;
+      while (count < expected) {
+        if (!current()) return;
+        const sample = nextSample(game);
+        if (!current()) return;
+        if (sample === null) throw new Error("Prepared PCM bank ended before its declared sample count.");
+        const sampleBytes = sample.pcm.byteLength;
+        if (!current()) return;
+        await client.sample(sample);
+        if (!current()) return;
+        count += 1;
+        bytes += sampleBytes;
+      }
+      if (!current()) return;
+      const extra = game.next_sample();
+      if (extra != null) {
+        extra.free();
+        if (!current()) return;
+        throw new Error("Prepared PCM bank exceeds its declared sample count.");
+      }
+      if (!current()) return;
+      const ended = await client.end();
+      if (!current()) return;
+      if (ended.count !== expected || ended.count !== count || ended.bytes !== bytes
+        || !integer(bytes, 0, limits.maxTotalBytes)) {
+        throw new Error("Direct PCM acknowledgement did not preserve the prepared bank.");
+      }
+      state.samplesEnded = true;
+      state.sampleRpcId = null;
+      reply(state, request, { kind: "samples-uploaded", count, bytes });
+    })().catch(error => {
+      if (play === state && state.game === game) failPlay(state, error, request);
+    });
+  } catch (error) {
+    if (!adopted) closeAudioHandoff(request);
+    throw error;
   }
 }
 
@@ -1997,6 +2090,7 @@ function handlePlay(request) {
       id: request.playId, startRpcId: identity(request.rpcId) ? request.rpcId : null,
       game: null, keys: null, active: false, origin: null, startFrame: null,
       batch: null, commandClient: null, commandPumping: false, audioPumping: false,
+      sampleMode: null, sampleClient: null, sampleRpcId: null, sampleCount: null, commandStarted: false,
       audioRpcId: null, renderObservation: null, lastPresentation: null,
       lastRpc: 0, lastTick: 0, lastRender: 0,
       lastHost: null, lastSequence: null, sourceOrder: new Map(), preOriginInputs: 0,
@@ -2064,7 +2158,7 @@ function handlePlay(request) {
     if (request.kind === "play-stop") { stopPlay(state, request); return; }
     if (request.kind === "play-start") throw new Error("Gameplay setup is already owned by this identity.");
     const roomRpc = ["play-room-open", "play-room-seal", "play-room-ready", "play-room-leave", "play-room-page"].includes(request.kind);
-    const requiresRpc = roomRpc || ["play-sample", "play-audio", "play-commands", "play-activate", "play-network-ready", "play-page"].includes(request.kind);
+    const requiresRpc = roomRpc || ["play-sample", "play-samples-upload", "play-audio", "play-commands", "play-activate", "play-network-ready", "play-page"].includes(request.kind);
     if (request.rpcId !== undefined && !requiresRpc && request.kind !== "play-ack") throw new Error("Unexpected gameplay RPC identity.");
     rpc(state, request, requiresRpc);
     if (roomRpc) { roomRequest(state, request); return; }
@@ -2089,12 +2183,16 @@ function handlePlay(request) {
     }
     if (!state.game || !state.prepared) throw new Error("Wait for actual gameplay preparation.");
     if (request.kind === "play-sample") samplePlay(state, request);
+    else if (request.kind === "play-samples-upload") { audioHandled = true; uploadSamples(state, request); }
     else if (request.kind === "play-audio") { audioHandled = true; attachAudio(state, request); }
     else if (request.kind === "play-network-ready") {
       if (state.room !== null || !state.network || state.network.requested || state.active || !state.samplesEnded
         || !state.commandsDrained || commandsPending(state)) throw new Error("Multiplayer readiness requires completed sample and command preparation.");
       void networkReady(state, request);
     } else if (request.kind === "play-commands") {
+      if (state.sampleMode === "direct" && (!state.samplesEnded || state.sampleRpcId !== null)) {
+        throw new Error("Direct samples require their genuine end acknowledgement before commands.");
+      }
       if (state.commandClient !== null) throw new Error("Commands belong to the direct audio endpoint.");
       if (state.batch !== null) throw new Error("An actual audio batch is still awaiting acknowledgement.");
       reply(state, request, commandBatch(state));
@@ -2109,6 +2207,9 @@ function handlePlay(request) {
       pumpAudio(state);
     } else if (request.kind === "play-activate") {
       if (state.active || !hostTime(request.hostNs) || !unsigned(request.startFrame)) throw new Error("Invalid or repeated gameplay activation.");
+      if (state.sampleMode === "direct" && (!state.samplesEnded || state.sampleRpcId !== null)) {
+        throw new Error("Direct samples require their genuine end acknowledgement before activation.");
+      }
       if (state.commandClient !== null && (!state.samplesEnded || !state.commandsDrained || commandsPending(state)
         || state.audioRpcId !== null || state.commandClient.state !== "ready")) throw new Error("Direct audio preparation is not fully acknowledged.");
       const synchronized = state.room ?? state.network;
