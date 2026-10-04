@@ -527,7 +527,7 @@ async function play(mode = "live") {
     rpc: null, timer: null, events: [], pressed: new Set(), bindings: [], sequence: 0n,
     canvas, touchInput: false, contacts: new Map(), nextContact: 0n,
     hidOwner: null, hidConnecting: null, hidDevices: null, hidSources: null, hidProfileFile: null,
-    tickId: 0, tickPending: null, audioBusy: false, commandsPending: true, startFrame: null,
+    tickId: 0, tickPending: null, commandsPending: true, startFrame: null,
     origin: null, lastHost: 0n, stopping: null, renderId: 0, renderPending: null,
     workerStarted: false, workerReleased: false, workerStop: null, finalScore: null,
     completionReady: false, completionTick: null, lastPresentation: null, cleanupError: null, peerDisplayFailed: false,
@@ -700,7 +700,7 @@ async function play(mode = "live") {
     controls();
     ui.stop.focus();
     status(mode === "replay" ? "Playing recorded replay. Stop ends this session." : "Playing. Stop ends this session; leaving the page stops playback.");
-    session.timer = setInterval(() => { if (session.mode === "live") pumpInput(session); void pumpAudio(session); }, 8);
+    session.timer = setInterval(() => { if (session.mode === "live") pumpInput(session); pumpPresentation(session); }, 8);
   } catch (error) {
     if (activePlay === session && session.phase !== "closing") await stopPlay(`Playback failed: ${String(error.message).slice(0, 4096)}`, true);
   }
@@ -811,7 +811,7 @@ function presentedPoint(session) {
 function finishPlay(session) {
   if (activePlay === session && session.phase === "playing" && session.completionReady
     && session.events.length === 0 && session.tickPending === null && session.renderPending === null
-    && !session.commandsPending && session.completionTick === session.tickId && !session.audioBusy) {
+    && !session.commandsPending && session.completionTick === session.tickId) {
     void stopPlay(session.mode === "replay" ? "Recorded replay ended."
       : session.endNs === undefined ? "Song completed." : "Section completed.", false, true);
   }
@@ -835,26 +835,18 @@ function pumpInput(session) {
   } catch (error) { void stopPlay(`Playback failed: ${error.message}`, true); }
 }
 
-async function pumpAudio(session) {
-  if (activePlay !== session || session.phase !== "playing" || session.audioBusy) return;
-  if (session.renderPending) return;
-  session.audioBusy = true;
+function pumpPresentation(session) {
+  if (activePlay !== session || session.phase !== "playing" || session.renderPending) return;
   try {
-    const report = await session.audio.poll();
-    if (session.phase === "playing") {
-      const renderId = ++session.renderId;
-      if (!Number.isSafeInteger(renderId)) throw new Error("Audio report identity exhausted.");
-      const timer = setTimeout(() => { if (session.renderPending?.renderId === renderId) void stopPlay("Audio report Worker stopped responding.", true); }, 10000);
-      session.renderPending = { renderId, timer };
-      const presentation = presentedPoint(session);
-      worker.postMessage({ kind: "play-render", playId: session.id, renderId, report,
-        presentedNs: presentation?.outputNs ?? null, presentedHostNs: presentation?.hostNs ?? null });
-    }
+    const renderId = ++session.renderId;
+    if (!Number.isSafeInteger(renderId)) throw new Error("Audio report identity exhausted.");
+    const presentation = presentedPoint(session);
+    const timer = setTimeout(() => { if (session.renderPending?.renderId === renderId) void stopPlay("Audio report Worker stopped responding.", true); }, 10000);
+    session.renderPending = { renderId, timer };
+    worker.postMessage({ kind: "play-render", playId: session.id, renderId,
+      presentedNs: presentation?.outputNs ?? null, presentedHostNs: presentation?.hostNs ?? null });
   } catch (error) {
     if (session.phase === "playing") void stopPlay(`Playback failed: ${String(error.message).slice(0, 4096)}`, true);
-  } finally {
-    session.audioBusy = false;
-    finishPlay(session);
   }
 }
 

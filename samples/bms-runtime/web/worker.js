@@ -445,6 +445,8 @@ function disposeGame(state) {
   const client = state.commandClient;
   state.commandClient = null;
   state.commandPumping = false;
+  state.audioPumping = false;
+  state.renderObservation = null;
   client?.close();
   const game = state.game;
   state.game = null;
@@ -489,7 +491,8 @@ function failPlay(state, error, request = null) {
 function stopPlay(state, request) {
   if (request.completed !== undefined && typeof request.completed !== "boolean") throw new Error("Invalid stopped-play completion choice.");
   const completed = request.completed === true;
-  if (completed && (!state.completed || commandsPending(state))) throw new Error("Natural stop has no current completion evidence.");
+  if (completed && (!state.completed || commandsPending(state) || state.audioPumping
+    || state.renderObservation !== null)) throw new Error("Natural stop has no current completion evidence.");
   const score = statistics(state);
   const savedOpponents = finalOpponents(state);
   play = null;
@@ -806,7 +809,8 @@ function commandBatch(state) {
 }
 
 function commandsPending(state) {
-  return state.batch !== null || state.commandPumping;
+  return state.batch !== null || state.commandPumping
+    || (state.commandClient !== null && !state.commandsDrained);
 }
 
 function closeAudioHandoff(request) {
@@ -819,7 +823,7 @@ function attachAudio(state, request) {
   let adopted = false;
   try {
     if (state.active || !state.samplesEnded || state.commandClient !== null || state.audioRpcId !== null
-      || state.batch !== null || state.commandPumping || state.commandsDrained
+      || state.batch !== null || state.audioPumping || state.commandsDrained
       || request.generation !== state.id || !integer(request.queueCapacity, 1, 65536)
       || Math.min(256, request.queueCapacity) !== state.commandBatchLimit
       || !integer(request.timeoutMs, 1, 60000) || !request.port
@@ -831,22 +835,57 @@ function attachAudio(state, request) {
     state.commandClient = new AudioCommandClient({ port: request.port, generation: request.generation,
       queueCapacity: request.queueCapacity, timeoutMs: request.timeoutMs });
     state.audioRpcId = request.rpcId;
-    pumpCommands(state);
+    pumpAudio(state);
   } catch (error) {
     if (!adopted) closeAudioHandoff(request);
     throw error;
   }
 }
 
-async function drainCommands(state) {
+function observeOutput(state, observation, output) {
+  renderedCursor(output, state.startFrame);
+  const completed = state.game.observe_output(output.words, observation.presentedNs);
+  if (typeof completed !== "boolean" || (completed && (state.batch !== null || state.commandPumping))) {
+    throw new Error("Invalid completion with outstanding gameplay commands.");
+  }
+  if (state.mode === "live" && observation.presentedNs !== null) {
+    state.game.observe_presentation(observation.presentedNs, observation.presentedHostNs);
+  }
+  state.commandsDrained = false; // Actual output may admit more BGM work.
+  state.completed = completed;
+  state.lastRender = observation.renderId;
+  return completed;
+}
+
+function publishRender(state, observation, completed) {
+  if (completed && commandsPending(state)) throw new Error("Completion produced outstanding gameplay commands.");
+  report("play-render-done", { playId: state.id, renderId: observation.renderId, completed,
+    commandsPending: commandsPending(state), observedTick: state.lastTick,
+    ...(state.mode === "replay" ? statistics(state) : {}) });
+  if (state.mode === "replay") scheduleDraw();
+}
+
+async function drainAudio(state) {
   const game = state.game;
   const client = state.commandClient;
   const current = () => play === state && state.game === game && state.commandClient === client;
   try {
     while (current()) {
       if (client.state !== "ready") throw new Error("Direct audio command owner is unavailable.");
-      const batch = commandBatch(state);
+      let batch;
+      if (state.active && state.renderObservation !== null) {
+        const observation = state.renderObservation;
+        const output = await client.poll();
+        if (!current()) return;
+        // Input can advance during the read. Apply the original presentation
+        // pair to the actual current game, retaining its latest input frontier.
+        const completed = observeOutput(state, observation, output);
+        state.renderObservation = null;
+        batch = commandBatch(state);
+        publishRender(state, observation, completed);
+      } else batch = commandBatch(state);
       if (batch === null) break;
+      state.commandPumping = true;
       let ack;
       try { ack = await client.commands(batch.commands); }
       catch (error) {
@@ -861,9 +900,12 @@ async function drainCommands(state) {
       // Transport sequence is independent; acknowledge the genuine core batch.
       game.acknowledge(batch.sequence, ack.admitted, true);
       state.batch = null;
+      state.commandPumping = false;
+      // The next iteration services a waiting report before extracting another
+      // batch; report-driven BGM credits cannot be starved by repeated commands.
     }
     if (!current()) return;
-    state.commandPumping = false;
+    state.audioPumping = false;
     if (state.audioRpcId !== null) {
       const rpcId = state.audioRpcId;
       state.audioRpcId = null;
@@ -872,15 +914,15 @@ async function drainCommands(state) {
   } catch (error) {
     if (current()) failPlay(state, error);
   } finally {
-    if (current()) state.commandPumping = false;
+    if (current()) { state.commandPumping = false; state.audioPumping = false; }
   }
 }
 
-function pumpCommands(state) {
+function pumpAudio(state) {
   if (state.commandClient !== null) {
-    if (state.commandPumping || (!state.active && state.audioRpcId === null)) return;
-    state.commandPumping = true;
-    void drainCommands(state);
+    if (state.audioPumping || (!state.active && state.audioRpcId === null)) return;
+    state.audioPumping = true;
+    void drainAudio(state);
     return;
   }
   if (!state.active || state.batch !== null) return;
@@ -958,6 +1000,7 @@ function stepPlay(state, request) {
   if (!Number.isSafeInteger(state.preOriginInputs + ignored)) throw new Error("Pre-origin input count overflow.");
   state.lastTick = request.tickId;
   state.completed = false;
+  state.commandsDrained = false;
   for (let index = 0; index < request.events.length; index++) {
     const event = request.events[index];
     if (event.hostNs < state.origin) state.preOriginInputs++;
@@ -975,7 +1018,7 @@ function stepPlay(state, request) {
     state.lastHost = request.watermark;
   }
   const score = statistics(state);
-  pumpCommands(state);
+  pumpAudio(state);
   if (play !== state) return;
   report("play-step-done", { playId: state.id, tickId: request.tickId, commandsPending: commandsPending(state), ...score });
   scheduleDraw();
@@ -994,7 +1037,8 @@ function handlePlay(request) {
     const state = {
       id: request.playId, startRpcId: identity(request.rpcId) ? request.rpcId : null,
       game: null, keys: null, active: false, origin: null, startFrame: null,
-      batch: null, commandClient: null, commandPumping: false, audioRpcId: null,
+      batch: null, commandClient: null, commandPumping: false, audioPumping: false,
+      audioRpcId: null, renderObservation: null,
       lastRpc: 0, lastTick: 0, lastRender: 0,
       lastHost: null, lastSequence: null, preOriginInputs: 0,
       recordReplay: false, completed: false,
@@ -1036,7 +1080,7 @@ function handlePlay(request) {
       state.game.acknowledge(request.sequence, request.admitted, request.success);
       state.batch = null;
       if (request.rpcId !== undefined) reply(state, request, null);
-      pumpCommands(state);
+      pumpAudio(state);
     } else if (request.kind === "play-activate") {
       if (state.active || !hostTime(request.hostNs) || !unsigned(request.startFrame)) throw new Error("Invalid or repeated gameplay activation.");
       if (state.commandClient !== null && (!state.samplesEnded || !state.commandsDrained || commandsPending(state)
@@ -1057,24 +1101,26 @@ function handlePlay(request) {
       reply(state, request, null);
     } else if (request.kind === "play-step") stepPlay(state, request);
     else if (request.kind === "play-render") {
-      if (!state.active || !identity(request.renderId) || request.renderId <= state.lastRender) throw new Error("Invalid rendered-report identity or state.");
-      if (state.mode === "replay") {
+      if (!state.active || state.renderObservation !== null || !identity(request.renderId)
+        || request.renderId <= state.lastRender) throw new Error("Invalid rendered-report identity or state.");
+      const direct = state.commandClient !== null;
+      if (direct && Object.hasOwn(request, "report")) throw new Error("Direct audio reports cannot be supplied by the caller.");
+      if (!direct && state.mode === "replay") {
         if (!(request.presentedNs === null || hostTime(request.presentedNs))) throw new Error("Invalid replay output presentation point.");
       } else if (!(request.presentedNs === null && request.presentedHostNs === null)
         && !(hostTime(request.presentedNs) && hostTime(request.presentedHostNs))) throw new Error("Invalid output presentation pair.");
-      renderedCursor(request.report, state.startFrame);
-      const completed = state.game.observe_output(request.report.words, request.presentedNs);
-      if (typeof completed !== "boolean" || (completed && commandsPending(state))) throw new Error("Invalid completion with outstanding gameplay commands.");
-      if (state.mode === "live" && request.presentedNs !== null) state.game.observe_presentation(request.presentedNs, request.presentedHostNs);
-      state.completed = completed;
-      state.lastRender = request.renderId;
-      pumpCommands(state);
+      const observation = Object.freeze({ renderId: request.renderId,
+        presentedNs: request.presentedNs, presentedHostNs: request.presentedHostNs });
+      if (direct) {
+        state.renderObservation = observation;
+        state.completed = false;
+        pumpAudio(state);
+        return;
+      }
+      const completed = observeOutput(state, observation, request.report);
+      pumpAudio(state);
       if (play !== state) return;
-      if (completed && commandsPending(state)) throw new Error("Completion produced outstanding gameplay commands.");
-      report("play-render-done", { playId: state.id, renderId: request.renderId, completed,
-        commandsPending: commandsPending(state), observedTick: state.lastTick,
-        ...(state.mode === "replay" ? statistics(state) : {}) });
-      if (state.mode === "replay") scheduleDraw();
+      publishRender(state, observation, completed);
     } else throw new Error("Unknown gameplay request.");
   } catch (error) {
     if (!audioHandled) closeAudioHandoff(request);
