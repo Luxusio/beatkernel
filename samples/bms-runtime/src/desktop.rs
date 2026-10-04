@@ -10,6 +10,9 @@ mod clipboard_fixtures;
 #[path = "font_fixture.rs"]
 mod font_fixture;
 #[cfg(test)]
+#[path = "desktop_ime_fields_fixtures.rs"]
+mod ime_fields_fixtures;
+#[cfg(test)]
 #[path = "desktop_room_fixtures.rs"]
 mod room_fixtures;
 #[cfg(test)]
@@ -1100,17 +1103,8 @@ fn record_launch(
     SessionLaunch::new(args)
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ImeField {
-    Search,
-    Setting(usize),
-    Profile,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct ImeTarget {
-    screen: ScreenInstanceId,
-    field: ImeField,
-}
+type ImeField = TextField;
+type ImeTarget = TextTarget;
 #[derive(Default)]
 struct ImeDraft {
     target: Option<ImeTarget>,
@@ -1348,21 +1342,27 @@ impl Desktop {
             ScreenRoute::Display => {
                 if let Some(draft) = &self.display {
                     for (slot, editor) in draft.editors.iter().enumerate() {
-                        values[slot] = editor.value();
+                        values[slot] = self.ime_editor(ImeField::Display(slot), editor).value();
                     }
                 }
                 4
             }
             ScreenRoute::Practice => {
                 if let Some(draft) = &self.practice {
-                    values[0] = draft.editor.value();
-                    values[1] = draft.end_editor.value();
+                    values[0] = self
+                        .ime_editor(ImeField::PracticeStart, &draft.editor)
+                        .value();
+                    values[1] = self
+                        .ime_editor(ImeField::PracticeEnd, &draft.end_editor)
+                        .value();
                 }
                 2
             }
             ScreenRoute::Records => {
                 if let Some(draft) = &self.records {
-                    values[0] = draft.directory.value();
+                    values[0] = self
+                        .ime_editor(ImeField::RecordDirectory, &draft.directory)
+                        .value();
                 }
                 1
             }
@@ -3242,23 +3242,7 @@ impl Desktop {
         }
     }
     fn ime_target(&self) -> Option<ImeTarget> {
-        if !self.ui_ready() {
-            return None;
-        }
-        let screen = self.navigator.active_id()?;
-        let field = match self.navigator.route() {
-            ScreenRoute::Selection if self.search_focused => ImeField::Search,
-            ScreenRoute::Settings => {
-                let settings = self.settings.as_ref()?;
-                if settings.profile_focused {
-                    ImeField::Profile
-                } else {
-                    ImeField::Setting(settings.selected)
-                }
-            }
-            _ => return None,
-        };
-        Some(ImeTarget { screen, field })
+        self.text_target()
     }
     fn sync_ime(&mut self) {
         if !self.ui_ready() {
@@ -3299,15 +3283,7 @@ impl Desktop {
         editor
     }
     fn ime_error(&mut self, error: String) {
-        match self.navigator.route() {
-            ScreenRoute::Settings => {
-                if let Some(settings) = &mut self.settings {
-                    settings.error = Some(error);
-                }
-            }
-            ScreenRoute::Selection => self.failure = Some(error),
-            _ => {}
-        }
+        self.clipboard_error(Some(error));
     }
     fn ime_event(&mut self, event: Ime) {
         self.sync_ime();
@@ -3322,16 +3298,10 @@ impl Desktop {
                 self.ime.composing = !text.is_empty();
                 self.ime.preview = None;
                 if !text.is_empty() {
-                    let editor = match self.ime.target.map(|target| target.field) {
-                        Some(ImeField::Search) => Some(&self.search_editor),
-                        Some(ImeField::Setting(_)) => {
-                            self.settings.as_ref().map(|draft| &draft.editor)
-                        }
-                        Some(ImeField::Profile) => {
-                            self.settings.as_ref().map(|draft| &draft.profile)
-                        }
-                        None => None,
-                    };
+                    let editor = self
+                        .ime
+                        .target
+                        .and_then(|target| self.text_editor(target.field));
                     if let Some(editor) = editor {
                         match editor.preedit(&text, cursor) {
                             Ok(preview) => self.ime.preview = Some(preview),
@@ -3343,14 +3313,16 @@ impl Desktop {
             Ime::Commit(text) if self.ime.enabled => {
                 self.ime.preview = None;
                 self.ime.composing = false;
-                match self.ime.target.map(|target| target.field) {
-                    Some(ImeField::Search) => self.edit_search(None, Some(&text)),
-                    Some(ImeField::Setting(_) | ImeField::Profile) => {
-                        if let Some(settings) = &mut self.settings {
-                            settings.edit(None, Some(&text));
-                        }
-                    }
-                    None => {}
+                if let Some(target) = self.ime.target {
+                    let result = self
+                        .text_editor(target.field)
+                        .cloned()
+                        .ok_or_else(|| "text field unavailable".to_string())
+                        .and_then(|mut editor| {
+                            editor.insert(&text)?;
+                            self.commit_clipboard_editor(target, editor)
+                        });
+                    self.clipboard_error(result.err());
                 }
             }
             _ => {}
@@ -3586,6 +3558,19 @@ impl Desktop {
             let draft = self.settings.as_mut().ok_or("settings draft unavailable")?;
             draft.values = values;
             draft.editor = editor;
+        } else if target.field == TextField::RecordDirectory {
+            let draft = self
+                .records
+                .as_mut()
+                .ok_or("record directory unavailable")?;
+            if draft.directory.value() != editor.value() {
+                draft.catalog = None;
+                draft.preview = None;
+                draft.selected = None;
+                draft.first = 0;
+                draft.message = None;
+            }
+            draft.directory = editor;
         } else {
             *self
                 .text_editor_mut(target.field)
@@ -4188,12 +4173,18 @@ impl Desktop {
                 .find(|&id| self.gesture.is_armed(id))
         };
         let display = self.display.as_ref().ok_or("display data unavailable")?;
+        let preview_editors: Option<[LineEditor; 4]> = self.ime.preview.as_ref().map(|_| {
+            std::array::from_fn(|index| {
+                self.ime_editor(ImeField::Display(index), &display.editors[index])
+                    .clone()
+            })
+        });
         let view = self
             .display_view
             .as_ref()
             .ok_or("display view unavailable")?;
         view.update(DisplayFrame {
-            editors: &display.editors,
+            editors: preview_editors.as_ref().unwrap_or(&display.editors),
             selected: display.selected,
             error: self
                 .input_font_error
@@ -4306,6 +4297,7 @@ impl Desktop {
             opponents,
             self.settings.as_ref().map(|draft| &draft.values),
         );
+        frame.directory = self.ime_editor(ImeField::RecordDirectory, &records.directory);
         frame.error = self.input_font_error.as_deref().or(frame.error);
         frame.hovered = beatkernel_bms_runtime::ui::records::hit(&frame, self.point());
         frame.armed = (50..=61)
@@ -4337,8 +4329,12 @@ impl Desktop {
             return Err("practice instance is stale".into());
         }
         practice.view.update(PracticeFrame {
-            editor: practice.editor.clone(),
-            end_editor: practice.end_editor.clone(),
+            editor: self
+                .ime_editor(ImeField::PracticeStart, &practice.editor)
+                .clone(),
+            end_editor: self
+                .ime_editor(ImeField::PracticeEnd, &practice.end_editor)
+                .clone(),
             end_focused: practice.end_focused,
             error: self
                 .input_font_error
