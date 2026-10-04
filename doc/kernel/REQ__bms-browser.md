@@ -2,6 +2,41 @@
 
 ## Input collection and rendering ownership
 
+### Coalesced touch movement acquisition
+
+For an owned live touch contact, `pointermove` acquisition consumes the actual
+`getCoalescedEvents()` list when nonempty. Preserve every sample's original
+timestamp, pressure and ordered contact identity; process the list instead of
+also processing its aggregated parent. An unavailable API or empty list uses
+the ordinary parent sample. Predicted samples never enter judging or replay.
+Down, Up, Cancel and lost capture retain their existing single-event lifecycle.
+
+Limit each movement list to 256 samples and the shared pending input queue to
+1024 events. Validate the entire list, remaining capacity, matching touch
+pointer identity/type and boolean primary status matching the parent,
+chronological timestamps no later than the parent, accepted
+watermark and finite coordinates before publishing any of its prefix. Invalid
+or oversized lists fail the session explicitly, without partial admission or
+silent truncation. Equal-time samples remain in acquisition order.
+
+Coalesced child events are not dispatched independently. On the existing
+untransformed canvas, acquire canvas-relative CSS coordinates using the
+dispatched parent's offset/client anchor and each child's client coordinates;
+do not assume a child's offset coordinates have dispatch-relative semantics.
+Snapshot the existing CSS/backing extents once for the acquired list. Window
+does no backing projection, lane lookup or rendering; the existing Worker
+touch path interprets the complete acquired prefix. Preserve local page,
+capture, shutdown and replacement ownership. Future transformed canvas layouts
+must supply a corresponding coordinate acquisition contract before use.
+
+Independent deferred fixtures must cover actual host forwarding, fallback,
+equal-time ordering, ignored predictions, invalid/oversized atomic failure and
+retained release/cancel behavior. Browser/device execution and measured cost
+remain unverified.
+
+The acquisition choice follows the [Pointer Events coalesced-event
+contract](https://www.w3.org/TR/pointerevents3/#coalesced-events).
+
 The browser main-thread budget prioritizes collection of all supported physical
 inputs: keyboard, touch/pointer, raw HID reports and Gamepad samples. This rule
 also applies to future input adapters. Window forwards bounded acquired data
