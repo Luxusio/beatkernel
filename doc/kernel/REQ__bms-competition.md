@@ -699,3 +699,32 @@ fanout/backpressure, participant-scoped progress and real final ACK delivery,
 native/browser application integration and interoperability/performance remain
 required follow-on work. Author deterministic state/lease fixtures for later
 execution; source compilation cannot establish acceptance.
+
+## Multi-host room admission wire
+
+Room admission uses distinct BKMR version 1 frames; bilateral BKMP frames must
+never be accepted as room messages. The bounded codec is shared by native QUIC
+and browser WebTransport adapters and carries canonical identity plus ordered
+local roster, assigned participant admission, ordered membership snapshots,
+and explicit seal/preparation/leave requests. Requests carry no caller-selected
+participant ID: a future server binds them to its admitted stream lease.
+
+Membership snapshots retain participant-scoped player IDs, phase, original
+deadline and preparation bits. Validate every member before admitting a complete
+snapshot: positive unique participants, valid local rosters, at most 64 hosts,
+nonnegative deadline for collecting/frozen, and consistent phase/preparation.
+Collecting has no prepared hosts; frozen has at least two hosts and is not yet
+fully prepared; prepared has at least two fully prepared hosts and no deadline.
+Admission IDs are positive. Reject unknown versions/tags, reserved bits,
+noncanonical booleans, impossible counts, trailing bytes and oversize frames.
+
+Incremental decoding bounds allocation from the complete header, preserves
+fragmented frames and admits only the current frame from a coalesced chunk.
+Reserve the validated body extent once so small transport fragments reuse the
+buffer instead of growing it repeatedly; before header validation reserve only
+the header. A completed message may reuse that bounded capacity for later frames.
+Malformed input never becomes a partially admitted message or silently resets
+the decoder; callers terminate the affected stream. These messages do not
+establish shared start clocks, gameplay progress, full writes or final ACKs.
+Server/client negotiation and stream ownership integration remain required;
+codec source and deferred fixtures alone do not prove interoperable gameplay.
