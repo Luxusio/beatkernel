@@ -27,6 +27,34 @@ only P1/P2, fixed two-player fields or a four-player array. A caller-supplied
 resource capacity limits the roster (up to 64), independently of game layout.
 This is same-host local play, separate from existing network peer competition.
 
+### Resolved source plan shared by native and browser hosts
+
+After host acquisition, represent routes using positive stable PlayerIds and
+canonical full-width DeviceIds, with no operating-system tag, path, product
+description or permission handle in the shared plan. Retain member order and
+own the immutable route snapshot. Validate one to 64 unique player identities;
+every member in a multi-player plan needs a distinct exact source. A solo member
+may retain automatic routing or an explicit source. DeviceId zero is a valid
+canonical identity; host-specific reserved-source rules belong to acquisition.
+
+The bounded numeric host bridge uses four u32 words per member: PlayerId,
+selector (0 automatic, 1 exact), source low word and source high word.
+Automatic rows require both source words zero and are legal only for solo.
+Reject empty/partial/over-capacity rows, unknown selectors, zero/duplicate
+PlayerIds, duplicate exact sources and automatic multi-player members. Preserve
+all 64 source bits without narrowing through floating-point numbers.
+
+Native identity resolution validates its entire assignment draft before calling
+attachment lookup, then applies the same canonical source validation used by
+RuntimeGroup setup. Lookup failure retains its real side-effect prefix; the
+shared plan does not open, close or roll back host devices. RuntimeGroup still
+requires exact member binding selectors and disjoint voice ownership. Source
+validation belongs to setup and adds no per-input or audio-callback work.
+
+This shared bridge is a prerequisite for browser local play. It does not make
+the current solo browser owner, device-assignment UI or multi-field rendering
+complete. Actual browser/device/runtime acceptance remains deferred.
+
 Player IDs survive roster growth and shrink for retained members. A solo roster
 uses automatic input and clears previous explicit assignments. Each member of
 an N>=2 roster must have a unique nonempty bounded native input identity before
@@ -72,8 +100,9 @@ disjoint player/BGM voice identities during setup. Checked namespace allocation
 happens outside real-time callbacks. Existing native solo compositions use the
 same group through an adapter. Linux terminal local sessions compose multiple
 devices with this group and publishes the same member reports to graphical
-panels. Settings Players supplies the Linux roster; other native platforms still
-require multiple-input wiring.
+panels. Settings Players supplies the native roster; Windows and macOS source
+paths likewise acquire multiple exact inputs as described above. Native
+execution acceptance and browser group integration remain pending.
 
 Group telemetry retention is limited to 65536 samples per member and 1048576
 samples in aggregate; zero retains counters only. Each member's judge/history

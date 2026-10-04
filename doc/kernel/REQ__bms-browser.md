@@ -1364,3 +1364,10 @@ Known ceiling: Profile/page source support does not establish actual browser,
 device, capture/replay or latency acceptance. Typed axes remain axes without
 ordinary press judgment. Local multiplayer assignment is separate remaining
 work, and polling/committed-frontier limits remain as specified above.
+
+The portable resolved local source plan is specified in
+[local input ownership](REQ__bms-local-players.md). Its owned numeric routes
+retain full-width acquired sources without using native settings hosts or
+browser product descriptions as identities. The current browser gameplay owner
+is still solo; multi-player device assignment, shared nonblocking ownership and
+multi-field rendering remain required integration work.
