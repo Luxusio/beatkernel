@@ -868,3 +868,31 @@ composed; unexpected controls must not grant readiness, consume a different
 lease, or bypass the Worker's output activation fence. No remote ACK, physical
 synchronization, progress/final-ACK support or interoperability is inferred from
 codec or compile-only evidence.
+
+
+## Prepared-room symmetric clock exchange
+
+A transport-independent RoomClockExchange binds one actual participant stream
+lease in a validated Prepared snapshot of 2..64 hosts. Both stream ends collect
+eight real four-timestamp samples using the existing shared ClockProbes and
+ClockFilter rules; BKMR positive sequences 1..8 map to the legacy core's 0..7
+without changing bilateral BKMP bytes or validation. No platform owns a second
+probe algorithm. Preserve original admission/receive timestamps; local stream
+write completion is evidence of complete software transfer, not hardware timing.
+
+Allow one in-flight frame, one pending local probe and one bounded pending reply.
+Replies take priority. A genuine reply may arrive before the adapter reports
+its local probe write complete; retain its original receipt time and correlate
+it exactly, while withholding readiness. Publish an estimate only after all
+eight local samples, eight local probe writes and eight peer reply writes are
+complete and pending/in-flight state is empty. Never infer these barriers from
+queued bytes. Exact nonreused full-width write IDs credit complete writes only.
+
+Rejected negative/regressing local times, invalid peer sequences/echoes, invalid
+four-timestamp chronology, unknown write IDs and unsupported messages preserve
+accepted state and the local chronology baseline. Stop fences future mutation
+and readiness. This component carries no timer, socket or OS branch; adapters
+still own deadlines, cancellation and stream lifetime. Actual server/client
+composition into RoomStartCoordinator/StartAgreement and Worker activation
+remains required; source/compile evidence does not prove playable multi-host
+start or physical audio synchronization.
