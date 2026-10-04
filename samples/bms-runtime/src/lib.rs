@@ -91,6 +91,8 @@ pub mod local_input;
 pub mod local_players;
 /// Host-independent prepared judges, bindings and disjoint key-sound voices.
 pub mod local_preparation;
+#[cfg(test)]
+mod local_preparation_fixtures;
 /// Shared-transport/output execution over independent actual core runtimes.
 pub mod local_runtime;
 /// Graphical local-player draft using typed keyboard metadata and stable IDs.
