@@ -43,6 +43,9 @@ mod browser_local_saved_fixtures;
 pub mod browser_multiplayer;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_replay;
+/// Worker bindings for the common bounded room-admission client.
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
+pub mod browser_room_client;
 #[cfg(test)]
 mod browser_touch_fixtures;
 /// Strict bounded application chart decoding before the UTF-8 parser.

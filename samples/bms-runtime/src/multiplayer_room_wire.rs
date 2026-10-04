@@ -335,6 +335,11 @@ impl RoomFrameDecoder {
         Self::default()
     }
 
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
+    pub(crate) fn buffered_bytes(&self) -> usize {
+        self.bytes.len()
+    }
+
     /// First request only the header; its validated tag/extent bounds the body.
     pub fn needed(&self) -> Result<usize, RoomWireError> {
         if self.bytes.len() < HEADER_BYTES {
