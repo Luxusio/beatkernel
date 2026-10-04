@@ -1,4 +1,4 @@
-//! Bounded HTTP/3 WebTransport ownership for bilateral relay or room admission.
+//! Bounded HTTP/3 WebTransport ownership for bilateral relay or room software start.
 use crate::{
     multiplayer_protocol::{encode_frame, FrameDecoder},
     multiplayer_rooms::{JoinOutcome, ParticipantId, ParticipantTicket, RoomPolicy, RoomRegistry},
@@ -37,13 +37,14 @@ pub const HELP: &str = "serve-multiplayer --bind IP:PORT --cert PATH --key PATH 
   --max-key-bytes N            1..1024 (default 128)\n\
   --max-sessions N             2..8192, including setup (default 128)\n\
   --max-setups N               1..256 and <= sessions (default 16)\n\
-  --group-hosts N              2..64 and <= sessions; BKMR room admission only\n\
+  --group-hosts N              2..64 and <= sessions; BKMR room admission/software start\n\
   --waiting-ms N               1..86400000 (default 30000)\n\
-  --setup-ms N                 1..60000 (default 10000)\n\
+  --setup-ms N                 1..60000 per setup/prepared handshake (default 10000)\n\
   --io-ms N                    1..120000 per complete frame read/write (default 10000)\n\
 Clients connect to https://SERVER/rooms/ASCII_KEY. Ctrl+C closes all sessions.\n\
-Default mode relays bilateral BKMP. Group mode admits and prepares a roster;\n\
-it does not provide group gameplay, shared start, progress, or final ACKs.\n";
+Default mode relays bilateral BKMP. Group mode admits a roster and coordinates\n\
+a measured software start; client activation, gameplay, progress and final ACKs\n\
+remain unimplemented. A software schedule is not physical audio alignment.\n";
 
 #[derive(Clone, Debug)]
 pub struct ServerOptions {
