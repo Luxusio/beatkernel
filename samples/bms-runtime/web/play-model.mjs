@@ -128,6 +128,14 @@ export function frameNanos(frame, rate) {
   if (ns > I64_MAX) throw new Error("Audio frame exceeds signed nanoseconds.");
   return ns;
 }
+export function audioScheduleFromFrame(contextFrame, startFrame, rate) {
+  if (typeof contextFrame !== "bigint" || contextFrame < 0n || contextFrame > U64_MAX
+    || typeof startFrame !== "bigint" || startFrame < 0n || startFrame > U64_MAX
+    || !Number.isInteger(rate) || rate < 1 || rate > 0xffffffff) throw new Error("Invalid audio schedule frame grid.");
+  const frame = contextFrame + BigInt(Math.ceil(rate / 50));
+  if (frame > U64_MAX) throw new Error("Audio schedule frame overflow.");
+  return frameNanos(frame > startFrame ? frame - startFrame : 0n, rate);
+}
 export function secondsToNanos(value) {
   if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error("Invalid context timestamp.");
   const whole = Math.floor(value);

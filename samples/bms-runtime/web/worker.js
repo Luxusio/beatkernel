@@ -1,6 +1,6 @@
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
-import { PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, renderedCursor } from "./play-model.mjs";
+import { PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, renderedCursor } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { validateSelections, validateOpponentSnapshot } from "./saved-opponents.mjs";
 import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, projectTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
@@ -447,6 +447,7 @@ function disposeGame(state) {
   state.commandPumping = false;
   state.audioPumping = false;
   state.renderObservation = null;
+  state.lastPresentation = null;
   client?.close();
   const game = state.game;
   state.game = null;
@@ -857,6 +858,40 @@ function observeOutput(state, observation, output) {
   return completed;
 }
 
+function snapshotPresentation(state, request, direct) {
+  const raw = Object.hasOwn(request, "timestamp");
+  if (raw) {
+    if (Object.hasOwn(request, "presentedNs") || Object.hasOwn(request, "presentedHostNs")) {
+      throw new Error("Raw and projected presentation observations cannot be mixed.");
+    }
+    const input = request.timestamp;
+    const observedNowMs = request.observedNowMs;
+    if (typeof observedNowMs !== "number" || !Number.isFinite(observedNowMs) || observedNowMs < 0
+      || (input !== null && (typeof input !== "object" || Array.isArray(input)))) {
+      throw new Error("Invalid raw presentation observation.");
+    }
+    const timestamp = input === null ? null : Object.freeze({
+      contextTime: input.contextTime, performanceTime: input.performanceTime,
+    });
+    let pair = timestamp === null ? null : presentationPair(timestamp, state.startFrame, state.rate, observedNowMs);
+    const previous = state.lastPresentation;
+    if (pair !== null && previous !== null && (pair.outputNs < previous.outputNs
+      || pair.hostNs < previous.hostNs || (pair.outputNs > previous.outputNs && pair.hostNs === previous.hostNs))) pair = null;
+    // Keep the original host age when output has not advanced. Worker arrival
+    // time never replaces the Window-domain observation used by this guard.
+    if (pair !== null && (previous === null || pair.outputNs > previous.outputNs)) state.lastPresentation = pair;
+    return Object.freeze({ renderId: request.renderId,
+      presentedNs: pair?.outputNs ?? null, presentedHostNs: pair?.hostNs ?? null });
+  }
+  if (Object.hasOwn(request, "observedNowMs")) throw new Error("Raw presentation time requires its timestamp snapshot.");
+  if (!direct && state.mode === "replay") {
+    if (!(request.presentedNs === null || hostTime(request.presentedNs))) throw new Error("Invalid replay output presentation point.");
+  } else if (!(request.presentedNs === null && request.presentedHostNs === null)
+    && !(hostTime(request.presentedNs) && hostTime(request.presentedHostNs))) throw new Error("Invalid output presentation pair.");
+  return Object.freeze({ renderId: request.renderId,
+    presentedNs: request.presentedNs, presentedHostNs: request.presentedHostNs });
+}
+
 function publishRender(state, observation, completed) {
   if (completed && commandsPending(state)) throw new Error("Completion produced outstanding gameplay commands.");
   report("play-render-done", { playId: state.id, renderId: observation.renderId, completed,
@@ -968,8 +1003,12 @@ function publishOpponents(state) {
 function stepPlay(state, request) {
   if (state.mode !== "live") throw new Error("Replay playback cannot accept live gameplay steps.");
   if (!state.active || !identity(request.tickId) || request.tickId <= state.lastTick
-    || !Array.isArray(request.events) || request.events.length > 256 || !hostTime(request.audioNs)
+    || !Array.isArray(request.events) || request.events.length > 256
     || !(request.watermark === null || hostTime(request.watermark))) throw new Error("Invalid active gameplay step.");
+  const rawFrame = Object.hasOwn(request, "contextFrame");
+  if (rawFrame === Object.hasOwn(request, "audioNs")) throw new Error("Choose exactly one raw or projected audio schedule.");
+  const audioNs = rawFrame ? audioScheduleFromFrame(request.contextFrame, state.startFrame, state.rate) : request.audioNs;
+  if (!hostTime(audioNs)) throw new Error("Invalid projected audio schedule.");
   let host = state.lastHost;
   let sequence = state.lastSequence;
   let ignored = 0;
@@ -1006,15 +1045,15 @@ function stepPlay(state, request) {
     if (event.hostNs < state.origin) state.preOriginInputs++;
     else if (encoded !== null) {
       const entry = encoded[index];
-      if (entry.kind === "hid") state.game.input_hid_blob(entry.bytes, request.audioNs);
-      else if (entry.kind === "touch") state.game.input_blob_at(entry.bytes, entry.position.x, entry.position.y, request.audioNs);
-      else state.game.input_blob(entry.bytes, request.audioNs);
-    } else state.game.input(event.hostNs, event.key, event.down, event.sequence, request.audioNs);
+      if (entry.kind === "hid") state.game.input_hid_blob(entry.bytes, audioNs);
+      else if (entry.kind === "touch") state.game.input_blob_at(entry.bytes, entry.position.x, entry.position.y, audioNs);
+      else state.game.input_blob(entry.bytes, audioNs);
+    } else state.game.input(event.hostNs, event.key, event.down, event.sequence, audioNs);
     state.lastHost = event.hostNs;
     state.lastSequence = event.sequence;
   }
   if (request.watermark !== null) {
-    if (request.watermark >= state.origin) state.game.advance(request.watermark, request.audioNs);
+    if (request.watermark >= state.origin) state.game.advance(request.watermark, audioNs);
     state.lastHost = request.watermark;
   }
   const score = statistics(state);
@@ -1038,7 +1077,7 @@ function handlePlay(request) {
       id: request.playId, startRpcId: identity(request.rpcId) ? request.rpcId : null,
       game: null, keys: null, active: false, origin: null, startFrame: null,
       batch: null, commandClient: null, commandPumping: false, audioPumping: false,
-      audioRpcId: null, renderObservation: null,
+      audioRpcId: null, renderObservation: null, lastPresentation: null,
       lastRpc: 0, lastTick: 0, lastRender: 0,
       lastHost: null, lastSequence: null, preOriginInputs: 0,
       recordReplay: false, completed: false,
@@ -1105,12 +1144,7 @@ function handlePlay(request) {
         || request.renderId <= state.lastRender) throw new Error("Invalid rendered-report identity or state.");
       const direct = state.commandClient !== null;
       if (direct && Object.hasOwn(request, "report")) throw new Error("Direct audio reports cannot be supplied by the caller.");
-      if (!direct && state.mode === "replay") {
-        if (!(request.presentedNs === null || hostTime(request.presentedNs))) throw new Error("Invalid replay output presentation point.");
-      } else if (!(request.presentedNs === null && request.presentedHostNs === null)
-        && !(hostTime(request.presentedNs) && hostTime(request.presentedHostNs))) throw new Error("Invalid output presentation pair.");
-      const observation = Object.freeze({ renderId: request.renderId,
-        presentedNs: request.presentedNs, presentedHostNs: request.presentedHostNs });
+      const observation = snapshotPresentation(state, request, direct);
       if (direct) {
         state.renderObservation = observation;
         state.completed = false;

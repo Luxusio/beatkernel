@@ -4,7 +4,7 @@ import { RecordsStore } from "./record-store.mjs";
 import { HidInputOwner } from "./hid-input.mjs";
 import { snapshotHidDevices } from "./hid-profile.mjs";
 import { SavedOpponentSelection, opponentLabel, validateOpponentSnapshot } from "./saved-opponents.mjs";
-import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, frameNanos, startProjection, committedStartProjection, presentationPair } from "./play-model.mjs";
+import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
 const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prepare", "position", "seek", "title", "details", "status", "viewport", "play", "stop", "keys", "record", "export", "replay-file", "replay-play", "replay-name", "records", "records-refresh", "records-save", "records-use", "records-delete", "multiplayer", "multiplayer-url", "multiplayer-role", "multiplayer-status", "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear", "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end", "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate", "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input", "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status"].map(id => [id, byId(id)]));
@@ -530,7 +530,7 @@ async function play(mode = "live") {
     tickId: 0, tickPending: null, commandsPending: true, startFrame: null,
     origin: null, lastHost: 0n, stopping: null, renderId: 0, renderPending: null,
     workerStarted: false, workerReleased: false, workerStop: null, finalScore: null,
-    completionReady: false, completionTick: null, lastPresentation: null, cleanupError: null, peerDisplayFailed: false,
+    completionReady: false, completionTick: null, cleanupError: null, peerDisplayFailed: false,
     recordReplay: mode === "live" && ui.record.checked === true, replay: null, replayError: null, naturalFinishRequested: false,
     replayFile: mode === "replay" ? selectedReplay : null,
     opponentSelection: mode === "live" && opponents.size ? opponents.snapshot() : null,
@@ -789,24 +789,12 @@ function releaseTouches(session) {
   }
 }
 
-function audioSchedule(session) {
-  const frame = session.audio.currentFrame + BigInt(Math.ceil(session.audio.sampleRate / 50));
-  return frameNanos(frame > session.startFrame ? frame - session.startFrame : 0n, session.audio.sampleRate);
-}
-function presentedPoint(session) {
-  let timestamp;
-  try { timestamp = session.audio.outputTimestamp(); }
+function outputTimestamp(session) {
+  try { return session.audio.outputTimestamp(); }
   catch (error) {
     if (error.code === "unsupported" || error.code === "unavailable") return null;
     throw error;
   }
-  const pair = presentationPair(timestamp, session.startFrame, session.audio.sampleRate, performance.now());
-  const previous = session.lastPresentation;
-  if (pair === null || (previous !== null && (pair.outputNs < previous.outputNs
-    || pair.hostNs < previous.hostNs || (pair.outputNs > previous.outputNs && pair.hostNs === previous.hostNs)))) return null;
-  // A repeated output position must not refresh the clock observer's age.
-  if (previous === null || pair.outputNs > previous.outputNs) session.lastPresentation = pair;
-  return pair;
 }
 function finishPlay(session) {
   if (activePlay === session && session.phase === "playing" && session.completionReady
@@ -831,7 +819,7 @@ function pumpInput(session) {
     session.completionReady = false;
     const timer = setTimeout(() => { if (session.tickPending?.tickId === tickId) void stopPlay("Gameplay Worker stopped responding.", true); }, 10000);
     session.tickPending = { tickId, timer, watermark, lastInput: events.at(-1)?.hostNs ?? session.lastHost };
-    worker.postMessage({ kind: "play-step", playId: session.id, tickId, events, watermark, audioNs: audioSchedule(session) });
+    worker.postMessage({ kind: "play-step", playId: session.id, tickId, events, watermark, contextFrame: session.audio.currentFrame });
   } catch (error) { void stopPlay(`Playback failed: ${error.message}`, true); }
 }
 
@@ -840,11 +828,11 @@ function pumpPresentation(session) {
   try {
     const renderId = ++session.renderId;
     if (!Number.isSafeInteger(renderId)) throw new Error("Audio report identity exhausted.");
-    const presentation = presentedPoint(session);
+    const timestamp = outputTimestamp(session);
+    const observedNowMs = performance.now();
     const timer = setTimeout(() => { if (session.renderPending?.renderId === renderId) void stopPlay("Audio report Worker stopped responding.", true); }, 10000);
     session.renderPending = { renderId, timer };
-    worker.postMessage({ kind: "play-render", playId: session.id, renderId,
-      presentedNs: presentation?.outputNs ?? null, presentedHostNs: presentation?.hostNs ?? null });
+    worker.postMessage({ kind: "play-render", playId: session.id, renderId, timestamp, observedNowMs });
   } catch (error) {
     if (session.phase === "playing") void stopPlay(`Playback failed: ${String(error.message).slice(0, 4096)}`, true);
   }
