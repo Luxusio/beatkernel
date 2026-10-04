@@ -1,10 +1,12 @@
 //! Deferred common-owner composition fixtures; no transport or output runs here.
 use crate::{
     local_players::PlayerId,
+    multiplayer_group::{GroupPrefix, MemberProgress},
     multiplayer_group_rooms::{GroupRoomPhase, GroupRoomPolicy, GroupRoomRegistry},
-    multiplayer_protocol::OutboundFrame,
+    multiplayer_protocol::{OutboundFrame, Progress},
     multiplayer_room_clock::RoomClockExchange,
     multiplayer_room_play::RoomPlayClient,
+    multiplayer_room_progress::RoomProgressRelay,
     multiplayer_room_start::RoomStartCoordinator,
     multiplayer_room_wire::{RoomMessage, decode_message, encode_message},
     multiplayer_rooms::ParticipantId,
@@ -177,6 +179,18 @@ fn clock_round(
 }
 
 fn committed(count: usize) -> (Cohort, i64) {
+    committed_during_accept(count, |_, _, _, _| {})
+}
+
+fn committed_during_accept(
+    count: usize,
+    mut on_pending_commit: impl FnMut(
+        &mut RoomPlayClient,
+        crate::multiplayer_group_rooms::GroupRoomSnapshot<'_>,
+        ParticipantId,
+        i64,
+    ),
+) -> (Cohort, i64) {
     let mut cohort = prepared(count);
     let room = cohort.registry.room("room").unwrap();
     let mut servers = cohort
@@ -340,6 +354,8 @@ fn committed(count: usize) -> (Cohort, i64) {
             );
             assert_eq!(*client, pending);
             assert!(client.poll_write(11_251 + offset(index)).unwrap().is_none());
+            assert!(coordinator.committed());
+            on_pending_commit(client, room, cohort.ids[index], 11_200 + offset(index));
             let (write_id, completed) = delayed_accept.unwrap();
             client
                 .written_at(write_id, completed, 11_252 + offset(index))
@@ -796,4 +812,324 @@ fn leave_and_stop_fence_clock_start_and_unconsumed_schedules_without_fabricating
         assert_eq!(*client, stopped);
         assert_eq!(client.participant(), participant);
     }
+}
+
+fn progress_rows(players: &[PlayerId], hits: u64) -> Vec<MemberProgress> {
+    players
+        .iter()
+        .map(|&player| MemberProgress {
+            player,
+            progress: Progress {
+                song_ns: 604_800_000_000_000 + hits as i64,
+                hits,
+                misses: 0,
+                combo: hits,
+                max_combo: hits,
+            },
+        })
+        .collect()
+}
+
+#[test]
+fn actual_committed_clients_and_relay_keep_global_write_ids_and_separate_every_final_receipt() {
+    for count in [2usize, 3, 4] {
+        let (mut cohort, _) = committed(count);
+        let snapshot = cohort.registry.room("room").unwrap();
+        let mut relay = RoomProgressRelay::new(snapshot).unwrap();
+        relay.activate().unwrap();
+        let mut outer_ids = Vec::new();
+        let mut delayed_upload = None;
+        for index in 0..count {
+            let client = &mut cohort.clients[index];
+            client
+                .publish_progress(&progress_rows(&snapshot.members[index].players, 1), false)
+                .unwrap();
+            client
+                .publish_progress(&progress_rows(&snapshot.members[index].players, 2), true)
+                .unwrap();
+            let at = 12_000 + offset(index);
+            let upload = client.poll_write(at).unwrap().unwrap();
+            assert_eq!(upload.id, if index == 0 { 22 } else { 21 });
+            let expected = GroupPrefix {
+                sequence: 1,
+                final_prefix: true,
+                members: progress_rows(&snapshot.members[index].players, 2),
+            };
+            assert_eq!(wire(&upload), RoomMessage::Progress(expected));
+            relay.receive(cohort.ids[index], &wire(&upload)).unwrap();
+            outer_ids.push(upload.id);
+            if index == 0 {
+                delayed_upload = Some((upload.id, at + 1));
+            } else {
+                client.written_at(upload.id, at + 1, at + 2).unwrap();
+            }
+            assert!(!client.progress_complete());
+        }
+        let mut received_early_aggregate = false;
+        let mut final_relay_write = None;
+        let mut aggregates_seen = 0;
+        for turn in 0..count * 6 {
+            let at = 13_000 + turn as i64 * 100;
+            for index in 0..count {
+                let own = cohort.ids[index];
+                if let Some(frame) = relay.poll_write(own).unwrap() {
+                    let message = decode_message(&frame.bytes).unwrap();
+                    let aggregate = matches!(message, RoomMessage::FinalAck { .. });
+                    let client = &mut cohort.clients[index];
+                    client
+                        .receive_at(message, at + offset(index) + 10, at + offset(index) + 20)
+                        .unwrap();
+                    if aggregate && index == 0 && delayed_upload.is_some() {
+                        assert!(!client.local_final_written());
+                        assert!(!client.local_final_acknowledged());
+                        assert!(
+                            client
+                                .poll_write(at + offset(index) + 21)
+                                .unwrap()
+                                .is_none()
+                        );
+                        let (id, completed) = delayed_upload.take().unwrap();
+                        client
+                            .written_at(id, completed, at + offset(index) + 22)
+                            .unwrap();
+                        assert!(client.local_final_written() && client.local_final_acknowledged());
+                        received_early_aggregate = true;
+                    }
+                    // Hold one real server aggregate write to distinguish all
+                    // local receipt boundaries from whole-relay completion.
+                    if aggregate {
+                        aggregates_seen += 1;
+                    }
+                    if aggregate && aggregates_seen == count {
+                        final_relay_write = Some((own, frame.id));
+                    } else {
+                        relay.written(own, frame.id).unwrap();
+                    }
+                }
+            }
+            for index in 0..count {
+                let client = &mut cohort.clients[index];
+                if let Some(frame) = client.poll_write(at + offset(index) + 30).unwrap() {
+                    assert_eq!(frame.id, outer_ids[index] + 1);
+                    outer_ids[index] = frame.id;
+                    let RoomMessage::FinalAck {
+                        participant,
+                        sequence,
+                    } = wire(&frame)
+                    else {
+                        panic!("real recipient ACK required")
+                    };
+                    assert_ne!(participant, cohort.ids[index]);
+                    assert_eq!(sequence, 1);
+                    assert!(!client.peer_final_ack_written(participant));
+                    relay.receive(cohort.ids[index], &wire(&frame)).unwrap();
+                    client
+                        .written_at(frame.id, at + offset(index) + 31, at + offset(index) + 32)
+                        .unwrap();
+                    assert!(client.peer_final_ack_written(participant));
+                }
+            }
+            if cohort.clients.iter().all(RoomPlayClient::progress_complete) {
+                break;
+            }
+        }
+        assert!(received_early_aggregate);
+        assert!(delayed_upload.is_none());
+        assert!(cohort.clients.iter().all(RoomPlayClient::progress_complete));
+        assert!(
+            !relay.complete(),
+            "local client completion is not authority to close the whole room"
+        );
+        let (recipient, id) = final_relay_write.unwrap();
+        relay.written(recipient, id).unwrap();
+        assert!(relay.complete());
+        for (index, client) in cohort.clients.iter_mut().enumerate() {
+            for remote in cohort
+                .ids
+                .iter()
+                .copied()
+                .filter(|id| *id != cohort.ids[index])
+            {
+                assert!(client.peer_progress(remote).unwrap().final_prefix);
+                assert!(client.peer_final_ack_written(remote));
+            }
+            assert!(client.poll_write(20_000 + offset(index)).unwrap().is_none());
+            assert!(!client.leave_written());
+        }
+    }
+}
+
+#[test]
+fn matching_pending_commit_stages_real_relay_prefix_until_accept_write_then_leave_fences_progress()
+{
+    let mut uncommitted = prepared(2);
+    let snapshot = uncommitted.registry.room("room").unwrap();
+    let early = RoomMessage::PeerProgress {
+        participant: uncommitted.ids[0],
+        prefix: GroupPrefix {
+            sequence: 1,
+            final_prefix: true,
+            members: progress_rows(&snapshot.members[0].players, 1),
+        },
+    };
+    let before = uncommitted.clients[1].clone();
+    assert!(uncommitted.clients[1].receive(early, 3).is_err());
+    assert_eq!(uncommitted.clients[1], before);
+    assert!(
+        uncommitted.clients[1]
+            .publish_progress(&progress_rows(&snapshot.members[1].players, 1), false)
+            .is_err()
+    );
+    assert_eq!(uncommitted.clients[1], before);
+
+    let mut staged_relay = None;
+    let (mut cohort, _) = committed_during_accept(2, |client, snapshot, own, captured_commit| {
+        let mut relay = RoomProgressRelay::new(snapshot).unwrap();
+        relay.activate().unwrap();
+        let source = &snapshot.members[0];
+        let upload = RoomMessage::Progress(GroupPrefix {
+            sequence: 1,
+            final_prefix: true,
+            members: progress_rows(&source.players, 1),
+        });
+        relay.receive(source.id, &upload).unwrap();
+        let frame = relay.poll_write(own).unwrap().unwrap();
+        let message = decode_message(&frame.bytes).unwrap();
+        let before = client.clone();
+        assert!(
+            client
+                .receive_at(message.clone(), captured_commit - 1, captured_commit + 51)
+                .is_err()
+        );
+        assert_eq!(*client, before);
+        client
+            .receive_at(message, captured_commit + 1, captured_commit + 51)
+            .unwrap();
+        assert!(client.peer_progress(source.id).unwrap().final_prefix);
+        assert!(!client.peer_final_ack_written(source.id));
+        assert!(client.poll_write(captured_commit + 51).unwrap().is_none());
+        assert!(
+            client
+                .publish_progress(&progress_rows(&snapshot.members[1].players, 1), true)
+                .is_err()
+        );
+        assert_eq!(client.take_schedule(), None);
+        relay.written(own, frame.id).unwrap();
+        staged_relay = Some(relay);
+    });
+    let own = cohort.ids[1];
+    let remote = cohort.ids[0];
+    let client = &mut cohort.clients[1];
+    assert!(client.take_schedule().is_some());
+    let ack = client.poll_write(12_000).unwrap().unwrap();
+    assert_eq!(ack.id, 21);
+    assert_eq!(
+        wire(&ack),
+        RoomMessage::FinalAck {
+            participant: remote,
+            sequence: 1
+        }
+    );
+    let mut relay = staged_relay.unwrap();
+    relay.receive(own, &wire(&ack)).unwrap();
+    assert!(relay.final_acknowledged(remote).unwrap());
+    assert!(!client.peer_final_ack_written(remote));
+    client.written_at(ack.id, 12_001, 12_002).unwrap();
+    assert!(client.peer_final_ack_written(remote));
+    let players = client.room().unwrap().members[1].players.clone();
+    client
+        .publish_progress(&progress_rows(&players, 1), false)
+        .unwrap();
+    client.request_leave().unwrap();
+    let before = client.clone();
+    assert!(
+        client
+            .publish_progress(&progress_rows(&players, 2), true)
+            .is_err()
+    );
+    assert!(
+        client
+            .receive_at(
+                RoomMessage::FinalAck {
+                    participant: own,
+                    sequence: 1
+                },
+                12_003,
+                12_004
+            )
+            .is_err()
+    );
+    assert_eq!(*client, before);
+    let leave = client.poll_write(12_004).unwrap().unwrap();
+    assert_eq!((leave.id, wire(&leave)), (22, RoomMessage::Leave));
+    assert!(!client.leave_written());
+    client.written(leave.id, 12_005).unwrap();
+    assert!(client.leave_written());
+    assert!(!client.progress_complete());
+    assert!(client.poll_write(12_006).unwrap().is_none());
+    client.stop();
+    assert!(
+        client
+            .publish_progress(&progress_rows(&players, 2), true)
+            .is_err()
+    );
+
+    // Leave may fence an already admitted upload, but its original bytes still
+    // own the outer write slot until the exact full-write receipt arrives.
+    let own = cohort.ids[0];
+    let client = &mut cohort.clients[0];
+    let players = client.room().unwrap().members[0].players.clone();
+    client
+        .publish_progress(&progress_rows(&players, 7), true)
+        .unwrap();
+    let upload = client.poll_write(13_000).unwrap().unwrap();
+    assert_eq!(upload.id, 22);
+    assert_eq!(
+        wire(&upload),
+        RoomMessage::Progress(GroupPrefix {
+            sequence: 1,
+            final_prefix: true,
+            members: progress_rows(&players, 7),
+        })
+    );
+    client.request_leave().unwrap();
+    assert!(!client.local_final_written());
+    assert!(!client.local_final_acknowledged());
+    assert!(!client.progress_complete());
+    assert!(client.poll_write(13_001).unwrap().is_none());
+    let fenced = client.clone();
+    assert!(
+        client
+            .publish_progress(&progress_rows(&players, 8), true)
+            .is_err()
+    );
+    assert!(
+        client
+            .receive_at(
+                RoomMessage::FinalAck {
+                    participant: own,
+                    sequence: 1
+                },
+                13_001,
+                13_002
+            )
+            .is_err()
+    );
+    assert!(client.written_at(upload.id + 1, 13_001, 13_002).is_err());
+    assert_eq!(*client, fenced);
+    client.written_at(upload.id, 13_001, 13_003).unwrap();
+    assert!(
+        !client.local_final_written(),
+        "post-fence transport completion grants no progress credit"
+    );
+    assert!(!client.local_final_acknowledged());
+    assert!(!client.progress_complete());
+    let leave = client.poll_write(13_004).unwrap().unwrap();
+    assert_eq!((leave.id, wire(&leave)), (23, RoomMessage::Leave));
+    assert!(!client.leave_written());
+    client.written_at(leave.id, 13_005, 13_006).unwrap();
+    assert!(client.leave_written());
+    assert!(client.poll_write(13_007).unwrap().is_none());
+    assert!(!client.local_final_written());
+    assert!(!client.progress_complete());
 }

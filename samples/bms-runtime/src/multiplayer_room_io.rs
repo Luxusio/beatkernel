@@ -2,9 +2,11 @@
 //! The caller owns clock origin, waiting, deadlines and stream disposal.
 
 use crate::multiplayer_protocol::OutboundFrame;
+use crate::multiplayer_group::{GroupPrefix, MemberProgress};
 use crate::multiplayer_room_play::RoomPlayClient;
 use crate::multiplayer_room_wire::RoomFrameDecoder;
 use crate::multiplayer_start::StartSchedule;
+use crate::multiplayer_rooms::ParticipantId;
 use std::{
     fmt,
     io::{self, Read, Write},
@@ -15,7 +17,7 @@ fn protocol_error(error: impl fmt::Display) -> io::Error {
 }
 
 /// One pending frame and one incremental decoder around the actual common
-/// admission/clock/start owner. Streams must be nonblocking or deadline-bounded;
+/// admission/clock/start/progress owner. Streams must be nonblocking or deadline-bounded;
 /// this driver creates no timers, retries, transport tasks or acknowledgement.
 pub struct RoomPlayIo<S: Read + Write> {
     session: RoomPlayClient,
@@ -86,6 +88,37 @@ impl<S: Read + Write> RoomPlayIo<S> {
         self.session
             .request_leave()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+    }
+
+    /// Queue actual committed member progress; local admission refusals retain
+    /// the healthy stream and do not manufacture a transport write receipt.
+    pub fn publish_progress(
+        &mut self,
+        members: &[MemberProgress],
+        final_prefix: bool,
+    ) -> io::Result<()> {
+        self.ensure_live()?;
+        self.session
+            .publish_progress(members, final_prefix)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+    }
+
+    pub fn peer_progress(&self, participant: ParticipantId) -> Option<&GroupPrefix> {
+        self.session.peer_progress(participant)
+    }
+
+    pub fn local_final_written(&self) -> bool {
+        self.session.local_final_written()
+    }
+    pub fn local_final_acknowledged(&self) -> bool {
+        self.session.local_final_acknowledged()
+    }
+    pub fn peer_final_ack_written(&self, participant: ParticipantId) -> bool {
+        self.session.peer_final_ack_written(participant)
+    }
+    /// Local completion is not permission to close the entire room.
+    pub fn progress_complete(&self) -> bool {
+        self.session.progress_complete()
     }
 
     /// Return only the common owner's once-only committed software schedule.

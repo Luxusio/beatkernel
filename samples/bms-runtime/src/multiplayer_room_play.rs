@@ -1,12 +1,14 @@
-//! Common room admission, measured clock exchange and client start agreement.
+//! Common room admission, measured clock exchange, start and progress receipts.
 //! The caller owns the stream, original elapsed observations and full writes;
 //! a returned software schedule is not a physical audio synchronization claim.
 
 use crate::local_players::PlayerId;
+use crate::multiplayer_group::{GroupPrefix, MemberProgress};
 use crate::multiplayer_group_rooms::{GroupRoomPhase, GroupRoomSnapshot};
 use crate::multiplayer_protocol::OutboundFrame;
 use crate::multiplayer_room_client::{RoomClientError, RoomClientSession};
 use crate::multiplayer_room_clock::{RoomClockError, RoomClockExchange};
+use crate::multiplayer_room_progress_client::{RoomProgressClient, RoomProgressClientError};
 use crate::multiplayer_room_wire::{encode_message, RoomMessage, RoomWireError};
 use crate::multiplayer_rooms::ParticipantId;
 use crate::multiplayer_start::{
@@ -25,6 +27,7 @@ pub enum RoomPlayError {
     IdExhausted,
     Admission(RoomClientError),
     Clock(RoomClockError),
+    Progress(RoomProgressClientError),
     Start(StartError),
     Wire(RoomWireError),
 }
@@ -43,6 +46,7 @@ impl fmt::Display for RoomPlayError {
             Self::IdExhausted => f.write_str("room play write identity space is exhausted"),
             Self::Admission(error) => write!(f, "{error}"),
             Self::Clock(error) => write!(f, "{error}"),
+            Self::Progress(error) => write!(f, "{error}"),
             Self::Start(error) => write!(f, "{error}"),
             Self::Wire(error) => write!(f, "{error}"),
         }
@@ -54,6 +58,7 @@ impl std::error::Error for RoomPlayError {
         match self {
             Self::Admission(error) => Some(error),
             Self::Clock(error) => Some(error),
+            Self::Progress(error) => Some(error),
             Self::Start(error) => Some(error),
             Self::Wire(error) => Some(error),
             _ => None,
@@ -69,6 +74,11 @@ impl From<RoomClientError> for RoomPlayError {
 impl From<RoomClockError> for RoomPlayError {
     fn from(error: RoomClockError) -> Self {
         Self::Clock(error)
+    }
+}
+impl From<RoomProgressClientError> for RoomPlayError {
+    fn from(error: RoomProgressClientError) -> Self {
+        Self::Progress(error)
     }
 }
 impl From<StartError> for RoomPlayError {
@@ -87,10 +97,11 @@ enum Receipt {
     Admission(u64),
     Clock(u64),
     Start(StartMessage),
+    Progress(u64),
 }
 
-/// One external write identity space across the actual admission, clock and
-/// Join-role start owners. Failed transitions retain every accepted prefix.
+/// One external write identity space across the actual admission, clock,
+/// Join-role start and progress owners. Failed transitions retain accepted prefixes.
 ///
 /// Clock/start candidates contain only bounded scalar state. Initial Prepared
 /// adoption clones the bounded admission identity/rosters once to validate the
@@ -101,6 +112,7 @@ pub struct RoomPlayClient {
     admission: RoomClientSession,
     admission_pending: bool,
     clock: Option<RoomClockExchange>,
+    progress: Option<RoomProgressClient>,
     start: StartAgreement,
     estimate_installed: bool,
     next_id: Option<u64>,
@@ -125,6 +137,7 @@ impl RoomPlayClient {
             admission,
             admission_pending: true,
             clock: None,
+            progress: None,
             start,
             estimate_installed: false,
             next_id: Some(1),
@@ -169,13 +182,94 @@ impl RoomPlayClient {
         Ok(())
     }
 
-    /// Queue the actual admission Leave and fence further clock/start traffic.
-    /// An outstanding frame must first receive its exact full-write receipt.
+    /// Queue the actual admission Leave and fence further control/progress work.
+    /// An outstanding progress frame drains through its exact outer receipt
+    /// without new progress credit; other outstanding control frames refuse.
     pub fn request_leave(&mut self) -> Result<(), RoomPlayError> {
-        self.request_available()?;
+        if self.stopped {
+            return Err(RoomPlayError::Stopped);
+        }
+        if self.leaving
+            || self.admission_pending
+            || self
+                .in_flight
+                .is_some_and(|(_, receipt, _)| !matches!(receipt, Receipt::Progress(_)))
+        {
+            return Err(RoomPlayError::InvalidState);
+        }
         self.admission.request_leave()?;
         self.admission_pending = true;
         self.leaving = true;
+        if let Some(progress) = &mut self.progress {
+            progress.stop();
+        }
+        Ok(())
+    }
+
+    /// Publish actual local member progress only after genuine start commitment.
+    /// A current upload may remain in flight while an ordinary next snapshot is
+    /// coalesced; no upload sequence is consumed by this operation.
+    pub fn publish_progress(
+        &mut self,
+        members: &[MemberProgress],
+        final_prefix: bool,
+    ) -> Result<(), RoomPlayError> {
+        if self.stopped {
+            return Err(RoomPlayError::Stopped);
+        }
+        if self.leaving || !self.start.committed() {
+            return Err(RoomPlayError::InvalidState);
+        }
+        self.progress
+            .as_mut()
+            .ok_or(RoomPlayError::InvalidState)?
+            .publish(members, final_prefix)?;
+        Ok(())
+    }
+
+    pub fn peer_progress(&self, participant: ParticipantId) -> Option<&GroupPrefix> {
+        self.progress
+            .as_ref()
+            .and_then(|progress| progress.peer_progress(participant))
+    }
+
+    pub fn local_final_written(&self) -> bool {
+        self.progress
+            .as_ref()
+            .is_some_and(RoomProgressClient::local_final_written)
+    }
+
+    pub fn local_final_acknowledged(&self) -> bool {
+        self.progress
+            .as_ref()
+            .is_some_and(RoomProgressClient::local_final_acknowledged)
+    }
+
+    pub fn peer_final_ack_written(&self, participant: ParticipantId) -> bool {
+        self.progress
+            .as_ref()
+            .is_some_and(|progress| progress.peer_final_ack_written(participant))
+    }
+
+    /// Local receipt completion alone does not authorize whole-room Leave.
+    pub fn progress_complete(&self) -> bool {
+        !self.stopped
+            && !self.leaving
+            && self
+                .progress
+                .as_ref()
+                .is_some_and(RoomProgressClient::local_complete)
+    }
+
+    // Called after the candidate's genuine start transition succeeds and before
+    // its infallible adoption. A preflighted pending Commit does not call this.
+    fn activate_progress(&mut self, start: &StartAgreement) -> Result<(), RoomPlayError> {
+        if start.committed() && !self.start.committed() {
+            self.progress
+                .as_mut()
+                .ok_or(RoomPlayError::InvalidState)?
+                .activate()?;
+        }
         Ok(())
     }
 
@@ -222,7 +316,7 @@ impl RoomPlayClient {
     }
 
     /// Admit at most one immutable frame. Admission requests have priority,
-    /// followed by symmetric clock work and the existing Join start agreement.
+    /// followed by clock/start work and then progress or recipient ACKs.
     pub fn poll_write(&mut self, now: i64) -> Result<Option<OutboundFrame>, RoomPlayError> {
         self.validate_now(now)?;
         if self.in_flight.is_some() {
@@ -262,7 +356,22 @@ impl RoomPlayClient {
         let frame = if let Some(message) = start.next(now)? {
             let id = self.next_id.ok_or(RoomPlayError::IdExhausted)?;
             let bytes = encode_message(&RoomMessage::Start(message))?;
-            Some((id, bytes, message))
+            Some((id, bytes, Receipt::Start(message)))
+        } else if self
+            .progress
+            .as_ref()
+            .is_some_and(RoomProgressClient::has_pending_write)
+        {
+            // Check the enclosing write identity before changing child queues.
+            // The child admits atomically without cloning all peer histories.
+            let id = self.next_id.ok_or(RoomPlayError::IdExhausted)?;
+            let frame = self
+                .progress
+                .as_mut()
+                .ok_or(RoomPlayError::InvalidState)?
+                .poll_write(now)?
+                .ok_or(RoomPlayError::InvalidState)?;
+            Some((id, frame.bytes, Receipt::Progress(frame.id)))
         } else {
             None
         };
@@ -270,8 +379,7 @@ impl RoomPlayClient {
         self.start = start;
         self.estimate_installed = installed;
         self.last_now = Some(now);
-        Ok(frame
-            .map(|(id, bytes, message)| self.adopt_frame(id, bytes, Receipt::Start(message), now)))
+        Ok(frame.map(|(id, bytes, receipt)| self.adopt_frame(id, bytes, receipt, now)))
     }
 
     /// Credit only the complete frame that owns the single external write slot.
@@ -310,8 +418,19 @@ impl RoomPlayClient {
                 if let Some(commit) = self.pending_commit {
                     start.receive(commit, now)?;
                 }
+                self.activate_progress(&start)?;
                 self.start = start;
                 self.pending_commit = None;
+            }
+            Receipt::Progress(inner) => {
+                // Leave stopped the child immediately, but the transport still
+                // owns these bytes until this exact outer frame finishes.
+                if !self.leaving {
+                    self.progress
+                        .as_mut()
+                        .ok_or(RoomPlayError::InvalidState)?
+                        .written(inner)?;
+                }
             }
         }
         self.in_flight = None;
@@ -343,6 +462,24 @@ impl RoomPlayClient {
             return Err(RoomPlayError::InvalidObservation);
         }
         match message {
+            RoomMessage::PeerProgress { .. } => {
+                if self.leaving || (!self.start.committed() && self.pending_commit.is_none()) {
+                    return Err(RoomPlayError::InvalidState);
+                }
+                self.progress
+                    .as_mut()
+                    .ok_or(RoomPlayError::InvalidState)?
+                    .receive(&message, captured_ns)?;
+            }
+            RoomMessage::FinalAck { .. } => {
+                if self.leaving || !self.start.committed() {
+                    return Err(RoomPlayError::InvalidState);
+                }
+                self.progress
+                    .as_mut()
+                    .ok_or(RoomPlayError::InvalidState)?
+                    .receive(&message, captured_ns)?;
+            }
             RoomMessage::ClockPing { .. } | RoomMessage::ClockPong { .. } => {
                 if self.leaving {
                     return Err(RoomPlayError::InvalidState);
@@ -383,6 +520,7 @@ impl RoomPlayClient {
                         return Err(RoomPlayError::InvalidState);
                     }
                     start.receive(message, now)?;
+                    self.activate_progress(&start)?;
                     self.start = start;
                     self.estimate_installed = installed;
                 }
@@ -403,8 +541,10 @@ impl RoomPlayClient {
                     let participant = admission.participant().ok_or(RoomPlayError::InvalidState)?;
                     let snapshot = admission.room().ok_or(RoomPlayError::InvalidState)?;
                     let clock = RoomClockExchange::new(snapshot, participant)?;
+                    let progress = RoomProgressClient::new(snapshot, participant)?;
                     self.admission = admission;
                     self.clock = Some(clock);
+                    self.progress = Some(progress);
                 } else {
                     self.admission.receive(message)?;
                 }
@@ -433,6 +573,9 @@ impl RoomPlayClient {
         self.stopped = true;
         if let Some(clock) = &mut self.clock {
             clock.stop();
+        }
+        if let Some(progress) = &mut self.progress {
+            progress.stop();
         }
     }
 }
