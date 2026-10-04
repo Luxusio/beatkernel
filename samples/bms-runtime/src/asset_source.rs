@@ -186,11 +186,9 @@ impl AssetSource for MemoryAssetSource<'_> {
         if let Some(path) = self.existing(&relative)? {
             return Ok(path);
         }
-        if policy == AssetPathPolicy::AudioVariants {
-            for candidate in asset_paths::variants(&relative) {
-                if let Some(path) = self.existing(&candidate)? {
-                    return Ok(path);
-                }
+        for candidate in asset_paths::variants_for(&relative, policy) {
+            if let Some(path) = self.existing(&candidate)? {
+                return Ok(path);
             }
         }
         Err(io::Error::new(

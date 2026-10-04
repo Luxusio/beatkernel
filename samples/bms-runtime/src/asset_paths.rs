@@ -11,6 +11,7 @@ pub enum AssetPathPolicy {
     #[default]
     Exact,
     AudioVariants,
+    ImageVariants,
 }
 
 pub(crate) fn relative_name(name: &str) -> io::Result<PathBuf> {
@@ -48,19 +49,41 @@ pub(crate) fn relative_name(name: &str) -> io::Result<PathBuf> {
 }
 
 pub(crate) fn variants(relative: &Path) -> Vec<PathBuf> {
-    let families = match relative
+    family_variants(relative, ["wav", "flac", "ogg", "mp3"])
+}
+
+pub(crate) fn variants_for(relative: &Path, policy: AssetPathPolicy) -> Vec<PathBuf> {
+    match policy {
+        AssetPathPolicy::Exact => Vec::new(),
+        AssetPathPolicy::AudioVariants => variants(relative),
+        AssetPathPolicy::ImageVariants => family_variants(relative, ["bmp", "png", "jpg", "jpeg"]),
+    }
+}
+
+fn family_variants(relative: &Path, families: [&str; 4]) -> Vec<PathBuf> {
+    let first = match relative
         .extension()
         .and_then(|extension| extension.to_str())
     {
-        Some(extension) if extension.eq_ignore_ascii_case("wav") => ["wav", "flac", "ogg", "mp3"],
-        Some(extension) if extension.eq_ignore_ascii_case("flac") => ["flac", "wav", "ogg", "mp3"],
-        Some(extension) if extension.eq_ignore_ascii_case("ogg") => ["ogg", "wav", "flac", "mp3"],
-        Some(extension) if extension.eq_ignore_ascii_case("mp3") => ["mp3", "wav", "flac", "ogg"],
-        None => ["wav", "flac", "ogg", "mp3"],
-        _ => return Vec::new(),
+        Some(extension) => match families
+            .iter()
+            .position(|family| extension.eq_ignore_ascii_case(family))
+        {
+            Some(index) => Some(index),
+            None => return Vec::new(),
+        },
+        None => None,
     };
-    let mut candidates = Vec::with_capacity(36);
-    for family in families {
+    let capacity = families
+        .iter()
+        .map(|family| 1usize << family.bytes().filter(u8::is_ascii_alphabetic).count())
+        .sum();
+    let mut candidates = Vec::with_capacity(capacity);
+    for index in first
+        .into_iter()
+        .chain((0..families.len()).filter(|index| Some(*index) != first))
+    {
+        let family = families[index];
         let letters = family.bytes().filter(u8::is_ascii_alphabetic).count();
         for mask in 0..(1usize << letters) {
             let mut letter_index = 0;
@@ -97,7 +120,19 @@ fn existing(root: &Path, candidate: &Path) -> io::Result<Option<PathBuf>> {
     }
     // A dangling symlink is an existing reference: canonicalization errors are
     // returned, rather than being mistaken for permission to try another file.
-    let resolved = fs::canonicalize(candidate)?;
+    let resolved = fs::canonicalize(candidate).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "existing asset reference is dangling or unresolvable: {}: {error}",
+                    candidate.display()
+                ),
+            )
+        } else {
+            error
+        }
+    })?;
     if !resolved.starts_with(root) {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
@@ -114,8 +149,8 @@ fn existing(root: &Path, candidate: &Path) -> io::Result<Option<PathBuf>> {
 }
 
 /// Resolves a contained regular file from a canonical directory root. Variant
-/// lookup preserves stem/directory spelling and tries at most 36 WAV/FLAC/OGG/MP3 ASCII
-/// extension case combinations. Unknown extensions remain literal-only.
+/// lookup preserves stem/directory spelling and tries at most 36 audio or 40
+/// static image ASCII extension case combinations. Unknown extensions remain literal-only.
 /// This assumes a trusted static filesystem; it is not a race-free sandbox.
 pub fn resolve_asset(root: &Path, name: &str, policy: AssetPathPolicy) -> io::Result<PathBuf> {
     let relative = relative_name(name)?;
@@ -129,11 +164,9 @@ pub fn resolve_asset(root: &Path, name: &str, policy: AssetPathPolicy) -> io::Re
     if let Some(resolved) = existing(&root, &root.join(&relative))? {
         return Ok(resolved);
     }
-    if policy == AssetPathPolicy::AudioVariants {
-        for candidate in variants(&relative) {
-            if let Some(resolved) = existing(&root, &root.join(candidate))? {
-                return Ok(resolved);
-            }
+    for candidate in variants_for(&relative, policy) {
+        if let Some(resolved) = existing(&root, &root.join(candidate))? {
+            return Ok(resolved);
         }
     }
     Err(io::Error::new(
@@ -363,7 +396,7 @@ mod fixtures {
             resolve_asset(&temp.0, "dangling.wav", AssetPathPolicy::AudioVariants)
                 .unwrap_err()
                 .kind(),
-            io::ErrorKind::NotFound
+            io::ErrorKind::InvalidData
         );
         symlink(&external, temp.0.join("variant.wav")).unwrap();
         temp.write("variant.flac");
@@ -379,7 +412,7 @@ mod fixtures {
             resolve_asset(&temp.0, "broken.ogg", AssetPathPolicy::AudioVariants)
                 .unwrap_err()
                 .kind(),
-            io::ErrorKind::NotFound
+            io::ErrorKind::InvalidData
         );
         symlink(&temp.0, temp.0.join("folder.wav")).unwrap();
         temp.write("folder.flac");

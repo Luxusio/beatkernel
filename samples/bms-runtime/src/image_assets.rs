@@ -57,7 +57,7 @@ impl ImageAssetLimits {
 pub enum ImageUnavailable {
     /// Nonzero visual token has no BMP definition.
     Undefined,
-    /// The literal contained asset is absent; no extension substitution was tried.
+    /// The contained asset is absent after supported filename variants, or vanished before reading.
     Missing,
     /// Encoded signature is not a supported static BMP/PNG/JPEG image.
     Unsupported,
@@ -162,7 +162,7 @@ impl ImageAssets {
                 bank.unavailable.insert(id, ImageUnavailable::Undefined);
                 continue;
             };
-            let path = match source.resolve(name, AssetPathPolicy::Exact) {
+            let path = match source.resolve(name, AssetPathPolicy::ImageVariants) {
                 Ok(path) => path,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     bank.unavailable.insert(id, ImageUnavailable::Missing);

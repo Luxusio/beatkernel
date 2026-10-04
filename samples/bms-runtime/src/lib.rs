@@ -100,6 +100,8 @@ mod image_base_fixtures;
 pub mod image_crop;
 /// Bounded raster decoding during preparation, independent of GPU ownership.
 pub mod image_decode;
+#[cfg(test)]
+mod image_variant_fixtures;
 /// Pure BMS input-sound timing and dedicated reusable voice preparation.
 pub mod input_sounds;
 #[cfg(test)]
