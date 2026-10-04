@@ -35,7 +35,9 @@ generated bindings, apps or runtime tests were executed.
 
 Native events have no composition generation ID; current-target and ordered
 enable/disable guards cannot prove rejection of every delayed native event.
-Candidate popup positioning, shaping and font fallback remain separate work.
+Native editing-area submission is subsequently implemented in
+[candidate-area positioning](CHANGE__ime-candidate-area.md); actual popup
+placement, shaping and font fallback remain separate acceptance/work.
 Numeric display/practice editors can preview and retain Unicode text; their
 existing Apply parser still rejects unsupported values. Actual native IME,
 rendered pixels and platform input behavior remain unverified. Runtime tests,

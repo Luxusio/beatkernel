@@ -198,6 +198,10 @@ an explicitly collapsed range keeps it visible. Range-only changes update the re
 Previews stay separate from saved drafts; committing, switching fields or leaving
 the active screen clears the decorations. Fields use the supplied font when
 available, otherwise bitmap glyphs; multilingual shaping remains pending.
+After native field presentation, its actual editing rectangle is submitted to
+the OS for candidate-window positioning through the same contained viewport.
+The OS decides popup placement; [backend limits](doc/changes/CHANGE__ime-candidate-area.md)
+and actual native acceptance remain relevant.
 Selection rows show artist metadata below the title when available.
 In Records, Remove Own and Remove Other remove one selected record occurrence
 from the competition draft without deleting its file. Selected own/other counts

@@ -217,7 +217,18 @@ controls. Commit, cancellation and field/lifecycle changes clear decorations;
 preview metadata never changes committed text or search results. Rejected edits
 preserve text, cursor and metadata. Supplied-font field rendering is specified
 below; bitmap rendering remains when no font is supplied or admission fails.
-OS candidate positioning and multilingual shaping are future work. Prepared regression
+After composing the current screen, provide the focused field's actual retained
+hit rectangle to the native IME cursor-area API. Project its logical rectangle
+through the renderer's common contained viewport into window client physical
+pixels, with outward rounding and clipping. Reuse actual field geometry rather
+than duplicating layout or text metrics. Cache unchanged submissions by window,
+screen/field and physical area; invalidate on loss of admission or replacement.
+Zero-sized surfaces, absent/stale field geometry and unrepresentable native
+coordinates yield no submission. Redraw after resize/scale or field changes
+supplies fresh geometry. The OS chooses candidate placement; X11 supports the
+position only, and unsupported backends cannot promise a visible popup.
+Multilingual shaping and real native candidate-placement acceptance remain
+unfinished. Prepared regression
 fixtures await later execution and do not certify native IME behavior.
 Native audio output metadata selection is described below. Native profile persistence is described below. Editing never acquires devices or
 changes native input/audio owners.
