@@ -107,6 +107,8 @@ mod input_sounds_fixtures;
 #[cfg(test)]
 mod invisible_admission_fixtures;
 #[cfg(test)]
+mod invisible_audio_fixtures;
+#[cfg(test)]
 mod invisible_contact_fixtures;
 #[cfg(test)]
 mod invisible_identity_fixtures;

@@ -8,7 +8,7 @@ use crate::{
     step_gameplay::{StepGameplay, StepGameplayConfig},
 };
 use beatkernel::{
-    audio::{AudioFormat, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId},
+    audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId},
     input::{
         BackendId, Binding, BindingMap, CodecLimits, ContactId, DeviceId, DeviceSelector,
         EventMeta, GameControlId, GameInputEvent, PhysicalControlId, PhysicalInputEvent, Position2,
@@ -254,7 +254,7 @@ fn actual_solo_and_local_preparation_enable_only_the_contact_invisible_condition
 }
 
 #[test]
-fn actual_step_capture_reconstructs_empty_contact_ownership_and_practice_identity_without_fallback_installation()
+fn actual_step_capture_reconstructs_empty_contact_ownership_and_practice_identity_with_installed_fallback()
  {
     for (text, start, tracks) in [
         (INVISIBLE, 0, true),
@@ -300,10 +300,18 @@ fn actual_step_capture_reconstructs_empty_contact_ownership_and_practice_identit
             assert_eq!(report.song_time, ts(start + index as i64));
             assert_eq!(report.bound_inputs, [expected.clone()]);
             assert!(report.judge_events.is_empty() && report.judge_error.is_none());
-            assert!(
-                report.audio_commands.is_empty() && report.audio_failures.is_empty(),
-                "constructor support does not install or schedule the still-unsupported BMS fallback plan"
-            );
+            let expected_audio = if tracks && fresh {
+                vec![AudioCommand::Play {
+                    sample: SampleId(1),
+                    voice: VoiceId(1),
+                    at: ts(9_000_000_000 + index as i64),
+                    gain: 1.0,
+                }]
+            } else {
+                vec![]
+            };
+            assert_eq!(report.audio_commands, expected_audio);
+            assert!(report.audio_failures.is_empty());
             admitted.push(expected);
         }
         let terminal = owner.judge().stable_hash().unwrap();

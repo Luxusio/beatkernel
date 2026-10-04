@@ -10,7 +10,7 @@ use crate::{
     step_gameplay::{StepGameplay, StepGameplayConfig, StepLocalGameplay},
 };
 use beatkernel::{
-    audio::{AudioFormat, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId},
+    audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId},
     chart::Beat,
     input::{
         Binding, BindingMap, CodecLimits, ContactId, DeviceId, DeviceSelector, EventMeta,
@@ -575,7 +575,16 @@ fn actual_solo_and_local_capture_share_source_identity_and_reconstruct_practice_
     let report = solo
         .process_input(event.clone(), &NoMapping, point(2, 9_000_000_000))
         .unwrap();
-    assert!(report.judge_events.is_empty() && report.audio_commands.is_empty());
+    assert!(report.judge_events.is_empty() && report.audio_failures.is_empty());
+    assert_eq!(
+        report.audio_commands,
+        [AudioCommand::Play {
+            sample: SampleId(1),
+            voice: VoiceId(2),
+            at: ts(9_000_000_000),
+            gain: 1.0,
+        }]
+    );
     let terminal = solo.judge().stable_hash().unwrap();
     solo.fail();
     let file = decode_replay(&solo.take_replay().unwrap().unwrap(), limits(4096)).unwrap();
@@ -632,7 +641,7 @@ fn actual_solo_and_local_capture_share_source_identity_and_reconstruct_practice_
             .unwrap();
     }
     local.activate(config().host_origin).unwrap();
-    for (player, device) in players.into_iter().zip(devices) {
+    for ((player, device), voice) in players.into_iter().zip(devices).zip([4, 5, 6]) {
         let InputResult::Processed(reports) = local
             .process_input(input(device.0), &NoMapping, point(2, 9_000_000_000))
             .unwrap()
@@ -641,9 +650,16 @@ fn actual_solo_and_local_capture_share_source_identity_and_reconstruct_practice_
         };
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0].player, player);
-        assert!(
-            reports[0].report.judge_events.is_empty()
-                && reports[0].report.audio_commands.is_empty()
+        assert!(reports[0].report.judge_events.is_empty());
+        assert!(reports[0].report.audio_failures.is_empty());
+        assert_eq!(
+            reports[0].report.audio_commands,
+            [AudioCommand::Play {
+                sample: SampleId(1),
+                voice: VoiceId(voice),
+                at: ts(9_000_000_000),
+                gain: 1.0,
+            }]
         );
     }
     local.fail();

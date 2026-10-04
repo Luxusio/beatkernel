@@ -95,6 +95,11 @@ impl InputSoundTimeline {
         Ok(Self { markers, controls })
     }
 
+    /// Borrows validated markers in ascending control/time order for setup checks.
+    pub fn markers(&self) -> &[InputSoundMarker] {
+        &self.markers
+    }
+
     /// Selects the most recent marker at or before `song_at`, scheduling at the
     /// independently supplied output timestamp. No prior marker means silence.
     pub fn command_for(

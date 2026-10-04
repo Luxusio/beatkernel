@@ -57,6 +57,17 @@ impl SongCompletion {
             judge_until = judge_until
                 .max(i128::from(endpoint) + i128::from(late_ns) - i128::from(input_offset_ns) + 1);
         }
+        let invisible = if prepared.source.invisible.is_empty() {
+            Vec::new()
+        } else {
+            prepared
+                .source
+                .compile_invisible()
+                .map_err(|_| CompletionError("invalid invisible completion timeline"))?
+        };
+        for event in &invisible {
+            judge_until = judge_until.max(i128::from(event.at.as_nanos()) + 1);
+        }
         let starts: BTreeMap<_, _> = prepared
             .compiled
             .chart
@@ -74,6 +85,10 @@ impl SongCompletion {
             let at =
                 (i128::from(*start) + i128::from(late_ns) - i128::from(input_offset_ns)).max(0);
             song_extent = song_extent.max(at + sample_duration(prepared, sound.sample)?);
+        }
+        for event in &invisible {
+            song_extent = song_extent
+                .max(i128::from(event.at.as_nanos()) + sample_duration(prepared, event.sample)?);
         }
         for command in &prepared.bgm_commands {
             let beatkernel::audio::AudioCommand::Play { at, sample, .. } = *command else {

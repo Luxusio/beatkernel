@@ -6,9 +6,9 @@ use crate::{
     bgm::{BgmConfig, BgmFeedError, BgmFeedReport, BgmFeeder},
     competition::{CompetitionError, ScoreSummary},
     completion::{CompletionError, SongCompletion},
-    input_sounds::InputSoundIdentity,
+    input_sounds::{InputSoundIdentity, InputSoundPlan},
     local_players::{PlayerId, ResolvedInputPlan},
-    local_preparation::{PreparedLocalMembers, prepare_local_members},
+    local_preparation::{PreparedLocalMembers, prepare_local_members, prepare_local_input_sounds},
     local_runtime::{GroupError, InputResult, PlayerReport, RuntimeGroup, SoloRuntime},
     native_judge::NativeJudgeConfig,
     replay_audio::{ReplayAudioError, before_endpoint, completed_render_cursor, section_end_frame},
@@ -24,7 +24,7 @@ use beatkernel::{
     interaction::InteractionState,
     judge::JudgeEngine,
     replay::{ReplayHeader, codec::ReplayCodecLimits},
-    runtime::{RuntimeProcessingClock, RuntimeReport},
+    runtime::{RuntimeProcessingClock, RuntimeReport, input_sound::InputSoundTimeline},
     time::{ClockDomainId, ClockMapper, ClockPair, ClockPoint, Duration, Timestamp},
     transport::{Rate, Transport},
 };
@@ -213,10 +213,12 @@ enum RuntimeSetup {
     Solo {
         bindings: BindingMap,
         judge: JudgeEngine,
+        input_sounds: Option<InputSoundTimeline>,
     },
     Local {
         members: PreparedLocalMembers,
         primary: PlayerId,
+        input_sounds: Vec<(PlayerId, InputSoundTimeline)>,
     },
 }
 
@@ -511,6 +513,25 @@ impl StepGameplay {
         // or filtering. The legacy solo branch retains its original sound IDs.
         let runtime_setup = match input {
             InputSetup::Solo(bindings) => {
+                let input_sounds = if prepared.source.invisible.is_empty() {
+                    None
+                } else {
+                    let plan = InputSoundPlan::prepare(
+                        &prepared.source,
+                        &prepared.sounds,
+                        &prepared.bgm_commands,
+                        beatkernel_bms::ParseOptions::default().max_objects,
+                    )
+                    .map_err(StepGameplayError::Setup)?;
+                    for &sample in plan.samples() {
+                        if prepared.bank.get(sample).is_none() {
+                            return Err(StepGameplayError::InvalidConfiguration(
+                                "input sound PCM sample is missing",
+                            ));
+                        }
+                    }
+                    Some(plan.timeline())
+                };
                 let rules = prepared.source.rules_with_input_mode(input_mode);
                 let constructor = if input_mode == BmsInputMode::ButtonOrContact
                     && !prepared.source.invisible.is_empty()
@@ -521,14 +542,25 @@ impl StepGameplay {
                 };
                 let judge = constructor(prepared.compiled.chart, rules, profile)
                     .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
-                RuntimeSetup::Solo { bindings, judge }
+                RuntimeSetup::Solo {
+                    bindings,
+                    judge,
+                    input_sounds,
+                }
             }
             InputSetup::Local(plan, bindings) => {
                 let primary = plan.members()[0].0;
                 let members =
                     prepare_local_members(&prepared, &plan, bindings, profile, input_mode)
                         .map_err(StepGameplayError::Setup)?;
-                RuntimeSetup::Local { members, primary }
+                let input_sounds =
+                    prepare_local_input_sounds(&prepared, &members.configs, &members.reserved)
+                        .map_err(StepGameplayError::Setup)?;
+                RuntimeSetup::Local {
+                    members,
+                    primary,
+                    input_sounds,
+                }
             }
         };
         let bgm_count = prepared.bgm_commands.len();
@@ -636,8 +668,12 @@ impl StepGameplay {
             .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
         let transport = Transport::new(config.host_origin.timestamp, song, Rate::NORMAL);
         let mut runtime = match runtime_setup {
-            RuntimeSetup::Solo { bindings, judge } => RuntimeOwner::Solo(
-                SoloRuntime::new(
+            RuntimeSetup::Solo {
+                bindings,
+                judge,
+                input_sounds,
+            } => {
+                let mut solo = SoloRuntime::new(
                     config.host_origin.domain,
                     config.output_origin.domain,
                     transport,
@@ -647,10 +683,19 @@ impl StepGameplay {
                     prepared.sounds,
                     config.telemetry_capacity,
                 )
-                .map_err(StepGameplayError::Setup)?,
-            ),
-            RuntimeSetup::Local { members, primary } => RuntimeOwner::Local {
-                group: RuntimeGroup::new(
+                .map_err(StepGameplayError::Setup)?;
+                if let Some(timeline) = input_sounds {
+                    solo.configure_input_sounds(timeline)
+                        .map_err(StepGameplayError::Setup)?;
+                }
+                RuntimeOwner::Solo(solo)
+            }
+            RuntimeSetup::Local {
+                members,
+                primary,
+                input_sounds,
+            } => {
+                let mut group = RuntimeGroup::new(
                     config.host_origin.domain,
                     config.output_origin.domain,
                     transport,
@@ -659,9 +704,14 @@ impl StepGameplay {
                     config.telemetry_capacity,
                     &members.reserved,
                 )
-                .map_err(StepGameplayError::Setup)?,
-                primary,
-            },
+                .map_err(StepGameplayError::Setup)?;
+                if !input_sounds.is_empty() {
+                    group
+                        .configure_input_sounds(input_sounds)
+                        .map_err(StepGameplayError::Setup)?;
+                }
+                RuntimeOwner::Local { group, primary }
+            }
         };
         // Profiling is not a clock source. In particular, no std::time::Instant
         // is sampled by core processing on browser or other nonblocking hosts.

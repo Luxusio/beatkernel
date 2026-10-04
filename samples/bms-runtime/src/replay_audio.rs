@@ -2,14 +2,21 @@
 
 use crate::{
     PreparedBms,
+    input_sounds::InputSoundPlan,
     practice::PracticeStart,
     practice_loop::PracticeLoop,
-    replay_playback::{decode_section_setup, reconstruct, reconstruct_section},
+    replay_playback::{
+        decode_section_setup, reconstruct, reconstruct_section, validate_section_setup,
+        validate_setup,
+    },
 };
 use beatkernel::{
     audio::{AudioCommand, RenderReport, SampleId},
     judge::{JudgeEvent, JudgeOutcome},
-    replay::codec::{ReplayCodecLimits, ReplayFile},
+    replay::{
+        ReplayOperation,
+        codec::{ReplayCodecLimits, ReplayFile},
+    },
     time::{ClockPoint, Duration, Timestamp},
 };
 use std::{collections::BTreeMap, error::Error};
@@ -159,6 +166,29 @@ fn plan_with_section(
     if preroll.as_nanos() < 0 {
         return Err(ReplayAudioError::InvalidConfiguration("negative preroll").into());
     }
+    // Keep a pristine actual judge only when fallback selection needs its held
+    // ownership. The reconstructed session below still owns full results/hash.
+    let input_sounds = if prepared.source.invisible.is_empty() {
+        None
+    } else {
+        let judge = if allow_finite {
+            validate_section_setup(&prepared.source, &file, limits)?
+        } else {
+            validate_setup(&prepared.source, &file, limits)?
+        };
+        let plan = InputSoundPlan::prepare(
+            &prepared.source,
+            &prepared.sounds,
+            &prepared.bgm_commands,
+            beatkernel_bms::ParseOptions::default().max_objects,
+        )?;
+        for &sample in plan.samples() {
+            if prepared.bank.get(sample).is_none() {
+                return Err(ReplayAudioError::MissingSample(sample).into());
+            }
+        }
+        Some((judge, plan.timeline()))
+    };
     let session = if allow_finite {
         reconstruct_section(&prepared.source, file, limits)?
     } else {
@@ -254,6 +284,59 @@ fn plan_with_section(
                 .try_reserve(1)
                 .map_err(|_| ReplayAudioError::AllocationFailed)?;
             scheduled.push((at, true, scheduled.len(), command));
+        }
+    }
+    if let Some((mut judge, timeline)) = input_sounds {
+        // One forward pass preserves contact/button freshness and equal-time
+        // operation order without rebuilding through repeated replay seeks.
+        for record in session.records() {
+            let input = match &record.operation {
+                ReplayOperation::Advance => {
+                    judge.advance_to(record.song_time)?;
+                    continue;
+                }
+                ReplayOperation::Input(input) => input,
+            };
+            let fresh = judge.is_fresh_press(input);
+            let results = judge.push_input(input, record.song_time)?;
+            let Some(AudioCommand::Play {
+                voice,
+                sample,
+                gain,
+                ..
+            }) = timeline.command_for_press(
+                input,
+                fresh,
+                record.song_time,
+                record.song_time,
+                &results,
+            )
+            else {
+                continue;
+            };
+            let at = output_time(
+                i128::from(record.song_time.as_nanos()),
+                start,
+                output_origin,
+                preroll,
+            )?;
+            if !before_endpoint(at, output_origin, sample_rate, end)? {
+                continue;
+            }
+            scheduled
+                .try_reserve(1)
+                .map_err(|_| ReplayAudioError::AllocationFailed)?;
+            scheduled.push((
+                at,
+                true,
+                scheduled.len(),
+                AudioCommand::Play {
+                    voice,
+                    sample,
+                    at,
+                    gain,
+                },
+            ));
         }
     }
     scheduled.sort_unstable_by_key(|&(at, is_hit, ordinal, _)| (at, is_hit, ordinal));

@@ -7,7 +7,10 @@ use beatkernel::{
         TouchRouter,
     },
     judge::JudgeEngine,
-    runtime::{Runtime, RuntimeError, RuntimeProcessingClock, RuntimeReport, SoundBinding},
+    runtime::{
+        Runtime, RuntimeError, RuntimeProcessingClock, RuntimeReport, SoundBinding,
+        input_sound::InputSoundTimeline,
+    },
     telemetry::RuntimeTelemetry,
     time::{ClockDomainId, ClockMapper, ClockPoint, Timestamp},
     transport::{Rate, Transport},
@@ -76,6 +79,8 @@ pub struct RuntimeGroup {
     poisoned: bool,
     started: bool,
     song_end: Option<Timestamp>,
+    occupied_voices: HashSet<VoiceId>,
+    input_sounds_configured: bool,
 }
 
 /// Parks the member's disconnected placeholders while it uses shared owners.
@@ -159,6 +164,8 @@ impl RuntimeGroup {
                 }
             }
         }
+        let mut occupied_voices = reserved;
+        occupied_voices.extend(voices.into_keys());
         let mut members = Vec::with_capacity(configs.len());
         for config in configs {
             let (placeholder, disconnected) =
@@ -188,7 +195,48 @@ impl RuntimeGroup {
             poisoned: false,
             started: false,
             song_end: None,
+            occupied_voices,
+            input_sounds_configured: false,
         })
+    }
+
+    /// Installs one timeline per member in exact source-plan order. All voice
+    /// checks precede any private Runtime mutation, so refusals permit retry.
+    pub fn configure_input_sounds(
+        &mut self,
+        timelines: Vec<(PlayerId, InputSoundTimeline)>,
+    ) -> Result<(), String> {
+        if self.poisoned || self.started || self.input_sounds_configured {
+            return Err("shared input sound configuration is locked".into());
+        }
+        if timelines.len() != self.members.len() {
+            return Err("input sound timeline count differs from cohort".into());
+        }
+        let mut voices = HashMap::new();
+        for (member, (player, timeline)) in self.members.iter().zip(&timelines) {
+            if member.player != *player {
+                return Err("input sound players differ from source-plan order".into());
+            }
+            for marker in timeline.markers() {
+                if self.occupied_voices.contains(&marker.voice) {
+                    return Err("input sound voice collides with gameplay or reserved BGM".into());
+                }
+                if voices
+                    .insert(marker.voice, *player)
+                    .is_some_and(|owner| owner != *player)
+                {
+                    return Err("input sound voice collides across local players".into());
+                }
+            }
+        }
+        for (member, (_, timeline)) in self.members.iter_mut().zip(timelines) {
+            member
+                .runtime
+                .configure_input_sounds(timeline)
+                .expect("validated fresh private member input sound setup cannot reject");
+        }
+        self.input_sounds_configured = true;
+        Ok(())
     }
 
     /// Install one immutable original-song boundary before any member runs.
@@ -441,6 +489,11 @@ impl RuntimeGroup {
 /// Production solo adapter uses exactly the same cohort execution path.
 pub struct SoloRuntime(RuntimeGroup);
 impl SoloRuntime {
+    /// Uses the same atomic one-member input-sound installation as local play.
+    pub fn configure_input_sounds(&mut self, timeline: InputSoundTimeline) -> Result<(), String> {
+        self.0.configure_input_sounds(vec![(PlayerId(1), timeline)])
+    }
+
     pub fn configure_touch_router(&mut self, router: TouchRouter) -> Result<(), String> {
         self.0.configure_touch_router(PlayerId(1), router)
     }
