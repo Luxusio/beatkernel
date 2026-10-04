@@ -707,7 +707,7 @@ never be accepted as room messages. The bounded codec is shared by native QUIC
 and browser WebTransport adapters and carries canonical identity plus ordered
 local roster, assigned participant admission, ordered membership snapshots,
 and explicit seal/preparation/leave requests. Requests carry no caller-selected
-participant ID: a future server binds them to its admitted stream lease.
+participant ID: the server binds them to its admitted stream lease.
 
 Membership snapshots retain participant-scoped player IDs, phase, original
 deadline and preparation bits. Validate every member before admitting a complete
@@ -726,5 +726,37 @@ the header. A completed message may reuse that bounded capacity for later frames
 Malformed input never becomes a partially admitted message or silently resets
 the decoder; callers terminate the affected stream. These messages do not
 establish shared start clocks, gameplay progress, full writes or final ACKs.
-Server/client negotiation and stream ownership integration remain required;
+Client negotiation and gameplay stream ownership integration remain required;
 codec source and deferred fixtures alone do not prove interoperable gameplay.
+
+## WebTransport multi-host admission owner
+
+The existing serve-multiplayer executable may explicitly select BKMR room
+admission with `--group-hosts N`, bounded to 2..64 and no greater than its session
+limit. Without that option it retains the bilateral BKMP relay. Preserve the
+existing TLS, exact Origin/path policy, bounded setup/session resources and
+Ctrl+C ownership. Both modes use the same platform-independent server.
+
+In group mode, require a complete valid Join frame during bounded setup before
+room admission. Its room key comes from the validated request path, never a
+message-selected route. Assign a nonreused participant lease, send Admitted
+before any snapshot on that participant's ordered stream, and publish complete
+room snapshots to every current host after successful join/seal/preparation.
+After admission accept only Seal, Ready and Leave bound to that exact stream
+lease. A forged server message, repeated Join, malformed input or closed peer
+must release and close the whole affected room, without harming other rooms.
+
+Outgoing frames and incoming owner commands remain bounded. A slow or closed
+recipient cannot cause unbounded queues or block the room owner; a failed
+snapshot delivery admission closes the affected room explicitly. Stream writer
+completion means a full write only, not a peer application acknowledgement.
+Idle admission streams wait for commands, expiry or stop; once a frame begins,
+its complete read/write uses the configured I/O deadline. Waiting expiry,
+disconnect and server stop close exact owned resources and join their tasks;
+late task completions cannot revive or remove a replacement same-key room.
+
+This server route delivers admission and readiness only. Multi-host start/clock
+agreement, gameplay progress/fanout, final ACKs and native/browser gameplay
+callers remain required. Source/compile-only evidence cannot prove endpoint,
+TLS, browser interoperability, physical sync or performance acceptance. Author
+deterministic I/O, ownership and refusal fixtures for deferred execution.
