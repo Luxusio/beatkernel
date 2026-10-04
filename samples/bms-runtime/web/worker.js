@@ -617,6 +617,77 @@ function roomAudioReady(state) {
     && state.commandClient !== null && state.commandClient.state === "ready";
 }
 
+function roomProgressWords(value, players, name) {
+  if (!(value instanceof Uint32Array) || !(value.buffer instanceof ArrayBuffer)
+    || value.buffer.byteLength > 2816) throw new Error(`Invalid bounded ${name}.`);
+  return groupWords(value, players, name);
+}
+
+function retainRoomReceipts(room, receipts) {
+  if (!receipts || typeof receipts.localFinalWritten !== "boolean"
+    || typeof receipts.localFinalAcknowledged !== "boolean" || typeof receipts.complete !== "boolean"
+    || (receipts.localFinalAcknowledged && !receipts.localFinalWritten)
+    || (receipts.complete && !receipts.localFinalAcknowledged)) throw new Error("Invalid actual room receipts.");
+  room.receipts = Object.freeze({ localFinalWritten: receipts.localFinalWritten,
+    localFinalAcknowledged: receipts.localFinalAcknowledged, complete: receipts.complete });
+}
+
+function retainRoomSnapshot(room, snapshot, participant) {
+  if (!unsigned(participant) || participant === 0n || (room.participant !== null && room.participant !== participant)) {
+    throw new Error("Room snapshot has no stable admitted participant.");
+  }
+  if (!snapshot || !integer(snapshot.phase, 0, 2)) throw new Error("Invalid actual room snapshot.");
+  if (snapshot.phase === 2 && room.peerPlayers === null) {
+    if (!Array.isArray(snapshot.members) || !integer(snapshot.members.length, 2, 64)) throw new Error("Invalid Prepared room roster.");
+    const roster = new Map();
+    for (const member of snapshot.members) {
+      if (!member || !unsigned(member.participant) || member.participant === 0n || roster.has(member.participant)
+        || member.prepared !== true || !(member.players instanceof Uint32Array)
+        || !(member.players.buffer instanceof ArrayBuffer) || member.players.buffer.byteLength > 256) {
+        throw new Error("Invalid Prepared room member.");
+      }
+      const players = networkWords(member.players, 1, 64, 1, "Prepared room players");
+      if (players.some(player => player === 0) || new Set(players).size !== players.length) throw new Error("Invalid Prepared player identities.");
+      roster.set(member.participant, Object.freeze(Array.from(players)));
+    }
+    const own = roster.get(participant);
+    if (!own || own.length !== room.localPlayers.length || own.some((player, index) => player !== room.localPlayers[index])) {
+      throw new Error("Prepared room changed the actual local roster.");
+    }
+    room.peerPlayers = roster;
+  }
+  room.participant = participant;
+}
+
+function roomOutcome(room) {
+  const peers = [];
+  if (room.peerPlayers !== null) for (const participant of room.peerPlayers.keys()) {
+    const prefix = room.peers.get(participant);
+    if (prefix) peers.push(prefix);
+  }
+  const errors = [room.failure, room.cleanupError].filter(value => value !== null)
+    .map(value => message(value) || "Room failure.");
+  return { participant: room.participant, finalQueued: room.finalQueued,
+    finalWritten: room.receipts.localFinalWritten, finalAcknowledged: room.receipts.localFinalAcknowledged,
+    localComplete: room.receipts.complete, finalDrain: "cancelled",
+    error: errors.length ? message(errors.join("; cleanup: ")) : null, peers };
+}
+
+function sendRoomProgress(state, final = false) {
+  const room = state.room;
+  if (play !== state || !state.active || !state.game || !room || !room.start || room.disposed
+    || room.leaving || room.failure !== null || room.finalQueued || !room.owner || room.owner.closed) return;
+  try {
+    const now = networkNow();
+    if (!hostTime(now) || (room.lastProgress !== null && now < room.lastProgress)) throw new Error("Room publication clock regressed.");
+    if (!final && room.lastProgress !== null && now - room.lastProgress < PROGRESS_INTERVAL_NS) return;
+    const words = roomProgressWords(state.game.progress_words(), room.localPlayers, "actual room progress");
+    room.owner.publishProgress(words, final);
+    room.lastProgress = now;
+    if (final) room.finalQueued = true;
+  } catch (error) { roomFailure(state, room, error); }
+}
+
 function closeRoomOwner(room) {
   if (room.owner === null) return null;
   if (room.ownerClosing === null) {
@@ -630,6 +701,16 @@ function closeRoomOwner(room) {
 function closeRoom(room) {
   if (!room) return Promise.resolve(null);
   if (room.closing !== null) return room.closing;
+  if (room.owner !== null) {
+    try {
+      const participant = room.owner.participant;
+      if (participant !== 0n) {
+        if (!unsigned(participant) || (room.participant !== null && room.participant !== participant)) throw new Error("Invalid retained room participant.");
+        room.participant = participant;
+      }
+      retainRoomReceipts(room, room.owner.receipts);
+    } catch (error) { room.failure ??= error; }
+  }
   room.disposed = true; // Fence callbacks before abort can synchronously notify.
   try { room.controller.abort(); } catch {}
   closeRoomOwner(room);
@@ -638,7 +719,7 @@ function closeRoom(room) {
     // assigned below and closed here without touching the released game.
     try { await room.opening; } catch {}
     try { await closeRoomOwner(room); return room.cleanupError; }
-    catch (error) { return error; }
+    catch (error) { room.cleanupError ??= error; return room.cleanupError; }
   })();
   return room.closing;
 }
@@ -651,8 +732,15 @@ function roomClosed(state, room, error) {
 
 function roomFailure(state, room, error) {
   if (play !== state || state.room !== room || room.disposed) return;
+  room.failure ??= error;
   roomClosed(state, room, error);
-  failPlay(state, error);
+  if (!state.active) failPlay(state, error);
+  else {
+    const rpcId = room.rpcId;
+    room.rpcId = null;
+    if (identity(rpcId)) report("play-reply", { playId: state.id, rpcId, error: message(error) });
+    void closeRoom(room);
+  }
 }
 
 function openRoom(state, request) {
@@ -674,12 +762,13 @@ function openRoom(state, request) {
     throw new Error("Room admission requires a canonical HTTPS room URL.");
   }
   const methods = ["request_seal", "request_ready", "request_leave", "needed_bytes", "frame_pending",
-    "receive_bytes", "next_write", "written", "participant_id", "revision", "has_snapshot", "leave_written", "snapshot", "take_start", "close", "free"];
+    "receive_bytes", "next_write", "written", "participant_id", "revision", "has_snapshot", "leave_written", "snapshot", "take_start",
+    "publish_progress", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written", "progress_complete", "close", "free"];
   if (typeof BrowserRoomClient !== "function" || typeof AbortController !== "function"
     || typeof BrowserRoomClient.new_with_start !== "function"
     || methods.some(name => typeof BrowserRoomClient.prototype?.[name] !== "function")
-    || typeof state.game.competition_identity !== "function") {
-    throw new Error("The gameplay binding does not provide actual room start ownership.");
+    || typeof state.game.competition_identity !== "function" || typeof state.game.progress_words !== "function") {
+    throw new Error("The gameplay binding does not provide actual room start/progress ownership.");
   }
   const players = networkWords(state.game.players, 1, 64, 1, "actual room roster");
   if (players.length !== state.localPlan.members.length
@@ -702,7 +791,10 @@ function openRoom(state, request) {
   }
   const room = { owner: null, ownerClosing: null, controller, opening: null, closing: null,
     rpcId: request.rpcId, disposed: false, leaving: false, closedReported: false, cleanupError: null,
-    windowOriginNs, originNs: null, start: null };
+    windowOriginNs, originNs: null, start: null, failure: null, participant: null,
+    localPlayers: Object.freeze(Array.from(players)), peerPlayers: null, peers: new Map(),
+    lastProgress: null, finalQueued: false,
+    receipts: Object.freeze({ localFinalWritten: false, localFinalAcknowledged: false, complete: false }) };
   const client = session;
   state.room = room; // One attempt per play; this slot is never reset or reused.
   // Install the joining promise before callbacks can fail reentrantly in open.
@@ -720,8 +812,21 @@ function openRoom(state, request) {
         // Accepted callbacks can run before open returns the owner. The actual
         // session provides the participant; no roster position is substituted.
         const participant = room.owner?.participant ?? client.participant_id();
-        if (!unsigned(participant) || participant === 0n) throw new Error("Room snapshot has no admitted participant.");
+        retainRoomSnapshot(room, snapshot, participant);
         report("play-room", { playId: state.id, event: { kind: "snapshot", participant, snapshot } });
+      },
+      onProgress: prefix => {
+        if (play !== state || state.room !== room || room.disposed || room.leaving) return;
+        if (!prefix || !unsigned(prefix.participant) || prefix.participant === 0n || prefix.participant === room.participant
+          || !unsigned(prefix.sequence) || prefix.sequence === 0n || typeof prefix.finalPrefix !== "boolean"
+          || !room.peerPlayers?.has(prefix.participant)) throw new Error("Invalid accepted room peer prefix.");
+        const words = roomProgressWords(prefix.words, room.peerPlayers.get(prefix.participant), "accepted room peer progress");
+        room.peers.set(prefix.participant, Object.freeze({ participant: prefix.participant,
+          sequence: prefix.sequence, finalPrefix: prefix.finalPrefix, words }));
+      },
+      onReceipts: receipts => {
+        if (play !== state || state.room !== room || room.disposed || room.leaving) return;
+        retainRoomReceipts(room, receipts);
       },
       onStart: (schedule, originNs) => {
         if (play !== state || state.room !== room || room.disposed || room.leaving) return;
@@ -802,8 +907,15 @@ function roomRequest(state, request) {
             room.rpcId = null;
             report("play-reply", { playId: state.id, rpcId: request.rpcId, error: message(error) });
           } else {
-            roomClosed(state, room, error);
-            failPlay(state, error);
+            if (room.disposed) {
+              // A joined Leave cleanup can fail after its room was fenced.
+              // Settle that RPC without reviving or disposing active gameplay.
+              room.failure ??= error;
+              room.rpcId = null;
+              report("play-reply", { playId: state.id, rpcId: request.rpcId, error: message(error) });
+              roomClosed(state, room, error);
+              if (!state.active) failPlay(state, error);
+            } else roomFailure(state, room, error);
           }
         }
       })();
@@ -877,6 +989,7 @@ function failPlay(state, error, request = null) {
   const score = statistics(state);
   const savedOpponents = finalOpponents(state);
   retainFinalGroup(state);
+  sendRoomProgress(state, true);
   play = null; // Invalidates a still-awaiting preparation before releasing owners.
   stopRedraw();
   closeNetwork(state.network);
@@ -894,6 +1007,7 @@ function failPlay(state, error, request = null) {
     released: cleanupError === null && roomError === null,
     replay, replayComplete: false, replayError, ...score, ...(replays ? { replays } : {}),
     ...(state.network ? { multiplayer: multiplayerOutcome(state.network) } : {}),
+    ...(state.room ? { room: roomOutcome(state.room) } : {}),
     ...(savedOpponents ? { savedOpponents } : {}) }, replayTransfers(replay, replays));
   if (roomClosing) void roomClosing.then(finished).catch(fatal);
   else finished(null);
@@ -908,6 +1022,7 @@ function stopPlay(state, request) {
   const score = statistics(state);
   const savedOpponents = finalOpponents(state);
   retainFinalGroup(state);
+  sendRoomProgress(state, true);
   play = null;
   stopRedraw();
   if (state.network) {
@@ -928,6 +1043,7 @@ function stopPlay(state, request) {
     const cleanupFailure = cleanupError ?? roomError;
     if (replays) for (const row of replays) row.replayComplete = !cleanupFailure && completed && row.replay !== null && row.replayError === null;
     const result = { replay, replayError, ...score, ...(multiplayer ? { multiplayer } : {}),
+      ...(state.room ? { room: roomOutcome(state.room) } : {}),
       ...(savedOpponents ? { savedOpponents } : {}), ...(replays ? { replays } : {}) };
     if (cleanupFailure) report("play-error", { playId: state.id, message: message(cleanupFailure), released: false,
       ...result, replayComplete: false }, replayTransfers(replay, replays));
@@ -1430,6 +1546,7 @@ function snapshotPresentation(state, request, direct) {
 
 function publishRender(state, observation, completed) {
   if (completed && commandsPending(state)) throw new Error("Completion produced outstanding gameplay commands.");
+  sendRoomProgress(state, completed);
   report("play-render-done", { playId: state.id, renderId: observation.renderId, completed,
     commandsPending: commandsPending(state), observedTick: state.lastTick,
     ...(state.mode === "replay" || state.localPlan ? statistics(state) : {}) });
@@ -1656,6 +1773,7 @@ function stepPlay(state, request) {
   report("play-step-done", { playId: state.id, tickId: request.tickId, commandsPending: commandsPending(state), ...score });
   scheduleDraw();
   sendProgress(state, score);
+  sendRoomProgress(state);
   publishOpponents(state);
 }
 
