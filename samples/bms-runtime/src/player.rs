@@ -163,6 +163,71 @@ pub fn publish_competition(
     })
 }
 
+/// Replace the whole cohort's peer presentation atomically without changing ghosts.
+pub fn publish_networks(
+    rows: &[(PlayerId, NetworkSnapshot)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    crate::multiplayer_group::validate_roster(
+        &rows.iter().map(|(player, _)| *player).collect::<Vec<_>>(),
+    )?;
+    for (_, snapshot) in rows {
+        if let Some(progress) = snapshot.progress {
+            crate::multiplayer_protocol::validate_progress(None, progress)?;
+        }
+    }
+    SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        let Some(current) = session.as_mut() else {
+            return Ok(());
+        };
+        if rows.iter().any(|(player, _)| {
+            !current
+                .snapshot
+                .players
+                .iter()
+                .any(|member| member.player == *player)
+        }) {
+            return Err("network presentation requires registered players".into());
+        }
+        for (player, peer) in rows {
+            let member = current
+                .snapshot
+                .players
+                .iter_mut()
+                .find(|member| member.player == *player)
+                .expect("registered cohort member");
+            member
+                .competition
+                .get_or_insert_with(|| CompetitionSnapshot {
+                    ghosts: Vec::new(),
+                    network: None,
+                })
+                .network = Some(peer.clone());
+        }
+        current.publish_latest(false);
+        Ok(())
+    })
+}
+
+/// Saved opponent updates preserve the independent shared peer comparison.
+pub fn publish_saved_competition(
+    player: PlayerId,
+    ghosts: Vec<GhostSnapshot>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let network = SESSION.with(|session| {
+        session.borrow().as_ref().and_then(|current| {
+            current
+                .snapshot
+                .players
+                .iter()
+                .find(|member| member.player == player)
+                .and_then(|member| member.competition.as_ref())
+                .and_then(|snapshot| snapshot.network.clone())
+        })
+    });
+    publish_competition(player, CompetitionSnapshot { ghosts, network })
+}
+
 /// Immutable UI copy of actual chart/time/results; no inferred clock relation.
 #[derive(Clone)]
 pub struct PlayerSnapshot {

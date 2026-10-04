@@ -158,6 +158,8 @@ pub mod native_end;
 pub mod native_finish;
 /// Shared native solo gameplay sequencing behind device operations.
 pub mod native_gameplay;
+/// One shared network/start owner over actual native local-member prefixes.
+pub mod native_group_competition;
 /// Shared native profile, completion and optional capture configuration.
 pub mod native_judge;
 /// Checked nominal session/host/output projection for future native frame startup.

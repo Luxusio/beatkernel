@@ -563,19 +563,26 @@ impl LiveCompetition {
                 }
             })
             .collect();
-        player::publish_competition(
-            self.player,
-            CompetitionSnapshot {
-                ghosts,
-                network: self.network_status.map(|status| NetworkSnapshot {
-                    status,
-                    progress: self.network.as_ref().and_then(|network| {
-                        selected_remote_member(network.remote_roster(), network.remote_progress())
+        if self.network.is_none() {
+            player::publish_saved_competition(self.player, ghosts)?;
+        } else {
+            player::publish_competition(
+                self.player,
+                CompetitionSnapshot {
+                    ghosts,
+                    network: self.network_status.map(|status| NetworkSnapshot {
+                        status,
+                        progress: self.network.as_ref().and_then(|network| {
+                            selected_remote_member(
+                                network.remote_roster(),
+                                network.remote_progress(),
+                            )
                             .map(|member| member.progress)
+                        }),
                     }),
-                }),
-            },
-        )?;
+                },
+            )?;
+        }
         self.last_presentation = Some(Instant::now());
         Ok(())
     }
