@@ -125,6 +125,7 @@ export class AudioHost {
   #abort = null;
   #sampleIds = new Set();
   #pcmBytes = 0;
+  #commandsTransferred = false;
 
   constructor(token, config) {
     if (token !== OWNER) throw new AudioHostError("state", "Use AudioHost.open().");
@@ -324,8 +325,43 @@ export class AudioHost {
     return this.#request("arm", { frame }, 0, [], () => { this.#state = "armed"; });
   }
 
+  async openCommandPort() {
+    this.#gate("attach-commands", ["allocated"]);
+    if (this.#commandsTransferred) throw this.#error("state", "attach-commands", "Command authority has already been transferred.");
+    if (typeof globalThis.MessageChannel !== "function") {
+      throw this.#error("unsupported", "attach-commands", "MessageChannel is required for direct command ownership.");
+    }
+    let channel;
+    try {
+      channel = new MessageChannel();
+      if (channel.port1 === channel.port2 || ![channel.port1, channel.port2].every(port => port
+        && ["postMessage", "start", "close"].every(name => typeof port[name] === "function"))) {
+        throw this.#error("unsupported", "attach-commands", "MessageChannel did not provide two usable endpoints.");
+      }
+    } catch (cause) {
+      try { channel?.port1?.close(); } catch {}
+      try { channel?.port2?.close(); } catch {}
+      throw cause instanceof AudioHostError ? cause : this.#error("transport", "attach-commands", "Command channel allocation failed.", { cause });
+    }
+    // A failed or timed-out transfer cannot prove that the processor did not
+    // adopt its endpoint. There is no fallback to the host command producer.
+    this.#commandsTransferred = true;
+    try {
+      await this.#request("attach-commands", { port: channel.port2 }, 0, [channel.port2]);
+      if (this.#failure) throw this.#failure;
+      if (this.#stopPromise) throw this.#error("closed", "attach-commands", "Audio owner stopped during command handoff.");
+      return Object.freeze({ port: channel.port1, generation: this.generation,
+        queueCapacity: this.#config.audioLimits.queueCapacity, timeoutMs: this.#config.timeoutMs });
+    } catch (error) {
+      try { channel.port1.close(); } catch {}
+      try { channel.port2.close(); } catch {}
+      throw error;
+    }
+  }
+
   async commands(commands) {
     this.#gate("commands", ["allocated", "armed"]);
+    if (this.#commandsTransferred) throw this.#error("state", "commands", "Command authority belongs to the transferred port.");
     const count = Array.isArray(commands) ? commands.length : 0;
     if (!integer(count, 1, this.#config.audioLimits.queueCapacity)) {
       throw this.#error("validation", "commands", "Command batch must be nonempty and bounded.");

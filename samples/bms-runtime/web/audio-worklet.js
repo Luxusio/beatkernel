@@ -18,6 +18,7 @@ const LAYOUT = 104;
 const MEMORY = 105;
 const EXCEPTION = 106;
 const FRAME = 107;
+const COMMAND_FIELDS = ["kind", "voice", "sample", "at", "gain", "value", "denominator"];
 
 function integer(value, min, max) {
   return Number.isSafeInteger(value) && value >= min && value <= max;
@@ -33,6 +34,8 @@ function signed(value) {
 
 function validCommand(command) {
   return command !== null && typeof command === "object"
+    && Reflect.ownKeys(command).length === COMMAND_FIELDS.length
+    && COMMAND_FIELDS.every(field => Object.hasOwn(command, field))
     && integer(command.kind, 0, 3) && unsigned(command.voice) && unsigned(command.sample)
     && signed(command.at) && typeof command.gain === "number" && Number.isFinite(command.gain)
     && Number.isFinite(Math.fround(command.gain)) && signed(command.value) && unsigned(command.denominator);
@@ -66,6 +69,8 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     if (!validOptions(config)) throw new Error("Invalid bounded audio processor options.");
     this.generation = config.generation;
     this.sequence = 0;
+    this.commandPort = null;
+    this.commandSequence = 0;
     this.channels = config.channels;
     this.maxFrames = config.audioLimits.maxFrames;
     this.maxBatch = config.audioLimits.queueCapacity;
@@ -109,20 +114,37 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     if (!this.diagnosed) {
       this.diagnosed = true;
       this.terminal.status = status;
-      this.port.postMessage(this.terminal);
+      try { this.port.postMessage(this.terminal); } catch {}
+      try { this.commandPort?.postMessage(this.terminal); } catch {}
     }
   }
 
-  ack(message, status, admitted = 0, error = null, report = null) {
-    this.port.postMessage({ kind: "ack", generation: this.generation,
+  ack(message, status, admitted = 0, error = null, report = null, port = this.port) {
+    port.postMessage({ kind: "ack", generation: this.generation,
       sequence: Number.isSafeInteger(message?.sequence) ? message.sequence : null,
       operation: typeof message?.kind === "string" ? message.kind : null,
       status, admitted, error, report });
   }
 
-  reject(message, status, error, admitted = 0) {
-    this.ack(message, status, admitted, error);
+  reject(message, status, error, admitted = 0, port = this.port) {
+    // A refused transfer still owns its received endpoint, not a live producer.
+    if (message?.kind === "attach-commands" && message.port !== this.commandPort && message.port !== this.port) {
+      try { message.port?.close(); } catch {}
+    }
+    try { this.ack(message, status, admitted, error, null, port); } catch {}
     this.fence(status);
+  }
+
+  closeCommandPort() {
+    const port = this.commandPort;
+    if (port === null) return;
+    this.commandPort = null;
+    try { port.postMessage({ kind: "closed", generation: this.generation }); }
+    finally {
+      port.onmessage = null;
+      port.onmessageerror = null;
+      port.close();
+    }
   }
 
   stop(message) {
@@ -133,14 +155,79 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
     this.buffer = null;
     this.memory = null;
     this.sampleIds.clear();
-    if (this.owner !== null) {
-      this.owner.free();
-      this.owner = null;
+    try {
+      if (this.owner !== null) {
+        this.owner.free();
+        this.owner = null;
+      }
+    } catch (error) {
+      this.fence(EXCEPTION);
+      throw error;
+    } finally {
+      this.closeCommandPort();
     }
     if (liveOwner === this) liveOwner = null;
     this.ack(message, 0);
     this.port.onmessage = null;
     this.port.close();
+  }
+
+  commands(message, port) {
+    let admitted = 0;
+    try {
+      const commands = message.commands;
+      if ((this.phase !== 1 && this.phase !== 2) || !Array.isArray(commands)
+        || commands.length === 0 || commands.length > this.maxBatch) {
+        this.reject(message, INVALID, "commands", 0, port);
+        return;
+      }
+      // Both producers use this whole-batch preflight and exact admission loop.
+      for (const command of commands) {
+        if (!validCommand(command)) {
+          this.reject(message, INVALID, "command", 0, port);
+          return;
+        }
+      }
+      for (const command of commands) {
+        const status = this.owner.enqueue(command.kind, command.voice, command.sample,
+          command.at, command.gain, command.value, command.denominator);
+        if (status !== 0) {
+          this.reject(message, status, "admission", admitted, port);
+          return;
+        }
+        admitted++;
+      }
+      this.ack(message, 0, admitted, null, null, port);
+    } catch {
+      this.reject(message, EXCEPTION, "exception", admitted, port);
+    }
+  }
+
+  commandControl(message) {
+    const port = this.commandPort;
+    if (port === null) return;
+    try {
+      if (message === null || typeof message !== "object" || message.kind !== "commands") {
+        this.reject(message, INVALID, "command-operation", 0, port);
+        return;
+      }
+      if (message.generation !== this.generation) {
+        this.reject(message, GENERATION, "generation", 0, port);
+        return;
+      }
+      if (!integer(message.sequence, 1, Number.MAX_SAFE_INTEGER) || message.sequence !== this.commandSequence + 1) {
+        this.reject(message, SEQUENCE, "sequence", 0, port);
+        return;
+      }
+      this.commandSequence = message.sequence;
+      if (this.failed || this.phase === 3) {
+        this.reject(message, STATE, "fenced", 0, port);
+        return;
+      }
+      this.commands(message, port);
+    } catch {
+      this.reject(message, EXCEPTION, "exception", 0, port);
+    }
   }
 
   control(message) {
@@ -222,6 +309,17 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
           this.output = new Float32Array(this.buffer, pointer, length);
           this.phase = 1;
         }
+      } else if (message.kind === "attach-commands") {
+        const port = message.port;
+        if (this.phase !== 1 || this.commandPort !== null || !port || port === this.port
+          || !["postMessage", "start", "close"].every(name => typeof port[name] === "function")) {
+          this.reject(message, STATE, "command-port");
+          return;
+        }
+        this.commandPort = port;
+        port.onmessage = event => this.commandControl(event.data);
+        port.onmessageerror = () => this.fence(INVALID);
+        port.start();
       } else if (message.kind === "arm") {
         if (this.phase !== 1 || !unsigned(message.frame) || !integer(currentFrame, 0, Number.MAX_SAFE_INTEGER)) {
           this.reject(message, INVALID, "arm");
@@ -230,29 +328,11 @@ class BeatKernelAudioProcessor extends AudioWorkletProcessor {
         status = this.owner.arm(message.frame, BigInt(currentFrame));
         if (status === 0) this.phase = 2;
       } else if (message.kind === "commands") {
-        const commands = message.commands;
-        if ((this.phase !== 1 && this.phase !== 2) || !Array.isArray(commands) || commands.length === 0 || commands.length > this.maxBatch) {
-          this.reject(message, INVALID, "commands");
+        if (this.commandPort !== null) {
+          this.reject(message, STATE, "transferred-command-owner");
           return;
         }
-        // Complete structural preflight precedes any admission, preserving the
-        // meaning of admitted-prefix ACKs even for malformed later records.
-        for (const command of commands) {
-          if (!validCommand(command)) {
-            this.reject(message, INVALID, "command");
-            return;
-          }
-        }
-        for (const command of commands) {
-          status = this.owner.enqueue(command.kind, command.voice, command.sample,
-            command.at, command.gain, command.value, command.denominator);
-          if (status !== 0) {
-            this.reject(message, status, "admission", admitted);
-            return;
-          }
-          admitted++;
-        }
-        this.ack(message, 0, admitted);
+        this.commands(message, this.port);
         return;
       } else if (message.kind === "poll") {
         // Each pair is low/high u32 for the binding's documented report index.
