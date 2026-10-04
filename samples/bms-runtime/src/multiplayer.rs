@@ -1,12 +1,16 @@
-//! Casual two-player progress transport. Remote scores are unauthenticated display data.
+//! Casual two-peer progress transport with scalar or whole-cohort prefixes.
+//! Remote scores are unauthenticated display data.
 //! Socket work never runs on the gameplay or audio thread. Software starts are committed.
 use crate::multiplayer_clock::OffsetEstimate;
+use crate::local_players::PlayerId;
+use crate::multiplayer_group::{GroupPrefix, MemberProgress, validate_members};
 #[cfg(test)]
 use crate::multiplayer_clock::{ClockFilter, ClockSample};
 use crate::multiplayer_protocol::{
-    FrameDecoder as Frames, MAX_IDENTITY, Outgoing, Session, WriteStep, validate_progress,
+    FrameDecoder as Frames, MAX_IDENTITY, OutboundFrame, Outgoing, Session, WriteStep,
+    validate_progress,
 };
-pub use crate::multiplayer_protocol::{MultiplayerError, MultiplayerEvent, Progress};
+pub use crate::multiplayer_protocol::{GroupEvent, MultiplayerError, MultiplayerEvent, Progress};
 #[cfg(test)]
 use crate::multiplayer_protocol::{
     ClockProbes, Protocol, VERSION, frame, parse_progress, parse_start_frame, prefix_frame,
@@ -18,7 +22,7 @@ use crate::multiplayer_webtransport_client::WebTransportOptions;
 use crate::multiplayer_webtransport_client::{WebTransportEndpoint, WebTransportStream};
 #[cfg(test)]
 use crate::multiplayer_start::StartMessage;
-use crate::multiplayer_start::{StartPolicy, StartSchedule};
+use crate::multiplayer_start::{StartPolicy, StartRole, StartSchedule};
 use beatkernel::{
     replay::{
         ReplayHeader,
@@ -48,13 +52,6 @@ enum Endpoint {
     WebTransport(WebTransportEndpoint),
 }
 impl Endpoint {
-    fn role(&self) -> crate::multiplayer_start::StartRole {
-        match self {
-            Self::Quic(endpoint) => endpoint.role(),
-            #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
-            Self::WebTransport(endpoint) => endpoint.role(),
-        }
-    }
     fn connect(self, stop: &AtomicBool, deadline: Instant) -> io::Result<Stream> {
         match self {
             Self::Quic(endpoint) => endpoint.connect(stop, deadline).map(Stream::Quic),
@@ -207,12 +204,85 @@ impl From<io::Error> for MultiplayerError {
     }
 }
 
+/// Lifecycle and whole-cohort observations from the same bounded worker queue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MultiplayerNotice {
+    Session(MultiplayerEvent),
+    Group(GroupEvent),
+}
+
+enum OutgoingMessage {
+    Scalar(Outgoing),
+    Group {
+        members: Vec<MemberProgress>,
+        final_prefix: bool,
+    },
+}
+impl OutgoingMessage {
+    fn final_prefix(&self) -> bool {
+        match self {
+            Self::Scalar(message) => message.final_prefix,
+            Self::Group { final_prefix, .. } => *final_prefix,
+        }
+    }
+    fn try_clone(&self) -> Result<Self, MultiplayerError> {
+        Ok(match self {
+            Self::Scalar(message) => Self::Scalar(Outgoing {
+                progress: message.progress,
+                final_prefix: message.final_prefix,
+            }),
+            Self::Group {
+                members,
+                final_prefix,
+            } => Self::Group {
+                members: copy_group_values(members)?,
+                final_prefix: *final_prefix,
+            },
+        })
+    }
+    fn send(self, session: &mut Session, now: i64) -> Result<OutboundFrame, MultiplayerError> {
+        match self {
+            Self::Scalar(message) => {
+                session.send_progress(message.progress, message.final_prefix, now)
+            }
+            Self::Group {
+                members,
+                final_prefix,
+            } => session.send_group_progress(members, final_prefix, now),
+        }
+    }
+}
+
+struct GroupOwnerState {
+    local_roster: Vec<PlayerId>,
+    local: Option<Vec<MemberProgress>>,
+    remote_roster: Option<Vec<PlayerId>>,
+    remote: Option<GroupPrefix>,
+    remote_final: Option<GroupPrefix>,
+}
+
+fn copy_group_values<T: Copy>(values: &[T]) -> Result<Vec<T>, MultiplayerError> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(values.len())
+        .map_err(|_| MultiplayerError::Protocol("group owner allocation failed".into()))?;
+    copy.extend_from_slice(values);
+    Ok(copy)
+}
+
+fn copy_group_prefix(prefix: &GroupPrefix) -> Result<GroupPrefix, MultiplayerError> {
+    Ok(GroupPrefix {
+        sequence: prefix.sequence,
+        final_prefix: prefix.final_prefix,
+        members: copy_group_values(&prefix.members)?,
+    })
+}
+
 /// Owned worker lifecycle. `stop` and Drop signal shutdown and join the worker.
 /// Ordinary progress queue overflow terminates the session explicitly.
 /// Terminal admission can retry capacity until the cleanup delivery deadline.
 pub struct Multiplayer {
-    outgoing: SyncSender<Outgoing>,
-    incoming: Receiver<MultiplayerEvent>,
+    outgoing: SyncSender<OutgoingMessage>,
+    incoming: Receiver<MultiplayerNotice>,
     terminal: Receiver<MultiplayerError>,
     stop_flag: Arc<AtomicBool>,
     ready_requested: Arc<AtomicBool>,
@@ -230,6 +300,7 @@ pub struct Multiplayer {
     remote_final: Option<Progress>,
     final_acknowledged: bool,
     finish_timeout: Duration,
+    group: Option<GroupOwnerState>,
 }
 impl Multiplayer {
     /// Bind only the caller's explicit address. Binding errors are returned immediately.
@@ -238,18 +309,14 @@ impl Multiplayer {
         identity: Vec<u8>,
         options: MultiplayerOptions,
     ) -> Result<Self, MultiplayerError> {
-        validate_options(&identity, &options)?;
-        let endpoint = Endpoint::Quic(QuicEndpoint::host(address, &options.quic)?);
-        Self::spawn(endpoint, identity, options)
+        Self::host_mode(address, identity, None, options)
     }
     pub fn join(
         address: SocketAddr,
         identity: Vec<u8>,
         options: MultiplayerOptions,
     ) -> Result<Self, MultiplayerError> {
-        validate_options(&identity, &options)?;
-        let endpoint = Endpoint::Quic(QuicEndpoint::join(address, &options.quic)?);
-        Self::spawn(endpoint, identity, options)
+        Self::join_mode(address, identity, None, options)
     }
     /// Connect to an HTTP/3 relay; the explicit role controls start negotiation,
     /// independently of both peers being network clients.
@@ -258,9 +325,67 @@ impl Multiplayer {
         identity: Vec<u8>,
         options: MultiplayerOptions,
     ) -> Result<Self, MultiplayerError> {
+        Self::webtransport_mode(connection, identity, None, options)
+    }
+    fn prepare_session(
+        identity: Vec<u8>,
+        players: Option<Vec<PlayerId>>,
+        role: StartRole,
+        options: &MultiplayerOptions,
+    ) -> Result<(Session, Option<GroupOwnerState>), MultiplayerError> {
+        validate_options(&identity, options)?;
+        let session = match players {
+            Some(players) => Session::new_group(
+                identity,
+                players,
+                role,
+                options.start_policy,
+                options.preroll_ns,
+            )?,
+            None => Session::new(identity, role, options.start_policy, options.preroll_ns)?,
+        };
+        let group = match session.local_roster() {
+            Some(players) => Some(GroupOwnerState {
+                local_roster: copy_group_values(players)?,
+                local: None,
+                remote_roster: None,
+                remote: None,
+                remote_final: None,
+            }),
+            None => None,
+        };
+        Ok((session, group))
+    }
+    fn host_mode(
+        address: SocketAddr,
+        identity: Vec<u8>,
+        players: Option<Vec<PlayerId>>,
+        options: MultiplayerOptions,
+    ) -> Result<Self, MultiplayerError> {
+        let (session, group) = Self::prepare_session(identity, players, StartRole::Host, &options)?;
+        let endpoint = Endpoint::Quic(QuicEndpoint::host(address, &options.quic)?);
+        Self::spawn(endpoint, session, group, options)
+    }
+    fn join_mode(
+        address: SocketAddr,
+        identity: Vec<u8>,
+        players: Option<Vec<PlayerId>>,
+        options: MultiplayerOptions,
+    ) -> Result<Self, MultiplayerError> {
+        let (session, group) = Self::prepare_session(identity, players, StartRole::Join, &options)?;
+        let endpoint = Endpoint::Quic(QuicEndpoint::join(address, &options.quic)?);
+        Self::spawn(endpoint, session, group, options)
+    }
+    fn webtransport_mode(
+        connection: WebTransportOptions,
+        identity: Vec<u8>,
+        players: Option<Vec<PlayerId>>,
+        options: MultiplayerOptions,
+    ) -> Result<Self, MultiplayerError> {
         #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
         {
-            validate_options(&identity, &options)?;
+            let (session, group) =
+                Self::prepare_session(identity, players, connection.role, &options)?;
             if options.quic.cert.is_some()
                 || options.quic.key.is_some()
                 || options.quic.server_name.is_some()
@@ -273,17 +398,18 @@ impl Multiplayer {
                 return Err(MultiplayerError::InvalidOptions);
             }
             let endpoint = Endpoint::WebTransport(WebTransportEndpoint::prepare(&connection)?);
-            Self::spawn(endpoint, identity, options)
+            Self::spawn(endpoint, session, group, options)
         }
         #[cfg(not(all(not(target_arch = "wasm32"), feature = "webtransport")))]
         {
-            let _ = (connection, identity, options);
+            let _ = (connection, identity, players, options);
             Err(crate::multiplayer_webtransport_client::unavailable().into())
         }
     }
     fn spawn(
         endpoint: Endpoint,
-        identity: Vec<u8>,
+        session: Session,
+        group: Option<GroupOwnerState>,
         options: MultiplayerOptions,
     ) -> Result<Self, MultiplayerError> {
         let (outgoing, out_rx) = mpsc::sync_channel(options.queue_capacity);
@@ -302,7 +428,7 @@ impl Multiplayer {
             .spawn(move || {
                 let result = run(
                     endpoint,
-                    identity,
+                    session,
                     options,
                     &worker_stop,
                     &worker_ready,
@@ -333,6 +459,7 @@ impl Multiplayer {
             remote_final: None,
             final_acknowledged: false,
             finish_timeout,
+            group,
         })
     }
     /// One-shot nonblocking preparation-ready request, independent of data capacity.
@@ -368,44 +495,49 @@ impl Multiplayer {
     }
     /// Gameplay-side admission only; performs no socket I/O and never waits for capacity.
     pub fn try_publish(&mut self, progress: Progress) -> Result<(), MultiplayerError> {
-        if self.closed || self.stop_flag.load(Ordering::Acquire) {
-            return Err(MultiplayerError::Closed);
-        }
-        if !self.is_ready() || self.start_schedule.is_none() {
-            return Err(MultiplayerError::Protocol(
-                "committed start required".into(),
-            ));
-        }
-        if self.local_final {
-            return Err(MultiplayerError::Protocol(
-                "local final already admitted".into(),
-            ));
-        }
-        validate_progress(self.local, progress)?;
-        match self.outgoing.try_send(Outgoing {
+        self.admit(OutgoingMessage::Scalar(Outgoing {
             progress,
             final_prefix: false,
-        }) {
-            Ok(()) => {
-                self.local = Some(progress);
-                if let Some(worker) = &self.worker {
-                    worker.thread().unpark();
-                }
-                Ok(())
-            }
-            Err(TrySendError::Full(_)) => {
-                self.signal_stop();
-                self.closed = true;
-                Err(MultiplayerError::QueueFull)
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                self.closed = true;
-                Err(MultiplayerError::Closed)
-            }
-        }
+        }))
     }
     /// Nonblocking terminal admission, immutable after success. Full is retryable.
     pub fn try_finish(&mut self, progress: Progress) -> Result<(), MultiplayerError> {
+        self.admit(OutgoingMessage::Scalar(Outgoing {
+            progress,
+            final_prefix: true,
+        }))
+    }
+    fn validate_publication(&self, message: &OutgoingMessage) -> Result<(), MultiplayerError> {
+        if self.local_final {
+            return Err(MultiplayerError::Protocol(
+                "local final already admitted".into(),
+            ));
+        }
+        match (self.group.as_ref(), message) {
+            (None, OutgoingMessage::Scalar(message)) => {
+                validate_progress(self.local, message.progress)
+            }
+            (Some(group), OutgoingMessage::Group { members, .. }) => {
+                validate_members(group.local.as_deref(), members)?;
+                if group.local_roster.len() != members.len()
+                    || group
+                        .local_roster
+                        .iter()
+                        .zip(members)
+                        .any(|(player, member)| *player != member.player)
+                {
+                    return Err(MultiplayerError::Protocol(
+                        "group progress changed the local roster".into(),
+                    ));
+                }
+                Ok(())
+            }
+            _ => Err(MultiplayerError::Protocol(
+                "publication mode differs from the session".into(),
+            )),
+        }
+    }
+    fn admit(&mut self, message: OutgoingMessage) -> Result<(), MultiplayerError> {
         if self.closed || self.stop_flag.load(Ordering::Acquire) {
             return Err(MultiplayerError::Closed);
         }
@@ -414,20 +546,36 @@ impl Multiplayer {
                 "committed start required".into(),
             ));
         }
-        if self.local_final {
-            return Err(MultiplayerError::Protocol(
-                "local final already admitted".into(),
-            ));
+        self.validate_publication(&message)?;
+        // Allocate the retained whole prefix before queue admission. Neither
+        // capacity refusal nor a later invalid member can change the old prefix.
+        let retained = message.try_clone()?;
+        let final_prefix = message.final_prefix();
+        match self.outgoing.try_send(message) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                if !final_prefix {
+                    self.signal_stop();
+                    self.closed = true;
+                }
+                return Err(MultiplayerError::QueueFull);
+            }
+            Err(TrySendError::Disconnected(_)) => {
+                if !final_prefix {
+                    self.closed = true;
+                }
+                return Err(MultiplayerError::Closed);
+            }
         }
-        validate_progress(self.local, progress)?;
-        self.outgoing
-            .try_send(Outgoing {
-                progress,
-                final_prefix: true,
-            })
-            .map_err(queue_error)?;
-        self.local = Some(progress);
-        self.local_final = true;
+        match retained {
+            OutgoingMessage::Scalar(message) => self.local = Some(message.progress),
+            OutgoingMessage::Group { members, .. } => {
+                if let Some(group) = &mut self.group {
+                    group.local = Some(members);
+                }
+            }
+        }
+        self.local_final = final_prefix;
         if let Some(worker) = &self.worker {
             worker.thread().unpark();
         }
@@ -436,12 +584,10 @@ impl Multiplayer {
     /// Cleanup-only bounded final delivery; performs no socket I/O on the caller.
     /// Call after native resources are stopped. Immediate cancellation still wins.
     pub fn finish_delivery(&mut self, progress: Progress) -> Result<(), MultiplayerError> {
-        if self.local_final {
-            return Err(MultiplayerError::Protocol(
-                "local final already admitted".into(),
-            ));
-        }
-        validate_progress(self.local, progress)?;
+        self.validate_publication(&OutgoingMessage::Scalar(Outgoing {
+            progress,
+            final_prefix: true,
+        }))?;
         let deadline = Instant::now() + self.finish_timeout;
         self.wait_for_delivery(progress, deadline)
     }
@@ -450,11 +596,24 @@ impl Multiplayer {
         progress: Progress,
         deadline: Instant,
     ) -> Result<(), MultiplayerError> {
+        self.wait_for_notice_delivery(
+            OutgoingMessage::Scalar(Outgoing {
+                progress,
+                final_prefix: true,
+            }),
+            deadline,
+        )
+    }
+    fn wait_for_notice_delivery(
+        &mut self,
+        message: OutgoingMessage,
+        deadline: Instant,
+    ) -> Result<(), MultiplayerError> {
         let mut admitted = self.local_final;
         loop {
             let mut failure = None;
-            for event in self.poll() {
-                if let MultiplayerEvent::Disconnected(error) = event {
+            for event in self.poll_notices() {
+                if let MultiplayerNotice::Session(MultiplayerEvent::Disconnected(error)) = event {
                     failure = Some(error);
                 }
             }
@@ -476,7 +635,7 @@ impl Multiplayer {
                 return Err(MultiplayerError::IoStalled);
             }
             if !admitted {
-                match self.try_finish(progress) {
+                match self.admit(message.try_clone()?) {
                     Ok(()) => admitted = true,
                     Err(MultiplayerError::QueueFull) => {}
                     Err(error) => return Err(error),
@@ -500,41 +659,83 @@ impl Multiplayer {
             MultiplayerEvent::Disconnected(_) => {}
         }
     }
-    /// Drain a bounded batch; terminal notification follows all retained remote data.
-    pub fn poll(&mut self) -> Vec<MultiplayerEvent> {
+    fn retain_notice(&mut self, notice: &MultiplayerNotice) -> Result<(), MultiplayerError> {
+        match notice {
+            MultiplayerNotice::Session(event) => self.retain_event(event),
+            MultiplayerNotice::Group(event) => {
+                let group = self.group.as_mut().ok_or_else(|| {
+                    MultiplayerError::Protocol("group observation on a scalar owner".into())
+                })?;
+                match event {
+                    GroupEvent::Roster(players) => {
+                        group.remote_roster = Some(copy_group_values(players)?)
+                    }
+                    GroupEvent::Progress(prefix) => {
+                        let remote = copy_group_prefix(prefix)?;
+                        let final_prefix = if prefix.final_prefix {
+                            Some(copy_group_prefix(prefix)?)
+                        } else {
+                            None
+                        };
+                        group.remote = Some(remote);
+                        if let Some(prefix) = final_prefix {
+                            group.remote_final = Some(prefix);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    fn drain_notices(
+        &mut self,
+        events: &mut Vec<MultiplayerNotice>,
+    ) -> Result<(), MultiplayerError> {
         // Worker may keep producing, so retain an explicit per-call bound.
-        let mut events = Vec::new();
         for _ in 0..1024 {
             match self.incoming.try_recv() {
                 Ok(event) => {
-                    self.retain_event(&event);
+                    let retained = self.retain_notice(&event);
                     events.push(event);
+                    if let Err(error) = retained {
+                        self.signal_stop();
+                        return Err(error);
+                    }
                 }
                 Err(_) => break,
             }
         }
-        let terminal = match self.terminal.try_recv() {
+        Ok(())
+    }
+    /// Drain a bounded batch; terminal notification follows all retained remote data.
+    pub fn poll(&mut self) -> Vec<MultiplayerEvent> {
+        self.poll_notices()
+            .into_iter()
+            .filter_map(|notice| match notice {
+                MultiplayerNotice::Session(event) => Some(event),
+                MultiplayerNotice::Group(_) => None,
+            })
+            .collect()
+    }
+    fn poll_notices(&mut self) -> Vec<MultiplayerNotice> {
+        let mut events = Vec::new();
+        let failure = self.drain_notices(&mut events).err();
+        let terminal = failure.or_else(|| match self.terminal.try_recv() {
             Ok(reason) => Some(reason),
             Err(TryRecvError::Disconnected) if !self.closed => {
                 Some(MultiplayerError::WorkerPanicked)
             }
             Err(_) => None,
-        };
+        });
         if let Some(reason) = terminal {
             // The worker has exited before publishing its terminal slot. Drain its
             // remaining bounded queue so no progress is emitted after disconnect.
-            for _ in 0..1024 {
-                match self.incoming.try_recv() {
-                    Ok(event) => {
-                        self.retain_event(&event);
-                        events.push(event);
-                    }
-                    Err(_) => break,
-                }
-            }
+            let reason = self.drain_notices(&mut events).err().unwrap_or(reason);
             self.closed = true;
             self.connected = false;
-            events.push(MultiplayerEvent::Disconnected(reason));
+            events.push(MultiplayerNotice::Session(MultiplayerEvent::Disconnected(
+                reason,
+            )));
         }
         events
     }
@@ -580,6 +781,125 @@ impl Drop for Multiplayer {
     }
 }
 
+/// Whole-cohort facade over the same worker and application acknowledgement lifecycle.
+/// Rows are unauthenticated peer reports, never an aggregate or a scalar alias.
+pub struct GroupMultiplayer {
+    owner: Multiplayer,
+}
+impl GroupMultiplayer {
+    pub fn host(
+        address: SocketAddr,
+        identity: Vec<u8>,
+        players: Vec<PlayerId>,
+        options: MultiplayerOptions,
+    ) -> Result<Self, MultiplayerError> {
+        Ok(Self {
+            owner: Multiplayer::host_mode(address, identity, Some(players), options)?,
+        })
+    }
+    pub fn join(
+        address: SocketAddr,
+        identity: Vec<u8>,
+        players: Vec<PlayerId>,
+        options: MultiplayerOptions,
+    ) -> Result<Self, MultiplayerError> {
+        Ok(Self {
+            owner: Multiplayer::join_mode(address, identity, Some(players), options)?,
+        })
+    }
+    pub fn webtransport(
+        connection: WebTransportOptions,
+        identity: Vec<u8>,
+        players: Vec<PlayerId>,
+        options: MultiplayerOptions,
+    ) -> Result<Self, MultiplayerError> {
+        Ok(Self {
+            owner: Multiplayer::webtransport_mode(connection, identity, Some(players), options)?,
+        })
+    }
+    pub fn try_ready(&mut self) -> Result<(), MultiplayerError> {
+        self.owner.try_ready()
+    }
+    pub fn is_ready(&self) -> bool {
+        self.owner.is_ready()
+    }
+    pub fn clock_now_ns(&self) -> Result<i64, MultiplayerError> {
+        self.owner.clock_now_ns()
+    }
+    pub fn clock_estimate(&self) -> Option<OffsetEstimate> {
+        self.owner.clock_estimate()
+    }
+    pub fn start_schedule(&self) -> Option<StartSchedule> {
+        self.owner.start_schedule()
+    }
+    pub fn start_policy(&self) -> StartPolicy {
+        self.owner.start_policy()
+    }
+    pub fn is_connected(&self) -> bool {
+        self.owner.is_connected()
+    }
+    pub fn request_stop(&mut self) {
+        self.owner.request_stop();
+    }
+    pub fn stop(&mut self) -> Result<(), MultiplayerError> {
+        self.owner.stop()
+    }
+    pub fn local_roster(&self) -> &[PlayerId] {
+        self.owner
+            .group
+            .as_ref()
+            .map(|group| group.local_roster.as_slice())
+            .unwrap_or(&[])
+    }
+    pub fn remote_roster(&self) -> Option<&[PlayerId]> {
+        self.owner
+            .group
+            .as_ref()
+            .and_then(|group| group.remote_roster.as_deref())
+    }
+    pub fn remote_progress(&self) -> Option<&GroupPrefix> {
+        self.owner
+            .group
+            .as_ref()
+            .and_then(|group| group.remote.as_ref())
+    }
+    pub fn remote_final_progress(&self) -> Option<&GroupPrefix> {
+        self.owner
+            .group
+            .as_ref()
+            .and_then(|group| group.remote_final.as_ref())
+    }
+    pub fn try_publish(&mut self, members: Vec<MemberProgress>) -> Result<(), MultiplayerError> {
+        self.owner.admit(OutgoingMessage::Group {
+            members,
+            final_prefix: false,
+        })
+    }
+    pub fn try_finish(&mut self, members: Vec<MemberProgress>) -> Result<(), MultiplayerError> {
+        self.owner.admit(OutgoingMessage::Group {
+            members,
+            final_prefix: true,
+        })
+    }
+    /// Cleanup-only delivery of this immutable whole prefix, confirmed by the
+    /// real final acknowledgement. Queue capacity refusal alone is retryable.
+    pub fn finish_delivery(
+        &mut self,
+        members: Vec<MemberProgress>,
+    ) -> Result<(), MultiplayerError> {
+        let message = OutgoingMessage::Group {
+            members,
+            final_prefix: true,
+        };
+        self.owner.validate_publication(&message)?;
+        let deadline = Instant::now() + self.owner.finish_timeout;
+        self.owner.wait_for_notice_delivery(message, deadline)
+    }
+    pub fn poll(&mut self) -> Vec<MultiplayerNotice> {
+        self.owner.poll_notices()
+    }
+}
+
 fn validate_identity(identity: &[u8]) -> Result<(), MultiplayerError> {
     if identity.is_empty() || identity.len() > MAX_IDENTITY {
         return Err(MultiplayerError::InvalidOptions);
@@ -612,9 +932,13 @@ fn elapsed_ns(epoch: Instant) -> Result<i64, MultiplayerError> {
 
 fn forward_session_events(
     session: &mut Session,
-    incoming: &SyncSender<MultiplayerEvent>,
+    incoming: &SyncSender<MultiplayerNotice>,
 ) -> Result<(), MultiplayerError> {
-    while let Some(event) = session.poll_event() {
+    while let Some(event) = session
+        .poll_group_event()
+        .map(MultiplayerNotice::Group)
+        .or_else(|| session.poll_event().map(MultiplayerNotice::Session))
+    {
         incoming.try_send(event).map_err(queue_error)?;
     }
     Ok(())
@@ -622,20 +946,14 @@ fn forward_session_events(
 
 fn run(
     endpoint: Endpoint,
-    identity: Vec<u8>,
+    mut session: Session,
     options: MultiplayerOptions,
     stop: &AtomicBool,
     ready_requested: &AtomicBool,
     clock_epoch: Instant,
-    outgoing: Receiver<Outgoing>,
-    incoming: SyncSender<MultiplayerEvent>,
+    outgoing: Receiver<OutgoingMessage>,
+    incoming: SyncSender<MultiplayerNotice>,
 ) -> Result<(), MultiplayerError> {
-    let mut session = Session::new(
-        identity,
-        endpoint.role(),
-        options.start_policy,
-        options.preroll_ns,
-    )?;
     let deadline = Instant::now() + options.setup_timeout;
     let mut stream = match endpoint.connect(stop, deadline) {
         Ok(stream) => stream,
@@ -729,11 +1047,7 @@ fn run(
                 let next = match session.poll_write(elapsed_ns(clock_epoch)?)? {
                     WriteStep::Frame(frame) => Some(frame),
                     WriteStep::ApplicationSlot => match outgoing.try_recv() {
-                        Ok(message) => Some(session.send_progress(
-                            message.progress,
-                            message.final_prefix,
-                            elapsed_ns(clock_epoch)?,
-                        )?),
+                        Ok(message) => Some(message.send(&mut session, elapsed_ns(clock_epoch)?)?),
                         Err(TryRecvError::Empty) => None,
                         Err(TryRecvError::Disconnected) => return Ok(()),
                     },
@@ -763,6 +1077,10 @@ fn queue_error<T>(error: TrySendError<T>) -> MultiplayerError {
         TrySendError::Disconnected(_) => MultiplayerError::Closed,
     }
 }
+
+#[cfg(test)]
+#[path = "multiplayer_native_group_fixtures.rs"]
+mod native_group_fixtures;
 
 #[cfg(test)]
 mod clock_probe_fixtures {
@@ -1297,8 +1615,13 @@ mod final_prefix_fixtures {
         assert!(owner.ready_requested.load(Ordering::Acquire));
         assert!(owner.try_ready().is_err());
         assert!(!owner.is_ready());
-        assert_eq!(outgoing.try_recv().unwrap().progress, progress(1));
-        incoming.try_send(MultiplayerEvent::Ready).unwrap();
+        assert_eq!(
+            scalar_outgoing(outgoing.try_recv().unwrap()).progress,
+            progress(1)
+        );
+        incoming
+            .try_send(MultiplayerNotice::Session(MultiplayerEvent::Ready))
+            .unwrap();
         assert_eq!(owner.poll(), vec![MultiplayerEvent::Ready]);
         assert!(owner.is_ready());
         assert!(owner.try_publish(progress(2)).is_err());
@@ -1308,7 +1631,9 @@ mod final_prefix_fixtures {
             .unwrap();
         let estimate = filter.estimate().unwrap();
         incoming
-            .try_send(MultiplayerEvent::ClockEstimated(estimate))
+            .try_send(MultiplayerNotice::Session(
+                MultiplayerEvent::ClockEstimated(estimate),
+            ))
             .unwrap();
         assert_eq!(
             owner.poll(),
@@ -1322,7 +1647,9 @@ mod final_prefix_fixtures {
             uncertainty_ns: 20,
         };
         incoming
-            .try_send(MultiplayerEvent::StartScheduled(schedule))
+            .try_send(MultiplayerNotice::Session(
+                MultiplayerEvent::StartScheduled(schedule),
+            ))
             .unwrap();
         assert_eq!(
             owner.poll(),
@@ -1483,10 +1810,16 @@ mod final_prefix_fixtures {
         assert!(exhausted.outgoing(message(1, true)).is_err());
         assert!(exhausted.local_final.is_none() && exhausted.local.is_none());
     }
+    fn scalar_outgoing(message: OutgoingMessage) -> Outgoing {
+        match message {
+            OutgoingMessage::Scalar(outgoing) => outgoing,
+            OutgoingMessage::Group { .. } => panic!("scalar fixture received group data"),
+        }
+    }
     fn owner() -> (
         Multiplayer,
-        Receiver<Outgoing>,
-        SyncSender<MultiplayerEvent>,
+        Receiver<OutgoingMessage>,
+        SyncSender<MultiplayerNotice>,
         SyncSender<MultiplayerError>,
     ) {
         let (outgoing, out_rx) = mpsc::sync_channel(1);
@@ -1517,6 +1850,7 @@ mod final_prefix_fixtures {
                 remote_final: None,
                 final_acknowledged: false,
                 finish_timeout: Duration::ZERO,
+                group: None,
             },
             out_rx,
             in_tx,
@@ -1533,9 +1867,9 @@ mod final_prefix_fixtures {
         );
         assert!(!owner.local_final && !owner.closed);
         assert_eq!(owner.local, Some(progress(1)));
-        assert!(!outgoing.try_recv().unwrap().final_prefix);
+        assert!(!scalar_outgoing(outgoing.try_recv().unwrap()).final_prefix);
         owner.try_finish(progress(2)).unwrap();
-        assert!(outgoing.try_recv().unwrap().final_prefix);
+        assert!(scalar_outgoing(outgoing.try_recv().unwrap()).final_prefix);
         assert!(owner.try_publish(progress(3)).is_err());
         assert!(owner.try_finish(progress(3)).is_err());
         owner.request_stop();
@@ -1557,12 +1891,16 @@ mod final_prefix_fixtures {
             let (mut owner, outgoing, incoming, terminal) = owner();
             owner.finish_timeout = Duration::from_secs(1);
             owner.try_finish(progress(1)).unwrap();
-            assert!(outgoing.try_recv().unwrap().final_prefix);
+            assert!(scalar_outgoing(outgoing.try_recv().unwrap()).final_prefix);
             incoming
-                .try_send(MultiplayerEvent::FinalProgress(progress(2)))
+                .try_send(MultiplayerNotice::Session(MultiplayerEvent::FinalProgress(
+                    progress(2),
+                )))
                 .unwrap();
             incoming
-                .try_send(MultiplayerEvent::FinalAcknowledged)
+                .try_send(MultiplayerNotice::Session(
+                    MultiplayerEvent::FinalAcknowledged,
+                ))
                 .unwrap();
             terminal.try_send(reason).unwrap();
             let deadline = Instant::now() + owner.finish_timeout;
@@ -1580,7 +1918,9 @@ mod final_prefix_fixtures {
         );
         assert!(!owner.local_final);
         incoming
-            .try_send(MultiplayerEvent::FinalProgress(progress(2)))
+            .try_send(MultiplayerNotice::Session(MultiplayerEvent::FinalProgress(
+                progress(2),
+            )))
             .unwrap();
         assert_eq!(
             owner.poll(),
