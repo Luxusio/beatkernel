@@ -193,6 +193,23 @@ actual processor and context cleanup. Stale handoffs and callbacks cannot revive
 a newer owner. Source fixtures, browser/audio execution and measured performance
 remain deferred.
 
+## Direct report transport component
+
+`AudioCommandClient.poll()` extends the direct endpoint to read genuine Worklet
+reports. It shares the command sequence and one pending request, and rejects
+operation overlap without queuing. Poll success carries zero command admissions
+and the actual 56-word report; a command ACK cannot settle it. The envelope
+requires a fixed, ordinary 224-byte ArrayBuffer with zero offset, a coherent
+availability marker and reserved header word. Detailed report semantics remain
+with the common Rust output decoder. Unavailable reports do not fabricate
+render progress. The host and direct poll share one real report getter path
+outside the audio callback.
+
+The transport extension is authored before its next dependent caller migration.
+The page currently still polls through Window; commands already bypass Window.
+Original Window output-presentation observations and completion/cleanup evidence
+remain required. Source fixtures and browser/audio/performance checks are deferred.
+
 ## AudioWorklet component
 
 The separate `browser-audio` feature exports the existing Rust Mixer through a

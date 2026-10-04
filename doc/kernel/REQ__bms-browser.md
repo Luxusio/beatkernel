@@ -175,6 +175,41 @@ callbacks after cancellation/free and one-time page endpoint transfer. Browser,
 physical audio, generated bindings, input latency and performance remain
 unverified until their deferred execution and QA are performed.
 
+## Direct report transport component
+
+Extend the transferred endpoint with AudioCommandClient.poll() before migrating
+its gameplay caller. Commands and poll share one monotonically ordered transport
+sequence and at most one pending operation. Overlap refuses locally; no hidden
+queue, polling timer or command retry is introduced into this transport client.
+Successful poll returns the actual processor report, independently of command
+admission; rejected poll must report zero admitted commands. A poll response
+cannot settle a command request, or vice versa.
+
+The Worklet reuses one control-handler report builder for both host and direct
+poll. It reads the actual BrowserAudio report_word fields, preserving all 56 u32
+words and their availability marker, with no simulated progress or timer-derived
+cursor. Report allocation stays outside process(). The direct endpoint accepts
+only commands and poll and preserves generation, ordering, phase and terminal
+fences. Host polling remains explicitly available until caller migration.
+
+The client validates the successful report shape: Uint32Array length 56, ordinary
+fixed ArrayBuffer backing of exactly 224 bytes with zero offset, availability
+word 0 or 1, reserved header word zero, and boolean available matching that
+marker. Detached, shared, resizable, truncated, misoffset or contradictory
+reports permanently fence the client rather than becoming output evidence.
+No report is actual rendering evidence before available becomes true. Full
+report semantic validation still belongs to the existing Rust output decoder
+and gameplay owner; this shape guard does not replace it. Non-poll and rejected
+ACKs cannot carry a report. All poll error, timeout, close and stale-message
+behavior obeys the same bounded owner lifecycle as command operations.
+
+This bottom-up transport change does not itself remove Window report polling.
+The next dependent caller integration must consume real reports directly in
+Worker, preserve original Window output-presentation observations and input
+clock provenance, serialize report operations with actual command submissions,
+and retain completion/cleanup barriers. Browser execution, actual audio and
+input/render/main-thread performance remain unverified.
+
 ## Finite live section controls
 
 Live start and optional end use original-song decimal seconds with at most nine
