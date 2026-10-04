@@ -1,5 +1,32 @@
 # Native Windows BMS sample composition
 
+## Shared native multi-host room network owner
+
+Native multi-host room networking must reuse `RoomPlayClient` and `RoomPlayIo`
+on one dedicated network thread, independent of Windows/macOS/Linux adapters.
+Transport connection, reads/writes and final stream cleanup must not execute on
+audio, input acquisition or UI threads. A bounded command interface must expose
+actual room admission/seal/ready/leave, committed schedule and accepted peer
+prefixes with complete participant/player identities. Busy local commands refuse
+without stopping a healthy connection. Preparation does not authorize gameplay:
+only the common committed schedule may enter native output-start projection.
+
+Use one monotonic clock origin established before asynchronous connection for
+stream observations and native host brackets. Preserve real full-write and peer
+ACK evidence. Natural finalization requires actual final publication, common
+local completion, explicit coordinated drain and genuine DrainComplete before
+successful stream finish; cancellation and failure cannot fabricate final or
+drain receipts. Join ownership before replacement, including failed acquisition,
+and retain cleanup failure independently of protocol failure. Remote scores remain
+display data and cannot enter local judgment. Membership, command queues and
+progress storage retain existing bounds; do not clone full room state every tick.
+
+This source phase provides the shared network owner and actual WebTransport
+connector. Native app lobby, cohort activation, portable score HUD and natural
+finalization callers still require integration before native multi-host play is
+available. Runtime, generated bindings, live TLS/device and performance acceptance
+remain deferred; compilation alone does not prove them.
+
 ## Local Windows groups
 
 Repeated `--local-player ID:INTERFACE_PATH` selects 2..64 distinct keyboards and
