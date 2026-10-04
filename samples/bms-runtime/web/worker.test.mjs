@@ -201,6 +201,7 @@ async function workerHarness(options = {}) {
   const opponentHelpers = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
   const physicalHelpers = new SourceTextModule(await readFile(new URL("./physical-input.mjs", import.meta.url), "utf8"), { context });
   const hidProfileHelpers = new SourceTextModule(await readFile(new URL("./hid-profile.mjs", import.meta.url), "utf8"), { context });
+  const gamepadProfileHelpers = new SourceTextModule(await readFile(new URL("./gamepad-profile.mjs", import.meta.url), "utf8"), { context });
   const commandClient = new SourceTextModule(await readFile(new URL("./audio-command-client.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
@@ -211,6 +212,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./saved-opponents.mjs") return opponentHelpers;
     if (specifier === "./physical-input.mjs") return physicalHelpers;
     if (specifier === "./hid-profile.mjs") return hidProfileHelpers;
+    if (specifier === "./gamepad-profile.mjs") return gamepadProfileHelpers;
     if (specifier === "./audio-command-client.mjs") return commandClient;
     throw new Error(`Unexpected Worker import: ${specifier}`);
   });

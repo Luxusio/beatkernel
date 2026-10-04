@@ -446,6 +446,7 @@ async function workerHarness(options = {}) {
   const opponentHelper = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
   const physicalHelper = new SourceTextModule(await readFile(new URL("./physical-input.mjs", import.meta.url), "utf8"), { context });
   const hidProfileHelper = new SourceTextModule(await readFile(new URL("./hid-profile.mjs", import.meta.url), "utf8"), { context });
+  const gamepadProfileHelper = new SourceTextModule(await readFile(new URL("./gamepad-profile.mjs", import.meta.url), "utf8"), { context });
   const commandClient = new SourceTextModule(await readFile(new URL("./audio-command-client.mjs", import.meta.url), "utf8"), { context });
   const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
   await worker.link(specifier => {
@@ -456,6 +457,7 @@ async function workerHarness(options = {}) {
     if (specifier === "./saved-opponents.mjs") return opponentHelper;
     if (specifier === "./physical-input.mjs") return physicalHelper;
     if (specifier === "./hid-profile.mjs") return hidProfileHelper;
+    if (specifier === "./gamepad-profile.mjs") return gamepadProfileHelper;
     if (specifier === "./audio-command-client.mjs") return commandClient;
     throw new Error(`Unexpected import: ${specifier}`);
   });
@@ -1046,6 +1048,193 @@ test("comparison errors hide the HUD once and remain separate from actual local 
   assert.equal(failed.replayError, null); assertReleased(h);
   await h.send(step({ tickId: 2 }));
   assert.equal(game.savedReads, 1); assert.equal(h.of("play-error").length, 1);
+});
+
+const GAMEPAD_SOURCE = 0x8877665544332211n;
+const GAMEPAD_HOST = 1000000000n;
+function gamepadSetup(rows = [[0x11, 0, 0], [0x12, 0, 1]], buttons = 2, axes = 1) {
+  return { devices: [{ source: GAMEPAD_SOURCE, buttons, axes }],
+    bindingWords: new Uint32Array(rows.flatMap(([lane, type, index]) =>
+      [lane, 0x44332211, 0x88776655, type, index])) };
+}
+function gamepadEvent(fields = {}) {
+  return { kind: "gamepad", source: GAMEPAD_SOURCE, index: 7, id: "genuine browser descriptor", mapping: "standard",
+    timestampMs: 1000, hostNs: GAMEPAD_HOST, sequence: 1n, axes: [0.25],
+    buttons: [{ value: 0.5, pressed: true, touched: true }, { value: 0, pressed: false, touched: false }], ...fields };
+}
+async function gamepadActive(options = {}, fields = {}) {
+  const h = await started({ ...options, startRequest: startRequest({ inputMode: "physical", gamepadSetup: gamepadSetup(), ...fields }) });
+  assert.equal((await h.rpc("play-activate", { hostNs: GAMEPAD_HOST, startFrame: START })).result, null);
+  return h;
+}
+
+test("Worker snapshots exact Gamepad native bindings and sends mixed physical fanout through the genuine canonical blob route", async () => {
+  const original = gamepadSetup([[0x11, 0, 0], [0x12, 0, 1], [0x11, 1, 0], [0x11, 2, 0], [0x11, 3, 0]]);
+  const h = await catalogWorker();
+  h.post(startRequest({ inputMode: "physical-contact", gamepadSetup: original, hidSetup: hidSetup([3n]), recordReplay: true }));
+  original.devices[0].source = 3n; original.devices[0].buttons = 0; original.bindingWords.fill(0);
+  await flushJobs();
+  const prepared = h.of("play-reply").at(-1).result;
+  assert.equal(prepared.kind, "prepared");
+  assert.equal(prepared.inputMode, "physical-contact");
+  assert.deepEqual(prepared.gamepadSources, [GAMEPAD_SOURCE]);
+  assert.deepEqual(prepared.hidSources, [3n]);
+  const actualWords = h.contactConstructions[0].args[5];
+  assert.deepEqual(Array.from(actualWords.slice(-35)), [
+    0x11, 1, 0x44332211, 0x88776655, 1, 0x57475044, 0,
+    0x12, 1, 0x44332211, 0x88776655, 1, 0x57475044, 1,
+    0x11, 1, 0x44332211, 0x88776655, 1, 0x57475044, 0x10000,
+    0x11, 1, 0x44332211, 0x88776655, 1, 0x57475044, 0x20000,
+    0x11, 1, 0x44332211, 0x88776655, 1, 0x57475044, 0x30000,
+  ]);
+  const game = h.games[0];
+  assert.ok(game.calls.findIndex(call => call[0] === "hid-setup") < game.calls.findIndex(call => call[0] === "capture"));
+  assert.equal(game.calls.filter(call => call[0] === "sample").length, 0);
+  await h.send({ kind: "play-activate", playId: 7, rpcId: 2, hostNs: GAMEPAD_HOST, startFrame: START });
+  const sequence = 0x0102030405060708n;
+  const key = { hostNs: GAMEPAD_HOST, key: 2, down: true, sequence };
+  const acquired = gamepadEvent({ sequence: sequence + 1n });
+  const touch = touchEvent({ hostNs: GAMEPAD_HOST + 1n, sequence: sequence + 2n });
+  const hid = hidEvent({ source: 3n, hostNs: GAMEPAD_HOST + 2n, sequence: sequence + 3n });
+  const audioNs = 9007199254741222n;
+  await h.send(step({ events: [key, acquired, touch, hid], watermark: GAMEPAD_HOST + 3n, audioNs }));
+  const calls = inputCalls(game);
+  assert.deepEqual(calls.map(call => call[0]), ["blob", "blob", "blob", "blob", "blob", "touch", "hid", "advance"]);
+  assert.deepEqual(Array.from(calls[0][1]), Array.from(encodeKeyboardEvent(key)));
+  const gamepadPackets = calls.slice(1, 5).map(call => call[1]);
+  assert.deepEqual(gamepadPackets.map(bytes => new DataView(bytes.buffer).getUint32(64, true)), [0, 0x10000, 0x20000, 0x30000]);
+  assert.deepEqual(gamepadPackets.map(bytes => bytes[6]), [0, 1, 1, 0]);
+  assert.deepEqual(gamepadPackets.map(bytes => bytes.length), [69, 73, 73, 69]);
+  for (const bytes of gamepadPackets) {
+    const packet = new DataView(bytes.buffer);
+    assert.deepEqual(Array.from(bytes.slice(0, 6)), [0x42, 0x4b, 0x50, 0x49, 1, 0]);
+    assert.equal(packet.getBigUint64(7, true), GAMEPAD_SOURCE);
+    assert.equal(packet.getBigInt64(15, true), GAMEPAD_HOST);
+    assert.equal(packet.getUint32(23, true), 0x57494e);
+    assert.equal(packet.getBigUint64(27, true), sequence + 1n);
+    assert.equal(packet.getUint32(36, true), 0x57475044);
+    assert.equal(packet.getUint32(41, true), packet.getUint32(64, true));
+    assert.equal(packet.getBigInt64(50, true), GAMEPAD_HOST);
+    assert.equal(bytes[58], 0); assert.equal(bytes[59], 1);
+    assert.equal(packet.getUint32(60, true), 0x57475044);
+  }
+  assert.equal(new DataView(gamepadPackets[1].buffer).getFloat32(68, true), 0.25);
+  assert.equal(new DataView(gamepadPackets[2].buffer).getFloat32(68, true), 0.5);
+  assert.deepEqual(Array.from(calls[5][1]), Array.from(encodeTouchEvent(touch)));
+  assert.deepEqual(Array.from(calls[6][1]), Array.from(encodeRawHidEvent(hid)));
+  assert.ok(calls.every(call => call.at(-1) === audioNs));
+  assert.equal(h.of("play-step-done").at(-1).hits, SCORE.hits, "the routing fixture does not manufacture judge results");
+  await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+
+  const only = await gamepadActive({}, { keyPairs: new Uint32Array() });
+  assert.deepEqual(only.of("play-reply")[0].result.gamepadSources, [GAMEPAD_SOURCE]);
+  assert.equal(only.physicalConstructions[0].args[5].length, 14, "pressed Gamepad bindings alone cover the actual prepared lanes");
+  await only.send(step({ events: [gamepadEvent()], watermark: GAMEPAD_HOST }));
+  assert.deepEqual(inputCalls(only.games[0]).map(call => call[0]), ["blob", "advance"]);
+  await only.send({ kind: "play-stop", playId: 7 }); assertReleased(only);
+  const ordinary = await started({ startRequest: startRequest({ inputMode: "physical" }) });
+  assert.equal(Object.hasOwn(ordinary.of("play-reply")[0].result, "gamepadSources"), false);
+  await ordinary.send({ kind: "play-stop", playId: 7 });
+});
+
+test("Worker refuses invalid Gamepad ownership or batches atomically and keeps pre-origin, stale-noop and physical fanout barriers", async () => {
+  for (const request of [startRequest({ gamepadSetup: gamepadSetup() }),
+    replayRequest(replayFile().file, { gamepadSetup: gamepadSetup() }),
+    startRequest({ inputMode: "physical", gamepadSetup: gamepadSetup(), hidSetup: hidSetup([GAMEPAD_SOURCE]) })]) {
+    const h = await catalogWorker();
+    await h.send(request);
+    assert.equal(h.games.length, 0); assert.equal(h.replays.length, 0);
+    assert.equal(h.of("play-error").length, 1);
+    assert.equal(h.of("play-reply").some(reply => reply.result?.kind === "prepared"), false);
+  }
+  const uncovered = await catalogWorker();
+  await uncovered.send(startRequest({ inputMode: "physical", keyPairs: new Uint32Array(),
+    gamepadSetup: gamepadSetup([[0x11, 0, 0], [0x12, 1, 0]]) }));
+  assert.equal(uncovered.games.length, 0);
+  assert.equal(uncovered.preparedOwners.at(-1).frees, 1, "axis binding cannot masquerade as ordinary press-lane coverage");
+  const fullRows = Array.from({ length: 128 }, (_, index) => [0x11, 0, index])
+    .concat(Array.from({ length: 128 }, (_, index) => [0x12, 3, index]));
+  const combined = await catalogWorker();
+  await combined.send(startRequest({ inputMode: "physical", gamepadSetup: gamepadSetup(fullRows, 128, 0) }));
+  assert.equal(combined.games.length, 0, "256 valid profile rows plus keyboard rows exceed the common constructor cap");
+  assert.equal(combined.of("play-error").length, 1);
+  for (const options of [{ missingInputBlob: true }, { missingPhysicalConstructor: true }]) {
+    const h = await catalogWorker(options);
+    await h.send(startRequest({ inputMode: "physical", gamepadSetup: gamepadSetup() }));
+    assert.equal(h.games.length, 0); assert.equal(h.preparedOwners.at(-1).frees, 1);
+    assert.equal(h.of("play-error").length, 1);
+  }
+  for (const bad of [gamepadEvent({ source: 4n }), gamepadEvent({ axes: [NaN] }),
+    gamepadEvent({ hostNs: GAMEPAD_HOST + 1n }), gamepadEvent({ sequence: 0n })]) {
+    const h = await gamepadActive();
+    await h.send(step({ events: [{ hostNs: GAMEPAD_HOST, key: 2, down: true, sequence: 1n }, bad], watermark: GAMEPAD_HOST + 1n }));
+    assert.equal(inputCalls(h.games[0]).length, 0);
+    assert.equal(h.of("play-step-done").length, 0); assertReleased(h);
+  }
+  const atomic = await gamepadActive();
+  const rejected = step({ events: [gamepadEvent(), { hostNs: GAMEPAD_HOST, key: 65535, down: true, sequence: 2n }], watermark: GAMEPAD_HOST });
+  await atomic.send(rejected);
+  assert.equal(inputCalls(atomic.games[0]).length, 0);
+  const failureCount = atomic.of("play-error").length;
+  await atomic.send(rejected); assert.equal(atomic.of("play-error").length, failureCount);
+  await atomic.send(startRequest({ playId: 8, inputMode: "physical", gamepadSetup: gamepadSetup() }));
+  await atomic.send({ kind: "play-activate", playId: 8, rpcId: 2, hostNs: GAMEPAD_HOST, startFrame: START });
+  await atomic.send(rejected);
+  assert.equal(inputCalls(atomic.games[1]).length, 0, "old owner batches cannot reach a newly prepared adapter");
+  await atomic.send(step({ playId: 8, events: [gamepadEvent()], watermark: GAMEPAD_HOST }));
+  assert.equal(inputCalls(atomic.games[1]).filter(call => call[0] === "blob").length, 1);
+  await atomic.send({ kind: "play-stop", playId: 8 });
+
+  const before = await gamepadActive();
+  const held = gamepadEvent({ timestampMs: 999, hostNs: 999000000n });
+  await before.send(step({ events: [held, { ...held, sequence: 2n }], watermark: GAMEPAD_HOST }));
+  assert.deepEqual(inputCalls(before.games[0]).map(call => call[0]), ["advance"]);
+  assert.equal(before.of("play-step-done").at(-1).preOriginInputs, 2, "a pre-origin sample counts once even when it emits no transition");
+  await before.send(step({ tickId: 2, events: [gamepadEvent({ sequence: 3n })], watermark: GAMEPAD_HOST }));
+  assert.equal(inputCalls(before.games[0]).filter(call => call[0] === "blob").length, 0,
+    "a held pre-origin level does not fabricate a new Down at activation");
+  await before.send(step({ tickId: 3, events: [gamepadEvent({ sequence: 4n, timestampMs: 1001, hostNs: 1001000000n,
+    buttons: [{ value: 0, pressed: false, touched: false }, { value: 0, pressed: false, touched: false }] })], watermark: 1001000000n }));
+  const released = inputCalls(before.games[0]).filter(call => call[0] === "blob");
+  assert.equal(released.length, 1); assert.equal(released[0][1][68], 1);
+  assert.equal(new DataView(released[0][1].buffer).getBigInt64(15, true), 1001000000n);
+  await before.send({ kind: "play-stop", playId: 7 });
+
+  const unchanged = await gamepadActive();
+  const idle = gamepadEvent({ buttons: [{ value: 0, pressed: false, touched: false }, { value: 0, pressed: false, touched: false }] });
+  await unchanged.send(step({ events: [idle], watermark: 1100000000n }));
+  await unchanged.send(step({ tickId: 2, events: [{ ...idle, sequence: 2n }], watermark: 1200000000n }));
+  assert.equal(unchanged.of("play-step-done").length, 2);
+  assert.deepEqual(inputCalls(unchanged.games[0]).map(call => call[0]), ["advance", "advance"]);
+  await unchanged.send(step({ tickId: 3, events: [gamepadEvent({ sequence: 3n })], watermark: 1200000000n }));
+  assert.equal(inputCalls(unchanged.games[0]).length, 2, "a newly changed old sample is refused rather than moved to the latest watermark");
+  assertReleased(unchanged);
+
+  const rows = Array.from({ length: 128 }, (_, index) => [0x11, 0, index]);
+  const wide = () => gamepadSetup(rows, 128, 0);
+  const all = pressed => Array.from({ length: 128 }, () => ({ value: pressed ? 1 : 0, pressed, touched: false }));
+  const down = gamepadEvent({ axes: [], buttons: all(true), sequence: 2n });
+  const up = { ...down, buttons: all(false), sequence: 3n };
+  const exact = await gamepadActive({}, { gamepadSetup: wide() });
+  await exact.send(step({ events: [down, up], watermark: GAMEPAD_HOST }));
+  assert.equal(inputCalls(exact.games[0]).filter(call => call[0] === "blob").length, 256);
+  assert.equal(exact.of("play-step-done").length, 1);
+  await exact.send({ kind: "play-stop", playId: 7 });
+  const excess = await gamepadActive({}, { gamepadSetup: wide() });
+  await excess.send(step({ events: [{ hostNs: GAMEPAD_HOST, key: 2, down: true, sequence: 1n }, down, up], watermark: GAMEPAD_HOST }));
+  assert.equal(inputCalls(excess.games[0]).length, 0);
+  assert.equal(excess.of("play-step-done").length, 0); assertReleased(excess);
+
+  let accepted = 0;
+  const partial = await gamepadActive({ inputBlob() {
+    if (++accepted === 2) throw new Error("actual canonical prefix failure");
+  } }, { gamepadSetup: gamepadSetup([[0x11, 0, 0], [0x12, 0, 1], [0x11, 1, 0]]) });
+  const pending = step({ events: [gamepadEvent()], watermark: GAMEPAD_HOST });
+  await partial.send(pending);
+  assert.equal(accepted, 2); assert.equal(partial.of("play-step-done").length, 0);
+  assert.match(partial.of("play-error").at(-1).message, /actual canonical prefix failure/);
+  assertReleased(partial);
+  await partial.send(pending); assert.equal(accepted, 2, "committed binding failure cannot retry the physical fanout");
 });
 
 const HID_SOURCE = 18446744073709551615n;
