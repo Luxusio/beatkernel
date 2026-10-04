@@ -659,6 +659,8 @@ function openRoom(state, request) {
   if (!roomAudioReady(state) || state.room !== null) {
     throw new Error("Room admission requires one pristine local game with completed audio preparation and no existing network.");
   }
+  const windowOriginNs = request.windowOriginNs;
+  if (!hostTime(windowOriginNs)) throw new Error("Room start requires the actual Window clock origin.");
   const url = request.url;
   if (typeof url !== "string" || url.length === 0 || url.length > 4096) {
     throw new Error("Room admission requires a canonical HTTPS room URL.");
@@ -672,11 +674,12 @@ function openRoom(state, request) {
     throw new Error("Room admission requires a canonical HTTPS room URL.");
   }
   const methods = ["request_seal", "request_ready", "request_leave", "needed_bytes", "frame_pending",
-    "receive_bytes", "next_write", "written", "participant_id", "revision", "has_snapshot", "leave_written", "snapshot", "close", "free"];
+    "receive_bytes", "next_write", "written", "participant_id", "revision", "has_snapshot", "leave_written", "snapshot", "take_start", "close", "free"];
   if (typeof BrowserRoomClient !== "function" || typeof AbortController !== "function"
+    || typeof BrowserRoomClient.new_with_start !== "function"
     || methods.some(name => typeof BrowserRoomClient.prototype?.[name] !== "function")
     || typeof state.game.competition_identity !== "function") {
-    throw new Error("The gameplay binding does not provide actual room admission ownership.");
+    throw new Error("The gameplay binding does not provide actual room start ownership.");
   }
   const players = networkWords(state.game.players, 1, 64, 1, "actual room roster");
   if (players.length !== state.localPlan.members.length
@@ -685,7 +688,7 @@ function openRoom(state, request) {
   }
   const identity = localCompetitionIdentity(state, players);
   const controller = new AbortController();
-  let session = new BrowserRoomClient(identity, players);
+  let session = BrowserRoomClient.new_with_start(identity, players, 100000000n);
   // Configuration validation in Owner.open precedes its ownership transfer.
   // Validate the real instance too so a refused configuration stays local.
   try {
@@ -698,7 +701,8 @@ function openRoom(state, request) {
     throw error;
   }
   const room = { owner: null, ownerClosing: null, controller, opening: null, closing: null,
-    rpcId: request.rpcId, disposed: false, leaving: false, closedReported: false, cleanupError: null };
+    rpcId: request.rpcId, disposed: false, leaving: false, closedReported: false, cleanupError: null,
+    windowOriginNs, originNs: null, start: null };
   const client = session;
   state.room = room; // One attempt per play; this slot is never reset or reused.
   // Install the joining promise before callbacks can fail reentrantly in open.
@@ -710,7 +714,7 @@ function openRoom(state, request) {
       try { abandoned.free(); } catch (error) { room.cleanupError ??= error; }
       return;
     }
-    const opening = BrowserRoomOwner.open(url, { session, signal: controller.signal,
+    const opening = BrowserRoomOwner.open(url, { session, now: networkNow, signal: controller.signal,
       onSnapshot: snapshot => {
         if (play !== state || state.room !== room || room.disposed || room.leaving) return;
         // Accepted callbacks can run before open returns the owner. The actual
@@ -718,6 +722,25 @@ function openRoom(state, request) {
         const participant = room.owner?.participant ?? client.participant_id();
         if (!unsigned(participant) || participant === 0n) throw new Error("Room snapshot has no admitted participant.");
         report("play-room", { playId: state.id, event: { kind: "snapshot", participant, snapshot } });
+      },
+      onStart: (schedule, originNs) => {
+        if (play !== state || state.room !== room || room.disposed || room.leaving) return;
+        if (state.active || room.start !== null || !hostTime(originNs)
+          || (room.originNs !== null && room.originNs !== originNs)
+          || !schedule || !hostTime(schedule.targetNs) || !hostTime(schedule.songTargetNs)
+          || !hostTime(schedule.uncertaintyNs)) throw new Error("Invalid committed room start.");
+        // The callback supplies the same original owner origin even when it
+        // precedes open's return. Never substitute a later clock observation.
+        const offset = originNs - room.windowOriginNs;
+        const targetHostNs = offset + schedule.targetNs;
+        const songTargetHostNs = offset + schedule.songTargetNs;
+        if (!hostTime(targetHostNs) || !hostTime(songTargetHostNs)
+          || songTargetHostNs - targetHostNs !== 100000000n) {
+          throw new Error("Committed room start cannot map to the Window clock.");
+        }
+        room.originNs = originNs;
+        room.start = Object.freeze({ targetHostNs, songTargetHostNs, uncertaintyNs: schedule.uncertaintyNs });
+        report("play-room", { playId: state.id, event: { kind: "start", ...room.start } });
       },
       onClose: error => {
         if (!room.leaving) roomFailure(state, room, error);
@@ -734,6 +757,11 @@ function openRoom(state, request) {
     room.owner = owner;
     if (room.disposed || play !== state) { await closeRoomOwner(room); return; }
     if (owner.closed) throw new Error("Room closed before acquisition completed.");
+    const originNs = owner.origin;
+    if (!hostTime(originNs) || (room.originNs !== null && room.originNs !== originNs)) {
+      throw new Error("Room owner clock origin changed during acquisition.");
+    }
+    room.originNs = originNs;
     const rpcId = room.rpcId;
     room.rpcId = null;
     report("play-reply", { playId: state.id, rpcId, result: { kind: "room-opened" } });
@@ -1709,16 +1737,15 @@ function handlePlay(request) {
       if (request.rpcId !== undefined) reply(state, request, null);
       pumpAudio(state);
     } else if (request.kind === "play-activate") {
-      if (state.room !== null) throw new Error("Room preparation has no shared playback start; activation is unavailable for this play owner.");
       if (state.active || !hostTime(request.hostNs) || !unsigned(request.startFrame)) throw new Error("Invalid or repeated gameplay activation.");
       if (state.commandClient !== null && (!state.samplesEnded || !state.commandsDrained || commandsPending(state)
         || state.audioRpcId !== null || state.commandClient.state !== "ready")) throw new Error("Direct audio preparation is not fully acknowledged.");
-      if (state.network) {
-        const network = state.network;
-        const target = network.start?.targetHostNs;
-        const now = networkNow() - network.windowOriginNs;
+      const synchronized = state.room ?? state.network;
+      if (synchronized) {
+        const target = synchronized.start?.targetHostNs;
+        const now = networkNow() - synchronized.windowOriginNs;
         const rounding = (1000000000n + BigInt(state.rate) - 1n) / BigInt(state.rate) + 1n;
-        if (network.disposed || !network.owner || network.owner.closed || !hostTime(target)
+        if (synchronized.disposed || synchronized.leaving || !synchronized.owner || synchronized.owner.closed || !hostTime(target)
           || request.targetHostNs !== target || request.hostNs < target || request.hostNs - target > rounding
           || !hostTime(now) || now >= request.hostNs) throw new Error("Multiplayer activation has no live, future committed start within one output frame.");
       }

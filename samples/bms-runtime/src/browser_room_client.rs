@@ -1,11 +1,13 @@
-//! WASM access to the actual common room client, without transport or clocks.
+//! WASM access to the common room start client, without transport or clock acquisition.
 
 use crate::browser_multiplayer::BrowserMultiplayerWrite;
 use crate::local_players::{PlayerId, MAX_LOCAL_PLAYERS};
 use crate::multiplayer_group_rooms::GroupRoomPhase;
 use crate::multiplayer_protocol::WriteStep;
-use crate::multiplayer_room_client::{RoomClientError, RoomClientSession};
-use crate::multiplayer_room_wire::{RoomFrameDecoder, RoomWireError};
+use crate::multiplayer_room_client::RoomClientError;
+use crate::multiplayer_room_play::{RoomPlayClient, RoomPlayError};
+use crate::multiplayer_room_wire::{RoomFrameDecoder, RoomMessage, RoomWireError};
+use crate::multiplayer_start::StartPolicy;
 use wasm_bindgen::prelude::*;
 
 fn error(value: impl std::fmt::Display) -> JsValue {
@@ -19,7 +21,7 @@ fn field(object: &js_sys::Object, name: &str, value: JsValue) -> Result<(), JsVa
     Ok(())
 }
 
-fn snapshot_value(session: &RoomClientSession) -> Result<JsValue, JsValue> {
+fn snapshot_value(session: &RoomPlayClient) -> Result<JsValue, JsValue> {
     let Some(room) = session.room() else {
         return Ok(JsValue::NULL);
     };
@@ -60,19 +62,19 @@ fn snapshot_value(session: &RoomClientSession) -> Result<JsValue, JsValue> {
 
 #[wasm_bindgen]
 pub struct BrowserRoomClient {
-    session: Option<RoomClientSession>,
+    session: Option<RoomPlayClient>,
     decoder: Option<RoomFrameDecoder>,
-    failure: Option<RoomClientError>,
+    failure: Option<RoomPlayError>,
     revision: u64,
 }
 
 impl BrowserRoomClient {
-    fn ensure_live(&self) -> Result<(), RoomClientError> {
-        if let Some(failure) = self.failure {
-            return Err(failure);
+    fn ensure_live(&self) -> Result<(), RoomPlayError> {
+        if let Some(failure) = &self.failure {
+            return Err(failure.clone());
         }
         if self.session.is_none() || self.decoder.is_none() {
-            return Err(RoomClientError::InvalidState);
+            return Err(RoomPlayError::InvalidState);
         }
         Ok(())
     }
@@ -80,24 +82,30 @@ impl BrowserRoomClient {
     fn operate<T>(
         &mut self,
         fatal_state: bool,
-        operation: impl FnOnce(&mut Self) -> Result<T, RoomClientError>,
+        operation: impl FnOnce(&mut Self) -> Result<T, RoomPlayError>,
     ) -> Result<T, JsValue> {
         self.ensure_live().map_err(error)?;
         let result = operation(self);
         if let Err(failure) = &result {
-            if fatal_state || *failure != RoomClientError::InvalidState {
-                self.failure = Some(*failure);
+            if fatal_state
+                || !matches!(
+                    failure,
+                    RoomPlayError::InvalidState
+                        | RoomPlayError::Admission(RoomClientError::InvalidState)
+                )
+            {
+                self.failure = Some(failure.clone());
             }
         }
         result.map_err(error)
     }
 
-    fn session(&mut self) -> Result<&mut RoomClientSession, RoomClientError> {
-        self.session.as_mut().ok_or(RoomClientError::InvalidState)
+    fn session(&mut self) -> Result<&mut RoomPlayClient, RoomPlayError> {
+        self.session.as_mut().ok_or(RoomPlayError::InvalidState)
     }
 
-    fn decoder(&mut self) -> Result<&mut RoomFrameDecoder, RoomClientError> {
-        self.decoder.as_mut().ok_or(RoomClientError::InvalidState)
+    fn decoder(&mut self) -> Result<&mut RoomFrameDecoder, RoomPlayError> {
+        self.decoder.as_mut().ok_or(RoomPlayError::InvalidState)
     }
 }
 
@@ -107,6 +115,15 @@ impl BrowserRoomClient {
     /// The common session validates the exact identity and positive unique roster.
     #[wasm_bindgen(constructor)]
     pub fn new(identity: Vec<u8>, players: Vec<u32>) -> Result<Self, JsValue> {
+        Self::new_with_start(identity, players, 0)
+    }
+
+    /// Supplies the actual local audio preroll to the common measured start owner.
+    pub fn new_with_start(
+        identity: Vec<u8>,
+        players: Vec<u32>,
+        preroll_ns: i64,
+    ) -> Result<Self, JsValue> {
         let count = players.len();
         if !(1..=MAX_LOCAL_PLAYERS).contains(&count) {
             return Err(error("room client requires 1..64 local players"));
@@ -115,7 +132,13 @@ impl BrowserRoomClient {
         for (target, player) in roster.iter_mut().zip(players) {
             *target = PlayerId(player);
         }
-        let session = RoomClientSession::new(&identity, &roster[..count]).map_err(error)?;
+        let session = RoomPlayClient::new(
+            &identity,
+            &roster[..count],
+            StartPolicy::default(),
+            preroll_ns,
+        )
+        .map_err(error)?;
         Ok(Self {
             session: Some(session),
             decoder: Some(RoomFrameDecoder::new()),
@@ -146,43 +169,92 @@ impl BrowserRoomClient {
     }
 
     /// Supply only the current decoder prefix, sliced before entering WASM.
-    /// Partial bytes never increment the accepted-message revision.
-    pub fn receive_bytes(&mut self, bytes: Vec<u8>) -> Result<u32, JsValue> {
+    /// Only complete admitted/snapshot messages increment the metadata revision.
+    pub fn receive_bytes(
+        &mut self,
+        bytes: Vec<u8>,
+        captured_ns: i64,
+        now_ns: i64,
+    ) -> Result<u32, JsValue> {
         self.operate(true, |owner| {
+            if captured_ns < 0 || captured_ns > now_ns {
+                return Err(RoomPlayError::InvalidObservation);
+            }
             if bytes.len() > 65_808 || bytes.len() > owner.decoder()?.needed()? {
                 return Err(RoomWireError::InvalidFrame.into());
             }
             let consumed = owner.decoder()?.push(&bytes)?;
             if let Some(message) = owner.decoder()?.take()? {
-                let revision = owner
-                    .revision
-                    .checked_add(1)
-                    .ok_or(RoomClientError::IdExhausted)?;
-                owner.session()?.receive(message)?;
+                let revision = if matches!(
+                    &message,
+                    RoomMessage::Admitted { .. } | RoomMessage::Snapshot { .. }
+                ) {
+                    owner
+                        .revision
+                        .checked_add(1)
+                        .ok_or(RoomPlayError::IdExhausted)?
+                } else {
+                    owner.revision
+                };
+                owner.session()?.receive_at(message, captured_ns, now_ns)?;
                 owner.revision = revision;
             }
             Ok(consumed as u32)
         })
     }
 
-    /// Only waiting or a genuine frame; room admission has no application slot.
-    pub fn next_write(&mut self) -> Result<BrowserMultiplayerWrite, JsValue> {
+    /// Only waiting or a genuine frame; room controls have no application slot.
+    pub fn next_write(&mut self, now_ns: i64) -> Result<BrowserMultiplayerWrite, JsValue> {
         self.operate(true, |owner| {
-            Ok(match owner.session()?.poll_write()? {
+            Ok(match owner.session()?.poll_write(now_ns)? {
                 Some(frame) => WriteStep::Frame(frame).into(),
                 None => WriteStep::Waiting.into(),
             })
         })
     }
 
-    pub fn written(&mut self, id: u64) -> Result<(), JsValue> {
-        self.operate(true, |owner| owner.session()?.written(id))
+    pub fn written(&mut self, id: u64, completed_ns: i64, now_ns: i64) -> Result<(), JsValue> {
+        self.operate(true, |owner| {
+            owner.session()?.written_at(id, completed_ns, now_ns)
+        })
+    }
+
+    /// Consumes only a genuine committed common schedule. All values retain
+    /// their exact integer domains across the JavaScript boundary.
+    pub fn take_start(&mut self) -> Result<JsValue, JsValue> {
+        let schedule = self.operate(true, |owner| Ok(owner.session()?.take_schedule()))?;
+        let Some(schedule) = schedule else {
+            return Ok(JsValue::NULL);
+        };
+        let result = (|| {
+            let value = js_sys::Object::new();
+            field(
+                &value,
+                "targetNs",
+                js_sys::BigInt::from(schedule.target_ns).into(),
+            )?;
+            field(
+                &value,
+                "songTargetNs",
+                js_sys::BigInt::from(schedule.song_target_ns).into(),
+            )?;
+            field(
+                &value,
+                "uncertaintyNs",
+                js_sys::BigInt::from(schedule.uncertainty_ns).into(),
+            )?;
+            Ok(value.into())
+        })();
+        if result.is_err() {
+            self.close();
+        }
+        result
     }
 
     pub fn participant_id(&self) -> u64 {
         self.session
             .as_ref()
-            .and_then(RoomClientSession::participant)
+            .and_then(RoomPlayClient::participant)
             .map_or(0, |participant| participant.0)
     }
 
@@ -199,7 +271,7 @@ impl BrowserRoomClient {
     pub fn leave_written(&self) -> bool {
         self.session
             .as_ref()
-            .is_some_and(RoomClientSession::leave_written)
+            .is_some_and(RoomPlayClient::leave_written)
     }
 
     /// Exact accepted metadata. Participant IDs and deadline values stay BigInt.
@@ -218,10 +290,13 @@ impl BrowserRoomClient {
 
     /// Idempotently release owned state. The caller separately frees this WASM handle.
     pub fn close(&mut self) {
+        if let Some(session) = &mut self.session {
+            session.stop();
+        }
         self.session = None;
         self.decoder = None;
         if self.failure.is_none() {
-            self.failure = Some(RoomClientError::InvalidState);
+            self.failure = Some(RoomPlayError::Stopped);
         }
     }
 }

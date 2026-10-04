@@ -514,11 +514,17 @@ async function workerHarness(options = {}) {
   }
   if (options.missingNetworkGroupConstructor) BrowserMultiplayer.new_group = undefined;
   class BrowserRoomClient {
+    static new_with_start(identity, players, preroll) {
+      const session = new BrowserRoomClient(identity, players);
+      session.preroll = preroll;
+      return session;
+    }
     constructor(identity, players) {
       this.identity = identity.slice(); this.players = players.slice();
       this.closes = 0; this.frees = 0; this.revisionValue = 0n; this.participantValue = 0n;
       this.dto = null; this.left = false; this.partial = false; this.need = 11;
       this.credits = []; this.received = []; this.requests = [];
+      this.receiveTimes = []; this.writeTimes = []; this.pollTimes = []; this.schedules = [];
       this.frames = [{ kind: 1, id: 1n, bytes: new Uint8Array(11) }];
       roomSessions.push(this);
       if (options.roomConstructError) throw new Error(options.roomConstructError);
@@ -539,14 +545,16 @@ async function workerHarness(options = {}) {
     has_snapshot() { this.live(); return this.dto !== null; }
     leave_written() { this.live(); return this.left; }
     snapshot() { this.live(); return this.dto; }
-    receive_bytes(bytes) {
+    receive_bytes(bytes, captured, processing) {
       this.live(); this.received.push([...bytes]);
+      this.receiveTimes.push({ captured, processing });
       if (options.roomReceiveError) throw new Error(options.roomReceiveError);
       this.onReceive?.(bytes);
       return bytes.length;
     }
-    next_write() {
+    next_write(processing) {
       this.live();
+      this.pollTimes.push(processing);
       const frame = this.frames.shift() ?? { kind: 0, id: 0n };
       let freed = false;
       const wrapper = {
@@ -558,11 +566,15 @@ async function workerHarness(options = {}) {
       };
       roomWrappers.push(wrapper); return wrapper;
     }
-    written(id) { this.live(); this.credits.push(id); this.onWritten?.(id); }
+    written(id, completed, processing) {
+      this.live(); this.credits.push(id); this.writeTimes.push({ id, completed, processing }); this.onWritten?.(id);
+    }
+    take_start() { this.live(); return this.schedules.shift() ?? null; }
     close() { this.live(); assert.equal(++this.closes, 1); }
     free() { this.live(); assert.equal(++this.frees, 1); }
   }
   if (options.missingRoomMethod) BrowserRoomClient.prototype[options.missingRoomMethod] = undefined;
+  if (options.missingRoomStartConstructor) BrowserRoomClient.new_with_start = undefined;
   // The actual room owner is loaded below. Only its byte channel is controlled.
   class RoomChannel {
     static async open(url, config) {
@@ -844,7 +856,7 @@ function roomStartRequest(fields = {}) {
   return startRequest({ inputMode: "physical", localPlanWords: localPlan([[0xffffffff, null]]), recordReplay: true, ...fields });
 }
 async function roomPrepared(options = {}) {
-  const h = await started({ ...options, startRequest: options.startRequest ?? roomStartRequest() });
+  const h = await started({ allowNetworkClock: true, ...options, startRequest: options.startRequest ?? roomStartRequest() });
   h.roomPort = commandPort();
   const rpc = await attachCommands(h, h.roomPort);
   assert.equal(h.of("play-reply").find(value => value.rpcId === rpc).result.kind, "audio-ready");
@@ -852,7 +864,7 @@ async function roomPrepared(options = {}) {
 }
 async function requestRoom(h, kind = "play-room-open", fields = {}) {
   const rpcId = ++h.rpcId;
-  await h.send({ kind, playId: 7, rpcId, ...(kind === "play-room-open" ? { url: ROOM_URL } : {}), ...fields });
+  await h.send({ kind, playId: 7, rpcId, ...(kind === "play-room-open" ? { url: ROOM_URL, windowOriginNs: 0n } : {}), ...fields });
   return rpcId;
 }
 function roomReply(h, rpc) { return h.of("play-reply").find(value => value.rpcId === rpc); }
@@ -872,10 +884,47 @@ async function roomSnapshot(h) {
   await roomReceive(h, () => { session.dto = snapshot; session.revisionValue++; });
   return snapshot;
 }
+async function preparedRoomReceipt(h) {
+  const session = h.roomSessions.at(-1), channel = h.roomChannels.at(-1);
+  channel.writes[0].gate.resolve(); await flushJobs();
+  const admitted = await roomSnapshot(h);
+  await roomReceive(h, () => {
+    session.dto = { ...admitted, phase: 1 }; session.revisionValue++;
+  });
+  session.onRequest = kind => {
+    assert.equal(kind, "ready");
+    session.frames.push({ kind: 1, id: 2n, bytes: new Uint8Array(11) });
+  };
+  const rpc = await requestRoom(h, "play-room-ready");
+  assert.deepEqual(roomReply(h, rpc).result, { kind: "room-requested", operation: "ready" });
+  assert.deepEqual(session.credits, [1n]);
+  channel.writes.at(-1).gate.resolve(); await flushJobs();
+  await roomReceive(h, () => {
+    session.dto = { ...admitted, phase: 2, deadlineNs: null,
+      members: admitted.members.map(member => ({ ...member, prepared: true })) };
+    session.revisionValue++;
+  });
+  session.onRequest = null;
+  assert.equal(h.of("play-room").some(row => row.event.kind === "start"), false);
+}
+async function queueRoomStart(h, schedule = { targetNs: 2000000000n, songTargetNs: 2100000000n, uncertaintyNs: 40n }) {
+  const session = h.roomSessions.at(-1);
+  // Opaque common-client output, not an implementation of its clock or start protocol.
+  session.onWritten = id => { if (id === 17n) session.schedules.push(schedule); };
+  await roomReceive(h, () => session.frames.push({ kind: 1, id: 17n, bytes: new Uint8Array(11) }));
+  assert.equal(h.of("play-room").some(row => row.event.kind === "start"), false);
+}
+async function committedRoom(h, schedule) {
+  await requestRoom(h);
+  await preparedRoomReceipt(h);
+  await queueRoomStart(h, schedule);
+  h.roomChannels.at(-1).writes.at(-1).gate.resolve(); await flushJobs();
+  return h.of("play-room").find(row => row.event.kind === "start")?.event;
+}
 
 test("room acquisition uses every actual local identity only after samples and direct command ACK drain", async () => {
   for (const request of [roomStartRequest(), localRequest({ recordReplay: true })]) {
-    const h = await started({ batches: [batch(771n)], startRequest: request });
+    const h = await started({ allowNetworkClock: true, batches: [batch(771n)], startRequest: request });
     const game = h.locals[0];
     let rpc = await requestRoom(h);
     assert.ok(roomReply(h, rpc).error);
@@ -893,6 +942,7 @@ test("room acquisition uses every actual local identity only after samples and d
     const session = h.roomSessions[0], channel = h.roomChannels[0];
     assert.deepEqual(session.players, new Uint32Array(game.memberIds));
     assert.deepEqual(session.identity, Uint8Array.of(66, 75, 82, 0, 255));
+    assert.equal(session.preroll, 100000000n);
     assert.deepEqual(game.calls.filter(call => call[0] === "member-identity").map(call => call[1]), game.memberIds);
     assert.equal(channel.url, ROOM_URL); assert.equal(channel.config.maxPrefixBytes, 65808);
     assert.equal(channel.writes.length, 1); assert.deepEqual(session.credits, []);
@@ -909,7 +959,8 @@ test("room acquisition uses every actual local identity only after samples and d
 
 test("room mode, capability, URL and complete member identity refusals stay before acquisition and preserve local preparation", async () => {
   for (const options of [
-    { missingRoomExport: true }, { missingRoomMethod: "receive_bytes" }, { missingLocalIdentity: true },
+    { missingRoomExport: true }, { missingRoomMethod: "receive_bytes" }, { missingRoomMethod: "take_start" },
+    { missingRoomStartConstructor: true }, { missingLocalIdentity: true },
     { roomConstructError: "actual room constructor refused" },
     { localIdentityError: player => player === 7 },
     { localIdentity: player => Uint8Array.of(player === 7 ? 2 : 1) },
@@ -1065,6 +1116,122 @@ test("fatal room I/O and malformed complete snapshots retain capture prefixes wh
     await h.send({ kind: "play-stop", playId: 7 });
     assert.equal(game.stops, 1); assert.equal(session.frees, 1);
   }
+});
+
+test("actual room owner delivers only the committed full-width start and Worker translates the original Window origin", async () => {
+  const h = await roomPrepared();
+  const game = h.locals[0], windowOriginNs = 10000000003n;
+  const rpc = await requestRoom(h, "play-room-open", { windowOriginNs });
+  assert.deepEqual(roomReply(h, rpc).result, { kind: "room-opened" });
+  const session = h.roomSessions[0], channel = h.roomChannels[0];
+  assert.equal(session.preroll, 100000000n);
+  await preparedRoomReceipt(h);
+  const snapshots = h.of("play-room").filter(row => row.event.kind === "snapshot").length;
+  const schedule = { targetNs: 9007199254740993n, songTargetNs: 9007199354740993n, uncertaintyNs: 37n };
+  h.setNetworkNow(1200);
+  await queueRoomStart(h, schedule);
+  assert.equal(channel.writes.length, 3); assert.equal(channel.activeReads, 1); assert.equal(channel.activeWrites, 1);
+  assert.equal(game.calls.some(row => row[0] === "activate"), false);
+  assert.deepEqual(session.credits, [1n, 2n]);
+  h.setNetworkNow(1500);
+  channel.writes.at(-1).gate.resolve(); await flushJobs();
+  assert.deepEqual(session.writeTimes.at(-1), { id: 17n, completed: 500000000n, processing: 500000000n });
+  assert.deepEqual(session.receiveTimes.at(-1), { captured: 200000000n, processing: 200000000n });
+  const event = h.of("play-room").find(row => row.event.kind === "start");
+  assert.deepEqual(event, { kind: "play-room", playId: 7, event: {
+    kind: "start", targetHostNs: 9007200254740990n, songTargetHostNs: 9007200354740990n, uncertaintyNs: 37n,
+  } });
+  assert.equal(h.of("play-room").filter(row => row.event.kind === "snapshot").length, snapshots);
+  const target = event.event.targetHostNs;
+  schedule.targetNs = 0n;
+  const hostNs = target + 20835n; // ceil(1e9 / 48000) + 1, the existing one-frame bound.
+  const activated = await h.rpc("play-activate", { targetHostNs: target, hostNs, startFrame: START });
+  assert.equal(activated.result, null);
+  assert.deepEqual(game.calls.filter(row => row[0] === "activate"), [["activate", hostNs]]);
+  await h.send(step({ events: [{ hostNs: hostNs + 11n, key: 2, down: true, sequence: 18446744073709551615n }],
+    watermark: hostNs + 11n, audioNs: 100000000n }));
+  const blob = game.calls.find(row => row[0] === "blob");
+  assert.deepEqual(blob[1], encodeKeyboardEvent({ hostNs: hostNs + 11n, key: 2, down: true, sequence: 18446744073709551615n }));
+  assert.equal(blob[2], 100000000n);
+  assert.equal(h.of("play-step-done").at(-1).tickId, 1);
+  await roomReceive(h, () => {});
+  assert.equal(h.of("play-room").filter(row => row.event.kind === "start").length, 1);
+  await h.send({ kind: "play-stop", playId: 7 });
+  assert.equal(game.frees, 1); assert.equal(session.frees, 1); assert.equal(channel.closes, 1);
+  assert.deepEqual(h.of("play-stopped")[0].replays.map(row => row.player), [0xffffffff]);
+});
+
+test("room Window origin, committed preroll and exact live activation boundaries refuse without alternate starts", async () => {
+  for (const windowOriginNs of [undefined, -1n, 1, 9223372036854775808n]) {
+    const h = await roomPrepared();
+    const rpc = await requestRoom(h, "play-room-open", { windowOriginNs });
+    assert.ok(roomReply(h, rpc).error); assert.equal(h.roomSessions.length, 0);
+    assert.equal(h.locals[0].frees, 0);
+    assert.deepEqual(roomReply(h, await requestRoom(h)).result, { kind: "room-opened" });
+    await h.send({ kind: "play-stop", playId: 7 });
+  }
+  for (const schedule of [
+    { targetNs: 2000000000n, songTargetNs: 2099999999n, uncertaintyNs: 40n },
+    { targetNs: 9223372036854775807n, songTargetNs: 9223372036854775807n, uncertaintyNs: 0n },
+  ]) {
+    const h = await roomPrepared();
+    assert.equal(await committedRoom(h, schedule), undefined);
+    assert.equal(h.of("play-room").filter(row => row.event.kind === "start").length, 0);
+    assert.equal(h.locals[0].calls.some(row => row[0] === "activate"), false);
+    assert.equal(h.locals[0].frees, 1); assert.equal(h.roomSessions[0].frees, 1);
+    assert.equal(h.of("play-error").length, 1);
+  }
+  for (const fault of ["missing-target", "wrong-target", "before-target", "rounding", "past", "repeated", "leaving"]) {
+    const h = await roomPrepared(); const event = await committedRoom(h);
+    assert.ok(event);
+    const request = { targetHostNs: event.targetHostNs, hostNs: event.targetHostNs, startFrame: START };
+    if (fault === "missing-target") delete request.targetHostNs;
+    if (fault === "wrong-target") request.targetHostNs++;
+    if (fault === "before-target") request.hostNs--;
+    if (fault === "rounding") request.hostNs += 20836n;
+    if (fault === "past") h.setNetworkNow(3000); // Now maps to the exact 13 s target.
+    if (fault === "repeated") assert.equal((await h.rpc("play-activate", request)).result, null);
+    if (fault === "leaving") {
+      const session = h.roomSessions[0];
+      session.onRequest = kind => { assert.equal(kind, "leave"); session.frames.push({ kind: 1, id: 18n, bytes: new Uint8Array(11) }); };
+      const leaving = await requestRoom(h, "play-room-leave");
+      assert.equal(roomReply(h, leaving), undefined);
+    }
+    assert.ok((await h.rpc("play-activate", request)).error);
+    assert.equal(h.locals[0].calls.filter(row => row[0] === "activate").length, fault === "repeated" ? 1 : 0);
+    assert.equal(h.locals[0].frees, 1); assert.equal(h.roomSessions[0].frees, 1);
+    assert.equal(h.of("play-error").length, 1);
+  }
+});
+
+test("Prepared timeout and stop during a pending room control join cleanup and never authorize a later owner", async () => {
+  const timed = await roomPrepared(); await requestRoom(timed); await preparedRoomReceipt(timed);
+  await roomReceive(timed, () => {});
+  await timed.runTimer(10000);
+  assert.equal(timed.of("play-room").some(row => row.event.kind === "start"), false);
+  assert.equal(timed.locals[0].frees, 1); assert.equal(timed.roomSessions[0].frees, 1);
+  assert.equal(timed.of("play-error").length, 1);
+
+  const h = await roomPrepared({ roomHoldAfterClose: true }); await requestRoom(h); await preparedRoomReceipt(h);
+  await queueRoomStart(h);
+  const session = h.roomSessions[0], channel = h.roomChannels[0], game = h.locals[0];
+  const credits = [...session.credits], received = session.received.length;
+  await h.send({ kind: "play-stop", playId: 7 });
+  assert.equal(game.frees, 1); assert.equal(session.frees, 1);
+  assert.equal(h.of("play-stopped").length, 0);
+  await h.send(startRequest({ playId: 8, rpcId: 1 }));
+  assert.equal(h.games[0].frees, 0);
+  channel.writes.at(-1).gate.resolve(); await flushJobs();
+  assert.equal(h.of("play-stopped").length, 0, "the outstanding read is still owned by room cleanup");
+  channel.reads.at(-1).gate.resolve(Uint8Array.of(1)); await flushJobs();
+  assert.deepEqual(session.credits, credits); assert.equal(session.received.length, received);
+  assert.equal(h.of("play-room").filter(row => row.event.kind === "start").length, 0);
+  assert.equal(h.of("play-stopped").length, 1); assert.equal(h.games[0].frees, 0);
+  const count = h.messages.length;
+  await h.send({ kind: "play-activate", playId: 7, rpcId: h.rpcId + 1,
+    targetHostNs: 13000000000n, hostNs: 13000000000n, startFrame: START });
+  assert.equal(h.messages.length, count); assert.equal(h.games[0].frees, 0);
+  await h.send({ kind: "play-stop", playId: 8 });
 });
 
 test("local saved records admit per member before touch setup and isolate one failed HUD through final capture", async () => {

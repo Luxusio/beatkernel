@@ -13,6 +13,7 @@ const [ownerSource, transportSource] = await Promise.all([
 const ENDPOINT = "https://example.test:4433/rooms/fixture";
 const MAX_U64 = 18446744073709551615n;
 const MAX_I64 = 9223372036854775807n;
+const CLOCK_ORIGIN = 9007199254740993n;
 
 function deferred() {
   let resolve, reject;
@@ -58,11 +59,19 @@ function snapshot(count = 2) {
     })),
   };
 }
+function preparedSnapshot() {
+  const value = snapshot();
+  value.phase = 2; value.deadlineNs = null;
+  for (const member of value.members) member.prepared = true;
+  return value;
+}
 
 async function harness(faults = {}) {
-  const trace = [], opens = [], wrappers = [], callbacks = [], closures = [];
+  const trace = [], opens = [], wrappers = [], callbacks = [], closures = [], starts = [];
   const timers = new Map();
   let now = 0, nextTimer = 0;
+  let clockValue = null, clockReads = [];
+  const clock = () => clockReads.shift() ?? clockValue ?? CLOCK_ORIGIN + BigInt(now) * 1000000n;
   function wrapper(descriptor) {
     let freed = false;
     const value = {
@@ -86,6 +95,7 @@ async function harness(faults = {}) {
     freed: false, closes: 0, frees: 0, need: 11, partial: false,
     participant: 0n, revisionValue: 0n, hasSnapshot: false, leaveDone: false, dto: null,
     controls: [frame()], receives: [], credits: [], requests: [], nextCalls: 0,
+    receiveTimes: [], writeTimes: [], pollTimes: [], schedules: [], startCalls: 0,
     alive() { assert.equal(this.freed, false, "WASM called after free"); },
     request_seal() { this.request("seal"); },
     request_ready() { this.request("ready"); },
@@ -97,19 +107,22 @@ async function harness(faults = {}) {
     },
     needed_bytes() { this.alive(); return this.need; },
     frame_pending() { this.alive(); return this.partial; },
-    receive_bytes(bytes) {
+    receive_bytes(bytes, captured, processing) {
       this.alive(); this.receives.push([...bytes]); trace.push(["receive", bytes.length]);
+      this.receiveTimes.push({ captured, processing });
       if (faults.receiveError) throw faults.receiveError;
       this.onReceive?.(bytes);
       return faults.consumed ?? bytes.length;
     },
-    next_write() {
+    next_write(processing) {
       this.alive(); this.nextCalls++; trace.push(["next-write"]);
+      this.pollTimes.push(processing);
       if (faults.nextError) throw faults.nextError;
       return wrapper(this.controls.shift() ?? { kind: 0 });
     },
-    written(id) {
+    written(id, completed, processing) {
       this.alive(); this.credits.push(id); trace.push(["written", id]);
+      this.writeTimes.push({ id, completed, processing });
       if (faults.writtenError) throw faults.writtenError;
       this.onWritten?.(id);
     },
@@ -118,6 +131,7 @@ async function harness(faults = {}) {
     has_snapshot() { this.alive(); return this.hasSnapshot; },
     leave_written() { this.alive(); return this.leaveDone; },
     snapshot() { this.alive(); trace.push(["snapshot"]); return this.dto; },
+    take_start() { this.alive(); this.startCalls++; return this.schedules.shift() ?? null; },
     close() { this.alive(); this.closes++; trace.push(["session-close"]); if (faults.sessionCloseError) throw faults.sessionCloseError; },
     free() { this.alive(); this.frees++; this.freed = true; trace.push(["session-free"]); },
   };
@@ -169,8 +183,9 @@ async function harness(faults = {}) {
   const { BrowserRoomOwner, BrowserRoomOwnerError } = ownerModule.namespace;
   function opening(options = {}) {
     return attempt(() => BrowserRoomOwner.open(ENDPOINT, {
-      session, channelFactory, setupTimeoutMs: 50, ioTimeoutMs: 10,
+      session, channelFactory, now: clock, setupTimeoutMs: 50, ioTimeoutMs: 10,
       onSnapshot: value => { callbacks.push(value); trace.push(["on-snapshot"]); },
+      onStart: (value, origin) => { starts.push({ value, origin }); trace.push(["on-start"]); },
       onClose: error => { closures.push(error); trace.push(["on-close"]); },
       ...options,
     }));
@@ -201,8 +216,9 @@ async function harness(faults = {}) {
     });
   }
   return {
-    session, opens, wrappers, callbacks, closures, timers, trace,
+    session, opens, wrappers, callbacks, closures, starts, timers, trace,
     BrowserRoomOwner, BrowserRoomOwnerError, opening, opened, channel, receive, observe,
+    setClock(value, reads = []) { clockValue = value; clockReads = [...reads]; },
     async elapse(milliseconds) {
       const target = now + milliseconds;
       for (;;) {
@@ -239,13 +255,14 @@ test("configuration retains caller ownership; actual frames preserve u64 IDs and
   for (const options of [
     { setupTimeoutMs: 0 }, { setupTimeoutMs: 60001 }, { ioTimeoutMs: 0 },
     { ioTimeoutMs: 60001 }, { channelFactory: 1 }, { onSnapshot: 1 }, { onClose: 1 },
+    { now: undefined }, { now: 1 }, { onStart: 1 },
   ]) {
     const h = await harness();
     assert.ok(await failure(h.opening(options), "validation") instanceof h.BrowserRoomOwnerError);
     assert.equal(h.opens.length, 0);
     assert.equal(h.session.closes, 0); assert.equal(h.session.frees, 0);
   }
-  for (const method of ["needed_bytes", "frame_pending", "receive_bytes", "next_write", "written", "revision", "snapshot", "free"]) {
+  for (const method of ["needed_bytes", "frame_pending", "receive_bytes", "next_write", "written", "revision", "snapshot", "take_start", "free"]) {
     const h = await harness(); delete h.session[method];
     await failure(h.opening(), "validation");
     assert.equal(h.opens.length, 0); assert.equal(h.session.frees, 0);
@@ -535,4 +552,116 @@ test("cancelled opening joins a late channel acquisition and closes it before re
   assert.deepEqual(h.session.credits, []);
   assert.equal(h.closures.length, 1);
   assert.equal(h.timers.size, 0);
+});
+
+test("original transport times reach the common client and controls wake one writer without clock polling", async () => {
+  const h = await harness();
+  const { owner, io } = await h.opened();
+  assert.equal(owner.origin, CLOCK_ORIGIN);
+  assert.deepEqual(h.session.pollTimes, [0n]);
+  h.setClock(CLOCK_ORIGIN + 200n, [CLOCK_ORIGIN + 100n, CLOCK_ORIGIN + 200n]);
+  io.writes[0].gate.resolve(); await flush();
+  assert.deepEqual(h.session.writeTimes, [{ id: MAX_U64, completed: 100n, processing: 200n }]);
+  await h.observe(io, preparedSnapshot());
+  const callbacks = h.callbacks.length, polls = h.session.nextCalls;
+  await h.elapse(7);
+  assert.equal(h.session.nextCalls, polls, "no interval pumps probes while both APIs are idle");
+  h.setClock(CLOCK_ORIGIN + 300n, [CLOCK_ORIGIN + 250n, CLOCK_ORIGIN + 300n]);
+  await h.receive(io, () => h.session.controls.push(frame(17n, frameBytes(8))));
+  assert.deepEqual(h.session.receiveTimes.at(-1), { captured: 250n, processing: 300n });
+  assert.equal(h.callbacks.length, callbacks, "control receipts do not invent admission revisions");
+  assert.equal(io.writes.length, 2); assert.equal(io.activeWrites, 1); assert.equal(io.activeReads, 1);
+  assert.deepEqual(h.starts, [], "queued control is not a committed schedule");
+  const actual = { targetNs: 9007199254740993n, songTargetNs: 9007199354740993n, uncertaintyNs: MAX_U64 };
+  h.session.onWritten = id => { if (id === 17n) h.session.schedules.push(actual); };
+  h.setClock(CLOCK_ORIGIN + 400n, [CLOCK_ORIGIN + 350n, CLOCK_ORIGIN + 400n]);
+  io.writes[1].gate.resolve(); await flush();
+  assert.deepEqual(h.session.writeTimes.at(-1), { id: 17n, completed: 350n, processing: 400n });
+  assert.deepEqual(h.starts.map(row => ({ ...row, value: { ...row.value } })), [{ value: actual, origin: CLOCK_ORIGIN }]);
+  assert.ok(Object.isFrozen(h.starts[0].value));
+  actual.targetNs = 0n;
+  assert.equal(h.starts[0].value.targetNs, 9007199254740993n, "binding DTO mutation cannot retarget the published start");
+  await h.receive(io, () => {});
+  await h.elapse(100);
+  assert.equal(h.starts.length, 1); assert.equal(owner.closed, false);
+  assert.equal(owner.origin, CLOCK_ORIGIN);
+  await cleaned(h, owner, io);
+});
+
+test("invalid clocks and malformed or repeated common schedules fence without publishing substitute starts", async () => {
+  for (const clock of [() => -1n, () => MAX_I64 + 1n, () => 0, () => { throw new Error("clock unavailable"); }]) {
+    const h = await harness();
+    await failure(h.opening({ now: clock }), "clock");
+    assert.equal(h.opens.length, 0); assert.equal(h.session.closes, 1); assert.equal(h.session.frees, 1);
+    assert.deepEqual(h.starts, []);
+  }
+  const regressed = await harness();
+  const opened = await regressed.opened();
+  opened.io.writes[0].gate.resolve(); await flush();
+  regressed.setClock(CLOCK_ORIGIN - 1n);
+  opened.io.reads[0].gate.resolve(Uint8Array.of(1)); await flush();
+  assert.equal(regressed.closures[0].code, "clock");
+  assert.deepEqual(regressed.session.receives, []);
+  await cleaned(regressed, opened.owner, opened.io);
+
+  const valid = { targetNs: 1000000000n, songTargetNs: 1100000000n, uncertaintyNs: 40n };
+  for (const dto of [undefined, {}, [], { ...valid, targetNs: -1n }, { ...valid, targetNs: 1 },
+    { ...valid, songTargetNs: 999999999n }, { ...valid, songTargetNs: MAX_I64 + 1n },
+    { ...valid, uncertaintyNs: -1n }, { ...valid, uncertaintyNs: MAX_U64 + 1n }]) {
+    const h = await harness(); const { owner, io } = await h.opened();
+    io.writes[0].gate.resolve(); await flush();
+    await h.observe(io, preparedSnapshot());
+    // Return the literal malformed value, including undefined, from the WASM edge.
+    h.session.take_start = function () { this.alive(); return dto; };
+    await h.receive(io, () => {});
+    assert.equal(owner.closed, true); assert.equal(h.closures[0].code, "protocol");
+    assert.deepEqual(h.starts, []); await cleaned(h, owner, io);
+  }
+  for (const fault of ["before-prepared", "duplicate", "callback"]) {
+    const h = await harness();
+    const { owner, io } = await h.opened(fault === "callback" ? { onStart() { throw new Error("start callback failed"); } } : {});
+    io.writes[0].gate.resolve(); await flush();
+    await h.observe(io, fault === "before-prepared" ? snapshot() : preparedSnapshot());
+    await h.receive(io, () => h.session.schedules.push({ ...valid }));
+    if (fault === "duplicate") {
+      assert.equal(owner.closed, false); assert.equal(h.starts.length, 1);
+      await h.receive(io, () => h.session.schedules.push({ ...valid }));
+      assert.equal(h.starts.length, 1);
+    }
+    assert.equal(owner.closed, true);
+    assert.equal(h.closures[0].code, fault === "callback" ? "callback" : "protocol");
+    await cleaned(h, owner, io);
+  }
+});
+
+test("Prepared has one fixed handshake deadline and cancellation joins controls without granting a late start", async () => {
+  const h = await harness(); const { owner, io } = await h.opened();
+  io.writes[0].gate.resolve(); await flush();
+  await h.observe(io);
+  await h.elapse(70);
+  assert.equal(owner.closed, false, "accepted admission has finished its setup timer");
+  await h.observe(io, preparedSnapshot());
+  await h.elapse(40);
+  await h.observe(io, preparedSnapshot());
+  await h.receive(io, () => {});
+  await h.elapse(10);
+  assert.equal(owner.closed, true); assert.equal(h.closures[0].code, "timeout");
+  assert.equal(h.closures[0].operation, "prepared");
+  assert.deepEqual(h.starts, []); await cleaned(h, owner, io);
+
+  const late = await harness();
+  const opened = await late.opened({}, { holdAfterClose: true });
+  opened.io.writes[0].gate.resolve(); await flush();
+  await late.observe(opened.io, preparedSnapshot());
+  await late.receive(opened.io, () => late.session.controls.push(frame(29n)));
+  late.session.onWritten = () => late.session.schedules.push({ targetNs: 1000000000n, songTargetNs: 1100000000n, uncertaintyNs: 0n });
+  const credits = [...late.session.credits], reads = late.session.receives.length;
+  const closing = attempt(() => opened.owner.close()); await flush();
+  assert.equal(closing.state, "pending");
+  opened.io.writes.at(-1).gate.resolve(); await flush();
+  assert.equal(closing.state, "pending");
+  opened.io.reads.at(-1).gate.resolve(Uint8Array.of(1));
+  await success(closing);
+  assert.deepEqual(late.session.credits, credits); assert.equal(late.session.receives.length, reads);
+  assert.deepEqual(late.starts, []); await cleaned(late, opened.owner, opened.io);
 });
