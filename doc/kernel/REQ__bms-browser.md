@@ -214,8 +214,9 @@ input/render/main-thread performance remain unverified.
 ## Worker-owned direct report caller
 
 The player page sends a bounded play-render observation containing its render
-identity and original presentedNs/presentedHostNs pair, with no report payload.
-It must not call AudioHost.poll() or relay Worklet word arrays. Window retains
+identity and original raw timestamp/observedNowMs values, with no report payload.
+Worker projects them to the presentedNs/presentedHostNs pair described below.
+Window must not call AudioHost.poll() or relay Worklet word arrays. Window retains
 AudioContext output timestamp acquisition, its actual performance domain and
 one pending render deadline. Missing presentation remains null; Worker arrival
 time cannot substitute for original output or input evidence.
@@ -251,6 +252,42 @@ Source fixtures must cover serialized report/command ordering, real report and
 original presentation provenance, pending completion, refused overlap/external
 payloads, failed or cancelled reports and stale owner callbacks. Browser/device/
 audio execution and measured input/render/main-thread performance remain deferred.
+
+## Worker projection of original host observations
+
+Window acquires AudioHost.currentFrame for a live input batch and sends the
+unchanged u64 contextFrame instead of computing relative audioNs. The shared
+pure audioScheduleFromFrame(contextFrame,startFrame,rate) validates both u64
+frames and the actual u32 rate, adds the existing ceil(rate/50) frame lookahead
+with checked u64 range, clamps pre-start position to zero and uses frameNanos
+for the original exact floor conversion and signed-nanosecond bound. Worker
+runs this projection before any gameplay input mutation. Acquisition timestamps,
+input ordering and offset application remain unchanged.
+
+Window sends play-render with a raw timestamp snapshot containing the actual
+AudioContext contextTime and originating performanceTime, plus observedNowMs
+from the same Window performance domain. Unsupported/unavailable presentation
+is explicit null. No Worker arrival time, alternate clock origin or estimated
+presentation replaces these values. Worker snapshots and validates the numeric
+fields before awaiting direct report polling, projects them with the existing
+presentationPair helper and retains the former per-session monotonic guard.
+Regressing/stale/future/pre-start observations yield the same absent evidence;
+a repeated output position cannot refresh retained observation age. Malformed
+observations refuse before report admission or core mutation. Valid projected
+pairs pass unchanged into the existing Rust output/presentation evidence path.
+
+The actual page sends only raw frame/presentation observations. Explicit
+lower-level Worker callers may retain the previous audioNs or projected-pair
+API; raw and projected forms are mutually exclusive and no page failure silently
+falls back to a projected value. Render identity, pending command/report and
+latest-input completion barriers remain unchanged. Closing a session clears its
+retained presentation state; late observations cannot update a newer owner.
+
+Deferred source fixtures must prove exact long-duration/overflow frame projection,
+original Window timing across different Worker origins and awaits, equal-output
+age behavior, malformed/mixed-form atomic refusal, actual scalar page packets,
+and live/replay cancellation/completion regression. These source changes do not
+establish browser/device execution or measured performance acceptance.
 
 ## Finite live section controls
 

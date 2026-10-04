@@ -207,7 +207,8 @@ render progress. The host and direct poll share one real report getter path
 outside the audio callback.
 
 The live/replay page sends `play-render` with only render identity and the
-original Window output-presentation pair. The attached Worker serializes actual
+original Window raw output timestamp and observation time. The attached Worker
+projects that pair and serializes actual
 client poll operations with command submission: a submitted batch receives its
 ACK, then a waiting report is read before the next batch is extracted. There is
 one retained report observation, and overlap or externally supplied report
@@ -222,6 +223,26 @@ no longer calls `AudioHost.poll()` or relays report arrays. Window still supplie
 its actual AudioContext output timestamps and control-frame/input observations,
 so continuous host work has not disappeared entirely. Source fixtures and
 browser/audio/performance checks remain deferred.
+
+## Original host observations and Worker projection
+
+The live input packet forwards raw `contextFrame` from AudioHost. Worker computes
+the existing ceil(rate/50) frame lookahead and relative floor nanoseconds with
+`audioScheduleFromFrame`, checking u64 addition and signed-nanosecond bounds.
+Input acquisition timestamps and the actual armed grid remain unchanged.
+
+The presentation packet forwards `timestamp` (actual contextTime/performanceTime,
+or null when unavailable) and `observedNowMs` from Window. Worker snapshots these
+values before polling, uses the existing `presentationPair` conversion, and
+retains the original monotonic guard. Stale, future, regressing and prestart
+observations remain absent; equal output does not renew retained observation
+age. Worker arrival time never substitutes for Window time. Raw and explicit
+legacy projected packets are mutually exclusive; the page has no fallback.
+
+Main no longer performs steady audio-frame/presentation arithmetic. It retains
+browser-required acquisition, initial activation/start projection, periodic
+input/presentation observations and lifecycle work. Source fixtures and actual
+browser/audio/input/render/main-thread performance checks remain deferred.
 
 ## AudioWorklet component
 
