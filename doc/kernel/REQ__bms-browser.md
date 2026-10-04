@@ -1,5 +1,38 @@
 # Browser host and shared selected-file preparation
 
+## Local gameplay binding boundary
+
+The browser local gameplay binding consumes one live BrowserPrepared and the
+portable resolved source plan. Numeric binding rows carry the player ID followed
+by the existing seven physical identity words. Preserve member order and all
+source bits. Limit the combined bindings to 256 rows; each member must cover the
+prepared chart lanes. Multi-player mappings require their assigned exact source;
+solo automatic mappings remain available without choosing a device.
+
+Reuse StepLocalGameplay for every member, with one sample bank, output clock,
+BGM producer and command/ACK owner. Keep per-member score, capture, contact
+routing and retained note/pressed feedback. Decode canonical physical input using
+the existing codec and preserve source/contact/acquisition provenance. Raw HID
+uses the existing bounded profile adapter. No synthetic keyboard path or
+per-player audio transport is introduced. Validate actual output evidence before
+publishing report-driven BGM commands.
+
+The Worker canvas exposes local drawing through the common four-field page
+composer. Borrow actual member score, note progress and recent results instead
+of cloning chart-sized progress or score maps each frame. Retain the shared
+bounded image cache; select backgrounds from each visible member's own frontier.
+Drawing neither advances judgment nor creates output evidence. Invalid page
+requests refuse before surface recreation or resource synchronization.
+
+Known ceiling: The current browser page remains solo until the Worker and actual
+device assignment flow consume this binding and local canvas entry point. Rust binding
+availability does not prove browser execution, generated JS bindings, device
+coverage, shared audio completion or performance acceptance.
+The 64-member roster bound and 256 combined binding-row bound are independent:
+a chart requiring many lanes can reach the binding budget before the roster
+bound. Refuse incomplete member coverage rather than silently sharing sources
+or truncating mappings.
+
 ## Performance-first browser thread ownership
 
 The Window main thread must do as little application rendering as possible.
