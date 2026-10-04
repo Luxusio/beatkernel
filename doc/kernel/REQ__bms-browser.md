@@ -2305,13 +2305,14 @@ so one pen cannot release another pen's held control. Capture active pointers;
 cancel/lost capture emits only releases for that pointer's tracked held mask,
 without reading coordinates or inventing a new contact or arrival timestamp.
 Native up then lost capture must not duplicate
-releases. Whole-event validation and bounded output (at most 33 DTOs) precede
+releases. Whole-event validation and bounded output (at most 33 DTOs per sample;
+coalesced movement has the separate bound below) precede
 publication. Fatal malformed acquisition/sequence/capture/callback error retires
 the owner, detaches every installed listener and reports cleanup evidence.
 Close is idempotent and never publishes synthetic input. Already queued old
-callbacks cannot mutate replacement ownership. Coalesced/predicted history,
-pointer lock relative acquisition, pressure and tilt are not implemented here;
-the component acquires dispatched samples only.
+callbacks cannot mutate replacement ownership. Predicted history, pointer lock
+relative acquisition, pressure and tilt are not implemented here. Coalesced
+movement acquisition follows the contract below.
 
 Main creates the owner for enabled live solo or local discovery using the same
 source/sequence allocator as HID/Gamepad. Snapshot complete binding choices at
@@ -2345,3 +2346,54 @@ pens, original times/IDs, once-only release, malformed data, listener/capture
 failure and stale cleanup, live preparation/queue forwarding, exact local source
 assignment, replay exclusion and replacement isolation. Actual browser/device
 execution, OS differences and performance acceptance remain deferred.
+
+## Coalesced mouse and pen movement acquisition
+
+Window collects keyboard, touch, mouse/pen, HID and Gamepad input. It preserves
+original timestamps and identities; Worker owns decoding, mapping, judgment,
+replay and rendering. Necessary permissions, gestures, lifecycle and resize
+observations remain on Window. Setup and final-result DOM changes are event-driven.
+
+For pointermove only, PointerInputOwner reads getCoalescedEvents once and calls
+an available function once with the native event as receiver. A nonempty array
+replaces the dispatched sample; absent method or empty array retains the original
+single sample. Noncallable methods, malformed arrays or more than 256 children
+are fatal acquisition errors. Never read predicted samples or add polling,
+rawupdate, layout reads or a Window rendering loop. Down/up/cancel/lost semantics
+remain unchanged.
+
+Snapshot parent and child fields once. Every child must match signed-i32
+pointerId, mouse/pen pointerType and boolean isPrimary. Original millisecond times
+must be finite, nonnegative, ordered, no later than the parent and no earlier
+than the tracked held pointer. Preserve child timestamps through HOST nanosecond
+conversion. Child buttons are unsigned32 masks; final child buttons must match
+the dispatched mask. Project each child using parent.offset plus child.client
+minus parent.client on the current untransformed canvas; require finite input
+coordinates and finite-f32 results. Do not substitute arrival time or use child
+offset fields.
+
+Validate the complete list, chronology, active-identity capacity and expanded
+output of at most 1024 DTOs before allocating sequences or mutating held state,
+capture or publication. Compute actual aggregate button edges per type across
+all held identities. Emit one position per child and only real aggregate mask
+transitions. Allocate increasing full-u64 sequences, freeze DTOs and the batch,
+commit final held state once, reconcile capture once, then publish once. Ownership
+changes during getters, native callbacks or allocation must discard obsolete
+publication and retain existing authoritative cleanup failures.
+
+Main accepts at most 1024 acquired DTOs, validates original within-batch time
+ordering and the entire admitted batch before appending to its bounded queue,
+then pumps once. Existing Worker requests carry at most 256 events; queued
+remainders keep the watermark null. Keep existing source/control admission,
+global frontier and Worker fanout limits. Delayed history behind the already
+committed global frontier is refused, never retimed or rolled back.
+
+Independent deferred component and actual Host fixtures cover mouse/pen ordered
+history, button transitions, missing/empty fallback, malformed or excessive
+history, atomic refusal, derived coordinates, original timestamps, frozen
+publication, stale ownership and multiple existing pump chunks. Actual browser,
+device and performance acceptance remain deferred. Relative pointer lock,
+predicted input, pressure and tilt remain future work.
+
+The [W3C coalesced-events contract](https://www.w3.org/TR/pointerevents3/#coalesced-events)
+provides the native history ordering and identity requirements.
