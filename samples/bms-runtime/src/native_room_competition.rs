@@ -12,6 +12,10 @@ use crate::{
     },
     native_start::{NativeStartAgreement, NativeStartResult, SessionHostBracket},
     room_opponent_hud::{RoomHudStatus, RoomOpponentHud},
+    player,
+    room_presentation::{
+        RoomLobby, RoomPresentation, RoomStatus, RoomUiAction, RoomUiReply, ROOM_UI_CAPACITY,
+    },
 };
 use beatkernel::time::ClockPoint;
 use std::{
@@ -86,6 +90,18 @@ struct Pending {
     id: u64,
     kind: CommandKind,
 }
+struct UiPending {
+    id: u64,
+    network: Option<u64>,
+    result: Option<Result<(), String>>,
+}
+fn ui_message(message: &str) -> String {
+    message
+        .chars()
+        .take(512)
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect()
+}
 
 /// Owns one actual local roster, one portable retained HUD and bounded command
 /// correlations. A room snapshot alone never authorizes native audio startup.
@@ -111,6 +127,10 @@ pub struct NativeRoomCompetition<P: NativeRoomPort = NativeRoomNetwork> {
     leaving: bool,
     cancelled: bool,
     outcome: Option<NativeRoomOutcome>,
+    ui_pending: Vec<UiPending>,
+    ui_presentation: Option<Arc<RoomPresentation>>,
+    ui_dirty: bool,
+    ui_error: Option<String>,
 }
 
 impl<P: NativeRoomPort> NativeRoomCompetition<P> {
@@ -134,9 +154,13 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
             peer_sequences
                 .try_reserve_exact(63)
                 .map_err(io::Error::other)?;
-            Ok((pending, replies, peer_sequences))
+            let mut ui_pending = Vec::new();
+            ui_pending
+                .try_reserve_exact(ROOM_UI_CAPACITY)
+                .map_err(io::Error::other)?;
+            Ok((pending, replies, peer_sequences, ui_pending))
         })();
-        let (pending, replies, peer_sequences) = match validated {
+        let (pending, replies, peer_sequences, ui_pending) = match validated {
             Ok(value) => value,
             Err(error) => {
                 let outcome = port.stop();
@@ -170,6 +194,10 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
             leaving: false,
             cancelled: false,
             outcome: None,
+            ui_pending,
+            ui_presentation: None,
+            ui_dirty: true,
+            ui_error: None,
         })
     }
 
@@ -199,15 +227,17 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
     }
 
     pub fn set_page(&mut self, page: usize) -> Result<(), String> {
-        self.hud
-            .as_mut()
-            .ok_or("room HUD is not prepared")?
-            .set_page(page)
+        let hud = self.hud.as_mut().ok_or("room HUD is not prepared")?;
+        let previous = hud.page_index();
+        hud.set_page(page)?;
+        self.ui_dirty |= previous != page;
+        Ok(())
     }
     pub fn disable_hud(&mut self) {
         self.fail_hud("room score presentation was disabled".into());
     }
     fn fail_hud(&mut self, error: String) {
+        self.ui_dirty |= self.hud_error.is_none();
         self.hud_error.get_or_insert(error);
         if let Some(hud) = &mut self.hud {
             hud.mark_failed();
@@ -218,11 +248,18 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
             if let Some(hud) = &mut self.hud {
                 if let Err(error) = hud.set_status(status) {
                     self.fail_hud(error);
+                } else if self
+                    .ui_presentation
+                    .as_ref()
+                    .is_none_or(|page| page.heading != hud.heading())
+                {
+                    self.ui_dirty = true;
                 }
             }
         }
     }
     fn fail_network(&mut self, error: io::Error) {
+        self.ui_dirty |= self.failure.is_none();
         self.failure.get_or_insert_with(|| error.into());
         self.port.request_stop();
         self.hud_status(RoomHudStatus::Disconnected);
@@ -328,6 +365,9 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
                 }
             }
         }
+        self.ui_dirty |= self.snapshot.revision != poll.snapshot.revision
+            || self.snapshot.participant != poll.snapshot.participant
+            || self.snapshot.terminal != poll.snapshot.terminal;
         self.snapshot = poll.snapshot;
         if let Some(room) = &self.snapshot.room {
             if room.phase == GroupRoomPhase::Prepared {
@@ -372,11 +412,14 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
                 let Some(hud) = &mut self.hud else {
                     continue;
                 };
+                let visible = hud.page().iter().any(|row| row.participant == *participant);
                 if let Err(error) = hud.update(*participant, prefix) {
                     self.hud_error = Some(error);
                     hud.mark_failed();
+                    self.ui_dirty = true;
                     break;
                 }
+                self.ui_dirty |= visible;
                 if let Some(index) = previous {
                     self.peer_sequences[index].1 = prefix.sequence;
                 } else {
@@ -410,6 +453,18 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
     /// Local phase refusals are returned through take_reply, without poisoning
     /// the room. Terminal network failures remain independently inspectable.
     pub fn poll(&mut self) -> io::Result<()> {
+        self.service_ui_cancellation();
+        if self.cancelled {
+            self.publish_ui();
+            return Ok(());
+        }
+        let result = self.poll_network();
+        self.publish_ui();
+        self.service_ui_requests();
+        self.publish_ui();
+        result
+    }
+    fn poll_network(&mut self) -> io::Result<()> {
         if self.outcome.is_some() {
             return Ok(());
         }
@@ -432,6 +487,202 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
         // Cleanup has its own terminal field. Do not relabel it as a protocol
         // error merely because the terminal snapshot was observed by polling.
         Ok(())
+    }
+
+    fn service_ui_cancellation(&mut self) {
+        if player::cancelled() && !self.cancelled {
+            self.cancelled = true;
+            self.port.request_stop();
+            self.hud_status(RoomHudStatus::Disconnected);
+            self.ui_dirty = true;
+            player::close_room_controls();
+            self.ui_pending.clear();
+        }
+    }
+    fn service_ui_requests(&mut self) {
+        if !player::attached() {
+            return;
+        }
+        self.service_ui_cancellation();
+        if self.cancelled || self.finishing || self.outcome.is_some() {
+            player::close_room_controls();
+            self.ui_pending.clear();
+            return;
+        }
+        // Retain a result under temporary channel contention; never resend its
+        // protocol command, and never expose a network identity as a UI identity.
+        let mut index = 0;
+        while index < self.ui_pending.len() {
+            if self.ui_pending[index].result.is_none() {
+                if let Some(network) = self.ui_pending[index].network {
+                    if let Some(reply) = self.replies.iter().position(|reply| reply.id == network) {
+                        let reply = self.replies.remove(reply).expect("located room reply");
+                        self.ui_pending[index].result =
+                            Some(reply.result.map_err(|error| ui_message(&error.to_string())));
+                    }
+                }
+            }
+            if let Some(result) = self.ui_pending[index].result.as_ref() {
+                let reply = RoomUiReply {
+                    id: self.ui_pending[index].id,
+                    result: result.clone(),
+                };
+                match player::reply_room(reply) {
+                    Ok(()) => {
+                        self.ui_pending.remove(index);
+                        continue;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                    Err(error) => {
+                        self.ui_error
+                            .get_or_insert_with(|| ui_message(&error.to_string()));
+                        player::close_room_controls();
+                        self.ui_pending.clear();
+                        self.ui_dirty = true;
+                        return;
+                    }
+                }
+            }
+            index += 1;
+        }
+        for _ in self.ui_pending.len()..ROOM_UI_CAPACITY {
+            let request = match player::take_room_request() {
+                Ok(Some(request)) => request,
+                Ok(None) => break,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+                Err(error) => {
+                    self.ui_error
+                        .get_or_insert_with(|| ui_message(&error.to_string()));
+                    self.ui_dirty = true;
+                    break;
+                }
+            };
+            if player::cancelled() {
+                self.service_ui_cancellation();
+                break;
+            }
+            let allowed = self
+                .ui_presentation
+                .as_ref()
+                .is_some_and(|page| page.allows(request.action));
+            let mut pending = UiPending {
+                id: request.id,
+                network: None,
+                result: None,
+            };
+            if !allowed {
+                pending.result =
+                    Some(Err("room action is unavailable in the current owner".into()));
+            } else {
+                let result = match request.action {
+                    RoomUiAction::Seal => self.seal().map(Some),
+                    RoomUiAction::Ready => self.ready().map(Some),
+                    RoomUiAction::Leave => self.leave().map(Some),
+                    RoomUiAction::Page(page) => self.set_page(page).map(|_| None).map_err(invalid),
+                };
+                match result {
+                    Ok(Some(network)) => pending.network = Some(network),
+                    Ok(None) => pending.result = Some(Ok(())),
+                    Err(error) => pending.result = Some(Err(ui_message(&error.to_string()))),
+                }
+            }
+            // Immediate local page/refusal results have no network receipt to await.
+            if let Some(result) = pending.result.as_ref() {
+                if player::reply_room(RoomUiReply {
+                    id: pending.id,
+                    result: result.clone(),
+                })
+                .is_ok()
+                {
+                    continue;
+                }
+            }
+            self.ui_pending.push(pending);
+        }
+    }
+    fn publish_ui(&mut self) {
+        if !player::attached() {
+            return;
+        }
+        let status = if self.finishing
+            || self.outcome.is_some()
+            || self.cancelled
+            || self.leaving
+            || self.pending(CommandKind::Leave)
+        {
+            RoomStatus::Closed
+        } else if self.failure.is_some() || self.snapshot.terminal.is_some() {
+            RoomStatus::Disconnected
+        } else if self.snapshot.schedule.is_some() {
+            RoomStatus::Connected
+        } else {
+            RoomStatus::Waiting
+        };
+        self.ui_dirty |= self
+            .ui_presentation
+            .as_ref()
+            .is_none_or(|old| old.status != status);
+        if self.ui_dirty {
+            let build = (|| -> Result<Arc<RoomPresentation>, String> {
+                let lobby = if let Some(old) = self.ui_presentation.as_ref().filter(|old| {
+                    old.lobby.revision == self.snapshot.revision
+                        && old.lobby.participant == self.snapshot.participant
+                }) {
+                    old.lobby.clone()
+                } else {
+                    let members = self
+                        .snapshot
+                        .room
+                        .as_ref()
+                        .map_or_else(Vec::new, |room| room.members.clone());
+                    Arc::new(RoomLobby::new(
+                        self.snapshot.participant,
+                        self.snapshot.revision,
+                        self.snapshot.room.as_ref().map(|room| room.phase),
+                        self.snapshot
+                            .room
+                            .as_ref()
+                            .and_then(|room| room.deadline_ns),
+                        members,
+                    )?)
+                };
+                let error = self
+                    .ui_error
+                    .as_deref()
+                    .or(self.hud_error.as_deref())
+                    .or_else(|| self.failure.as_ref().map(|error| error.message.as_str()))
+                    .or_else(|| {
+                        self.snapshot.terminal.as_ref().and_then(|outcome| {
+                            outcome
+                                .cleanup_error
+                                .as_ref()
+                                .map(|error| error.message.as_str())
+                        })
+                    })
+                    .map(ui_message);
+                Ok(Arc::new(RoomPresentation::new(
+                    lobby,
+                    status,
+                    self.hud.as_ref(),
+                    error,
+                )?))
+            })();
+            match build {
+                Ok(page) => {
+                    self.ui_presentation = Some(page.clone());
+                    self.ui_dirty = false;
+                    if let Err(error) = player::publish_room(page) {
+                        self.ui_error.get_or_insert(error);
+                        self.ui_dirty = true;
+                    }
+                }
+                Err(error) => {
+                    self.ui_error.get_or_insert(error);
+                }
+            }
+        } else {
+            player::retry_room_publication();
+        }
     }
 
     fn validated_local(&self, members: &[MemberProgress]) -> io::Result<Vec<MemberProgress>> {
@@ -571,6 +822,7 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
             return outcome.clone();
         }
         self.finishing = true;
+        player::close_room_controls();
         let _ = self.poll();
         let result = if completed && self.local.is_some() {
             self.validated_local(members).and_then(|terminal| {
@@ -616,6 +868,8 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
         self.snapshot.terminal = Some(outcome.clone());
         self.hud_status(RoomHudStatus::Disconnected);
         self.outcome = Some(outcome.clone());
+        self.ui_dirty = true;
+        self.publish_ui();
         outcome
     }
 }
@@ -626,6 +880,10 @@ impl<P: NativeRoomPort> NativeStartAgreement for NativeRoomCompetition<P> {
         service: &mut dyn FnMut() -> NativeStartResult<bool>,
     ) -> NativeStartResult<bool> {
         let result = (|| -> NativeStartResult<bool> {
+            self.service_ui_cancellation();
+            if self.cancelled {
+                return Ok(false);
+            }
             if self.finishing
                 || self.outcome.is_some()
                 || self.cancelled
@@ -638,7 +896,14 @@ impl<P: NativeRoomPort> NativeStartAgreement for NativeRoomCompetition<P> {
                 if !service()? {
                     return Ok(false);
                 }
-                self.poll()?;
+                let polled = self.poll();
+                if self.cancelled {
+                    return Ok(false);
+                }
+                polled?;
+                if self.leaving || self.pending(CommandKind::Leave) {
+                    return Err("native room Leave is pending before output activation".into());
+                }
                 // A late failed Commit can be retained as history; terminal
                 // failure must be checked before using that schedule for output.
                 if self.snapshot.terminal.is_some() {
@@ -705,3 +970,7 @@ impl<P: NativeRoomPort> Drop for NativeRoomCompetition<P> {
 #[cfg(test)]
 #[path = "native_room_competition_fixtures.rs"]
 mod fixtures;
+
+#[cfg(test)]
+#[path = "native_room_ui_fixtures.rs"]
+mod ui_fixtures;
