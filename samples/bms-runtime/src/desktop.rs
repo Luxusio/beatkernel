@@ -1,6 +1,9 @@
 //! Native main-thread presentation of snapshots from the actual gameplay owner.
 use crate::desktop_clipboard::ClipboardWorker;
 #[cfg(test)]
+#[path = "desktop_catalog_fixtures.rs"]
+mod catalog_fixtures;
+#[cfg(test)]
 #[path = "desktop_clipboard_fixtures.rs"]
 mod clipboard_fixtures;
 #[cfg(test)]
@@ -37,6 +40,7 @@ use beatkernel_bms_runtime::{
     font_text::{FontText, MAX_TEXT_GLYPHS},
     local_players::PlayerId,
     local_setup::LocalSetup,
+    native_catalog::{CatalogControl, NativeCatalog},
     panel_scope::{PanelScope, TaskPermit},
     player, player_chart,
     room_presentation::RoomUiAction,
@@ -217,15 +221,82 @@ struct Entry {
     artist: String,
 }
 fn prepare_title_font(bytes: Vec<u8>, items: &[SelectionItem]) -> Result<Arc<FontAtlas>, String> {
+    prepare_title_font_with(bytes, items, || Ok(()))
+}
+fn prepare_title_font_with(
+    bytes: Vec<u8>,
+    items: &[SelectionItem],
+    mut checkpoint: impl FnMut() -> Result<(), String>,
+) -> Result<Arc<FontAtlas>, String> {
+    checkpoint()?;
     let mut atlas = FontAtlas::new(bytes, 14.0, 1024, 1024, 4096)?;
     for item in items {
+        checkpoint()?;
         for value in [&item.title, &item.artist] {
             for character in value.chars().take(MAX_TEXT_GLYPHS) {
                 atlas.prepare(character)?;
             }
         }
     }
+    checkpoint()?;
     Ok(Arc::new(atlas))
+}
+
+struct PreparedCatalog {
+    entries: Vec<Entry>,
+    items: Arc<[SelectionItem]>,
+    search: CatalogSearch,
+    diagnostics: Arc<[String]>,
+    font: Option<Arc<FontAtlas>>,
+}
+fn prepare_catalog(
+    library: player_chart::ChartLibrary,
+    font_path: Option<PathBuf>,
+    control: &CatalogControl,
+) -> Result<PreparedCatalog, String> {
+    control.checkpoint()?;
+    let entries: Vec<_> = library
+        .entries
+        .into_iter()
+        .map(|entry| Entry {
+            path: entry.path,
+            title: entry.title,
+            artist: entry.artist,
+        })
+        .collect();
+    let items: Arc<[SelectionItem]> = entries
+        .iter()
+        .map(|entry| SelectionItem {
+            title: entry.title.clone(),
+            artist: entry.artist.clone(),
+        })
+        .collect::<Vec<_>>()
+        .into();
+    control.checkpoint()?;
+    let search = CatalogSearch::new(&items)?;
+    control.checkpoint()?;
+    let font = if let Some(path) = font_path {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .map_err(|error| error.to_string())?
+            .take(32 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        control.checkpoint()?;
+        Some(prepare_title_font_with(bytes, &items, || {
+            control.checkpoint()
+        })?)
+    } else {
+        None
+    };
+    control.checkpoint()?;
+    Ok(PreparedCatalog {
+        entries,
+        items,
+        search,
+        diagnostics: library.diagnostics.into(),
+        font,
+    })
 }
 struct Game {
     viewer: player::PlayerViewer,
@@ -519,26 +590,19 @@ pub(super) fn run(
                 .apply_overrides(&options.display_overrides)?,
         );
     }
-    let (entries, diagnostics) = if let Some(root) = &options.library {
-        let library = match player_chart::scan_library(root) {
-            Ok(library) => library,
-            Err(error) => player_chart::ChartLibrary {
-                entries: Vec::new(),
-                diagnostics: vec![error.to_string()],
-            },
-        };
-        (
-            library
-                .entries
-                .into_iter()
-                .map(|entry| Entry {
-                    path: entry.path,
-                    title: entry.title,
-                    artist: entry.artist,
-                })
-                .collect::<Vec<_>>(),
-            library.diagnostics,
-        )
+    let (catalog, catalog_message) = if let Some(root) = &options.library {
+        let font_path = options.title_font.clone();
+        match NativeCatalog::spawn(root.clone(), move |library, control| {
+            prepare_catalog(library, font_path, control)
+        }) {
+            Ok(catalog) => (Some(catalog), Some("Loading library catalog…".into())),
+            Err(error) => (None, Some(format!("Catalog unavailable: {error}"))),
+        }
+    } else {
+        (None, None)
+    };
+    let (entries, diagnostics) = if options.library.is_some() {
+        (Vec::new(), Vec::new())
     } else {
         let path = options
             .chart
@@ -570,7 +634,9 @@ pub(super) fn run(
     let selection_diagnostics = diagnostics.into();
     let catalog_search = CatalogSearch::new(&selection_items)?;
     let search_editor = LineEditor::new("", 256)?;
-    let title_font = if let Some(path) = &options.title_font {
+    let title_font = if options.library.is_some() {
+        None
+    } else if let Some(path) = &options.title_font {
         let mut bytes = Vec::new();
         std::fs::File::open(path)?
             .take(32 * 1024 * 1024 + 1)
@@ -602,6 +668,9 @@ pub(super) fn run(
         settings: None,
         settings_view: None,
         profile_io: None,
+        catalog_message,
+        catalog_progress: player_chart::ScanProgress::default(),
+        catalog,
         entries,
         selected: 0,
         selection_items,
@@ -1081,6 +1150,9 @@ struct Desktop {
     settings: Option<PanelScope<SettingsDraft>>,
     settings_view: Option<SettingsView>,
     profile_io: Option<ProfileOperation>,
+    catalog: Option<NativeCatalog<PreparedCatalog>>,
+    catalog_progress: player_chart::ScanProgress,
+    catalog_message: Option<String>,
     entries: Vec<Entry>,
     selected: usize,
     selection_items: Arc<[SelectionItem]>,
@@ -1116,6 +1188,99 @@ struct Desktop {
     hits: Vec<(ControlId, Bounds)>,
 }
 impl Desktop {
+    fn catalog_busy(&self) -> bool {
+        // A worker can finish just after collect_catalog's poll. Keep waking
+        // active Selection until it has actually consumed that joined result.
+        self.catalog.as_ref().is_some_and(|catalog| {
+            !catalog.is_finished()
+                || (!self.is_suspended() && self.navigator.route() == ScreenRoute::Selection)
+        })
+    }
+    fn collect_catalog(&mut self) {
+        let Some(catalog) = &mut self.catalog else {
+            return;
+        };
+        let progress = catalog.progress();
+        let changed = progress != self.catalog_progress;
+        if changed {
+            self.catalog_progress = progress;
+            self.catalog_message = Some(format!(
+                "{} - {} charts, {} entries, {} bytes",
+                if progress.stage == player_chart::ScanStage::Complete {
+                    "Preparing search and title font"
+                } else {
+                    "Loading library catalog"
+                },
+                progress.charts,
+                progress.entries,
+                progress.bytes
+            ));
+        }
+        // A hidden/suspended Selection does not receive another panel's draft
+        // or reactive bindings. The finished thread retains its owned result.
+        if !self.closing()
+            && (self.is_suspended() || self.navigator.route() != ScreenRoute::Selection)
+        {
+            return;
+        }
+        let result = self.catalog.as_mut().and_then(NativeCatalog::poll);
+        let completed = result.is_some();
+        if let Some(result) = result {
+            self.catalog = None;
+            if self.closing() {
+                return;
+            }
+            match result.and_then(|catalog| self.install_catalog(catalog)) {
+                Ok(()) => self.catalog_message = None,
+                Err(error) => self.catalog_message = Some(format!("Catalog unavailable: {error}")),
+            }
+        }
+        if (changed || completed) && !self.closing() && !self.is_suspended() && !self.occluded {
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+    }
+    fn install_catalog(&mut self, catalog: PreparedCatalog) -> Result<(), String> {
+        if self.closing() || self.is_suspended() || self.navigator.route() != ScreenRoute::Selection
+        {
+            return Err("catalog Selection is not active".into());
+        }
+        let search_editor = LineEditor::new("", 256)?;
+        // Preflight GPU ownership before publishing any catalog component.
+        let font = if let (Some(renderer), Some(atlas)) = (&mut self.renderer, &catalog.font) {
+            let texture = renderer.upload_texture(atlas.image())?;
+            match FontText::new(Arc::clone(atlas), texture) {
+                Ok(font) => Some(font),
+                Err(error) => {
+                    let _ = renderer.remove_texture(texture);
+                    return Err(error);
+                }
+            }
+        } else {
+            None
+        };
+        if let (Some(renderer), Some(previous)) = (&mut self.renderer, &self.font_text) {
+            if let Err(error) = renderer.remove_texture(previous.texture_id()) {
+                if let Some(font) = &font {
+                    let _ = renderer.remove_texture(font.texture_id());
+                }
+                return Err(error);
+            }
+        }
+        self.entries = catalog.entries;
+        self.selection_items = catalog.items;
+        self.catalog_search = catalog.search;
+        self.selection_diagnostics = catalog.diagnostics;
+        self.title_font = catalog.font;
+        self.selected = 0;
+        self.search_editor = search_editor;
+        self.search_focused = false;
+        self.catalog_wheel.reset();
+        self.gesture.cancel();
+        self.bind_title_font(font);
+        Ok(())
+    }
     fn bind_title_font(&mut self, font: Option<FontText>) {
         self.font_text = font;
         self.selection_view = None;
@@ -1346,6 +1511,9 @@ impl Desktop {
             self.commit_route(next);
         }
         self.cancel();
+        if let Some(catalog) = &self.catalog {
+            catalog.cancel();
+        }
         if let Some(clipboard) = &mut self.clipboard {
             clipboard.begin_close();
         }
@@ -3056,6 +3224,9 @@ impl Desktop {
         }
     }
     fn set_search_focus(&mut self, focused: bool) {
+        if self.catalog.is_some() {
+            return;
+        }
         if self.search_focused != focused {
             self.catalog_wheel.reset();
             self.search_focused = focused;
@@ -3747,6 +3918,9 @@ impl Desktop {
         }
     }
     fn start(&mut self) -> Result<(), String> {
+        if self.catalog.is_some() {
+            return Err("wait for the library catalog to finish loading".into());
+        }
         if !self.ui_ready() || self.navigator.route() != ScreenRoute::Selection {
             return Err("chart selection is not active".into());
         }
@@ -3776,7 +3950,7 @@ impl Desktop {
         Ok(())
     }
     fn reactive_waits_for_events(&self) -> bool {
-        self.reactive_scene_idle() && !self.clipboard_busy()
+        self.reactive_scene_idle() && !self.clipboard_busy() && !self.catalog_busy()
     }
     fn reactive_scene_idle(&self) -> bool {
         matches!(
@@ -3797,6 +3971,70 @@ impl Desktop {
                 .is_none_or(|renderer| !renderer.needs_redraw())
     }
     fn draw_selection(&mut self) -> Result<(), String> {
+        if self.catalog.is_some() {
+            self.selection_view = None;
+            self.painted_reactive = None;
+            self.scene.clear();
+            self.hits.clear();
+            rect(&mut self.scene, 0, 0, 960, 720, 0x10151e);
+            text(
+                &mut self.scene,
+                24,
+                20,
+                "BEATKERNEL BMS PLAYER",
+                3,
+                0xf0f4ff,
+            );
+            text(&mut self.scene, 24, 140, "LOADING LIBRARY", 2, 0xf0f4ff);
+            text(
+                &mut self.scene,
+                24,
+                180,
+                self.catalog_message
+                    .as_deref()
+                    .unwrap_or("Preparing library catalog"),
+                1,
+                0x9bb1cf,
+            );
+            text(
+                &mut self.scene,
+                24,
+                204,
+                "Chart selection is available when preparation finishes.",
+                1,
+                0x9bb1cf,
+            );
+            molecules::button(
+                &mut self.scene,
+                Bounds {
+                    x: 550,
+                    y: 65,
+                    width: 180,
+                    height: 34,
+                },
+                "START",
+                false,
+                false,
+            );
+            let point = self.point();
+            for (id, y, label) in [(ControlId(5), 20, "SETTINGS"), (ControlId(4), 65, "EXIT")] {
+                control(
+                    &mut self.scene,
+                    &mut self.hits,
+                    &self.gesture,
+                    point,
+                    id,
+                    Bounds {
+                        x: 750,
+                        y,
+                        width: 180,
+                        height: 34,
+                    },
+                    label,
+                );
+            }
+            return self.render_scene();
+        }
         let id = self
             .navigator
             .active_id()
@@ -3825,7 +4063,8 @@ impl Desktop {
             error: self
                 .input_font_error
                 .clone()
-                .or_else(|| self.failure.clone()),
+                .or_else(|| self.failure.clone())
+                .or_else(|| self.catalog_message.clone()),
             backend_pending: self.active_backend != self.options.backend,
         };
         let view = self
@@ -4691,6 +4930,7 @@ impl ApplicationHandler for Desktop {
         }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.collect_catalog();
         self.collect_game();
         self.collect_profile();
         self.sync_ime();
@@ -4698,6 +4938,7 @@ impl ApplicationHandler for Desktop {
         if self.closing()
             && self.game.as_ref().is_none_or(|game| game.joined)
             && self.profile_io.is_none()
+            && self.catalog.is_none()
             && self
                 .clipboard
                 .as_ref()
@@ -4711,7 +4952,7 @@ impl ApplicationHandler for Desktop {
         } else if self.closing()
             || self.is_suspended()
             || self.occluded
-            || (self.clipboard_busy() && self.reactive_scene_idle())
+            || ((self.clipboard_busy() || self.catalog_busy()) && self.reactive_scene_idle())
         {
             event_loop.set_control_flow(ControlFlow::WaitUntil(
                 Instant::now() + Duration::from_millis(4),
@@ -4725,7 +4966,7 @@ impl ApplicationHandler for Desktop {
                 self.next_frame =
                     Instant::now() + Duration::from_secs_f64(1.0 / self.options.fps as f64);
             }
-            let wake = if self.clipboard_busy() {
+            let wake = if self.clipboard_busy() || self.catalog_busy() {
                 self.next_frame
                     .min(Instant::now() + Duration::from_millis(4))
             } else {
@@ -4740,6 +4981,7 @@ impl ApplicationHandler for Desktop {
         self.game = None;
         self.release_backgrounds();
         self.profile_io = None;
+        self.catalog = None;
         self.clipboard = None;
     }
 }
@@ -5830,6 +6072,9 @@ mod tests {
             settings: None,
             settings_view: None,
             profile_io: None,
+            catalog: None,
+            catalog_progress: player_chart::ScanProgress::default(),
+            catalog_message: None,
             entries: vec![Entry {
                 path: PathBuf::from("fixture.bms"),
                 title: "FIXTURE".into(),
