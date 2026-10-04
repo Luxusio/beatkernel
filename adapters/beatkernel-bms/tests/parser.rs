@@ -425,13 +425,7 @@ fn stops_ignore_measure_length_and_use_same_beat_new_tempo() {
 }
 #[test]
 fn unsupported_and_missing_definitions_are_line_specific() {
-    for command in [
-        "#SCROLL 2",
-        "#LNTYPE 3",
-        "#STP 001.0 100",
-        "#00031:01",
-        "#000SC:01",
-    ] {
+    for command in ["#SCROLL 2", "#LNTYPE 3", "#STP 001.0 100", "#000SC:01"] {
         let error = parse(command, ParseOptions::default()).unwrap_err();
         assert_eq!(error.line, 1, "{command}");
         assert!(

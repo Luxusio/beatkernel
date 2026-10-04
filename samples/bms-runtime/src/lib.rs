@@ -100,6 +100,8 @@ mod image_base_fixtures;
 pub mod image_crop;
 /// Bounded raster decoding during preparation, independent of GPU ownership.
 pub mod image_decode;
+#[cfg(test)]
+mod invisible_admission_fixtures;
 /// Fixed-capacity lane feedback from actual local judge results and song time.
 pub mod judge_feedback;
 pub mod live_pause;
@@ -537,7 +539,8 @@ fn prepare_seeded(
 }
 
 /// Prepares the same chart and assets from bounded bytes and a scoped resource source.
-/// Replay setup is validated before any resource acquisition.
+/// Unsupported invisible timelines are refused before replay setup; replay
+/// setup is then validated before any resource acquisition.
 /// Equal resolved keys reuse decoding within this call; source bytes and the
 /// decoder must remain stable during preparation. Each sample ID owns its PCM.
 pub fn prepare_from_source(
@@ -558,6 +561,9 @@ pub fn prepare_from_source(
         options.max_bytes,
     )?;
     let source = parse_seeded(&text, options, seed)?;
+    if !source.invisible.is_empty() {
+        return Err("invisible keysound playback is not supported during preparation".into());
+    }
     let wav_gain = source.wav_gain()?;
     if let Some((file, limits)) = replay {
         replay_playback::validate_setup(&source, file, limits)?;

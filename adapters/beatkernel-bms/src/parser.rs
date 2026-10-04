@@ -147,6 +147,9 @@ fn visible(channel: u8) -> bool {
 fn long(channel: u8) -> bool {
     matches!(channel, 0x51..=0x59 | 0x61..=0x69)
 }
+fn invisible(channel: u8) -> bool {
+    matches!(channel, 0x31..=0x39 | 0x41..=0x49)
+}
 fn lane(channel: u8) -> BmsLane {
     BmsLane(if long(channel) {
         channel - 0x40
@@ -266,6 +269,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
     let mut warnings = Vec::new();
     let mut rows = Vec::new();
     let mut visual_rows = Vec::new();
+    let mut invisible_rows = Vec::new();
     let mut raw_count = 0usize;
     let mut max_measure = 0usize;
     for (line, command_line) in selected {
@@ -305,6 +309,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
             if !matches!(channel, 1 | 3 | 4 | 6 | 7 | 8 | 9 | 0x0a | 0x0b..=0x0e)
                 && !visible(channel)
                 && !long(channel)
+                && !invisible(channel)
             {
                 return Err(fail(
                     line,
@@ -342,6 +347,8 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
             };
             if matches!(channel, 4 | 6 | 7 | 0x0a | 0x0b..=0x0e) {
                 visual_rows.push(row);
+            } else if invisible(channel) {
+                invisible_rows.push(row);
             } else {
                 rows.push(row);
             }
@@ -689,6 +696,66 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
     bga.sort_by_key(|event| (event.beat, event.ordinal));
     let mut bga_opacity: Vec<_> = opacity_merged.into_values().collect();
     bga_opacity.sort_by_key(|event| (event.beat, event.ordinal));
+    // Invisible subdivisions never enlarge either gameplay or visual grids.
+    let mut invisible_resolution = resolution;
+    let mut invisible_events = Vec::new();
+    let mut invisible_ordinal = 0u64;
+    for row in invisible_rows {
+        for (index, value) in row
+            .tokens
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, value)| *value != 0)
+        {
+            let offset = arithmetic(
+                row.line,
+                durations[row.measure].mul(Ratio {
+                    n: index as i128,
+                    d: row.tokens.len() as i128,
+                }),
+            )?;
+            let beat = arithmetic(row.line, origins[row.measure].add(offset))?;
+            update_resolution(
+                &mut invisible_resolution,
+                beat.d,
+                options.max_resolution,
+                row.line,
+            )?;
+            // Validate every selected nonzero reference, even a replaced token.
+            let sample = sample(value, row.line, &samples)?;
+            invisible_events.push((
+                beat,
+                BmsLane(row.channel - 0x20),
+                sample,
+                invisible_ordinal,
+                row.line,
+            ));
+            invisible_ordinal += 1;
+        }
+    }
+    let invisible_resolution =
+        u32::try_from(invisible_resolution).map_err(|_| fail(0, BmsErrorKind::Resolution))?;
+    let mut invisible_merged = BTreeMap::new();
+    for (beat, lane, sample, ordinal, line) in invisible_events {
+        let tick = arithmetic(line, beat.ticks(invisible_resolution))?;
+        define(
+            &mut invisible_merged,
+            (tick, lane),
+            InvisibleEvent {
+                beat: Beat::new(tick).map_err(|error| fail(line, BmsErrorKind::Compile(error)))?,
+                lane,
+                sample,
+                ordinal,
+                line,
+            },
+            line,
+            "invisible lane position",
+            options.duplicates,
+        )?;
+    }
+    let mut invisible: Vec<_> = invisible_merged.into_values().collect();
+    invisible.sort_by_key(|event| (event.beat, event.ordinal));
     let resolution = u32::try_from(resolution).map_err(|_| fail(0, BmsErrorKind::Resolution))?;
     let mut measures = Vec::with_capacity(max_measure + 1);
     for measure in 0..=max_measure {
@@ -934,6 +1001,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
         .and_then(|count| count.checked_add(bgm.len()))
         .and_then(|count| count.checked_add(bga.len()))
         .and_then(|count| count.checked_add(bga_opacity.len()))
+        .and_then(|count| count.checked_add(invisible.len()))
         .filter(|count| *count <= options.max_objects && *count <= MAX_SOURCE_ITEMS)
         .ok_or_else(|| fail(0, BmsErrorKind::Limit("source items")))?;
     let mut source = SourceChart::new(resolution, base)
@@ -1018,6 +1086,8 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
         bga,
         bga_opacity,
         bga_ticks_per_beat: visual_resolution,
+        invisible,
+        invisible_ticks_per_beat: invisible_resolution,
         notes: mapped,
         bgm,
         metadata,

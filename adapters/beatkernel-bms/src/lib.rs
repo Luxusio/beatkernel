@@ -3,10 +3,12 @@
 //! Seeded RANDOM/SETRANDOM and SWITCH flow resolve before payload interpretation.
 //! Long-note tail tokens are metadata only and never automatic sounds.
 //! BMP image selections compile separately without changing the gameplay grid.
+//! Invisible keysound selections have a separate unjudged timing API.
 //! Asset paths are opaque references; loading/decoding belongs to the application.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 mod conditional;
+mod invisible;
 mod parser;
 mod rational;
 use beatkernel::{
@@ -18,6 +20,7 @@ use beatkernel::{
     time::Timestamp,
 };
 pub use parser::{parse, parse_seeded};
+pub use invisible::{InvisibleEvent, ScheduledInvisible};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Explicit input semantics for the BMS adapter's builtin judge rules.
@@ -50,7 +53,7 @@ pub struct ParseOptions {
     pub max_lines: usize,
     /// Maximum bytes in one physical line.
     pub max_line_bytes: usize,
-    /// Maximum nonzero tokens and final gameplay/timing/BGM/BGA items combined.
+    /// Maximum nonzero tokens and final gameplay/timing/BGM/BGA/invisible items combined.
     pub max_objects: usize,
     /// Maximum exact quarter-beat tick resolution (LCM); never silently rounded.
     pub max_resolution: u32,
@@ -277,6 +280,10 @@ pub struct BmsChart {
     pub bga_opacity: Vec<BgaOpacityEvent>,
     /// Independent visual tick grid encompassing the gameplay resolution.
     pub bga_ticks_per_beat: u32,
+    /// Unjudged keysound selections in independent beat/ordinal order.
+    pub invisible: Vec<InvisibleEvent>,
+    /// Independent invisible tick grid encompassing the gameplay resolution.
+    pub invisible_ticks_per_beat: u32,
     /// Lane/keysound mapping by chart-local object identity.
     pub notes: Vec<BmsNote>,
     /// Layered source BGM events in beat/ordinal order.
@@ -355,6 +362,7 @@ impl BmsChart {
             })
     }
     /// Compiles gameplay, BGM and visual selections with checked core timing.
+    /// Invisible keysound selections require the separate `compile_invisible` API.
     pub fn compile(&self) -> Result<CompiledBms, BmsError> {
         let chart = self
             .source
