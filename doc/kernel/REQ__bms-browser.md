@@ -127,16 +127,53 @@ or old generation can revive a disposed owner. Closing the client does not claim
 that the AudioContext or Rust processor has been released; joined host cleanup
 still owns that evidence.
 
-This component does not by itself migrate the live/replay gameplay caller or
-prove browser execution, input delay, real audio or main-thread performance.
-Caller integration is the next dependent part of the already planned host bridge
-migration. Existing output/presentation and completion barriers remain required.
+This transport component is consumed by the direct gameplay caller described
+below. Source integration does not prove browser execution, input delay, real
+audio or main-thread performance. Existing output/presentation and completion
+barriers remain required.
 
 API basis: the [HTML channel messaging specification](https://html.spec.whatwg.org/multipage/web-messaging.html#channel-messaging)
 defines transferred endpoints and queued message delivery; the
 [Web Audio specification](https://webaudio.github.io/web-audio-api/#dom-audioworkletprocessor-port)
 defines the node/processor MessagePort and recommends explicit port closure.
 These API contracts do not establish implementation or performance acceptance.
+
+## Direct gameplay command caller
+
+The page must obtain the real AudioHost command descriptor after finish and
+transfer its port exactly once to the current gameplay Worker before arming.
+Both live and replay use the direct path. The Worker owns AudioCommandClient,
+drains actual initial core commands through it, and only replies to setup when
+all actual admitted-prefix ACKs have reached the core. A preparation error,
+stale page/session, failed transfer or cancellation closes any endpoint still
+owned locally and enters joined cleanup; no host-command fallback is permitted.
+
+During play, commands flow from the actual BrowserGame/BrowserReplay batch
+through AudioCommandClient directly to the processor. The returned transport
+sequence is distinct from the real core batch sequence; the retained core batch
+is acknowledged only with its own identity and actual admitted count. A rejected
+prefix is acknowledged as failed before fencing the game where possible, with
+no retry, dropped tail or invented success. ACK errors, timer expiry and late
+responses cannot mutate a freed or newer game. Close/detach the client before
+freeing its gameplay owner, while AudioHost still joins actual processor/context
+cleanup independently.
+
+Window must not receive normal command arrays or relay per-batch ACKs. It retains
+actual poll/output-presentation observations and bounded step/render protocol.
+Step responses carry the actual commandsPending boolean; render responses carry
+commandsPending and observedTick from the Worker input prefix. Window accepts
+natural completion only when observedTick equals its latest issued tick, its
+input/render operations and event queue are drained, and no command prefix is
+pending. Stale completion cannot authorize natural stop after newer input. Setup/ready and output
+completion barriers remain actual core evidence. Legacy lower-level Worker
+control callers may retain their explicit untransferred command route; the
+player page always uses the new handoff and cannot silently choose that route.
+
+Source fixtures must cover real client/Worker ACK correlation, initial drain,
+active live/replay commands, rejected prefixes, pending completion, stale
+callbacks after cancellation/free and one-time page endpoint transfer. Browser,
+physical audio, generated bindings, input latency and performance remain
+unverified until their deferred execution and QA are performed.
 
 ## Finite live section controls
 
@@ -454,7 +491,10 @@ One FIFO boundary carries bounded event batches and explicit advancement
 watermarks; graphics Worker timestamps never replace physical event timestamps.
 Actual core reports drive song time, judgments and score. Unsupported or late
 input is rejected explicitly, without silently moving its time. The browser
-currently exposes one logical keyboard, with explicit code/lane bindings.
+source forwards a logical keyboard, live pointer/touch contacts and optional
+profile-based authorized HID interfaces through common physical input routing.
+Bindings, source/contact identities and acquisition provenance remain explicit;
+actual device execution and route acceptance are unverified.
 
 The gameplay owner retains one bounded outgoing command batch awaiting Worklet
 acknowledgement. Core input/advance operations may continue against the bounded

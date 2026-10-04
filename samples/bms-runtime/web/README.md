@@ -176,11 +176,22 @@ routes share Worklet command admission, with independent control sequences.
 Host commands cannot resume after the handoff; no failed prefix is retried.
 Host stop retains deallocation and context-cleanup responsibility.
 
-This component has source and deferred fixtures before its caller migration. The page still
-uses the existing Window command bridge; it will not claim a direct gameplay
-path until Worker ownership and joined cleanup are connected. Output timestamp
-acquisition and actual presentation evidence remain required. Browser, audio,
-fixture execution and measured performance are deferred.
+The live/replay page source now calls `openCommandPort()` after resource finish
+and transfers the returned port once in `play-audio`. The gameplay Worker owns
+the real command client, drains initial core batches before `audio-ready`, and
+sends active commands directly to the processor. Transport sequence numbers and
+core batch identities remain distinct. Rejected prefixes reach the actual core
+without retrying or changing the original audio error. Main no longer submits
+command arrays or relays command ACKs. The explicit untransferred low-level
+Worker protocol remains available, but the page has no fallback to it.
+
+Window still polls actual output evidence and observes AudioContext presentation
+time. Step/render responses carry `commandsPending`; render responses also carry
+`observedTick`, so an old completion cannot authorize stop after newer input.
+Worker closes its command client before freeing gameplay; AudioHost still joins
+actual processor and context cleanup. Stale handoffs and callbacks cannot revive
+a newer owner. Source fixtures, browser/audio execution and measured performance
+remain deferred.
 
 ## AudioWorklet component
 
