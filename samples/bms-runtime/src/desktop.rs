@@ -22,6 +22,9 @@ mod room_fixtures;
 #[path = "desktop_room_results_fixtures.rs"]
 mod room_results_fixtures;
 #[cfg(test)]
+#[path = "desktop_startup_fixtures.rs"]
+mod startup_fixtures;
+#[cfg(test)]
 #[path = "native_viewport_fixtures.rs"]
 mod viewport_fixtures;
 #[cfg(test)]
@@ -120,6 +123,7 @@ const LOOP_TOGGLE_BOUNDS: Bounds = Bounds {
 type Native = fn(&[String]) -> Result<(), Box<dyn Error>>;
 type QueryDevices = fn(DeviceRequest) -> Result<DeviceCatalog, Box<dyn Error>>;
 
+#[derive(Clone)]
 struct Options {
     native: Vec<String>,
     library: Option<PathBuf>,
@@ -367,6 +371,38 @@ fn spawn_catalog(options: &Options) -> Result<Option<NativeCatalog<PreparedCatal
     } else {
         Ok(None)
     }
+}
+fn prepare_startup_options(
+    mut options: Options,
+    control: &CatalogControl,
+) -> Result<Options, String> {
+    control.checkpoint()?;
+    if let Some(path) = &options.profile {
+        let profile =
+            beatkernel_bms_runtime::settings_profile::load_player_profile(path, settings_host())
+                .map_err(|error| error.to_string())?;
+        control.checkpoint()?;
+        let native = beatkernel_bms_runtime::settings::overlay_native_args(
+            &profile.native.native_args(),
+            &without_chart(&options.native),
+            settings_host(),
+        )?;
+        let display = profile
+            .presentation
+            .apply_overrides(&options.display_overrides)?;
+        options.native = native;
+        options.set_display(display);
+    }
+    control.checkpoint()?;
+    Ok(options)
+}
+fn spawn_startup_profile(options: &Options) -> Result<Option<NativeCatalog<Options>>, String> {
+    if options.profile.is_none() {
+        return Ok(None);
+    }
+    let options = options.clone();
+    NativeCatalog::spawn_prepared(move |control| prepare_startup_options(options, control))
+        .map(Some)
 }
 struct Game {
     viewer: player::PlayerViewer,
@@ -645,55 +681,9 @@ pub(super) fn run(
         );
         return Ok(());
     }
-    let mut options = Options::parse(args)?;
-    if let Some(path) = &options.profile {
-        let profile =
-            beatkernel_bms_runtime::settings_profile::load_player_profile(path, settings_host())?;
-        options.native = beatkernel_bms_runtime::settings::overlay_native_args(
-            &profile.native.native_args(),
-            &without_chart(&options.native),
-            settings_host(),
-        )?;
-        options.set_display(
-            profile
-                .presentation
-                .apply_overrides(&options.display_overrides)?,
-        );
-    }
-    let (catalog, catalog_message) = match spawn_catalog(&options) {
-        Ok(Some(catalog)) => (
-            Some(catalog),
-            Some(if options.library.is_some() {
-                "Loading library catalog…".into()
-            } else {
-                "Preparing chart title font…".into()
-            }),
-        ),
-        Ok(None) => (None, None),
-        Err(error) => (
-            None,
-            Some(format!("Selection preparation unavailable: {error}")),
-        ),
-    };
-    let (entries, diagnostics) = if options.library.is_some() || options.title_font.is_some() {
-        (Vec::new(), Vec::new())
-    } else {
-        let path = options
-            .chart
-            .as_ref()
-            .expect("validated chart selection")
-            .clone();
-        (vec![direct_entry(path)], Vec::<String>::new())
-    };
-    let selection_items: Arc<[SelectionItem]> = entries
-        .iter()
-        .map(|entry| SelectionItem {
-            title: entry.title.clone(),
-            artist: entry.artist.clone(),
-        })
-        .collect::<Vec<_>>()
-        .into();
-    let selection_diagnostics = diagnostics.into();
+    let options = Options::parse(args)?;
+    let startup = spawn_startup_profile(&options)?;
+    let selection_items: Arc<[SelectionItem]> = Arc::from([]);
     let catalog_search = CatalogSearch::new(&selection_items)?;
     let search_editor = LineEditor::new("", 256)?;
     let event_loop = EventLoop::new()?;
@@ -719,10 +709,11 @@ pub(super) fn run(
         settings: None,
         settings_view: None,
         profile_io: None,
-        catalog_message,
+        startup,
+        catalog_message: None,
         catalog_progress: player_chart::ScanProgress::default(),
-        catalog,
-        entries,
+        catalog: None,
+        entries: Vec::new(),
         selected: 0,
         selection_items,
         catalog_search,
@@ -737,7 +728,7 @@ pub(super) fn run(
         font_text: None,
         input_font: None,
         input_font_error: None,
-        selection_diagnostics,
+        selection_diagnostics: Arc::from([]),
         selection_view: None,
         painted_reactive: None,
         window: None,
@@ -756,6 +747,9 @@ pub(super) fn run(
         gesture: Gesture::default(),
         hits: Vec::with_capacity(32),
     };
+    if app.startup.is_none() {
+        app.begin_selection()?;
+    }
     event_loop.run_app(&mut app)?;
     if let Some(error) = app.fatal {
         return Err(error.into());
@@ -1193,6 +1187,7 @@ struct Desktop {
     settings: Option<PanelScope<SettingsDraft>>,
     settings_view: Option<SettingsView>,
     profile_io: Option<ProfileOperation>,
+    startup: Option<NativeCatalog<Options>>,
     catalog: Option<NativeCatalog<PreparedCatalog>>,
     catalog_progress: player_chart::ScanProgress,
     catalog_message: Option<String>,
@@ -1231,6 +1226,96 @@ struct Desktop {
     hits: Vec<(ControlId, Bounds)>,
 }
 impl Desktop {
+    fn startup_busy(&self) -> bool {
+        self.startup.as_ref().is_some_and(|startup| {
+            !startup.is_finished()
+                || self.closing()
+                || (!self.is_suspended()
+                    && !self.occluded
+                    && self.navigator.route() == ScreenRoute::Selection)
+        })
+    }
+    fn collect_startup(&mut self) {
+        if self.startup.is_none()
+            || (!self.closing()
+                && (self.is_suspended()
+                    || self.occluded
+                    || self.navigator.route() != ScreenRoute::Selection))
+        {
+            return;
+        }
+        let Some(result) = self.startup.as_mut().and_then(NativeCatalog::poll) else {
+            return;
+        };
+        self.startup = None;
+        if self.closing() {
+            return;
+        }
+        let result = result.and_then(|options| {
+            self.active_backend = options.backend;
+            self.options = options;
+            self.initialize_renderer()?;
+            self.begin_selection()
+        });
+        if let Err(error) = result {
+            self.fail(error);
+            return;
+        }
+        self.next_frame = Instant::now();
+        if let Some(window) = &self.window {
+            window.set_title("BeatKernel BMS player");
+            window.request_redraw();
+        }
+    }
+    fn begin_selection(&mut self) -> Result<(), String> {
+        if self.startup.is_some() || self.closing() {
+            return Err("selection waits for startup profile preparation".into());
+        }
+        let (catalog, message) = match spawn_catalog(&self.options) {
+            Ok(Some(catalog)) => (
+                Some(catalog),
+                Some(if self.options.library.is_some() {
+                    "Loading library catalog…".into()
+                } else {
+                    "Preparing chart title font…".into()
+                }),
+            ),
+            Ok(None) => (None, None),
+            Err(error) => (
+                None,
+                Some(format!("Selection preparation unavailable: {error}")),
+            ),
+        };
+        let entries = if self.options.library.is_some() || self.options.title_font.is_some() {
+            Vec::new()
+        } else {
+            vec![direct_entry(
+                self.options
+                    .chart
+                    .clone()
+                    .ok_or("missing chart selection")?,
+            )]
+        };
+        let items: Arc<[SelectionItem]> = entries
+            .iter()
+            .map(|entry| SelectionItem {
+                title: entry.title.clone(),
+                artist: entry.artist.clone(),
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let search = CatalogSearch::new(&items)?;
+        self.catalog = catalog;
+        self.catalog_message = message;
+        self.catalog_progress = player_chart::ScanProgress::default();
+        self.entries = entries;
+        self.selection_items = items;
+        self.catalog_search = search;
+        self.selection_diagnostics = Arc::from([]);
+        self.selection_view = None;
+        self.invalidate_hits();
+        Ok(())
+    }
     fn catalog_busy(&self) -> bool {
         // A worker can finish just after collect_catalog's poll. Keep waking
         // active Selection until it has actually consumed that joined result.
@@ -1455,12 +1540,16 @@ impl Desktop {
     }
     fn ui_ready(&self) -> bool {
         self.active
+            && self.startup.is_none()
             && self.navigator.phase() == ScreenPhase::Active
             && !self.occluded
             && self.profile_io.is_none()
     }
     /// Prepare an atomic route change before data preparation or thread spawn.
     fn prepare_route(&self, to: ScreenRoute) -> Result<ScreenNavigator, String> {
+        if self.startup.is_some() && to != ScreenRoute::Closing {
+            return Err("navigation waits for startup profile preparation".into());
+        }
         if to != ScreenRoute::Closing
             && !matches!(to, ScreenRoute::Play { .. } | ScreenRoute::Results { .. })
             && self.game.as_ref().is_some_and(|game| !game.joined)
@@ -1565,6 +1654,9 @@ impl Desktop {
             self.commit_route(next);
         }
         self.cancel();
+        if let Some(startup) = &self.startup {
+            startup.cancel();
+        }
         if let Some(catalog) = &self.catalog {
             catalog.cancel();
         }
@@ -2726,7 +2818,12 @@ impl Desktop {
         )
     }
     fn hit(&self) -> Option<ControlId> {
-        if !self.active || self.closing() || self.is_suspended() || self.occluded {
+        if self.startup.is_some()
+            || !self.active
+            || self.closing()
+            || self.is_suspended()
+            || self.occluded
+        {
             return None;
         }
         let point = self.point()?;
@@ -3855,6 +3952,12 @@ impl Desktop {
         self.sync_input_font();
     }
     fn key(&mut self, key: KeyCode, repeat: bool) {
+        if self.startup.is_some() {
+            if key == KeyCode::Escape && !repeat {
+                self.request_close();
+            }
+            return;
+        }
         self.sync_ime();
         if self.ime_owns_keyboard() {
             return;
@@ -4079,7 +4182,10 @@ impl Desktop {
         Ok(())
     }
     fn reactive_waits_for_events(&self) -> bool {
-        self.reactive_scene_idle() && !self.clipboard_busy() && !self.catalog_busy()
+        self.reactive_scene_idle()
+            && !self.clipboard_busy()
+            && !self.catalog_busy()
+            && !self.startup_busy()
     }
     fn reactive_scene_idle(&self) -> bool {
         matches!(
@@ -4501,7 +4607,7 @@ impl Desktop {
         self.render_scene()
     }
     fn draw(&mut self) -> Result<(), String> {
-        if self.navigator.phase() != ScreenPhase::Active {
+        if self.startup.is_some() || self.navigator.phase() != ScreenPhase::Active {
             return Ok(());
         }
         let route = self.navigator.route();
@@ -4850,6 +4956,42 @@ impl Desktop {
         Ok(())
     }
 
+    fn initialize_renderer(&mut self) -> Result<(), String> {
+        if self.startup.is_some()
+            || self.renderer.is_some()
+            || self.closing()
+            || self.is_suspended()
+            || self.occluded
+        {
+            return Ok(());
+        }
+        let Some(window) = self.window.as_ref().cloned() else {
+            return Ok(());
+        };
+        // Native startup only, after the actual profile/CLI options are joined.
+        // Reusable Renderer::new stays async for WASM hosts.
+        let instance = graphics::instance(self.active_backend)?;
+        let surface = instance
+            .create_surface(window.clone())
+            .map_err(|error| error.to_string())?;
+        let mut renderer =
+            pollster::block_on(Renderer::new(surface, &instance, self.options.presentation))?;
+        let size = window.inner_size();
+        renderer.resize(size.width, size.height)?;
+        let font_text = self
+            .title_font
+            .as_ref()
+            .map(|atlas| {
+                let texture = renderer.upload_texture(atlas.image())?;
+                FontText::new(Arc::clone(atlas), texture)
+            })
+            .transpose()?;
+        self.instance = Some(instance);
+        self.renderer = Some(renderer);
+        self.bind_title_font(font_text);
+        Ok(())
+    }
+
     fn release_backgrounds(&mut self) {
         if let Some(renderer) = &mut self.renderer {
             if let Err(error) = self.bga_cache.clear(renderer) {
@@ -4894,7 +5036,11 @@ impl ApplicationHandler for Desktop {
         if self.window.is_none() {
             match event_loop.create_window(
                 Window::default_attributes()
-                    .with_title("BeatKernel BMS player")
+                    .with_title(if self.startup.is_some() {
+                        "BeatKernel BMS player — Loading profile…"
+                    } else {
+                        "BeatKernel BMS player"
+                    })
                     .with_inner_size(LogicalSize::new(WIDTH as f64, HEIGHT as f64)),
             ) {
                 Ok(window) => {
@@ -4907,47 +5053,18 @@ impl ApplicationHandler for Desktop {
                 }
             }
         }
-        if self.renderer.is_none() {
-            let window = self.window.as_ref().expect("created window").clone();
-            // Native startup only. Reusable Renderer::new stays async for WASM hosts.
-            let result = (|| -> Result<(wgpu::Instance, Renderer, Option<FontText>), String> {
-                let instance = graphics::instance(self.active_backend)?;
-                let surface = instance
-                    .create_surface(window.clone())
-                    .map_err(|error| error.to_string())?;
-                let mut renderer = pollster::block_on(Renderer::new(
-                    surface,
-                    &instance,
-                    self.options.presentation,
-                ))?;
-                let size = window.inner_size();
-                renderer.resize(size.width, size.height)?;
-                let font_text = self
-                    .title_font
-                    .as_ref()
-                    .map(|atlas| {
-                        let texture = renderer.upload_texture(atlas.image())?;
-                        FontText::new(Arc::clone(atlas), texture)
-                    })
-                    .transpose()?;
-                Ok((instance, renderer, font_text))
-            })();
-            match result {
-                Ok((instance, renderer, font_text)) => {
-                    self.instance = Some(instance);
-                    self.renderer = Some(renderer);
-                    self.bind_title_font(font_text);
-                }
-                Err(error) => {
-                    self.fail(error);
-                    return;
-                }
-            }
-        }
         self.active = self
             .window
             .as_ref()
             .is_some_and(|window| window.has_focus());
+        self.collect_startup();
+        if self.startup.is_some() || self.closing() {
+            return;
+        }
+        if let Err(error) = self.initialize_renderer() {
+            self.fail(error);
+            return;
+        }
         self.next_frame = Instant::now();
         if let Some(window) = &self.window {
             window.request_redraw();
@@ -5079,7 +5196,10 @@ impl ApplicationHandler for Desktop {
                 );
             }
             WindowEvent::RedrawRequested
-                if !self.is_suspended() && !self.closing() && !self.occluded =>
+                if self.startup.is_none()
+                    && !self.is_suspended()
+                    && !self.closing()
+                    && !self.occluded =>
             {
                 self.collect_game();
                 if let Err(error) = self.draw() {
@@ -5094,13 +5214,32 @@ impl ApplicationHandler for Desktop {
         if request_redraw {
             self.sync_input_font();
         }
-        if request_redraw && !self.closing() && !self.is_suspended() && !self.occluded {
+        if request_redraw
+            && self.startup.is_none()
+            && !self.closing()
+            && !self.is_suspended()
+            && !self.occluded
+        {
             if let Some(window) = &self.window {
                 window.request_redraw();
             }
         }
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.collect_startup();
+        if self.startup.is_some() {
+            event_loop.set_control_flow(if self.startup_busy() {
+                ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(4))
+            } else {
+                ControlFlow::Wait
+            });
+            return;
+        }
+        if self.renderer.is_none() && !self.closing() && !self.is_suspended() && !self.occluded {
+            if let Err(error) = self.initialize_renderer() {
+                self.fail(error);
+            }
+        }
         self.collect_catalog();
         self.collect_game();
         self.collect_profile();
@@ -5109,6 +5248,7 @@ impl ApplicationHandler for Desktop {
         if self.closing()
             && self.game.as_ref().is_none_or(|game| game.joined)
             && self.profile_io.is_none()
+            && self.startup.is_none()
             && self.catalog.is_none()
             && self
                 .clipboard
@@ -5152,6 +5292,7 @@ impl ApplicationHandler for Desktop {
         self.game = None;
         self.release_backgrounds();
         self.profile_io = None;
+        self.startup = None;
         self.catalog = None;
         self.clipboard = None;
     }
@@ -6243,6 +6384,7 @@ mod tests {
             settings: None,
             settings_view: None,
             profile_io: None,
+            startup: None,
             catalog: None,
             catalog_progress: player_chart::ScanProgress::default(),
             catalog_message: None,
