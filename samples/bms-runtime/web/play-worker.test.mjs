@@ -946,13 +946,14 @@ function commandPort() {
 
 // Actual AudioSampleClient performs all sequencing/accounting; this port only
 // transfers bytes and supplies explicitly controlled Worklet acknowledgements.
-function samplePort() {
+function samplePort(onPost = null) {
   return {
     posts: [], transfers: [], starts: 0, closes: 0, onmessage: null, onmessageerror: null,
     start() { this.starts++; },
     postMessage(value, transfer = []) {
       assert.equal(this.closes, 0);
       this.posts.push(structuredClone(value, { transfer })); this.transfers.push([...transfer]);
+      onPost?.(this.posts.at(-1));
     },
     close() { this.closes++; },
     async acknowledge(fields = {}) {
@@ -976,9 +977,12 @@ test("direct solo local and replay sample upload waits for every real client ACK
     const h = await started(mode === "local" ? { startRequest: localRequest() }
       : mode === "replay" ? { startRequest: replayRequest(replayFile().file) }
       : mode === "empty" ? { samples: [] } : {});
-    const game = h.locals[0] ?? h.replays[0] ?? h.games[0], port = samplePort();
+    const game = h.locals[0] ?? h.replays[0] ?? h.games[0], postsBeforeAdmission = [];
+    const port = samplePort(message => postsBeforeAdmission.push({ kind: message.kind, admitted: h.of("play-samples-admitted").length }));
     const rpcId = await uploadSamples(h, port), count = mode === "empty" ? 0 : 2;
     assert.equal(port.starts, 1); assert.equal(port.posts.length, 1);
+    assert.deepEqual(postsBeforeAdmission, [{ kind: count ? "sample" : "end-samples", admitted: 0 }]);
+    assert.deepEqual(h.of("play-samples-admitted"), [{ kind: "play-samples-admitted", playId: 7, rpcId, count }]);
     assert.equal(h.of("play-reply").some(value => value.rpcId === rpcId), false);
     if (count !== 0) {
       assert.deepEqual(port.posts[0], { kind: "sample", generation: 7, sequence: 1, id: 19n, rate: 44100, channels: 2,
@@ -999,9 +1003,14 @@ test("direct solo local and replay sample upload waits for every real client ACK
     assert.equal(game.calls.filter(row => row[0] === "sample").length, count + 1, "actual null terminator is checked");
     assert.equal(h.of("play-reply").some(value => value.rpcId === rpcId), false);
     assert.equal(game.calls.some(row => row[0] === "activate"), false);
+    assert.equal(h.of("play-samples-admitted").length, 1, "per-sample progress cannot generate more Window notifications");
+    assert.ok(postsBeforeAdmission.slice(1).every(row => row.admitted === 1));
     await port.acknowledge();
     assert.deepEqual(h.of("play-reply").find(value => value.rpcId === rpcId).result,
       { kind: "samples-uploaded", count, bytes: count ? 24 : 0 });
+    assert.equal(h.of("play-samples-admitted").length, 1);
+    assert.ok(h.messages.findIndex(value => value.kind === "play-samples-admitted")
+      < h.messages.findIndex(value => value.kind === "play-reply" && value.rpcId === rpcId));
     assert.equal(port.closes, 1); assert.equal(port.onmessage, null);
     assert.equal(h.of("play-reply").some(value => value.result?.kind === "sample" || value.result?.pcm), false);
     const commands = commandPort();
@@ -1032,6 +1041,7 @@ test("direct sample enumeration, wrapper and remote failures preserve exact pref
     if (scenario.timeout) await h.runTimer(50);
     const reply = h.of("play-reply").find(value => value.rpcId === rpcId);
     assert.equal(typeof reply.error, "string"); assert.equal(reply.result, undefined);
+    assert.equal(h.of("play-samples-admitted").length, port.posts.length ? 1 : 0);
     if (scenario.message) { assert.match(reply.error, scenario.message); assert.doesNotMatch(reply.error, /secondary release/); }
     assert.equal(game.calls.filter(row => row[0] === "sample").length, scenario.reads);
     assert.deepEqual(game.samples.map(value => value.takes), scenario.takes);
@@ -1057,6 +1067,7 @@ test("direct sample enumeration, wrapper and remote failures preserve exact pref
     assert.equal(wrapper.pcm.byteLength, 16, "falsy extraction/release failure never transfers the retained PCM");
     assert.equal(game.samples[1].takes, 0); assert.equal(port.posts.length, 0);
     assert.equal(port.closes, 1); assert.equal(game.frees, 1);
+    assert.equal(h.of("play-samples-admitted").length, 0);
     assert.equal(h.of("play-reply").filter(value => value.rpcId === rpcId).length, 1);
     assert.equal(h.of("play-reply").some(value => value.result?.kind === "samples-uploaded"), false);
   }
@@ -1064,6 +1075,17 @@ test("direct sample enumeration, wrapper and remote failures preserve exact pref
     const h = await catalogWorker({ sampleCount: count }); await h.send(startRequest());
     assert.equal(h.of("play-reply").some(value => value.result?.kind === "prepared"), false);
     assert.equal(h.games[0].calls.some(row => row[0] === "sample"), false); assert.equal(h.games[0].frees, 1);
+    assert.equal(h.of("play-samples-admitted").length, 0);
+  }
+  for (const boundary of ["start", "postMessage"]) {
+    const h = await started(), port = samplePort();
+    port[boundary] = () => { throw new Error(`actual sample endpoint ${boundary} failed`); };
+    const rpcId = await uploadSamples(h, port);
+    assert.equal(h.of("play-samples-admitted").length, 0);
+    assert.equal(h.of("play-reply").filter(value => value.rpcId === rpcId).length, 1);
+    assert.match(h.of("play-reply").find(value => value.rpcId === rpcId).error, /sample|start|sent/i);
+    assert.equal(port.closes, 1); assert.equal(h.games[0].frees, 1);
+    assert.equal(h.games[0].samples[0].frees, boundary === "start" ? 0 : 1);
   }
 });
 
@@ -1075,6 +1097,7 @@ test("stop awaiting a direct sample or EOS settles its RPC once before late ACKs
     if (phase === "end") { await port.acknowledge(); await port.acknowledge(); }
     const stale = port.onmessage, last = port.posts.at(-1);
     assert.equal(last.kind, phase === "sample" ? "sample" : "end-samples");
+    assert.deepEqual(h.of("play-samples-admitted"), [{ kind: "play-samples-admitted", playId: 7, rpcId, count: 2 }]);
     await h.send({ kind: "play-stop", playId: 7 });
     assert.equal(game.frees, 1); assert.equal(game.stops, 1); assert.equal(port.closes, 1);
     const cancelled = h.of("play-reply").filter(value => value.rpcId === rpcId);
@@ -1088,6 +1111,7 @@ test("stop awaiting a direct sample or EOS settles its RPC once before late ACKs
     assert.equal(h.of("play-reply").length, receipts + 1);
     assert.equal(h.games[1].calls.some(row => row[0] === "sample"), false);
     assert.equal(h.games[1].frees, 0);
+    assert.equal(h.of("play-samples-admitted").length, 1, "late ACK cannot publish another admission for either owner");
     await h.send({ kind: "play-stop", playId: 8 }); assert.equal(h.games[1].frees, 1);
   }
 });
@@ -1099,6 +1123,7 @@ test("direct sample adoption closes refused endpoints and excludes legacy reads 
   for (const fields of invalid) {
     const h = await started(), port = samplePort(); await uploadSamples(h, port, fields);
     assert.equal(port.closes, 1); assert.equal(port.posts.length, 0);
+    assert.equal(h.of("play-samples-admitted").length, 0);
     assert.equal(h.games[0].calls.some(row => row[0] === "sample"), false);
     assert.equal(h.of("play-reply").some(value => value.result?.kind === "samples-uploaded"), false);
   }

@@ -520,6 +520,10 @@ async function harness(faults = {}) {
       && result?.kind === "prepared" && !Object.hasOwn(result, "inputMode")) result = { ...result, inputMode: request.inputMode };
     await receive({ kind: "play-reply", playId: request.playId, rpcId: request.rpcId, result });
   }
+  async function admitSamples(request, count) {
+    assert.equal(request?.kind, "play-samples-upload");
+    await receive({ kind: "play-samples-admitted", playId: request.playId, rpcId: request.rpcId, count });
+  }
   async function preview() {
     const worker = workers.at(-1);
     await receive({ kind: "ready" });
@@ -565,6 +569,7 @@ async function harness(faults = {}) {
           records: Math.floor(1000000 / localPlayers.length) } } : {}) }),
       ...(start.mode === "replay" ? { mode: "replay", recordedUntilNs: 2350000000n } : {}) });
     if (!completeUpload) return worker.last("play-samples-upload");
+    await admitSamples(worker.last("play-samples-upload"), sampleCount);
     await reply(worker.last("play-samples-upload"), { kind: "samples-uploaded", count: sampleCount, bytes: sampleCount * 16 });
     return worker.last("play-audio");
   }
@@ -600,7 +605,7 @@ async function harness(faults = {}) {
     recordOpens, recordCalls, recordOwners, captures, releases, hid, hidDevices, get layoutReads() { return layoutReads; },
     get gamepadReads() { return gamepadReads; },
     resize(width, height) { viewport = { width, height }; resizeObservers.at(-1).callback(); },
-    click, receive, reply, preview, begin, prepared, launch, advance,
+    click, receive, reply, admitSamples, preview, begin, prepared, launch, advance,
     setNow(value) { assert.ok(value >= now); now = value; },
     setTimeOrigin(value) { context.performance.timeOrigin = value; },
     async close() {
@@ -889,6 +894,86 @@ test("joined local capture retains each valid member prefix for explicit downloa
   h.click("stop"); await flush(); await h.receive(finalScore(replay.id)); await h.close();
 });
 
+test("missing sample-port admission has one finite deadline and joins or forcibly releases the still-unacknowledged Worker", async () => {
+  for (const workerReleases of [true, false]) {
+    const h = await harness(); await h.preview(); const start = await h.begin(), worker = h.workers[0];
+    const upload = await h.prepared(start, 2, false);
+    assert.equal(upload.port.transfers, 1); assert.equal(h.audio.finishes, 0);
+    await h.advance(9999);
+    assert.equal(worker.messages("play-stop").length, 0); assert.equal(h.audio.stopStarts, 0);
+    await h.advance(1);
+    assert.equal(worker.messages("play-stop").length, 1); assert.equal(h.audio.stopStarts, 1);
+    assert.equal(h.get("play").disabled, true); assert.equal(h.audio.finishes, 0); assert.deepEqual(h.audio.arms, []);
+    // A late admission/final result cannot discharge the separate cleanup join.
+    await h.admitSamples(upload, 2);
+    await h.reply(upload, { kind: "samples-uploaded", count: 2, bytes: 24 });
+    assert.equal(h.audio.finishes, 0); assert.equal(h.get("play").disabled, true);
+    if (workerReleases) {
+      await h.receive(finalScore(start.playId));
+      assert.equal(h.get("play").disabled, false); assert.equal(worker.terminations, 0);
+      assert.match(h.get("status").textContent, /timed out|admission/i);
+    } else {
+      await h.advance(9999); assert.equal(worker.terminations, 0);
+      await h.advance(1); assert.equal(worker.terminations, 1);
+      assert.equal(h.get("play").disabled, true); assert.match(h.get("status").textContent, /Reload the page/i);
+    }
+    assert.equal(worker.messages("play-samples-upload").length, 1);
+    assert.equal(worker.messages("play-audio").length, 0); assert.equal(worker.messages("play-sample").length, 0);
+    await h.close();
+  }
+});
+
+test("malformed or duplicate current admission and success before admission cannot authorize finish or command handoff", async () => {
+  const cases = [
+    ...[undefined, null, -1, 1, 2.5, "2", NaN, 7941].map(count => ({ count })),
+    { duplicate: true }, { earlySuccess: true }, { earlyError: true },
+  ];
+  for (const scenario of cases) {
+    const h = await harness(); await h.preview(); const start = await h.begin(), worker = h.workers[0];
+    const upload = await h.prepared(start, 2, false);
+    if (scenario.duplicate) {
+      await h.admitSamples(upload, 2);
+      assert.equal(h.audio.finishes, 0); assert.equal(worker.messages("play-stop").length, 0);
+      await h.admitSamples(upload, 2);
+    } else if (scenario.earlySuccess) await h.reply(upload, { kind: "samples-uploaded", count: 2, bytes: 24 });
+    else if (scenario.earlyError) await h.receive({ kind: "play-reply", playId: start.playId,
+      rpcId: upload.rpcId, error: "sample endpoint could not start" });
+    else await h.receive({ kind: "play-samples-admitted", playId: start.playId, rpcId: upload.rpcId, count: scenario.count });
+    assert.equal(worker.messages("play-stop").length, 1); assert.equal(h.audio.stopStarts, 1);
+    assert.equal(h.audio.finishes, 0); assert.equal(h.audio.attachments, 0); assert.deepEqual(h.audio.arms, []);
+    await h.admitSamples(upload, 2); await h.reply(upload, { kind: "samples-uploaded", count: 2, bytes: 24 });
+    assert.equal(worker.messages("play-stop").length, 1); assert.equal(h.audio.finishes, 0);
+    await h.receive(finalScore(start.playId)); assert.equal(h.get("play").disabled, false);
+    if (scenario.earlyError) assert.match(h.get("status").textContent, /sample endpoint could not start/);
+    assert.equal(h.get("status").dataset.error, "true"); await h.close();
+  }
+});
+
+test("stale admission cannot clear a replacement deadline and cancelled admission waiters cannot revive setup", async () => {
+  for (const staleField of ["playId", "rpcId"]) {
+    const h = await harness(); await h.preview(); const first = await h.begin(), worker = h.workers[0];
+    const abandoned = await h.prepared(first, 2, false), originalAudio = h.audio;
+    h.click("stop"); await flush(); await h.receive(finalScore(first.playId));
+    await h.advance(10001);
+    assert.equal(worker.terminations, 0); assert.equal(worker.messages("play-stop").length, 1);
+    assert.equal(originalAudio.stopStarts, 1); assert.equal(originalAudio.finishes, 0);
+    const next = await h.begin(), current = await h.prepared(next, 1, false);
+    assert.ok(next.playId > first.playId); assert.ok(current.rpcId > abandoned.rpcId);
+    await h.receive({ kind: "play-samples-admitted", playId: next.playId, rpcId: current.rpcId, count: 1,
+      ...(staleField === "playId" ? { playId: first.playId } : { rpcId: abandoned.rpcId }) });
+    await h.admitSamples(abandoned, 2);
+    await h.reply(abandoned, { kind: "samples-uploaded", count: 2, bytes: 24 });
+    assert.equal(h.audio.finishes, 0); assert.equal(h.audio.stopStarts, 0);
+    await h.advance(9999); assert.equal(h.audio.stopStarts, 0);
+    await h.advance(1);
+    assert.equal(h.audio.stopStarts, 1); assert.equal(worker.last("play-stop").playId, next.playId);
+    assert.equal(worker.messages("play-stop").length, 2); assert.equal(h.audio.finishes, 0);
+    await h.receive(finalScore(next.playId)); assert.equal(h.get("play").disabled, false);
+    assert.equal(originalAudio.finishes, 0); assert.equal(originalAudio.stopStarts, 1);
+    assert.equal(worker.messages("play-audio").length, 0); await h.close();
+  }
+});
+
 test("Window transfers one bounded sample descriptor and waits beyond a whole-bank timeout before exact upload receipt and finish", async () => {
   for (const mode of ["live", "replay"]) for (const count of [0, 2]) {
     const h = await harness(); await h.preview();
@@ -903,6 +988,8 @@ test("Window transfers one bounded sample descriptor and waits beyond a whole-ba
     assert.equal(audio.sampleAttachments, 1); assert.deepEqual(worker.posts.find(row => row.value === upload).transfer, [upload.port]);
     assert.equal(Object.hasOwn(upload, "pcm"), false); assert.equal(worker.messages("play-sample").length, 0);
     assert.equal(audio.samples.length, 0); assert.equal(audio.finishes, 0); assert.equal(audio.attachments, 0);
+    await h.admitSamples(upload, count);
+    assert.equal(audio.finishes, 0); assert.equal(audio.attachments, 0);
     await h.advance(10001);
     assert.equal(worker.messages("play-stop").length, 0, "individual Worklet ACK deadlines do not become a whole-bank Window timer");
     assert.equal(audio.stopStarts, 0); assert.equal(audio.finishes, 0); assert.deepEqual(audio.arms, []);
@@ -937,7 +1024,10 @@ test("Window refuses malformed sample handoff and aggregate count or byte eviden
     const h = await harness(faults); await h.preview(); const start = await h.begin(), worker = h.workers[0];
     if (faults.transferFailure) worker.failKind = "play-samples-upload";
     const upload = await h.prepared(start, 2, false);
-    if (Object.hasOwn(faults, "receipt")) await h.reply(upload, faults.receipt);
+    if (Object.hasOwn(faults, "receipt")) {
+      await h.admitSamples(upload, 2);
+      await h.reply(upload, faults.receipt);
+    }
     if (faults.remoteFailure) await h.receive({ kind: "play-reply", playId: start.playId,
       rpcId: upload.rpcId, error: "actual sample ACK timed out" });
     assert.equal(h.audio.finishes, 0); assert.equal(h.audio.attachments, 0); assert.deepEqual(h.audio.arms, []);
@@ -1938,6 +2028,7 @@ test("finite replay metadata snapshots the actual output grid before samples and
   const sampleRequest = worker.last("play-samples-upload");
   assert.ok(sampleRequest);
   endNs = null; endFrame = 0n;
+  await h.admitSamples(sampleRequest, 1);
   await h.reply(sampleRequest, { kind: "samples-uploaded", count: 1, bytes: 8 });
   assert.deepEqual(h.audio.finishArgs, [[4411n]]);
   assert.equal(h.audio.samples.length, 0, "Window receives only aggregate sample completion");
@@ -1984,6 +2075,7 @@ test("finite replay admission and finish failures clean up without transferring 
   const start = await h.begin("replay"), worker = h.workers[0];
   await h.reply(start, { kind: "prepared", mode: "replay", title: "Finite endpoint", notes: 1, samples: 0,
     lanes: [0x11], opponentCount: 0, startNs: 0n, endNs: 1000000000n, endFrame: 52800n });
+  await h.admitSamples(worker.last("play-samples-upload"), 0);
   await h.reply(worker.last("play-samples-upload"), { kind: "samples-uploaded", count: 0, bytes: 0 });
   assert.deepEqual(h.audio.finishArgs, [[52800n]]);
   assert.equal(h.audio.finishes, 1);
@@ -3625,6 +3717,7 @@ test("finite live controls capture one pre-gesture section and join input, outpu
   await flush();
   assert.deepEqual(reads, { end: 1, frame: 1 });
   actualEnd = undefined; actualFrame = undefined;
+  await h.admitSamples(worker.last("play-samples-upload"), 1);
   await h.reply(worker.last("play-samples-upload"), { kind: "samples-uploaded", count: 1, bytes: 8 });
   assert.deepEqual(h.audio.finishArgs, [[4411n]], "the endpoint uses actual output rate without a Window sample relay");
   await h.reply(worker.last("play-audio"), null);
@@ -3702,6 +3795,7 @@ test("invalid or mismatched live ends preserve drafts for retry and manual prefi
   assert.equal(start.endNs, 2000000000n);
   await h.reply(start, { kind: "prepared", title: "Retried finite section", samples: 0, notes: 1,
     lanes: [0x11], opponentCount: 0, startNs: 1000000000n, endNs: 2000000000n, endFrame: 52800n });
+  await h.admitSamples(worker.last("play-samples-upload"), 0);
   await h.reply(worker.last("play-samples-upload"), { kind: "samples-uploaded", count: 0, bytes: 0 });
   assert.deepEqual(h.audio.finishArgs, [[52800n]]);
   await h.reply(worker.last("play-audio"), null);
@@ -3724,6 +3818,7 @@ test("invalid or mismatched live ends preserve drafts for retry and manual prefi
   assert.equal(file.reads, 0);
   await h.reply(replay, { kind: "prepared", mode: "replay", title: "Recorded finite section", samples: 0, notes: 1,
     lanes: [0x11], opponentCount: 0, startNs: 9000000000n, endNs: 9000000001n, endFrame: 4801n });
+  await h.admitSamples(worker.last("play-samples-upload"), 0);
   await h.reply(worker.last("play-samples-upload"), { kind: "samples-uploaded", count: 0, bytes: 0 });
   assert.deepEqual(h.audio.finishArgs, [[4801n]]);
   await h.reply(worker.last("play-audio"), null);

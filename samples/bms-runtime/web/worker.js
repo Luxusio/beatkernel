@@ -1722,6 +1722,11 @@ function uploadSamples(state, request) {
     state.sampleClient = client;
     const current = () => !failed && play === state && state.game === game
       && state.sampleClient === client && state.sampleRpcId === request.rpcId;
+    const reportAdmission = () => {
+      if (current() && (client.state === "ready" || client.state === "ended")) {
+        report("play-samples-admitted", { playId: state.id, rpcId: request.rpcId, count: expected });
+      }
+    };
     void (async () => {
       let count = 0;
       let bytes = 0;
@@ -1731,8 +1736,19 @@ function uploadSamples(state, request) {
         if (!current()) return;
         if (sample === null) throw new Error("Prepared PCM bank ended before its declared sample count.");
         const sampleBytes = sample.pcm.byteLength;
+        if (count === 0) {
+          // First-request validation must finish before announcing admission.
+          // A detached empty buffer otherwise looks like a valid zero-byte asset.
+          if (!integer(sampleBytes, 0, limits.maxAssetBytes)) throw new Error("Prepared PCM asset exceeds its byte limit.");
+          new Float32Array(sample.pcm.buffer, 0, 0);
+        }
         if (!current()) return;
-        await client.sample(sample);
+        const pending = client.sample(sample);
+        if (count === 0) {
+          pending.catch(() => {}); // A throwing notification still owns rejection cleanup.
+          reportAdmission();
+        }
+        await pending;
         if (!current()) return;
         count += 1;
         bytes += sampleBytes;
@@ -1745,7 +1761,12 @@ function uploadSamples(state, request) {
         throw new Error("Prepared PCM bank exceeds its declared sample count.");
       }
       if (!current()) return;
-      const ended = await client.end();
+      const ending = client.end();
+      if (expected === 0) {
+        ending.catch(() => {});
+        reportAdmission();
+      }
+      const ended = await ending;
       if (!current()) return;
       if (ended.count !== expected || ended.count !== count || ended.bytes !== bytes
         || !integer(bytes, 0, limits.maxTotalBytes)) {

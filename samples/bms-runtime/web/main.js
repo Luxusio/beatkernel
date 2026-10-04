@@ -837,21 +837,25 @@ function multiplayerConfiguration() {
   return { mode, config: { url: url.href, host: role === "host", windowOriginNs } };
 }
 
-function playRpc(session, kind, fields = {}, transfer = []) {
+function playRpc(session, kind, fields = {}, transfer = [], expectedSamples = null) {
   if (activePlay !== session || session.phase === "closing" || !worker) return Promise.reject(new Error("Playback owner is closed."));
   if (session.rpc) return Promise.reject(new Error("A playback setup operation is already pending."));
+  if (kind === "play-samples-upload" && (!Number.isSafeInteger(expectedSamples)
+    || expectedSamples < 0 || expectedSamples > PLAY_PCM_SAMPLES)) {
+    return Promise.reject(new Error("Sample upload requires its actual prepared count."));
+  }
   const rpcId = ++serial;
   if (!Number.isSafeInteger(rpcId)) return Promise.reject(new Error("Playback request identity exhausted."));
   return new Promise((resolve, reject) => {
-    // The bounded upload client times each sample and EOS independently.
-    // A whole-bank deadline would reject a valid sequence of admitted uploads.
-    const timer = kind === "play-samples-upload" ? null : setTimeout(() => {
-      if (session.rpc?.rpcId !== rpcId) return;
+    // Upload keeps this deadline until Worker proves actual producer admission.
+    // Individual sample/EOS deadlines then bound the remaining operation.
+    const timer = setTimeout(() => {
+      if (session.rpc?.rpcId !== rpcId || session.rpc.admitted) return;
       session.rpc = null;
       if (activePlay === session && session.owner === owner) controls();
       reject(new Error("Playback Worker operation timed out."));
     }, 10000);
-    session.rpc = { rpcId, timer, resolve, reject };
+    session.rpc = { rpcId, kind, admitted: false, expectedSamples, timer, resolve, reject };
     controls();
     try { worker.postMessage({ kind, playId: session.id, rpcId, ...fields }, transfer); }
     catch (error) { clearTimeout(timer); session.rpc = null; controls(); reject(error); }
@@ -1253,7 +1257,8 @@ async function play(mode = "live") {
         + (session.touchInput && (!session.localSources || session.localSources.has(2n)) ? " · Touch lanes enabled" : "")
         + (session.hidSources ? ` · ${session.hidSources.size} HID interface(s)` : "")
         + (session.gamepadSources ? ` · ${session.gamepadSources.size} ${session.gamepadProfileFile ? "profile-configured" : "automatic standard"} Gamepad(s); ${session.gamepadDevices.length - session.gamepadSources.size} unmatched device(s) ignored` : "");
-    if (!Number.isSafeInteger(prepared.samples) || prepared.samples < 0 || prepared.samples > PLAY_PCM_SAMPLES) {
+    const preparedSamples = prepared.samples;
+    if (!Number.isSafeInteger(preparedSamples) || preparedSamples < 0 || preparedSamples > PLAY_PCM_SAMPLES) {
       throw new Error("Prepared audio asset count exceeds the bounded section capacity.");
     }
     const sampleDescriptor = await session.audio.openSamplePort();
@@ -1271,9 +1276,9 @@ async function play(mode = "live") {
         || !Number.isSafeInteger(sampleDescriptor.timeoutMs) || sampleDescriptor.timeoutMs < 1 || sampleDescriptor.timeoutMs > 60000) {
         throw new Error("Audio sample handoff did not preserve its owner configuration.");
       }
-      const uploaded = await playRpc(session, "play-samples-upload", sampleDescriptor, [sampleDescriptor.port]);
+      const uploaded = await playRpc(session, "play-samples-upload", sampleDescriptor, [sampleDescriptor.port], preparedSamples);
       if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
-      if (uploaded?.kind !== "samples-uploaded" || uploaded.count !== prepared.samples
+      if (uploaded?.kind !== "samples-uploaded" || uploaded.count !== preparedSamples
         || !Number.isSafeInteger(uploaded.bytes) || uploaded.bytes < 0
         || uploaded.bytes > limits.maxTotalBytes || uploaded.bytes % (2 * 4) !== 0
         || uploaded.bytes > uploaded.count * limits.maxAssetBytes) {
@@ -1748,6 +1753,20 @@ function receivePlay(data) {
     receiveMultiplayer(session, data.event);
   } else if (data.kind === "play-room") {
     receiveRoom(session, data.event);
+  } else if (data.kind === "play-samples-admitted") {
+    const request = session.rpc;
+    if (!request || data.rpcId !== request.rpcId) return;
+    if (request.kind !== "play-samples-upload" || request.admitted
+      || !Number.isSafeInteger(data.count) || data.count !== request.expectedSamples) {
+      session.rpc = null;
+      clearTimeout(request.timer);
+      if (session.owner === owner) controls();
+      request.reject(new Error("Sample upload admission was malformed or repeated."));
+      return;
+    }
+    request.admitted = true;
+    clearTimeout(request.timer);
+    request.timer = null;
   } else if (data.kind === "play-reply") {
     const request = session.rpc;
     if (!request || data.rpcId !== request.rpcId) return;
@@ -1755,7 +1774,9 @@ function receivePlay(data) {
     clearTimeout(request.timer);
     if (session.owner === owner) controls();
     if (typeof data.error === "string") request.reject(Object.assign(new Error(data.error), { playbackRefusal: true }));
-    else request.resolve(data.result);
+    else if (request.kind === "play-samples-upload" && !request.admitted) {
+      request.reject(new Error("Sample upload completed before producer admission."));
+    } else request.resolve(data.result);
   } else if (data.kind === "play-stopped") {
     session.finalScore = data;
     replayReceipt(session, data);
