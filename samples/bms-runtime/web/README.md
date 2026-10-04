@@ -185,8 +185,9 @@ without retrying or changing the original audio error. Main no longer submits
 command arrays or relays command ACKs. The explicit untransferred low-level
 Worker protocol remains available, but the page has no fallback to it.
 
-Window still polls actual output evidence and observes AudioContext presentation
-time. Step/render responses carry `commandsPending`; render responses also carry
+Worker polls actual output evidence on the direct endpoint; Window only
+observes AudioContext presentation time. Step/render responses carry
+`commandsPending`; render responses also carry
 `observedTick`, so an old completion cannot authorize stop after newer input.
 Worker closes its command client before freeing gameplay; AudioHost still joins
 actual processor and context cleanup. Stale handoffs and callbacks cannot revive
@@ -205,10 +206,22 @@ with the common Rust output decoder. Unavailable reports do not fabricate
 render progress. The host and direct poll share one real report getter path
 outside the audio callback.
 
-The transport extension is authored before its next dependent caller migration.
-The page currently still polls through Window; commands already bypass Window.
-Original Window output-presentation observations and completion/cleanup evidence
-remain required. Source fixtures and browser/audio/performance checks are deferred.
+The live/replay page sends `play-render` with only render identity and the
+original Window output-presentation pair. The attached Worker serializes actual
+client poll operations with command submission: a submitted batch receives its
+ACK, then a waiting report is read before the next batch is extracted. There is
+one retained report observation, and overlap or externally supplied report
+arrays are refused in direct mode. Explicit unattached low-level callers keep
+their existing report API.
+
+Reports reach the existing Rust output/presentation path against current gameplay
+and input chronology. Newly generated commands and pending operations remain
+completion barriers. Cancellation clears the observation and closes the client
+before game release; late reports cannot mutate a freed or newer game. The page
+no longer calls `AudioHost.poll()` or relays report arrays. Window still supplies
+its actual AudioContext output timestamps and control-frame/input observations,
+so continuous host work has not disappeared entirely. Source fixtures and
+browser/audio/performance checks remain deferred.
 
 ## AudioWorklet component
 

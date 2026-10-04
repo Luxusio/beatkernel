@@ -97,7 +97,8 @@ The continuous command path shall use a transferred MessagePort, avoiding
 Window command validation, copies and per-batch ACK relay. Introduce the bounded
 transport component before changing its gameplay caller. AudioContext creation,
 user activation and actual output timestamp acquisition remain host operations.
-The existing host polling path retains its own sequence and output evidence.
+The explicit low-level host polling path retains its own control sequence and
+output evidence; the direct gameplay caller reads reports on Worker.
 
 AudioHost.openCommandPort() is a once-only handoff after allocation and before
 arming, with no pending host operation. It transfers one MessageChannel endpoint
@@ -109,7 +110,8 @@ Setup/sample/finish/arm/poll/stop remain on the host control lane. No retry or
 fallback resumes host command authority after a transferred attachment.
 
 The processor command lane has an independent safe integer sequence, initially
-zero, accepts only bounded command batches and preserves the actual Rust enqueue
+zero, accepts bounded command batches and actual report polls, and preserves
+the actual Rust enqueue
 admitted-prefix count. Both lanes share the same structural command preflight
 and enqueue operation. Generation mismatch, wrong operation, sequence gaps,
 malformed records and failed admission fence the audio owner. A failed batch is
@@ -203,12 +205,52 @@ and gameplay owner; this shape guard does not replace it. Non-poll and rejected
 ACKs cannot carry a report. All poll error, timeout, close and stale-message
 behavior obeys the same bounded owner lifecycle as command operations.
 
-This bottom-up transport change does not itself remove Window report polling.
-The next dependent caller integration must consume real reports directly in
-Worker, preserve original Window output-presentation observations and input
-clock provenance, serialize report operations with actual command submissions,
-and retain completion/cleanup barriers. Browser execution, actual audio and
+The direct gameplay caller described below consumes reports on Worker. It
+preserves original Window output-presentation observations and input clock
+provenance, serializes report operations with actual command submissions, and
+retains completion/cleanup barriers. Browser execution, actual audio and
 input/render/main-thread performance remain unverified.
+
+## Worker-owned direct report caller
+
+The player page sends a bounded play-render observation containing its render
+identity and original presentedNs/presentedHostNs pair, with no report payload.
+It must not call AudioHost.poll() or relay Worklet word arrays. Window retains
+AudioContext output timestamp acquisition, its actual performance domain and
+one pending render deadline. Missing presentation remains null; Worker arrival
+time cannot substitute for original output or input evidence.
+
+The attached gameplay Worker reads the real report through AudioCommandClient
+poll() and passes its actual words through the existing renderedCursor and Rust
+observe_output/observe_presentation path. Commands and report reads share one
+bounded operation owner, with no simultaneous client requests or hidden queues.
+One pending render observation is allowed; repeated, overlapping, stale or
+out-of-order observations refuse. A pending command batch receives its actual
+ACK before report polling; an active report waiting behind it is serviced before
+new command batches so report-driven BGM credits cannot starve indefinitely.
+Initial setup still drains genuine commands before readiness and activation.
+
+Direct mode refuses externally supplied report arrays; the explicit unattached
+low-level Worker protocol keeps its existing report API. Report timeout, bad
+shape/semantics, terminal or generation failure fences the gameplay owner.
+Polling never acknowledges a core command or fabricates rendered progress.
+Original presentation pairs remain unchanged across awaits. The output report
+is processed against actual current core state and input chronology, not an
+old pre-await game snapshot.
+
+Step/render replies retain actual commandsPending and observedTick. Report
+operation state is distinct from command admission state; neither async work
+nor a stale completion may permit natural stop. A report's processed request is
+retired before publishing completion, and newly generated commands are accounted
+for before the completion snapshot. Stop/failure clears pending observation,
+closes/detaches client before freeing the game and guards late poll/ACK callbacks
+against stale or freed ownership. Joined actual AudioHost cleanup remains required.
+
+Both live and replay page callers use this direct report path with no fallback.
+Source fixtures must cover serialized report/command ordering, real report and
+original presentation provenance, pending completion, refused overlap/external
+payloads, failed or cancelled reports and stale owner callbacks. Browser/device/
+audio execution and measured input/render/main-thread performance remain deferred.
 
 ## Finite live section controls
 
