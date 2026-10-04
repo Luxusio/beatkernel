@@ -5,7 +5,7 @@ const I64_MAX = 9223372036854775807n;
 const I64_MIN = -9223372036854775808n;
 const U64_MAX = 18446744073709551615n;
 const MAX_FRAME = 65547;
-const SESSION_METHODS = ["request_ready", "needed_bytes", "receive_bytes", "next_write", "send_progress",
+const SESSION_METHODS = ["request_ready", "needed_bytes", "receive_bytes", "next_write",
   "written", "poll_event", "setup_complete", "preparation_pending", "start_committed", "close", "free"];
 
 export class BrowserMultiplayerOwnerError extends Error {
@@ -28,15 +28,35 @@ function integer(value, min, max) {
   return Number.isSafeInteger(value) && value >= min && value <= max;
 }
 
+function boundedWords(words, min, max, stride = 1) {
+  if (!(words instanceof Uint32Array) || !integer(words.length, min, max)
+    || words.length % stride !== 0 || !(words.buffer instanceof ArrayBuffer)
+    || words.buffer.resizable === true || words.byteLength !== words.length * 4) return false;
+  try { new Uint32Array(words.buffer, words.byteOffset, words.length); }
+  catch { return false; }
+  return true;
+}
+
+function validGroupEvent(event) {
+  if (!event || typeof event !== "object") return false;
+  if (event.kind === "roster") return boundedWords(event.players, 1, 64);
+  return (event.kind === "group-progress" || event.kind === "group-final-progress")
+    && typeof event.sequence === "bigint" && event.sequence >= 0n && event.sequence <= U64_MAX
+    && boundedWords(event.words, 11, 704, 11);
+}
+
 function quietCall(owner, method) {
   try { Promise.resolve(owner?.[method]()).catch(() => {}); } catch {}
 }
 
 function configuration(options) {
   const { session, now, channelFactory = (url, config) => WebTransportChannel.open(url, config),
-    signal, setupTimeoutMs = 10000, tickMs = 5, onEvent, onClose } = options ?? {};
+    signal, setupTimeoutMs = 10000, tickMs = 5, onEvent, onClose, group = false } = options ?? {};
   if (typeof globalThis.AbortController !== "function"
     || !session || SESSION_METHODS.some(name => typeof session[name] !== "function")
+    || typeof group !== "boolean"
+    || (group ? ["send_group_progress", "poll_group_event"] : ["send_progress"])
+      .some(name => typeof session[name] !== "function")
     || typeof now !== "function" || typeof channelFactory !== "function"
     || !integer(setupTimeoutMs, 1, 60000) || !integer(tickMs, 1, 1000)
     || (onEvent !== undefined && typeof onEvent !== "function")
@@ -45,7 +65,7 @@ function configuration(options) {
       || typeof signal.addEventListener !== "function" || typeof signal.removeEventListener !== "function"))) {
     throw new BrowserMultiplayerOwnerError("validation", "open", "Invalid multiplayer owner configuration.");
   }
-  return { session, now, channelFactory, signal, setupTimeoutMs, tickMs, onEvent, onClose };
+  return { session, now, channelFactory, signal, setupTimeoutMs, tickMs, onEvent, onClose, group };
 }
 
 export class BrowserMultiplayerOwner {
@@ -195,11 +215,24 @@ export class BrowserMultiplayerOwner {
 
   #drainEvents() {
     for (let count = 0; count <= 8 && !this.closed; count++) {
-      const event = this.#core("poll_event", session => session.poll_event());
-      if (event === null || event === undefined) break;
-      if (count === 8 || typeof event !== "object" || typeof event.kind !== "string") {
-        throw this.#fail(new BrowserMultiplayerOwnerError("core", "poll_event", "Multiplayer event boundary is malformed or exceeds eight events."));
+      let event;
+      let operation = "poll_event";
+      let groupEvent = false;
+      if (this.#config.group) {
+        event = this.#core("poll_group_event", session => session.poll_group_event());
+        if (event !== null && event !== undefined) {
+          operation = "poll_group_event";
+          groupEvent = true;
+        }
       }
+      if (!groupEvent) event = this.#core("poll_event", session => session.poll_event());
+      if (event === null || event === undefined) break;
+      try {
+        if (count === 8 || typeof event !== "object" || typeof event.kind !== "string"
+          || (groupEvent && !validGroupEvent(event))) {
+          throw new BrowserMultiplayerOwnerError("core", operation, "Multiplayer event boundary is malformed or exceeds eight events.");
+        }
+      } catch (cause) { throw this.#fatal(cause, "core", operation); }
       // A callback may close this owner. Retain proven peer acknowledgement
       // before invoking it; cleanup cannot revoke an already observed receipt.
       if (event.kind === "final-acknowledged") {
@@ -287,9 +320,14 @@ export class BrowserMultiplayerOwner {
       let submission = null;
       if (frame.kind === 2 && this.#submission !== null) {
         submission = this.#submission;
-        const { songNs, hits, misses, combo, maxCombo } = submission.progress;
-        frame = this.#takeWrite(this.#core("send_progress", session => session.send_progress(
-          songNs, hits, misses, combo, maxCombo, submission.finalPrefix, this.elapsed())));
+        if (this.#config.group) {
+          frame = this.#takeWrite(this.#core("send_group_progress", session => session.send_group_progress(
+            submission.words, submission.finalPrefix, this.elapsed())));
+        } else {
+          const { songNs, hits, misses, combo, maxCombo } = submission.progress;
+          frame = this.#takeWrite(this.#core("send_progress", session => session.send_progress(
+            songNs, hits, misses, combo, maxCombo, submission.finalPrefix, this.elapsed())));
+        }
         if (frame.kind !== 1) throw new Error("Rust application admission did not return a frame.");
       }
       if (frame.kind === 1) {
@@ -312,6 +350,7 @@ export class BrowserMultiplayerOwner {
   async submit(progress, finalPrefix = false) {
     this.#ensureOpen();
     if (this.#submission !== null) throw new BrowserMultiplayerOwnerError("busy", "submit", "A multiplayer submission is already pending.");
+    if (this.#config.group) throw new BrowserMultiplayerOwnerError("validation", "submit", "Scalar progress requires a scalar multiplayer owner.");
     const snapshot = { songNs: progress?.songNs, hits: progress?.hits, misses: progress?.misses,
       combo: progress?.combo, maxCombo: progress?.maxCombo };
     if (typeof finalPrefix !== "boolean" || typeof snapshot.songNs !== "bigint"
@@ -324,6 +363,23 @@ export class BrowserMultiplayerOwner {
     // readiness, final sequencing and every protocol admission decision.
     const pending = deferred();
     this.#submission = { ...pending, progress: snapshot, finalPrefix };
+    this.#wake();
+    return pending.promise;
+  }
+
+  async submit_group(words, finalPrefix = false) {
+    this.#ensureOpen();
+    if (this.#submission !== null) throw new BrowserMultiplayerOwnerError("busy", "submit_group", "A multiplayer submission is already pending.");
+    if (!this.#config.group) throw new BrowserMultiplayerOwnerError("validation", "submit_group", "Group progress requires a group multiplayer owner.");
+    if (typeof finalPrefix !== "boolean" || !boundedWords(words, 11, 704, 11)) {
+      throw new BrowserMultiplayerOwnerError("validation", "submit_group", "Group progress requires 1..64 complete eleven-word rows on fixed ordinary storage.");
+    }
+    // Own the admitted bytes without invoking a caller-supplied species or
+    // retaining a mutable view. Rust validates roster, scores and progression.
+    const snapshot = new Uint32Array(words.length);
+    snapshot.set(words);
+    const pending = deferred();
+    this.#submission = { ...pending, words: snapshot, finalPrefix };
     this.#wake();
     return pending.promise;
   }
