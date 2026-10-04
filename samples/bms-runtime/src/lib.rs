@@ -149,6 +149,10 @@ pub mod multiplayer_room_play;
 mod multiplayer_room_play_fixtures;
 /// Participant-scoped coalesced room progress and actual final recipient ACKs.
 pub mod multiplayer_room_progress;
+/// Common participant publication, peer receipt and local final ACK ownership.
+pub mod multiplayer_room_progress_client;
+#[cfg(test)]
+mod multiplayer_room_progress_client_fixtures;
 #[cfg(test)]
 mod multiplayer_room_progress_fixtures;
 /// Shared prepared multi-host software-start coordination.
