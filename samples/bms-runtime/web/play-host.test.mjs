@@ -196,6 +196,7 @@ async function harness(faults = {}) {
       this.capturedPointers.delete(id);
       releases.push({ surface: this, id });
       traces.push(["release", id]);
+      if (faults.pointerReleaseError) throw faults.pointerReleaseError;
       // Exercise synchronous native notification too: ownership must be gone
       // before this can attempt to create another cancellation.
       this.emit("lostpointercapture", { pointerId: id, timeStamp: now });
@@ -243,7 +244,7 @@ async function harness(faults = {}) {
     "opponents-kind", "opponents-label", "opponents-add", "records-opponent", "opponents-clear",
     "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end",
     "bindings", "bindings-reset", "settings-save", "settings-load", "settings-status", "output-latency", "output-latency-ms", "output-rate",
-    "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input",
+    "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input", "pointer-input", "pointer-bindings",
     "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status",
     "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear",
     "local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay"]) {
@@ -324,7 +325,7 @@ async function harness(faults = {}) {
   const window = new Events();
   Object.assign(window, { isSecureContext: true, devicePixelRatio: 1, Worker,
     OffscreenCanvas: class {}, ResizeObserver, matchMedia: () => new Events() });
-  if (faults.touchSupported) window.PointerEvent = class {};
+  if (faults.touchSupported || faults.pointerSupported) window.PointerEvent = class {};
   const addWindowListener = window.addEventListener.bind(window);
   window.addEventListener = (kind, listener) => {
     addWindowListener(kind, listener);
@@ -517,7 +518,7 @@ async function harness(faults = {}) {
     this.setExport("RecordsStore", RecordsStore);
   }, { context });
   const modules = new Map();
-  for (const name of ["host_model.mjs", "play-model.mjs", "settings-profile.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "local-play-host.mjs", "main.js"]) {
+  for (const name of ["host_model.mjs", "play-model.mjs", "settings-profile.mjs", "saved-opponents.mjs", "hid-input.mjs", "hid-profile.mjs", "gamepad-input.mjs", "pointer-input.mjs", "local-play-host.mjs", "main.js"]) {
     const url = new URL(name, import.meta.url);
     modules.set(name, new SourceTextModule(await readFile(url, "utf8"), {
       context, identifier: url.href, initializeImportMeta(meta) { meta.url = url.href; },
@@ -600,6 +601,7 @@ async function harness(faults = {}) {
       ...(start.gamepadDevices !== undefined ? { gamepadSources: faults.gamepadAdmittedSources
         ?? start.gamepadDevices.filter(device => device.mapping === "standard" && device.buttons >= 9
           && (localSources === null || localSources.includes(device.source))).map(device => device.source) } : {}),
+      ...(start.pointerSetup === undefined ? {} : { pointerDevices: faults.pointerAdmittedDevices ?? start.pointerSetup.devices }),
       ...(localPlayers === null ? {} : { localPlayers, localPage: start.localPage ?? 0,
         ...(start.recordReplay ? { recordLimits: { bytes: Math.floor(64 * 1024 * 1024 / localPlayers.length),
           records: Math.floor(1000000 / localPlayers.length) } } : {}) }),
@@ -1842,6 +1844,205 @@ test("HID permission remains an explicit gesture, retains profile metadata only 
     else assert.equal(h.get("play").disabled, false);
     await h.close();
   }
+});
+
+function enablePointers(h) {
+  h.get("pointer-input").checked = true; h.get("pointer-input").emit("change");
+}
+function nativePointer(fields = {}) {
+  return { pointerType: "mouse", pointerId: -7, timeStamp: 1300.125, offsetX: 123.5, offsetY: -2.25, buttons: 1,
+    getCoalescedEvents() { assert.fail("mouse/pen owner must acquire only dispatched samples"); },
+    getPredictedEvents() { assert.fail("predicted pointer samples cannot enter gameplay"); }, ...fields };
+}
+function pointerListenerCount(canvas) {
+  return ["pointerdown", "pointermove", "pointerup", "pointercancel", "lostpointercapture"]
+    .reduce((sum, kind) => sum + (canvas.listeners.get(kind)?.size ?? 0), 0);
+}
+async function pointerStepDone(h, request) {
+  await h.receive({ kind: "play-step-done", playId: request.playId, tickId: request.tickId,
+    songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+}
+
+test("enabled Window pointers snapshot explicit button choices and forward original mixed batches without layout or score rendering", async () => {
+  const h = await harness({ pointerSupported: true }); await h.preview();
+  assert.equal(h.get("pointer-input").checked, false);
+  for (const [type, lane, value] of [["mouse", "11", "1"], ["mouse", "12", "2"], ["mouse", "13", "3"],
+    ["pen", "11", "1"], ["pen", "12", "2"], ["pen", "13", ""], ["mouse", "29", ""], ["pen", "29", ""]])
+    assert.equal(h.get(`pointer-${type}-${lane}`).value, value);
+  const plain = await h.launch();
+  assert.equal(Object.hasOwn(plain.start, "pointerSetup"), false);
+  assert.equal(h.get("canvas").emit("contextmenu").defaultPrevented, false, "ordinary keyboard play retains the browser menu");
+  h.click("stop"); await flush(); await h.receive(finalScore(plain.id));
+  enablePointers(h);
+  const canvas = h.get("canvas"), baseline = pointerListenerCount(canvas);
+  const priorMoves = new Set(canvas.listeners.get("pointermove") ?? []);
+  const start = await h.begin(), worker = h.workers[0];
+  assert.equal(canvas.emit("contextmenu").defaultPrevented, false, "pending pointer preparation has no menu authority");
+  assert.equal(h.opens.at(-1).gesture, true, "audio acquisition remains in the original click gesture");
+  assert.equal(start.inputMode, "physical");
+  assert.deepEqual(start.pointerSetup.devices, [{ source: 3n, pointerType: "mouse" }, { source: 4n, pointerType: "pen" }]);
+  const rows = Array.from({ length: start.pointerSetup.bindingWords.length / 4 }, (_, index) =>
+    Array.from(start.pointerSetup.bindingWords.slice(index * 4, index * 4 + 4))).sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+  assert.deepEqual(rows, [[0x11, 3, 0, 1], [0x12, 3, 0, 2], [0x13, 3, 0, 3], [0x11, 4, 0, 1], [0x12, 4, 0, 2]]);
+  assert.equal(h.get("pointer-input").disabled, true); assert.equal(h.get("pointer-mouse-11").disabled, true);
+  h.get("pointer-mouse-11").value = "4"; h.get("pointer-mouse-11").emit("change");
+  const commands = await h.prepared(start);
+  assert.equal(canvas.emit("contextmenu").defaultPrevented, false, "admitted setup still waits for actual activation");
+  await h.reply(commands, null); await h.reply(worker.last("play-activate"), null);
+  assert.equal(canvas.emit("contextmenu").defaultPrevented, true);
+  assert.equal(worker.messages("play-step").length, 0, "menu suppression does not invent pointer input");
+  const staleMove = [...canvas.listeners.get("pointermove")].find(handler => !priorMoves.has(handler));
+  assert.ok(staleMove);
+  h.setNow(1300.125); const layout = h.layoutReads, display = watchPlayDisplay(h);
+  canvas.emit("pointerdown", nativePointer({ buttons: 9 }));
+  const first = worker.last("play-step");
+  assert.deepEqual(first.events, [
+    { kind: "pointer", pointerType: "mouse", hostNs: 1300125000n, source: 3n, sequence: 1n,
+      code: 4294967289, control: 0, mode: 0, x: 123.5, y: -2.25 },
+    { kind: "pointer-button", pointerType: "mouse", hostNs: 1300125000n, source: 3n, sequence: 2n,
+      code: 4294967289, control: 1, state: 0 },
+  ], "unbound control4 is filtered; editing a disabled field cannot redirect the frozen launch binding");
+  h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300.25 });
+  canvas.emit("pointerdown", nativePointer({ pointerType: "pen", pointerId: 23, buttons: 2, timeStamp: 1300.5, offsetX: -8 }));
+  await pointerStepDone(h, first);
+  const mixed = worker.last("play-step");
+  assert.deepEqual(mixed.events.map(row => [row.kind ?? "keyboard", row.sequence, row.hostNs]), [
+    ["keyboard", 4n, 1300250000n], ["pointer", 5n, 1300500000n], ["pointer-button", 6n, 1300500000n],
+  ]);
+  assert.equal(mixed.events[1].source, 4n); assert.equal(mixed.events[1].mode, 0);
+  assert.equal(mixed.events[1].x, -8); assert.equal(mixed.events[2].control, 2);
+  await pointerStepDone(h, mixed);
+  canvas.emit("pointerup", nativePointer({ buttons: 0, timeStamp: 1300.75 }));
+  const release = worker.last("play-step");
+  assert.deepEqual(release.events.map(row => [row.kind, row.control, row.state]), [["pointer", 0, undefined], ["pointer-button", 1, 1]]);
+  await pointerStepDone(h, release);
+  const count = worker.messages("play-step").length;
+  canvas.emit("lostpointercapture", { pointerType: "mouse", pointerId: -7 });
+  assert.equal(worker.messages("play-step").length, count); assert.equal(h.layoutReads, layout); assert.deepEqual(display, []);
+  h.click("stop");
+  assert.equal(canvas.emit("contextmenu").defaultPrevented, false, "closing immediately relinquishes menu authority");
+  await flush(); await h.receive(finalScore(start.playId));
+  assert.equal(canvas.emit("contextmenu").defaultPrevented, false);
+  assert.equal(pointerListenerCount(canvas), baseline);
+  const afterStop = worker.messages("play-step").length;
+  staleMove(nativePointer({ buttons: 0, timeStamp: 1400 })); assert.equal(worker.messages("play-step").length, afterStop);
+  chooseRecording(h, [selectedRecording().file]);
+  const replay = await h.launch(0, "replay");
+  assert.equal(Object.hasOwn(replay.start, "pointerSetup"), false); assert.equal(pointerListenerCount(h.get("canvas")), baseline);
+  assert.equal(h.get("canvas").emit("contextmenu").defaultPrevented, false, "replay never owns live pointer menu suppression");
+  h.get("canvas").emit("pointerdown", nativePointer({ timeStamp: 1400 }));
+  assert.equal(worker.messages("play-step").length, afterStop);
+  h.click("stop"); await flush(); await h.receive(finalScore(replay.id));
+  h.window.emit("pagehide"); h.window.emit("pageshow", { persisted: true }); await flush(); await h.preview();
+  enablePointers(h);
+  const replacement = await h.launch(), currentCanvas = h.get("canvas");
+  assert.notEqual(currentCanvas, canvas);
+  assert.equal(currentCanvas.emit("contextmenu").defaultPrevented, true);
+  assert.equal(canvas.emit("contextmenu").defaultPrevented, false, "a retained old canvas cannot suppress its replacement's menu");
+  h.click("stop"); await flush(); await h.receive(finalScore(replacement.id)); await h.close();
+});
+
+test("local discovery owns distinct pointer aggregates beside HID and Gamepad and only assigned descriptors reach the Worker", async () => {
+  const h = await harness({ pointerSupported: true, gamepads: [nativeGamepad()], hidSupported: true,
+    hidDescriptors: [{ vendorId: 1, productId: 2 }] });
+  await h.preview(); enablePointers(h); chooseControllerProfile(h, selectedControllerProfile().file);
+  await localCount(h, 2); h.click("local-discover"); await flush();
+  assert.equal(h.opens.length, 0); assert.equal(h.hid.gets, 1);
+  const choices = h.get("local-source-1").children;
+  const mouse = choices.find(option => /mouse/i.test(option.textContent));
+  const pen = choices.find(option => /pen/i.test(option.textContent));
+  const pad = choices.find(option => option.textContent.startsWith("Gamepad "));
+  const hid = choices.find(option => option.textContent.startsWith("HID "));
+  assert.ok(mouse && pen && pad && hid);
+  const allSources = [mouse, pen, pad, hid].map(option => BigInt(option.value));
+  assert.equal(new Set(allSources).size, 4); assert.ok(allSources.every(source => source >= 3n));
+  assert.equal(h.get("pointer-input").disabled, true); assert.equal(h.get("pointer-pen-11").disabled, true);
+  const canvas = h.get("canvas"), worker = h.workers[0];
+  canvas.emit("pointermove", nativePointer({ buttons: 0, timeStamp: 1000 }));
+  assert.equal(worker.messages("play-step").length, 0, "discovery observations are not another player's input");
+  localAssign(h, 1, BigInt(mouse.value)); localAssign(h, 2, BigInt(hid.value));
+  const start = await h.begin();
+  assert.deepEqual(start.pointerSetup.devices, [{ source: BigInt(mouse.value), pointerType: "mouse" }]);
+  assert.ok(Array.from({ length: start.pointerSetup.bindingWords.length / 4 }, (_, index) =>
+    BigInt(start.pointerSetup.bindingWords[index * 4 + 1]) | BigInt(start.pointerSetup.bindingWords[index * 4 + 2]) << 32n)
+    .every(source => source === BigInt(mouse.value)));
+  assert.deepEqual(Array.from(start.localPlanWords), [1, 1, Number(BigInt(mouse.value)), 0, 2, 1, Number(BigInt(hid.value)), 0]);
+  assert.equal(h.hidDevices[0].opens, 1, "launch reuses the retained discovery resource");
+  await h.reply(await h.prepared(start), null); await h.reply(worker.last("play-activate"), null);
+  h.setNow(1300);
+  canvas.emit("pointerdown", nativePointer({ pointerType: "pen", pointerId: 8, timeStamp: 1300 }));
+  assert.equal(worker.messages("play-step").length, 0, "an unassigned aggregate channel stays outside the exact local roster");
+  canvas.emit("pointerdown", nativePointer({ timeStamp: 1300 }));
+  const accepted = worker.last("play-step");
+  assert.equal(accepted.events.length, 2); assert.ok(accepted.events.every(row => row.source === BigInt(mouse.value)));
+  await pointerStepDone(h, accepted);
+  h.click("stop"); await flush(); await h.receive(localFinal(start));
+  assert.equal(h.hidDevices[0].closes, 1); assert.equal(h.get("pointer-input").disabled, false);
+  assert.match(h.get("local-status").textContent, /sources released/);
+  h.click("local-discover"); await flush();
+  const secondCanvas = h.get("canvas"), beforeRelease = worker.messages("play-step").length;
+  secondCanvas.emit("pointerdown", nativePointer({ timeStamp: 1400 }));
+  h.click("local-release"); await flush();
+  assert.equal(worker.messages("play-step").length, beforeRelease, "release never fabricates queued gameplay input");
+  assert.equal(h.get("pointer-input").disabled, false); await h.close();
+});
+
+test("pointer admission, whole-batch queue limits and capture cleanup refuse safely without reviving replacement ownership", async () => {
+  for (const mutate of [() => undefined, devices => [], devices => devices.slice().reverse(),
+    devices => [devices[0], devices[0]], devices => [{ ...devices[0], source: 99n }, devices[1]],
+    devices => [{ ...devices[0], pointerType: "pen" }, devices[1]], devices => [{ ...devices[0], source: 3 }, devices[1]]]) {
+    const h = await harness({ pointerSupported: true }); await h.preview(); enablePointers(h);
+    const start = await h.begin(), worker = h.workers[0], pointerDevices = mutate(start.pointerSetup.devices);
+    await h.reply(start, { kind: "prepared", title: "untrusted pointer ownership", samples: 0, lanes: [0x11], startNs: 0n,
+      opponentCount: 0, ...(pointerDevices === undefined ? {} : { pointerDevices }) });
+    assert.equal(worker.messages("play-samples-upload").length, 0); assert.equal(worker.last("play-stop").playId, start.playId);
+    await h.receive(finalScore(start.playId)); assert.equal(h.audio.stopStarts, 1); await h.close();
+  }
+  const duplicate = await harness({ pointerSupported: true }); await duplicate.preview(); enablePointers(duplicate);
+  duplicate.get("pointer-mouse-12").value = "1";
+  duplicate.click("play"); await flush();
+  assert.equal(duplicate.workers[0].messages("play-start").length, 0); await duplicate.close();
+
+  const h = await harness({ pointerSupported: true }); await h.preview(); enablePointers(h);
+  const session = await h.launch(), worker = h.workers[0], canvas = h.get("canvas");
+  h.setNow(1300); canvas.emit("pointerdown", nativePointer({ timeStamp: 1300 }));
+  const pending = worker.last("play-step");
+  for (let index = 0; index < 1023; index++) canvas.emit("pointermove", nativePointer({ timeStamp: 1300, offsetX: index }));
+  assert.equal(worker.messages("play-step").length, 1);
+  canvas.emit("pointermove", nativePointer({ timeStamp: 1300, buttons: 3 }));
+  await flush();
+  assert.equal(worker.last("play-stop").playId, session.id);
+  await pointerStepDone(h, pending);
+  assert.equal(worker.messages("play-step").length, 1, "a two-row overflow event publishes no partial position prefix");
+  await h.receive(finalScore(session.id));
+  const replacement = await h.launch();
+  const moves = [...(h.get("canvas").listeners.get("pointermove") ?? [])];
+  h.setNow(1500); h.get("canvas").emit("pointermove", nativePointer({ timeStamp: 1500, buttons: 0 }));
+  const frontier = worker.last("play-step"); await pointerStepDone(h, frontier);
+  h.get("canvas").emit("pointermove", nativePointer({ timeStamp: 1499, buttons: 1 })); await flush();
+  assert.equal(worker.last("play-stop").playId, replacement.id);
+  await h.receive(finalScore(replacement.id));
+  const count = worker.messages("play-step").length;
+  for (const stale of moves) stale(nativePointer({ timeStamp: 1600, buttons: 0 }));
+  assert.equal(worker.messages("play-step").length, count); await h.close();
+
+  const capture = await harness({ pointerSupported: true, captureFailure: new Error("native pointer capture denied") });
+  await capture.preview(); enablePointers(capture); const active = await capture.launch();
+  capture.setNow(1300); capture.get("canvas").emit("pointerdown", nativePointer({ timeStamp: 1300 })); await flush();
+  assert.equal(capture.workers[0].messages("play-step").length, 0);
+  assert.equal(capture.workers[0].last("play-stop").playId, active.id);
+  await capture.receive(finalScore(active.id)); await capture.close();
+
+  const dirty = await harness({ pointerSupported: true }); await dirty.preview(); enablePointers(dirty);
+  const held = await dirty.launch(); dirty.setNow(1300);
+  dirty.get("canvas").emit("pointerdown", nativePointer({ timeStamp: 1300 }));
+  const beforeClose = dirty.workers[0].messages("play-step").length;
+  dirty.faults.pointerReleaseError = new Error("native pointer release remained unproven");
+  dirty.click("stop"); await flush(); await dirty.receive(finalScore(held.id));
+  assert.match(dirty.get("status").textContent, /Pointer cleanup failed.*Reload/i);
+  assert.equal(dirty.get("play").disabled, true);
+  assert.equal(dirty.workers[0].messages("play-step").length, beforeClose, "failed cleanup still cannot publish synthetic releases");
+  await dirty.close();
 });
 
 test("live HID discovers authorized interfaces automatically and queues original reports beside touch and keyboard without Window interpretation", async () => {

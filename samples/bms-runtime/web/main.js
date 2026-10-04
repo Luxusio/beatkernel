@@ -3,6 +3,7 @@ import { AudioHost } from "./audio-host.mjs";
 import { RecordsStore } from "./record-store.mjs";
 import { HidInputOwner } from "./hid-input.mjs";
 import { GamepadInputOwner } from "./gamepad-input.mjs";
+import { PointerInputOwner } from "./pointer-input.mjs";
 import { LocalRoster, validateLocalPrepared, localReplayReceipt } from "./local-play-host.mjs";
 import { snapshotHidDevices } from "./hid-profile.mjs";
 import { snapshotBrowserSettings } from "./settings-profile.mjs";
@@ -14,6 +15,7 @@ const ui = Object.fromEntries(["folder", "files", "chart", "rate", "seed", "prep
 for (const id of ["local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay"]) ui[id] = byId(id);
 for (const id of ["multiplayer-mode", "room-seal", "room-ready", "room-leave", "room-score-prev", "room-score-next", "room-score-page"]) ui[id] = byId(id);
 for (const id of ["settings-save", "settings-load", "settings-status"]) ui[id] = byId(id);
+for (const id of ["pointer-input", "pointer-bindings"]) ui[id] = byId(id);
 let canvas = byId("canvas");
 let cssExtent = [0, 0];
 let surfaceExtent = [0, 0];
@@ -225,6 +227,7 @@ let importedReplayId = 0;
 let opponentButtons = [];
 let opponentResultRows = [];
 const bindingFields = createBindingFields();
+const pointerFields = createPointerFields();
 const localRoster = new LocalRoster();
 let localSetup = null;
 let localCleanup = null;
@@ -283,10 +286,14 @@ function releaseLocalSources(reason = "Discover sources again before local play.
   let gamepadError = null;
   try { setup.gamepadOwner?.close(); gamepadError = setup.gamepadOwner?.cleanupFailure; }
   catch (error) { gamepadError = error; }
+  let pointerError = null;
+  try { setup.pointerOwner?.close(); pointerError = setup.pointerOwner?.cleanupFailure; }
+  catch (error) { pointerError = error; }
+  if (setup.canvas === canvas && (!activePlay || activePlay === setup)) delete setup.canvas.dataset.touchInput;
   let closed;
   try { closed = setup.hidOwner?.close() ?? Promise.resolve(); }
   catch (error) { closed = Promise.reject(error); }
-  const cleanup = Promise.resolve(closed).then(() => { if (gamepadError) throw gamepadError; }).catch(error => {
+  const cleanup = Promise.resolve(closed).then(() => { if (gamepadError || pointerError) throw gamepadError ?? pointerError; }).catch(error => {
     hidOwnershipFailed = true;
     fatal(new Error(`Input cleanup failed: ${String(error.message).slice(0, 4096)} Reload the page.`));
   }).finally(() => {
@@ -303,19 +310,22 @@ async function discoverLocalSources() {
   if (settingsOperation || !initialized || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || localCleanup || localDiscovery
     || localRoster.players.length === 1) return;
   const operation = { owner, players: localRoster.players, hid: ui["hid-input"].checked,
-    hidProfile: selectedHidProfile, gamepadProfile: selectedGamepadProfile, touch: ui["touch-input"].checked };
+    hidProfile: selectedHidProfile, gamepadProfile: selectedGamepadProfile, touch: ui["touch-input"].checked,
+    pointer: ui["pointer-input"].checked };
   localDiscovery = operation;
   controls();
   await releaseLocalSources(undefined, false);
   if (localDiscovery !== operation || operation.owner !== owner || !initialized || activePlay || hidOwnershipFailed || localCleanup || document.hidden
     || operation.players.join(",") !== localRoster.players.join(",") || operation.hid !== ui["hid-input"].checked
-    || operation.hidProfile !== selectedHidProfile || operation.gamepadProfile !== selectedGamepadProfile || operation.touch !== ui["touch-input"].checked) {
+    || operation.hidProfile !== selectedHidProfile || operation.gamepadProfile !== selectedGamepadProfile || operation.touch !== ui["touch-input"].checked
+    || operation.pointer !== ui["pointer-input"].checked) {
     if (localDiscovery === operation) localDiscovery = null;
     controls();
     return;
   }
   const setup = { owner, phase: "preparing", sequence: 0n, nextSource: 3n, gamepadOwner: null, gamepadDevices: [],
     gamepadSources: null, gamepadProfileFile: selectedGamepadProfile, hidOwner: null, hidDevices: null, hidSources: null,
+    canvas, pointerInput: operation.pointer === true, pointerOwner: null, pointerDevices: null, pointerSources: null, pointerSelection: null,
     hidProfileFile: ui["hid-input"].checked ? selectedHidProfile : null, touchInput: ui["touch-input"].checked === true, inventory: [] };
   localSetup = setup;
   controls();
@@ -324,6 +334,13 @@ async function discoverLocalSources() {
     if (ui["hid-input"].checked && (!hidCapable() || setup.hidProfileFile === null)) throw new Error("Select an HID profile and authorize its devices before discovery.");
     if (setup.gamepadProfileFile !== null && typeof navigator.getGamepads !== "function") throw new Error("Gamepad acquisition is unavailable.");
     if (setup.touchInput && typeof window.PointerEvent !== "function") throw new Error("Touch input is unavailable.");
+    if (setup.pointerInput) {
+      if (typeof window.PointerEvent !== "function") throw new Error("Pointer input is unavailable.");
+      setup.pointerSelection = snapshotPointerChoices();
+      setup.pointerOwner = createSessionPointers(setup);
+      if (!inputOwnerCurrent(setup)) { setup.pointerOwner.close(); return; }
+      setup.pointerDevices = setup.pointerOwner.devices;
+    }
     if (typeof navigator.getGamepads === "function") {
       setup.gamepadOwner = createSessionGamepads(setup);
       setup.gamepadOwner.poll();
@@ -341,6 +358,7 @@ async function discoverLocalSources() {
       ...(setup.touchInput ? [Object.freeze({ source: 2n, label: "Touch surface · source 2" })] : []),
       ...(setup.hidDevices ?? []).map(device => Object.freeze({ source: device.source, label: `HID ${device.vendorId}:${device.productId} · source ${device.source}` })),
       ...setup.gamepadDevices.map(device => Object.freeze({ source: device.source, label: `Gamepad ${device.id.slice(0, 128)} · source ${device.source}` })),
+      ...(setup.pointerDevices ?? []).map(device => Object.freeze({ source: device.source, label: `Window ${device.pointerType} aggregate · source ${device.source}` })),
     ]);
     setup.phase = "ready";
     localDiscovery = null;
@@ -369,6 +387,59 @@ function createBindingFields() {
   });
   ui.bindings.append(rows);
   return fields;
+}
+
+function createPointerFields() {
+  const rows = document.createDocumentFragment();
+  const fields = [];
+  for (const [lane] of KEY_BINDINGS) for (const pointerType of ["mouse", "pen"]) {
+    const label = document.createElement("label");
+    label.textContent = `Lane ${lane.toString(16).toUpperCase()} ${pointerType}`;
+    const field = document.createElement("select");
+    field.id = `pointer-${pointerType}-${lane.toString(16)}`;
+    field.disabled = true;
+    field.append(new Option("Unbound", ""));
+    for (let control = 1; control <= 32; control++) field.append(new Option(`Button ${control}`, String(control)));
+    field.value = lane >= 0x11 && lane <= (pointerType === "mouse" ? 0x13 : 0x12) ? String(lane - 0x10) : "";
+    label.append(field);
+    rows.append(label);
+    fields.push([lane, pointerType, field]);
+  }
+  ui["pointer-bindings"].append(rows);
+  return fields;
+}
+
+function snapshotPointerChoices() {
+  const rows = [];
+  const seen = new Set();
+  for (const [lane, pointerType, field] of pointerFields) {
+    const value = field.value;
+    if (value === "") continue;
+    if (typeof value !== "string" || !/^(?:[1-9]|[12][0-9]|3[0-2])$/.test(value)) throw new Error("Choose an unbound pointer control or button 1 through 32.");
+    const control = Number(value);
+    const key = `${pointerType}:${control}`;
+    if (seen.has(key)) throw new Error("A mouse or pen button can bind only one lane.");
+    seen.add(key);
+    rows.push(Object.freeze([lane, pointerType, control]));
+  }
+  if (!rows.length) throw new Error("Enabled pointer input needs at least one button binding.");
+  return Object.freeze(rows);
+}
+
+function samePointerChoices(left, right) {
+  return left.length === right.length && left.every((row, index) => row.every((value, field) => value === right[index][field]));
+}
+
+function pointerSetupFor(session) {
+  if (!session.pointerOwner || !session.pointerDevices?.length) return null;
+  const words = [];
+  for (const [lane, pointerType, control] of session.pointerSelection) {
+    const device = session.pointerDevices.find(candidate => candidate.pointerType === pointerType);
+    if (!device) continue;
+    words.push(lane, Number(device.source & 0xffffffffn), Number(device.source >> 32n), control);
+  }
+  if (!words.length) throw new Error("Assigned pointer sources need button bindings for their chart lanes.");
+  return Object.freeze({ devices: session.pointerDevices, bindingWords: Uint32Array.from(words) });
 }
 
 function status(text, error = false) {
@@ -524,6 +595,60 @@ function createSessionHid(session) {
   });
 }
 
+function createSessionPointers(session) {
+  // Reuse the existing touch-action rule for pen direct manipulation. Actual
+  // touch admission remains controlled independently by session.touchInput.
+  session.canvas.dataset.touchInput = "true";
+  return new PointerInputOwner({ target: session.canvas,
+    nextSource: () => nextInputSource(session), nextSequence: () => nextInputSequence(session),
+    isCurrent: () => inputOwnerCurrent(session),
+    onBatch: batch => {
+      if (!inputOwnerCurrent(session) || session.phase !== "playing" || session.mode !== "live") return;
+      if (!Array.isArray(batch) || batch.length < 1 || batch.length > 33) throw new Error("Invalid pointer acquisition batch.");
+      const accepted = [];
+      let sequence = session.pointerSequence ?? null;
+      for (const sample of batch) {
+        if (!sample || typeof sample !== "object" || Array.isArray(sample)) throw new Error("Invalid pointer acquisition sample.");
+        const { kind, pointerType, hostNs, source, sequence: currentSequence, code, control } = sample;
+        if ((kind !== "pointer" && kind !== "pointer-button")
+          || !session.pointerOwner.devices.some(device => device.source === source && device.pointerType === pointerType)
+          || typeof hostNs !== "bigint" || hostNs < 0n || hostNs > 9223372036854775807n
+          || typeof currentSequence !== "bigint" || currentSequence < 0n || currentSequence > 18446744073709551615n
+          || (sequence !== null && currentSequence <= sequence) || currentSequence > session.sequence
+          || !Number.isInteger(code) || code < 0 || code > 0xffffffff) throw new Error("Pointer acquisition identity changed.");
+        const event = kind === "pointer"
+          ? { kind, pointerType, hostNs, source, sequence: currentSequence, code, control, mode: sample.mode, x: sample.x, y: sample.y }
+          : { kind, pointerType, hostNs, source, sequence: currentSequence, code, control, state: sample.state };
+        if (kind === "pointer" ? control !== 0 || event.mode !== 0 || !finiteTouchSample(event.x) || !finiteTouchSample(event.y)
+          : !Number.isInteger(control) || control < 1 || control > 32 || (event.state !== 0 && event.state !== 1 && event.state !== 2)) {
+          throw new Error("Invalid acquired pointer position or button state.");
+        }
+        sequence = currentSequence;
+        const admitted = session.pointerSources?.get(source);
+        if (!admitted || (kind === "pointer-button" && !admitted.controls.has(control))) continue;
+        if (hostNs < session.lastHost) throw new Error("Pointer input arrived behind the accepted gameplay watermark.");
+        accepted.push(Object.freeze(event));
+      }
+      if (!inputOwnerCurrent(session) || session.phase !== "playing") return;
+      if (session.events.length + accepted.length > 1024) throw new Error("Pending input capacity exceeded.");
+      session.pointerSequence = sequence;
+      if (!accepted.length) return;
+      session.events.push(...accepted);
+      session.completionReady = false;
+      pumpInput(session);
+    },
+    onError: error => {
+      if (!inputOwnerCurrent(session)) return;
+      if (error.cleanupError) hidOwnershipFailed = true;
+      if (localSetup === session) {
+        if (error.cleanupError) fatal(new Error("Pointer input cleanup failed. Reload the page."));
+        else void releaseLocalSources(`Pointer discovery failed: ${String(error.message).slice(0, 4096)}`);
+      } else void stopPlay(`Pointer input failed: ${String(error.message).slice(0, 4096)}`
+        + (error.cleanupError ? " Input cleanup failed. Reload the page." : ""), true);
+    },
+  });
+}
+
 function controls() {
   const playing = activePlay !== null;
   const busy = settingsOperation !== null || recordsOperation !== null || hidPermission !== null || hidOwnershipFailed || localCleanup !== null || localDiscovery !== null;
@@ -571,6 +696,8 @@ function controls() {
   ui["captured-replay"].disabled = playing || busy || capturedReplays.length === 0;
   ui["bindings-reset"].disabled = recordsDisabled;
   ui["touch-input"].disabled = inputLocked;
+  ui["pointer-input"].disabled = inputLocked || typeof window.PointerEvent !== "function";
+  for (const [, , field] of pointerFields) field.disabled = inputLocked || !ui["pointer-input"].checked || typeof window.PointerEvent !== "function";
   for (const id of ["hid-input", "hid-authorize", "hid-profile"]) ui[id].disabled = inputLocked || !hidCapable();
   ui["gamepad-profile"].disabled = inputLocked || typeof globalThis.navigator?.getGamepads !== "function";
   ui["gamepad-profile-clear"].disabled = inputLocked || selectedGamepadProfile === null;
@@ -755,6 +882,22 @@ function start() {
     fresh.addEventListener(name, event => touch(event, phase, fresh), { passive: false });
   }
   fresh.addEventListener("lostpointercapture", event => touch(event, 3, fresh, true), { passive: false });
+  fresh.addEventListener("contextmenu", event => {
+    const session = activePlay;
+    const current = () => session && activePlay === session && session.owner === owner
+      && canvas === fresh && session.canvas === fresh && session.mode === "live" && session.phase === "playing"
+      && session.pointerInput && !session.pointerOwner?.closed && session.pointerSources?.size > 0;
+    if (!current()) return;
+    try {
+      const preventDefault = event.preventDefault;
+      if (!current()) return;
+      if (typeof preventDefault !== "function") throw new Error("Pointer context menu cannot be suppressed.");
+      preventDefault.call(event);
+      if (!current()) return;
+    } catch (error) {
+      if (current()) void stopPlay(`Pointer input failed: ${String(error?.message ?? error).slice(0, 4096)}`, true);
+    }
+  }, { passive: false });
   controls();
   status("Initializing graphics…");
   try {
@@ -837,6 +980,10 @@ ui["local-count"].addEventListener("change", () => {
   } catch (error) { ui["local-count"].value = String(localRoster.players.length); status(error.message, true); }
 });
 ui["local-discover"].addEventListener("click", () => { void discoverLocalSources(); });
+ui["pointer-input"].addEventListener("change", () => {
+  if (settingsOperation || activePlay || localSetup || localDiscovery || localCleanup) return;
+  controls();
+});
 ui["local-release"].addEventListener("click", () => { if (!settingsOperation && !activePlay) void releaseLocalSources(); });
 ui["local-page"].addEventListener("change", () => { void changeLocalPage(); });
 ui["captured-replay"].addEventListener("change", () => {
@@ -1220,6 +1367,8 @@ async function play(mode = "live") {
       retained = localSetup;
       if (!retained || retained.phase !== "ready" || retained.owner !== owner) throw new Error("Discover and assign local input sources before playing.");
       if (retained.touchInput !== (ui["touch-input"].checked === true)
+        || retained.pointerInput !== (ui["pointer-input"].checked === true)
+        || (retained.pointerInput && !samePointerChoices(retained.pointerSelection, snapshotPointerChoices()))
         || retained.hidProfileFile !== (ui["hid-input"].checked ? selectedHidProfile : null)
         || retained.gamepadProfileFile !== selectedGamepadProfile) throw new Error("Input configuration changed. Discover local sources again.");
       // Poll this exact owner before freezing the plan. A changed native
@@ -1237,12 +1386,14 @@ async function play(mode = "live") {
   }
   const acquired = retained ? { sequence: retained.sequence, nextSource: retained.nextSource,
     gamepadOwner: retained.gamepadOwner, gamepadDevices: retained.gamepadDevices,
+    pointerOwner: retained.pointerOwner, pointerDevices: retained.pointerDevices, pointerSelection: retained.pointerSelection,
     hidOwner: retained.hidOwner, hidDevices: retained.hidDevices } : {};
   const session = Object.assign(retained ?? {}, { id: ++serial, owner, mode, phase: "preparing", controller: new AbortController(), audio: null, opening: null,
     rpc: null, timer: null, events: [], pressed: new Set(), bindings: [], sequence: 0n, nextSource: 3n, inputPumping: false,
     canvas, touchInput: false, contacts: new Map(), nextContact: 0n,
     hidOwner: null, hidConnecting: null, hidDevices: null, hidSources: null, hidProfileFile: null,
     gamepadOwner: null, gamepadDevices: null, gamepadSources: null, gamepadProfileFile: null,
+    pointerInput: false, pointerOwner: null, pointerDevices: null, pointerSources: null, pointerSelection: null, pointerSequence: null,
     tickId: 0, tickPending: null, commandsPending: true, startFrame: null,
     origin: null, lastHost: 0n, stopping: null, renderId: 0, renderPending: null,
     workerStarted: false, workerReleased: false, workerStop: null, finalScore: null,
@@ -1265,6 +1416,11 @@ async function play(mode = "live") {
         Object.freeze({ ...entry, player: session.localPlan.players[0] })));
     }
     session.touchInput = mode === "live" && ui["touch-input"].checked === true;
+    session.pointerInput = mode === "live" && ui["pointer-input"].checked === true;
+    if (session.pointerInput) {
+      if (typeof window.PointerEvent !== "function") throw new Error("Pointer input is unavailable.");
+      if (!retained) session.pointerSelection = snapshotPointerChoices();
+    }
     if (session.touchInput && (typeof window.PointerEvent !== "function"
       || typeof session.canvas.setPointerCapture !== "function" || typeof session.canvas.releasePointerCapture !== "function")) {
       throw new Error("Touch play requires Pointer Events and canvas pointer capture support.");
@@ -1307,6 +1463,11 @@ async function play(mode = "live") {
     clearOpponentResults(session.opponentSelection ? "Preparing selected saved opponents…"
       : mode === "replay" ? "Saved comparisons are inactive during replay playback." : "No saved opponents selected.");
     if (!retained && session.hidProfileFile !== null) session.hidOwner = createSessionHid(session);
+    if (!retained && session.pointerInput) {
+      session.pointerOwner = createSessionPointers(session);
+      if (!inputOwnerCurrent(session)) { session.pointerOwner.close(); return; }
+      session.pointerDevices = session.pointerOwner.devices;
+    }
     if (!retained && mode === "live" && typeof navigator.getGamepads === "function") {
       session.gamepadDevices = [];
       session.gamepadOwner = createSessionGamepads(session);
@@ -1338,7 +1499,10 @@ async function play(mode = "live") {
     if (session.localSources) {
       session.hidDevices = session.hidDevices?.filter(device => session.localSources.has(device.source)) ?? null;
       session.gamepadDevices = session.gamepadDevices?.filter(device => session.localSources.has(device.source)) ?? null;
+      session.pointerDevices = session.pointerDevices === null ? null
+        : Object.freeze(session.pointerDevices.filter(device => session.localSources.has(device.source)));
     }
+    session.pointerSetup = pointerSetupFor(session);
     session.requestHid = session.hidOwner !== null && (!session.localSources || session.hidDevices?.length > 0);
     session.requestGamepad = session.gamepadOwner !== null && (!session.localSources || session.gamepadDevices?.length > 0);
     if (session.localSources && !session.requestHid) session.hidSources = new Set();
@@ -1353,6 +1517,7 @@ async function play(mode = "live") {
         ...(session.requestHid ? { hidProfileFile: session.hidProfileFile, hidDevices: session.hidDevices } : {}),
         ...(session.requestGamepad ? { gamepadDevices: session.gamepadDevices } : {}),
         ...(session.requestGamepad && session.gamepadProfileFile ? { gamepadProfileFile: session.gamepadProfileFile } : {}),
+        ...(session.pointerSetup ? { pointerSetup: session.pointerSetup } : {}),
         keyPairs: Uint32Array.from(session.bindingSelection.flatMap(row => [row[0], row[2]])) };
     const prepared = await playRpc(session, "play-start", { libraryId, path: ui.chart.value,
       rate: session.audio.sampleRate, commandBatchLimit: session.commandBatchLimit, ...source });
@@ -1400,6 +1565,26 @@ async function play(mode = "live") {
       }
       session.gamepadSources = admitted;
     } else if (prepared.gamepadSources !== undefined) throw new Error("Preparation admitted Gamepads without an owned input session.");
+    if (session.pointerSetup) {
+      const devices = prepared.pointerDevices;
+      const expected = session.pointerSetup.devices;
+      const owned = session.pointerOwner.devices;
+      if (session.pointerOwner.closed || owned.length !== 2 || !Array.isArray(devices) || devices.length !== expected.length) {
+        throw new Error("Preparation omitted the exact owned pointer aggregates.");
+      }
+      const admitted = new Map();
+      for (let index = 0; index < devices.length; index++) {
+        const device = devices[index];
+        if (!device || device.source !== expected[index].source || device.pointerType !== expected[index].pointerType
+          || !owned.some(row => row.source === device.source && row.pointerType === device.pointerType)
+          || admitted.has(device.source) || session.hidSources?.has(device.source) || session.gamepadSources?.has(device.source)) {
+          throw new Error("Preparation changed an owned pointer source identity.");
+        }
+        admitted.set(device.source, { pointerType: device.pointerType,
+          controls: new Set(session.pointerSelection.filter(row => row[1] === device.pointerType).map(row => row[2])) });
+      }
+      session.pointerSources = admitted;
+    } else if (prepared.pointerDevices !== undefined) throw new Error("Preparation admitted pointer input without requested ownership.");
     const preparedStart = prepared.startNs === undefined && mode === "live" && session.startNs === 0n ? 0n : prepared.startNs;
     if (typeof preparedStart !== "bigint") throw new Error("Preparation omitted its actual song start.");
     validateStart(preparedStart);
@@ -1418,7 +1603,7 @@ async function play(mode = "live") {
     ui.details.textContent = `${prepared.artist || "Unknown artist"} · ${prepared.notes} notes · ${prepared.samples} sounds · ${session.audio.sampleRate} Hz output · start ${seconds(preparedStart.toString())} s`
       + (session.endNs === undefined ? "" : ` · ${mode === "replay" ? "recorded end" : "end"} ${seconds(session.endNs.toString())} s`)
       + (session.localPlan ? ` · ${session.localPlan.players.length} local players` : "");
-    if (session.localPlan || session.hidOwner !== null || session.gamepadSources?.size > 0) {
+    if (session.localPlan || session.hidOwner !== null || session.gamepadSources?.size > 0 || session.pointerSources?.size > 0) {
       bindingsFor(prepared.lanes); // Validate actual lane shape; Worker proved combined coverage.
       session.bindings = session.localSources && !session.localSources.has(1n) ? []
         : bindingsFor(prepared.lanes.filter(lane => session.bindingSelection.some(row => row[0] === lane)), session.bindingSelection);
@@ -1427,6 +1612,7 @@ async function play(mode = "live") {
       : session.bindings.map(row => `${row[0].toString(16).toUpperCase()}: ${row[1]}`).join(" · ")
         + (session.touchInput && (!session.localSources || session.localSources.has(2n)) ? " · Touch lanes enabled" : "")
         + (session.hidSources ? ` · ${session.hidSources.size} HID interface(s)` : "")
+        + (session.pointerSources ? ` · ${session.pointerSources.size} Window mouse/pen aggregate source(s)` : "")
         + (session.gamepadSources ? ` · ${session.gamepadSources.size} ${session.gamepadProfileFile ? "profile-configured" : "automatic standard"} Gamepad(s); ${session.gamepadDevices.length - session.gamepadSources.size} unmatched device(s) ignored` : "");
     const preparedSamples = prepared.samples;
     if (!Number.isSafeInteger(preparedSamples) || preparedSamples < 0 || preparedSamples > PLAY_PCM_SAMPLES) {
@@ -1698,7 +1884,7 @@ function touch(event, phase, surface, lost = false) {
 }
 
 function releaseTouches(session) {
-  delete session.canvas.dataset.touchInput;
+  if (session.canvas === canvas && (!activePlay || activePlay === session)) delete session.canvas.dataset.touchInput;
   // Remove ownership before releasing any capture, including synchronous callbacks.
   const ids = [...session.contacts.keys()];
   session.contacts.clear();
@@ -2093,6 +2279,13 @@ function stopPlay(reason, failed = false, completed = false) {
   session.naturalFinishRequested = completed;
   session.phase = "closing";
   settleRoomStart(session, new Error("Room start wait cancelled."));
+  let pointersStopped;
+  try {
+    session.pointerOwner?.close();
+    if (session.pointerOwner?.cleanupFailure) throw session.pointerOwner.cleanupFailure;
+    pointersStopped = Promise.resolve();
+  } catch (error) { pointersStopped = Promise.reject(error); }
+  pointersStopped.catch(() => {});
   let gamepadsStopped;
   try {
     session.gamepadOwner?.close();
@@ -2169,12 +2362,19 @@ function stopPlay(reason, failed = false, completed = false) {
           failed = true;
           reason += ` Gamepad cleanup failed: ${String(error.message).slice(0, 4096)} Reload the page before playing again.`;
         }),
+        pointersStopped.catch(error => {
+          hidOwnershipFailed = true;
+          stop();
+          failed = true;
+          reason += ` Pointer cleanup failed: ${String(error.message).slice(0, 4096)} Reload the page before playing again.`;
+        }),
       ]);
     }
     finally {
       await workerStopped;
       session.hidOwner = session.hidConnecting = session.hidDevices = session.hidSources = session.hidProfileFile = null;
       session.gamepadOwner = session.gamepadDevices = session.gamepadSources = session.gamepadProfileFile = null;
+      session.pointerOwner = session.pointerDevices = session.pointerSources = session.pointerSelection = session.pointerSetup = null;
       if (session.cleanupError !== null) {
         failed = true;
         reason = `Gameplay cleanup failed: ${session.cleanupError} Reload the page before playing again.`;
