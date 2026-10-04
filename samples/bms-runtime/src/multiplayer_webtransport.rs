@@ -1,4 +1,4 @@
-//! Bounded HTTP/3 WebTransport stream relay; peers retain all BKMP session logic.
+//! Bounded HTTP/3 WebTransport ownership for bilateral relay or room admission.
 use crate::{
     multiplayer_protocol::{encode_frame, FrameDecoder},
     multiplayer_rooms::{JoinOutcome, ParticipantId, ParticipantTicket, RoomPolicy, RoomRegistry},
@@ -25,6 +25,9 @@ use tokio::{
 };
 use wtransport::{Connection, Endpoint, RecvStream, SendStream, ServerConfig, VarInt};
 
+#[path = "multiplayer_webtransport_group.rs"]
+mod group;
+
 const FILE_LIMIT: usize = 1024 * 1024;
 const DRAIN: Duration = Duration::from_secs(2);
 pub const HELP: &str = "serve-multiplayer --bind IP:PORT --cert PATH --key PATH --origin ORIGIN\n\
@@ -34,10 +37,13 @@ pub const HELP: &str = "serve-multiplayer --bind IP:PORT --cert PATH --key PATH 
   --max-key-bytes N            1..1024 (default 128)\n\
   --max-sessions N             2..8192, including setup (default 128)\n\
   --max-setups N               1..256 and <= sessions (default 16)\n\
+  --group-hosts N              2..64 and <= sessions; BKMR room admission only\n\
   --waiting-ms N               1..86400000 (default 30000)\n\
   --setup-ms N                 1..60000 (default 10000)\n\
   --io-ms N                    1..120000 per complete frame read/write (default 10000)\n\
-Clients connect to https://SERVER/rooms/ASCII_KEY. Ctrl+C closes all sessions.\n";
+Clients connect to https://SERVER/rooms/ASCII_KEY. Ctrl+C closes all sessions.\n\
+Default mode relays bilateral BKMP. Group mode admits and prepares a roster;\n\
+it does not provide group gameplay, shared start, progress, or final ACKs.\n";
 
 #[derive(Clone, Debug)]
 pub struct ServerOptions {
@@ -50,6 +56,7 @@ pub struct ServerOptions {
     pub max_key_bytes: usize,
     pub max_sessions: usize,
     pub max_setups: usize,
+    pub group_hosts: Option<usize>,
     pub waiting_ttl: Duration,
     pub setup_timeout: Duration,
     pub io_timeout: Duration,
@@ -99,6 +106,7 @@ impl ServerOptions {
                 "--max-key-bytes" => "--max-key-bytes",
                 "--max-sessions" => "--max-sessions",
                 "--max-setups" => "--max-setups",
+                "--group-hosts" => "--group-hosts",
                 "--waiting-ms" => "--waiting-ms",
                 "--setup-ms" => "--setup-ms",
                 "--io-ms" => "--io-ms",
@@ -154,6 +162,14 @@ impl ServerOptions {
                 .map_err(|_| ConfigError::Invalid("--max-sessions"))?,
             max_setups: usize::try_from(number("--max-setups", 16)?)
                 .map_err(|_| ConfigError::Invalid("--max-setups"))?,
+            group_hosts: if values.contains_key("--group-hosts") {
+                Some(
+                    usize::try_from(number("--group-hosts", 2)?)
+                        .map_err(|_| ConfigError::Invalid("--group-hosts"))?,
+                )
+            } else {
+                None
+            },
             waiting_ttl: Duration::from_millis(number("--waiting-ms", 30000)?),
             setup_timeout: Duration::from_millis(number("--setup-ms", 10000)?),
             io_timeout: Duration::from_millis(number("--io-ms", 10000)?),
@@ -193,6 +209,12 @@ impl ServerOptions {
         }
         if self.max_setups > self.max_sessions {
             return Err(ConfigError::Invalid("--max-setups"));
+        }
+        if self
+            .group_hosts
+            .is_some_and(|hosts| !(2..=64).contains(&hosts) || hosts > self.max_sessions)
+        {
+            return Err(ConfigError::Invalid("--group-hosts"));
         }
         for (flag, value, max) in [
             ("--waiting-ms", self.waiting_ttl, 86400000),
@@ -563,7 +585,13 @@ pub fn run(options: ServerOptions) -> io::Result<()> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?
-        .block_on(serve(options, config))
+        .block_on(async move {
+            if options.group_hosts.is_some() {
+                group::serve(options, config).await
+            } else {
+                serve(options, config).await
+            }
+        })
 }
 
 async fn serve(options: ServerOptions, config: ServerConfig) -> io::Result<()> {

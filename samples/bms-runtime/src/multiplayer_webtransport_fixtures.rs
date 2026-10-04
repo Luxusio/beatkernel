@@ -62,6 +62,7 @@ fn configuration_preserves_explicit_endpoints_and_bounded_policy_without_opening
     assert!(!defaults.allow_missing_origin);
     assert_eq!((defaults.max_rooms, defaults.max_key_bytes), (64, 128));
     assert_eq!((defaults.max_sessions, defaults.max_setups), (128, 16));
+    assert_eq!(defaults.group_hosts, None);
     assert_eq!(defaults.waiting_ttl, Duration::from_secs(30));
     assert_eq!(defaults.setup_timeout, Duration::from_secs(10));
     assert_eq!(defaults.io_timeout, Duration::from_secs(10));
@@ -75,6 +76,8 @@ fn configuration_preserves_explicit_endpoints_and_bounded_policy_without_opening
         "8192",
         "--max-setups",
         "256",
+        "--group-hosts",
+        "64",
         "--waiting-ms",
         "86400000",
         "--setup-ms",
@@ -92,6 +95,7 @@ fn configuration_preserves_explicit_endpoints_and_bounded_policy_without_opening
     .unwrap();
     assert_eq!((upper.max_rooms, upper.max_key_bytes), (4096, 1024));
     assert_eq!((upper.max_sessions, upper.max_setups), (8192, 256));
+    assert_eq!(upper.group_hosts, Some(64));
     assert_eq!(upper.waiting_ttl, Duration::from_secs(86_400));
     assert_eq!(upper.setup_timeout, Duration::from_secs(60));
     assert_eq!(upper.io_timeout, Duration::from_secs(120));
@@ -107,6 +111,8 @@ fn configuration_preserves_explicit_endpoints_and_bounded_policy_without_opening
         "2",
         "--max-setups",
         "1",
+        "--group-hosts",
+        "2",
         "--waiting-ms",
         "1",
         "--setup-ms",
@@ -117,6 +123,30 @@ fn configuration_preserves_explicit_endpoints_and_bounded_policy_without_opening
     .unwrap();
     assert_eq!(lower.max_rooms, 1);
     assert_eq!(lower.io_timeout, Duration::from_millis(1));
+    assert_eq!(lower.group_hosts, Some(2));
+    for value in ["0", "1", "65", "-1", "2.0", "18446744073709551616"] {
+        assert!(ServerOptions::parse(&with_options(&["--group-hosts", value])).is_err());
+    }
+    assert_eq!(
+        ServerOptions::parse(&with_options(&["--group-hosts"])).unwrap_err(),
+        ConfigError::Missing("--group-hosts")
+    );
+    assert_eq!(
+        ServerOptions::parse(&with_options(&["--group-hosts", "2", "--group-hosts", "3"]))
+            .unwrap_err(),
+        ConfigError::Duplicate("--group-hosts")
+    );
+    assert!(
+        ServerOptions::parse(&with_options(&[
+            "--max-sessions",
+            "2",
+            "--max-setups",
+            "1",
+            "--group-hosts",
+            "3",
+        ]))
+        .is_err()
+    );
 }
 
 #[test]
@@ -480,16 +510,18 @@ fn cancellation_and_whole_frame_read_or_write_deadlines_bound_owned_streams() {
             let (a_read, a_write) = tokio::io::split(relay_left);
             let (b_read, b_write) = tokio::io::split(relay_right);
             let (_stop, cancel) = tokio::sync::watch::channel(false);
-            assert!(relay_pair(
-                a_read,
-                a_write,
-                b_read,
-                b_write,
-                Duration::from_millis(20),
-                cancel
-            )
-            .await
-            .is_err());
+            assert!(
+                relay_pair(
+                    a_read,
+                    a_write,
+                    b_read,
+                    b_write,
+                    Duration::from_millis(20),
+                    cancel
+                )
+                .await
+                .is_err()
+            );
         }
 
         // Full valid input with an unread one-byte destination exercises write backpressure.
