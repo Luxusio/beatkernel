@@ -23,6 +23,7 @@ export class GamepadInputOwner {
   #busy = false;
   #closed = false;
   #failure = null;
+  #cleanupFailure = null;
   #notified = false;
   #connectedListener;
   #disconnectedListener;
@@ -59,6 +60,7 @@ export class GamepadInputOwner {
 
   get closed() { return this.#closed; }
   get failure() { return this.#failure; }
+  get cleanupFailure() { return this.#cleanupFailure; }
   get devices() {
     return Object.freeze(Array.from(this.#devices.values(), ({ source, index, id, mapping }) =>
       Object.freeze({ source, index, id, mapping })));
@@ -224,8 +226,14 @@ export class GamepadInputOwner {
     this.#devices.clear();
     for (const [name, listener] of [["gamepadconnected", this.#connectedListener], ["gamepaddisconnected", this.#disconnectedListener]]) {
       try { this.#target.removeEventListener(name, listener); }
-      catch (cause) { this.#failure ??= new Error("Gamepad listener cleanup failed.", { cause }); }
+      catch (cause) {
+        this.#cleanupFailure ??= new Error("Gamepad listener cleanup failed.", { cause });
+        this.#failure ??= this.#cleanupFailure;
+      }
     }
+    // A constructor failure has not returned an owner for callers to inspect.
+    // Keep failed cleanup attached to the original acquisition/setup error too.
+    if (this.#cleanupFailure !== null) this.#failure.cleanupError = this.#cleanupFailure;
     this.#notifyError();
   }
 }

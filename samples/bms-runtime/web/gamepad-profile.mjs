@@ -8,6 +8,29 @@ const integer = (value, min, max) => Number.isInteger(value) && value >= min && 
 const unsigned = value => typeof value === "bigint" && value >= 0n && value <= U64_MAX;
 const laneValid = lane => integer(lane, 0x11, 0x19) || integer(lane, 0x21, 0x29);
 
+export function automaticGamepadSetup(devices) {
+  if (!Array.isArray(devices) || devices.length > 16) throw new Error("Automatic Gamepad setup requires at most sixteen descriptors.");
+  const sources = new Set();
+  const slots = new Set();
+  const admitted = [];
+  const words = [];
+  for (const device of devices) {
+    if (!device || typeof device !== "object" || Array.isArray(device)) throw new Error("Invalid automatic Gamepad descriptor.");
+    const { source, index, id, mapping, buttons, axes } = device;
+    if (!unsigned(source) || source < 3n || sources.has(source) || !integer(index, 0, 63) || slots.has(index)
+      || typeof id !== "string" || id.length > 1024 || (mapping !== "" && mapping !== "standard")
+      || !integer(buttons, 0, 128) || !integer(axes, 0, 64)) throw new Error("Invalid automatic Gamepad identity or control counts.");
+    sources.add(source);
+    slots.add(index);
+    if (mapping !== "standard" || buttons < 9) continue;
+    admitted.push({ source, buttons, axes });
+    const low = Number(source & 0xffffffffn);
+    const high = Number(source >> 32n);
+    for (let button = 0; button < 9; button++) words.push(0x11 + button, low, high, 0, button);
+  }
+  return snapshotGamepadSetup({ devices: admitted, bindingWords: Uint32Array.from(words) });
+}
+
 export function snapshotGamepadSetup(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || !Array.isArray(value.devices) || value.devices.length > 16

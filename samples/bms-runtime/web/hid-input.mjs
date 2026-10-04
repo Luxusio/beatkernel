@@ -39,6 +39,8 @@ export class HidInputOwner {
   #maxDevices;
   #maxReportBytes;
   #nextSource;
+  #allocateSource;
+  #lastSource = 2n;
   #devices = new Map();
   #pending = null;
   #closing = new Map();
@@ -48,12 +50,13 @@ export class HidInputOwner {
   #cleanupFailure = null;
   #disconnectListener;
 
-  constructor({ hid, nextSequence, onReport, onDisconnect, onError,
+  constructor({ hid, nextSequence, nextSource, onReport, onDisconnect, onError,
     maxDevices = 16, maxReportBytes = 1024, firstSource = 3n } = {}) {
     if (!hid || ["getDevices", "requestDevice", "addEventListener", "removeEventListener"].some(name => typeof hid[name] !== "function")) {
       throw new Error("WebHID is unavailable or lacks its device ownership API.");
     }
     if ([nextSequence, onReport, onDisconnect, onError].some(callback => typeof callback !== "function")
+      || (nextSource !== undefined && typeof nextSource !== "function")
       || !Number.isInteger(maxDevices) || maxDevices < 1 || maxDevices > 16
       || !Number.isInteger(maxReportBytes) || maxReportBytes < 1 || maxReportBytes > 1024
       || typeof firstSource !== "bigint" || firstSource < 3n || firstSource > U64_MAX) {
@@ -67,6 +70,7 @@ export class HidInputOwner {
     this.#maxDevices = maxDevices;
     this.#maxReportBytes = maxReportBytes;
     this.#nextSource = firstSource;
+    this.#allocateSource = nextSource ?? (() => this.#nextSource++);
     this.#disconnectListener = event => this.#disconnect(event);
     try {
       hid.addEventListener("disconnect", this.#disconnectListener);
@@ -125,7 +129,6 @@ export class HidInputOwner {
     if (!Array.isArray(devices) || devices.length > 16) throw new Error("HID discovery exceeds sixteen interfaces.");
     const seen = new Set();
     const additions = [];
-    let nextSource = this.#nextSource;
     for (const device of devices) {
       if (seen.has(device)) continue;
       seen.add(device);
@@ -137,10 +140,17 @@ export class HidInputOwner {
       }
       if (device.opened) throw new Error("HID interface is already opened externally.");
       if (this.#devices.size + this.#closing.size + additions.length >= this.#maxDevices) throw new Error("HID device capacity exceeded.");
-      if (nextSource > U64_MAX) throw new Error("HID source identity exhausted.");
-      additions.push({ device, source: nextSource++, owned: false, ready: false, listening: false, listener: null, closePromise: null });
+      additions.push({ device, source: null, owned: false, ready: false, listening: false, listener: null, closePromise: null });
     }
-    this.#nextSource = nextSource;
+    for (const entry of additions) {
+      const source = this.#allocateSource();
+      if (typeof source !== "bigint" || source < 3n || source > U64_MAX || source <= this.#lastSource) {
+        throw new Error("HID source allocator must return fresh increasing u64 identities.");
+      }
+      this.#lastSource = source; // Accepted allocations are burned even if setup later fails.
+      entry.source = source;
+      if (this.#closed) throw this.#failure ?? new Error("HID owner closed during source allocation.");
+    }
     for (const entry of additions) {
       if (this.#closed) throw this.#failure ?? new Error("HID owner closed before opening an interface.");
       // Recheck just before open; an unrelated owner may have opened an

@@ -2,6 +2,7 @@ import { snapshotFiles, nanoseconds, seconds } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
 import { RecordsStore } from "./record-store.mjs";
 import { HidInputOwner } from "./hid-input.mjs";
+import { GamepadInputOwner } from "./gamepad-input.mjs";
 import { snapshotHidDevices } from "./hid-profile.mjs";
 import { SavedOpponentSelection, opponentLabel, validateOpponentSnapshot } from "./saved-opponents.mjs";
 import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
@@ -115,14 +116,65 @@ async function authorizeHid() {
   }
 }
 
+function nextInputSequence(session) {
+  if (activePlay !== session || session.owner !== owner || session.phase === "closing") throw new Error("Input owner is no longer active.");
+  const sequence = session.sequence + 1n;
+  if (sequence > 18446744073709551615n) throw new Error("Input acquisition sequence exhausted.");
+  session.sequence = sequence;
+  return sequence;
+}
+
+function nextInputSource(session) {
+  if (activePlay !== session || session.owner !== owner || session.phase === "closing") throw new Error("Input owner is no longer active.");
+  const source = session.nextSource;
+  if (source > 18446744073709551615n) throw new Error("Input source identity exhausted.");
+  session.nextSource++;
+  return source;
+}
+
+function createSessionGamepads(session) {
+  return new GamepadInputOwner({ navigator, eventTarget: window,
+    nextSource: () => nextInputSource(session), nextSequence: () => nextInputSequence(session),
+    onSample: event => {
+      if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
+      if (session.phase === "preparing") {
+        if (session.gamepadDevices.length >= 16) throw new Error("Gamepad descriptor capacity exceeded.");
+        session.gamepadDevices.push(Object.freeze({ source: event.source, index: event.index, id: event.id,
+          mapping: event.mapping, buttons: event.buttons.length, axes: event.axes.length }));
+        return;
+      }
+      if (session.phase !== "playing" || !session.gamepadSources?.has(event.source)) return;
+      if (session.events.length >= 1024) throw new Error("Pending input capacity exceeded.");
+      // Old unchanged Gamepad timestamps are legitimate; Worker determines
+      // whether this sample changes any admitted controls before chronology.
+      session.events.push(event);
+      session.completionReady = false;
+    },
+    onDisconnect: event => {
+      if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
+      const participates = session.gamepadSources === null
+        ? session.gamepadDevices?.some(device => device.source === event.source && device.mapping === "standard" && device.buttons >= 9)
+        : session.gamepadSources.has(event.source);
+      if (participates) {
+        void stopPlay("Playback stopped after a Gamepad disconnected.", true);
+      }
+    },
+    onError: error => {
+      if (activePlay === session && session.owner === owner && session.phase !== "closing") {
+        if (error.cleanupError) hidOwnershipFailed = true;
+        void stopPlay(`Gamepad input failed: ${String(error.message).slice(0, 4096)}`
+          + (error.cleanupError ? " Input cleanup failed. Reload the page before playing again." : ""), true);
+      }
+    },
+  });
+}
+
 function createSessionHid(session) {
   return new HidInputOwner({ hid: navigator.hid,
+    nextSource: () => nextInputSource(session),
     nextSequence: () => {
       if (activePlay !== session || session.owner !== owner || session.phase !== "playing") return session.sequence;
-      const sequence = session.sequence + 1n;
-      if (sequence > 18446744073709551615n) throw new Error("HID acquisition sequence exhausted.");
-      session.sequence = sequence;
-      return sequence;
+      return nextInputSequence(session);
     },
     onReport: event => {
       if (activePlay !== session || session.owner !== owner || session.phase !== "playing"
@@ -296,7 +348,7 @@ function received(data) {
 
 function start() {
   stop();
-  if (hidOwnershipFailed) { status("HID cleanup failed. Reload the page before playing again.", true); return; }
+  if (hidOwnershipFailed) { status("Input cleanup failed. Reload the page before playing again.", true); return; }
   libraryId = importId = selectId = selectedId = seekId = 0;
   importing = preparing = hasPreview = false;
   audioModule = null;
@@ -524,9 +576,10 @@ async function play(mode = "live") {
   if (!initialized || !hasPreview || !audioModule || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed) return;
   if (mode === "replay" && selectedReplay === null) return;
   const session = { id: ++serial, owner, mode, phase: "preparing", controller: new AbortController(), audio: null, opening: null,
-    rpc: null, timer: null, events: [], pressed: new Set(), bindings: [], sequence: 0n,
+    rpc: null, timer: null, events: [], pressed: new Set(), bindings: [], sequence: 0n, nextSource: 3n, inputPumping: false,
     canvas, touchInput: false, contacts: new Map(), nextContact: 0n,
     hidOwner: null, hidConnecting: null, hidDevices: null, hidSources: null, hidProfileFile: null,
+    gamepadOwner: null, gamepadDevices: null, gamepadSources: null,
     tickId: 0, tickPending: null, commandsPending: true, startFrame: null,
     origin: null, lastHost: 0n, stopping: null, renderId: 0, renderPending: null,
     workerStarted: false, workerReleased: false, workerStop: null, finalScore: null,
@@ -570,6 +623,13 @@ async function play(mode = "live") {
     clearOpponentResults(session.opponentSelection ? "Preparing selected saved opponents…"
       : mode === "replay" ? "Saved comparisons are inactive during replay playback." : "No saved opponents selected.");
     if (session.hidProfileFile !== null) session.hidOwner = createSessionHid(session);
+    if (mode === "live" && typeof navigator.getGamepads === "function") {
+      session.gamepadDevices = [];
+      session.gamepadOwner = createSessionGamepads(session);
+      session.gamepadOwner.poll();
+      if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
+      session.gamepadDevices = Object.freeze(session.gamepadDevices);
+    }
     // open invokes resume synchronously here, inside the button's user gesture.
     const opening = AudioHost.open({ module: audioModule, generation: session.id, channels: 2,
       contextOptions: session.contextOptions,
@@ -595,6 +655,7 @@ async function play(mode = "live") {
         ...(session.multiplayer ? { multiplayer: session.multiplayer } : {}),
         ...(session.opponentSelection ? { opponents: session.opponentSelection } : {}),
         ...(session.hidOwner ? { hidProfileFile: session.hidProfileFile, hidDevices: session.hidDevices } : {}),
+        ...(session.gamepadOwner ? { gamepadDevices: session.gamepadDevices } : {}),
         keyPairs: Uint32Array.from(session.bindingSelection.flatMap(row => [row[0], row[2]])) };
     const prepared = await playRpc(session, "play-start", { libraryId, path: ui.chart.value,
       rate: session.audio.sampleRate, commandBatchLimit: session.commandBatchLimit, ...source });
@@ -618,6 +679,20 @@ async function play(mode = "live") {
     } else if (prepared.hidSourceCount !== undefined || prepared.hidSources !== undefined) {
       throw new Error("Preparation admitted HID without an owned device session.");
     }
+    if (session.gamepadOwner !== null) {
+      const sources = prepared.gamepadSources;
+      const eligible = session.gamepadDevices.filter(device => device.mapping === "standard" && device.buttons >= 9);
+      if (!Array.isArray(sources) || sources.length !== eligible.length) throw new Error("Preparation omitted the exact eligible Gamepad sources.");
+      const admitted = new Set();
+      const owned = session.gamepadOwner.devices;
+      for (const source of sources) {
+        if (typeof source !== "bigint" || source < 3n || source > 18446744073709551615n || admitted.has(source)
+          || !eligible.some(device => device.source === source) || !owned.some(device => device.source === source)
+          || session.hidSources?.has(source)) throw new Error("Preparation changed an owned Gamepad source identity.");
+        admitted.add(source);
+      }
+      session.gamepadSources = admitted;
+    } else if (prepared.gamepadSources !== undefined) throw new Error("Preparation admitted Gamepads without an owned input session.");
     const preparedStart = prepared.startNs === undefined && mode === "live" && session.startNs === 0n ? 0n : prepared.startNs;
     if (typeof preparedStart !== "bigint") throw new Error("Preparation omitted its actual song start.");
     validateStart(preparedStart);
@@ -634,14 +709,15 @@ async function play(mode = "live") {
     ui.title.textContent = prepared.title || ui.chart.value;
     ui.details.textContent = `${prepared.artist || "Unknown artist"} · ${prepared.notes} notes · ${prepared.samples} sounds · ${session.audio.sampleRate} Hz output · start ${seconds(preparedStart.toString())} s`
       + (session.endNs === undefined ? "" : ` · ${mode === "replay" ? "recorded end" : "end"} ${seconds(session.endNs.toString())} s`);
-    if (session.hidOwner !== null) {
+    if (session.hidOwner !== null || session.gamepadSources?.size > 0) {
       bindingsFor(prepared.lanes); // Validate actual lane shape; Worker proved combined coverage.
       session.bindings = bindingsFor(prepared.lanes.filter(lane => session.bindingSelection.some(row => row[0] === lane)), session.bindingSelection);
     } else session.bindings = mode === "replay" ? [] : bindingsFor(prepared.lanes, session.bindingSelection);
     ui.keys.textContent = mode === "replay" ? "Recorded input playback · Escape stops the replay."
       : session.bindings.map(row => `${row[0].toString(16).toUpperCase()}: ${row[1]}`).join(" · ")
         + (session.touchInput ? " · Touch lanes enabled" : "")
-        + (session.hidSources ? ` · ${session.hidSources.size} HID interface(s)` : "");
+        + (session.hidSources ? ` · ${session.hidSources.size} HID interface(s)` : "")
+        + (session.gamepadSources ? ` · ${session.gamepadSources.size} standard Gamepad(s); ${session.gamepadDevices.length - session.gamepadSources.size} unsupported layout(s) ignored` : "");
     for (let index = 0; index < prepared.samples; index++) {
       const sample = await playRpc(session, "play-sample");
       if (sample?.kind !== "sample") throw new Error("Prepared audio asset count changed.");
@@ -720,9 +796,7 @@ function key(event, down) {
     const hostNs = millisecondsToNanos(event.timeStamp);
     if (hostNs < session.lastHost) throw new Error("Keyboard input arrived behind the accepted gameplay watermark.");
     if (down) session.pressed.add(event.code); else session.pressed.delete(event.code);
-    session.sequence++;
-    if (session.sequence > 18446744073709551615n) throw new Error("Keyboard sequence exhausted.");
-    session.events.push({ hostNs, key: binding[2], down, sequence: session.sequence });
+    session.events.push({ hostNs, key: binding[2], down, sequence: nextInputSequence(session) });
     session.completionReady = false;
     pumpInput(session);
   } catch (error) { void stopPlay(`Playback failed: ${error.message}`, true); }
@@ -757,9 +831,8 @@ function touch(event, phase, surface, lost = false) {
       || !Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
       throw new Error("Touch input requires finite coordinates, pressure and a positive canvas extent.");
     }
-    const sequence = session.sequence + 1n;
     const contact = previous?.contact ?? session.nextContact + 1n;
-    if (sequence > 18446744073709551615n || contact > 18446744073709551615n) throw new Error("Touch acquisition identity exhausted.");
+    if (contact > 18446744073709551615n) throw new Error("Touch acquisition identity exhausted.");
     const current = { contact, x, y, pressure, width, height };
     if (phase === 0) {
       // Capture belongs to this contact before any event can reach the Worker.
@@ -771,7 +844,7 @@ function touch(event, phase, surface, lost = false) {
       // Native release may emit lost capture; the removed owner cannot cancel twice.
       if (!lost) surface.releasePointerCapture(id);
     } else session.contacts.set(id, current);
-    session.sequence = sequence;
+    const sequence = nextInputSequence(session);
     session.events.push({ kind: "touch", hostNs, sequence, contact, phase, code: id >>> 0,
       x, y, pressure, width, height });
     session.completionReady = false;
@@ -805,22 +878,27 @@ function finishPlay(session) {
   }
 }
 function pumpInput(session) {
-  if (activePlay !== session || session.mode !== "live" || session.phase !== "playing" || session.tickPending !== null) return;
+  if (activePlay !== session || session.mode !== "live" || session.phase !== "playing" || session.tickPending !== null || session.inputPumping) return;
+  session.inputPumping = true;
   try {
+    session.gamepadOwner?.poll();
+    if (activePlay !== session || session.owner !== owner || session.phase !== "playing") return;
     const events = session.events.splice(0, 256);
+    let lastInput = session.lastHost;
+    for (const event of events) if (event.hostNs > lastInput) lastInput = event.hostNs;
     let watermark = null;
     if (!session.events.length) {
       watermark = millisecondsToNanos(Math.max(0, performance.now() - 12));
-      if (events.length && watermark < events.at(-1).hostNs) watermark = events.at(-1).hostNs;
-      if (watermark < session.lastHost) watermark = session.lastHost;
+      if (watermark < lastInput) watermark = lastInput;
     }
     const tickId = ++session.tickId;
     if (!Number.isSafeInteger(tickId)) throw new Error("Gameplay step identity exhausted.");
     session.completionReady = false;
     const timer = setTimeout(() => { if (session.tickPending?.tickId === tickId) void stopPlay("Gameplay Worker stopped responding.", true); }, 10000);
-    session.tickPending = { tickId, timer, watermark, lastInput: events.at(-1)?.hostNs ?? session.lastHost };
+    session.tickPending = { tickId, timer, watermark, lastInput };
     worker.postMessage({ kind: "play-step", playId: session.id, tickId, events, watermark, contextFrame: session.audio.currentFrame });
   } catch (error) { void stopPlay(`Playback failed: ${error.message}`, true); }
+  finally { session.inputPumping = false; }
 }
 
 function pumpPresentation(session) {
@@ -953,6 +1031,13 @@ function stopPlay(reason, failed = false, completed = false) {
   const hadHid = session.hidOwner !== null;
   session.naturalFinishRequested = completed;
   session.phase = "closing";
+  let gamepadsStopped;
+  try {
+    session.gamepadOwner?.close();
+    if (session.gamepadOwner?.cleanupFailure) throw session.gamepadOwner.cleanupFailure;
+    gamepadsStopped = Promise.resolve();
+  } catch (error) { gamepadsStopped = Promise.reject(error); }
+  gamepadsStopped.catch(() => {});
   // Detach acquisition synchronously; the returned promise also owns any late
   // authorized open. Join it alongside audio and Worker release below.
   let hidStopped;
@@ -1011,11 +1096,18 @@ function stopPlay(reason, failed = false, completed = false) {
           failed = true;
           reason += ` HID cleanup failed: ${String(error.message).slice(0, 4096)} Reload the page before playing again.`;
         }),
+        gamepadsStopped.catch(error => {
+          hidOwnershipFailed = true;
+          stop();
+          failed = true;
+          reason += ` Gamepad cleanup failed: ${String(error.message).slice(0, 4096)} Reload the page before playing again.`;
+        }),
       ]);
     }
     finally {
       await workerStopped;
       session.hidOwner = session.hidConnecting = session.hidDevices = session.hidSources = session.hidProfileFile = null;
+      session.gamepadOwner = session.gamepadDevices = session.gamepadSources = null;
       if (session.cleanupError !== null) {
         failed = true;
         reason = `Gameplay cleanup failed: ${session.cleanupError} Reload the page before playing again.`;

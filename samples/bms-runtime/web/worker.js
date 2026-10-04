@@ -6,7 +6,7 @@ import { validateSelections, validateOpponentSnapshot } from "./saved-opponents.
 import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, projectTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
 import { snapshotHidDevices, hidSetupFromProfile } from "./hid-profile.mjs";
 import { AudioCommandClient } from "./audio-command-client.mjs";
-import { snapshotGamepadSetup, GamepadAdapter } from "./gamepad-profile.mjs";
+import { snapshotGamepadSetup, automaticGamepadSetup, GamepadAdapter } from "./gamepad-profile.mjs";
 const { BrowserGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserView } = runtime;
 let ready = null;
 let view = null;
@@ -450,6 +450,7 @@ function disposeGame(state) {
   state.renderObservation = null;
   state.lastPresentation = null;
   state.gamepadAdapter = null;
+  state.sourceOrder.clear();
   client?.close();
   const game = state.game;
   state.game = null;
@@ -599,9 +600,11 @@ async function preparePlay(state, request) {
     }
     let gamepad = null;
     let gamepadAdapter = null;
-    if (request.gamepadSetup !== undefined) {
+    if (request.gamepadSetup !== undefined || request.gamepadDevices !== undefined) {
       if (state.mode !== "live" || !state.physicalInput) throw new Error("Gamepad setup requires live canonical physical input ownership.");
-      gamepad = snapshotGamepadSetup(request.gamepadSetup);
+      if (request.gamepadSetup !== undefined && request.gamepadDevices !== undefined) throw new Error("Choose automatic Gamepad devices or explicit bindings, not both.");
+      gamepad = request.gamepadDevices === undefined ? snapshotGamepadSetup(request.gamepadSetup)
+        : automaticGamepadSetup(request.gamepadDevices);
       if (bindingWords.length + gamepad.physicalWords.length > 256 * 7) throw new Error("Combined physical binding capacity exceeded.");
       gamepadAdapter = new GamepadAdapter(gamepad);
     }
@@ -1035,22 +1038,24 @@ function stepPlay(state, request) {
   if (rawFrame === Object.hasOwn(request, "audioNs")) throw new Error("Choose exactly one raw or projected audio schedule.");
   const audioNs = rawFrame ? audioScheduleFromFrame(request.contextFrame, state.startFrame, state.rate) : request.audioNs;
   if (!hostTime(audioNs)) throw new Error("Invalid projected audio schedule.");
-  let host = state.lastHost;
-  let sequence = state.lastSequence;
   let ignored = 0;
   let fanout = 0;
   let gamepadDraft = null;
-  const encoded = state.physicalInput ? [] : null;
+  const sourceOrder = new Map(state.sourceOrder);
+  const entries = [];
   // Validate the complete bounded batch before the first actual Runtime call.
-  for (const event of request.events) {
+  for (let index = 0; index < request.events.length; index++) {
+    const event = request.events[index];
     if (!event || typeof event !== "object" || Array.isArray(event) || !hostTime(event.hostNs) || !unsigned(event.sequence)) {
       throw new Error("Invalid gameplay input or source chronology.");
     }
+    let encoded = null;
+    let source;
     if (event.kind === "gamepad") {
       if (state.gamepadAdapter === null) throw new Error("Gamepad input requires an admitted physical profile.");
       gamepadDraft ??= state.gamepadAdapter.fork();
       const bytes = gamepadDraft.decode(event);
-      encoded.push({ kind: "gamepad", bytes });
+      encoded = { kind: "gamepad", bytes };
       fanout += bytes.length;
       if (fanout > 256) throw new Error("Canonical input fanout capacity exceeded.");
       if (event.hostNs < state.origin) ignored++;
@@ -1059,40 +1064,48 @@ function stepPlay(state, request) {
       if (bytes.length === 0) continue;
     } else if (event.kind === "hid") {
       if (state.hidSources === null || !state.hidSources.has(event.source)) throw new Error("HID input requires an admitted source profile.");
-      encoded.push({ kind: "hid", bytes: encodeRawHidEvent(event) });
+      encoded = { kind: "hid", bytes: encodeRawHidEvent(event) };
+      source = event.source;
     } else if (event.kind === "touch") {
       if (!state.touchInput) throw new Error("Touch input requires the prepared contact mode.");
       const position = projectTouchEvent(event, state.touchWidth, state.touchHeight);
-      encoded.push({ kind: "touch", bytes: encodeTouchEvent(event), position });
+      encoded = { kind: "touch", bytes: encodeTouchEvent(event), position };
+      source = 2n;
     } else {
       if (event.kind !== undefined || !integer(event.key, 1, 65535) || !state.keys.has(event.key)
         || typeof event.down !== "boolean") throw new Error("Invalid gameplay keyboard input.");
-      if (encoded !== null) encoded.push({ kind: "keyboard", bytes: encodeKeyboardEvent(event) });
+      if (state.physicalInput) encoded = { kind: "keyboard", bytes: encodeKeyboardEvent(event) };
+      source = 1n;
     }
     if (event.kind !== "gamepad") {
       fanout++;
       if (fanout > 256) throw new Error("Canonical input fanout capacity exceeded.");
       if (event.hostNs < state.origin) ignored++;
+      const previous = sourceOrder.get(source);
+      if (previous && (event.hostNs < previous.hostNs || event.sequence < previous.sequence)) {
+        throw new Error("Gameplay input regressed within its original source chronology.");
+      }
+      sourceOrder.set(source, { hostNs: event.hostNs, sequence: event.sequence });
     }
-    if ((host !== null && event.hostNs < host) || (sequence !== null && event.sequence < sequence)) {
-      throw new Error("Changed gameplay input precedes the committed global chronology.");
-    }
-    host = event.hostNs;
-    sequence = event.sequence;
+    entries.push({ event, encoded, index });
   }
+  // Core sequences belong to each DeviceId. Different sources may be sampled
+  // in another order; preserve all original metadata while ordering timestamps.
+  entries.sort((a, b) => a.event.hostNs < b.event.hostNs ? -1 : a.event.hostNs > b.event.hostNs ? 1 : a.index - b.index);
+  if (entries.length && state.lastHost !== null && entries[0].event.hostNs < state.lastHost) {
+    throw new Error("Changed gameplay input precedes the committed global chronology.");
+  }
+  const host = entries.at(-1)?.event.hostNs ?? state.lastHost;
   if (request.watermark !== null && host !== null && request.watermark < host) throw new Error("Gameplay watermark precedes its input prefix.");
   if (!Number.isSafeInteger(state.preOriginInputs + ignored)) throw new Error("Pre-origin input count overflow.");
   if (gamepadDraft !== null) state.gamepadAdapter = gamepadDraft;
+  state.sourceOrder = sourceOrder;
+  state.preOriginInputs += ignored;
   state.lastTick = request.tickId;
   state.completed = false;
   state.commandsDrained = false;
-  for (let index = 0; index < request.events.length; index++) {
-    const event = request.events[index];
-    const entry = encoded?.[index];
-    if (event.hostNs < state.origin) state.preOriginInputs++;
-    // One original sample counts once, even when it fans out or emits nothing.
-    if (entry?.kind === "gamepad" && entry.bytes.length === 0) continue;
-    if (event.hostNs >= state.origin && encoded !== null) {
+  for (const { event, encoded: entry } of entries) {
+    if (event.hostNs >= state.origin && entry !== null) {
       if (entry.kind === "hid") state.game.input_hid_blob(entry.bytes, audioNs);
       else if (entry.kind === "touch") state.game.input_blob_at(entry.bytes, entry.position.x, entry.position.y, audioNs);
       else if (entry.kind === "gamepad") for (const bytes of entry.bytes) state.game.input_blob(bytes, audioNs);
@@ -1128,7 +1141,7 @@ function handlePlay(request) {
       batch: null, commandClient: null, commandPumping: false, audioPumping: false,
       audioRpcId: null, renderObservation: null, lastPresentation: null,
       lastRpc: 0, lastTick: 0, lastRender: 0,
-      lastHost: null, lastSequence: null, preOriginInputs: 0,
+      lastHost: null, lastSequence: null, sourceOrder: new Map(), preOriginInputs: 0,
       recordReplay: false, completed: false,
       mode: "live", physicalInput: false, touchInput: false, touchWidth: null, touchHeight: null,
       hidSources: null, gamepadAdapter: null,
