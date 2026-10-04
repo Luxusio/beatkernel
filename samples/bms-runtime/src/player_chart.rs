@@ -410,6 +410,7 @@ pub struct ScanProgress {
     pub directories: usize,
     pub entries: usize,
     pub charts: usize,
+    /// Actual raw chart bytes returned, including failed prefixes and detection bytes.
     pub bytes: u64,
 }
 
@@ -428,7 +429,8 @@ fn scan_boundary(
 
 /// Scans an explicit directory without following symlinks or loading WAV files.
 /// Limits: 128 directories, depth eight, 1024 chart files, 8192 directory entries
-/// and 64 MiB aggregate advertised chart bytes (individual reader cap: 8 MiB).
+/// and 64 MiB aggregate raw chart bytes (individual reader cap: 8 MiB).
+/// One extra counted byte may detect aggregate overflow and ends the scan.
 pub fn scan_library(root: &Path) -> Result<ChartLibrary, PlayerChartError> {
     scan_library_with(root, |_| true)
 }
@@ -539,21 +541,27 @@ pub fn scan_library_with(
                 ));
                 continue;
             }
-            if progress.bytes + metadata.len() > 64 * 1024 * 1024 {
+            scan_boundary(&mut progress, ScanStage::Reading, &mut checkpoint)?;
+            // Same bounded decoder and seed-zero parser as load_chart, with a
+            // cancellation boundary between the real read and real parse.
+            let options = beatkernel_bms::ParseOptions::default();
+            let remaining = (64 * 1024 * 1024 - progress.bytes) as usize;
+            let (consumed, text) = match fs::File::open(&path) {
+                Ok(mut file) => crate::chart_text::read_chart_text_with_budget(
+                    &mut file,
+                    options.max_bytes,
+                    remaining,
+                ),
+                Err(error) => (0, Err(error)),
+            };
+            progress.bytes += consumed as u64;
+            scan_boundary(&mut progress, ScanStage::Parsing, &mut checkpoint)?;
+            if progress.bytes > 64 * 1024 * 1024 {
                 library
                     .diagnostics
                     .push("library aggregate chart-byte limit reached (64 MiB)".into());
                 break 'scan;
             }
-            progress.bytes += metadata.len();
-            scan_boundary(&mut progress, ScanStage::Reading, &mut checkpoint)?;
-            // Same bounded decoder and seed-zero parser as load_chart, with a
-            // cancellation boundary between the real read and real parse.
-            let options = beatkernel_bms::ParseOptions::default();
-            let text = fs::File::open(&path).and_then(|mut file| {
-                crate::chart_text::read_chart_text(&mut file, options.max_bytes)
-            });
-            scan_boundary(&mut progress, ScanStage::Parsing, &mut checkpoint)?;
             let chart = text.map_err(|error| error.to_string()).and_then(|text| {
                 beatkernel_bms::parse_seeded(&text, options, 0).map_err(|error| error.to_string())
             });

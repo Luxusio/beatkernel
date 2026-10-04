@@ -94,35 +94,54 @@ pub fn decode_chart_text<'a>(
 /// Reads at most max_bytes+1 to detect oversized/growing input, retries
 /// interruptions, and propagates reader failures. No filesystem is opened here.
 pub fn read_chart_text(reader: &mut impl Read, max_bytes: usize) -> io::Result<String> {
-    let read_limit = max_bytes.checked_add(1).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "chart reader byte limit overflow",
-        )
-    })?;
-    let mut raw = Vec::new();
-    let mut scratch = [0u8; 4096];
-    loop {
-        let request = (read_limit - raw.len()).min(scratch.len());
-        let read = match reader.read(&mut scratch[..request]) {
-            Ok(0) => break,
-            Ok(read) => read,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        };
-        append_bounded(&mut raw, &scratch[..read], max_bytes)?;
-    }
-    match decode_chart_text(&raw, ChartTextEncoding::Auto, max_bytes)? {
-        Cow::Owned(text) => Ok(text),
-        Cow::Borrowed(text) => {
-            let mut owned = String::new();
-            owned
-                .try_reserve_exact(text.len())
-                .map_err(|_| io::Error::other("chart text allocation failed"))?;
-            owned.push_str(text);
-            Ok(owned)
+    read_chart_text_with_budget(reader, max_bytes, max_bytes).1
+}
+
+/// Returns actual raw consumption even when reading, allocation or decoding fails.
+/// The raw budget is independent of the decoded UTF-8 cap. One counted detection
+/// byte may exceed the lesser raw limit; it is never appended or decoded.
+pub fn read_chart_text_with_budget(
+    reader: &mut impl Read,
+    max_bytes: usize,
+    raw_remaining: usize,
+) -> (usize, io::Result<String>) {
+    let mut consumed = 0;
+    let result = (|| {
+        max_bytes.checked_add(1).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "chart reader byte limit overflow",
+            )
+        })?;
+        let raw_limit = max_bytes.min(raw_remaining);
+        let read_limit = raw_limit + 1; // The checked max_bytes bounds raw_limit.
+        let mut raw = Vec::new();
+        let mut scratch = [0u8; 4096];
+        loop {
+            let request = (read_limit - consumed).min(scratch.len());
+            let read = match reader.read(&mut scratch[..request]) {
+                Ok(0) => break,
+                Ok(read) if read <= request => read,
+                Ok(_) => return Err(invalid("chart reader returned an invalid byte count")),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            };
+            consumed += read;
+            append_bounded(&mut raw, &scratch[..read], raw_limit)?;
         }
-    }
+        match decode_chart_text(&raw, ChartTextEncoding::Auto, max_bytes)? {
+            Cow::Owned(text) => Ok(text),
+            Cow::Borrowed(text) => {
+                let mut owned = String::new();
+                owned
+                    .try_reserve_exact(text.len())
+                    .map_err(|_| io::Error::other("chart text allocation failed"))?;
+                owned.push_str(text);
+                Ok(owned)
+            }
+        }
+    })();
+    (consumed, result)
 }
 
 #[cfg(test)]

@@ -48,6 +48,10 @@ pub mod browser_replay;
 pub mod browser_room_client;
 #[cfg(test)]
 mod browser_touch_fixtures;
+#[cfg(test)]
+mod catalog_read_budget_fixtures;
+#[cfg(test)]
+mod chart_read_budget_fixtures;
 /// Strict bounded application chart decoding before the UTF-8 parser.
 pub mod chart_text;
 /// Saved-record opponents and actual judgment summaries.
