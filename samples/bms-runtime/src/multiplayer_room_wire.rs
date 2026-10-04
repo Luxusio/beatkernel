@@ -1,4 +1,4 @@
-//! Distinct BKMR v2 room-admission, control and progress frames.
+//! Distinct BKMR v2 room-admission, control, progress and coordinated-drain frames.
 //! Stream owners assign source participants; an upload never chooses its source.
 //! Codec validation grants no membership, start, delivery or final-ACK authority.
 
@@ -56,6 +56,14 @@ pub enum RoomMessage {
         prefix: GroupPrefix,
     },
     FinalAck {
+        participant: ParticipantId,
+        sequence: u64,
+    },
+    DrainReady {
+        participant: ParticipantId,
+        sequence: u64,
+    },
+    DrainComplete {
         participant: ParticipantId,
         sequence: u64,
     },
@@ -207,11 +215,24 @@ fn message_extent(message: &RoomMessage) -> Result<(u8, usize), RoomWireError> {
         RoomMessage::FinalAck {
             participant,
             sequence,
+        }
+        | RoomMessage::DrainReady {
+            participant,
+            sequence,
+        }
+        | RoomMessage::DrainComplete {
+            participant,
+            sequence,
         } => {
             if participant.0 == 0 || *sequence == 0 {
                 return Err(RoomWireError::InvalidMessage);
             }
-            (15, 16)
+            let tag = match message {
+                RoomMessage::FinalAck { .. } => 15,
+                RoomMessage::DrainReady { .. } => 16,
+                _ => 17,
+            };
+            (tag, 16)
         }
     })
 }
@@ -303,6 +324,14 @@ pub fn encode_message(message: &RoomMessage) -> Result<Vec<u8>, RoomWireError> {
         RoomMessage::FinalAck {
             participant,
             sequence,
+        }
+        | RoomMessage::DrainReady {
+            participant,
+            sequence,
+        }
+        | RoomMessage::DrainComplete {
+            participant,
+            sequence,
         } => {
             frame.extend_from_slice(&participant.0.to_le_bytes());
             frame.extend_from_slice(&sequence.to_le_bytes());
@@ -354,7 +383,7 @@ fn read_header(frame: &[u8]) -> Result<(u8, usize), RoomWireError> {
             (8 + MIN_PROGRESS_PAYLOAD..=8 + MAX_PROGRESS_PAYLOAD).contains(&length)
                 && (length - 20) % 44 == 0
         }
-        15 => length == 16,
+        15..=17 => length == 16,
         _ => false,
     };
     if !valid_length {
@@ -507,16 +536,30 @@ pub fn decode_message(frame: &[u8]) -> Result<RoomMessage, RoomWireError> {
                 prefix: read_prefix(&mut payload)?,
             }
         }
-        15 => RoomMessage::FinalAck {
-            participant: ParticipantId(u64::from_le_bytes(read_array(&mut payload)?)),
-            sequence: u64::from_le_bytes(read_array(&mut payload)?),
-        },
+        15..=17 => {
+            let participant = ParticipantId(u64::from_le_bytes(read_array(&mut payload)?));
+            let sequence = u64::from_le_bytes(read_array(&mut payload)?);
+            match tag {
+                15 => RoomMessage::FinalAck {
+                    participant,
+                    sequence,
+                },
+                16 => RoomMessage::DrainReady {
+                    participant,
+                    sequence,
+                },
+                _ => RoomMessage::DrainComplete {
+                    participant,
+                    sequence,
+                },
+            }
+        }
         _ => return Err(RoomWireError::InvalidFrame),
     };
     if !payload.is_empty() {
         return Err(RoomWireError::InvalidMessage);
     }
-    if matches!(tag, 7..=12 | 15) {
+    if matches!(tag, 7..=12 | 15..=17) {
         message_extent(&message)?;
     }
     Ok(message)

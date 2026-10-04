@@ -39,6 +39,14 @@ const PROGRESS: &[u8] = &[
     255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1, 255, 255, 255, 255, 255, 255, 255,
     255,
 ];
+const DRAIN_READY: &[u8] = &[
+    b'B', b'K', b'M', b'R', 2, 0, 16, 16, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    255, 255, 255, 255, 255, 255, 255, 255,
+];
+const DRAIN_COMPLETE: &[u8] = &[
+    b'B', b'K', b'M', b'R', 2, 0, 17, 16, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 8, 7, 6,
+    5, 4, 3, 2, 1,
+];
 
 fn progress_prefix() -> GroupPrefix {
     GroupPrefix {
@@ -1197,6 +1205,14 @@ fn syntactic_progress_and_ack_do_not_authorize_existing_prepared_client_owners()
             participant: own.id,
             sequence: u64::MAX,
         },
+        RoomMessage::DrainReady {
+            participant: own.id,
+            sequence: u64::MAX,
+        },
+        RoomMessage::DrainComplete {
+            participant: own.id,
+            sequence: u64::MAX,
+        },
     ] {
         let bytes = encode_message(&message).unwrap();
         assert_eq!(decode_message(&bytes).unwrap(), message);
@@ -1210,4 +1226,124 @@ fn syntactic_progress_and_ack_do_not_authorize_existing_prepared_client_owners()
         assert!(!admission.leave_written());
         assert!(!play.leave_written());
     }
+}
+
+#[test]
+fn literal_drain_frames_keep_positive_full_width_identity_and_exact_v2_extents() {
+    for (message, literal) in [
+        (
+            RoomMessage::DrainReady {
+                participant: ParticipantId(0x8877_6655_4433_2211),
+                sequence: u64::MAX,
+            },
+            DRAIN_READY,
+        ),
+        (
+            RoomMessage::DrainComplete {
+                participant: ParticipantId(u64::MAX),
+                sequence: 0x0102_0304_0506_0708,
+            },
+            DRAIN_COMPLETE,
+        ),
+    ] {
+        assert_eq!(encode_message(&message).unwrap(), literal);
+        assert_eq!(decode_message(literal).unwrap(), message);
+        assert_eq!(literal.len(), 27);
+        for offset in [11usize, 19] {
+            let mut zero = literal.to_vec();
+            zero[offset..offset + 8].fill(0);
+            assert_eq!(decode_message(&zero), Err(RoomWireError::InvalidMessage));
+        }
+        for version in [1, 3] {
+            let mut invalid = literal.to_vec();
+            invalid[4] = version;
+            assert_eq!(decode_message(&invalid), Err(RoomWireError::InvalidFrame));
+        }
+        assert!(decode_message(&literal[..26]).is_err());
+        let mut trailing = literal.to_vec();
+        trailing.push(0);
+        assert!(decode_message(&trailing).is_err());
+    }
+    for participant in [0, 1, u64::MAX] {
+        for sequence in [0, 1, u64::MAX] {
+            for message in [
+                RoomMessage::DrainReady {
+                    participant: ParticipantId(participant),
+                    sequence,
+                },
+                RoomMessage::DrainComplete {
+                    participant: ParticipantId(participant),
+                    sequence,
+                },
+            ] {
+                assert_eq!(
+                    encode_message(&message).is_ok(),
+                    participant != 0 && sequence != 0
+                );
+            }
+        }
+    }
+    for tag in [16, 17] {
+        for length in [0u32, 15, 17, u32::MAX] {
+            let mut header = DRAIN_READY[..11].to_vec();
+            header[6] = tag;
+            header[7..11].copy_from_slice(&length.to_le_bytes());
+            let mut arriving = header.clone();
+            arriving.extend_from_slice(DRAIN_COMPLETE);
+            let mut decoder = RoomFrameDecoder::new();
+            assert_eq!(decoder.push(&arriving), Err(RoomWireError::InvalidFrame));
+            assert_eq!(
+                decoder.bytes, header,
+                "an invalid drain header admits no body bytes"
+            );
+            assert!(decoder.needed().is_err());
+        }
+    }
+}
+
+#[test]
+fn drain_fragments_coalesce_only_one_frame_and_retain_invalid_owned_payloads() {
+    for literal in [DRAIN_READY, DRAIN_COMPLETE] {
+        for boundary in 0..=literal.len() {
+            let mut decoder = RoomFrameDecoder::new();
+            feed_fragment(&mut decoder, &literal[..boundary]);
+            if boundary != literal.len() {
+                assert_eq!(decoder.take().unwrap(), None);
+            }
+            feed_fragment(&mut decoder, &literal[boundary..]);
+            assert_eq!(
+                decoder.take().unwrap(),
+                Some(decode_message(literal).unwrap())
+            );
+            assert_eq!(decoder.needed().unwrap(), 11);
+        }
+        let mut malformed = literal.to_vec();
+        malformed[19..27].fill(0);
+        let mut decoder = RoomFrameDecoder::new();
+        for byte in malformed.chunks(1) {
+            assert_eq!(decoder.push(byte).unwrap(), 1);
+        }
+        assert_eq!(decoder.take(), Err(RoomWireError::InvalidMessage));
+        assert_eq!(decoder.bytes, malformed);
+        assert_eq!(decoder.push(LEAVE).unwrap(), 0);
+        assert_eq!(decoder.take(), Err(RoomWireError::InvalidMessage));
+        assert_eq!(decoder.bytes, malformed);
+    }
+    let joined = [DRAIN_READY, DRAIN_COMPLETE, LEAVE].concat();
+    let mut decoder = RoomFrameDecoder::new();
+    let mut offset = 0;
+    for literal in [DRAIN_READY, DRAIN_COMPLETE, LEAVE] {
+        assert_eq!(decoder.push(&joined[offset..]).unwrap(), 11);
+        offset += 11;
+        if literal.len() > 11 {
+            assert_eq!(decoder.push(&joined[offset..]).unwrap(), 16);
+            offset += 16;
+        }
+        assert_eq!(decoder.push(&joined[offset..]).unwrap(), 0);
+        assert_eq!(
+            decoder.take().unwrap(),
+            Some(decode_message(literal).unwrap())
+        );
+    }
+    assert_eq!(offset, joined.len());
 }
