@@ -2272,3 +2272,76 @@ enter the existing capture path. Independent deferred fixtures cover model
 limits/ownership, solo and exact local construction, actual packet dispatch,
 whole-batch refusals, source collisions, replay refusal and cleanup. Browser,
 device, replay execution and latency acceptance remain deferred.
+
+## Window mouse and pen acquisition and launch
+
+Add optional live `pointer-input` checkbox and event-driven lane binding controls
+in `pointer-bindings`, with one mouse and one pen button choice for each of the
+eighteen lanes. Each choice is unbound or control 1..32 (buttons bit index plus
+one), unique within its type. Default mouse controls 1/2/3 bind lanes 0x11/0x12/
+0x13; default pen controls 1/2 bind 0x11/0x12. Keyboard, touch, HID and Gamepad
+remain available together. Pointer input defaults off and replay opens no live
+pointer owner. Solo needs no device chooser. Multiple players can assign the
+Window mouse aggregate and Window pen aggregate as distinct session sources
+through the existing roster; these are aggregate capability channels, not proof
+that a physical mouse/pen exists or separate hardware identities.
+
+`PointerInputOwner` in `pointer-input.mjs` acquires from its actual canvas via
+Pointer Events only: pointerdown/move/up/cancel and lostpointercapture. Public
+constructor receives `{target,nextSource,nextSequence,onBatch,onError,isCurrent}`,
+allocates exactly two descriptors in mouse/pen order through the shared session
+allocator, exposes frozen `devices`, and provides `close()`, `closed` and
+`cleanupFailure`. No private polling/render loop, JSON, canonical byte encoding,
+lane projection, Runtime calls or layout reads occur in this component. Native
+listener/capture operations must check current ownership around callbacks.
+Ignore touch/unknown pointer types. Acquire timestamp from the dispatched event,
+signed-i32 pointerId as the unchanged u32 native code, finite f32 offsetX/Y in
+absolute mode 0, and original unsigned32 buttons mask. Emit one original
+Pointer position on down/move/up plus mask transitions as genuine Button DTOs, preserving
+the timestamp/source/type and freshly allocated full-u64 sequences. Button
+control is bit index plus one; mask bit 1 is left/tip, bit 2 right/barrel, bit 4
+middle. Track at most 64 pointer identities and aggregate held masks per type
+so one pen cannot release another pen's held control. Capture active pointers;
+cancel/lost capture emits only releases for that pointer's tracked held mask,
+without reading coordinates or inventing a new contact or arrival timestamp.
+Native up then lost capture must not duplicate
+releases. Whole-event validation and bounded output (at most 33 DTOs) precede
+publication. Fatal malformed acquisition/sequence/capture/callback error retires
+the owner, detaches every installed listener and reports cleanup evidence.
+Close is idempotent and never publishes synthetic input. Already queued old
+callbacks cannot mutate replacement ownership. Coalesced/predicted history,
+pointer lock relative acquisition, pressure and tilt are not implemented here;
+the component acquires dispatched samples only.
+
+Main creates the owner for enabled live solo or local discovery using the same
+source/sequence allocator as HID/Gamepad. Snapshot complete binding choices at
+launch, construct existing `pointerSetup`, and filter exact local sources before
+Worker preparation. Enabled live canvas interaction declares `touch-action:none`
+for the pointer mode so pen direct manipulation cannot silently steal play;
+reuse the existing `data-touch-input` CSS flag for this purpose. Actual touch
+admission still depends on the distinct touch configuration. Clear the flag on
+retirement without altering replacement ownership or active touch usage.
+Suppress the native context menu only on the current owned playing canvas when
+live pointer input has admitted sources, so a mapped right/barrel button cannot
+open a menu over gameplay. Setup, replay, retired canvases and other page targets
+retain their normal context-menu behavior.
+Bindings cannot change under retained discovery ownership.
+Verify prepared `pointerDevices` exactly against owned requested descriptors,
+without overlap with HID/Gamepad, before accepting any pointer input. Only
+mapped button DTOs and admitted position DTOs enter the common bounded queue;
+preserve original time and enforce its existing global frontier. Validate the
+whole acquired batch and queue capacity before append, then pump once. Discovery
+observations and unassigned aggregate channels cannot enter another player's
+input. Close the owner on local release, all stop/fatal/page lifecycle paths,
+and propagate cleanup failure through existing joined ownership handling. Freeze
+controls during setup/play/pending settings; portable version1 settings remain
+the explicit keyboard-only binding format. Main still does no game rendering,
+judgment, file decoding or new periodic presentation work.
+
+The [W3C Pointer Events button and capture contract](https://www.w3.org/TR/pointerevents3/)
+defines the mask ordering and automatic capture release after up/cancel. Deferred
+independent component and actual Host fixtures must cover masks/chords/aggregated
+pens, original times/IDs, once-only release, malformed data, listener/capture
+failure and stale cleanup, live preparation/queue forwarding, exact local source
+assignment, replay exclusion and replacement isolation. Actual browser/device
+execution, OS differences and performance acceptance remain deferred.
