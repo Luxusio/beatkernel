@@ -632,7 +632,7 @@ function multiplayerSelectionChanged() {
   controls();
   ui["multiplayer-status"].textContent = ui.multiplayer.checked
     ? ui["multiplayer-mode"].value === "room"
-      ? "Live Play opens a room lobby after audio preparation. Room score progress and final acknowledgements are not yet available."
+      ? "Live Play opens a room lobby after audio preparation, with score progress, final acknowledgements and coordinated drain."
       : "Live Play will wait for the peer's compatible setup and committed start. Replay stays local."
     : "Solo play selected.";
 }
@@ -1210,7 +1210,7 @@ async function play(mode = "live") {
     if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
     if (millisecondsToNanos(performance.now()) >= session.origin) throw new Error("Playback activation missed its chosen start. Start a fresh session.");
     session.phase = "playing";
-    if (session.room) ui["multiplayer-status"].textContent = "Room software start activated · progress publication enabled. Multi-host score display and coordinated final drain are not yet available.";
+    if (session.room) ui["multiplayer-status"].textContent = "Room software start activated · progress publication and coordinated final drain enabled. Multi-host score display is not yet available.";
     ui.rate.value = String(session.audio.sampleRate);
     controls();
     ui.stop.focus();
@@ -1611,7 +1611,13 @@ function releasePlayWorker(session) {
 function stopPlay(reason, failed = false, completed = false) {
   const session = activePlay;
   if (!session) return Promise.resolve();
-  if (session.stopping) return session.stopping;
+  if (session.stopping) {
+    if (!completed && session.room && session.naturalFinishRequested && !session.workerReleased && !session.room.drainCancelled) {
+      session.room.drainCancelled = true;
+      try { worker?.postMessage({ kind: "play-stop", playId: session.id, completed: false }); } catch {}
+    }
+    return session.stopping;
+  }
   const hadHid = session.hidOwner !== null;
   session.naturalFinishRequested = completed;
   session.phase = "closing";
@@ -1656,7 +1662,7 @@ function stopPlay(reason, failed = false, completed = false) {
         stop();
         failed = true;
         reason = "Gameplay cleanup timed out. Reload the page before playing again.";
-      }, 10000);
+      }, completed && session.room ? 20000 : 10000);
       session.workerStop = { timer, resolve };
     });
     try { worker.postMessage({ kind: "play-stop", playId: session.id, completed }); }
@@ -1730,8 +1736,13 @@ function stopPlay(reason, failed = false, completed = false) {
               : outcome?.finalQueued === true ? "Final score prefix queued · full write unconfirmed."
                 : "Room ended without a confirmed final score write.";
           const error = typeof outcome?.error === "string" ? outcome.error.slice(0, 4096) : session.room.error;
+          const drain = outcome?.finalDrain === "complete"
+            ? " Coordinated room drain completed."
+            : outcome?.finalDrain === "failed" ? " Coordinated room drain failed; the local result is retained."
+              : outcome?.finalDrain === "cancelled" ? " Coordinated room drain cancelled."
+                : " Room drain result unavailable.";
           ui["multiplayer-status"].textContent = receipt + (error ? ` ${error}` : "")
-            + " Coordinated room final drain remains unavailable.";
+            + drain;
         }
         const result = !session.localPlan && score && typeof score.hits === "bigint" && typeof score.misses === "bigint"
           ? ` Hits ${score.hits} · Misses ${score.misses} · Combo ${score.combo ?? "unavailable"}.` : "";

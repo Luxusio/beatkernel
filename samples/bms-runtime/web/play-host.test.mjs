@@ -4852,7 +4852,7 @@ test("a valid playing room closure preserves Window input and output while final
     }));
     assert.equal(h.audio.stopStarts, 1); assert.equal(worker.messages("play-stop").length, 1);
     assert.match(h.get("multiplayer-status").textContent, expected);
-    assert.match(h.get("multiplayer-status").textContent, /Coordinated room final drain remains unavailable/);
+    assert.match(h.get("multiplayer-status").textContent, /Coordinated room drain cancelled/);
     assert.match(content(h.get("local-results")), /Recorded prefix/);
     assert.equal(h.get("captured-replay").children.some(option => option.value === String(player)), true);
     await h.close();
@@ -4865,6 +4865,65 @@ test("a valid playing room closure preserves Window input and output while final
     assert.equal(worker.messages("play-stop").length, 1, "malformed initial closure metadata remains fatal during play");
     assert.equal(h.audio.stopStarts, 1);
     await h.receive(localFinal(start)); await h.close();
+  }
+});
+
+test("joined room drain outcomes remain distinct while the natural cleanup wait preserves local recordings and Window ownership", async () => {
+  for (const [finalDrain, expected] of [
+    ["complete", /Coordinated room drain completed/],
+    ["failed", /Coordinated room drain failed; the local result is retained/],
+    ["cancelled", /Coordinated room drain cancelled/],
+  ]) {
+    const stopping = deferred(), h = await harness({ stopGate: stopping });
+    await h.preview(); h.get("record").checked = true;
+    const { start, worker } = await openRoomLobby(h);
+    await roomEvent(h, start, roomRoster(start, { phase: 2 }));
+    await roomEvent(h, start, roomStart()); await h.reply(worker.last("play-activate"), null);
+    const field = h.get("multiplayer-status"), writes = [];
+    let text = field.textContent;
+    Object.defineProperty(field, "textContent", { configurable: true, get: () => text,
+      set(value) { writes.push(value); text = value; } });
+    const display = watchPlayDisplay(h), layout = h.layoutReads;
+    h.setNow(1700); await h.advance(8);
+    const tick = worker.last("play-step"), render = worker.last("play-render");
+    await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
+      completed: true, commandsPending: false, observedTick: tick.tickId });
+    assert.equal(worker.messages("play-stop").length, 0);
+    assert.deepEqual(display, []); assert.equal(h.layoutReads, layout); assert.deepEqual(writes, []);
+    await h.receive({ kind: "play-step-done", playId: start.playId, tickId: tick.tickId,
+      songNs: 2350000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
+    assert.equal(worker.last("play-stop").completed, true); assert.equal(h.audio.stopStarts, 1);
+    assert.deepEqual(display.filter(write => write.id !== "status"), []);
+    assert.equal(h.layoutReads, layout); assert.deepEqual(writes, []);
+    const inputCount = worker.messages("play-step").length, renderCount = worker.messages("play-render").length;
+    await h.advance(10001);
+    assert.equal(worker.terminations, 0, "the host watchdog leaves room for the independent ten-second drain deadline");
+    assert.equal(h.get("play").disabled, true); assert.equal(worker.messages("play-stop").length, 1);
+    assert.equal(worker.messages("play-step").length, inputCount);
+    assert.equal(worker.messages("play-render").length, renderCount);
+    const player = start.localPlanWords[0];
+    const result = localFinal(start, {
+      room: { participant: ROOM_PARTICIPANT, finalQueued: true, finalWritten: true,
+        finalAcknowledged: true, localComplete: true, finalDrain,
+        error: finalDrain === "failed" ? "actual coordinated drain timeout" : null, peers: [] },
+      replays: [{ player, replay: Uint8Array.of(66, 75, 82, 1), replayError: null, replayComplete: true }],
+    });
+    await h.receive(result);
+    assert.deepEqual(writes, [], "the audio owner has not finished cleanup");
+    assert.equal(h.get("captured-replay").disabled, true);
+    stopping.resolve(); await flush();
+    assert.equal(writes.length, 1); assert.match(text, expected);
+    assert.match(text, /written and acknowledged by the room relay/);
+    assert.match(content(h.get("local-results")), /Complete/);
+    h.get("captured-replay").value = String(player); h.get("captured-replay").emit("change");
+    assert.equal(h.get("export").disabled, false); assert.match(h.get("export").textContent, /complete/i);
+    assert.equal(h.get("play").disabled, false);
+    const once = writes.length;
+    await h.receive(result);
+    await roomEvent(h, start, { kind: "closed", error: "late prior drain closure" });
+    assert.equal(writes.length, once); assert.equal(worker.messages("play-room-leave").length, 0);
+    assert.equal(h.audio.polls, 0); assert.equal(worker.messages("play-commands").length, 0);
+    await h.close();
   }
 });
 
