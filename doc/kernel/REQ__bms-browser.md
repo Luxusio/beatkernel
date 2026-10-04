@@ -1491,8 +1491,8 @@ its own display; saved failure hides only saved rows. Failure indicators stay
 within their respective reserved space and do not alter render/touch geometry.
 Invalid or unadmitted updates and duplicate/late admission preserve accepted
 state. No update changes another member, advances gameplay or creates network
-evidence. The page and Worker still refuse local-network combinations until
-actual connections and coordinated common start are integrated. These APIs
+evidence. The page still refuses local-network combinations; the actual Worker
+group connection and common start path is specified below. These APIs
 and deferred fixtures do not establish browser runtime acceptance.
 
 The local binding's progress_words reads all actual members in frozen order:
@@ -1503,8 +1503,9 @@ substitutes a shared frontier, samples a clock or advances gameplay. It remains
 available for the retained final prefix after gameplay failure. The portable
 whole-cohort payload codec is specified by
 [local input ownership](REQ__bms-local-players.md); the scalar BKMP v6 Session
-now has an explicit group mode; current Worker/Page do not yet publish group
-payloads. BrowserMultiplayer exposes new_group, send_group_progress with exact
+now has an explicit group mode. Worker publishes actual group prefixes through
+the shared owner; Page launch remains separate integration. BrowserMultiplayer
+exposes new_group, send_group_progress with exact
 member words and poll_group_event with typed roster/progress words and an exact
 BigInt sequence. The old scalar DTO and constructor remain compatible. Both
 modes reuse actual readiness, clock/start and complete-write/final-ACK state.
@@ -1527,6 +1528,45 @@ one eight-event budget; synchronous callbacks may close the owner without any
 later access to its freed Session. Both modes retain one pending submission and
 one exact full-write/final-ACK barrier. This owner API does not itself enable
 local network UI or choose remote member HUD targets.
+
+### Actual local Worker network integration
+
+Live local gameplay may request the same existing multiplayer configuration.
+Before moving the prepared chart, validate group binding capabilities. Before
+touch layout admission, reserve peer HUD space for every actual local member.
+Before opening the transport, every member's bounded canonical competition
+identity must agree byte-for-byte; then create one actual group Session with
+the frozen local roster. Group mode reuses the common committed start and
+Window/audio activation handshake, never one start or song per member.
+
+The optional multiplayer.peerTargets is a fixed, ordinary Uint32Array of at
+most 64 complete (localPlayer, remotePlayer) pairs. Local IDs must belong to the
+frozen plan and occur once; remote IDs must be positive. Copy the mapping before
+awaits. A received distinct bounded remote roster must contain every explicitly
+selected remote ID. Without explicit targets, pair admitted local and remote
+members by their frozen roster order. Surplus local members have no assigned
+opponent; never borrow another member's score. Explicit targets can assign one
+remote member to multiple locals. Empty explicit targets opt out of peer score
+updates while retaining shared lifecycle status and whole-cohort network participation.
+
+Group progress uses the actual game's progress_words, validated for exact
+eleven-word rows in frozen local order before entering the generated binding.
+Remote group prefixes must match the accepted remote roster; map their own
+ten-word progress rows into each selected member's existing peer HUD. All
+periodic scores and HUD updates stay on Worker. A per-member presentation fault
+disables only that member's peer display, preserving saved comparisons, local
+gameplay and the shared transport. Group final outcome uses multiplayer.peers
+in actual local order, with player, remotePlayer (null when unassigned), status,
+progress, final and error for each member. It never aliases the first member
+into the scalar multiplayer.peer field. Periodic member scores are not sent to
+Window.
+
+Capture a retained actual final group word snapshot before disposing the game,
+then release local ownership and await the existing shared full-write/final-ACK
+drain. Snapshot failure must still release the game and report network failure.
+Cancellation and late connection completion cannot access freed owners. The
+Window local-network launch controls and real browser/device/transport
+acceptance remain follow-on work.
 
 ## Touch-aware local page changes
 

@@ -86,12 +86,14 @@ so legacy event consumers do not need new scalar enum cases.
 
 Browser bindings expose explicit group construction, exact word submission and
 group event polling on this same Session owner. Group APIs cannot be used on a
-scalar session and scalar progress cannot be sent on a group session. Host
-acquisition, group canonical identity selection, remote HUD target mapping,
-page/Worker/native transport callers and multi-host room integration remain
+scalar session and scalar progress cannot be sent on a group session. The actual
+browser Worker checks every member's canonical identity, opens one group owner,
+publishes whole-cohort progress and maps the accepted remote roster into
+per-member peer HUDs as specified by the [browser contract](REQ__bms-browser.md).
+Page launch, native group callers and multi-host room integration remain
 required follow-on work; current UI still refuses local network combinations.
 No group codec call creates a connection, start receipt or final acknowledgement.
-Browser/native callers remain unfinished; tests authored and compile checks
+Complete browser/native callers remain unfinished; tests authored and compile checks
 cannot prove network acceptance.
 
 A solo player starts without input-device selection. Two or more local players
