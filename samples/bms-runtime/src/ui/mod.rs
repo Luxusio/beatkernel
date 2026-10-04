@@ -5,6 +5,8 @@ pub mod catalog_search;
 pub mod clipboard;
 pub mod devices;
 pub mod display;
+#[cfg(test)]
+mod grapheme_editing_fixtures;
 pub mod interaction;
 pub mod molecules;
 pub mod organisms;

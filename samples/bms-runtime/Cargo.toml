@@ -13,7 +13,7 @@ crate-type = ["rlib", "cdylib"]
 [features]
 default = ["desktop"]
 desktop = ["graphics", "dep:winit", "dep:pollster", "dep:arboard"]
-graphics = ["dep:wgpu", "dep:bytemuck", "dep:floem_reactive", "dep:ab_glyph"]
+graphics = ["dep:wgpu", "dep:bytemuck", "dep:floem_reactive", "dep:ab_glyph", "dep:unicode-segmentation"]
 browser = ["graphics", "dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys"]
 browser-audio = ["dep:wasm-bindgen", "dep:js-sys"]
 webtransport = ["dep:wtransport", "dep:url", "tokio/sync", "tokio/macros", "tokio/signal", "tokio/io-util"]
@@ -35,6 +35,7 @@ winit = { version = "=0.30.13", optional = true }
 pollster = { version = "=0.4.0", optional = true }
 floem_reactive = { version = "=0.2.0", optional = true }
 ab_glyph = { version = "=0.2.32", optional = true }
+unicode-segmentation = { version = "=1.13.3", optional = true }
 arboard = { version = "=3.6.1", default-features = false, features = ["wayland-data-control"], optional = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

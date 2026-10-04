@@ -44,6 +44,7 @@ packages; binary redistributors must still inventory the actual linked graph.
 | pollster 0.4.0 | MIT | [license](third-party/pollster-0.4.0-LICENSE.txt) |
 | floem_reactive 0.2.0 | MIT | [license](third-party/floem-reactive-0.2.0-LICENSE.txt) |
 | ab_glyph 0.2.32 | Apache-2.0 | [license](third-party/ab-glyph-0.2.32-LICENSE.txt) |
+| unicode-segmentation 1.13.3 | MIT | [license](third-party/unicode-segmentation-1.13.3-LICENSE-MIT.txt) |
 | encoding_rs 0.8.35 | MIT AND BSD-3-Clause | [MIT](third-party/encoding-rs-0.8.35-LICENSE-MIT.txt), [WHATWG](third-party/encoding-rs-0.8.35-LICENSE-WHATWG.txt) |
 | claxon 0.4.3 | Apache-2.0 | [license](third-party/claxon-0.4.3-LICENSE.txt) |
 | lewton 0.10.2 | MIT | [license](third-party/lewton-0.10.2-LICENSE.txt) |
@@ -59,6 +60,11 @@ package declares MIT but omits the license text; its retained text comes from
 [0.2.0 package](https://crates.io/crates/floem/0.2.0).
 Only the standalone reactive engine is linked; the Floem window/widget host is
 not a dependency. minifb is no longer included by this application.
+
+The graphics feature directly reuses the pinned unicode-segmentation package
+for bounded menu editor commands. Its exact upstream MIT notice is retained;
+the kernel, headless application and browser audio feature do not gain this
+direct dependency.
 
 Claxon includes Copyright 2014 Ruud van Asseldonk; its exact published Apache-2.0
 license is retained above. The codec is linked only in the application preparation

@@ -1,4 +1,6 @@
-//! Bounded UTF-8 scalar editing for menus, independent of platform key events.
+//! Bounded grapheme editing for menus, independent of platform key events.
+use unicode_segmentation::UnicodeSegmentation;
+
 pub const MAX_LINE_BYTES: usize = 4096;
 
 /// Absolute UTF-8 byte ranges in a visual preedit, never a committed selection.
@@ -49,7 +51,7 @@ impl LineEditor {
     pub fn value(&self) -> &str {
         &self.value
     }
-    /// Byte offset, always on a UTF-8 scalar boundary.
+    /// Byte offset on a grapheme boundary, or the original scalar boundary in preedit.
     pub const fn cursor(&self) -> usize {
         self.cursor
     }
@@ -68,7 +70,41 @@ impl LineEditor {
         self.anchor = (!self.value.is_empty()).then_some(0);
     }
     pub fn clear_selection(&mut self) {
+        self.normalize_boundaries();
         self.anchor = None;
+    }
+    fn boundary_floor(&self, at: usize) -> usize {
+        if at == self.value.len() {
+            return at;
+        }
+        self.value
+            .grapheme_indices(true)
+            .take_while(|&(offset, _)| offset <= at)
+            .last()
+            .map_or(0, |(offset, _)| offset)
+    }
+    fn boundary_ceil(&self, at: usize) -> usize {
+        self.value
+            .grapheme_indices(true)
+            .find(|&(offset, _)| offset >= at)
+            .map_or(self.value.len(), |(offset, _)| offset)
+    }
+    fn normalized_range(&self) -> (usize, usize) {
+        self.selection().map_or_else(
+            || {
+                let at = self.boundary_ceil(self.cursor);
+                (at, at)
+            },
+            |(begin, end)| (self.boundary_floor(begin), self.boundary_ceil(end)),
+        )
+    }
+    // Native preedit endpoints can be inside a cluster. Ordinary commands
+    // expand selected ranges and normalize the caret when leaving preedit.
+    fn normalize_boundaries(&mut self) {
+        let (begin, end) = self.normalized_range();
+        let reversed = self.anchor.is_some_and(|anchor| self.cursor < anchor);
+        self.cursor = if reversed { begin } else { end };
+        self.anchor = (begin != end).then_some(if reversed { end } else { begin });
         self.composition = None;
     }
     /// Validation failure preserves content, cursor, selection and composition.
@@ -76,7 +112,7 @@ impl LineEditor {
         if text.chars().any(invalid_character) {
             return Err("text input cannot contain control characters".into());
         }
-        let (begin, end) = self.selection().unwrap_or((self.cursor, self.cursor));
+        let (begin, end) = self.normalized_range();
         if (self.value.len() - (end - begin))
             .checked_add(text.len())
             .is_none_or(|len| len > self.max_bytes)
@@ -84,7 +120,7 @@ impl LineEditor {
             return Err("text input exceeds its byte limit".into());
         }
         self.value.replace_range(begin..end, text);
-        self.cursor = begin + text.len();
+        self.cursor = self.boundary_ceil(begin + text.len());
         self.anchor = None;
         self.composition = None;
         Ok(())
@@ -106,13 +142,14 @@ impl LineEditor {
         let mut preview = self.clone();
         preview.composition = None;
         if text.is_empty() {
+            preview.normalize_boundaries();
             return Ok(preview); // Cancellation never deletes a committed selection.
         }
-        let begin = self.selection().map_or(self.cursor, |range| range.0);
+        let begin = self.normalized_range().0;
         preview.insert(text)?;
-        if let Some((start, _)) = cursor {
-            preview.cursor = begin + start;
-        }
+        // Preserve native scalar endpoints, including a missing cursor's raw
+        // replacement end when this text joins a neighboring grapheme.
+        preview.cursor = begin + cursor.map_or(text.len(), |(start, _)| start);
         preview.composition = Some(Composition {
             range: (begin, begin + text.len()),
             selection: cursor.map(|(start, end)| (begin + start, begin + end)),
@@ -126,31 +163,36 @@ impl LineEditor {
         self.composition = None;
     }
     pub fn move_left(&mut self, extend: bool) {
+        self.normalize_boundaries();
         let cursor = if !extend && self.selection().is_some() {
             self.selection().unwrap().0
         } else {
-            self.value[..self.cursor]
-                .char_indices()
-                .next_back()
+            self.value
+                .grapheme_indices(true)
+                .take_while(|&(at, _)| at < self.cursor)
+                .last()
                 .map_or(0, |(at, _)| at)
         };
         self.move_to(cursor, extend);
     }
     pub fn move_right(&mut self, extend: bool) {
+        self.normalize_boundaries();
         let cursor = if !extend && self.selection().is_some() {
             self.selection().unwrap().1
         } else {
-            self.value[self.cursor..]
-                .chars()
-                .next()
-                .map_or(self.cursor, |character| self.cursor + character.len_utf8())
+            self.value
+                .grapheme_indices(true)
+                .find(|&(at, _)| at > self.cursor)
+                .map_or(self.value.len(), |(at, _)| at)
         };
         self.move_to(cursor, extend);
     }
     pub fn move_home(&mut self, extend: bool) {
+        self.normalize_boundaries();
         self.move_to(0, extend);
     }
     pub fn move_end(&mut self, extend: bool) {
+        self.normalize_boundaries();
         self.move_to(self.value.len(), extend);
     }
     pub fn left(&mut self) {
@@ -170,28 +212,36 @@ impl LineEditor {
             return false;
         };
         self.value.replace_range(begin..end, "");
-        self.cursor = begin;
+        self.cursor = self.boundary_ceil(begin);
         self.anchor = None;
         true
     }
     pub fn backspace(&mut self) {
-        self.composition = None;
+        self.normalize_boundaries();
         if self.remove_selection() {
             return;
         }
-        let previous = self.cursor;
-        self.left();
-        self.value.replace_range(self.cursor..previous, "");
+        let begin = self
+            .value
+            .grapheme_indices(true)
+            .take_while(|&(at, _)| at < self.cursor)
+            .last()
+            .map_or(0, |(at, _)| at);
+        self.value.replace_range(begin..self.cursor, "");
+        self.cursor = self.boundary_ceil(begin);
     }
     pub fn delete(&mut self) {
-        self.composition = None;
+        self.normalize_boundaries();
         if self.remove_selection() {
             return;
         }
-        if let Some(character) = self.value[self.cursor..].chars().next() {
-            self.value
-                .replace_range(self.cursor..self.cursor + character.len_utf8(), "");
-        }
+        let end = self
+            .value
+            .grapheme_indices(true)
+            .find(|&(at, _)| at > self.cursor)
+            .map_or(self.value.len(), |(at, _)| at);
+        self.value.replace_range(self.cursor..end, "");
+        self.cursor = self.boundary_ceil(self.cursor);
     }
     /// A bounded scalar window and caret column using the bitmap font metrics.
     pub fn visible(&self, max_chars: usize) -> (&str, usize) {
