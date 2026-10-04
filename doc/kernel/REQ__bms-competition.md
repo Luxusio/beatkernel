@@ -1,5 +1,32 @@
 # Unified BMS application and competition
 
+## Participant-scoped room progress wire
+
+Extend BKMR v2 with bounded progress upload (tag 13), participant-labelled peer
+progress (tag 14), and final application acknowledgement (tag 15). Retain tags
+1..12, strict version/magic handling and the existing 65,808-byte maximum frame.
+Upload carries the existing schema-1 GroupPrefix: final flag, ordered positive
+local player IDs and actual cumulative Progress counters. Its sequence is
+positive full-width u64; each payload contains 1..64 members. Peer progress
+prepends one positive full-width participant ID. FinalAck carries the original
+participant ID and exact positive final sequence, both u64 little-endian.
+
+An upload does not choose its source participant: the server must derive that
+identity from the actual admitted stream lease. The source participant and local
+player ID jointly identify a remote player; overlapping local IDs across hosts
+are valid. Reuse common GroupPrefix validation/encoding, and validate the whole
+message before allocating its exact frame. Header validation bounds nested
+payloads before body acquisition. Codec validation establishes no start,
+membership, sequence chronology, delivery or acknowledgement authority.
+
+The actual owners must later gate upload on committed start, preserve exact
+frozen rosters and monotonic sequences/counters, bound/coalesce peer fanout and
+record each recipient's genuine acknowledgement only for the original final
+prefix. Full stream writes alone are not application acknowledgement. Self-
+reported progress is presentation data, never trusted ranking or local judge
+input. Until those owner/server/Worker/native integrations are complete, room
+progress and final acknowledgement remain unavailable to the application.
+
 ## Shared timed room stream driver
 
 Native room transport must compose the same RoomPlayClient used by the browser,
