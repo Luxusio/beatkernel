@@ -989,6 +989,76 @@ fn room_upload(player: PlayerId, final_prefix: bool) -> RoomMessage {
     })
 }
 
+// Retain actual aggregate frames after a genuine shared start and all peer
+// final-prefix/ACK exchanges. Their outer write receipts are still outstanding.
+fn pending_drain_room(
+    cohort: &mut ControlCohort,
+) -> (PreparedRoom, Vec<(ParticipantId, QueuedFrame)>, i64) {
+    let (mut room, commits, at) = pending_commit_room(cohort);
+    for (id, write_id) in commits {
+        room.written(id, write_id, at + 1, at + 500).unwrap();
+    }
+    assert!(room.committed());
+    for (index, &id) in cohort.ids.iter().enumerate() {
+        room.receive(
+            id,
+            &room_upload(PlayerId(index as u32 + 1), true),
+            at + 510,
+            at + 520,
+        )
+        .unwrap();
+    }
+    let mut acks = Vec::new();
+    for turn in 1..cohort.ids.len() {
+        let time = at + 600 + turn as i64 * 100;
+        room.pump(&cohort.senders, time).unwrap();
+        for &id in &cohort.ids {
+            let frame = cohort.receivers.get_mut(&id).unwrap().try_recv().unwrap();
+            let RoomMessage::PeerProgress {
+                participant,
+                prefix,
+            } = decode_message(&frame.bytes).unwrap()
+            else {
+                panic!("actual final peer frame required before aggregate admission")
+            };
+            assert_ne!(participant, id);
+            assert!(prefix.final_prefix);
+            acks.push((
+                id,
+                RoomMessage::FinalAck {
+                    participant,
+                    sequence: prefix.sequence,
+                },
+            ));
+            room.written(id, frame.receipt.unwrap(), time + 1, time + 10)
+                .unwrap();
+        }
+    }
+    let admitted = at + 1000 + cohort.ids.len() as i64 * 100;
+    for (id, ack) in acks {
+        room.receive(id, &ack, admitted - 20, admitted - 10)
+            .unwrap();
+    }
+    room.pump(&cohort.senders, admitted).unwrap();
+    let frames = cohort
+        .ids
+        .iter()
+        .map(|&id| {
+            let frame = cohort.receivers.get_mut(&id).unwrap().try_recv().unwrap();
+            assert_eq!(
+                decode_message(&frame.bytes).unwrap(),
+                RoomMessage::FinalAck {
+                    participant: id,
+                    sequence: 1
+                }
+            );
+            (id, frame)
+        })
+        .collect();
+    assert!(!room.complete());
+    (room, frames, admitted)
+}
+
 #[test]
 fn actual_server_stages_after_own_commit_and_relays_only_after_all_commit_and_ack_receipts() {
     for count in [2usize, 3, 4] {
@@ -1236,5 +1306,531 @@ fn relay_queue_failure_and_stale_receipts_release_exact_room_after_real_committe
                 .is_empty()
         );
         assert_eq!(cohort.registry.room("room").unwrap().members[0].id, a.id);
+    }
+}
+
+#[test]
+fn actual_actor_drain_uses_original_ready_capture_and_exact_outer_aggregate_and_complete_writes() {
+    for count in [2usize, 3, 4, 64] {
+        let mut cohort = ControlCohort::prepared(count);
+        let (mut room, aggregates, admitted) = pending_drain_room(&mut cohort);
+        let first = cohort.ids[0];
+        let ready = RoomMessage::DrainReady {
+            participant: first,
+            sequence: 1,
+        };
+        assert!(
+            room.receive(first, &ready, admitted - 1, admitted + 10)
+                .is_err()
+        );
+        assert!(
+            room.receive(cohort.ids[1], &ready, admitted, admitted + 10)
+                .is_err()
+        );
+        assert!(
+            room.receive(first, &ready, admitted, i64::MAX).is_err(),
+            "overflow cannot install a drain deadline or processing frontier"
+        );
+        assert!(
+            !room.expired(i64::MAX),
+            "rejected readiness installs no committed drain deadline"
+        );
+        room.receive(first, &ready, admitted, admitted + 10)
+            .unwrap();
+        assert!(
+            room.receive(first, &ready, admitted + 1, admitted + 11)
+                .is_err()
+        );
+        assert!(
+            room.written(first, count as u64, admitted + 1, admitted + 12)
+                .is_err(),
+            "a child relay ID cannot substitute for the actual outer write ID"
+        );
+        for &(id, ref aggregate) in &aggregates[1..] {
+            room.written(id, aggregate.receipt.unwrap(), admitted + 1, admitted + 20)
+                .unwrap();
+        }
+        for &id in &cohort.ids[1..count - 1] {
+            room.receive(
+                id,
+                &RoomMessage::DrainReady {
+                    participant: id,
+                    sequence: 1,
+                },
+                admitted + 2,
+                admitted + 21,
+            )
+            .unwrap();
+        }
+        room.pump(&cohort.senders, admitted + 22).unwrap();
+        for id in &cohort.ids {
+            assert!(cohort.receivers.get_mut(id).unwrap().try_recv().is_err());
+        }
+        assert!(!room.complete());
+        room.written(
+            first,
+            aggregates[0].1.receipt.unwrap(),
+            admitted + 1,
+            admitted + 23,
+        )
+        .unwrap();
+        assert!(room.complete());
+        assert!(!room.drain_settled());
+        room.pump(&cohort.senders, admitted + 24).unwrap();
+        for id in &cohort.ids {
+            assert!(
+                cohort.receivers.get_mut(id).unwrap().try_recv().is_err(),
+                "one host is still not Ready"
+            );
+        }
+        let last = cohort.ids[count - 1];
+        room.receive(
+            last,
+            &RoomMessage::DrainReady {
+                participant: last,
+                sequence: 1,
+            },
+            admitted + 3,
+            admitted + 25,
+        )
+        .unwrap();
+        room.pump(&cohort.senders, admitted + 30).unwrap();
+        for (index, &(id, ref aggregate)) in aggregates.iter().enumerate() {
+            let frame = cohort.receivers.get_mut(&id).unwrap().try_recv().unwrap();
+            let write_id = frame.receipt.unwrap();
+            assert_eq!(write_id, aggregate.receipt.unwrap() + 1);
+            assert_eq!(
+                decode_message(&frame.bytes).unwrap(),
+                RoomMessage::DrainComplete {
+                    participant: id,
+                    sequence: 1
+                }
+            );
+            assert!(room.relay.drain_complete_admitted(id).unwrap());
+            assert!(!room.relay.drain_complete_written(id).unwrap());
+            assert!(!room.drain_settled());
+            assert!(
+                room.written(id, aggregate.receipt.unwrap(), admitted + 31, admitted + 40)
+                    .is_err()
+            );
+            room.written(id, write_id, admitted + 31, admitted + 40)
+                .unwrap();
+            assert_eq!(room.relay.drained(), index + 1 == count);
+        }
+        assert!(room.relay.drained());
+        let mut rooms = BTreeMap::from([("room".to_owned(), room)]);
+        assert!(
+            release_settled(&mut cohort.registry, &rooms, "room", admitted + 50)
+                .unwrap()
+                .is_empty(),
+            "local full writes cannot prove that remote clients received their Complete notices"
+        );
+        assert_eq!(cohort.registry.room("room").unwrap().members.len(), count);
+        assert_eq!(cohort.senders.len(), count);
+        let mut tickets = Vec::new();
+        for (index, &id) in cohort.ids.iter().enumerate() {
+            let retired = terminal_room(
+                &mut cohort.registry,
+                &mut rooms,
+                &mut cohort.senders,
+                "room",
+                id,
+                admitted + 60 + index as i64,
+            )
+            .unwrap();
+            if index + 1 < count {
+                assert!(retired.is_empty());
+            } else {
+                tickets = retired;
+            }
+        }
+        assert_eq!(
+            tickets.iter().map(|ticket| ticket.id).collect::<Vec<_>>(),
+            cohort.ids
+        );
+        let mut resources = BTreeMap::<ParticipantId, PeerResource>::new();
+        release(&mut resources, &mut cohort.senders, &mut rooms, tickets);
+        assert!(cohort.registry.room("room").is_none());
+        assert!(rooms.is_empty());
+        assert!(cohort.senders.is_empty());
+        assert!(
+            release_settled(&mut cohort.registry, &rooms, "room", admitted + 200)
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn expected_peer_retirement_keeps_other_complete_writes_and_never_releases_a_replacement_room() {
+    for all_retired in [false, true] {
+        let mut cohort = ControlCohort::prepared(4);
+        let other = add_host(
+            &mut cohort.registry,
+            &mut cohort.senders,
+            &mut cohort.receivers,
+            "other",
+            &[PlayerId(u32::MAX)],
+            2,
+        );
+        let (mut room, aggregates, admitted) = pending_drain_room(&mut cohort);
+        for &(id, ref frame) in &aggregates {
+            room.written(id, frame.receipt.unwrap(), admitted + 1, admitted + 10)
+                .unwrap();
+            room.receive(
+                id,
+                &RoomMessage::DrainReady {
+                    participant: id,
+                    sequence: 1,
+                },
+                admitted + 2,
+                admitted + 10,
+            )
+            .unwrap();
+        }
+        room.pump(&cohort.senders, admitted + 20).unwrap();
+        let notices = cohort
+            .ids
+            .iter()
+            .map(|&id| {
+                let frame = cohort.receivers.get_mut(&id).unwrap().try_recv().unwrap();
+                assert_eq!(
+                    decode_message(&frame.bytes).unwrap(),
+                    RoomMessage::DrainComplete {
+                        participant: id,
+                        sequence: 1
+                    }
+                );
+                (id, frame.receipt.unwrap())
+            })
+            .collect::<Vec<_>>();
+        let first = notices[0].0;
+        let mut rooms = BTreeMap::from([("room".to_owned(), room)]);
+        let mut resources = BTreeMap::<ParticipantId, PeerResource>::new();
+        let early = terminal_room(
+            &mut cohort.registry,
+            &mut rooms,
+            &mut cohort.senders,
+            "room",
+            first,
+            admitted + 21,
+        )
+        .unwrap();
+        assert!(early.is_empty());
+        assert!(!cohort.senders.contains_key(&first));
+        assert_eq!(cohort.registry.room("room").unwrap().members.len(), 4);
+        assert!(
+            cohort.ids[1..]
+                .iter()
+                .all(|id| cohort.senders.contains_key(id))
+        );
+        assert!(!rooms["room"].relay.drain_complete_written(first).unwrap());
+        assert!(!rooms["room"].relay.drained());
+        assert!(!rooms["room"].drain_settled());
+        assert!(
+            terminal_room(
+                &mut cohort.registry,
+                &mut rooms,
+                &mut cohort.senders,
+                "room",
+                first,
+                admitted + 22
+            )
+            .unwrap()
+            .is_empty()
+        );
+        // The joined task and its delayed callback may both arrive. Neither is
+        // evidence that a retired Complete was fully written.
+        rooms
+            .get_mut("room")
+            .unwrap()
+            .written(first, notices[0].1, admitted + 21, admitted + 23)
+            .unwrap();
+        rooms
+            .get_mut("room")
+            .unwrap()
+            .receive(
+                first,
+                &RoomMessage::DrainReady {
+                    participant: first,
+                    sequence: 1,
+                },
+                admitted + 2,
+                admitted + 23,
+            )
+            .unwrap();
+        rooms
+            .get_mut("room")
+            .unwrap()
+            .pump(&cohort.senders, admitted + 24)
+            .unwrap();
+        assert!(!rooms["room"].relay.drain_complete_written(first).unwrap());
+        let mut released = Vec::new();
+        for (index, &(id, write_id)) in notices.iter().enumerate().skip(1) {
+            let now = admitted + 30 + index as i64;
+            let tickets = if all_retired {
+                terminal_room(
+                    &mut cohort.registry,
+                    &mut rooms,
+                    &mut cohort.senders,
+                    "room",
+                    id,
+                    now,
+                )
+                .unwrap()
+            } else {
+                rooms
+                    .get_mut("room")
+                    .unwrap()
+                    .written(id, write_id, admitted + 21, now)
+                    .unwrap();
+                release_settled(&mut cohort.registry, &rooms, "room", now).unwrap()
+            };
+            if !all_retired || index < notices.len() - 1 {
+                assert!(tickets.is_empty());
+            } else {
+                released = tickets;
+            }
+        }
+        if !all_retired {
+            assert!(released.is_empty());
+            assert_eq!(cohort.registry.room("room").unwrap().members.len(), 4);
+            assert!(
+                cohort.ids[1..]
+                    .iter()
+                    .all(|id| cohort.senders.contains_key(id)),
+                "remaining full-written peers stay connected until their actual terminal events"
+            );
+            for (index, &(id, _)) in notices.iter().enumerate().skip(1) {
+                let tickets = terminal_room(
+                    &mut cohort.registry,
+                    &mut rooms,
+                    &mut cohort.senders,
+                    "room",
+                    id,
+                    admitted + 40 + index as i64,
+                )
+                .unwrap();
+                if index + 1 < notices.len() {
+                    assert!(tickets.is_empty());
+                } else {
+                    released = tickets;
+                }
+            }
+        }
+        assert_eq!(
+            released.iter().map(|ticket| ticket.id).collect::<Vec<_>>(),
+            cohort.ids
+        );
+        assert!(
+            !rooms["room"].relay.drained(),
+            "retirement settles resources without fabricating all Complete writes"
+        );
+        release(&mut resources, &mut cohort.senders, &mut rooms, released);
+        assert!(rooms.is_empty());
+        assert!(cohort.registry.room("room").is_none());
+        assert_eq!(
+            cohort.registry.room("other").unwrap().members[0].id,
+            other.id
+        );
+        assert!(cohort.senders.contains_key(&other.id));
+        let replacement = add_host(
+            &mut cohort.registry,
+            &mut cohort.senders,
+            &mut cohort.receivers,
+            "room",
+            &[PlayerId(90)],
+            admitted + 50,
+        );
+        add_host(
+            &mut cohort.registry,
+            &mut cohort.senders,
+            &mut cohort.receivers,
+            "room",
+            &[PlayerId(91)],
+            admitted + 50,
+        );
+        cohort.registry.seal(replacement.id, admitted + 51).unwrap();
+        let replacement_ids = cohort
+            .registry
+            .room("room")
+            .unwrap()
+            .members
+            .iter()
+            .map(|member| member.id)
+            .collect::<Vec<_>>();
+        for &id in &replacement_ids {
+            cohort.registry.ready(id, admitted + 52).unwrap();
+        }
+        rooms.insert(
+            "room".to_owned(),
+            PreparedRoom::new(cohort.registry.room("room").unwrap(), admitted + 53, 1000).unwrap(),
+        );
+        for &(old, write_id) in &notices {
+            assert!(
+                terminal_room(
+                    &mut cohort.registry,
+                    &mut rooms,
+                    &mut cohort.senders,
+                    "room",
+                    old,
+                    admitted + 54
+                )
+                .unwrap()
+                .is_empty()
+            );
+            assert!(
+                rooms
+                    .get_mut("room")
+                    .unwrap()
+                    .written(old, write_id, admitted + 21, admitted + 54)
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            cohort
+                .registry
+                .room("room")
+                .unwrap()
+                .members
+                .iter()
+                .map(|member| member.id)
+                .collect::<Vec<_>>(),
+            replacement_ids
+        );
+        assert!(
+            replacement_ids
+                .iter()
+                .all(|id| cohort.senders.contains_key(id))
+        );
+    }
+}
+
+#[test]
+fn pre_drain_disconnect_explicit_leave_and_fixed_committed_deadline_keep_whole_room_cancellation() {
+    for mode in [
+        "before-ready",
+        "before-complete",
+        "leave",
+        "full-complete",
+        "closed-complete",
+        "deadline",
+    ] {
+        let mut cohort = ControlCohort::prepared(3);
+        let other = add_host(
+            &mut cohort.registry,
+            &mut cohort.senders,
+            &mut cohort.receivers,
+            "other",
+            &[PlayerId(8)],
+            2,
+        );
+        let (mut room, aggregates, admitted) = pending_drain_room(&mut cohort);
+        let first = cohort.ids[0];
+        let mut closing = first;
+        if mode != "before-ready" {
+            // First accepted readiness is held behind the aggregate callback.
+            room.receive(
+                first,
+                &RoomMessage::DrainReady {
+                    participant: first,
+                    sequence: 1,
+                },
+                admitted,
+                admitted + 10,
+            )
+            .unwrap();
+            assert!(!room.expired(admitted + 10 + 10_000_000_000 - 1));
+            assert!(room.expired(admitted + 10 + 10_000_000_000));
+        }
+        if matches!(mode, "leave" | "full-complete" | "closed-complete") {
+            for &(id, ref aggregate) in &aggregates {
+                room.written(id, aggregate.receipt.unwrap(), admitted + 1, admitted + 20)
+                    .unwrap();
+                if id != first {
+                    room.receive(
+                        id,
+                        &RoomMessage::DrainReady {
+                            participant: id,
+                            sequence: 1,
+                        },
+                        admitted + 1,
+                        admitted + 20,
+                    )
+                    .unwrap();
+                }
+            }
+            if mode == "leave" {
+                room.pump(&cohort.senders, admitted + 30).unwrap();
+                assert!(room.relay.drain_complete_admitted(first).unwrap());
+            } else {
+                closing = *cohort.ids.last().unwrap();
+                if mode == "full-complete" {
+                    for _ in 0..OUTGOING_CAPACITY {
+                        cohort.senders[&closing]
+                            .try_send(queued(
+                                Arc::new(encode_message(&RoomMessage::Ready).unwrap()),
+                                None,
+                            ))
+                            .unwrap();
+                    }
+                } else {
+                    cohort.receivers.remove(&closing);
+                }
+                assert!(room.pump(&cohort.senders, admitted + 30).is_err());
+                assert!(
+                    !room.retire(closing, admitted + 31).unwrap(),
+                    "a failed Complete queue admission never permits expected retirement"
+                );
+            }
+            assert!(!room.expired(admitted + 10 + 10_000_000_000 - 1));
+            assert!(
+                room.expired(admitted + 10 + 10_000_000_000),
+                "later Ready messages do not renew the first drain deadline"
+            );
+        }
+        let mut rooms = BTreeMap::from([("room".to_owned(), room)]);
+        let time = if mode == "deadline" {
+            admitted + 10 + 10_000_000_000
+        } else {
+            admitted + 40
+        };
+        let tickets = match mode {
+            "leave" => {
+                apply_request(&mut cohort.registry, first, &RoomMessage::Leave, time).unwrap()
+            }
+            "deadline" => {
+                assert!(
+                    rooms
+                        .get_mut("room")
+                        .unwrap()
+                        .pump(&cohort.senders, time)
+                        .is_err()
+                );
+                cohort.registry.release(first, time).unwrap()
+            }
+            _ => terminal_room(
+                &mut cohort.registry,
+                &mut rooms,
+                &mut cohort.senders,
+                "room",
+                closing,
+                time,
+            )
+            .unwrap(),
+        };
+        assert_eq!(
+            tickets.iter().map(|ticket| ticket.id).collect::<Vec<_>>(),
+            cohort.ids
+        );
+        let mut resources = BTreeMap::<ParticipantId, PeerResource>::new();
+        release(&mut resources, &mut cohort.senders, &mut rooms, tickets);
+        assert!(rooms.is_empty());
+        assert!(cohort.registry.room("room").is_none());
+        assert_eq!(
+            cohort.registry.room("other").unwrap().members[0].id,
+            other.id
+        );
+        assert!(cohort.senders.contains_key(&other.id));
     }
 }

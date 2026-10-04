@@ -40,6 +40,8 @@ struct PeerControl {
     last_received: Option<i64>,
     commit_admitted: Option<i64>,
     final_admitted: [Option<i64>; 64],
+    drain_admitted: bool,
+    retired: bool,
 }
 
 /// The same bounded control owner is called by the live actor and portable
@@ -50,6 +52,8 @@ struct PreparedRoom {
     peers: Vec<PeerControl>,
     prepared_now: i64,
     deadline: i64,
+    timeout_ns: i64,
+    drain_deadline: Option<i64>,
     last_now: i64,
 }
 
@@ -79,6 +83,8 @@ impl PreparedRoom {
                 last_received: None,
                 commit_admitted: None,
                 final_admitted: [None; 64],
+                drain_admitted: false,
+                retired: false,
             });
         }
         Ok(Self {
@@ -87,6 +93,8 @@ impl PreparedRoom {
             peers,
             prepared_now: now,
             deadline,
+            timeout_ns,
+            drain_deadline: None,
             last_now: now,
         })
     }
@@ -115,8 +123,11 @@ impl PreparedRoom {
         captured_ns: i64,
         now: i64,
     ) -> io::Result<()> {
-        self.validate_now(now)?;
         let index = self.peer_index(id)?;
+        if self.peers[index].retired {
+            return Ok(());
+        }
+        self.validate_now(now)?;
         let ack_admitted = match message {
             RoomMessage::FinalAck { participant, .. } => {
                 self.peers[index].final_admitted[self.peer_index(*participant)?]
@@ -132,6 +143,15 @@ impl PreparedRoom {
         {
             return Err(invalid("invalid prepared room read observation"));
         }
+        let drain_deadline =
+            if matches!(message, RoomMessage::DrainReady { .. }) && self.drain_deadline.is_none() {
+                Some(
+                    now.checked_add(self.timeout_ns)
+                        .ok_or_else(|| invalid("room drain deadline overflow"))?,
+                )
+            } else {
+                None
+            };
         match message {
             RoomMessage::Progress(_) => {
                 if !peer
@@ -140,7 +160,9 @@ impl PreparedRoom {
                 {
                     return Err(invalid("room progress precedes its admitted Commit"));
                 }
-                self.relay.receive(id, message).map_err(invalid)?;
+                self.relay
+                    .receive_at(id, message, captured_ns)
+                    .map_err(invalid)?;
             }
             RoomMessage::FinalAck { .. } => {
                 if !self.relay.active()
@@ -150,8 +172,14 @@ impl PreparedRoom {
                         "room final acknowledgement precedes its admitted final relay",
                     ));
                 }
-                self.relay.receive(id, message).map_err(invalid)?;
+                self.relay
+                    .receive_at(id, message, captured_ns)
+                    .map_err(invalid)?;
             }
+            RoomMessage::DrainReady { .. } => self
+                .relay
+                .receive_at(id, message, captured_ns)
+                .map_err(invalid)?,
             RoomMessage::ClockPing { .. } | RoomMessage::ClockPong { .. } => {
                 peer.clock
                     .receive_at(message, captured_ns, now)
@@ -187,6 +215,9 @@ impl PreparedRoom {
             _ => return Err(invalid("unexpected prepared room control")),
         }
         peer.last_received = Some(captured_ns);
+        if drain_deadline.is_some() {
+            self.drain_deadline = drain_deadline;
+        }
         self.last_now = now;
         Ok(())
     }
@@ -198,8 +229,11 @@ impl PreparedRoom {
         completed_ns: i64,
         now: i64,
     ) -> io::Result<()> {
-        self.validate_now(now)?;
         let index = self.peer_index(id)?;
+        if self.peers[index].retired {
+            return Ok(());
+        }
+        self.validate_now(now)?;
         let peer = &mut self.peers[index];
         let (expected, receipt, admitted_ns) = peer
             .in_flight
@@ -239,7 +273,7 @@ impl PreparedRoom {
     fn pump(&mut self, frames: &Frames, now: i64) -> io::Result<()> {
         self.validate_now(now)?;
         for peer in &mut self.peers {
-            if peer.in_flight.is_some() {
+            if peer.retired || peer.in_flight.is_some() {
                 continue;
             }
             if !peer.estimate_installed {
@@ -252,23 +286,34 @@ impl PreparedRoom {
             }
             let mut clock = peer.clock.clone();
             let next = if let Some(frame) = clock.next(now).map_err(invalid)? {
-                Some((Arc::new(frame.bytes), ControlReceipt::Clock(frame.id), None))
+                Some((
+                    Arc::new(frame.bytes),
+                    ControlReceipt::Clock(frame.id),
+                    None,
+                    false,
+                ))
             } else if let Some(message) = self.coordinator.next(peer.id, now).map_err(invalid)? {
                 Some((
                     Arc::new(encode_message(&RoomMessage::Start(message)).map_err(invalid)?),
                     ControlReceipt::Start(message),
                     None,
+                    false,
                 ))
-            } else if let Some(frame) = self.relay.poll_write(peer.id).map_err(invalid)? {
+            } else if let Some(frame) = self.relay.poll_write_at(peer.id, now).map_err(invalid)? {
+                let drain = self
+                    .relay
+                    .drain_complete_admitted(peer.id)
+                    .map_err(invalid)?;
                 Some((
                     frame.bytes,
                     ControlReceipt::Relay(frame.id),
                     frame.final_source,
+                    drain,
                 ))
             } else {
                 None
             };
-            if let Some((bytes, receipt, final_source)) = next {
+            if let Some((bytes, receipt, final_source, drain)) = next {
                 let id = peer
                     .next_id
                     .ok_or_else(|| invalid("room control write identity exhausted"))?;
@@ -291,6 +336,9 @@ impl PreparedRoom {
                     .map_err(|_| invalid("prepared room output full or closed"))?;
                 peer.next_id = id.checked_add(1);
                 peer.in_flight = Some((id, receipt, now));
+                if drain {
+                    peer.drain_admitted = true;
+                }
                 if matches!(receipt, ControlReceipt::Start(StartMessage::Commit(_))) {
                     peer.commit_admitted = Some(now);
                 }
@@ -305,11 +353,34 @@ impl PreparedRoom {
     }
 
     fn expired(&self, now: i64) -> bool {
-        !self.committed() && now >= self.deadline
+        (!self.committed() && now >= self.deadline)
+            || self.drain_deadline.is_some_and(|deadline| now >= deadline)
     }
 
     fn committed(&self) -> bool {
         self.coordinator.committed()
+    }
+
+    /// Retire only after this exact recipient's Complete entered its stream
+    /// queue. Keep the original receipt untouched; EOF is not a full write.
+    fn retire(&mut self, id: ParticipantId, now: i64) -> io::Result<bool> {
+        let index = self.peer_index(id)?;
+        if self.peers[index].retired {
+            return Ok(true);
+        }
+        self.validate_now(now)?;
+        if !self.peers[index].drain_admitted {
+            return Ok(false);
+        }
+        self.peers[index].retired = true;
+        self.last_now = now;
+        Ok(true)
+    }
+
+    // A local full write is not remote receipt. Keep live connections until
+    // their actual terminal events, or the fixed drain deadline, settle them.
+    fn drain_settled(&self) -> bool {
+        self.drain_deadline.is_some() && self.peers.iter().all(|peer| peer.retired)
     }
 
     #[cfg(test)]
@@ -587,6 +658,50 @@ impl Drop for PeerResource {
     }
 }
 
+/// Pure registry/room/queue disposition used by the actual terminal path.
+/// The caller drops only the terminating resource, then releases these tickets.
+fn terminal_room(
+    registry: &mut GroupRoomRegistry,
+    rooms: &mut BTreeMap<String, PreparedRoom>,
+    frames: &mut Frames,
+    key: &str,
+    id: ParticipantId,
+    now: i64,
+) -> io::Result<Vec<GroupParticipantTicket>> {
+    if !registry
+        .room(key)
+        .is_some_and(|room| room.members.iter().any(|member| member.id == id))
+    {
+        return Ok(Vec::new()); // A stale terminal cannot release a replacement.
+    }
+    // An expired or invalid terminal observation still cancels the exact room;
+    // only successful Complete-admitted retirement preserves its other leases.
+    let retired = rooms
+        .get_mut(key)
+        .is_some_and(|room| room.retire(id, now).unwrap_or(false));
+    if !retired {
+        return registry.release(id, now).map_err(invalid);
+    }
+    frames.remove(&id);
+    release_settled(registry, rooms, key, now)
+}
+
+fn release_settled(
+    registry: &mut GroupRoomRegistry,
+    rooms: &BTreeMap<String, PreparedRoom>,
+    key: &str,
+    now: i64,
+) -> io::Result<Vec<GroupParticipantTicket>> {
+    if !rooms.get(key).is_some_and(PreparedRoom::drain_settled) {
+        return Ok(Vec::new());
+    }
+    let id = registry
+        .room(key)
+        .and_then(|room| room.members.first().map(|member| member.id))
+        .ok_or_else(|| invalid("settled room lost its immutable registry membership"))?;
+    registry.release(id, now).map_err(invalid)
+}
+
 fn release(
     resources: &mut BTreeMap<ParticipantId, PeerResource>,
     frames: &mut Frames,
@@ -594,9 +709,9 @@ fn release(
     tickets: Vec<GroupParticipantTicket>,
 ) {
     for ticket in tickets {
+        rooms.remove(&ticket.room);
         frames.remove(&ticket.id);
         if let Some(resource) = resources.remove(&ticket.id) {
-            rooms.remove(&resource.key);
             drop(resource);
         }
     }
@@ -637,49 +752,14 @@ pub(super) async fn serve(options: ServerOptions, config: ServerConfig) -> io::R
                 _ = expiry.tick() => {
                     let time = now(origin)?;
                     release(&mut resources, &mut frames, &mut rooms, registry.expire(time).map_err(invalid)?);
-                    let closed: Vec<_> = resources.iter().filter(|(_, resource)|
-                        resource.connection.quic_connection().close_reason().is_some()
-                        || rooms.get(&resource.key).is_some_and(|room| room.expired(time))
-                    ).map(|(id, _)| *id).collect();
-                    for id in closed {
+                    // Retained rooms can outlive individual resources during
+                    // drain. Expiry must not depend on a remaining connection.
+                    let expired: Vec<_> = rooms.iter().filter(|(_, room)| room.expired(time))
+                        .filter_map(|(key, _)| registry.room(key)
+                            .and_then(|room| room.members.first().map(|member| member.id))).collect();
+                    for id in expired {
                         release(&mut resources, &mut frames, &mut rooms, registry.release(id, time).map_err(invalid)?);
                     }
-                }
-                finished = peers.join_next(), if !peers.is_empty() => {
-                    let (id, _result, resource) = finished.ok_or_else(|| invalid("peer task missing"))?.map_err(invalid)?;
-                    release(&mut resources, &mut frames, &mut rooms, registry.release(id, now(origin)?).map_err(invalid)?);
-                    drop(resource);
-                }
-                finished = setups.join_next(), if !setups.is_empty() => {
-                    let candidate = finished.ok_or_else(|| invalid("setup task missing"))?.map_err(invalid)?;
-                    let Ok(GroupPrepared { prepared: Prepared { key, mut resource }, identity, players }) = candidate else { continue; };
-                    let time = now(origin)?;
-                    release(&mut resources, &mut frames, &mut rooms, registry.expire(time).map_err(invalid)?);
-                    let ticket = match registry.join(&key, &identity, &players, time) {
-                        Ok(ticket) => ticket,
-                        Err(_) => { drop(resource); continue; }
-                    };
-                    let (write, read) = resource.stream.take().ok_or_else(|| invalid("admitted stream missing"))?;
-                    let (sender, receiver) = mpsc::channel(OUTGOING_CAPACITY);
-                    let (peer_stop, peer_stopped) = watch::channel(false);
-                    resources.insert(ticket.id, PeerResource { key, connection: resource.connection.clone(), stop: peer_stop, last_received: None });
-                    frames.insert(ticket.id, sender.clone());
-                    let published = (|| -> io::Result<()> {
-                        let admitted = Arc::new(encode_message(&RoomMessage::Admitted { participant: ticket.id }).map_err(invalid)?);
-                        sender.try_send(QueuedFrame { bytes: admitted, receipt: None }).map_err(|_| invalid("new room output closed"))?;
-                        publish_room(&registry, &frames, &ticket.room)
-                    })();
-                    if published.is_err() {
-                        release(&mut resources, &mut frames, &mut rooms, registry.release(ticket.id, time).map_err(invalid)?);
-                        drop(resource);
-                        continue;
-                    }
-                    let commands = commands.clone();
-                    let limit = options.io_timeout;
-                    peers.spawn(async move {
-                        let result = peer_io(ticket.id, read, write, commands, receiver, limit, peer_stopped, origin).await;
-                        (ticket.id, result, resource)
-                    });
                 }
                 command = requests.recv() => {
                     let Some(command) = command else { return Err(cancelled()); };
@@ -733,7 +813,7 @@ pub(super) async fn serve(options: ServerOptions, config: ServerConfig) -> io::R
                                 let room = rooms.get_mut(&key).ok_or_else(|| invalid("unexpected room write receipt"))?;
                                 room.written(command.id, write_id, completed_ns, time)?;
                                 room.pump(&frames, time)?;
-                                Ok(Vec::new())
+                                release_settled(&mut registry, &rooms, &key, time)
                             }
                         }
                     })();
@@ -742,6 +822,56 @@ pub(super) async fn serve(options: ServerOptions, config: ServerConfig) -> io::R
                         Err(_) => registry.release(command.id, time).map_err(invalid)?,
                     };
                     release(&mut resources, &mut frames, &mut rooms, tickets);
+                }
+                // Drain already queued controls before observing termination:
+                // a Leave or malformed control still cancels the whole room.
+                // QUIC closure is observed by these actual stream tasks, not a
+                // higher-priority duplicate close_reason sweep.
+                finished = peers.join_next(), if !peers.is_empty() => {
+                    let (id, peer_result, resource) = finished.ok_or_else(|| invalid("peer task missing"))?.map_err(invalid)?;
+                    if let Some(key) = resources.get(&id).map(|peer| peer.key.clone()) {
+                        let time = now(origin)?;
+                        let tickets = if peer_result.as_ref().err().is_some_and(|error| error.kind() == io::ErrorKind::InvalidData) {
+                            registry.release(id, time).map_err(invalid)?
+                        } else {
+                            terminal_room(&mut registry, &mut rooms, &mut frames, &key, id, time)?
+                        };
+                        frames.remove(&id);
+                        resources.remove(&id);
+                        release(&mut resources, &mut frames, &mut rooms, tickets);
+                    }
+                    drop(resource);
+                }
+                finished = setups.join_next(), if !setups.is_empty() => {
+                    let candidate = finished.ok_or_else(|| invalid("setup task missing"))?.map_err(invalid)?;
+                    let Ok(GroupPrepared { prepared: Prepared { key, mut resource }, identity, players }) = candidate else { continue; };
+                    let time = now(origin)?;
+                    release(&mut resources, &mut frames, &mut rooms, registry.expire(time).map_err(invalid)?);
+                    let ticket = match registry.join(&key, &identity, &players, time) {
+                        Ok(ticket) => ticket,
+                        Err(_) => { drop(resource); continue; }
+                    };
+                    let (write, read) = resource.stream.take().ok_or_else(|| invalid("admitted stream missing"))?;
+                    let (sender, receiver) = mpsc::channel(OUTGOING_CAPACITY);
+                    let (peer_stop, peer_stopped) = watch::channel(false);
+                    resources.insert(ticket.id, PeerResource { key, connection: resource.connection.clone(), stop: peer_stop, last_received: None });
+                    frames.insert(ticket.id, sender.clone());
+                    let published = (|| -> io::Result<()> {
+                        let admitted = Arc::new(encode_message(&RoomMessage::Admitted { participant: ticket.id }).map_err(invalid)?);
+                        sender.try_send(QueuedFrame { bytes: admitted, receipt: None }).map_err(|_| invalid("new room output closed"))?;
+                        publish_room(&registry, &frames, &ticket.room)
+                    })();
+                    if published.is_err() {
+                        release(&mut resources, &mut frames, &mut rooms, registry.release(ticket.id, time).map_err(invalid)?);
+                        drop(resource);
+                        continue;
+                    }
+                    let commands = commands.clone();
+                    let limit = options.io_timeout;
+                    peers.spawn(async move {
+                        let result = peer_io(ticket.id, read, write, commands, receiver, limit, peer_stopped, origin).await;
+                        (ticket.id, result, resource)
+                    });
                 }
                 incoming = endpoint.accept() => {
                     if setups.len() >= options.max_setups || peers.len() >= options.max_sessions {
