@@ -1005,7 +1005,7 @@ async function play(mode = "live") {
     session.bindingSelection = mode === "live" ? snapshotBindings(bindingFields.map(([lane, field]) => [lane, field.value])) : null;
     const connection = mode === "live" && ui.multiplayer.checked === true ? multiplayerConfiguration() : null;
     session.multiplayer = connection?.mode === "peer" ? connection.config : null;
-    session.room = connection?.mode === "room" ? { ...connection.config, opened: false, opening: false,
+    session.room = connection?.mode === "room" ? { ...connection.config, opened: false, opening: false, closed: false,
       participant: null, snapshot: null, start: null, waiter: null, control: null,
       sealRequested: false, readyRequested: false, leaving: false } : null;
     controls();
@@ -1210,7 +1210,7 @@ async function play(mode = "live") {
     if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
     if (millisecondsToNanos(performance.now()) >= session.origin) throw new Error("Playback activation missed its chosen start. Start a fresh session.");
     session.phase = "playing";
-    if (session.room) ui["multiplayer-status"].textContent = "Room software start activated. Remote score progress and final acknowledgements are not yet available.";
+    if (session.room) ui["multiplayer-status"].textContent = "Room software start activated · progress publication enabled. Multi-host score display and coordinated final drain are not yet available.";
     ui.rate.value = String(session.audio.sampleRate);
     controls();
     ui.stop.focus();
@@ -1386,7 +1386,7 @@ function pumpPresentation(session) {
 
 function receiveRoom(session, event) {
   const room = session.room;
-  if (!room || session.owner !== owner || session.phase === "closing" || room.leaving) return;
+  if (!room || session.owner !== owner || session.phase === "closing" || room.leaving || room.closed) return;
   try {
     if (!room.opening || !event || typeof event !== "object" || Array.isArray(event)) throw new Error("Invalid room event.");
     if (event.kind === "snapshot") {
@@ -1444,6 +1444,13 @@ function receiveRoom(session, event) {
       controls();
     } else if (event.kind === "closed") {
       if (typeof event.error !== "string" || event.error.length < 1 || event.error.length > 4096) throw new Error("Invalid room closure notice.");
+      if (session.phase === "playing") {
+        room.closed = true;
+        room.error = event.error;
+        ui["multiplayer-status"].textContent = `Room disconnected: ${event.error} · local play continues.`;
+        controls();
+        return;
+      }
       throw new Error(`Room closed: ${event.error}`);
     } else throw new Error("Unknown room event.");
   } catch (error) {
@@ -1716,8 +1723,15 @@ function stopPlay(reason, failed = false, completed = false) {
             ? finalLocalPeerText(outcome?.peers, session.localPlan.players) : finalPeerText(outcome?.peer));
         }
         if (session.room && session.owner === owner) {
-          ui["multiplayer-status"].textContent = `Room session ended${session.room.error ? `: ${session.room.error}` : "."}`
-            + " Remote score progress and final acknowledgements are not yet available.";
+          const outcome = score?.room;
+          const receipt = outcome?.finalWritten === true && outcome.finalAcknowledged === true
+            ? "Final score prefix written and acknowledged by the room relay."
+            : outcome?.finalWritten === true ? "Final score prefix written · aggregate ACK unavailable."
+              : outcome?.finalQueued === true ? "Final score prefix queued · full write unconfirmed."
+                : "Room ended without a confirmed final score write.";
+          const error = typeof outcome?.error === "string" ? outcome.error.slice(0, 4096) : session.room.error;
+          ui["multiplayer-status"].textContent = receipt + (error ? ` ${error}` : "")
+            + " Coordinated room final drain remains unavailable.";
         }
         const result = !session.localPlan && score && typeof score.hits === "bigint" && typeof score.misses === "bigint"
           ? ` Hits ${score.hits} · Misses ${score.misses} · Combo ${score.combo ?? "unavailable"}.` : "";

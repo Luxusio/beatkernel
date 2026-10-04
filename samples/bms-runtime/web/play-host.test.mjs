@@ -4807,6 +4807,67 @@ test("an early committed room event survives the open reply and activates one ex
   pending.click("stop"); await flush(); await pending.receive(localFinal(queued.start)); await pending.close();
 });
 
+test("a valid playing room closure preserves Window input and output while final status distinguishes queued, written and acknowledged prefixes", async () => {
+  for (const [written, acknowledged, expected] of [
+    [false, false, /queued · full write unconfirmed/],
+    [true, false, /written · aggregate ACK unavailable/],
+    [true, true, /written and acknowledged by the room relay/],
+  ]) {
+    const h = await harness(); await h.preview(); h.get("record").checked = true;
+    const { start, worker } = await openRoomLobby(h);
+    await roomEvent(h, start, roomRoster(start, { phase: 2 }));
+    await roomEvent(h, start, roomStart());
+    await h.reply(worker.last("play-activate"), null);
+    assert.match(h.get("multiplayer-status").textContent, /progress publication enabled/);
+    const display = watchPlayDisplay(h), layout = h.layoutReads;
+    await roomEvent(h, start, { kind: "closed", error: "room stream lost after activation" });
+    const disconnected = h.get("multiplayer-status").textContent;
+    assert.match(disconnected, /room stream lost after activation.*local play continues/);
+    assert.equal(worker.messages("play-stop").length, 0); assert.equal(h.audio.stopStarts, 0);
+    assert.equal(h.get("stop").disabled, false); assert.equal(h.get("record").disabled, true);
+    for (const id of ["room-seal", "room-ready", "room-leave"]) assert.equal(h.get(id).disabled, true);
+    await roomEvent(h, start, { kind: "closed", error: "duplicate late closure" });
+    assert.equal(h.get("multiplayer-status").textContent, disconnected);
+    h.setNow(1700);
+    h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1699.125 });
+    const input = worker.last("play-step");
+    assert.ok(input.events.some(event => event.key === 2 && event.hostNs === 1699125000n));
+    await h.receive({ kind: "play-step-done", playId: start.playId, tickId: input.tickId,
+      songNs: 200000000n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
+    await h.advance(8);
+    const render = worker.last("play-render"); assert.ok(render);
+    assert.equal(Object.hasOwn(render, "report"), false);
+    await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
+      songNs: 200000000n, hits: 1n, misses: 0n, combo: 1n, completed: false });
+    assert.deepEqual(display, []); assert.equal(h.layoutReads, layout);
+    assert.equal(h.get("multiplayer-status").textContent, disconnected);
+    assert.equal(h.audio.polls, 0); assert.equal(worker.messages("play-stop").length, 0);
+    h.click("stop"); await flush();
+    const player = start.localPlanWords[0];
+    await h.receive(localFinal(start, {
+      room: { participant: ROOM_PARTICIPANT, finalQueued: true, finalWritten: written,
+        finalAcknowledged: acknowledged, localComplete: acknowledged, finalDrain: "cancelled",
+        error: "room stream lost after activation", peers: [] },
+      replays: [{ player, replay: Uint8Array.of(66, 75, 82, 1), replayError: null, replayComplete: false }],
+    }));
+    assert.equal(h.audio.stopStarts, 1); assert.equal(worker.messages("play-stop").length, 1);
+    assert.match(h.get("multiplayer-status").textContent, expected);
+    assert.match(h.get("multiplayer-status").textContent, /Coordinated room final drain remains unavailable/);
+    assert.match(content(h.get("local-results")), /Recorded prefix/);
+    assert.equal(h.get("captured-replay").children.some(option => option.value === String(player)), true);
+    await h.close();
+  }
+  for (const error of ["", 7]) {
+    const h = await harness(); await h.preview(); const { start, worker } = await openRoomLobby(h);
+    await roomEvent(h, start, roomRoster(start, { phase: 2 }));
+    await roomEvent(h, start, roomStart()); await h.reply(worker.last("play-activate"), null);
+    await roomEvent(h, start, { kind: "closed", error });
+    assert.equal(worker.messages("play-stop").length, 1, "malformed initial closure metadata remains fatal during play");
+    assert.equal(h.audio.stopStarts, 1);
+    await h.receive(localFinal(start)); await h.close();
+  }
+});
+
 test("room URL, bounded roster and committed schedule refusals preserve cleanup and never reinterpret queue success as start", async () => {
   for (const url of ["http://example.test/rooms/a", "https://example.test/competition",
     "https://example.test/rooms/a?extra=1", "https://example.test/rooms/a#fragment",
