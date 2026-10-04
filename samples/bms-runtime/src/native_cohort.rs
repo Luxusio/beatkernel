@@ -559,6 +559,9 @@ pub fn run_cohort<D: NativeGameplayDevice>(
             false,
             resume_boundary.is_some(),
         ) {
+            if let Some(network) = session.network.as_deref_mut() {
+                network.mark_native_completed();
+            }
             player::publish_section_end(config.end_song.expect("finite cohort endpoint admitted"));
             return Ok(());
         }
@@ -587,6 +590,9 @@ pub fn run_cohort<D: NativeGameplayDevice>(
                 )?;
             }
             if finished {
+                if let Some(network) = session.network.as_deref_mut() {
+                    network.mark_native_completed();
+                }
                 return Ok(());
             }
         }

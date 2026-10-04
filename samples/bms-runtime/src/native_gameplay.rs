@@ -498,6 +498,9 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
             batch.backlog,
             resume_boundary.is_some(),
         ) {
+            if let Some(competition) = session.competition.as_mut() {
+                competition.mark_native_completed();
+            }
             player::publish_section_end(config.end_song.expect("finite endpoint admitted"));
             return Ok(());
         }
@@ -514,6 +517,9 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
                     device.render_report()?,
                     session.discipline.latest_pair().map(|pair| pair.source),
                 )? {
+                    if let Some(competition) = session.competition.as_mut() {
+                        competition.mark_native_completed();
+                    }
                     return Ok(());
                 }
             }
@@ -525,6 +531,9 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
 
 #[cfg(test)]
 mod fixtures {
+    mod room_completion {
+        include!("native_room_completion_fixtures.rs");
+    }
     include!("native_gameplay_interval_fixtures.rs");
     use super::*;
     use beatkernel::{

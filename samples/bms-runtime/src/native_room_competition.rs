@@ -491,13 +491,20 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
 
     fn service_ui_cancellation(&mut self) {
         if player::cancelled() && !self.cancelled {
-            self.cancelled = true;
-            self.port.request_stop();
-            self.hud_status(RoomHudStatus::Disconnected);
-            self.ui_dirty = true;
-            player::close_room_controls();
-            self.ui_pending.clear();
+            self.request_stop();
         }
+    }
+
+    /// Revoke startup/final authority without joining on a gameplay operation.
+    /// Final cleanup still consumes the actual port's joined outcome in finish.
+    pub(crate) fn request_stop(&mut self) {
+        self.cancelled = true;
+        self.port.request_stop();
+        self.hud_status(RoomHudStatus::Disconnected);
+        self.ui_dirty = true;
+        player::close_room_controls();
+        self.ui_pending.clear();
+        self.publish_ui();
     }
     fn service_ui_requests(&mut self) {
         if !player::attached() {

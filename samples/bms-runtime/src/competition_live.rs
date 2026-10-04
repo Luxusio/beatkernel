@@ -3,11 +3,12 @@ use crate::{
     competition::{Competition, OpponentKind},
     local_players::PlayerId,
     multiplayer::{
-        GroupMultiplayer, MultiplayerEvent, MultiplayerNotice, MultiplayerOptions, Progress,
+        MultiplayerEvent, MultiplayerNotice, MultiplayerOptions, Progress,
         competition_identity_for_section,
     },
     multiplayer_group::{GroupPrefix, MemberProgress, validate_members, validate_roster},
     multiplayer_quic::QuicCredentials,
+    native_competition_network::NativeCompetitionNetwork,
     player::{self, CompetitionSnapshot, GhostSnapshot, NetworkSnapshot, NetworkStatus},
     replay_capture::LiveReplayCapture,
     replay_playback::read_replay,
@@ -36,7 +37,7 @@ const START_POLICY_FLAGS: [&str; 5] = [
     "--mp-start-max-lateness-ms",
 ];
 
-/// Explicit connection role; only one peer is admitted in the initial mode.
+/// Explicit bilateral role or multi-host room selection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NetworkRole {
     /// Listen on this address without silently selecting public interfaces.
@@ -49,6 +50,8 @@ pub enum NetworkRole {
         role: crate::multiplayer_start::StartRole,
         origin: String,
     },
+    /// Room authority comes from actual admission order, not a chosen start role.
+    RoomWebTransport { url: String, origin: String },
 }
 
 /// Competition features are opt-in and retained independently of native options.
@@ -58,7 +61,7 @@ pub struct CompetitionOptions {
     pub quic: QuicCredentials,
     /// Saved own/other replays; at most eight opponents.
     pub ghosts: Vec<(OpponentKind, PathBuf)>,
-    /// Optional two-peer connection.
+    /// Optional bilateral connection or explicitly selected multi-host room.
     pub network: Option<NetworkRole>,
     /// Finite connection/identity and native preparation readiness deadline.
     pub setup_timeout: Duration,
@@ -89,6 +92,7 @@ impl CompetitionOptions {
         let mut start_seen = [false; 5];
         let mut quic_seen = [false; 4];
         let mut webtransport = [None, None, None];
+        let mut room = None;
         while index < args.len() {
             let flag = args[index].as_str();
             if !matches!(
@@ -103,6 +107,7 @@ impl CompetitionOptions {
                     | "--mp-ca"
                     | "--mp-server-name"
                     | "--mp-webtransport"
+                    | "--mp-room"
                     | "--mp-role"
                     | "--mp-origin"
             ) && !START_POLICY_FLAGS.contains(&flag)
@@ -126,6 +131,15 @@ impl CompetitionOptions {
                 .filter(|value| !value.is_empty())
                 .ok_or("competition option requires a nonempty value")?;
             match flag {
+                "--mp-room" => {
+                    if room.is_some() {
+                        return Err("duplicate room URL".into());
+                    }
+                    if value.len() > 4096 || value.chars().any(char::is_control) {
+                        return Err("invalid bounded room URL".into());
+                    }
+                    room = Some(value.clone());
+                }
                 "--mp-webtransport" | "--mp-role" | "--mp-origin" => {
                     let field = match flag {
                         "--mp-webtransport" => 0,
@@ -226,7 +240,18 @@ impl CompetitionOptions {
             }
             index += 2;
         }
-        if webtransport.iter().any(Option::is_some) {
+        if let Some(url) = room {
+            if options.network.is_some() || webtransport[0].is_some() || webtransport[1].is_some() {
+                return Err("room mode cannot mix bilateral transport or --mp-role".into());
+            }
+            let origin = webtransport[2]
+                .take()
+                .ok_or("room mode requires --mp-origin")?;
+            if options.quic.ca.is_none() {
+                return Err("room mode requires --mp-ca".into());
+            }
+            options.network = Some(NetworkRole::RoomWebTransport { url, origin });
+        } else if webtransport.iter().any(Option::is_some) {
             if options.network.is_some() {
                 return Err("WebTransport and raw QUIC modes are mutually exclusive".into());
             }
@@ -255,7 +280,7 @@ impl CompetitionOptions {
                 Some(NetworkRole::Join(_)) if quic_seen[0] || quic_seen[1] => {
                     return Err("QUIC join uses CA/server name, not host credentials".into());
                 }
-                Some(NetworkRole::WebTransport { .. })
+                Some(NetworkRole::WebTransport { .. } | NetworkRole::RoomWebTransport { .. })
                     if quic_seen[0] || quic_seen[1] || quic_seen[3] =>
                 {
                     return Err("WebTransport uses CA trust without host certificate/key or a server-name override".into());
@@ -310,7 +335,7 @@ pub fn load_chart_with_seed(path: &Path, seed: u64) -> Result<BmsChart> {
 pub struct LiveCompetition {
     player: PlayerId,
     competition: Competition,
-    network: Option<GroupMultiplayer>,
+    network: Option<NativeCompetitionNetwork>,
     last_publish: Option<i64>,
     last_display: Option<i64>,
     network_failed: bool,
@@ -491,37 +516,29 @@ impl LiveCompetition {
             ..MultiplayerOptions::default()
         };
         let network = match &options.network {
-            Some(NetworkRole::Host(address)) => Some(GroupMultiplayer::host(
-                *address,
+            Some(role) => Some(NativeCompetitionNetwork::new(
+                role,
                 identity,
                 vec![player],
                 settings,
             )?),
-            Some(NetworkRole::Join(address)) => Some(GroupMultiplayer::join(
-                *address,
-                identity,
-                vec![player],
-                settings,
-            )?),
-            Some(NetworkRole::WebTransport { url, role, origin }) => {
-                Some(GroupMultiplayer::webtransport(
-                    crate::multiplayer_webtransport_client::WebTransportOptions {
-                        url: url.clone(),
-                        origin: origin.clone(),
-                        role: *role,
-                        ca: options
-                            .quic
-                            .ca
-                            .clone()
-                            .ok_or("WebTransport requires --mp-ca")?,
-                    },
-                    identity,
-                    vec![player],
-                    settings,
-                )?)
-            }
             None => None,
         };
+        Self::from_prepared(player, competition, network, options.setup_timeout).map(Some)
+    }
+
+    /// Attach already prepared comparisons and the single selected network
+    /// owner; canonical identity preparation precedes this ownership transfer.
+    pub(crate) fn from_prepared(
+        player: PlayerId,
+        competition: Competition,
+        network: Option<NativeCompetitionNetwork>,
+        setup_timeout: Duration,
+    ) -> Result<Self> {
+        if player.0 == 0 {
+            return Err("competition player ID must be nonzero".into());
+        }
+        let network_status = network.as_ref().map(|_| NetworkStatus::Waiting);
         let mut prepared = Self {
             player,
             competition,
@@ -529,12 +546,12 @@ impl LiveCompetition {
             last_publish: None,
             last_display: None,
             network_failed: false,
-            network_status: options.network.as_ref().map(|_| NetworkStatus::Waiting),
+            network_status,
             last_presentation: None,
-            network_setup_timeout: options.setup_timeout,
+            network_setup_timeout: setup_timeout,
         };
         prepared.publish_presentation(true)?;
-        Ok(Some(prepared))
+        Ok(prepared)
     }
 
     fn publish_presentation(&mut self, force: bool) -> Result<()> {
@@ -563,7 +580,11 @@ impl LiveCompetition {
                 }
             })
             .collect();
-        if self.network.is_none() {
+        if self
+            .network
+            .as_ref()
+            .is_none_or(NativeCompetitionNetwork::is_room)
+        {
             player::publish_saved_competition(self.player, ghosts)?;
         } else {
             player::publish_competition(
@@ -617,7 +638,19 @@ impl LiveCompetition {
                     }
                 }
             }
-            if !self.network_failed
+            if network.is_room() {
+                let score = self.competition.score();
+                network.observe_room(&[MemberProgress {
+                    player: self.player,
+                    progress: Progress {
+                        song_ns: song,
+                        hits: score.hits,
+                        misses: score.misses,
+                        combo: score.combo,
+                        max_combo: score.max_combo,
+                    },
+                }])?;
+            } else if !self.network_failed
                 && !disconnected
                 && network.is_ready()
                 && self
@@ -693,7 +726,7 @@ impl LiveCompetition {
     pub fn committed_start_schedule(&self) -> Option<crate::multiplayer_start::StartSchedule> {
         self.network
             .as_ref()
-            .and_then(GroupMultiplayer::start_schedule)
+            .and_then(NativeCompetitionNetwork::start_schedule)
     }
     /// Brackets a caller's actual native host read without inventing a clock relation.
     pub fn native_host_bracket(
@@ -713,7 +746,7 @@ impl LiveCompetition {
     pub fn network_clock_now_ns(&self) -> Result<Option<i64>> {
         self.network
             .as_ref()
-            .map(GroupMultiplayer::clock_now_ns)
+            .map(NativeCompetitionNetwork::clock_now_ns)
             .transpose()
             .map_err(Into::into)
     }
@@ -793,6 +826,18 @@ impl LiveCompetition {
         })
     }
 
+    pub(crate) fn mark_native_completed(&mut self) {
+        if let Some(network) = &mut self.network {
+            network.mark_native_completed();
+        }
+    }
+    /// Actual common native completion proof; independent of cleanup/UI status.
+    pub fn native_completed(&self) -> bool {
+        self.network
+            .as_ref()
+            .is_some_and(NativeCompetitionNetwork::native_completed)
+    }
+
     /// Send the exact last observed prefix, wait boundedly for receipt and join.
     /// Call only after native cleanup; a peer receipt is not a ranked final result.
     pub fn finish(&mut self) {
@@ -820,7 +865,27 @@ impl LiveCompetition {
                     self.network_failed = true;
                 }
             }
-            if !self.network_failed && network.is_ready() {
+            if network.is_room() {
+                let members = terminal_prefix
+                    .map(|progress| {
+                        vec![MemberProgress {
+                            player: self.player,
+                            progress,
+                        }]
+                    })
+                    .unwrap_or_default();
+                if let Err(error) = network.finish_delivery(members) {
+                    eprintln!("room finalization failed: {error}");
+                    self.network_failed = true;
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(outcome) = network.room_outcome() {
+                    println!(
+                        "room cleanup cancelled={} receipts={:?} protocol_error={:?} cleanup_error={:?}",
+                        outcome.cancelled, outcome.receipts, outcome.error, outcome.cleanup_error
+                    );
+                }
+            } else if !self.network_failed && network.is_ready() {
                 if let Some(progress) = terminal_prefix {
                     if let Err(error) = network.finish_delivery(vec![MemberProgress {
                         player: self.player,

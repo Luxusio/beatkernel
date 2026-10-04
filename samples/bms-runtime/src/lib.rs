@@ -184,6 +184,8 @@ pub mod native_chart;
 pub mod native_cohort;
 /// Shared local member construction, activation and recording finalization.
 pub mod native_cohort_setup;
+/// One application routing boundary for bilateral and multi-host room competition.
+pub mod native_competition_network;
 /// Omitted solo option defaults, independent of native discovery.
 pub mod native_defaults;
 pub mod native_end;

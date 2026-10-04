@@ -2,14 +2,15 @@
 //! Remote prefixes are display data and never enter any local judge.
 
 use crate::{
-    competition_live::{CompetitionOptions, NetworkRole, replay_limits},
+    competition_live::{CompetitionOptions, replay_limits},
     local_players::PlayerId,
     local_runtime::MemberConfig,
     multiplayer::{
-        GroupMultiplayer, MultiplayerError, MultiplayerEvent, MultiplayerNotice,
-        MultiplayerOptions, competition_identity_for_section,
+        MultiplayerError, MultiplayerEvent, MultiplayerNotice, MultiplayerOptions,
+        competition_identity_for_section,
     },
     multiplayer_group::{GroupPrefix, MemberProgress, validate_members, validate_roster},
+    native_competition_network::NativeCompetitionNetwork,
     native_start::{NativeStartAgreement, NativeStartResult, SessionHostBracket},
     player::{self, NetworkSnapshot, NetworkStatus},
     replay_capture::LiveReplayCapture,
@@ -22,7 +23,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 /// Shared readiness, committed start, progress and cleanup for one whole cohort.
 pub struct NativeGroupCompetition {
-    network: GroupMultiplayer,
+    network: NativeCompetitionNetwork,
     players: Vec<PlayerId>,
     local: Option<Vec<MemberProgress>>,
     last_publish: Option<Instant>,
@@ -62,29 +63,7 @@ impl NativeGroupCompetition {
         let mut network_players = Vec::new();
         network_players.try_reserve_exact(players.len())?;
         network_players.extend_from_slice(&players);
-        let network = match role {
-            NetworkRole::Host(address) => {
-                GroupMultiplayer::host(*address, identity, network_players, settings)?
-            }
-            NetworkRole::Join(address) => {
-                GroupMultiplayer::join(*address, identity, network_players, settings)?
-            }
-            NetworkRole::WebTransport { url, role, origin } => GroupMultiplayer::webtransport(
-                crate::multiplayer_webtransport_client::WebTransportOptions {
-                    url: url.clone(),
-                    origin: origin.clone(),
-                    role: *role,
-                    ca: options
-                        .quic
-                        .ca
-                        .clone()
-                        .ok_or("WebTransport requires --mp-ca")?,
-                },
-                identity,
-                network_players,
-                settings,
-            )?,
-        };
+        let network = NativeCompetitionNetwork::new(role, identity, network_players, settings)?;
         let mut owner = Self {
             network,
             players,
@@ -101,7 +80,15 @@ impl NativeGroupCompetition {
     }
 
     pub fn is_failed(&self) -> bool {
-        self.status == NetworkStatus::Disconnected
+        self.status == NetworkStatus::Disconnected || self.network.room_failed()
+    }
+
+    pub(crate) fn mark_native_completed(&mut self) {
+        self.network.mark_native_completed();
+    }
+    /// Actual common native completion proof; independent of cleanup/UI status.
+    pub fn native_completed(&self) -> bool {
+        self.network.native_completed()
     }
 
     /// Retain the whole real prefix before optional network publication. A
@@ -109,6 +96,12 @@ impl NativeGroupCompetition {
     pub fn observe(&mut self, members: &[MemberProgress]) -> Result<()> {
         if self.finished {
             return Err("group competition already stopped".into());
+        }
+        if self.network.is_room() {
+            // The room controller retains every actual prefix and applies its
+            // own network-clock cadence and display-only failure policy.
+            self.network.observe_room(members)?;
+            return Ok(());
         }
         let next = validated_local_prefix(&self.players, self.local.as_deref(), members)?;
         self.local = Some(next);
@@ -171,7 +164,8 @@ impl NativeGroupCompetition {
     }
 
     fn publish_presentation(&mut self, force: bool) -> Result<()> {
-        if !player::attached()
+        if self.network.is_room()
+            || !player::attached()
             || (!force
                 && self
                     .last_presentation
@@ -203,6 +197,28 @@ impl NativeGroupCompetition {
     /// Cleanup only: after an observation, send one actual terminal prefix and
     /// await its application ACK. Always join, including unplayed cancellation.
     pub fn finish(&mut self, members: &[MemberProgress]) -> Result<()> {
+        if self.network.is_room() {
+            if self.finished {
+                return Err("group competition already stopped".into());
+            }
+            // Actual native completion proof is held by this shared backend;
+            // cleanup success and initialized state cannot create it.
+            let delivery = copy_members(members)
+                .and_then(|members| self.network.finish_delivery(members).map_err(Into::into));
+            let joined = self
+                .network
+                .stop()
+                .map_err(Box::<dyn std::error::Error>::from);
+            self.finished = true;
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(outcome) = self.network.room_outcome() {
+                println!(
+                    "room cleanup cancelled={} receipts={:?} protocol_error={:?} cleanup_error={:?}",
+                    outcome.cancelled, outcome.receipts, outcome.error, outcome.cleanup_error
+                );
+            }
+            return delivery.and(joined);
+        }
         let was_failed = self.is_failed();
         let delivery = (|| -> Result<()> {
             if self.finished {
