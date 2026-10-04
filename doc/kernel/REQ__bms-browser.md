@@ -1,5 +1,28 @@
 # Browser host and shared selected-file preparation
 
+## Input collection and rendering ownership
+
+The browser main-thread budget prioritizes collection of all supported physical
+inputs: keyboard, touch/pointer, raw HID reports and Gamepad samples. This rule
+also applies to future input adapters. Window forwards bounded acquired data
+with original source/contact identities, sequence and originating timestamps;
+Worker arrival time must never replace input time. Permission/device prompts,
+user activation, pointer capture, focus/visibility, resize and browser output
+observations stay with the browser owner that requires them.
+
+Worker owns profile decoding, lane mapping, touch hit testing, judgment, replay,
+network state and retained gameplay/HUD rendering on OffscreenCanvas. Window
+must not add a gameplay drawing loop, periodic DOM score updates or per-note
+rendering. Audio rendering belongs to AudioWorklet. Gamepad acquisition polling
+on Window is input collection, not a rendering loop. Setup controls and final
+status/results metadata may update DOM on actual events; these updates must not
+move game rendering or score computation onto Window.
+
+Deferred verification must cover keyboard, touch, HID and Gamepad forwarding,
+original timestamp/source preservation and Worker rendering ownership. Actual
+browser/device runs and measured main-thread cost remain unverified; source
+ownership alone does not establish latency or throughput guarantees.
+
 ## Worker-owned retained room Results
 
 After actual room drain/close joins, retain at most one bounded immutable archive
