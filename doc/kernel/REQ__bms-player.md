@@ -366,6 +366,27 @@ warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warni
 
 ## Known ceiling
 
+### Actual catalog read budget
+
+Catalog scanning accounts raw bytes actually returned by chart readers,
+including prefixes whose read, text decode or parse later fails. File metadata
+can reject an individually oversized candidate, but cannot establish aggregate
+read usage. Limit each candidate read to the lesser of its existing 8 MiB raw
+cap and the remaining 64 MiB catalog raw budget. One extra byte may be read to
+detect an oversized/growing stream; it is counted explicitly, never parsed or
+published, and ends aggregate scanning when it exceeds the remaining budget.
+Thus accepted raw usage is at most 64 MiB, and attempted usage is at most
+64 MiB plus one detection byte across the scan, rather than one full extra file.
+
+Preserve the separate per-chart decoded UTF-8 limit, synchronous read/scan APIs,
+deterministic catalog order, existing directory/chart/depth limits, diagnostics,
+cooperative cancellation and complete-catalog publication. Do not decode audio
+assets during catalog scanning. Scalar progress bytes report actual returned
+raw bytes, not advertised sizes. A cancelled scan still returns no partial
+catalog. Deferred fixtures must exercise real reader budgets and controlled
+scan-time file changes; actual filesystem/window/performance acceptance remains
+unverified.
+
 ### Aspect-preserving viewport and input
 
 Render the complete logical scene inside one centered, aspect-preserving pixel
@@ -444,9 +465,10 @@ Native filesystem/window/device/performance acceptance remains unverified.
   writers need external coordination and directory crash durability is not
   promised — verify target filesystem behavior during deferred file acceptance.
 
-- Catalog reads are capped per file at 8 MiB; aggregate accounting uses
-  advertised file sizes — tighten aggregate accounting if concurrent file
-  replacement must count against that budget.
+- Catalog reads retain separate raw/decoded per-file limits and charge actual
+  returned raw prefixes against 64 MiB. A single counted detection byte can
+  exceed the aggregate budget and stops scanning before parsing that candidate;
+  physical disk traffic and arbitrary syscall interruption are not measured.
 - Library catalog scan/search/title-font CPU preparation use one background
   owner after asynchronous startup; cooperative cancellation cannot interrupt
   arbitrary filesystem calls or decoder work. Direct chart/profile startup and

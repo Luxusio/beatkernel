@@ -145,6 +145,9 @@ owned background worker while selection shows loading. Complete results install
 together; closing cancels and waits for the actual owner. Direct chart and
 profile startup keep their existing paths, and font GPU upload stays on the UI
 renderer. Native responsiveness still requires runtime acceptance.
+Catalog scanning charges actual returned chart bytes, including failed prefixes,
+against its 64 MiB raw budget. Each read uses the remaining budget; at most one
+extra aggregate detection byte is consumed and never parsed or published.
 Catalog rows can also be clicked; Start, Cancel, Return and Exit buttons use
 the same session commands. Mouse hit testing follows the rendered logical
 viewport and never contributes gameplay input timestamps.

@@ -38,7 +38,9 @@ are compile-only checks; the full player Goal and Harness task remain open.
 Cancellation cannot interrupt arbitrary filesystem calls or decoder work.
 Unexpected final Drop must join its real owner and may wait for such a call.
 Profile loading and direct `--chart` startup remain separate existing paths.
-Optional font GPU upload can still require renderer time. The scanner's 64 MiB
-aggregate bound accounts advertised metadata sizes, not replacement races.
+Optional font GPU upload can still require renderer time. The advertised-size
+aggregate accounting present in this initial phase is superseded by
+[actual catalog read accounting](CHANGE__catalog-read-budget.md), which charges
+returned raw bytes and bounds the aggregate detection probe.
 Actual native window/filesystem/device behavior and measured responsiveness
 remain unverified.
