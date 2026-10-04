@@ -194,6 +194,11 @@ acquisition is permitted on Window and does not authorize gameplay rendering.
 Solo input uses automatic source admission; multiple local players use distinct
 assigned acquired sources, including three, four and larger supported rosters.
 
+This boundary also applies to future physical input adapters. Adding an input
+kind must preserve its own typed payload and provenance through common routing,
+with bounded acquisition on Window and interpretation on Worker. Do not add a
+Window gameplay renderer or a separate judgment path for that input kind.
+
 ## Actual multi-host room lobby caller
 
 Expose the BKMR room path as an explicit choice alongside the existing bilateral

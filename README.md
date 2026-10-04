@@ -140,6 +140,11 @@ notes, holds, judgment feedback and counters from actual game snapshots.
 Use `player --library DIR` or `player --chart PATH` with optional advanced native
 device/buffer/binding options as `play`. Up/Down select, Enter starts, and
 Escape/focus loss cancels. Native settings can also be edited before play.
+Library metadata, search and optional title-font CPU preparation run on one
+owned background worker while selection shows loading. Complete results install
+together; closing cancels and waits for the actual owner. Direct chart and
+profile startup keep their existing paths, and font GPU upload stays on the UI
+renderer. Native responsiveness still requires runtime acceptance.
 Catalog rows can also be clicked; Start, Cancel, Return and Exit buttons use
 the same session commands. Mouse hit testing follows the rendered logical
 viewport and never contributes gameplay input timestamps.

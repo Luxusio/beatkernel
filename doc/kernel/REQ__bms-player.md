@@ -366,6 +366,33 @@ warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warni
 
 ## Known ceiling
 
+### Asynchronous native catalog startup
+
+For `player --library`, construct the native window and event loop without
+waiting for complete library enumeration, chart metadata parsing or supplied
+title-font preparation. One owned background operation performs bounded
+metadata scanning, search preparation and CPU font work, reusing existing
+catalog limits and deterministic order. No audio files are opened by catalog
+scanning. Publish only a complete prepared catalog; UI frames share bounded
+progress counters and do not copy partial entry lists.
+
+While loading, selection shows an explicit loading state and cannot launch a
+chart from partial or stale data. Close requests cooperative cancellation and
+waits for actual owner completion without blocking ordinary event dispatch.
+Results arriving during closing must not install entries or fonts. Hidden or
+suspended selection can retain completed data but cannot resurrect a disposed
+screen or mutate another panel's draft. Installing the result updates selection
+items, normalized search, diagnostics and font ownership atomically; failure
+remains visible and cannot fabricate a usable selection.
+
+Keep synchronous scan callers compatible. Cancellation is checked between
+traversal/read/parse/preparation boundaries, and is not a promise to interrupt an
+arbitrary filesystem syscall or decoder. Supplied font GPU upload remains on
+the renderer owner. Profile loading and direct `--chart` setup are separate
+existing startup paths. Deferred fixtures cover scan ordering/bounds/cancellation,
+actual background ownership and native loading/close/hidden-publication behavior.
+Native filesystem/window/device/performance acceptance remains unverified.
+
 - Comparison views retain eight records and one peer; local panels show this
   detail only when toggled. A four-player panel with eight records has a 72px
   lane region while comparisons are open (44px if a future native group+peer
@@ -387,9 +414,11 @@ warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warni
 - Catalog reads are capped per file at 8 MiB; aggregate accounting uses
   advertised file sizes — tighten aggregate accounting if concurrent file
   replacement must count against that budget.
-- Catalog scan happens before window creation; loading/calibration cancellation
-  waits for the current preparation step — add asynchronous catalog/progressive
-  preparation if startup responsiveness requires interrupting these steps.
+- Library catalog scan/search/title-font CPU preparation use one background
+  owner after asynchronous startup; cooperative cancellation cannot interrupt
+  arbitrary filesystem calls or decoder work. Direct chart/profile startup and
+  game loading/calibration remain separate paths. GPU font upload can still
+  consume renderer time; native responsiveness acceptance remains deferred.
 - At most 2048 visible notes per displayed playfield and a finite UI rectangle
   batch are rendered per frame (65,536 UI rectangles). Note overlap and geometry
   capacity overflow report an error — revise admission for denser layouts.
