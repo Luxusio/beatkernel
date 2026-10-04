@@ -473,11 +473,8 @@ fn main() -> Result<()> {
     run_args(&args)
 }
 
-fn finite_mode(options: &Options, network: bool) -> Result<()> {
+fn finite_mode(options: &Options, _network: bool) -> Result<()> {
     options.playback_end()?;
-    if !options.local_players.is_empty() && network {
-        return Err("network competition currently supports one local participant only".into());
-    }
     Ok(())
 }
 #[cfg(any(target_os = "macos", test))]
@@ -524,10 +521,10 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
         println!(
-            "Graphical player is bms-player; this is a native developer composition. Local mode: replace --keyboard-registry with repeated --local-player ID:REGISTRY (2..64 distinct keyboards).\n"
+            "Graphical player is bms-player; this is a native developer composition. Local mode: replace --keyboard-registry with repeated --local-player ID:REGISTRY (2..64 distinct keyboards). Network local groups share one connection and start agreement.\n"
         );
         println!(
-            "macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned and strictly after start; solo network CoreAudio with the same section endpoint or offline local CoreAudio completes a finite prefix only after native presentation and input drain, without forcing remaining notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact solo or assigned local registry attachments, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown."
+            "macos_bms --chart PATH --device AUDIO_DEVICE_ID --keyboard-registry IOREGISTRY_ENTRY_ID --rate HZ --channels N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned and strictly after start; solo or local cohort CoreAudio completes a finite prefix only after native presentation and input drain, without forcing remaining notes. Network peers must agree on the same finite section endpoint. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Exact solo or assigned local registry attachments, actual keyboard HID controls; native float32 CoreAudio, no fallback. Physical timing Unknown."
         );
         return Ok(());
     }
@@ -555,9 +552,7 @@ mod native {
         transport::{Rate, Transport},
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
-    use beatkernel_bms_runtime::native_audio::{
-        NativeAudioConfig, PreparedNativeAudio, prepare_audio,
-    };
+    use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio, prepare_audio};
     use beatkernel_bms_runtime::{
         ChannelPolicy,
         native_chart::{NativeChartConfig, prepare_chart},
@@ -655,15 +650,15 @@ mod native {
         MAX_START_INPUT_EVENTS, NativeStartConfig, NativeStartDevice, NativeStartObservation,
         NativeStartResult, start_committed,
     };
-    struct StartupDevice<'a> {
-        audio: &'a mut CoreAudioStream,
-        input: &'a mut HidInput,
-        clock: &'a MachClock,
-        selected: DeviceId,
-        registry: u64,
-        pre_origin: &'a mut u64,
-        other_devices: &'a mut u64,
-        retained: &'a mut VecDeque<HidSample>,
+    pub(super) struct StartupDevice<'a> {
+        pub(super) audio: &'a mut CoreAudioStream,
+        pub(super) input: &'a mut HidInput,
+        pub(super) clock: &'a MachClock,
+        pub(super) selected: &'a [DeviceId],
+        pub(super) check_selection: &'a dyn Fn(&HidInput) -> Result<()>,
+        pub(super) pre_origin: &'a mut u64,
+        pub(super) other_devices: &'a mut u64,
+        pub(super) retained: &'a mut VecDeque<HidSample>,
     }
     impl NativeStartDevice for StartupDevice<'_> {
         type Evidence = ();
@@ -674,7 +669,7 @@ mod native {
             startup_input(
                 self.input,
                 self.selected,
-                self.registry,
+                self.check_selection,
                 self.pre_origin,
                 self.other_devices,
                 if retain {
@@ -793,8 +788,8 @@ mod native {
     }
     fn startup_input(
         input: &mut HidInput,
-        selected: DeviceId,
-        registry: u64,
+        selected: &[DeviceId],
+        check_selection: &dyn Fn(&HidInput) -> Result<()>,
         pre_origin: &mut u64,
         other_devices: &mut u64,
         retained: Option<&mut VecDeque<HidSample>>,
@@ -803,13 +798,13 @@ mod native {
             return Ok(false);
         }
         input.poll(WallDuration::from_millis(1))?;
-        check_hid(input, selected, registry)?;
+        check_selection(input)?;
         let mut retained = retained;
         for _ in 0..256 {
             let Some(sample) = input.pop() else {
                 break;
             };
-            if sample.event.meta().source != selected {
+            if !selected.contains(&sample.event.meta().source) {
                 *other_devices = other_devices.saturating_add(1);
             } else if let Some(events) = retained.as_deref_mut() {
                 retain_startup_sample(events, sample)?;
@@ -1074,12 +1069,14 @@ mod native {
                     .as_mut()
                     .ok_or("network startup owner missing")?;
                 let started = {
+                    let check_selection =
+                        |input: &HidInput| check_hid(input, selected_id, options.keyboard_registry);
                     let mut device = StartupDevice {
                         audio: &mut audio,
                         input: &mut input,
                         clock: &clock,
-                        selected: selected_id,
-                        registry: options.keyboard_registry,
+                        selected: std::slice::from_ref(&selected_id),
+                        check_selection: &check_selection,
                         pre_origin: &mut pre_origin,
                         other_devices: &mut other_devices,
                         retained: &mut startup_inputs,
@@ -1317,12 +1314,7 @@ mod fixtures {
         assert!(parse(&local).is_ok());
         assert!(validate_args(&local).is_ok());
         local.extend(["--mp-host".into(), "127.0.0.1:34567".into()]);
-        assert!(
-            validate_args(&local)
-                .unwrap_err()
-                .to_string()
-                .contains("one local participant")
-        );
+        assert!(validate_args(&local).is_ok());
     }
     #[test]
     fn finite_frontier_is_exclusive_and_requires_real_drain_resume_and_logical_end() {
@@ -1720,7 +1712,7 @@ mod fixtures {
         assert!(validate_args(&group).is_ok());
         let mut network = group.clone();
         network.extend(["--mp-host".into(), "127.0.0.1:34567".into()]);
-        assert!(validate_args(&network).is_err());
+        assert!(validate_args(&network).is_ok());
         for bad in [
             "0:4",
             "4:0",

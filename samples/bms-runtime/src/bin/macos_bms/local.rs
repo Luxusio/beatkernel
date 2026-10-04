@@ -12,8 +12,9 @@ use beatkernel::{
 use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio, prepare_audio};
 use beatkernel_bms_runtime::native_cohort_setup::{
     CohortPreparation, PreparedCohort, activate_cohort, admit_cohort as admit_mode, finish_cohort,
-    prepare_cohort,
+    finish_cohort_network, prepare_cohort,
 };
+use beatkernel_bms_runtime::native_start::{MAX_START_INPUT_EVENTS, NativeStartConfig, start_committed};
 use beatkernel_bms_runtime::{
     ChannelPolicy,
     competition_live::CompetitionOptions,
@@ -44,7 +45,7 @@ use beatkernel_platform::{
     macos::{
         audio::{CoreAudioRequest, CoreAudioStream},
         clock::MachClock,
-        input::{HidCounters, HidInput},
+        input::{HidCounters, HidInput, HidSample},
     },
 };
 use std::time::{Duration as WallDuration, Instant};
@@ -55,6 +56,7 @@ struct CohortDevice<'a> {
     clock: &'a MachClock,
     selected: &'a [DeviceId],
     assignments: &'a [(PlayerId, u64)],
+    retained: &'a mut std::collections::VecDeque<HidSample>,
 }
 impl NativeGameplayDevice for CohortDevice<'_> {
     fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()> {
@@ -76,7 +78,8 @@ impl NativeGameplayDevice for CohortDevice<'_> {
         events: &mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
     ) -> NativeGameplayResult<InputBatch> {
         for _ in 0..256 {
-            let Some(sample) = self.input.pop() else {
+            let sample = self.retained.pop_front().or_else(|| self.input.pop());
+            let Some(sample) = sample else {
                 return Ok(InputBatch {
                     backlog: false,
                     closed: false,
@@ -299,7 +302,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         .map(|(index, &(player, _))| (player, selected[index]))
         .collect();
     let PreparedCohort {
-        network: _,
+        mut network,
         configs,
         mut states,
         save_paths,
@@ -324,11 +327,12 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             replay_max_records: options.replay_max_records,
         },
     )?;
+    let network_start = network.is_some();
     let PreparedNativeAudio {
         mut producer,
         bgm,
         mixer,
-    } = prepare_audio(
+    } = match prepare_audio(
         prepared.bank,
         prepared.bgm_commands,
         NativeAudioConfig {
@@ -339,9 +343,21 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             voices: options.voices,
             max_render_frames: options.buffer as usize,
             playback_end_frame: playback_end,
-            gated_start: false,
+            gated_start: network_start,
         },
-    )?;
+    ) {
+        Ok(audio) => audio,
+        Err(error) => {
+            let mut failures = vec![format!("local audio preparation: {error}")];
+            if let Err(close) = input.close() {
+                failures.push(format!(
+                    "IOHID close after audio preparation failure: {close}"
+                ));
+            }
+            finish_cohort_network(network.as_mut(), &states, &mut failures);
+            return finish_cohort(states, save_paths, failures, save_capture);
+        }
+    };
     let mut bgm = BgmSession(bgm);
     let mut stream = match CoreAudioStream::open(
         CoreAudioRequest {
@@ -358,12 +374,8 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             if let Err(close) = input.close() {
                 failures.push(format!("IOHID close after audio open failure: {close}"));
             }
-            for state in &mut states {
-                if let Some(competition) = state.competition.as_mut() {
-                    competition.finish();
-                }
-            }
-            return Err(failures.join("; ").into());
+            finish_cohort_network(network.as_mut(), &states, &mut failures);
+            return finish_cohort(states, save_paths, failures, save_capture);
         }
     };
     println!(
@@ -371,29 +383,86 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         stream.configuration()
     );
     let mut before_origin = 0u64;
+    let mut other_devices = 0u64;
+    let mut retained = std::collections::VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
     let outcome = (|| -> Result<()> {
         check_group(&input, &options.local_players, &selected)?;
-        stream.start()?;
-        let mut discipline = PresentationDiscipline::new(
-            DisciplineConfig::default(),
-            output_origin(),
-            HOST,
-            song_origin,
-        )?;
-        let pair = seed_group(
-            &stream,
-            &mut input,
-            &clock,
-            &options.local_players,
-            &selected,
-            &mut discipline,
-            &mut bgm,
-            &mut producer,
-        )?;
-        let host_origin = ClockPoint {
-            domain: HOST,
-            timestamp: estimated_origin(pair, output_origin())?,
+        let (mut discipline, host_origin, playback_origin) = if let Some(network) = network.as_mut()
+        {
+            let started = {
+                let check_selection =
+                    |input: &HidInput| check_group(input, &options.local_players, &selected);
+                let mut device = super::native::StartupDevice {
+                    audio: &mut stream,
+                    input: &mut input,
+                    clock: &clock,
+                    selected: &selected,
+                    check_selection: &check_selection,
+                    pre_origin: &mut before_origin,
+                    other_devices: &mut other_devices,
+                    retained: &mut retained,
+                };
+                start_committed(
+                    &mut device,
+                    network,
+                    &mut producer,
+                    &mut pause,
+                    &mut native_end,
+                    NativeStartConfig {
+                        output_origin: output_origin(),
+                        sample_rate: options.format.sample_rate(),
+                        playback_end_frame: playback_end,
+                        setup_timeout: competition_options.setup_timeout,
+                        max_clock_age_ns: competition_options.start_policy.max_age_ns,
+                        max_rate_error_ppm: DisciplineConfig::default().max_rate_error_ppm,
+                    },
+                    |report, producer| {
+                        feed_rendered(&mut bgm, report, |command| producer.try_push(command))
+                    },
+                )?
+            };
+            let Some(started) = started else {
+                return Ok(());
+            };
+            let playback_origin = started.plan.selected_output();
+            let mut discipline = PresentationDiscipline::new_with_playback_origin(
+                DisciplineConfig::default(),
+                output_origin(),
+                playback_origin,
+                HOST,
+                song_origin,
+            )?;
+            discipline.observe_clock_pair(started.observation.timing.point()?)?;
+            println!(
+                "shared native applied start={:?}; host={:?}; physical accuracy unmeasured",
+                started.plan, started.host_origin
+            );
+            (discipline, started.host_origin, playback_origin)
+        } else {
+            stream.start()?;
+            let mut discipline = PresentationDiscipline::new(
+                DisciplineConfig::default(),
+                output_origin(),
+                HOST,
+                song_origin,
+            )?;
+            let pair = seed_group(
+                &stream,
+                &mut input,
+                &clock,
+                &options.local_players,
+                &selected,
+                &mut discipline,
+                &mut bgm,
+                &mut producer,
+            )?;
+            let host_origin = ClockPoint {
+                domain: HOST,
+                timestamp: estimated_origin(pair, output_origin())?,
+            };
+            (discipline, host_origin, output_origin())
         };
+        discipline.validate_host(clock.sample()?.normalized)?;
         let (mut group, mut merger) = activate_cohort(
             configs,
             &reserved,
@@ -410,11 +479,12 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 clock: &clock,
                 selected: &selected,
                 assignments: &options.local_players,
+                retained: &mut retained,
             };
             run_cohort(
                 &mut device,
                 NativeCohortSession {
-                    network: None,
+                    network: network.as_mut(),
                     group: &mut group,
                     states: &mut states,
                     merger: &mut merger,
@@ -428,13 +498,13 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 NativeGameplayConfig {
                     origin: host_origin,
                     stream_origin: output_origin(),
-                    playback_origin: output_origin(),
+                    playback_origin,
                     song_origin,
                     sample_rate: options.format.sample_rate(),
                     end_song: options.end_ns.map(Timestamp::from_nanos),
                     advance_lag: Duration::from_nanos(options.advance_lag),
                     seconds: options.seconds,
-                    pause_supported: true,
+                    pause_supported: !network_start,
                     logical_schedule: true,
                 },
             )
@@ -456,7 +526,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     let stop = stream.stop();
     let close = input.close();
     println!(
-        "shared final CoreAudio={:?}; HID counters={:?}; pre-origin ignored={before_origin}; physical delivery unverified",
+        "shared final CoreAudio={:?}; HID counters={:?}; pre-origin ignored={before_origin}; other-device startup inputs={other_devices}; physical delivery unverified",
         stream.snapshot(),
         input.counters()
     );
@@ -476,6 +546,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     if let Err(error) = close {
         failures.push(format!("input cleanup: {error}"));
     }
+    finish_cohort_network(network.as_mut(), &states, &mut failures);
     finish_cohort(states, save_paths, failures, save_capture)
 }
 
@@ -888,7 +959,9 @@ mod fixtures {
     fn unsupported_local_modes_reject_before_resource_preparation() {
         assert!(admit_mode(2, false).is_ok());
         assert!(admit_mode(64, false).is_ok());
-        for (count, network) in [(1, false), (65, false), (2, true)] {
+        assert!(admit_mode(2, true).is_ok());
+        assert!(admit_mode(64, true).is_ok());
+        for (count, network) in [(1, false), (65, false)] {
             assert!(admit_mode(count, network).is_err());
         }
     }

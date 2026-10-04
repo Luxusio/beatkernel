@@ -680,12 +680,9 @@ pub(crate) fn validate_args(args: &[String]) -> Result<()> {
 }
 
 fn validate_finite_modes(
-    options: &Options,
-    competition: &beatkernel_bms_runtime::competition_live::CompetitionOptions,
+    _options: &Options,
+    _competition: &beatkernel_bms_runtime::competition_live::CompetitionOptions,
 ) -> Result<()> {
-    if !options.local_players.is_empty() && competition.network.is_some() {
-        return Err("network competition currently supports one local participant only".into());
-    }
     Ok(())
 }
 
@@ -712,10 +709,10 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
         println!(
-            "Local play: repeat --local-player ID:EXACT_INTERFACE_PATH for 2..64 distinct keyboards, without --keyboard-path. Stable positive u32 IDs are preserved in GUI scores and .p<ID>.bkr replay files. --advance-lag-ns 0..1000000000 (default 2000000) controls the common input frontier. Network + local groups is unsupported; saved ghosts are per-player. Native commands compose the graphical player's actual runtime."
+            "Local play: repeat --local-player ID:EXACT_INTERFACE_PATH for 2..64 distinct keyboards, without --keyboard-path. Stable positive u32 IDs are preserved in GUI scores and .p<ID>.bkr replay files. --advance-lag-ns 0..1000000000 (default 2000000) controls the common input frontier. Network local groups share one connection and start agreement; saved ghosts remain per-player. Native commands compose the graphical player's actual runtime."
         );
         println!(
-            "windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --start-ns N --end-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Optional --end-ns unsigned strictly after start completes a native-presented, input-drained finite prefix for solo or local WASAPI/SDK-enabled ASIO; ASIO waits for the actual crossing block upper presentation interval. Solo network peers must agree on the same finite section endpoint; local groups remain offline. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Optional --keyboard-path EXACT_INTERFACE_PATH selects one physical keyboard; omitted accepts any physical keyboard. Explicit device removal fails the session. Focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured."
+            "windows_bms --chart PATH --device EXACT_ID [--backend wasapi|asio] --mode shared|exclusive [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nASIO instead requires --asio-view native|32|64 --output-channels 0,1 --asio-system-clock multimedia --asio-timer-error-ns N --asio-drift-error-ns N --asio-latency-error-ns N; optional --asio-anchor-age-ns N (default1000000000), exact --buffer frames:N or preferred default. ASIO rejects mode/period/shared-policy and ns buffers; WASAPI rejects ASIO flags. ASIO requires sample asio-sdk, SDK/MSVC toolchain and explicitly selected trusted installed driver. Error bounds are caller estimates, not physical guarantees.\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --bgm-lookahead-ns N --buffer default|frames:N|ns:N --period default|frames:N|ns:N --shared-policy engine|legacy --channel-policy exact|mono-stereo --voices N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --start-ns N --end-ns N --preroll-ns N\nBounds: seconds 1..3600, voices 1..4096, preroll 0..10000000000 ns, BGM lookahead positive i64 ns. Defaults: chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, buffer/period default, shared engine, exact channels, voices256, early/late150000000ns, offset0, preroll3000000000ns. Optional --end-ns unsigned strictly after start completes a native-presented, input-drained finite prefix for solo or local WASAPI/SDK-enabled ASIO; ASIO waits for the actual crossing block upper presentation interval. Solo and local group network peers must agree on the same finite section endpoint. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after calibration, including remaining preroll. Bind every used BMS lane explicitly; Optional --keyboard-path EXACT_INTERFACE_PATH selects one physical keyboard; omitted accepts any physical keyboard. Explicit device removal fails the session. Focused native window. Actual supported BMS and WAV assets; no synthetic input. Physical latency unmeasured."
         );
         return Ok(());
     }
@@ -743,9 +740,7 @@ mod native {
         transport::Rate,
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
-    use beatkernel_bms_runtime::native_audio::{
-        NativeAudioConfig, PreparedNativeAudio, prepare_audio,
-    };
+    use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio, prepare_audio};
     use beatkernel_bms_runtime::{
         ChannelPolicy,
         native_chart::{NativeChartConfig, prepare_chart},
@@ -1176,15 +1171,16 @@ mod native {
             self.stream.schedule(rate)
         }
     }
-    struct StartupDevice<'a> {
-        stream: &'a mut super::live_output::Output,
-        input: &'a mut WindowsInput,
-        acquisition: &'a AcquisitionWindow,
-        clock: &'a QpcClock,
-        selected: Option<(u64, usize)>,
-        pre_origin: &'a mut u64,
-        retained: &'a mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
-        physical: PresentationDiscipline,
+    pub(super) struct StartupDevice<'a> {
+        pub(super) stream: &'a mut super::live_output::Output,
+        pub(super) input: &'a mut WindowsInput,
+        pub(super) acquisition: &'a AcquisitionWindow,
+        pub(super) clock: &'a QpcClock,
+        pub(super) selected: &'a [(beatkernel::input::DeviceId, usize)],
+        pub(super) pre_origin: &'a mut u64,
+        pub(super) retained:
+            &'a mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
+        pub(super) physical: PresentationDiscipline,
     }
     impl NativeStartDevice for StartupDevice<'_> {
         type Evidence = super::live_output::StartupEvidence;
@@ -1227,14 +1223,13 @@ mod native {
     fn startup_messages(
         input: &mut WindowsInput,
         acquisition: &AcquisitionWindow,
-        selected: Option<(u64, usize)>,
+        selected: &[(beatkernel::input::DeviceId, usize)],
         pre_origin: &mut u64,
         mut retained: Option<
             &mut std::collections::VecDeque<beatkernel::input::PhysicalInputEvent>,
         >,
     ) -> Result<bool> {
-        let selected = selected.map(|(id, handle)| (beatkernel::input::DeviceId(id), handle));
-        let batch = read_messages(input, acquisition, selected.as_slice(), 256, |event| {
+        let batch = read_messages(input, acquisition, selected, 256, |event| {
             if let Some(events) = retained.as_deref_mut() {
                 if events.len() >= MAX_START_INPUT_EVENTS {
                     return Err("startup Raw Input buffer exhausted; restart required".into());
@@ -1495,6 +1490,8 @@ mod native {
         let mut capture = None;
         let mut pre_origin_inputs = 0u64;
         let mut startup_inputs = std::collections::VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
+        let startup_selection =
+            selected.map(|(id, handle)| (beatkernel::input::DeviceId(id), handle));
         let outcome = (|| -> Result<()> {
             capture = prepare_capture(
                 &judge,
@@ -1517,7 +1514,7 @@ mod native {
                         input: &mut input,
                         acquisition: &acquisition,
                         clock: &clock,
-                        selected,
+                        selected: startup_selection.as_slice(),
                         pre_origin: &mut pre_origin_inputs,
                         retained: &mut startup_inputs,
                         physical: PresentationDiscipline::new(
@@ -1582,7 +1579,7 @@ mod native {
                         startup_messages(
                             &mut input,
                             &acquisition,
-                            selected,
+                            startup_selection.as_slice(),
                             &mut pre_origin_inputs,
                             None,
                         )
@@ -1782,12 +1779,7 @@ mod preroll_fixtures {
         network.extend(["--end-ns".into(), "2".into()]);
         assert!(validate_args(&network).is_ok());
         local.extend(["--mp-host".into(), "127.0.0.1:39001".into()]);
-        assert!(
-            validate_args(&local)
-                .unwrap_err()
-                .to_string()
-                .contains("one local participant")
-        );
+        assert!(validate_args(&local).is_ok());
         let mut asio = parse(&base).unwrap();
         asio.backend = Backend::Asio;
         asio.end_ns = Some(2);
