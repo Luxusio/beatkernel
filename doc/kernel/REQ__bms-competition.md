@@ -1,5 +1,41 @@
 # Unified BMS application and competition
 
+## Common client progress and local final-receipt boundary
+
+Compose one RoomProgressClient with RoomPlayClient and its native timed stream
+driver. Initialize from the same immutable Prepared roster and actual admitted
+participant. Publication requires genuine local committed-start evidence; a
+matching pending Commit may stage bounded peer prefixes but never publication
+or ACK writes before the real local Accept full-write barrier. Activate progress
+only when the actual common start owner commits.
+
+Keep one queued local snapshot and one actual in-flight write, with member
+monotonicity checked against the latest accepted publication. Coalesce only
+unsent ordinary snapshots. Assign positive consecutive upload sequences on
+frame admission, so coalescing cannot create wire sequence gaps. A queued final
+snapshot is irreversible and retained through partial writes. Preserve the one
+external nonreused write-ID space across admission, clock, start, uploads and
+recipient acknowledgements. Borrow bounded per-participant peer prefixes for
+presentation; never overwrite local judgment with remote self-reports.
+
+Peer prefixes may skip coalesced sequences but must strictly increase, preserve
+the source's exact frozen local roster and common monotonic member counters, and
+remain immutable after final. Require other known participants. Retain exactly
+one recipient ACK for each genuine peer final and credit its completion only on
+the actual full write. The source's aggregate FinalAck must name this client's
+own participant and exact final upload sequence, with original read capture at
+or after that final frame's admission. Hold one matching early aggregate ACK
+until the actual final upload full write; duplicate or unrelated ACKs refuse.
+
+Local completion requires own final full write, genuine aggregate ACK, all peer
+finals, and all this client's recipient ACK full writes. It is a local receipt
+boundary and does not authorize whole-room Leave/closure: the current server's
+Leave closes the whole immutable room, so coordinated room-wide final shutdown
+must be added before automatic application final drain can safely use it.
+Explicit Leave/Stop still fence publication and further progress/ACK traffic.
+Browser bindings/Worker/gameplay/HUD/final drain and native app room activation
+remain follow-on integrations; no complete multiplayer acceptance is inferred.
+
 ## Room progress relay and actual server acknowledgement ownership
 
 Use one portable RoomProgressRelay over the immutable Prepared roster, composed
