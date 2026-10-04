@@ -1,6 +1,9 @@
 //! Application identity checks and logical reconstruction of captured BMS play.
 
-use crate::replay_capture::{CaptureError, setup_input_header};
+use crate::{
+    input_sounds::InputSoundIdentity,
+    replay_capture::{CaptureError, setup_input_sound_header},
+};
 #[cfg(test)]
 use crate::replay_capture::LiveReplayCapture;
 use beatkernel::{
@@ -31,6 +34,8 @@ pub enum PlaybackError {
     Judge(JudgeError),
     /// The supplied BMS chart could not be compiled.
     Bms(BmsError),
+    /// Invisible sound selections could not form a canonical setup identity.
+    InputSounds(String),
     /// An operation or snapshot could not be reconstructed.
     Replay(ReplayError),
     /// Reading the supplied stream failed.
@@ -405,6 +410,8 @@ fn validate_recorded_setup(
         ));
     }
     let selected = crate::section_start::source_at(source, start)?;
+    let input_sounds =
+        InputSoundIdentity::from_source(&selected).map_err(PlaybackError::InputSounds)?;
     let compiled = selected.compile()?;
     let constructor =
         if input_mode == BmsInputMode::ButtonOrContact && !selected.invisible.is_empty() {
@@ -417,7 +424,7 @@ fn validate_recorded_setup(
         selected.rules_with_input_mode(input_mode),
         profile,
     )?;
-    let expected = setup_input_header(
+    let expected = setup_input_sound_header(
         &judge,
         file.header.normalized_clock,
         limits,
@@ -425,6 +432,7 @@ fn validate_recorded_setup(
         chart_seed,
         end,
         input_mode,
+        input_sounds,
     )?;
     if expected != file.header {
         return Err(PlaybackError::IdentityMismatch(

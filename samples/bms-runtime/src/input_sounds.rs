@@ -10,6 +10,52 @@ use beatkernel::{
 use beatkernel_bms::BmsChart;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Noncryptographic compatibility identity of validated invisible selections.
+/// Source lines, resource paths, output clocks and voice assignments are excluded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputSoundIdentity(u64);
+
+impl InputSoundIdentity {
+    /// Hashes actual compiled selections in semantic control/time order. Empty
+    /// sources have no extension and retain their exact legacy setup identity.
+    pub fn from_source(source: &BmsChart) -> Result<Option<Self>, String> {
+        if source.invisible.is_empty() {
+            return Ok(None);
+        }
+        let mut events = source
+            .compile_invisible()
+            .map_err(|error| error.to_string())?;
+        let gain = source.wav_gain().map_err(|error| error.to_string())?;
+        events.sort_unstable_by_key(|event| (event.lane.control().0, event.at));
+        for pair in events.windows(2) {
+            if pair[0].lane.control() == pair[1].lane.control() && pair[0].at == pair[1].at {
+                return Err("duplicate invisible input-sound control/time".into());
+            }
+        }
+        let mut hash = 14_695_981_039_346_656_037u64;
+        let mut feed = |bytes: &[u8]| {
+            for &byte in bytes {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(1_099_511_628_211);
+            }
+        };
+        feed(b"beatkernel-bms/input-sounds/v1");
+        feed(&(events.len() as u64).to_le_bytes());
+        feed(&gain.to_bits().to_le_bytes());
+        for event in events {
+            feed(&event.lane.control().0.to_le_bytes());
+            feed(&event.at.as_nanos().to_le_bytes());
+            feed(&event.sample.0.to_le_bytes());
+        }
+        Ok(Some(Self(hash)))
+    }
+
+    /// Returns the versioned semantic FNV-1a64 fingerprint, not an asset digest.
+    pub const fn fingerprint(self) -> u64 {
+        self.0
+    }
+}
+
 /// An immutable input-sound plan; preparation neither loads PCM nor schedules it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct InputSoundPlan {

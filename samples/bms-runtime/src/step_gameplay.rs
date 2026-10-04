@@ -6,12 +6,13 @@ use crate::{
     bgm::{BgmConfig, BgmFeedError, BgmFeedReport, BgmFeeder},
     competition::{CompetitionError, ScoreSummary},
     completion::{CompletionError, SongCompletion},
+    input_sounds::InputSoundIdentity,
     local_players::{PlayerId, ResolvedInputPlan},
     local_preparation::{PreparedLocalMembers, prepare_local_members},
     local_runtime::{GroupError, InputResult, PlayerReport, RuntimeGroup, SoloRuntime},
     native_judge::NativeJudgeConfig,
     replay_audio::{ReplayAudioError, before_endpoint, completed_render_cursor, section_end_frame},
-    replay_capture::{CaptureError, LiveReplayCapture, setup_input_header},
+    replay_capture::{CaptureError, LiveReplayCapture, setup_input_sound_header},
 };
 use beatkernel::{
     audio::{
@@ -299,6 +300,7 @@ pub struct StepGameplay {
     start: Timestamp,
     end: Option<Timestamp>,
     input_mode: BmsInputMode,
+    input_sound_identity: Option<InputSoundIdentity>,
     playback_end_frame: Option<u64>,
     preroll: Duration,
     activated: bool,
@@ -503,6 +505,8 @@ impl StepGameplay {
         } else {
             None
         };
+        let input_sound_identity =
+            InputSoundIdentity::from_source(&prepared.source).map_err(StepGameplayError::Setup)?;
         // Local voice reservation sees original BGM IDs before section mapping
         // or filtering. The legacy solo branch retains its original sound IDs.
         let runtime_setup = match input {
@@ -685,6 +689,7 @@ impl StepGameplay {
             start,
             end,
             input_mode,
+            input_sound_identity,
             playback_end_frame,
             preroll: config.preroll,
             activated: false,
@@ -736,7 +741,7 @@ impl StepGameplay {
                 "competition identity requires an unprocessed runtime",
             ));
         }
-        setup_input_header(
+        setup_input_sound_header(
             self.runtime.judge(),
             self.host_domain,
             limits,
@@ -744,6 +749,7 @@ impl StepGameplay {
             chart_seed,
             None,
             self.input_mode,
+            self.input_sound_identity,
         )
         .map_err(|error| StepGameplayError::Capture {
             error,
@@ -785,7 +791,7 @@ impl StepGameplay {
                 "capture configuration requires an unprocessed, unconfigured runtime",
             ));
         }
-        let capture = LiveReplayCapture::new_with_input_mode(
+        let capture = LiveReplayCapture::new_with_input_sounds(
             self.runtime.judge(),
             self.host_domain,
             limits,
@@ -793,6 +799,7 @@ impl StepGameplay {
             chart_seed,
             self.end,
             self.input_mode,
+            self.input_sound_identity,
         )
         .map_err(|error| StepGameplayError::Capture {
             error,
@@ -1648,7 +1655,7 @@ impl StepLocalGameplay {
             )
             .into());
         }
-        setup_input_header(
+        setup_input_sound_header(
             self.judge(player).expect("checked member"),
             self.control.host_domain,
             limits,
@@ -1656,6 +1663,7 @@ impl StepLocalGameplay {
             chart_seed,
             None,
             self.control.input_mode,
+            self.control.input_sound_identity,
         )
         .map_err(|error| {
             StepGameplayError::Capture {
@@ -1696,7 +1704,7 @@ impl StepLocalGameplay {
             )
             .into());
         }
-        let capture = LiveReplayCapture::new_with_input_mode(
+        let capture = LiveReplayCapture::new_with_input_sounds(
             self.judge(player).expect("checked member"),
             self.control.host_domain,
             limits,
@@ -1704,6 +1712,7 @@ impl StepLocalGameplay {
             chart_seed,
             self.control.end,
             self.control.input_mode,
+            self.control.input_sound_identity,
         )
         .map_err(|error| StepGameplayError::Capture {
             error,

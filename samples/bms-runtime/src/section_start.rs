@@ -133,6 +133,7 @@ pub fn prepare_at(
         .sounds
         .iter()
         .map(|sound| sound.sample)
+        .chain(prepared.source.invisible.iter().map(|event| event.sample))
         .chain(
             prepared
                 .bgm_commands
@@ -221,7 +222,7 @@ pub fn prepare_at(
             correction_ns: plan.correction_nanos(),
         });
     }
-    if retained.is_empty() && commands.is_empty() {
+    if retained.is_empty() && commands.is_empty() && prepared.source.invisible.is_empty() {
         return Err("practice start has no remaining objects or BGM".into());
     }
     commands.sort_by_key(|command| match command {

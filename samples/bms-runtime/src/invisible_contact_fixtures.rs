@@ -4,7 +4,7 @@ use crate::{
     local_players::{PlayerId, ResolvedInputPlan},
     local_preparation::prepare_local_members,
     replay_playback::{decode_section_setup, reconstruct_section, validate_section_setup},
-    section_start::prepare_at,
+    section_start::source_at,
     step_gameplay::{StepGameplay, StepGameplayConfig},
 };
 use beatkernel::{
@@ -109,7 +109,10 @@ fn prepared(text: &str, start: i64) -> (PreparedBms, BmsChart) {
     // Public typed composition isolates these constructor tests from the retained
     // prepare_from_source unsupported-invisible guard. No decoder/asset IO is used.
     let original = parse(text, Default::default()).unwrap();
-    let source = original.clone();
+    // Constructor-only coverage deliberately includes ordinary filtered-empty
+    // charts. source_at selects actual objects without asserting that the full
+    // practice preparation API admits an empty playable section; there is no BGM.
+    let source = source_at(&original, ts(start)).unwrap();
     let compiled = source.compile().unwrap();
     let format = AudioFormat::new(8000, 1).unwrap();
     let mut bank = SampleBank::new(format, pcm_limits()).unwrap();
@@ -139,10 +142,7 @@ fn prepared(text: &str, start: i64) -> (PreparedBms, BmsChart) {
         sounds,
         bgm_commands: vec![],
     };
-    (
-        prepare_at(value, ts(start), pcm_limits()).unwrap().0,
-        original,
-    )
+    (value, original)
 }
 struct NoMapping;
 impl ClockMapper for NoMapping {

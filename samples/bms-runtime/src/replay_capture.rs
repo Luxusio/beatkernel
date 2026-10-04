@@ -1,5 +1,6 @@
 //! Bounded control-thread recording of the actual runtime's accepted operations.
 
+use crate::input_sounds::InputSoundIdentity;
 use beatkernel::{
     input::encode_event,
     judge::JudgeEngine,
@@ -105,6 +106,24 @@ pub fn setup_input_header(
     end: Option<Timestamp>,
     input_mode: BmsInputMode,
 ) -> Result<ReplayHeader, CaptureError> {
+    setup_input_sound_header(
+        judge, domain, limits, start, chart_seed, end, input_mode, None,
+    )
+}
+
+/// Canonical setup with an optional validated invisible input-sound identity.
+/// None preserves legacy bytes; Some extends only the chart identity to v2.
+#[allow(clippy::too_many_arguments)]
+pub fn setup_input_sound_header(
+    judge: &JudgeEngine,
+    domain: ClockDomainId,
+    limits: ReplayCodecLimits,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+    input_mode: BmsInputMode,
+    input_sounds: Option<InputSoundIdentity>,
+) -> Result<ReplayHeader, CaptureError> {
     if start.as_nanos() < 0 {
         return Err(CaptureError::InvalidStart);
     }
@@ -141,8 +160,13 @@ pub fn setup_input_header(
         .checked_mul(20)
         .and_then(|bytes| bytes.checked_add(prefix.len() + start_bytes + 16))
         .ok_or(ReplayCodecError::LengthOverflow)?;
+    let (identity_prefix, identity_size): (&[u8], usize) = if input_sounds.is_some() {
+        (b"bms-judge-setup/v2:", b"bms-judge-setup/v2:".len() + 16)
+    } else {
+        (b"bms-judge-setup/v1:", b"bms-judge-setup/v1:".len() + 8)
+    };
     let header_size = options_size
-        .checked_add(b"bms-judge-setup/v1:".len() + 8)
+        .checked_add(identity_size)
         .and_then(|bytes| bytes.checked_add(rules_identity.len()))
         .and_then(|bytes| bytes.checked_add(env!("CARGO_PKG_VERSION").len()))
         .ok_or(ReplayCodecError::LengthOverflow)?;
@@ -152,10 +176,13 @@ pub fn setup_input_header(
     let hash = judge.stable_hash().map_err(ReplayError::from)?;
     let mut identity = Vec::new();
     identity
-        .try_reserve_exact(b"bms-judge-setup/v1:".len() + 8)
+        .try_reserve_exact(identity_size)
         .map_err(|_| ReplayCodecError::AllocationFailed)?;
-    identity.extend_from_slice(b"bms-judge-setup/v1:");
+    identity.extend_from_slice(identity_prefix);
     identity.extend_from_slice(&hash.to_le_bytes());
+    if let Some(input_sounds) = input_sounds {
+        identity.extend_from_slice(&input_sounds.fingerprint().to_le_bytes());
+    }
     let mut rules = Vec::new();
     rules
         .try_reserve_exact(rules_identity.len())
@@ -281,7 +308,34 @@ impl LiveReplayCapture {
         end: Option<Timestamp>,
         input_mode: BmsInputMode,
     ) -> Result<Self, CaptureError> {
-        let header = setup_input_header(judge, domain, limits, start, chart_seed, end, input_mode)?;
+        Self::new_with_input_sounds(
+            judge, domain, limits, start, chart_seed, end, input_mode, None,
+        )
+    }
+
+    /// Captures the same accepted operations with optional invisible sound
+    /// compatibility metadata. Final header/file budgets include the extension.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_input_sounds(
+        judge: &JudgeEngine,
+        domain: ClockDomainId,
+        limits: ReplayCodecLimits,
+        start: Timestamp,
+        chart_seed: u64,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+        input_sounds: Option<InputSoundIdentity>,
+    ) -> Result<Self, CaptureError> {
+        let header = setup_input_sound_header(
+            judge,
+            domain,
+            limits,
+            start,
+            chart_seed,
+            end,
+            input_mode,
+            input_sounds,
+        )?;
         let header_bytes =
             encode_replay(&ReplayFile::new(header.clone(), Vec::new()), limits)?.len();
         Ok(Self {
