@@ -33,6 +33,13 @@ async function harness(faults = {}) {
   let Processor;
   let inProcess = false;
   let memoryReads = 0;
+  class CommandPort {
+    constructor() { this.messages = []; this.onmessage = null; this.onmessageerror = null; this.closes = 0; this.starts = 0; }
+    postMessage(message) { this.messages.push(structuredClone(message)); }
+    start() { this.starts++; }
+    close() { assert.equal(inProcess, false, "command port disposal belongs to host control"); this.closes++; }
+    send(message) { this.onmessage?.({ data: message }); }
+  }
   class FakeProcessor {
     constructor() {
       this.port = {
@@ -119,6 +126,7 @@ async function harness(faults = {}) {
   await actual.evaluate();
   return {
     owners, ports, memory, context, initializations,
+    commandPort() { return new CommandPort(); },
     get memoryReads() { return memoryReads; },
     create(overrides) { return new Processor({ processorOptions: options(overrides) }); },
     send(processor, kind, sequence, fields = {}) {
@@ -140,6 +148,94 @@ function notices(processor, kind) { return processor.port.messages.filter(messag
 function assertSilent(output) {
   for (const bus of output) for (const channel of bus) assert.ok(channel.every(value => value === 0));
 }
+
+test("dedicated command ownership uses the actual shared enqueue path and independent sequence while host poll and stop remain authoritative", async () => {
+  const h = await harness(), processor = h.create(), owner = h.owners[0];
+  h.send(processor, "finish", 1);
+  const first = command(); assert.equal(h.send(processor, "commands", 2, { commands: [first] }).admitted, 1);
+  const port = h.commandPort();
+  assert.equal(h.send(processor, "attach-commands", 3, { port }).status, 0);
+  assert.equal(port.starts, 1); assert.equal(port.messages.length, 0);
+  const controlCount = notices(processor, "ack").length;
+  const values = [command({ kind: 1, voice: 0n }), command({ kind: 2, value: -1n, denominator: 3n })];
+  port.send({ kind: "commands", generation: 17, sequence: 1, commands: values });
+  const ack = port.messages.at(-1);
+  assert.equal(ack.kind, "ack"); assert.equal(ack.sequence, 1); assert.equal(ack.operation, "commands");
+  assert.equal(ack.status, 0); assert.equal(ack.admitted, 2); assert.equal(ack.report, null);
+  assert.equal(notices(processor, "ack").length, controlCount, "command ACKs never return through the host lane");
+  assert.deepEqual(owner.calls.enqueue, [first, ...values].map(value => [value.kind, value.voice, value.sample,
+    value.at, value.gain, value.value, value.denominator]));
+  const poll = h.send(processor, "poll", 4); assert.equal(poll.sequence, 4); assert.equal(poll.report.available, false);
+  assert.equal(owner.calls.reports.length, 56);
+  assert.equal(h.send(processor, "arm", 5, { frame: 9007199254740993n }).status, 0);
+  port.send({ kind: "commands", generation: 17, sequence: 2, commands: [command({ kind: 3 })] });
+  assert.equal(port.messages.at(-1).admitted, 1);
+  const stale = port.onmessage;
+  assert.equal(h.send(processor, "stop", 6).status, 0);
+  assert.equal(owner.frees, 1); assert.equal(port.closes, 1);
+  assert.deepEqual(port.messages.at(-1), { kind: "closed", generation: 17 });
+  assert.equal(port.onmessage, null); assert.equal(port.onmessageerror, null);
+  const noticesBefore = port.messages.length;
+  stale({ data: { kind: "commands", generation: 17, sequence: 3, commands: [command()] } });
+  assert.equal(owner.calls.enqueue.length, 4); assert.equal(port.messages.length, noticesBefore);
+  const output = planar(2); assert.equal(h.process(processor, 0, output), false); assertSilent(output);
+  const next = h.create(); h.send(next, "finish", 1);
+  stale({ data: { kind: "commands", generation: 17, sequence: 3, commands: [command()] } });
+  assert.equal(h.owners[1].calls.enqueue.length, 0); h.send(next, "stop", 2);
+});
+
+test("command endpoint refusal and actual partial admission fence both lanes once and reserve deallocation for host stop", async () => {
+  for (const phase of ["setup", "armed", "duplicate"]) {
+    const h = await harness(), processor = h.create(); let sequence = 0;
+    if (phase !== "setup") h.send(processor, "finish", ++sequence);
+    if (phase === "armed") h.send(processor, "arm", ++sequence, { frame: 0n });
+    const existing = phase === "duplicate" ? h.commandPort() : null;
+    if (existing) assert.equal(h.send(processor, "attach-commands", ++sequence, { port: existing }).status, 0);
+    const refused = h.commandPort();
+    assert.notEqual(h.send(processor, "attach-commands", ++sequence, { port: refused }).status, 0);
+    assert.equal(refused.closes, 1); assert.equal(h.owners[0].frees, 0);
+    assert.equal(notices(processor, "terminal").length, 1);
+    h.send(processor, "stop", ++sequence); assert.equal(h.owners[0].frees, 1);
+    if (existing) assert.equal(existing.closes, 1);
+  }
+  const cases = [
+    { fields: { generation: 16 }, status: 102 }, { fields: { sequence: 2 }, status: 101 },
+    { fields: { sequence: Number.MAX_SAFE_INTEGER + 1 }, status: 101 },
+    { fields: { kind: "stop" }, status: 100 }, { fields: { kind: "poll" }, status: 100 },
+    { fields: { commands: [command(), command({ extra: true })] }, status: 100 },
+    { fields: { commands: [command(), command({ gain: NaN })] }, status: 100 },
+    { fields: { commands: Array.from({ length: 5 }, () => command()) }, status: 100 },
+    { faults: { enqueueStatuses: [0, 3] }, status: 3, admitted: 1 },
+    { faults: { enqueueThrowAt: 2 }, status: 106, admitted: 1 },
+    { hostCommands: true, status: 103 }, { messageError: true }, { faults: { renderStatus: 9 }, render: true },
+  ];
+  for (const scenario of cases) {
+    const h = await harness(scenario.faults), processor = h.create(), owner = h.owners[0], port = h.commandPort();
+    h.send(processor, "finish", 1); h.send(processor, "attach-commands", 2, { port });
+    if (scenario.hostCommands) assert.equal(h.send(processor, "commands", 3, { commands: [command()] }).status, scenario.status);
+    else if (scenario.messageError) port.onmessageerror({ type: "messageerror" });
+    else if (scenario.render) {
+      const output = planar(2); assert.equal(h.process(processor, 0, output), false); assertSilent(output);
+    } else {
+      port.send({ kind: "commands", generation: 17, sequence: 1,
+        commands: [command(), command({ kind: 1 }), command({ kind: 2 })], ...scenario.fields });
+      const ack = port.messages.find(message => message.kind === "ack");
+      assert.equal(ack.status, scenario.status); assert.equal(ack.admitted, scenario.admitted ?? 0);
+      assert.equal(ack.report, null);
+      assert.equal(owner.calls.enqueue.length, scenario.admitted ? 2 : 0);
+    }
+    assert.equal(notices(processor, "terminal").length, 1);
+    assert.equal(port.messages.filter(message => message.kind === "terminal").length, 1);
+    assert.equal(owner.frees, 0); assert.equal(port.closes, 0, "callback failure does not dispose Rust or port ownership");
+    const admittedCalls = owner.calls.enqueue.length;
+    port.send({ kind: "commands", generation: 17, sequence: 3, commands: [command()] });
+    assert.equal(owner.calls.enqueue.length, admittedCalls);
+    assert.equal(port.messages.filter(message => message.kind === "terminal").length, 1);
+    h.send(processor, "stop", 20);
+    assert.equal(owner.frees, 1); assert.equal(port.closes, 1); assert.equal(processor.port.closed, true);
+    assert.deepEqual(port.messages.at(-1), { kind: "closed", generation: 17 });
+  }
+});
 
 test("failed initialization releases singleton and a second live owner never reinitializes bindings", async () => {
   for (const failure of ["initError", "constructorError", "status"]) {

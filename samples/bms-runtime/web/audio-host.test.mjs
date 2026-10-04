@@ -62,6 +62,7 @@ async function harness(faults = {}) {
   const contexts = [];
   const nodes = [];
   const trace = [];
+  const channels = [];
   const timers = new Map();
   let now = 0;
   let timerId = 0;
@@ -92,12 +93,20 @@ async function harness(faults = {}) {
       if (postAttempts === faults.postThrowsAt) throw new Error("injected postMessage failure");
       assert.equal(this.closes, 0, "posting after port cleanup");
       const transfers = Array.isArray(transfer) ? transfer : transfer.transfer ?? [];
-      const snapshot = structuredClone(message, { transfer: transfers });
+      const snapshot = message.kind === "attach-commands"
+        ? { ...structuredClone({ ...message, port: undefined }), port: message.port }
+        : structuredClone(message, { transfer: transfers });
       this.sent.push({ message: snapshot, transfers: [...transfers] });
       trace.push(["post", message.kind, message.sequence]);
     }
     start() { this.starts++; }
     close() { this.closes++; trace.push(["port-close"]); }
+  }
+  class MessageChannel {
+    constructor() {
+      if (faults.channelThrows) throw new Error("channel constructor failed");
+      this.port1 = new Port(); this.port2 = new Port(); channels.push(this);
+    }
   }
   class AudioContext extends EventTarget {
     constructor(configuration) {
@@ -170,6 +179,7 @@ async function harness(faults = {}) {
   const context = createContext({
     AudioContext: faults.unsupported ? undefined : AudioContext,
     AudioWorkletNode: faults.unsupported ? undefined : AudioWorkletNode,
+    MessageChannel: faults.noMessageChannel ? undefined : MessageChannel,
     AbortController, AbortSignal, ArrayBuffer, SharedArrayBuffer, DataView,
     Float32Array, Uint32Array, Uint8Array, WebAssembly, URL, DOMException, structuredClone,
     Date: class extends Date {
@@ -196,7 +206,7 @@ async function harness(faults = {}) {
   await actual.evaluate();
   return {
     AudioHost: actual.namespace.AudioHost, AudioHostError: actual.namespace.AudioHostError,
-    faults, contexts, nodes, timers, trace,
+    faults, contexts, nodes, channels, timers, trace,
     get now() { return now; },
     get sent() { return nodes.at(-1)?.port.sent ?? []; },
     last() { return this.sent.at(-1)?.message; },
@@ -286,6 +296,74 @@ async function stop(h, owner, expectedState = "closed") {
   assert.equal(owner.state, expectedState);
   assertClean(h);
 }
+
+test("command handoff is a single acknowledged transfer while host polling, arming and stop retain their own control sequence", async () => {
+  const h = await harness(), owner = await open(h);
+  await localError(h, () => owner.openCommandPort(), "state"); assert.equal(h.channels.length, 0);
+  await acknowledged(h, () => owner.finish());
+  const polling = observe(() => owner.poll()), prior = h.last();
+  await localError(h, () => owner.openCommandPort(), "busy"); assert.equal(h.channels.length, 0);
+  h.reply(prior); assert.equal((await polling.result).ok, true);
+  const pending = observe(() => owner.openCommandPort());
+  const attachment = h.last(), channel = h.channels[0];
+  assert.equal(attachment.kind, "attach-commands"); assert.equal(attachment.sequence, prior.sequence + 1);
+  assert.equal(attachment.port, channel.port2);
+  assert.deepEqual(h.sent.at(-1).transfers, [channel.port2]);
+  await flush(); assert.equal(pending.settled, false, "port creation alone cannot prove processor adoption");
+  await localError(h, () => owner.openCommandPort(), "busy");
+  h.reply(attachment); const accepted = await pending.result; assert.equal(accepted.ok, true);
+  const descriptor = accepted.value;
+  assert.equal(descriptor.port, channel.port1); assert.equal(descriptor.generation, 17);
+  assert.equal(descriptor.queueCapacity, 4); assert.equal(descriptor.timeoutMs, 50);
+  assert.ok(Object.isFrozen(descriptor)); assert.equal(channel.port1.closes, 0);
+  await localError(h, () => owner.commands([command()]), "state");
+  await localError(h, () => owner.openCommandPort(), "state"); assert.equal(h.channels.length, 1);
+  const actualReport = report(); actualReport.words[46] = 0xffffffff;
+  const value = await acknowledged(h, () => owner.poll(), { report: actualReport });
+  assert.equal(value.available, false); assert.equal(value.words[46], 0xffffffff);
+  assert.equal(h.last().sequence, attachment.sequence + 1);
+  await acknowledged(h, () => owner.arm(U64_MAX));
+  await localError(h, () => owner.openCommandPort(), "state");
+  await localError(h, () => owner.commands([command()]), "state");
+  descriptor.port.close(); // The transferred client endpoint is now caller-owned.
+  await stop(h, owner); assert.equal(channel.port1.closes, 1);
+  assert.equal(h.sent.filter(item => item.message.kind === "commands").length, 0);
+  for (const fault of [{ noMessageChannel: true }, { channelThrows: true }]) {
+    const unsupported = await harness(fault), usable = await open(unsupported);
+    await acknowledged(unsupported, () => usable.finish());
+    await localError(unsupported, () => usable.openCommandPort(), fault.noMessageChannel ? "unsupported" : "transport");
+    assert.equal(usable.state, "allocated");
+    assert.equal((await acknowledged(unsupported, () => usable.commands([command()]))).admitted, 1);
+    await stop(unsupported, usable);
+  }
+});
+
+test("cancelled, refused and timed-out command attachments close unreturned endpoints without reclaiming command authority", async () => {
+  const h = await harness(), owner = await open(h); await acknowledged(h, () => owner.finish());
+  const transfer = observe(() => owner.openCommandPort()), attached = h.last();
+  const stopping = observe(() => owner.stop()); await flush();
+  failure(await transfer.result, "closed");
+  assert.equal(h.channels[0].port1.closes, 1); assert.equal(h.channels[0].port2.closes, 1);
+  const stopMessage = h.last(); assert.equal(stopMessage.kind, "stop");
+  h.reply(attached); await flush(); assert.equal(stopping.settled, false);
+  h.reply(stopMessage); assert.equal((await stopping.result).ok, true); assertClean(h);
+  await localError(h, () => owner.commands([command()]), "closed");
+  for (const failureKind of ["remote", "protocol", "timeout", "post"]) {
+    const failed = await harness(failureKind === "post" ? { postThrowsAt: 2 } : {});
+    const current = await open(failed); await acknowledged(failed, () => current.finish());
+    const admission = observe(() => current.openCommandPort());
+    if (failureKind === "remote") failed.reply(failed.last(), { status: 3, admitted: 0, error: "attachment refused" });
+    else if (failureKind === "protocol") failed.reply(failed.last(), { admitted: 1 });
+    else if (failureKind === "timeout") await failed.expire();
+    const error = failure(await admission.result, failureKind === "post" ? "transport" : failureKind);
+    assert.equal(failed.channels[0].port1.closes, 1); assert.equal(failed.channels[0].port2.closes, 1);
+    assert.equal(current.state, "failed");
+    const later = await localError(failed, () => current.commands([command()]), error.code);
+    assert.equal(later, error);
+    await stop(failed, current, "failed");
+    assert.equal(failed.sent.filter(item => item.message.kind === "commands").length, 0);
+  }
+});
 
 test("open resumes during the gesture, snapshots configuration, and requires exact ready evidence", async () => {
   const moduleGate = deferred();
