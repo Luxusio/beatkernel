@@ -4,7 +4,7 @@ import { PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateE
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { BrowserRoomOwner } from "./room-owner.mjs";
 import { validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
-import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, projectTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
+import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
 import { snapshotHidDevices, hidSetupFromProfile } from "./hid-profile.mjs";
 import { AudioCommandClient } from "./audio-command-client.mjs";
 import { snapshotGamepadSetup, snapshotGamepadDevices, automaticGamepadSetup, gamepadSetupFromProfile, GamepadAdapter } from "./gamepad-profile.mjs";
@@ -1475,7 +1475,8 @@ async function preparePlay(state, request) {
       throw new Error("The gameplay binding does not provide canonical physical input ownership.");
     }
     if (state.touchInput && (typeof Game?.prototype?.configure_touch_regions !== "function"
-      || typeof Game?.prototype?.input_blob_at !== "function"
+      || typeof Game?.prototype?.input_blob_on_surface !== "function"
+      || typeof Game?.prototype?.preflight_touch_surface !== "function"
       || (state.localPlan && (typeof Game?.prototype?.touch_bounds !== "function"
         || typeof Game?.prototype?.set_touch_page !== "function")))) {
       throw new Error("The gameplay binding does not provide contact routing ownership.");
@@ -1914,8 +1915,14 @@ function stepPlay(state, request) {
       source = event.source;
     } else if (event.kind === "touch") {
       if (!state.touchInput) throw new Error("Touch input requires the prepared contact mode.");
-      const position = projectTouchEvent(event, state.touchWidth, state.touchHeight);
-      encoded = { kind: "touch", bytes: encodeTouchEvent(event), position };
+      if (!integer(event.surfaceWidth, 1, 0xffffffff) || !integer(event.surfaceHeight, 1, 0xffffffff)) {
+        throw new Error("Touch input requires a positive original backing extent.");
+      }
+      const bytes = encodeTouchEvent(event); // Includes original CSS/sample validation.
+      state.game.preflight_touch_surface(Math.fround(event.x), Math.fround(event.y),
+        event.width, event.height, event.surfaceWidth, event.surfaceHeight);
+      encoded = { kind: "touch", bytes, width: event.width, height: event.height,
+        surfaceWidth: event.surfaceWidth, surfaceHeight: event.surfaceHeight };
       source = 2n;
     } else {
       if (event.kind !== undefined || !integer(event.key, 1, 65535) || !state.keys.has(event.key)
@@ -1953,7 +1960,8 @@ function stepPlay(state, request) {
   for (const { event, encoded: entry } of entries) {
     if (event.hostNs >= state.origin && entry !== null) {
       if (entry.kind === "hid") state.game.input_hid_blob(entry.bytes, audioNs);
-      else if (entry.kind === "touch") state.game.input_blob_at(entry.bytes, entry.position.x, entry.position.y, audioNs);
+      else if (entry.kind === "touch") state.game.input_blob_on_surface(entry.bytes,
+        entry.width, entry.height, entry.surfaceWidth, entry.surfaceHeight, audioNs);
       else if (entry.kind === "gamepad") for (const bytes of entry.bytes) state.game.input_blob(bytes, audioNs);
       else state.game.input_blob(entry.bytes, audioNs);
     } else if (event.hostNs >= state.origin) state.game.input(event.hostNs, event.key, event.down, event.sequence, audioNs);

@@ -7,7 +7,10 @@ use std::{
 use crate::{
     browser::BrowserPrepared,
     browser_hid_input::BrowserHidSetup,
-    browser_input::{PhysicalInputSetup, TouchInputSetup, decode_input},
+    browser_input::{
+        PhysicalInputSetup, TouchInputSetup, decode_input, project_touch_on_surface,
+        project_touch_position_on_surface,
+    },
     competition::OpponentKind,
     image_assets::ImageAssets,
     note_progress::NoteProgress,
@@ -668,6 +671,48 @@ impl BrowserGame {
             &Explicit,
             point(OUTPUT, audio_ns),
         );
+        self.accept_report(result)
+    }
+    /// Read-only scalar preflight lets a whole batch reject invalid geometry before dispatch.
+    pub fn preflight_touch_surface(
+        &self,
+        x: f32,
+        y: f32,
+        css_width: f64,
+        css_height: f64,
+        surface_width: u32,
+        surface_height: u32,
+    ) -> Result<(), JsValue> {
+        project_touch_position_on_surface(
+            Position2 { x, y },
+            [css_width, css_height],
+            [surface_width, surface_height],
+            crate::playfield_layout::LOGICAL_EXTENT,
+        )
+        .map(|_| ())
+        .map_err(error)
+    }
+    /// Decode the original sample once and use the same viewport as presentation.
+    pub fn input_blob_on_surface(
+        &mut self,
+        bytes: Vec<u8>,
+        css_width: f64,
+        css_height: f64,
+        surface_width: u32,
+        surface_height: u32,
+        audio_ns: i64,
+    ) -> Result<(), JsValue> {
+        let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
+        let position = project_touch_on_surface(
+            &input,
+            [css_width, css_height],
+            [surface_width, surface_height],
+            crate::playfield_layout::LOGICAL_EXTENT,
+        )
+        .map_err(error)?;
+        let result =
+            self.game
+                .process_input_at(input, position, &Explicit, point(OUTPUT, audio_ns));
         self.accept_report(result)
     }
     pub fn advance(&mut self, host_ns: i64, audio_ns: i64) -> Result<(), JsValue> {

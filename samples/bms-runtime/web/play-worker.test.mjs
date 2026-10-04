@@ -352,9 +352,17 @@ async function workerHarness(options = {}) {
       options.inputBlob?.(this, bytes, audioNs);
     }
     input_blob_at(bytes, x, y, audioNs) {
+      assert.fail("Worker contact routing must use the shared surface projection binding");
+    }
+    preflight_touch_surface(x, y, cssWidth, cssHeight, surfaceWidth, surfaceHeight) {
       this.live(); assert.equal(this.contact, true);
-      this.calls.push(["touch", bytes.slice(), x, y, audioNs]);
-      options.inputBlobAt?.(this, bytes, x, y, audioNs);
+      (this.touchPreflights ??= []).push([x, y, cssWidth, cssHeight, surfaceWidth, surfaceHeight]);
+      options.preflightTouchSurface?.(this, x, y, cssWidth, cssHeight, surfaceWidth, surfaceHeight);
+    }
+    input_blob_on_surface(bytes, cssWidth, cssHeight, surfaceWidth, surfaceHeight, audioNs) {
+      this.live(); assert.equal(this.contact, true);
+      this.calls.push(["touch", bytes.slice(), cssWidth, cssHeight, surfaceWidth, surfaceHeight, audioNs]);
+      options.inputBlobOnSurface?.(this, bytes, cssWidth, cssHeight, surfaceWidth, surfaceHeight, audioNs);
     }
     input_hid_blob(bytes, audioNs) {
       this.live(); assert.equal(this.physical, true);
@@ -397,7 +405,8 @@ async function workerHarness(options = {}) {
   if (options.missingInputBlob) BrowserGame.prototype.input_blob = undefined;
   if (options.missingContactConstructor) BrowserGame.new_physical_contact = undefined;
   if (options.missingTouchSetup) BrowserGame.prototype.configure_touch_regions = undefined;
-  if (options.missingInputBlobAt) BrowserGame.prototype.input_blob_at = undefined;
+  if (options.missingInputBlobOnSurface) BrowserGame.prototype.input_blob_on_surface = undefined;
+  if (options.missingPreflightTouchSurface) BrowserGame.prototype.preflight_touch_surface = undefined;
   if (options.missingHidSetup) BrowserGame.prototype.configure_hid_devices = undefined;
   if (options.missingInputHidBlob) BrowserGame.prototype.input_hid_blob = undefined;
   class BrowserLocalGame extends BrowserGame {
@@ -911,7 +920,8 @@ function assertReleased(h, score = SCORE) {
 
 function touchEvent(fields = {}) {
   return { kind: "touch", hostNs: ORIGIN, sequence: 1n, contact: 18446744073709551615n,
-    phase: 0, code: 0xfffffffe, x: 120, y: 90, pressure: 0.5, width: 480, height: 360, ...fields };
+    phase: 0, code: 0xfffffffe, x: 120, y: 90, pressure: 0.5, width: 480, height: 360,
+    surfaceWidth: 960, surfaceHeight: 720, ...fields };
 }
 
 // Platform endpoint only: the actual AudioCommandClient owns validation,
@@ -3321,7 +3331,7 @@ test("mixed keyboard contact and numbered or zero-ID HID inputs use the actual c
     assert.deepEqual(Array.from(calls[index][1]), Array.from(encoded));
     assert.equal(calls[index].at(-1), 9007199254741222n);
   }
-  assert.deepEqual(calls[1].slice(2), [240, 180, 9007199254741222n]);
+  assert.deepEqual(calls[1].slice(2), [480, 360, 960, 720, 9007199254741222n]);
   assert.equal(new DataView(calls[2][1].buffer).getBigUint64(7, true), HID_SOURCE);
   assert.deepEqual(Array.from(calls[2][1].slice(65)), [9, 255, 0], "a payload byte equal to report ID remains payload");
   assert.equal(calls[3][1].length, 64); assert.equal(calls[3][1][59], 0);
@@ -3415,15 +3425,77 @@ test("contact mode configures actual geometry before capture and forwards mixed 
     const contacts = game.calls.filter(call => call[0] === "touch");
     assert.equal(contacts.length, 2);
     assert.deepEqual(contacts.map(call => Array.from(call[1])), [down, up].map(event => Array.from(encodeTouchEvent(event))));
-    assert.deepEqual(contacts.map(call => call.slice(2)), [[240, 180, 100000000n], [1000, 180, 100000000n]]);
+    assert.deepEqual(contacts.map(call => call.slice(2)), [[480, 360, 960, 720, 100000000n], [480, 360, 960, 720, 100000000n]]);
     assert.equal(game.calls.filter(call => call[0] === "input").length, 0);
     assert.equal(h.of("play-step-done").at(-1).tickId, 1);
     await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
   }
 });
 
+test("touch surface snapshots reach the shared binding with original bytes after complete scalar geometry preflight", async () => {
+  for (const local of [false, true]) {
+    const preflights = [];
+    const h = await active({ startRequest: local ? localRequest() : startRequest({ inputMode: "physical-contact" }),
+      preflightTouchSurface(game, ...geometry) {
+        assert.equal(inputCalls(game).length, 0, "every scalar geometry check precedes any input or advance mutation");
+        preflights.push(geometry);
+      } });
+    const game = local ? h.locals[0] : h.games[0];
+    const inputs = [
+      touchEvent({ x: 200.123456789, y: 300.375, width: 1280, height: 720, surfaceWidth: 2560, surfaceHeight: 1440 }),
+      touchEvent({ sequence: 2n, hostNs: ORIGIN + 1n, phase: 1, x: 800.25, y: 500.5,
+        width: 1000, height: 1000, surfaceWidth: 1001, surfaceHeight: 1001 }),
+      touchEvent({ sequence: 3n, hostNs: ORIGIN + 2n, phase: 2, x: -15.5, y: 800.25,
+        width: 1280, height: 720, surfaceWidth: 1280, surfaceHeight: 720 }),
+    ];
+    await h.send({ kind: "resize", width: 1920, height: 1080 });
+    await h.send(step({ events: inputs, watermark: ORIGIN + 2n, audioNs: 9007199254741222n }));
+    assert.deepEqual(preflights, inputs.map(input => [Math.fround(input.x), Math.fround(input.y),
+      input.width, input.height, input.surfaceWidth, input.surfaceHeight]));
+    const contacts = inputCalls(game).filter(call => call[0] === "touch");
+    assert.deepEqual(contacts.map(call => call[1]), inputs.map(encodeTouchEvent));
+    assert.deepEqual(contacts.map(call => call.slice(2)), [
+      [1280, 720, 2560, 1440, 9007199254741222n],
+      [1000, 1000, 1001, 1001, 9007199254741222n],
+      [1280, 720, 1280, 720, 9007199254741222n],
+    ]);
+    assert.equal(h.of("play-step-done").length, 1); assert.equal(h.of("play-error").length, 0);
+    assert.equal(h.views[0].extents.at(-1)[0], 1920);
+    assert.equal(contacts[2][1][76], 2, "the captured off-surface release keeps its actual phase");
+    await h.send({ kind: "play-stop", playId: 7 }); assert.equal(game.frees, 1);
+  }
+});
+
+test("invalid backing extents and binding projection refusal reject a whole mixed input batch before any committed prefix", async () => {
+  for (const local of [false, true]) for (const malformed of [
+    { surfaceWidth: undefined }, { surfaceHeight: 0 }, { surfaceWidth: -1 }, { surfaceWidth: 1.5 },
+    { surfaceHeight: 4294967296 }, { surfaceWidth: NaN }, { width: Number.MIN_VALUE },
+  ]) {
+    const h = await active({ startRequest: local ? localRequest({ recordReplay: true })
+      : startRequest({ inputMode: "physical-contact", recordReplay: true }),
+      preflightTouchSurface(game, x, y, cssWidth) {
+        assert.equal(inputCalls(game).length, 0);
+        if (cssWidth === Number.MIN_VALUE) throw new Error("actual portable projection cannot represent this point");
+      } });
+    const game = local ? h.locals[0] : h.games[0];
+    const first = touchEvent(), bad = touchEvent({ sequence: 2n, hostNs: ORIGIN + 1n, ...malformed });
+    await h.send(step({ events: [first, { hostNs: ORIGIN, key: 2, down: true, sequence: 1n }, bad], watermark: ORIGIN + 1n }));
+    assert.equal(inputCalls(game).length, 0);
+    assert.equal(h.of("play-step-done").length, 0); assert.equal(h.of("play-error").length, 1);
+    assert.equal(game.frees, 1);
+    const result = h.of("play-error")[0];
+    if (local) assert.ok(result.replays.every(row => row.replayComplete === false));
+    else assert.equal(result.replayComplete, false);
+    if (malformed.width === Number.MIN_VALUE) {
+      assert.equal(game.touchPreflights.length, 2);
+      assert.match(result.message, /actual portable projection/);
+    }
+  }
+});
+
 test("contact capability geometry and consuming constructor failures preserve explicit ownership without fallback", async () => {
-  for (const options of [{ missingContactConstructor: true }, { missingTouchSetup: true }, { missingInputBlobAt: true }, { missingInputBlob: true }]) {
+  for (const options of [{ missingContactConstructor: true }, { missingTouchSetup: true }, { missingInputBlobOnSurface: true },
+    { missingPreflightTouchSurface: true }, { missingInputBlob: true }]) {
     const h = await catalogWorker(options);
     await h.send(startRequest({ inputMode: "physical-contact" }));
     assert.equal(h.contactConstructions.length, 0);
@@ -3465,7 +3537,7 @@ test("mixed touch batches preflight all packets and preserve a committed binding
   assert.equal(plain.games[0].calls.filter(call => ["blob", "touch", "advance"].includes(call[0])).length, 0);
   assertReleased(plain);
   const h = await active({ startRequest: startRequest({ inputMode: "physical-contact" }),
-    inputBlobAt(game, bytes) { if (bytes[76] === 1) throw new Error("actual contact binding rejected later input"); } });
+    inputBlobOnSurface(game, bytes) { if (bytes[76] === 1) throw new Error("actual contact binding rejected later input"); } });
   await h.send(step({ events: [touchEvent(), touchEvent({ hostNs: ORIGIN + 1n, sequence: 2n, phase: 1 })], watermark: ORIGIN + 1n }));
   assert.equal(h.games[0].calls.filter(call => call[0] === "touch").length, 2);
   assert.equal(h.games[0].calls.filter(call => call[0] === "advance").length, 0);

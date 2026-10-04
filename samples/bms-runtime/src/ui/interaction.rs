@@ -22,30 +22,15 @@ impl Bounds {
     }
 }
 
-/// Matches the renderer's current full-surface stretch; edges are half-open.
+/// Matches the renderer's contain viewport; bars and edges are excluded.
 pub fn logical_point(
     point: (f64, f64),
     physical: (u32, u32),
     logical: (u32, u32),
 ) -> Option<(f64, f64)> {
-    let (width, height) = physical;
-    if width == 0
-        || height == 0
-        || logical.0 == 0
-        || logical.1 == 0
-        || !point.0.is_finite()
-        || !point.1.is_finite()
-        || point.0 < 0.0
-        || point.1 < 0.0
-        || point.0 >= f64::from(width)
-        || point.1 >= f64::from(height)
-    {
-        return None;
-    }
-    Some((
-        point.0 * f64::from(logical.0) / f64::from(width),
-        point.1 * f64::from(logical.1) / f64::from(height),
-    ))
+    crate::viewport::Viewport::new([physical.0, physical.1], [logical.0, logical.1])
+        .ok()?
+        .project(point)
 }
 
 /// Accumulates normalized wheel lines without device or clock ownership.
@@ -152,7 +137,7 @@ mod tests {
         assert_eq!(wheel.push(-0.0), 0);
     }
     #[test]
-    fn pointer_mapping_matches_stretch_and_excludes_invalid_extents_and_edges() {
+    fn pointer_mapping_matches_contained_viewport_and_excludes_invalid_extents_and_edges() {
         assert_eq!(
             logical_point((960.0, 360.0), (1920, 720), (960, 720)),
             Some((480.0, 360.0))

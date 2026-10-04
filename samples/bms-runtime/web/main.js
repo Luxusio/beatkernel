@@ -14,6 +14,7 @@ for (const id of ["local-count", "local-discover", "local-release", "local-sourc
 for (const id of ["multiplayer-mode", "room-seal", "room-ready", "room-leave", "room-score-prev", "room-score-next", "room-score-page"]) ui[id] = byId(id);
 let canvas = byId("canvas");
 let cssExtent = [0, 0];
+let surfaceExtent = [0, 0];
 ui["touch-input"].checked = typeof window.PointerEvent === "function" && globalThis.navigator?.maxTouchPoints > 0;
 let worker = null;
 let observer = null;
@@ -477,11 +478,12 @@ function fatal(error) {
 function resize() {
   if (!worker) return;
   const box = ui.viewport.getBoundingClientRect();
-  cssExtent = [box.width, box.height];
   const dpr = window.devicePixelRatio || 1;
   // Do not assign canvas backing dimensions here; the renderer validates first.
   const dimensions = [box.width, box.height].map(value => Math.round(value * dpr));
   if (dimensions.some(value => !Number.isSafeInteger(value) || value < 0 || value > 0xffffffff)) return fatal(new Error("Canvas dimensions are outside the supported range."));
+  cssExtent = [box.width, box.height];
+  surfaceExtent = dimensions;
   worker.postMessage({ kind: "resize", width: dimensions[0], height: dimensions[1] });
 }
 function densityChanged() {
@@ -591,6 +593,7 @@ function start() {
   canvas.replaceWith(fresh);
   canvas = fresh;
   cssExtent = [0, 0];
+  surfaceExtent = [0, 0];
   for (const [name, phase] of [["pointerdown", 0], ["pointermove", 1], ["pointerup", 2], ["pointercancel", 3]]) {
     fresh.addEventListener(name, event => touch(event, phase, fresh), { passive: false });
   }
@@ -1379,15 +1382,21 @@ function touch(event, phase, surface, lost = false) {
     const x = lost && !finiteTouchSample(event.offsetX) ? previous.x : event.offsetX;
     const y = lost && !finiteTouchSample(event.offsetY) ? previous.y : event.offsetY;
     const pressure = lost && !finiteTouchSample(event.pressure) ? previous.pressure : event.pressure;
-    const width = lost && !(Number.isFinite(cssExtent[0]) && cssExtent[0] > 0) ? previous.width : cssExtent[0];
-    const height = lost && !(Number.isFinite(cssExtent[1]) && cssExtent[1] > 0) ? previous.height : cssExtent[1];
+    const geometryAvailable = cssExtent.every(value => Number.isFinite(value) && value > 0)
+      && surfaceExtent.every(value => Number.isInteger(value) && value > 0 && value <= 0xffffffff);
+    const width = lost && !geometryAvailable ? previous.width : cssExtent[0];
+    const height = lost && !geometryAvailable ? previous.height : cssExtent[1];
+    const surfaceWidth = lost && !geometryAvailable ? previous.surfaceWidth : surfaceExtent[0];
+    const surfaceHeight = lost && !geometryAvailable ? previous.surfaceHeight : surfaceExtent[1];
     if (!finiteTouchSample(x) || !finiteTouchSample(y) || !finiteTouchSample(pressure)
-      || !Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
-      throw new Error("Touch input requires finite coordinates, pressure and a positive canvas extent.");
+      || !Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0
+      || !Number.isInteger(surfaceWidth) || surfaceWidth <= 0 || surfaceWidth > 0xffffffff
+      || !Number.isInteger(surfaceHeight) || surfaceHeight <= 0 || surfaceHeight > 0xffffffff) {
+      throw new Error("Touch input requires finite coordinates, pressure and positive CSS and backing extents.");
     }
     const contact = previous?.contact ?? session.nextContact + 1n;
     if (contact > 18446744073709551615n) throw new Error("Touch acquisition identity exhausted.");
-    const current = { contact, x, y, pressure, width, height };
+    const current = { contact, x, y, pressure, width, height, surfaceWidth, surfaceHeight };
     if (phase === 0) {
       // Capture belongs to this contact before any event can reach the Worker.
       surface.setPointerCapture(id);
@@ -1400,7 +1409,7 @@ function touch(event, phase, surface, lost = false) {
     } else session.contacts.set(id, current);
     const sequence = nextInputSequence(session);
     session.events.push({ kind: "touch", hostNs, sequence, contact, phase, code: id >>> 0,
-      x, y, pressure, width, height });
+      x, y, pressure, width, height, surfaceWidth, surfaceHeight });
     session.completionReady = false;
     pumpInput(session);
   } catch (error) { void stopPlay(`Playback failed: ${String(error.message).slice(0, 4096)}`, true); }

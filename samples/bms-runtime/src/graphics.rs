@@ -610,7 +610,7 @@ impl Renderer {
         self.check_failure()
     }
 
-    /// Logical geometry stretches to the full physical surface. Upload only
+    /// Logical geometry fits the shared centered viewport. Upload only
     /// instance data once, then draw contiguous texture batches in painter order.
     pub fn render(&mut self, scene: &Scene) -> Result<(), String> {
         self.check_failure()?;
@@ -627,6 +627,11 @@ impl Renderer {
         if self.suspended || self.recreate_surface {
             return Ok(());
         }
+        let [x, y, width, height] = crate::viewport::Viewport::new(
+            [self.config.width, self.config.height],
+            scene.logical_extent(),
+        )?
+        .rect();
         let frame = match self.surface.get_current_texture() {
             Ok(frame) => frame,
             Err(wgpu::SurfaceError::Timeout) => return Ok(()),
@@ -718,6 +723,7 @@ impl Renderer {
                 color_attachments: &attachments,
                 ..Default::default()
             });
+            pass.set_viewport(x as f32, y as f32, width as f32, height as f32, 0.0, 1.0);
             for batch in scene.batches() {
                 if let Some(slot) = batch.playfield {
                     let layer = &self.note_layers[slot];

@@ -5,7 +5,10 @@ use crate::{
     browser::BrowserPrepared,
     browser_game::{BrowserSample, OUTPUT, encode_batch, encode_saved_opponents},
     browser_hid_input::BrowserHidSetup,
-    browser_input::{LocalPhysicalInputSetup, TouchInputSetup, decode_input},
+    browser_input::{
+        LocalPhysicalInputSetup, TouchInputSetup, decode_input, project_touch_on_surface,
+        project_touch_position_on_surface,
+    },
     competition::OpponentKind,
     image_assets::ImageAssets,
     local_players::PlayerId,
@@ -760,6 +763,47 @@ impl BrowserLocalGame {
             &Explicit,
             point(OUTPUT, audio_ns),
         );
+        self.accept_input(result)
+    }
+    /// Read-only scalar preflight shares the actual input projection below.
+    pub fn preflight_touch_surface(
+        &self,
+        x: f32,
+        y: f32,
+        css_width: f64,
+        css_height: f64,
+        surface_width: u32,
+        surface_height: u32,
+    ) -> Result<(), JsValue> {
+        project_touch_position_on_surface(
+            Position2 { x, y },
+            [css_width, css_height],
+            [surface_width, surface_height],
+            crate::playfield_layout::LOGICAL_EXTENT,
+        )
+        .map(|_| ())
+        .map_err(error)
+    }
+    pub fn input_blob_on_surface(
+        &mut self,
+        bytes: Vec<u8>,
+        css_width: f64,
+        css_height: f64,
+        surface_width: u32,
+        surface_height: u32,
+        audio_ns: i64,
+    ) -> Result<(), JsValue> {
+        let input = decode_input(&bytes, self.input_limits, HOST).map_err(error)?;
+        let position = project_touch_on_surface(
+            &input,
+            [css_width, css_height],
+            [surface_width, surface_height],
+            crate::playfield_layout::LOGICAL_EXTENT,
+        )
+        .map_err(error)?;
+        let result =
+            self.game
+                .process_input_at(input, position, &Explicit, point(OUTPUT, audio_ns));
         self.accept_input(result)
     }
     /// Decode an entire genuine report before dispatch. Every typed event keeps

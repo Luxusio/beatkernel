@@ -16,6 +16,9 @@ mod room_fixtures;
 #[path = "desktop_room_results_fixtures.rs"]
 mod room_results_fixtures;
 #[cfg(test)]
+#[path = "native_viewport_fixtures.rs"]
+mod viewport_fixtures;
+#[cfg(test)]
 use beatkernel_bms_runtime::bga::BgaState;
 use beatkernel_bms_runtime::ui::{
     atoms::{rect, text},
@@ -76,13 +79,18 @@ use winit::{
 
 const WIDTH: usize = 960;
 const HEIGHT: usize = 720;
-fn catalog_scroll_lines(delta: MouseScrollDelta, physical_height: u32) -> f64 {
+fn catalog_scroll_lines(delta: MouseScrollDelta, physical: (u32, u32)) -> f64 {
     match delta {
         MouseScrollDelta::LineDelta(_, y) => f64::from(y),
-        MouseScrollDelta::PixelDelta(position) if physical_height != 0 => {
-            position.y * (HEIGHT as f64 / f64::from(physical_height)) / ROW_HEIGHT as f64
+        MouseScrollDelta::PixelDelta(position) => {
+            let Ok(viewport) = beatkernel_bms_runtime::viewport::Viewport::new(
+                [physical.0, physical.1],
+                [WIDTH as u32, HEIGHT as u32],
+            ) else {
+                return f64::NAN;
+            };
+            position.y * (HEIGHT as f64 / f64::from(viewport.rect()[3])) / ROW_HEIGHT as f64
         }
-        MouseScrollDelta::PixelDelta(_) => f64::NAN,
     }
 }
 const PAUSE_BOUNDS: Bounds = Bounds {
@@ -4863,11 +4871,11 @@ impl ApplicationHandler for Desktop {
                     self.catalog_wheel.reset();
                 }
                 if phase != TouchPhase::Cancelled {
-                    let height = self
-                        .window
-                        .as_ref()
-                        .map_or(0, |window| window.inner_size().height);
-                    let lines = catalog_scroll_lines(delta, height);
+                    let physical = self.window.as_ref().map_or((0, 0), |window| {
+                        let size = window.inner_size();
+                        (size.width, size.height)
+                    });
+                    let lines = catalog_scroll_lines(delta, physical);
                     let over_catalog = self.over_catalog(self.point());
                     self.scroll_catalog(lines, over_catalog);
                 }
@@ -6427,10 +6435,10 @@ mod tests {
         assert!(app.game.is_none());
     }
     #[test]
-    fn catalog_pixel_scroll_uses_render_stretch_and_rejects_zero_extent() {
+    fn catalog_pixel_scroll_uses_viewport_scale_and_rejects_zero_extent() {
         use winit::dpi::PhysicalPosition;
         assert_eq!(
-            catalog_scroll_lines(MouseScrollDelta::LineDelta(99.0, -2.0), 0),
+            catalog_scroll_lines(MouseScrollDelta::LineDelta(99.0, -2.0), (0, 0)),
             -2.0
         );
         for height in [360, 720, 1440] {
@@ -6438,7 +6446,7 @@ mod tests {
             assert_eq!(
                 catalog_scroll_lines(
                     MouseScrollDelta::PixelDelta(PhysicalPosition::new(999.0, pixel)),
-                    height
+                    (height / 3 * 4, height)
                 ),
                 1.0
             );
@@ -6446,7 +6454,7 @@ mod tests {
         assert!(
             catalog_scroll_lines(
                 MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, 1.0)),
-                0
+                (0, 0)
             )
             .is_nan()
         );

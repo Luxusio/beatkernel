@@ -2158,6 +2158,59 @@ test("one retained replay survives a failed export and its URLs are replaced onl
   assert.deepEqual(h.revoked, h.urls.map(entry => entry.url));
 });
 
+test("touch acquisition snapshots cached CSS and backing extents across resize and lost capture without Window projection or rendering", async () => {
+  const h = await harness({ touchSupported: true }); await h.preview();
+  const session = await h.launch(), worker = h.workers[0], surface = h.get("canvas");
+  for (const field of ["width", "height"]) Object.defineProperty(surface, field, {
+    configurable: true, get: () => 1, set() { assert.fail("only the renderer owns backing dimensions"); },
+  });
+  h.window.devicePixelRatio = 1.5; h.resize(1280, 720);
+  assert.deepEqual(worker.last("resize"), { kind: "resize", width: 1920, height: 1080 });
+  h.setNow(1300);
+  const pointer = (kind, fields = {}) => surface.emit(kind, { pointerType: "touch", pointerId: 11,
+    offsetX: 100.125, offsetY: 300.5, pressure: 0.375, timeStamp: 1300, ...fields });
+  const ack = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+    songNs: 1n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+  const display = watchPlayDisplay(h), firstReads = h.layoutReads;
+  const renderRequests = worker.messages("play-render").length;
+  pointer("pointerdown");
+  const first = worker.last("play-step"), raw = first.events[0];
+  assert.deepEqual(raw, { kind: "touch", hostNs: 1300000000n, sequence: 1n, contact: 1n, phase: 0,
+    code: 11, x: 100.125, y: 300.5, pressure: 0.375, width: 1280, height: 720, surfaceWidth: 1920, surfaceHeight: 1080 });
+  assert.equal(h.captures.length, 1, "a bar point is still acquired; common routing alone decides its destination");
+  pointer("pointermove", { offsetX: 1200.25, offsetY: 700.5, timeStamp: 1300.125 });
+  assert.equal(h.layoutReads, firstReads);
+  h.resize(1001.5, 701.25);
+  assert.deepEqual(worker.last("resize"), { kind: "resize", width: 1502, height: 1052 });
+  const resizedReads = h.layoutReads;
+  pointer("pointerup", { offsetX: -25.5, offsetY: 900.25, timeStamp: 1300.25 });
+  assert.equal(h.layoutReads, resizedReads);
+  await ack(first);
+  const queued = worker.last("play-step");
+  assert.deepEqual(queued.events.map(event => [event.phase, event.width, event.height, event.surfaceWidth, event.surfaceHeight]), [
+    [1, 1280, 720, 1920, 1080], [2, 1001.5, 701.25, 1502, 1052],
+  ]);
+  assert.deepEqual(queued.events.map(event => [event.x, event.y]), [[1200.25, 700.5], [-25.5, 900.25]]);
+  assert.ok(queued.events.every(event => event.contact === 1n));
+  assert.deepEqual(first.events[0], raw);
+  await ack(queued);
+  h.setNow(1301);
+  pointer("pointerdown", { timeStamp: 1301 }); const held = worker.last("play-step");
+  h.resize(0, 0); const zeroReads = h.layoutReads;
+  pointer("lostpointercapture", { offsetX: NaN, offsetY: undefined, pressure: undefined, timeStamp: 1301.125 });
+  pointer("lostpointercapture", { timeStamp: 1301.25 });
+  await ack(held);
+  const cancelled = worker.last("play-step");
+  assert.deepEqual(cancelled.events, [{ kind: "touch", hostNs: 1301125000n, sequence: 5n, contact: 2n,
+    phase: 3, code: 11, x: 100.125, y: 300.5, pressure: 0.375,
+    width: 1001.5, height: 701.25, surfaceWidth: 1502, surfaceHeight: 1052 }]);
+  assert.equal(h.layoutReads, zeroReads); assert.deepEqual(display, []);
+  await ack(cancelled);
+  assert.equal(worker.messages("play-render").length, renderRequests, "input acquisition does not request presentation work");
+  assert.equal(h.audio.polls, 0);
+  h.click("stop"); await flush(); await h.receive(finalScore(session.id)); await h.close();
+});
+
 test("touch capture preserves original samples and shared keyboard order without pointer-time layout or duplicate cancellation", async () => {
   const h = await harness({ touchSupported: true });
   const preview = await h.preview();
@@ -2182,7 +2235,7 @@ test("touch capture preserves original samples and shared keyboard order without
   assert.equal(pointer("pointerdown").defaultPrevented, true);
   const down = worker.last("play-step");
   assert.deepEqual(down.events, [{ kind: "touch", hostNs: 1300000000n, sequence: 1n, contact: 1n,
-    phase: 0, code: 4294967294, x: 120, y: 90, pressure: 0.5, width: 480, height: 360 }]);
+    phase: 0, code: 4294967294, x: 120, y: 90, pressure: 0.5, width: 480, height: 360, surfaceWidth: 480, surfaceHeight: 360 }]);
   assert.equal(h.captures.length, 1);
   assert.ok(h.traces.findIndex(row => row[0] === "capture") < h.traces.findIndex(row => row[1] === "play-step"));
   assert.equal(pointer("pointerdown", { offsetX: 400 }).defaultPrevented, false);
@@ -2197,7 +2250,7 @@ test("touch capture preserves original samples and shared keyboard order without
   assert.deepEqual(mixed.events.map(event => event.sequence), [2n, 3n, 4n]);
   assert.deepEqual(mixed.events.map(event => event.hostNs), [1300125000n, 1300250000n, 1300500000n]);
   assert.deepEqual(mixed.events[0], { kind: "touch", hostNs: 1300125000n, sequence: 2n, contact: 1n,
-    phase: 1, code: 4294967294, x: 400, y: -10, pressure: 1.25, width: 480, height: 360 });
+    phase: 1, code: 4294967294, x: 400, y: -10, pressure: 1.25, width: 480, height: 360, surfaceWidth: 480, surfaceHeight: 360 });
   assert.deepEqual(mixed.events[1], { hostNs: 1300250000n, key: 2, down: true, sequence: 3n });
   assert.equal(mixed.events[2].phase, 2);
   assert.equal(mixed.events[2].contact, 1n);
@@ -2216,7 +2269,7 @@ test("touch capture preserves original samples and shared keyboard order without
   await done(reused);
   const canceled = worker.last("play-step");
   assert.deepEqual(canceled.events, [{ kind: "touch", hostNs: 1301125000n, sequence: 6n, contact: 2n,
-    phase: 3, code: 4294967294, x: 120, y: 90, pressure: 0.5, width: 960, height: 720 }]);
+    phase: 3, code: 4294967294, x: 120, y: 90, pressure: 0.5, width: 960, height: 720, surfaceWidth: 960, surfaceHeight: 720 }]);
   await done(canceled);
   assert.equal(h.layoutReads, resizedReads);
   assert.deepEqual(display, [], "pointer acquisition and accepted input receipts leave the Worker-owned HUD alone");
