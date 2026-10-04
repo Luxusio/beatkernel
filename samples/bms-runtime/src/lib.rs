@@ -135,6 +135,10 @@ mod multiplayer_protocol_fixtures;
 pub mod multiplayer_room_client;
 #[cfg(test)]
 mod multiplayer_room_fixtures;
+/// Shared prepared multi-host software-start coordination.
+pub mod multiplayer_room_start;
+#[cfg(test)]
+mod multiplayer_room_start_fixtures;
 /// Distinct bounded BKMR room admission messages and incremental framing.
 pub mod multiplayer_room_wire;
 /// Bounded waiting and paired stream ownership, independent of transport I/O.

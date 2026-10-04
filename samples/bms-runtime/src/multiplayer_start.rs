@@ -226,17 +226,93 @@ impl StartAgreement {
         *self = candidate;
         Ok(result)
     }
+    fn next_clock_ready_inner(&mut self, now: i64) -> Result<Option<StartMessage>, StartError> {
+        if self.local_ready || self.estimate.is_none() {
+            return Ok(None);
+        }
+        self.estimate_at(now)?;
+        self.in_flight = Some(StartMessage::ClockReady(self.preroll_ns));
+        Ok(self.in_flight)
+    }
+
+    /// Lets the room coordinator exchange readiness without proposing a
+    /// different target on each participant's polling time.
+    pub(crate) fn next_clock_ready(
+        &mut self,
+        now: i64,
+    ) -> Result<Option<StartMessage>, StartError> {
+        let mut candidate = *self;
+        candidate.observe_now(now)?;
+        let result = if candidate.in_flight.is_some() || candidate.stage == Stage::Committed {
+            None
+        } else {
+            candidate.next_clock_ready_inner(now)?
+        };
+        *self = candidate;
+        Ok(result)
+    }
+
+    /// Validates any installed estimate even before both readiness receipts
+    /// exist. Some contains the actual peer preroll and estimate width.
+    pub(crate) fn readiness(&self, now: i64) -> Result<Option<(i64, u64)>, StartError> {
+        let mut candidate = *self;
+        candidate.observe_now(now)?;
+        if candidate.estimate.is_none() {
+            return Ok(None);
+        }
+        let estimate = candidate.estimate_at(now)?;
+        Ok((candidate.local_ready && candidate.peer_ready)
+            .then_some((candidate.peer_preroll_ns, estimate.round_trip_ns())))
+    }
+
+    fn proposal_message(&mut self, deadline: i64, now: i64) -> Result<StartMessage, StartError> {
+        self.schedule_at(deadline, now)?;
+        self.proposal = Some(deadline);
+        self.stage = Stage::Proposing;
+        Ok(StartMessage::Propose(deadline))
+    }
+
+    /// Admits the one externally selected room target through the same checked
+    /// host proposal transition. Existing proposals are never replaced.
+    pub(crate) fn propose_song_target(
+        &mut self,
+        song_target: i64,
+        now: i64,
+    ) -> Result<Option<StartMessage>, StartError> {
+        let mut candidate = *self;
+        candidate.observe_now(now)?;
+        if candidate.role != StartRole::Host {
+            return Err(StartError::UnexpectedMessage);
+        }
+        let result = if candidate.in_flight.is_some() || candidate.stage != Stage::Waiting {
+            None
+        } else {
+            if !candidate.local_ready || !candidate.peer_ready {
+                return Err(StartError::NotPrepared);
+            }
+            let message = candidate.proposal_message(song_target, now)?;
+            candidate.in_flight = Some(message);
+            Some(message)
+        };
+        *self = candidate;
+        Ok(result)
+    }
+
+    /// The actual Accept receipt remains true while Commit is in flight and
+    /// after its write, so a room-wide barrier cannot close behind an early peer.
+    pub(crate) fn accepted(&self) -> bool {
+        matches!(
+            self.stage,
+            Stage::Accepted | Stage::Committing | Stage::Committed
+        )
+    }
+
     fn next_inner(&mut self, now: i64) -> Result<Option<StartMessage>, StartError> {
         if self.in_flight.is_some() || self.stage == Stage::Committed {
             return Ok(None);
         }
         if !self.local_ready {
-            if self.estimate.is_none() {
-                return Ok(None);
-            }
-            self.estimate_at(now)?;
-            self.in_flight = Some(StartMessage::ClockReady(self.preroll_ns));
-            return Ok(self.in_flight);
+            return self.next_clock_ready_inner(now);
         }
         if !self.peer_ready {
             return Ok(None);
@@ -250,10 +326,7 @@ impl StartAgreement {
                         + i128::from(self.preroll_ns.max(self.peer_preroll_ns)),
                 )
                 .map_err(|_| StartError::Overflow)?;
-                self.schedule_at(deadline, now)?;
-                self.proposal = Some(deadline);
-                self.stage = Stage::Proposing;
-                StartMessage::Propose(deadline)
+                self.proposal_message(deadline, now)?
             }
             (StartRole::Join, Stage::Proposed) => {
                 let deadline = self.proposal.ok_or(StartError::UnexpectedMessage)?;
