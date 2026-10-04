@@ -112,6 +112,8 @@ mod invisible_audio_fixtures;
 mod invisible_contact_fixtures;
 #[cfg(test)]
 mod invisible_identity_fixtures;
+#[cfg(test)]
+mod invisible_lane_fixtures;
 /// Fixed-capacity lane feedback from actual local judge results and song time.
 pub mod judge_feedback;
 pub mod live_pause;

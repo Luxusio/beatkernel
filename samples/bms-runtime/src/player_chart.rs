@@ -38,7 +38,7 @@ pub struct PlayerChart {
     pub lanes: Vec<u8>,
     /// Notes ordered by compiled head timestamp, then identity.
     pub notes: Vec<PlayerNote>,
-    /// Latest gameplay endpoint, in song nanoseconds.
+    /// Latest gameplay endpoint or invisible selection, in song nanoseconds.
     pub duration_ns: i64,
     /// Validated presentation-only POORBGA mode cached during chart preparation.
     pub poor_bga_mode: beatkernel_bms::PoorBgaMode,
@@ -79,6 +79,13 @@ impl PlayerChart {
         chart: &CompiledChart,
     ) -> Result<Self, PlayerChartError> {
         let poor_bga_mode = source.poor_bga_mode().map_err(PlayerChartError)?;
+        let invisible = if source.invisible.is_empty() {
+            Vec::new()
+        } else {
+            source
+                .compile_invisible()
+                .map_err(|error| PlayerChartError(error.to_string()))?
+        };
         let mut by_id = BTreeMap::new();
         for note in &source.notes {
             if by_id.insert(note.object, note.lane.channel()).is_some() {
@@ -96,6 +103,17 @@ impl PlayerChart {
         let mut lanes: Vec<u8> = by_id.values().copied().collect();
         lanes.sort_by_key(|channel| lane_order(*channel));
         lanes.dedup();
+        let mut duration_ns = 0;
+        for event in &invisible {
+            let lane = event.lane.channel();
+            if !lanes.contains(&lane) {
+                lanes.push(lane);
+            }
+            duration_ns = duration_ns.max(event.at.as_nanos());
+        }
+        if !invisible.is_empty() {
+            lanes.sort_by_key(|channel| lane_order(*channel));
+        }
         let lane_indices: BTreeMap<_, _> = lanes
             .iter()
             .enumerate()
@@ -122,7 +140,6 @@ impl PlayerChart {
         object_index.sort_unstable_by_key(|entry| entry.0);
         let tree_leaves = notes.len().max(1).next_power_of_two();
         let mut endpoint_tree = vec![i64::MIN; tree_leaves * 2];
-        let mut duration_ns = 0;
         for (index, note) in notes.iter().enumerate() {
             let end = note.end.unwrap_or(note.start).as_nanos();
             endpoint_tree[tree_leaves + index] = end;
