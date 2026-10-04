@@ -157,3 +157,62 @@ Fresh state/session replacement clears contact ownership; explicit paired
 replacement accepts a routing checkpoint alongside the restored judge and
 transport. The caller synchronizes output and supplies a coherent checkpoint.
 Partial judging/audio failures keep actual admitted input/report evidence.
+
+## Optional shared input-sound timeline
+
+Add portable runtime::input_sound::InputSoundMarker with fields control
+(GameControlId), at(Timestamp), sample(SampleId), voice(VoiceId), gain(f32).
+InputSoundTimeline::new(markers:Vec<InputSoundMarker>, max_markers:usize) validates
+positive caller capacity at most100000, totalcount, finite signed gains and
+unique control/time positions before constructing an owned immutable sorted
+index. Signed song timestamps remain exact. The same voice may be deliberately
+reused; collision policy belongs to the app. Empty timelines are valid.
+
+InputSoundTimeline::command_for(control,song_at,audio_at) selects the most recent
+marker at or before original unoffset song_at and returns its Play at independent
+audio_at. No prior marker means no sound. Control lookup and per-control binary
+search must not scan all markers on each input. No state cursor, polling, file
+IO or audio callback work. command_for_press(input:&GameInputEvent,
+fresh:bool,song_at,audio_at,results:&[JudgeEvent]) is the common pure policy for
+live/replay composition: require actual Button Down or Touch Down and fresh;
+suppress fallback when this accepted bound operation emits an Instant/HoldHead
+Hit. Up/Repeat/Move/Cancel/axis/pointer/custom input never trigger fallback.
+
+Expose JudgeEngine::is_fresh_press(&GameInputEvent) using the engine's actual
+button/contact ownership and enabled contact mode. push_input must use the same
+freshness calculation; the query is read-only and cannot commit held state.
+Duplicate Down is not fresh; distinct source/physical/control/contact ownership
+remains independent. Reconstructed judge snapshots retain this same truth.
+
+Runtime::configure_input_sounds(InputSoundTimeline) installs at most once before
+committed operations, returning RuntimeError::InputSoundConfigurationLocked on
+late/repeated configuration. The first committed-operation configuration lock
+survives state restoration even when no timeline was installed. Default remains
+unconfigured. At each successful
+bound push, use freshness acquired before actual judge mutation and its actual
+returned results to select fallback. Failed fanout does not erase already
+accepted bound-operation sound attempts. Emit existing judged sounds first,
+then selected fallback sounds in accepted binding order through the same
+CommandProducer and telemetry. Preserve exact audio_commands/audio_failures
+admission evidence, no retries or invented results. At/after configured song
+end, bindings and fallback both remain suppressed; advances never synthesize
+press sounds. Queue failure cannot undo accepted judging or held ownership.
+
+Timeline lookup is stateless and retains its immutable mapping during existing
+same-chart replace_state/session or paired contact checkpoint restoration.
+Freshness derives from the installed reconstructed judge. This does not reset
+or bypass song-time/output chronology. Callers changing charts still construct
+fresh runtime owners and explicit voice plans.
+
+Independent deferred fixtures cover validation/cap/identity/index boundaries,
+original song versus output time, fresh presses, ordinary hit precedence,
+button/contact ownership, duplicates/repeats/releases, unbound inputs, endpoint,
+partial queue admission and restoration. Compare actual Runtime output and
+actual ReplaySession bound-operation reconstruction using the same timeline
+selection policy. No platform-specific or separate replay sound rule is added.
+
+This establishes the real optional core Runtime path. BMS invisible preparation
+continues to refuse playback until app voice allocation, sample loading, replay
+identity and live/local/replay wiring all consume the same timeline. Core source
+and compile-only checks do not prove browser/device/audio execution or complete
+invisible-note playback. Runtime test execution and formal QA remain deferred.
