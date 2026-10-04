@@ -16,6 +16,9 @@ mod ime_area_fixtures;
 #[path = "desktop_ime_fields_fixtures.rs"]
 mod ime_fields_fixtures;
 #[cfg(test)]
+#[path = "desktop_renderer_startup_fixtures.rs"]
+mod renderer_startup_fixtures;
+#[cfg(test)]
 #[path = "desktop_room_fixtures.rs"]
 mod room_fixtures;
 #[cfg(test)]
@@ -733,6 +736,7 @@ pub(super) fn run(
         painted_reactive: None,
         window: None,
         renderer: None,
+        renderer_startup: None,
         bga_cache: BgaTextureCache::default(),
         instance: None,
         scene: Scene::new(WIDTH as u32, HEIGHT as u32),
@@ -1166,6 +1170,14 @@ struct PendingClipboard {
     target: TextTarget,
     edit: ClipboardEdit,
 }
+struct PreparedRenderer {
+    instance: wgpu::Instance,
+    renderer: Renderer,
+}
+struct RendererStartup {
+    job: NativeCatalog<PreparedRenderer>,
+    retired: bool,
+}
 struct Desktop {
     options: Options,
     active_backend: BackendChoice,
@@ -1209,6 +1221,9 @@ struct Desktop {
     selection_diagnostics: Arc<[String]>,
     selection_view: Option<SelectionView>,
     painted_reactive: Option<ScreenInstanceId>,
+    // On unexpected Desktop drop, join the transferred surface owner before
+    // releasing this UI-owned window reference.
+    renderer_startup: Option<RendererStartup>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     bga_cache: BgaTextureCache,
@@ -1263,8 +1278,10 @@ impl Desktop {
         }
         self.next_frame = Instant::now();
         if let Some(window) = &self.window {
-            window.set_title("BeatKernel BMS player");
-            window.request_redraw();
+            if !self.renderer_pending() {
+                window.set_title("BeatKernel BMS player");
+                window.request_redraw();
+            }
         }
     }
     fn begin_selection(&mut self) -> Result<(), String> {
@@ -1321,7 +1338,10 @@ impl Desktop {
         // active Selection until it has actually consumed that joined result.
         self.catalog.as_ref().is_some_and(|catalog| {
             !catalog.is_finished()
-                || (!self.is_suspended() && self.navigator.route() == ScreenRoute::Selection)
+                || self.closing()
+                || (!self.is_suspended()
+                    && !self.renderer_pending()
+                    && self.navigator.route() == ScreenRoute::Selection)
         })
     }
     fn collect_catalog(&mut self) {
@@ -1351,7 +1371,9 @@ impl Desktop {
         // A hidden/suspended Selection does not receive another panel's draft
         // or reactive bindings. The finished thread retains its owned result.
         if !self.closing()
-            && (self.is_suspended() || self.navigator.route() != ScreenRoute::Selection)
+            && (self.is_suspended()
+                || self.renderer_pending()
+                || self.navigator.route() != ScreenRoute::Selection)
         {
             return;
         }
@@ -1428,6 +1450,9 @@ impl Desktop {
     }
     /// Prepare changed field glyphs at UI state boundaries, never in retained paint.
     fn sync_input_font(&mut self) {
+        if self.startup.is_some() || self.renderer_pending() {
+            return;
+        }
         self.input_font_error = None;
         if let Err(error) = self.prepare_input_font() {
             self.input_font = None;
@@ -1541,14 +1566,15 @@ impl Desktop {
     fn ui_ready(&self) -> bool {
         self.active
             && self.startup.is_none()
+            && !self.renderer_pending()
             && self.navigator.phase() == ScreenPhase::Active
             && !self.occluded
             && self.profile_io.is_none()
     }
     /// Prepare an atomic route change before data preparation or thread spawn.
     fn prepare_route(&self, to: ScreenRoute) -> Result<ScreenNavigator, String> {
-        if self.startup.is_some() && to != ScreenRoute::Closing {
-            return Err("navigation waits for startup profile preparation".into());
+        if (self.startup.is_some() || self.renderer_pending()) && to != ScreenRoute::Closing {
+            return Err("navigation waits for startup preparation".into());
         }
         if to != ScreenRoute::Closing
             && !matches!(to, ScreenRoute::Play { .. } | ScreenRoute::Results { .. })
@@ -1657,6 +1683,7 @@ impl Desktop {
         if let Some(startup) = &self.startup {
             startup.cancel();
         }
+        self.retire_renderer_startup();
         if let Some(catalog) = &self.catalog {
             catalog.cancel();
         }
@@ -2819,6 +2846,7 @@ impl Desktop {
     }
     fn hit(&self) -> Option<ControlId> {
         if self.startup.is_some()
+            || self.renderer_pending()
             || !self.active
             || self.closing()
             || self.is_suspended()
@@ -3304,6 +3332,7 @@ impl Desktop {
         self.request_close();
     }
     fn collect_game(&mut self) {
+        let renderer_pending = self.renderer_pending();
         if let Some(game) = &mut self.game {
             for _ in 0..beatkernel_bms_runtime::room_presentation::ROOM_UI_CAPACITY {
                 match game.viewer.take_room_reply() {
@@ -3313,7 +3342,9 @@ impl Desktop {
             }
             if let Some(snapshot) = game.viewer.take_latest() {
                 if let (Some(window), Some(chart)) = (&self.window, &snapshot.chart) {
-                    window.set_title(&window_title(&chart.title, &chart.artist));
+                    if !renderer_pending {
+                        window.set_title(&window_title(&chart.title, &chart.artist));
+                    }
                 }
                 game.accept_snapshot(snapshot);
             }
@@ -3346,7 +3377,7 @@ impl Desktop {
         }
         // Only the joined worker's final native acknowledgement can repeat.
         self.repeat_practice_if_due();
-        if self.navigator.phase() == ScreenPhase::Active {
+        if self.navigator.phase() == ScreenPhase::Active && !self.renderer_pending() {
             if let Some(game) = &self.game {
                 if game.joined && matches!(self.navigator.route(), ScreenRoute::Play { .. }) {
                     if let Err(error) = self.navigate(ScreenRoute::Results {
@@ -3952,7 +3983,7 @@ impl Desktop {
         self.sync_input_font();
     }
     fn key(&mut self, key: KeyCode, repeat: bool) {
-        if self.startup.is_some() {
+        if self.startup.is_some() || self.renderer_pending() {
             if key == KeyCode::Escape && !repeat {
                 self.request_close();
             }
@@ -4186,6 +4217,7 @@ impl Desktop {
             && !self.clipboard_busy()
             && !self.catalog_busy()
             && !self.startup_busy()
+            && !self.renderer_startup_busy()
     }
     fn reactive_scene_idle(&self) -> bool {
         matches!(
@@ -4607,7 +4639,10 @@ impl Desktop {
         self.render_scene()
     }
     fn draw(&mut self) -> Result<(), String> {
-        if self.startup.is_some() || self.navigator.phase() != ScreenPhase::Active {
+        if self.startup.is_some()
+            || self.renderer_pending()
+            || self.navigator.phase() != ScreenPhase::Active
+        {
             return Ok(());
         }
         let route = self.navigator.route();
@@ -4959,6 +4994,7 @@ impl Desktop {
     fn initialize_renderer(&mut self) -> Result<(), String> {
         if self.startup.is_some()
             || self.renderer.is_some()
+            || self.renderer_startup.is_some()
             || self.closing()
             || self.is_suspended()
             || self.occluded
@@ -4968,28 +5004,106 @@ impl Desktop {
         let Some(window) = self.window.as_ref().cloned() else {
             return Ok(());
         };
-        // Native startup only, after the actual profile/CLI options are joined.
-        // Reusable Renderer::new stays async for WASM hosts.
+        // Native instance/surface acquisition stays with the window owner.
+        // Their owned handles move to the worker; WASM setup remains async.
         let instance = graphics::instance(self.active_backend)?;
         let surface = instance
-            .create_surface(window.clone())
+            .create_surface(window)
             .map_err(|error| error.to_string())?;
-        let mut renderer =
-            pollster::block_on(Renderer::new(surface, &instance, self.options.presentation))?;
-        let size = window.inner_size();
-        renderer.resize(size.width, size.height)?;
-        let font_text = self
-            .title_font
-            .as_ref()
-            .map(|atlas| {
-                let texture = renderer.upload_texture(atlas.image())?;
-                FontText::new(Arc::clone(atlas), texture)
-            })
-            .transpose()?;
-        self.instance = Some(instance);
-        self.renderer = Some(renderer);
-        self.bind_title_font(font_text);
+        let presentation = self.options.presentation;
+        let job = NativeCatalog::spawn_prepared(move |control| {
+            control.checkpoint()?;
+            let renderer = pollster::block_on(Renderer::new(surface, &instance, presentation))?;
+            control.checkpoint()?;
+            Ok(PreparedRenderer { instance, renderer })
+        })?;
+        self.renderer_startup = Some(RendererStartup {
+            job,
+            retired: false,
+        });
+        self.gesture.cancel();
+        self.invalidate_hits();
+        if let Some(window) = &self.window {
+            window.set_title("BeatKernel BMS player — Preparing graphics…");
+        }
         Ok(())
+    }
+
+    fn renderer_pending(&self) -> bool {
+        self.renderer_startup.is_some() || (self.window.is_some() && self.renderer.is_none())
+    }
+
+    fn renderer_startup_busy(&self) -> bool {
+        self.renderer_startup.as_ref().is_some_and(|startup| {
+            !startup.job.is_finished()
+                || startup.retired
+                || self.closing()
+                || (!self.is_suspended() && !self.occluded)
+        })
+    }
+
+    fn retire_renderer_startup(&mut self) {
+        if let Some(startup) = &mut self.renderer_startup {
+            startup.retired = true;
+            startup.job.cancel();
+        }
+    }
+
+    fn collect_renderer(&mut self) {
+        let Some(startup) = &self.renderer_startup else {
+            return;
+        };
+        let retired = startup.retired;
+        if !retired && !self.closing() && (self.is_suspended() || self.occluded) {
+            return;
+        }
+        let Some(result) = self
+            .renderer_startup
+            .as_mut()
+            .and_then(|startup| startup.job.poll())
+        else {
+            return;
+        };
+        self.renderer_startup = None;
+        if retired || self.closing() {
+            return;
+        }
+        let result = result.and_then(
+            |PreparedRenderer {
+                 instance,
+                 mut renderer,
+             }| {
+                let window = self
+                    .window
+                    .as_ref()
+                    .ok_or("renderer window is unavailable")?;
+                // Use current UI size/atlas, never the values at worker admission.
+                // No handle or font binding is published until all preflight succeeds.
+                let size = window.inner_size();
+                renderer.resize(size.width, size.height)?;
+                let font_text = self
+                    .title_font
+                    .as_ref()
+                    .map(|atlas| {
+                        let texture = renderer.upload_texture(atlas.image())?;
+                        FontText::new(Arc::clone(atlas), texture)
+                    })
+                    .transpose()?;
+                self.instance = Some(instance);
+                self.renderer = Some(renderer);
+                self.bind_title_font(font_text);
+                Ok(())
+            },
+        );
+        if let Err(error) = result {
+            self.fail(error);
+            return;
+        }
+        self.next_frame = Instant::now();
+        if let Some(window) = &self.window {
+            window.set_title("BeatKernel BMS player");
+            window.request_redraw();
+        }
     }
 
     fn release_backgrounds(&mut self) {
@@ -5039,7 +5153,7 @@ impl ApplicationHandler for Desktop {
                     .with_title(if self.startup.is_some() {
                         "BeatKernel BMS player — Loading profile…"
                     } else {
-                        "BeatKernel BMS player"
+                        "BeatKernel BMS player — Preparing graphics…"
                     })
                     .with_inner_size(LogicalSize::new(WIDTH as f64, HEIGHT as f64)),
             ) {
@@ -5058,6 +5172,7 @@ impl ApplicationHandler for Desktop {
             .as_ref()
             .is_some_and(|window| window.has_focus());
         self.collect_startup();
+        self.collect_renderer();
         if self.startup.is_some() || self.closing() {
             return;
         }
@@ -5067,10 +5182,13 @@ impl ApplicationHandler for Desktop {
         }
         self.next_frame = Instant::now();
         if let Some(window) = &self.window {
-            window.request_redraw();
+            if !self.renderer_pending() {
+                window.request_redraw();
+            }
         }
     }
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.retire_renderer_startup();
         self.catalog_wheel.reset();
         self.navigator.suspend();
         self.synchronize_panel_lifecycles();
@@ -5197,6 +5315,7 @@ impl ApplicationHandler for Desktop {
             }
             WindowEvent::RedrawRequested
                 if self.startup.is_none()
+                    && !self.renderer_pending()
                     && !self.is_suspended()
                     && !self.closing()
                     && !self.occluded =>
@@ -5216,6 +5335,7 @@ impl ApplicationHandler for Desktop {
         }
         if request_redraw
             && self.startup.is_none()
+            && !self.renderer_pending()
             && !self.closing()
             && !self.is_suspended()
             && !self.occluded
@@ -5227,6 +5347,7 @@ impl ApplicationHandler for Desktop {
     }
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.collect_startup();
+        self.collect_renderer();
         if self.startup.is_some() {
             event_loop.set_control_flow(if self.startup_busy() {
                 ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(4))
@@ -5249,6 +5370,7 @@ impl ApplicationHandler for Desktop {
             && self.game.as_ref().is_none_or(|game| game.joined)
             && self.profile_io.is_none()
             && self.startup.is_none()
+            && self.renderer_startup.is_none()
             && self.catalog.is_none()
             && self
                 .clipboard
@@ -5256,6 +5378,22 @@ impl ApplicationHandler for Desktop {
                 .is_none_or(ClipboardWorker::is_finished)
         {
             event_loop.exit();
+            return;
+        }
+        if self.renderer_pending() {
+            // A ready hidden result stays owned without continuous wakeups.
+            // Retired/closing work still wakes until its real join is consumed.
+            let busy = self.renderer_startup_busy()
+                || self.catalog_busy()
+                || self.clipboard_busy()
+                || self.profile_io.is_some()
+                || self.game.as_ref().is_some_and(|game| !game.joined)
+                || self.closing();
+            event_loop.set_control_flow(if busy {
+                ControlFlow::WaitUntil(Instant::now() + Duration::from_millis(4))
+            } else {
+                ControlFlow::Wait
+            });
             return;
         }
         if self.reactive_waits_for_events() {
@@ -5293,6 +5431,7 @@ impl ApplicationHandler for Desktop {
         self.release_backgrounds();
         self.profile_io = None;
         self.startup = None;
+        self.renderer_startup = None;
         self.catalog = None;
         self.clipboard = None;
     }
@@ -6420,6 +6559,7 @@ mod tests {
             painted_reactive: None,
             window: None,
             renderer: None,
+            renderer_startup: None,
             bga_cache: BgaTextureCache::default(),
             instance: None,
             scene: Scene::new(WIDTH as u32, HEIGHT as u32),

@@ -27,8 +27,9 @@ impl CatalogControl {
     }
 }
 
-/// One owned CPU preparation thread, optionally including a library scan.
-/// Native/UI/GPU handles remain with their owners.
+/// One owned preparation thread for explicitly transferred `Send` data and
+/// handles, optionally including a library scan. Native window acquisition
+/// stays on the UI owner; renderer preparation returns its handles at join.
 pub struct NativeCatalog<T: Send + 'static> {
     control: CatalogControl,
     worker: Option<JoinHandle<Result<T, String>>>,
@@ -51,8 +52,9 @@ impl<T: Send + 'static> NativeCatalog<T> {
             prepare(library, control)
         })
     }
-    /// Prepare CPU-owned data without scanning a directory, using the same
-    /// cancellation checkpoints and joined-result ownership as library startup.
+    /// Prepare explicitly transferred owned data/handles without a directory
+    /// scan, using the same cancellation checkpoints and joined-result
+    /// ownership as library startup.
     pub fn spawn_prepared(
         prepare: impl FnOnce(&CatalogControl) -> Result<T, String> + Send + 'static,
     ) -> Result<Self, String> {
