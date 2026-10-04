@@ -5,17 +5,17 @@ use crate::{
     competition::ScoreSummary,
     competition_live::{CompetitionOptions, LiveCompetition},
     local_input::InputMerger,
-    local_players::{MAX_LOCAL_PLAYERS, PlayerId},
-    local_runtime::{MemberConfig, RuntimeGroup, VoiceAllocator},
+    local_players::{MAX_LOCAL_PLAYERS, PlayerId, ResolvedInputPlan},
+    local_preparation::{PreparedLocalMembers, prepare_local_members},
+    local_runtime::{MemberConfig, RuntimeGroup},
     native_cohort::{PlayerState, replay_path},
     native_gameplay::NativeGameplayResult,
     native_judge::{NativeJudgeConfig, capture_limits, prepare_capture},
     replay_capture::LiveReplayCapture,
 };
 use beatkernel::{
-    audio::{AudioCommand, CommandProducer, VoiceId},
+    audio::{CommandProducer, VoiceId},
     input::{Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId},
-    judge::JudgeEngine,
     time::{ClockDomainId, ClockPoint, Timestamp},
     transport::Transport,
 };
@@ -107,53 +107,47 @@ pub fn prepare_cohort(
         config.replay_max_bytes,
         config.replay_max_records,
     )?;
-    let mut reserved = Vec::new();
-    reserved.try_reserve_exact(prepared.bgm_commands.len())?;
-    for command in &prepared.bgm_commands {
-        match command {
-            AudioCommand::Play { voice, .. } => reserved.push(*voice),
-            _ => return Err("prepared BGM command is not Play".into()),
-        }
-    }
-    let first = reserved
-        .iter()
-        .map(|voice| voice.0)
-        .max()
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or("cohort voice namespace overflow")?;
-    let mut allocator = VoiceAllocator::new(first);
-    let mut configs = Vec::new();
-    let mut states = Vec::new();
-    let mut save_paths = Vec::new();
-    configs.try_reserve_exact(assignments.len())?;
-    states.try_reserve_exact(assignments.len())?;
-    save_paths.try_reserve_exact(assignments.len())?;
-    for &(player, device) in assignments {
-        let judge = JudgeEngine::new(
-            prepared.compiled.chart.clone(),
-            prepared.source.rules(),
-            profile.clone(),
-        )?;
-        let bindings =
-            BindingMap::from_bindings(config.bindings.iter().map(|(&lane, &key)| Binding {
+    let plan = ResolvedInputPlan::new(
+        assignments
+            .iter()
+            .map(|&(player, device)| (player, Some(device)))
+            .collect(),
+    )?;
+    let mut maps = Vec::new();
+    maps.try_reserve_exact(assignments.len())?;
+    for &(_, device) in assignments {
+        maps.push(BindingMap::from_bindings(config.bindings.iter().map(
+            |(&lane, &key)| Binding {
                 device: DeviceSelector::Exact(device),
                 physical: PhysicalControlId::keyboard(key),
                 game_control: GameControlId(u32::from(lane)),
-            }))?;
-        let mut sounds = prepared.sounds.clone();
-        for sound in &sounds {
-            if !sound.gain.is_finite() {
-                return Err("cohort sound has nonfinite gain".into());
-            }
-        }
-        allocator.remap(&mut sounds)?;
+            },
+        ))?);
+    }
+    let PreparedLocalMembers { configs, reserved } = prepare_local_members(
+        prepared,
+        &plan,
+        maps,
+        profile,
+        beatkernel_bms::BmsInputMode::ButtonOnly,
+    )?;
+    let mut states = Vec::new();
+    let mut save_paths = Vec::new();
+    states.try_reserve_exact(assignments.len())?;
+    save_paths.try_reserve_exact(assignments.len())?;
+    for member in &configs {
+        let player = member.player;
         let path = config
             .record_replay
             .map(|path| replay_path(path, player))
             .transpose()?;
-        let capture =
-            prepare_capture(&judge, config.host, config.start, config.chart_seed, limits)?;
+        let capture = prepare_capture(
+            &member.judge,
+            config.host,
+            config.start,
+            config.chart_seed,
+            limits,
+        )?;
         let completion = judge_config.completion(prepared)?;
         states.push(PlayerState {
             player,
@@ -164,13 +158,6 @@ pub fn prepare_cohort(
             last_song: song_origin,
         });
         save_paths.push((player, path));
-        configs.push(MemberConfig {
-            player,
-            device: Some(device),
-            bindings,
-            judge,
-            sounds,
-        });
     }
     for (state, member) in states.iter_mut().zip(&configs) {
         state.competition = LiveCompetition::prepare_for_at_with_chart_seed(

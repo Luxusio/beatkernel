@@ -89,6 +89,8 @@ pub mod live_pause;
 pub mod local_input;
 /// Collection-based local player identity and unique native input assignment.
 pub mod local_players;
+/// Host-independent prepared judges, bindings and disjoint key-sound voices.
+pub mod local_preparation;
 /// Shared-transport/output execution over independent actual core runtimes.
 pub mod local_runtime;
 /// Graphical local-player draft using typed keyboard metadata and stable IDs.
