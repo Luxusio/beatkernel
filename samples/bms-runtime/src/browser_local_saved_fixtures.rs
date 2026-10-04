@@ -175,6 +175,136 @@ fn recorded_members() -> [Vec<u8>; 2] {
 }
 
 #[test]
+fn whole_cohort_progress_observes_independent_committed_frontiers_even_after_failure() {
+    use crate::{
+        multiplayer_group::{
+            MemberProgress, decode_prefix, encode_prefix, encode_words, validate_members,
+        },
+        multiplayer_protocol::Progress,
+    };
+    let mut observed = owner(0);
+    let mut baseline = owner(0);
+    let initial = observed.group_progress().unwrap();
+    assert_eq!(
+        initial.iter().map(|row| row.player).collect::<Vec<_>>(),
+        PLAYERS
+    );
+    assert!(initial.iter().all(|row| row.progress
+        == Progress {
+            song_ns: -100_000_000,
+            hits: 0,
+            misses: 0,
+            combo: 0,
+            max_combo: 0,
+        }));
+    assert!(observed.input_setup_available());
+    for game in [&mut observed, &mut baseline] {
+        for player in PLAYERS {
+            game.configure_capture(player, limits(), u64::MAX).unwrap();
+        }
+        game.activate(point(11, 10_000_000_000)).unwrap();
+        input(game, 0, 0, 1, ButtonState::Down);
+        input(game, 1, 0, 1, ButtonState::Down);
+        input(game, 1, 1, 2, ButtonState::Up);
+        input(game, 1, 1_000_000_000, 3, ButtonState::Down);
+    }
+    let expected = [
+        MemberProgress {
+            player: PLAYERS[0],
+            progress: Progress {
+                song_ns: 0,
+                hits: 1,
+                misses: 0,
+                combo: 1,
+                max_combo: 1,
+            },
+        },
+        MemberProgress {
+            player: PLAYERS[1],
+            progress: Progress {
+                song_ns: 1_000_000_000,
+                hits: 2,
+                misses: 0,
+                combo: 2,
+                max_combo: 2,
+            },
+        },
+        MemberProgress {
+            player: PLAYERS[2],
+            progress: Progress {
+                song_ns: -100_000_000,
+                hits: 0,
+                misses: 0,
+                combo: 0,
+                max_combo: 0,
+            },
+        },
+    ];
+    let hashes: Vec<_> = PLAYERS
+        .iter()
+        .map(|player| observed.judge(*player).unwrap().stable_hash().unwrap())
+        .collect();
+    let shared_song = observed.song_time();
+    let prefix = observed.group_progress().unwrap();
+    assert_eq!(prefix, expected);
+    validate_members(Some(&initial), &prefix).unwrap();
+    let words = encode_words(&prefix).unwrap();
+    assert_eq!(words.len(), 33);
+    assert_eq!(
+        words.chunks_exact(11).map(|row| row[0]).collect::<Vec<_>>(),
+        [7, u32::MAX, 91]
+    );
+    let mut detached = observed.group_progress().unwrap();
+    detached[0].player = PlayerId(999);
+    detached[0].progress.hits = 999;
+    assert_eq!(observed.group_progress().unwrap(), expected);
+    assert_eq!(observed.song_time(), shared_song);
+
+    // A genuine member chronology refusal fences the cohort after distinct
+    // committed prefixes. Reading cleanup state must not advance idle members.
+    for game in [&mut observed, &mut baseline] {
+        let backwards = PhysicalInputEvent::Button(ButtonEvent {
+            meta: EventMeta::new(SOURCES[1], point(11, 10_100_000_000), 4),
+            control: PhysicalControlId::keyboard(4),
+            state: ButtonState::Up,
+        });
+        assert!(
+            game.process_input(backwards, &Exact, point(22, 1_100_000_000))
+                .is_err()
+        );
+        assert!(game.failed());
+    }
+    let retained = observed.group_progress().unwrap();
+    assert_eq!(retained, expected);
+    let encoded = encode_prefix(u64::MAX, true, &retained).unwrap();
+    let decoded = decode_prefix(&encoded, u64::MAX, Some(&prefix)).unwrap();
+    assert!(decoded.final_prefix);
+    assert_eq!(decoded.members, expected);
+    assert_eq!(observed.group_progress().unwrap(), expected);
+    assert_eq!(
+        PLAYERS
+            .iter()
+            .map(|player| observed.judge(*player).unwrap().stable_hash().unwrap())
+            .collect::<Vec<_>>(),
+        hashes
+    );
+    for (index, player) in PLAYERS.into_iter().enumerate() {
+        let actual = observed.take_replay(player).unwrap().unwrap();
+        let untouched = baseline.take_replay(player).unwrap().unwrap();
+        assert_eq!(
+            actual, untouched,
+            "snapshot reads must not change a member's capture"
+        );
+        let file = decode_replay(&actual, limits()).unwrap();
+        assert_eq!(
+            file.records.last().map(|record| record.song_time),
+            [Some(Timestamp::ZERO), Some(ts(1_000_000_000)), None][index]
+        );
+        assert!(observed.take_replay(player).unwrap().is_none());
+    }
+}
+
+#[test]
 fn four_member_peer_and_saved_geometry_does_not_change_actual_cohort_capture_or_judgment() {
     use crate::{
         browser_input::TouchInputSetup,

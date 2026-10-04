@@ -1537,6 +1537,30 @@ impl StepLocalGameplay {
             .find(|member| member.player == player)
             .map(|member| member.song)
     }
+    /// Observe the actual ordered cohort without advancing gameplay. Retained
+    /// committed prefixes remain readable after failure for final publication.
+    /// This bounded control-side allocation is outside input/audio callbacks.
+    pub fn group_progress(
+        &self,
+    ) -> Result<Vec<crate::multiplayer_group::MemberProgress>, StepLocalGameplayError> {
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(self.members.len()).map_err(|_| {
+            StepGameplayError::Setup("local progress snapshot allocation failed".into())
+        })?;
+        for member in &self.members {
+            rows.push(crate::multiplayer_group::MemberProgress {
+                player: member.player,
+                progress: crate::multiplayer_protocol::Progress {
+                    song_ns: member.song.as_nanos(),
+                    hits: member.score.hits,
+                    misses: member.score.misses,
+                    combo: member.score.combo,
+                    max_combo: member.score.max_combo,
+                },
+            });
+        }
+        Ok(rows)
+    }
     pub fn song_time(&self) -> Timestamp {
         self.control.song_time()
     }

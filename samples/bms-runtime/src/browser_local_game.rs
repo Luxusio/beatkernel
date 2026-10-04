@@ -238,6 +238,12 @@ impl BrowserLocalGame {
             .map(Timestamp::as_nanos)
             .ok_or_else(|| error("unknown local player"))
     }
+    /// Exact ordered member progress for a bounded control-side network snapshot.
+    /// PlayerId precedes five low/high word pairs; no host clock is sampled.
+    pub fn progress_words(&self) -> Result<Vec<u32>, JsValue> {
+        let rows = self.game.group_progress().map_err(error)?;
+        crate::multiplayer_group::encode_words(&rows).map_err(error)
+    }
     pub fn pressed(&self, player: u32) -> Result<u32, JsValue> {
         self.members
             .iter()
