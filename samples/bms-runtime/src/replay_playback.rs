@@ -406,7 +406,13 @@ fn validate_recorded_setup(
     }
     let selected = crate::section_start::source_at(source, start)?;
     let compiled = selected.compile()?;
-    let judge = JudgeEngine::new(
+    let constructor =
+        if input_mode == BmsInputMode::ButtonOrContact && !selected.invisible.is_empty() {
+            JudgeEngine::new_with_contacts
+        } else {
+            JudgeEngine::new
+        };
+    let judge = constructor(
         compiled.chart,
         selected.rules_with_input_mode(input_mode),
         profile,

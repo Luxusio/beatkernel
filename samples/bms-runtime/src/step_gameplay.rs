@@ -508,7 +508,14 @@ impl StepGameplay {
         let runtime_setup = match input {
             InputSetup::Solo(bindings) => {
                 let rules = prepared.source.rules_with_input_mode(input_mode);
-                let judge = JudgeEngine::new(prepared.compiled.chart, rules, profile)
+                let constructor = if input_mode == BmsInputMode::ButtonOrContact
+                    && !prepared.source.invisible.is_empty()
+                {
+                    JudgeEngine::new_with_contacts
+                } else {
+                    JudgeEngine::new
+                };
+                let judge = constructor(prepared.compiled.chart, rules, profile)
                     .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
                 RuntimeSetup::Solo { bindings, judge }
             }

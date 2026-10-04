@@ -81,7 +81,14 @@ pub fn prepare_local_members(
         .try_reserve_exact(plan.members().len())
         .map_err(|_| "local member allocation failed")?;
     for (&(player, device), bindings) in plan.members().iter().zip(bindings) {
-        let judge = JudgeEngine::new(
+        let constructor = if input_mode == BmsInputMode::ButtonOrContact
+            && !prepared.source.invisible.is_empty()
+        {
+            JudgeEngine::new_with_contacts
+        } else {
+            JudgeEngine::new
+        };
+        let judge = constructor(
             prepared.compiled.chart.clone(),
             prepared.source.rules_with_input_mode(input_mode),
             profile.clone(),

@@ -63,6 +63,22 @@ impl JudgeEngine {
         )
     }
 
+    /// Enables contact ownership even when no chart object uses press semantics.
+    /// Tracking does not change object eligibility or create judged objects.
+    pub fn new_with_contacts(
+        chart: CompiledChart,
+        rules: Vec<Rule>,
+        profile: JudgeProfile,
+    ) -> Result<Self, JudgeError> {
+        Self::with_policies_and_contacts(
+            chart,
+            rules,
+            profile,
+            Box::new(ClosestCandidate),
+            Box::new(WindowJudgePolicy),
+        )
+    }
+
     /// Constructs a judge with caller-selected candidate and grading policies.
     pub fn with_policies(
         chart: CompiledChart,
@@ -70,6 +86,29 @@ impl JudgeEngine {
         profile: JudgeProfile,
         resolver: Box<dyn CandidateResolver>,
         policy: Box<dyn JudgePolicy>,
+    ) -> Result<Self, JudgeError> {
+        Self::build(chart, rules, profile, resolver, policy, false)
+    }
+
+    /// Uses caller policies with immutable contact ownership enabled, including
+    /// empty charts. Candidate eligibility remains defined by each evaluator.
+    pub fn with_policies_and_contacts(
+        chart: CompiledChart,
+        rules: Vec<Rule>,
+        profile: JudgeProfile,
+        resolver: Box<dyn CandidateResolver>,
+        policy: Box<dyn JudgePolicy>,
+    ) -> Result<Self, JudgeError> {
+        Self::build(chart, rules, profile, resolver, policy, true)
+    }
+
+    fn build(
+        chart: CompiledChart,
+        rules: Vec<Rule>,
+        profile: JudgeProfile,
+        resolver: Box<dyn CandidateResolver>,
+        policy: Box<dyn JudgePolicy>,
+        contacts: bool,
     ) -> Result<Self, JudgeError> {
         let mut registrations = HashMap::new();
         for rule in &rules {
@@ -115,7 +154,7 @@ impl JudgeEngine {
             identities.insert(object.id, index);
         }
         let count = interactions.len();
-        let contact_enabled = eligibility.contains(&StartEligibility::ProfilePress);
+        let contact_enabled = contacts || eligibility.contains(&StartEligibility::ProfilePress);
         let mut engine = Self {
             chart,
             profile,
@@ -580,6 +619,7 @@ impl JudgeEngine {
             || self.profile != source.profile
             || self.controls != source.controls
             || self.eligibility != source.eligibility
+            || self.contact_enabled != source.contact_enabled
             || self.initial_configuration != source.initial_configuration
         {
             return Err(SnapshotError::ConfigurationMismatch);

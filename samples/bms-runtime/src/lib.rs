@@ -106,6 +106,8 @@ pub mod input_sounds;
 mod input_sounds_fixtures;
 #[cfg(test)]
 mod invisible_admission_fixtures;
+#[cfg(test)]
+mod invisible_contact_fixtures;
 /// Fixed-capacity lane feedback from actual local judge results and song time.
 pub mod judge_feedback;
 pub mod live_pause;
