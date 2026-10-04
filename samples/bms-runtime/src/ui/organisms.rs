@@ -19,6 +19,35 @@ use beatkernel::{
 const TOP: i64 = 110;
 #[cfg(test)]
 const LINE: i64 = 610;
+
+/// Room comparisons occupy only the existing footer; note and touch geometry
+/// above y=640 is untouched. All text is cached by the retained model.
+pub fn room_opponent_footer(
+    scene: &mut Scene,
+    hud: &crate::room_opponent_hud::RoomOpponentHud,
+) -> Result<(), String> {
+    use crate::scene::ClipRect;
+    let footer = ClipRect::new([0, 646, 960, 74])?;
+    super::atoms::text_clipped(
+        scene,
+        12,
+        646,
+        hud.heading(),
+        1,
+        if hud.failed() { 0xff8e8e } else { 0x9bb1cf },
+        footer,
+    )?;
+    for (index, row) in hud.page().iter().enumerate() {
+        let x = 12 + (index % 2) * 480;
+        let y = 663 + (index / 2) * 27;
+        let clip = ClipRect::new([x as i64, y as i64, 456, 27])?;
+        super::atoms::text_clipped(scene, x, y, row.label(), 1, 0xf0f4ff, clip)?;
+        for (line, text) in row.counters().iter().enumerate() {
+            super::atoms::text_clipped(scene, x, y + 9 * (line + 1), text, 1, 0x9bb1cf, clip)?;
+        }
+    }
+    Ok(())
+}
 #[cfg(test)]
 fn note_y(time: Timestamp, now: Timestamp, lookahead: i64) -> i64 {
     project_note(time, now, lookahead, TOP, LINE).clamp(-10_000, 10_000)

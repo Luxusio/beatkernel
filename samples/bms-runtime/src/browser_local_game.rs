@@ -13,6 +13,7 @@ use crate::{
     note_progress::NoteProgress,
     player_chart::PlayerChart,
     pressed_keys::PressedKeys,
+    room_opponent_hud::{RoomHudStatus, RoomOpponentHud},
     saved_opponent_hud::SavedOpponentHud,
     saved_opponents::SavedOpponents,
     step_gameplay::{
@@ -89,6 +90,8 @@ pub struct BrowserLocalGame {
     pub(crate) chart: Arc<PlayerChart>,
     pub(crate) images: Arc<ImageAssets>,
     pub(crate) members: Vec<BrowserLocalMember>,
+    pub(crate) room_hud: Option<RoomOpponentHud>,
+    pub(crate) room_hud_disabled: bool,
     input_limits: CodecLimits,
     input_bindings: Vec<Binding>,
     hid_setup: Option<BrowserHidSetup>,
@@ -202,6 +205,8 @@ impl BrowserLocalGame {
             chart,
             images: prepared.images,
             members,
+            room_hud: None,
+            room_hud_disabled: false,
             input_limits: input.limits,
             input_bindings,
             hid_setup: None,
@@ -485,6 +490,118 @@ impl BrowserLocalGame {
         }
         member.saved_hud.mark_peer_failed();
         Ok(())
+    }
+
+    /// Freeze actual Prepared host/player metadata without changing any field
+    /// or touch geometry. Rows are [host low, host high, count, players...].
+    pub fn configure_room_hud(&mut self, own: u64, words: Vec<u32>) -> Result<(), JsValue> {
+        use crate::multiplayer_group_rooms::GroupRoomMember;
+        use crate::multiplayer_rooms::ParticipantId;
+        if self.room_hud.is_some()
+            || self.room_hud_disabled
+            || !self.game.input_setup_available()
+            || words.is_empty()
+            || words.len() > 4288
+        {
+            return Err(error(
+                "room HUD requires pristine bounded Prepared membership",
+            ));
+        }
+        let mut members = Vec::new();
+        members
+            .try_reserve_exact(64)
+            .map_err(|_| error("room HUD roster allocation failed"))?;
+        let mut offset = 0;
+        while offset < words.len() {
+            let header = words
+                .get(offset..offset + 3)
+                .ok_or_else(|| error("incomplete room HUD host"))?;
+            let participant = ParticipantId(u64::from(header[0]) | (u64::from(header[1]) << 32));
+            let count = header[2] as usize;
+            if !(1..=64).contains(&count) || members.len() == 64 {
+                return Err(error("room HUD roster exceeds bounds"));
+            }
+            offset += 3;
+            let source = words
+                .get(offset..offset + count)
+                .ok_or_else(|| error("incomplete room HUD players"))?;
+            let mut players = Vec::new();
+            players
+                .try_reserve_exact(count)
+                .map_err(|_| error("room HUD player allocation failed"))?;
+            players.extend(source.iter().map(|&player| PlayerId(player)));
+            members.push(GroupRoomMember {
+                id: participant,
+                players,
+                prepared: true,
+            });
+            offset += count;
+        }
+        let own_member = members
+            .iter()
+            .find(|member| member.id == ParticipantId(own))
+            .ok_or_else(|| error("room HUD is missing this participant"))?;
+        if own_member.players.as_slice() != self.game.players() {
+            return Err(error("room HUD changed the actual local roster"));
+        }
+        let hud = RoomOpponentHud::new(ParticipantId(own), &members).map_err(error)?;
+        self.room_hud = Some(hud);
+        Ok(())
+    }
+
+    pub fn update_room_hud(
+        &mut self,
+        participant: u64,
+        sequence: u64,
+        final_prefix: bool,
+        words: Vec<u32>,
+    ) -> Result<(), JsValue> {
+        let members = crate::multiplayer_group::decode_words(&words).map_err(error)?;
+        let prefix = crate::multiplayer_group::GroupPrefix {
+            sequence,
+            final_prefix,
+            members,
+        };
+        self.room_hud
+            .as_mut()
+            .ok_or_else(|| error("room HUD is not configured"))?
+            .update(
+                crate::multiplayer_rooms::ParticipantId(participant),
+                &prefix,
+            )
+            .map_err(error)
+    }
+
+    pub fn set_room_hud_status(&mut self, status: u32) -> Result<(), JsValue> {
+        let status = match status {
+            0 => RoomHudStatus::Waiting,
+            1 => RoomHudStatus::Connected,
+            2 => RoomHudStatus::Disconnected,
+            _ => return Err(error("invalid room HUD status")),
+        };
+        self.room_hud
+            .as_mut()
+            .ok_or_else(|| error("room HUD is not configured"))?
+            .set_status(status)
+            .map_err(error)
+    }
+    pub fn set_room_hud_page(&mut self, page: u32) -> Result<(), JsValue> {
+        self.room_hud
+            .as_mut()
+            .ok_or_else(|| error("room HUD is not configured"))?
+            .set_page(page as usize)
+            .map_err(error)
+    }
+    pub fn room_hud_pages(&self) -> u32 {
+        self.room_hud
+            .as_ref()
+            .map_or(0, |hud| hud.page_count() as u32)
+    }
+    pub fn disable_room_hud(&mut self) {
+        self.room_hud_disabled = true;
+        if let Some(hud) = &mut self.room_hud {
+            hud.mark_failed();
+        }
     }
 
     pub fn configure_touch_regions(

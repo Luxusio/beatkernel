@@ -205,6 +205,18 @@ impl BrowserCanvas {
                 }
             }
         }
+        if let Some(hud) = &game.room_hud {
+            organisms::room_opponent_footer(&mut self.scene, hud)?;
+        } else if game.room_hud_disabled {
+            atoms::text(
+                &mut self.scene,
+                12,
+                646,
+                "ROOM SCORES UNAVAILABLE",
+                1,
+                0xff8e8e,
+            );
+        }
         self.renderer.render(&self.scene)
     }
 
