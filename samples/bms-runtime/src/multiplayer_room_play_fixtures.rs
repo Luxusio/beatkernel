@@ -258,6 +258,7 @@ fn committed(count: usize) -> (Cohort, i64) {
         );
     }
     assert_eq!(coordinator.song_target_ns(), Some(target));
+    let mut delayed_accept = None;
     for index in 0..count {
         let client = &mut cohort.clients[index];
         let accept = client.poll_write(11_081 + offset(index)).unwrap().unwrap();
@@ -270,7 +271,7 @@ fn committed(count: usize) -> (Cohort, i64) {
         assert!(
             client
                 .receive(
-                    RoomMessage::Start(StartMessage::Commit(target)),
+                    RoomMessage::Start(StartMessage::Commit(target + 1)),
                     11_082 + offset(index)
                 )
                 .is_err()
@@ -278,7 +279,13 @@ fn committed(count: usize) -> (Cohort, i64) {
         assert_eq!(*client, before);
         assert!(client.written(1, 11_900 + offset(index)).is_err());
         assert_eq!(*client, before);
-        client.written(accept.id, 11_082 + offset(index)).unwrap();
+        if index + 1 == count {
+            // The frame reaches the server, while its real local completion
+            // notification remains queued behind later received controls.
+            delayed_accept = Some((accept.id, 11_082 + offset(index)));
+        } else {
+            client.written(accept.id, 11_082 + offset(index)).unwrap();
+        }
         let before = client.clone();
         assert!(
             client
@@ -311,11 +318,39 @@ fn committed(count: usize) -> (Cohort, i64) {
         coordinator
             .written(cohort.ids[index], commit, 11_101 + index as i64)
             .unwrap();
-        deliver(
-            &mut cohort.clients[index],
-            RoomMessage::Start(commit),
-            11_200 + offset(index),
-        );
+        if index + 1 == count {
+            let client = &mut cohort.clients[index];
+            client
+                .receive_at(
+                    RoomMessage::Start(commit),
+                    11_200 + offset(index),
+                    11_250 + offset(index),
+                )
+                .unwrap();
+            assert_eq!(client.take_schedule(), None);
+            let pending = client.clone();
+            assert!(
+                client
+                    .receive_at(
+                        RoomMessage::Start(commit),
+                        11_201 + offset(index),
+                        11_251 + offset(index)
+                    )
+                    .is_err()
+            );
+            assert_eq!(*client, pending);
+            assert!(client.poll_write(11_251 + offset(index)).unwrap().is_none());
+            let (write_id, completed) = delayed_accept.unwrap();
+            client
+                .written_at(write_id, completed, 11_252 + offset(index))
+                .unwrap();
+        } else {
+            deliver(
+                &mut cohort.clients[index],
+                RoomMessage::Start(commit),
+                11_200 + offset(index),
+            );
+        }
     }
     assert!(coordinator.committed());
     (cohort, target)
@@ -658,6 +693,44 @@ fn invalid_controls_receipts_and_times_leave_admission_and_clock_state_atomic() 
     );
     assert_eq!(*client, before);
     assert_eq!(client.take_schedule(), None);
+
+    let mut queued = prepared(2);
+    let client = &mut queued.clients[0];
+    let ping = client.poll_write(100).unwrap().unwrap();
+    assert!(client.poll_write(200).unwrap().is_none());
+    client.written_at(ping.id, 101, 201).unwrap();
+    client
+        .receive_at(
+            RoomMessage::ClockPong {
+                sequence: 1,
+                sent_ns: 100,
+                received_ns: 105,
+                replied_ns: 110,
+            },
+            120,
+            202,
+        )
+        .unwrap();
+    let peer_ping = RoomMessage::ClockPing {
+        sequence: 1,
+        sent_ns: 5,
+    };
+    let before = client.clone();
+    assert!(client.receive_at(peer_ping.clone(), 119, 203).is_err());
+    assert_eq!(*client, before);
+    assert!(client.receive_at(peer_ping.clone(), 204, 203).is_err());
+    assert_eq!(*client, before);
+    client.receive_at(peer_ping, 121, 203).unwrap();
+    let pong = client.poll_write(204).unwrap().unwrap();
+    assert_eq!(
+        wire(&pong),
+        RoomMessage::ClockPong {
+            sequence: 1,
+            sent_ns: 5,
+            received_ns: 121,
+            replied_ns: 204,
+        }
+    );
 }
 
 #[test]

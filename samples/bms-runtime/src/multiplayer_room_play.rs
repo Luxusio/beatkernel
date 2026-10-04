@@ -20,6 +20,7 @@ pub enum RoomPlayError {
     Stopped,
     NegativeNow,
     TimeRegression,
+    InvalidObservation,
     UnknownWrite,
     IdExhausted,
     Admission(RoomClientError),
@@ -35,6 +36,7 @@ impl fmt::Display for RoomPlayError {
             Self::Stopped => f.write_str("room play client is stopped"),
             Self::NegativeNow => f.write_str("room play clock must be nonnegative"),
             Self::TimeRegression => f.write_str("room play clock regressed"),
+            Self::InvalidObservation => f.write_str("invalid room play observation time"),
             Self::UnknownWrite => {
                 f.write_str("room play receipt does not match the in-flight frame")
             }
@@ -102,8 +104,10 @@ pub struct RoomPlayClient {
     start: StartAgreement,
     estimate_installed: bool,
     next_id: Option<u64>,
-    in_flight: Option<(u64, Receipt)>,
+    in_flight: Option<(u64, Receipt, i64)>,
     last_now: Option<i64>,
+    last_received: Option<i64>,
+    pending_commit: Option<StartMessage>,
     leaving: bool,
     stopped: bool,
 }
@@ -126,6 +130,8 @@ impl RoomPlayClient {
             next_id: Some(1),
             in_flight: None,
             last_now: None,
+            last_received: None,
+            pending_commit: None,
             leaving: false,
             stopped: false,
         })
@@ -210,7 +216,7 @@ impl RoomPlayClient {
         now: i64,
     ) -> OutboundFrame {
         self.next_id = id.checked_add(1);
-        self.in_flight = Some((id, receipt));
+        self.in_flight = Some((id, receipt, now));
         self.last_now = Some(now);
         OutboundFrame { id, bytes }
     }
@@ -272,10 +278,24 @@ impl RoomPlayClient {
     /// Finished clock evidence is retained independently of later start-policy
     /// admission; installing an estimate never erases a real write receipt.
     pub fn written(&mut self, id: u64, now: i64) -> Result<(), RoomPlayError> {
+        self.written_at(id, now, now)
+    }
+
+    /// Credit a delayed full-write observation without retimestamping it. Start
+    /// freshness is still checked at the current processing time.
+    pub fn written_at(
+        &mut self,
+        id: u64,
+        completed_ns: i64,
+        now: i64,
+    ) -> Result<(), RoomPlayError> {
         self.validate_now(now)?;
-        let (expected, receipt) = self.in_flight.ok_or(RoomPlayError::UnknownWrite)?;
+        let (expected, receipt, admitted_ns) = self.in_flight.ok_or(RoomPlayError::UnknownWrite)?;
         if id != expected {
             return Err(RoomPlayError::UnknownWrite);
+        }
+        if completed_ns < admitted_ns || completed_ns > now {
+            return Err(RoomPlayError::InvalidObservation);
         }
         match receipt {
             Receipt::Admission(inner) => self.admission.written(inner)?,
@@ -283,18 +303,45 @@ impl RoomPlayClient {
                 .clock
                 .as_mut()
                 .ok_or(RoomPlayError::InvalidState)?
-                .written(inner, now)?,
-            Receipt::Start(message) => self.start.written(message, now)?,
+                .written_at(inner, completed_ns, now)?,
+            Receipt::Start(message) => {
+                let mut start = self.start;
+                start.written(message, now)?;
+                if let Some(commit) = self.pending_commit {
+                    start.receive(commit, now)?;
+                }
+                self.start = start;
+                self.pending_commit = None;
+            }
         }
         self.in_flight = None;
         self.last_now = Some(now);
         Ok(())
     }
 
-    /// Supply the original, ordered local receipt timestamp. No queue dequeue
-    /// or arrival fallback replaces the observations used by the clock owner.
+    /// Receive an observation processed immediately at its capture timestamp.
     pub fn receive(&mut self, message: RoomMessage, now: i64) -> Result<(), RoomPlayError> {
+        self.receive_at(message, now, now)
+    }
+
+    /// Preserve original ordered read captures independently of processing time
+    /// and local write-completion callbacks. A matching early Commit is held
+    /// until the exact Accept frame receives a real full-write receipt.
+    pub fn receive_at(
+        &mut self,
+        message: RoomMessage,
+        captured_ns: i64,
+        now: i64,
+    ) -> Result<(), RoomPlayError> {
         self.validate_now(now)?;
+        if captured_ns < 0
+            || captured_ns > now
+            || self
+                .last_received
+                .is_some_and(|previous| captured_ns < previous)
+        {
+            return Err(RoomPlayError::InvalidObservation);
+        }
         match message {
             RoomMessage::ClockPing { .. } | RoomMessage::ClockPong { .. } => {
                 if self.leaving {
@@ -303,7 +350,7 @@ impl RoomPlayClient {
                 self.clock
                     .as_mut()
                     .ok_or(RoomPlayError::InvalidState)?
-                    .receive(&message, now)?;
+                    .receive_at(&message, captured_ns, now)?;
             }
             RoomMessage::Start(message) => {
                 if self.leaving {
@@ -315,9 +362,30 @@ impl RoomPlayClient {
                 } else {
                     self.start_candidate(clock)?
                 };
-                start.receive(message, now)?;
-                self.start = start;
-                self.estimate_installed = installed;
+                if let (
+                    StartMessage::Commit(target),
+                    Some((_, Receipt::Start(StartMessage::Accept(expected)), admitted_ns)),
+                ) = (message, self.in_flight)
+                {
+                    if self.pending_commit.is_some() || target != expected {
+                        return Err(RoomPlayError::InvalidState);
+                    }
+                    if captured_ns < admitted_ns {
+                        return Err(RoomPlayError::InvalidObservation);
+                    }
+                    // Validate through the genuine transitions on a copy, but
+                    // do not substitute peer response for local write evidence.
+                    start.written(StartMessage::Accept(expected), now)?;
+                    start.receive(message, now)?;
+                    self.pending_commit = Some(message);
+                } else {
+                    if self.pending_commit.is_some() {
+                        return Err(RoomPlayError::InvalidState);
+                    }
+                    start.receive(message, now)?;
+                    self.start = start;
+                    self.estimate_installed = installed;
+                }
             }
             message => {
                 let initial_prepared = !self.leaving
@@ -342,6 +410,7 @@ impl RoomPlayClient {
                 }
             }
         }
+        self.last_received = Some(captured_ns);
         self.last_now = Some(now);
         Ok(())
     }

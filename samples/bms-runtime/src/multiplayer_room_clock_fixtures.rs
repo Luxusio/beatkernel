@@ -691,3 +691,141 @@ fn shared_typed_probes_preserve_legacy_bkmp_bytes_zero_based_sequence_and_select
     assert!(legacy_a.next_pong(1_800).unwrap().is_none());
     assert!(legacy_b.next_pong(2_200).unwrap().is_none());
 }
+
+#[test]
+fn delayed_actor_processing_preserves_captured_ping_receipts_and_pong_sample_times() {
+    let (mut a, mut b) = pair();
+    for index in 0..8 {
+        let at = 1_000 + index * 1_000;
+        let a_ping = a.next(at).unwrap().unwrap();
+        let b_ping = b.next(at + 400).unwrap().unwrap();
+        assert!(a.next(at + 200).unwrap().is_none());
+        assert!(b.next(at + 600).unwrap().is_none());
+        a.written_at(a_ping.id, at + 2, at + 201).unwrap();
+        b.written_at(b_ping.id, at + 403, at + 601).unwrap();
+        a.receive_at(&message(&b_ping), at + 7, at + 202).unwrap();
+        b.receive_at(&message(&a_ping), at + 411, at + 602).unwrap();
+        let a_pong = a.next(at + 203).unwrap().unwrap();
+        let b_pong = b.next(at + 603).unwrap().unwrap();
+        assert_eq!(
+            message(&a_pong),
+            RoomMessage::ClockPong {
+                sequence: index as u64 + 1,
+                sent_ns: at + 400,
+                received_ns: at + 7,
+                replied_ns: at + 203,
+            }
+        );
+        assert_eq!(
+            message(&b_pong),
+            RoomMessage::ClockPong {
+                sequence: index as u64 + 1,
+                sent_ns: at,
+                received_ns: at + 411,
+                replied_ns: at + 603,
+            }
+        );
+        a.written_at(a_pong.id, at + 204, at + 300).unwrap();
+        b.written_at(b_pong.id, at + 604, at + 700).unwrap();
+        a.receive_at(&message(&b_pong), at + 220, at + 301).unwrap();
+        b.receive_at(&message(&a_pong), at + 630, at + 701).unwrap();
+        if index < 7 {
+            assert_eq!(a.estimate(), None);
+            assert_eq!(b.estimate(), None);
+        }
+    }
+    let a_estimate = a.estimate().unwrap();
+    let b_estimate = b.estimate().unwrap();
+    assert_eq!(
+        (
+            a_estimate.lower_ns(),
+            a_estimate.upper_ns(),
+            a_estimate.round_trip_ns()
+        ),
+        (383, 411, 28)
+    );
+    assert_eq!(
+        (
+            b_estimate.lower_ns(),
+            b_estimate.upper_ns(),
+            b_estimate.round_trip_ns()
+        ),
+        (-427, -393, 34)
+    );
+    assert_eq!(a_estimate.observed_local_ns(), 8_220);
+    assert_eq!(b_estimate.observed_local_ns(), 8_630);
+}
+
+#[test]
+fn captured_read_and_write_lanes_validate_independently_without_retiming_or_partial_adoption() {
+    let (mut exchange, _) = pair();
+    let ping = exchange.next(100).unwrap().unwrap();
+    assert!(exchange.next(200).unwrap().is_none());
+    for (id, completed, processing) in [
+        (ping.id, -1, 201),
+        (ping.id, 99, 201),
+        (ping.id, 202, 201),
+        (ping.id + 1, 150, 201),
+        (ping.id, 150, 199),
+    ] {
+        let before = exchange.clone();
+        assert!(exchange.written_at(id, completed, processing).is_err());
+        assert_eq!(exchange, before);
+    }
+    exchange.written_at(ping.id, 150, 201).unwrap();
+    let pong = RoomMessage::ClockPong {
+        sequence: 1,
+        sent_ns: 100,
+        received_ns: 105,
+        replied_ns: 110,
+    };
+    // The read was captured before the delayed write notification. Neither
+    // lane is retimestamped to the other's capture or the previous actor poll.
+    exchange.receive_at(&pong, 120, 202).unwrap();
+    let peer_ping = RoomMessage::ClockPing {
+        sequence: 1,
+        sent_ns: 5,
+    };
+    for (captured, processing) in [(-1, 203), (119, 203), (204, 203), (120, 201)] {
+        let before = exchange.clone();
+        assert!(
+            exchange
+                .receive_at(&peer_ping, captured, processing)
+                .is_err()
+        );
+        assert_eq!(exchange, before);
+    }
+    let before = exchange.clone();
+    assert!(exchange.written_at(ping.id, 150, 203).is_err());
+    assert_eq!(exchange, before);
+    exchange.receive_at(&peer_ping, 120, 203).unwrap();
+    let reply = exchange.next(204).unwrap().unwrap();
+    assert_eq!(
+        message(&reply),
+        RoomMessage::ClockPong {
+            sequence: 1,
+            sent_ns: 5,
+            received_ns: 120,
+            replied_ns: 204,
+        }
+    );
+    let before = exchange.clone();
+    assert!(exchange.written_at(reply.id, 203, 205).is_err());
+    assert_eq!(exchange, before);
+    exchange.written_at(reply.id, 204, 205).unwrap();
+    assert_eq!(exchange.estimate(), None);
+
+    let (mut old, mut explicit) = pair();
+    let old_ping = old.next(100).unwrap().unwrap();
+    let explicit_ping = explicit.next(100).unwrap().unwrap();
+    old.written(old_ping.id, 101).unwrap();
+    explicit.written_at(explicit_ping.id, 101, 101).unwrap();
+    old.receive(&pong, 120).unwrap();
+    explicit.receive_at(&pong, 120, 120).unwrap();
+    assert_eq!(old, explicit);
+    exchange.stop();
+    let stopped = exchange.clone();
+    assert!(exchange.receive_at(&peer_ping, 120, 206).is_err());
+    assert!(exchange.written_at(reply.id, 204, 206).is_err());
+    assert_eq!(exchange, stopped);
+}
