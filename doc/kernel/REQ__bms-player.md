@@ -1956,3 +1956,32 @@ portable real preparation/section tests with >1295 and up to3843 referenced
 samples plus4096 tails, explicit low-count rejection before decode, byte-bound
 rejection and unchanged keysound identities. Test execution, generated bindings,
 browser/device/audio/performance and ordered QA remain deferred.
+
+## Owned direct-chart title-font startup
+
+For --chart with --title-font, create the native window/event loop without
+reading the font file or preparing its glyph atlas on the UI thread. Extend
+NativeCatalog with a CPU-only preparation constructor using its same cancellation,
+nonblocking progress/poll and owned join/drop rules, without scanning the chart's
+parent directory. The existing library constructor must delegate through the
+same owner and preserve actual scan budgets/progress.
+
+Direct preparation preserves the original literal chart path, filename title
+and empty artist; it does not claim to parse chart metadata. Prepare its search
+and bounded font using the same helper/checkpoints as library preparation.
+While the job is pending, selection has no published entries/font or Start hit;
+Settings/Exit and native lifecycle stay usable. Install complete entries/search/
+font together only after real join into active Selection, respecting suspension,
+hidden screens, close and GPU texture preflight. Font error/cancellation never
+publishes a partial direct selection or silently proceeds without requested font.
+Without a supplied font, preserve the cheap direct filename selection path.
+
+Thread spawn failure is an explicit preparation error; no synchronous I/O
+fallback. Final close cancels and joins the same owner. Native profile startup
+reading and GPU/OS syscalls remain separate work and are not force-interruptible.
+Author independent actual owned-job and Desktop fixtures for direct operation
+without directory scan, original path/title/search/font, worker-thread ownership,
+pending gates, failure, suspension/hidden return, cancellation and joined cleanup.
+Scoped Rust formatting and exactly four compile-only checks after both terminal
+STOPPED finals are authorized; no assertion/test, app/device/runtime or formal
+review/QA execution under the standing deferral.
