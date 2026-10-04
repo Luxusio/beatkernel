@@ -273,10 +273,13 @@ async function harness(faults = {}) {
 
   function createAudio() { return {
     sampleRate: faults.actualRate ?? 48000,
-    samples: [], commandsSeen: [], arms: [], polls: 0, finishes: 0, finishArgs: [], outputReads: 0,
+    samples: [], commandsSeen: [], arms: [], polls: 0, finishes: 0, finishArgs: [], outputReads: 0, frameReads: 0,
     stopCalls: 0, stopStarts: 0, stopping: null,
     commandPorts: [], attachments: 0, configuration: null,
     get currentFrame() {
+      this.frameReads++;
+      if (faults.frameFailure) throw faults.frameFailure;
+      if (Object.hasOwn(faults, "contextFrame")) return faults.contextFrame;
       const frames = faults.actualRate === undefined ? now * 48 : now * faults.actualRate / 1000;
       return BigInt(Math.floor(frames));
     },
@@ -285,6 +288,7 @@ async function harness(faults = {}) {
       this.outputReads++;
       traces.push(["output-timestamp"]);
       if (faults.outputFailure) throw faults.outputFailure;
+      if (faults.outputObject) return faults.outputObject;
       if (faults.outputEvidence) return { ...faults.outputEvidence };
       throw Object.assign(new Error("output evidence is not available"), { code: "unavailable" });
     },
@@ -687,7 +691,7 @@ test("natural completion requires the latest issued tick and settled direct comm
   }
 });
 
-test("live and replay send only the original presentation pair while one Worker report remains outstanding", async () => {
+test("live and replay send only original raw presentation observations while one Worker report remains outstanding", async () => {
   for (const mode of ["live", "replay"]) {
     const h = await harness({ outputEvidence: { contextTime: 1.5, performanceTime: 1499.875 } });
     await h.preview(); if (mode === "replay") chooseRecording(h, [selectedRecording().file]);
@@ -695,7 +699,7 @@ test("live and replay send only the original presentation pair while one Worker 
     h.setNow(1500); await h.advance(8);
     const first = worker.last("play-render");
     assert.deepEqual(first, { kind: "play-render", playId: session.id, renderId: 1,
-      presentedNs: 250000000n, presentedHostNs: 1499875000n });
+      timestamp: { contextTime: 1.5, performanceTime: 1499.875 }, observedNowMs: 1500 });
     assert.equal(h.audio.polls, 0); assert.equal(h.audio.outputReads, 1);
     const transfer = worker.posts.find(entry => entry.value === first);
     assert.equal(transfer.transferCount, 0, "Window has no Worklet report buffer to transfer");
@@ -717,13 +721,13 @@ test("live and replay send only the original presentation pair while one Worker 
       completed: false, commandsPending: mode === "live" });
     await h.advance(8);
     const second = worker.last("play-render");
-    assert.equal(second.renderId, 2); assert.equal(second.presentedNs, 500000000n);
-    assert.equal(second.presentedHostNs, 1750000000n); assert.equal(Object.hasOwn(second, "report"), false);
+    assert.equal(second.renderId, 2); assert.deepEqual(second.timestamp, { contextTime: 1.75, performanceTime: 1750 });
+    assert.equal(Object.hasOwn(second, "presentedNs"), false); assert.equal(Object.hasOwn(second, "report"), false);
     await h.receive({ kind: "play-render-done", playId: session.id, renderId: second.renderId, completed: false });
     h.faults.outputFailure = Object.assign(new Error("temporarily unavailable"), { code: "unavailable" });
     await h.advance(8);
     const absent = worker.last("play-render");
-    assert.equal(absent.presentedNs, null); assert.equal(absent.presentedHostNs, null);
+    assert.equal(absent.timestamp, null); assert.equal(typeof absent.observedNowMs, "number");
     assert.equal(Object.hasOwn(absent, "report"), false);
     assert.equal(h.audio.polls, 0); assert.deepEqual(h.audio.commandsSeen, []);
     assert.equal(worker.messages("play-commands").length, 0); assert.equal(worker.messages("play-ack").length, 0);
@@ -794,6 +798,78 @@ test("cancelled direct observations cannot finish a closing session or a later p
     await h.receive(finalScore(next.id));
     assert.match(h.get("status").textContent, /Recorded replay ended/);
     assert.equal(audio.stopStarts, 1); assert.equal(audio.polls, 0);
+    await h.close();
+  }
+});
+
+test("Window snapshots exact raw frames and output observations while leaving projection to the actual-rate Worker owner", async () => {
+  const original = { contextTime: 1.5, performanceTime: 1499.875 }, reads = { context: 0, host: 0 };
+  const outputObject = {
+    get contextTime() { reads.context++; return original.contextTime; },
+    get performanceTime() { reads.host++; return original.performanceTime; },
+  };
+  const h = await harness({ actualRate: 44100, contextFrame: 4294967299n, outputObject });
+  await h.preview(); h.get("output-rate").value = "48000";
+  const session = await h.launch(), worker = h.workers[0];
+  assert.equal(session.start.rate, 44100); assert.equal(h.opens[0].options.contextOptions.sampleRate, 48000);
+  assert.equal(h.audio.frameReads, 0);
+  h.setNow(1500);
+  h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1500.125 });
+  const down = worker.last("play-step");
+  assert.equal(down.contextFrame, 4294967299n); assert.equal(Object.hasOwn(down, "audioNs"), false);
+  assert.deepEqual(down.events, [{ hostNs: 1500125000n, key: 2, down: true, sequence: 1n }]);
+  h.faults.contextFrame = 4294967300n;
+  h.window.emit("keyup", { code: "KeyZ", repeat: false, timeStamp: 1500.25 });
+  await h.receive({ kind: "play-step-done", playId: session.id, tickId: down.tickId,
+    commandsPending: false, songNs: 0n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+  const up = worker.last("play-step");
+  assert.equal(up.contextFrame, 4294967300n); assert.equal(down.contextFrame, 4294967299n);
+  assert.deepEqual(up.events, [{ hostNs: 1500250000n, key: 2, down: false, sequence: 2n }]);
+  assert.equal(up.watermark, 1500250000n); assert.equal(Object.hasOwn(up, "audioNs"), false);
+  await h.advance(8);
+  const render = worker.last("play-render");
+  assert.deepEqual(render.timestamp, { contextTime: 1.5, performanceTime: 1499.875 });
+  assert.equal(render.observedNowMs, 1500); assert.deepEqual(reads, { context: 1, host: 1 });
+  for (const field of ["presentedNs", "presentedHostNs", "report"]) assert.equal(Object.hasOwn(render, field), false);
+  original.contextTime = 604800.125; original.performanceTime = 604800000.125;
+  await h.advance(248);
+  assert.equal(worker.messages("play-render").length, 1); assert.deepEqual(reads, { context: 1, host: 1 });
+  assert.deepEqual(render.timestamp, { contextTime: 1.5, performanceTime: 1499.875 });
+  assert.equal(h.audio.polls, 0);
+  h.click("stop"); await flush(); await h.receive(finalScore(session.id)); await h.close();
+});
+
+test("raw observation acquisition failures never fall back and replay never acquires a live scheduling frame", async () => {
+  for (const mode of ["live", "replay"]) {
+    const faults = { frameFailure: new Error("actual context frame unavailable"),
+      outputFailure: Object.assign(new Error("no presentation yet"), { code: "unavailable" }) };
+    const h = await harness(faults); await h.preview();
+    if (mode === "replay") chooseRecording(h, [selectedRecording().file]);
+    const session = await h.launch(0, mode), worker = h.workers[0];
+    await h.advance(8);
+    assert.equal(worker.messages("play-step").length, 0);
+    if (mode === "live") {
+      assert.equal(h.audio.frameReads, 1); assert.equal(worker.messages("play-render").length, 0);
+      assert.equal(worker.last("play-stop").completed, false);
+      await h.receive(finalScore(session.id));
+      assert.match(h.get("status").textContent, /actual context frame unavailable/);
+    } else {
+      assert.equal(h.audio.frameReads, 0);
+      const request = worker.last("play-render");
+      assert.deepEqual(request, { kind: "play-render", playId: session.id, renderId: 1,
+        timestamp: null, observedNowMs: 1008 });
+      assert.equal(worker.messages("play-stop").length, 0);
+      await h.receive({ kind: "play-render-done", playId: session.id, renderId: request.renderId,
+        completed: false, commandsPending: false, observedTick: 0 });
+      h.faults.outputFailure = Object.assign(new Error("actual output clock failed"), { code: "state" });
+      await h.advance(8);
+      assert.equal(worker.messages("play-render").length, 1);
+      assert.equal(worker.last("play-stop").completed, false); assert.equal(h.audio.frameReads, 0);
+      await h.receive(finalScore(session.id));
+      assert.match(h.get("status").textContent, /actual output clock failed/);
+    }
+    assert.equal(h.audio.polls, 0); assert.deepEqual(h.audio.commandsSeen, []);
+    assert.equal(h.audio.stopStarts, 1); assert.equal(h.get("play").disabled, false);
     await h.close();
   }
 });
@@ -1151,7 +1227,8 @@ test("replay selection retains bounded File metadata, opens in the gesture and p
   await h.advance(8);
   assert.equal(worker.messages("play-step").length, 0);
   const render = worker.last("play-render");
-  assert.equal(render.presentedNs, 50000000n);
+  assert.deepEqual(render.timestamp, { contextTime: 1.3, performanceTime: 1300 });
+  assert.equal(Object.hasOwn(render, "presentedNs"), false);
   await h.receive({ kind: "play-render-done", playId: start.playId, renderId: render.renderId,
     completed: false, songNs: 2350000000n, hits: 23n, misses: 4n, combo: 11n, preOriginInputs: 0 });
   assert.equal(h.get("status").textContent, retainedDisplay.status);
@@ -1675,7 +1752,8 @@ test("Window explicitly negotiates physical input before PCM and preserves nativ
   assert.ok(up.tickId > down.tickId);
   assert.deepEqual(up.events, [{ hostNs: 1300125000n, key: 19, down: false, sequence: 2n }]);
   assert.equal(up.watermark, 1300125000n);
-  assert.ok(down.audioNs >= 0n && up.audioNs >= 0n);
+  assert.equal(down.contextFrame, 62400n); assert.equal(up.contextFrame, 62400n);
+  assert.equal(Object.hasOwn(down, "audioNs"), false); assert.equal(Object.hasOwn(up, "audioNs"), false);
   await done(up);
   assert.equal(worker.messages("play-stop").length, 0);
   h.click("stop"); await flush();
@@ -2166,7 +2244,7 @@ test("natural completion joins captured input and command admission before the n
   await h.close();
 });
 
-test("output observations retain original time without host polling or extrapolation and drop regressing points", async () => {
+test("output observations retain original raw time without host polling, extrapolation or Window filtering", async () => {
   const h = await harness({ outputEvidence: { contextTime: 1.3, performanceTime: 1300 } });
   await h.preview();
   const session = await h.launch();
@@ -2177,8 +2255,8 @@ test("output observations retain original time without host polling or extrapola
   assert.equal(h.audio.outputReads, 1);
   assert.equal(worker.messages("play-render").length, 1);
   const first = worker.last("play-render");
-  assert.equal(first.presentedNs, 50000000n, "8 ms of host delay does not advance output evidence");
-  assert.equal(first.presentedHostNs, 1300000000n);
+  assert.deepEqual(first.timestamp, { contextTime: 1.3, performanceTime: 1300 });
+  assert.equal(first.observedNowMs, 1300, "the original acquisition observation is not rewritten at receipt time");
   const outputIndex = h.traces.findIndex(row => row[0] === "output-timestamp");
   const requestIndex = h.traces.findIndex(row => row[0] === "post" && row[1] === "play-render");
   assert.ok(outputIndex >= 0 && outputIndex < requestIndex);
@@ -2187,12 +2265,11 @@ test("output observations retain original time without host polling or extrapola
   h.faults.outputEvidence = { contextTime: 1.29, performanceTime: 1308 };
   await h.advance(8);
   const regressed = worker.last("play-render");
-  assert.equal(regressed.presentedNs, null);
-  assert.equal(regressed.presentedHostNs, null);
+  assert.deepEqual(regressed.timestamp, { contextTime: 1.29, performanceTime: 1308 });
   await h.receive({ kind: "play-render-done", playId: session.id, renderId: regressed.renderId, completed: false });
   h.faults.outputEvidence = { contextTime: 1.3, performanceTime: 1316 };
   await h.advance(8);
-  assert.equal(worker.last("play-render").presentedNs, 50000000n, "a missing point does not reset the accepted frontier");
+  assert.deepEqual(worker.last("play-render").timestamp, { contextTime: 1.3, performanceTime: 1316 });
   assert.equal(worker.messages("play-stop").length, 0);
   await h.close();
 });
@@ -2206,8 +2283,8 @@ test("unavailable output keeps completion pending while malformed evidence and r
     const worker = h.workers[0];
     if (code === "unsupported" || code === "unavailable") {
       const report = worker.last("play-render");
-      assert.equal(report.presentedNs, null);
-      assert.equal(report.presentedHostNs, null);
+      assert.equal(report.timestamp, null);
+      assert.equal(typeof report.observedNowMs, "number");
       await h.receive({ kind: "play-render-done", playId: session.id, renderId: report.renderId, completed: false });
       await h.receive({ kind: "play-step-done", playId: session.id,
         tickId: worker.last("play-step").tickId, songNs: 604800000000000n,
@@ -2243,7 +2320,7 @@ test("unavailable output keeps completion pending while malformed evidence and r
   }
 });
 
-test("Window retains only progressing clock pairs and defers coarse or regressing coordinates", async () => {
+test("Window forwards coarse and regressing raw observations so the Worker owns the retained presentation frontier", async () => {
   const h = await harness({ outputEvidence: { contextTime: 1.5, performanceTime: 1500 } });
   await h.preview();
   const session = await h.launch();
@@ -2251,19 +2328,11 @@ test("Window retains only progressing clock pairs and defers coarse or regressin
   h.setNow(1500);
   await h.advance(8);
   const initial = worker.last("play-render");
-  assert.equal(initial.presentedNs, 250000000n);
-  assert.equal(initial.presentedHostNs, 1500000000n);
+  assert.deepEqual(initial.timestamp, { contextTime: 1.5, performanceTime: 1500 });
   let previous = initial;
-  for (const [contextTime, performanceTime, outputNs, hostNs] of [
-    // The repeated output forwards its actual host coordinate without retaining
-    // it as new progress. A subsequent host below 1504 ms must remain admissible.
-    [1.5, 1504, 250000000n, 1504000000n],
-    [1.5009765625, 1500, null, null],
-    [1.5009765625, 1502.125, 250976562n, 1502125000n],
-    [1.5, 1510, null, null],
-    [1.501953125, 1501, null, null],
-    [1.501953125, 1502.125, null, null],
-    [1.501953125, 1510, 251953125n, 1510000000n],
+  for (const [contextTime, performanceTime] of [
+    [1.5, 1504], [1.5009765625, 1500], [1.5009765625, 1502.125], [1.5, 1510],
+    [1.501953125, 1501], [1.501953125, 1502.125], [1.501953125, 1510],
   ]) {
     await h.receive({ kind: "play-render-done", playId: session.id,
       renderId: previous.renderId, completed: false });
@@ -2271,8 +2340,9 @@ test("Window retains only progressing clock pairs and defers coarse or regressin
     await h.advance(8);
     const next = worker.last("play-render");
     assert.ok(next.renderId > previous.renderId);
-    assert.equal(next.presentedNs, outputNs);
-    assert.equal(next.presentedHostNs, hostNs);
+    assert.deepEqual(next.timestamp, { contextTime, performanceTime });
+    assert.equal(Object.hasOwn(next, "presentedNs"), false);
+    assert.equal(Object.hasOwn(next, "presentedHostNs"), false);
     previous = next;
   }
   assert.equal(worker.messages("play-stop").length, 0);

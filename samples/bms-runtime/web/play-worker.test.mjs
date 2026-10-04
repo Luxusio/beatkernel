@@ -720,7 +720,7 @@ async function directActive(options = {}) {
   const rpcId = await attachCommands(h, port);
   assert.deepEqual(h.of("play-reply").find(value => value.rpcId === rpcId).result,
     { kind: "audio-ready", commandsPending: false });
-  await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START });
+  await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: options.activationFrame ?? START });
   return { h, port, game: h.replays[0] ?? h.games[0] };
 }
 
@@ -852,6 +852,100 @@ test("direct report overlap, external payloads, bad evidence and cancelled polli
     await flushJobs();
     assert.equal(game.calls.length, calls); assert.equal(h.messages.length, messages);
     assert.equal(h.games[1].stops, 0);
+    await h.send({ kind: "play-stop", playId: 8 });
+  }
+});
+
+function rawStep(fields = {}) {
+  return { kind: "play-step", playId: 7, tickId: 1, events: [], watermark: ORIGIN, contextFrame: 48000n, ...fields };
+}
+function rawObservation(fields = {}) {
+  return { kind: "play-render", playId: 7, renderId: 1, timestamp: null, observedNowMs: 1000, ...fields };
+}
+
+test("Worker projects raw frame and presentation observations without replacing Window provenance across awaits or repeated outputs", async () => {
+  const armed = 29030406000n; // One week plus 125 ms at the actual 48 kHz grid.
+  const { h, port, game } = await directActive({ activationFrame: armed });
+  const raw = rawObservation({ timestamp: { contextTime: 604800.25, performanceTime: 9007199254.75 },
+    observedNowMs: 9007199255 });
+  await h.send(raw);
+  assert.equal(port.posts.at(-1).kind, "poll");
+  raw.timestamp.contextTime = 0; raw.timestamp.performanceTime = 0; raw.observedNowMs = 0;
+  await h.send(rawStep({ contextFrame: armed + 4800n,
+    events: [{ hostNs: ORIGIN + 7n, key: 2, down: true, sequence: 9007199254740993n }], watermark: ORIGIN + 9n }));
+  assert.deepEqual(game.calls.find(row => row[0] === "input"),
+    ["input", ORIGIN + 7n, 2, true, 9007199254740993n, 120000000n]);
+  assert.deepEqual(game.calls.find(row => row[0] === "advance"), ["advance", ORIGIN + 9n, 120000000n]);
+  assert.equal(h.of("play-step-done").at(-1).commandsPending, true, "the in-flight report has not probed new core work yet");
+  assert.equal(game.calls.filter(row => row[0] === "output").length, 0);
+  await port.acknowledge({ report: renderReport({ start: armed }) });
+  assert.equal(game.calls.find(row => row[0] === "output")[2], 125000000n);
+  assert.deepEqual(game.calls.find(row => row[0] === "presentation"), ["presentation", 125000000n, 9007199254750000n]);
+  assert.equal(h.of("play-render-done").at(-1).observedTick, 1);
+  assert.equal(h.of("play-render-done").at(-1).commandsPending, false);
+  let renderId = 1;
+  for (const [timestamp, now, output, host] of [
+    [{ contextTime: 604800.25, performanceTime: 9007199254.875 }, 9007199255, 125000000n, 9007199254875000n],
+    [{ contextTime: 604800.2509765625, performanceTime: 9007199254.75 }, 9007199255, null, null],
+    // Equal output above must not retain its newer host coordinate as fresh progress.
+    [{ contextTime: 604800.2509765625, performanceTime: 9007199254.8125 }, 9007199255, 125976562n, 9007199254812500n],
+    [{ contextTime: 604800.25, performanceTime: 9007199255 }, 9007199255, null, null],
+    [{ contextTime: 604800.251953125, performanceTime: 9007199254.75 }, 9007199255, null, null],
+    [{ contextTime: 604800.251953125, performanceTime: 9007199254.8125 }, 9007199255, null, null],
+    [{ contextTime: 604800.251953125, performanceTime: 9007199255 }, 9007199255, 126953125n, 9007199255000000n],
+    [{ contextTime: 604800.2529296875, performanceTime: 9007199255 }, 9007200255.125, null, null],
+    [{ contextTime: 604800.2529296875, performanceTime: 9007199256 }, 9007199255, null, null],
+    [{ contextTime: 604800, performanceTime: 9007199255 }, 9007199255, null, null],
+    [{ contextTime: 0, performanceTime: 0 }, 9007199255, null, null],
+    [null, 9007199255, null, null],
+  ]) {
+    const before = game.calls.filter(row => row[0] === "presentation").length;
+    await h.send(rawObservation({ renderId: ++renderId, timestamp, observedNowMs: now }));
+    await port.acknowledge({ report: renderReport({ start: armed }) });
+    assert.equal(game.calls.filter(row => row[0] === "output").at(-1)[2], output);
+    const presented = game.calls.filter(row => row[0] === "presentation");
+    assert.equal(presented.length, before + (output === null ? 0 : 1));
+    if (output !== null) assert.deepEqual(presented.at(-1), ["presentation", output, host]);
+    assert.equal(h.of("play-render-done").at(-1).observedTick, 1);
+  }
+  assert.equal(h.of("play-error").length, 0, "the Worker clock throws if any projection tries to acquire it");
+  await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+});
+
+test("malformed or mixed raw observations refuse before input mutation or report polling and cancelled raw reads cannot revive owners", async () => {
+  const missingFrame = rawStep(); delete missingFrame.contextFrame;
+  const invalid = [missingFrame,
+    ...[undefined, null, 1, -1n, 18446744073709551615n].map(contextFrame => rawStep({ contextFrame })),
+    rawStep({ audioNs: undefined }), rawStep({ audioNs: 0n }),
+    rawObservation({ timestamp: undefined }), rawObservation({ observedNowMs: undefined }),
+    rawObservation({ observedNowMs: -1 }), rawObservation({ observedNowMs: Infinity }),
+    rawObservation({ timestamp: { contextTime: NaN, performanceTime: 1 } }),
+    rawObservation({ timestamp: { contextTime: 1, performanceTime: "1" } }),
+    rawObservation({ timestamp: { contextTime: -1, performanceTime: 1 } }),
+    rawObservation({ presentedNs: undefined }), rawObservation({ presentedHostNs: undefined }),
+    rawObservation({ presentedNs: null, presentedHostNs: null }),
+    directObservation({ observedNowMs: 1000 }),
+  ];
+  for (const request of invalid) {
+    const { h, port, game } = await directActive({ activationFrame: 48000n });
+    await h.send(request);
+    assert.equal(h.of("play-error").length, 1); assert.equal(port.posts.length, 0);
+    assert.deepEqual(game.calls.filter(row => ["input", "advance", "output", "presentation", "ack"].includes(row[0])), []);
+    assertReleased(h);
+  }
+  for (const mode of ["live", "replay"]) {
+    const { h, port, game } = await directActive({ activationFrame: 48000n,
+      ...(mode === "replay" ? { startRequest: replayRequest(replayFile().file) } : {}) });
+    const stale = port.onmessage;
+    await h.send(rawObservation({ timestamp: { contextTime: 1.5, performanceTime: 1499.875 }, observedNowMs: 1500 }));
+    await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+    await h.send(startRequest({ playId: 8 }));
+    const calls = game.calls.length, messages = h.messages.length;
+    stale({ data: { kind: "ack", generation: 7, sequence: 1, operation: "poll", status: 0,
+      admitted: 0, error: null, report: renderReport({ start: 48000n }) } });
+    await flushJobs();
+    assert.equal(game.calls.length, calls); assert.equal(h.messages.length, messages);
+    assert.equal(h.games.at(-1).stops, 0);
     await h.send({ kind: "play-stop", playId: 8 });
   }
 });

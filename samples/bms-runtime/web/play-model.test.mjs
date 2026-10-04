@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  millisecondsToNanos, secondsToNanos, frameNanos, startProjection, committedStartProjection,
+  millisecondsToNanos, secondsToNanos, frameNanos, audioScheduleFromFrame, startProjection, committedStartProjection,
   presentationPoint, presentationPair, reportWord, renderedCursor,
   KEY_BINDINGS, KEY_CHOICES, snapshotBindings, bindingsFor,
   parseTimingMilliseconds, timingFromMilliseconds, validateTiming,
@@ -12,6 +12,35 @@ import {
 
 const U64_MAX = 18446744073709551615n;
 const I64_MAX = 9223372036854775807n;
+
+test("raw context frames project on the actual armed grid with conservative lookahead and exact long-duration flooring", () => {
+  for (const [context, start, rate, expected] of [
+    [0n, 960n, 48000, 0n], [0n, 961n, 48000, 0n], [1n, 960n, 48000, 20833n],
+    [5n, 6n, 3, 0n], [6n, 6n, 3, 333333333n], [0n, 0n, 51, 39215686n],
+    [100n, 90n, 50, 220000000n], [26671680000n, 0n, 44100, 604800020000000n],
+    [9007199254740993n, 9007199254740990n, 1000000000, 20000003n],
+    [U64_MAX - 1n, U64_MAX, 1, 0n],
+    [U64_MAX - 960n, U64_MAX - 960n, 48000, 20000000n],
+    [I64_MAX - 20000000n, 0n, 1000000000, I64_MAX],
+  ]) assert.equal(audioScheduleFromFrame(context, start, rate), expected);
+  assert.equal(audioScheduleFromFrame(44100n, 44100n, 44100), 20000000n);
+  assert.equal(audioScheduleFromFrame(48000n, 48000n, 48000), 20000000n);
+});
+
+test("raw frame scheduling refuses lossy observations and overflow before pre-start clamping or signed conversion", () => {
+  for (const value of [undefined, null, 0, "0", -1n, U64_MAX + 1n]) {
+    assert.throws(() => audioScheduleFromFrame(value, 0n, 48000));
+    assert.throws(() => audioScheduleFromFrame(0n, value, 48000));
+  }
+  for (const rate of [undefined, null, 0, -1, 1.5, NaN, Infinity, "48000", 48000n, 0x100000000]) {
+    assert.throws(() => audioScheduleFromFrame(0n, 0n, rate));
+  }
+  assert.throws(() => audioScheduleFromFrame(U64_MAX, U64_MAX, 1), "lookahead overflow cannot be hidden by clamping");
+  assert.throws(() => audioScheduleFromFrame(U64_MAX - 959n, U64_MAX, 48000));
+  assert.throws(() => audioScheduleFromFrame(I64_MAX - 19999999n, 0n, 1000000000));
+  assert.throws(() => audioScheduleFromFrame(9223372036n, 0n, 1));
+  assert.equal(audioScheduleFromFrame(0n, U64_MAX, 1), 0n, "only the relative scheduled timestamp requires i64 headroom");
+});
 
 test("live section snapshots preserve exact original-song decimal endpoints and optional unlimited bounds", () => {
   for (const [start, end, expected] of [
