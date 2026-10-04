@@ -512,8 +512,9 @@ Native filesystem/window/device/performance acceptance remains unverified.
   physical disk traffic and arbitrary syscall interruption are not measured.
 - Library catalog scan/search/title-font CPU preparation use one background
   owner after asynchronous startup; cooperative cancellation cannot interrupt
-  arbitrary filesystem calls or decoder work. Direct chart/profile startup and
-  game loading/calibration remain separate paths. GPU font upload can still
+  arbitrary filesystem calls or decoder work. Direct title-font and startup
+  profile preparation now use the owned stages specified below; game loading/
+  calibration remain separate paths. GPU font upload can still
   consume renderer time; native responsiveness acceptance remains deferred.
 - At most 2048 visible notes per displayed playfield and a finite UI rectangle
   batch are rendered per frame (65,536 UI rectangles). Note overlap and geometry
@@ -1977,11 +1978,46 @@ publishes a partial direct selection or silently proceeds without requested font
 Without a supplied font, preserve the cheap direct filename selection path.
 
 Thread spawn failure is an explicit preparation error; no synchronous I/O
-fallback. Final close cancels and joins the same owner. Native profile startup
-reading and GPU/OS syscalls remain separate work and are not force-interruptible.
+fallback. Final close cancels and joins the same owner. Startup profile
+preparation uses the owned stage below; GPU/OS syscalls are not force-interruptible.
 Author independent actual owned-job and Desktop fixtures for direct operation
 without directory scan, original path/title/search/font, worker-thread ownership,
 pending gates, failure, suspension/hidden return, cancellation and joined cleanup.
 Scoped Rust formatting and exactly four compile-only checks after both terminal
 STOPPED finals are authorized; no assertion/test, app/device/runtime or formal
 review/QA execution under the standing deferral.
+
+## Owned startup profile before renderer initialization
+
+Read and decode --profile through the existing NativeCatalog::spawn_prepared
+CPU owner, including its bounded 72 KiB regular-file loader, cancellation
+checkpoints, nonblocking poll and actual join/drop. Preserve native profile
+values overlaid by explicit CLI native flags (excluding chart) and presentation
+values overlaid by explicit CLI display flags. Chart/library/font selection
+remains external and literal. No synchronous profile I/O fallback.
+
+Create the native window/event loop without waiting for profile I/O. While
+startup is pending, use the window title for loading status, create no renderer,
+GPU instance, selection/font job or native audio/input owner, publish no
+selection and admit no settings/navigation/play. OS close and nonrepeat Escape
+cancel startup; focus, resize, occlusion and suspend still route normally.
+No temporary renderer using CLI defaults may precede the profile's actual GPU
+backend/presentation. A plain startup without --profile retains existing paths.
+
+After real join, apply the complete prepared Options only to eligible Selection.
+Suspended/hidden/occluded UI retains the joined-ready owner until eligible;
+closing consumes/discards without install. Set active backend from the fully
+prepared profile/CLI result, then create its renderer and begin existing
+selection/font preparation. A startup error is fatal and closes/joins, with
+no default-settings success fallback. Poll only while ownership is pending;
+completed idle UI waits for events. Close waits for the startup owner too;
+unexpected exit cancels and joins it. Cooperative cancellation cannot forcibly
+interrupt an OS filesystem call or later GPU initialization.
+
+Author independent real profile-file and Desktop owned-worker fixtures for
+version compatibility/CLI precedence/literal selection, missing/malformed/
+wrong-host/oversized profiles, pending input/start/GPU gates, hidden/suspended
+return, cancellation/close and exactly one join/install. Add source-linked
+fixtures without opening windows/devices. Scoped formatting plus exactly four
+compile-only checks after both terminal STOPPED finals are authorized; actual
+assertions, app/device/runtime and formal review/QA remain deferred.

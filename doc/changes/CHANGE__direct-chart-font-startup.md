@@ -45,8 +45,9 @@ three WASM cadence dead-code warnings remain. Source whitespace inspection
 reported no diagnostics. Compilation does not establish assertion outcomes
 or actual native startup, font pixels, cancellation timing or GPU behavior.
 
-Native
-profile startup is still synchronous. GPU and OS I/O calls cannot be force
+At this increment native profile startup remained synchronous. The dependent
+[Owned startup profile](CHANGE__native-startup-profile.md) records that migration.
+GPU and OS I/O calls cannot be force
 interrupted by this cooperative cancellation. Actual native startup, focus,
 rendering, close/restart, input/audio and performance remain unverified.
 Only scoped Rust formatting and four compile-only checks are authorized after
