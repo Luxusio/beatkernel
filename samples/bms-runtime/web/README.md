@@ -923,3 +923,11 @@ Use the actual controller's vendor/product IDs and documented report layout;
 the example does not infer a device descriptor or claim a controller mapping.
 The page does no profile parsing or input rendering. These changes and deferred
 fixtures have not been exercised with a browser or physical HID device.
+
+
+`gamepad-input.mjs` adds an optional bounded acquisition component for Window
+Gamepad samples. It preserves the browser's sample timestamp and normalized
+button/axis values; source IDs come from the caller's shared allocator. It has
+no polling timer or rendering. Page/Worker binding and playable gamepad support
+remain pending. `gamepad-input.test.mjs` contains deferred controlled-endpoint
+fixtures; no execution or device acceptance is claimed.

@@ -1180,3 +1180,48 @@ and acquired device identities to Worker, where parsing and eligible-device
 matching occur. Preparation proves admitted sources before Window forwards
 reports. All stop paths detach listeners and join HID ownership cleanup. The
 [HID contract](REQ__browser-hid.md) defines profile version 1 and refusal rules.
+
+
+## Gamepad acquisition component
+
+Physical input scope includes keyboard, touch, HID, gamepad and other supported
+adapters. Window performs only browser-required acquisition and lifecycle work;
+Worker owns control interpretation, bindings, judgment and rendering.
+
+The optional `GamepadInputOwner` component acquires bounded button/axis samples
+from the Window Gamepad API. Explicit polling has no private render loop or
+timer. Preserve browser-normalized double values, pressed/touched flags, mapping,
+index and product description, and the original `Gamepad.timestamp` in the
+Window clock domain. Do not substitute poll or Worker arrival time. Equal
+timestamps may contain changed samples and must not alone suppress acquisition.
+
+Use the caller's shared source allocator for connection-scoped source IDs,
+independent of browser index and product description, and the shared acquisition
+sequence allocator; source and sequence allocations must advance within the
+owner and remain bounded u64 values. Connection continuity uses the actual
+Gamepad object, with index only locating its slot. Replacement objects, absent
+slots and observed lifecycle retirement terminate the old source; a stale
+disconnect for an old object must not retire a replacement. Never derive HID
+usages or hardware serial identity from Gamepad metadata. Retirement reports the original source without fabricating a
+release. Limits and whole-poll validation bound storage and reject malformed
+samples before publishing a partial poll. Close and failure detach listeners
+and fence further publication, including callback reentry. Lane bindings,
+axis thresholds and duplicate suppression belong to a later Worker adapter.
+Defaults and hard caps are 16 active devices, 64 slots, 128 buttons and 64 axes
+per device, with product descriptions capped at 1024 code units. Smaller
+positive limits are configurable. Invalid or exhausted allocators, native
+errors and consumer exceptions permanently fail the owner. Whole-poll
+validation prevents malformed-tail publication; a consumer exception cannot
+roll back callbacks already delivered.
+
+The [W3C Gamepad specification](https://www.w3.org/TR/gamepad/) exposes Gamepad
+to Window, defines its timestamp as the latest browser update, allows index
+reuse after disconnect, and defines product descriptions without unique device
+identifiers. This API supplies snapshots, so polling cannot recover transitions
+that occurred between observations. Browser exposure/permission and lifecycle
+behavior require actual browser/device checks.
+
+Known ceiling: This acquisition component has no page/Worker gameplay caller
+yet. It does not establish playable gamepad support, capture/replay integration,
+perfect reconnect identity when browser lifecycle evidence is missing, or
+measured latency. Deferred fixtures are source only; execution remains pending.
