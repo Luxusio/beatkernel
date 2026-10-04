@@ -228,6 +228,14 @@ async function cleaned(h, owner, io) {
 }
 
 test("configuration retains caller ownership; actual frames preserve u64 IDs and release wrappers before writes", async () => {
+  for (const url of ["", "https://example.test/rooms/" + "a".repeat(4096),
+    { toString() { assert.fail("non-string URL must never be coerced"); } }]) {
+    const h = await harness();
+    await failure(attempt(() => h.BrowserRoomOwner.open(url, { session: h.session })), "validation");
+    assert.equal(h.session.closes, 0);
+    assert.equal(h.session.frees, 0);
+    assert.equal(h.timers.size, 0);
+  }
   for (const options of [
     { setupTimeoutMs: 0 }, { setupTimeoutMs: 60001 }, { ioTimeoutMs: 0 },
     { ioTimeoutMs: 60001 }, { channelFactory: 1 }, { onSnapshot: 1 }, { onClose: 1 },
@@ -477,4 +485,54 @@ test("malformed prefixes, cancellation and late continuations fence before free 
   assert.equal(failed.owner.closed, true);
   assert.equal(callbacks.closures[0].code, "callback");
   await cleaned(callbacks, failed.owner, failed.io);
+});
+
+test("failed opening joins an acquired channel operation before rejecting without a public handle", async () => {
+  const h = await harness();
+  const signal = new AbortController();
+  const opening = h.opening({ signal: signal.signal });
+  await flush();
+  const io = h.channel({ holdAfterClose: true });
+  const write = io.write;
+  io.write = function (bytes) {
+    const pending = write.call(this, bytes);
+    signal.abort(); // Cancel reentrantly after this channel operation is acquired.
+    return pending;
+  };
+  h.opens[0].gate.resolve(io);
+  await flush();
+  assert.equal(opening.state, "pending", "failed open retains the hidden channel continuation");
+  assert.equal(io.closes, 1);
+  assert.equal(h.session.closes, 1);
+  assert.equal(h.session.frees, 1);
+  assert.deepEqual(h.session.credits, []);
+  assert.equal(io.reads.length, 0);
+  io.writes[0].gate.resolve();
+  await failure(opening, "aborted");
+  assert.deepEqual(h.session.credits, []);
+  assert.deepEqual(h.session.receives, []);
+  assert.equal(h.closures.length, 1);
+  assert.equal(h.timers.size, 0);
+});
+
+test("cancelled opening joins a late channel acquisition and closes it before rejection", async () => {
+  const h = await harness();
+  const controller = new AbortController();
+  const opening = h.opening({ signal: controller.signal });
+  await flush();
+  controller.abort();
+  await flush();
+  assert.equal(opening.state, "pending", "acquisition remains owned after cancellation fencing");
+  assert.equal(h.session.closes, 1);
+  assert.equal(h.session.frees, 1);
+  const io = h.channel();
+  h.opens[0].gate.resolve(io);
+  await failure(opening, "aborted");
+  assert.equal(io.closes, 1);
+  assert.equal(io.reads.length, 0);
+  assert.equal(io.writes.length, 0);
+  assert.deepEqual(h.session.receives, []);
+  assert.deepEqual(h.session.credits, []);
+  assert.equal(h.closures.length, 1);
+  assert.equal(h.timers.size, 0);
 });

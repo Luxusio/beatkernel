@@ -37,9 +37,12 @@ function configuration(url, options) {
       || typeof signal.addEventListener !== "function" || typeof signal.removeEventListener !== "function"))) {
     throw new BrowserRoomOwnerError("validation", "open", "Invalid room owner configuration.");
   }
+  if (typeof url !== "string" || url.length === 0 || url.length > 4096) {
+    throw new BrowserRoomOwnerError("validation", "open", "Room requires a canonical HTTPS room URL.");
+  }
   let address;
   try { address = new URL(url); } catch {}
-  if (typeof url !== "string" || url.length > 4096 || !address || address.href !== url
+  if (!address || address.href !== url
     || address.protocol !== "https:" || !address.hostname || address.port === "0"
     || address.username || address.password || address.search || address.hash
     || !/^\/rooms\/[A-Za-z0-9_-]{1,1024}$/.test(address.pathname)) {
@@ -119,7 +122,7 @@ export class BrowserRoomOwner {
         || owner.#core("initial", session => session.leave_written()) !== false) {
         throw new BrowserRoomOwnerError("protocol", "open", "Room session is already in use.");
       }
-      const opening = Promise.resolve(config.channelFactory(url, { signal: owner.#controller.signal,
+      const opening = owner.#track(() => config.channelFactory(url, { signal: owner.#controller.signal,
         setupTimeoutMs: config.setupTimeoutMs, ioTimeoutMs: config.ioTimeoutMs, maxPrefixBytes: MAX_FRAME }));
       opening.then(channel => { if (owner.closed) quiet(channel, "close"); }, () => {});
       const channel = await owner.#await(opening);
@@ -134,7 +137,13 @@ export class BrowserRoomOwner {
         owner.#readLoop().catch(cause => owner.#fatal(cause, "transport", "read"))];
       owner.#ensure();
       return owner;
-    } catch (cause) { throw owner.#fatal(cause, "transport", "open"); }
+    } catch (cause) {
+      const failure = owner.#fatal(cause, "transport", "open");
+      // A failed opening returns no handle. Settle its acquired channel API
+      // continuations here so callers can join ownership through open itself.
+      await owner.close();
+      throw failure;
+    }
   }
 
   #ensure() { if (this.#failure) throw this.#failure; }
