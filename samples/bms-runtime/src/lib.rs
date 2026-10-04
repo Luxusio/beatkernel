@@ -84,6 +84,8 @@ pub mod font_atlas;
 mod font_atlas_fixtures;
 #[cfg(all(feature = "graphics", test))]
 mod font_fixture;
+#[cfg(all(feature = "graphics", test))]
+mod font_grapheme_window_fixtures;
 /// Cached font glyphs composed through the existing ordered sprite path.
 #[cfg(feature = "graphics")]
 pub mod font_text;

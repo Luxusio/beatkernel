@@ -6,6 +6,7 @@ use crate::{
     ui::text_input::LineEditor,
 };
 use std::sync::Arc;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// Maximum scalar prefix considered for one single-line draw.
 pub const MAX_TEXT_GLYPHS: usize = 1024;
@@ -46,7 +47,7 @@ impl FontText {
     pub const fn texture_id(&self) -> TextureId {
         self.texture
     }
-    /// Validates the complete bounded editor, then borrows a scalar-aligned
+    /// Validates the complete bounded editor, then borrows a grapheme-aligned
     /// window. This only reads cached metrics: it neither allocates nor prepares
     /// glyphs on success. Decorations use the same rebased pen as drawing.
     pub fn field_line<'a>(
@@ -69,42 +70,76 @@ impl FontText {
             });
         }
         let available = f64::from(width);
+        let caret_cluster = value.grapheme_indices(true).find(|&(at, cluster)| {
+            (cursor == 0 && at == 0) || (at < cursor && cursor <= at + cluster.len())
+        });
+        if caret_cluster.is_some_and(|(_, cluster)| cluster.chars().count() > MAX_TEXT_GLYPHS) {
+            return Err("caret grapheme exceeds the font scalar budget".into());
+        }
         // Prefer the full composition when both pixel and scalar budgets admit
-        // it. Otherwise anchor scrolling at the native/committed caret.
+        // its enclosing clusters. Native scalar endpoints themselves stay intact.
         let fitting_composition = if let Some(composition) = composition {
-            let (advance, count) =
-                self.measure(&value[composition.range.0..composition.range.1])?;
-            (advance <= available && count <= MAX_TEXT_GLYPHS).then_some(composition.range)
+            let begin = value
+                .grapheme_indices(true)
+                .take_while(|&(at, _)| at <= composition.range.0)
+                .last()
+                .map_or(0, |(at, _)| at);
+            let end = value
+                .grapheme_indices(true)
+                .find(|&(at, _)| at >= composition.range.1)
+                .map_or(value.len(), |(at, _)| at);
+            let (advance, count) = self.measure(&value[begin..end])?;
+            (advance <= available && count <= MAX_TEXT_GLYPHS).then_some((begin, end))
         } else {
             None
         };
-        let target = fitting_composition.map_or(cursor, |range| range.1);
+        let required = fitting_composition.unwrap_or_else(|| {
+            caret_cluster
+                .filter(|&(at, cluster)| at < cursor && cursor < at + cluster.len())
+                .map_or((cursor, cursor), |(at, cluster)| (at, at + cluster.len()))
+        });
+        let target = required.1;
         let mut start = target;
         let mut advance = 0.0;
-        for (at, character) in value[..target].char_indices().rev().take(MAX_TEXT_GLYPHS) {
-            let next = advance + f64::from(self.cached_glyph(character)?.advance);
-            if next > available {
+        let mut count = 0;
+        for (at, cluster) in value
+            .grapheme_indices(true)
+            .rev()
+            .filter(|&(at, _)| at < target)
+        {
+            let (cluster_advance, scalars) = self.measure(cluster)?;
+            let next = advance + cluster_advance;
+            if scalars > MAX_TEXT_GLYPHS - count || (next > available && at < required.0) {
                 break;
             }
             start = at;
             advance = next;
+            count += scalars;
         }
         // Reverse accumulation chooses the window; forward accumulation is
         // authoritative for painting. A rounding discrepancy cannot move the
         // caret outside the field or split a composition that fits by itself.
         if self.measure(&value[start..target])?.0 > available {
-            start = fitting_composition.map_or(cursor, |range| range.0);
+            start = required.0;
         }
         let mut end = start;
         let mut pen = 0.0;
-        for (at, character) in value[start..].char_indices().take(MAX_TEXT_GLYPHS) {
-            // Keep zero-advance scalars through the target even at the exact
-            // right boundary. The borrowed window must still contain its caret.
-            if pen >= available && start + at >= target {
+        let mut count = 0;
+        for (at, cluster) in value.grapheme_indices(true).filter(|&(at, _)| at >= start) {
+            let scalars = cluster.chars().count();
+            if scalars > MAX_TEXT_GLYPHS - count {
                 break;
             }
-            pen += f64::from(self.cached_glyph(character)?.advance);
-            end = start + at + character.len_utf8();
+            // Keep zero-advance clusters through the target even at the exact
+            // right boundary. The borrowed window must still contain its caret.
+            if pen >= available && at >= target {
+                break;
+            }
+            for character in cluster.chars() {
+                pen += f64::from(self.cached_glyph(character)?.advance);
+            }
+            count += scalars;
+            end = at + cluster.len();
         }
         let position = |byte: usize| -> Result<i64, String> {
             let byte = byte.clamp(start, end);
@@ -117,7 +152,7 @@ impl FontText {
         };
         Ok(FontFieldLine {
             value: &value[start..end],
-            caret_x: position(cursor)?,
+            caret_x: position(cursor)?.clamp(0, i64::from(width)),
             caret_visible,
             composition: composition
                 .map(|range| clip(range.range))

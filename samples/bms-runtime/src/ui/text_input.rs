@@ -243,12 +243,12 @@ impl LineEditor {
         self.value.replace_range(self.cursor..end, "");
         self.cursor = self.boundary_ceil(self.cursor);
     }
-    /// A bounded scalar window and caret column using the bitmap font metrics.
+    /// A whole-grapheme window with a scalar budget and bitmap caret column.
     pub fn visible(&self, max_chars: usize) -> (&str, usize) {
         let line = self.visible_line(max_chars);
         (line.value, line.caret)
     }
-    /// Projects preedit decorations without allocating or splitting UTF-8 scalars.
+    /// Borrows whole clusters; native decorations retain their scalar endpoints.
     pub fn visible_line(&self, max_chars: usize) -> VisibleLine<'_> {
         let caret_visible = self
             .composition
@@ -262,8 +262,36 @@ impl LineEditor {
                 selection: None,
             };
         }
+        let caret_cluster = self.value.grapheme_indices(true).find(|&(at, cluster)| {
+            (self.cursor == 0 && at == 0) || (at < self.cursor && self.cursor <= at + cluster.len())
+        });
+        if caret_cluster.is_some_and(|(_, cluster)| cluster.chars().count() > max_chars) {
+            return VisibleLine {
+                value: &self.value[self.cursor..self.cursor],
+                caret: 0,
+                caret_visible,
+                composition: None,
+                selection: None,
+            };
+        }
+        let required = self
+            .composition
+            .and_then(|composition| {
+                let range = (
+                    self.boundary_floor(composition.range.0),
+                    self.boundary_ceil(composition.range.1),
+                );
+                (self.value[range.0..range.1].chars().count() <= max_chars).then_some(range)
+            })
+            .unwrap_or_else(|| {
+                caret_cluster
+                    .filter(|&(at, cluster)| at < self.cursor && self.cursor < at + cluster.len())
+                    .map_or((self.cursor, self.cursor), |(at, cluster)| {
+                        (at, at + cluster.len())
+                    })
+            });
         let column = self.value[..self.cursor].chars().count();
-        let first = self.composition.map_or_else(
+        let preferred_first = self.composition.map_or_else(
             || column.saturating_sub(max_chars),
             |composition| {
                 self.value[..composition.range.1]
@@ -273,17 +301,36 @@ impl LineEditor {
                     .min(column)
             },
         );
-        let start = self
+        let first = preferred_first.max(
+            self.value[..required.1]
+                .chars()
+                .count()
+                .saturating_sub(max_chars),
+        );
+        let candidate = self
             .value
             .char_indices()
             .nth(first)
             .map_or(self.value.len(), |(at, _)| at);
-        let end = self.value[start..]
-            .char_indices()
-            .nth(max_chars)
-            .map_or(self.value.len(), |(at, _)| start + at);
+        let start = self.boundary_ceil(candidate).min(required.0);
+        let mut end = start;
+        let mut count = 0;
+        // Segment the full value: suffix segmentation would change RI pairing.
+        for (at, cluster) in self
+            .value
+            .grapheme_indices(true)
+            .filter(|&(at, _)| at >= start)
+        {
+            let scalars = cluster.chars().count();
+            if scalars > max_chars - count {
+                break;
+            }
+            count += scalars;
+            end = at + cluster.len();
+        }
         let value = &self.value[start..end];
-        let last = first + value.chars().count();
+        let first = self.value[..start].chars().count();
+        let last = first + count;
         let clip = |(begin, end): (usize, usize)| {
             let begin = self.value[..begin].chars().count().max(first);
             let end = self.value[..end].chars().count().min(last);
