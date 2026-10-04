@@ -70,6 +70,10 @@ pub struct Scene {
 }
 
 impl Scene {
+    pub fn logical_extent(&self) -> [u32; 2] {
+        [self.width, self.height]
+    }
+
     pub fn new(width: u32, height: u32) -> Self {
         Self::with_capacity(width, height, MAX_RECTANGLES)
     }

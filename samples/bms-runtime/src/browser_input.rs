@@ -10,6 +10,46 @@ use beatkernel::{
     time::ClockDomainId,
 };
 
+/// Projects original CSS touch coordinates through the renderer's integer viewport.
+/// The canonical input remains unchanged; bars are intentionally not clipped.
+pub fn project_touch_on_surface(
+    input: &PhysicalInputEvent,
+    css: [f64; 2],
+    surface: [u32; 2],
+    logical: [u32; 2],
+) -> Result<Position2, String> {
+    let PhysicalInputEvent::Touch(touch) = input else {
+        return Err("surface projection requires a genuine touch input".into());
+    };
+    project_touch_position_on_surface(touch.position, css, surface, logical)
+}
+
+/// Allocation-free scalar path shared by whole-batch preflight and actual dispatch.
+pub fn project_touch_position_on_surface(
+    position: Position2,
+    css: [f64; 2],
+    surface: [u32; 2],
+    logical: [u32; 2],
+) -> Result<Position2, String> {
+    if css.iter().any(|value| !value.is_finite() || *value <= 0.0) {
+        return Err("touch CSS extents must be positive and finite".into());
+    }
+    let viewport = crate::viewport::Viewport::new(surface, logical)?;
+    let backing = (
+        f64::from(position.x) / css[0] * f64::from(surface[0]),
+        f64::from(position.y) / css[1] * f64::from(surface[1]),
+    );
+    let (x, y) = viewport.project_unclipped(backing)?;
+    let projected = Position2 {
+        x: x as f32,
+        y: y as f32,
+    };
+    if !projected.x.is_finite() || !projected.y.is_finite() {
+        return Err("projected touch exceeds finite input coordinates".into());
+    }
+    Ok(projected)
+}
+
 /// Setup-only mapping and byte budgets, using the same core identities as native input.
 #[derive(Debug)]
 pub struct PhysicalInputSetup {

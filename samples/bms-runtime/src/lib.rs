@@ -300,6 +300,11 @@ mod touch_page_fixtures;
 /// Atomic Design-style presentation compositions, independent of native I/O.
 #[cfg(feature = "graphics")]
 pub mod ui;
+pub mod viewport;
+#[cfg(test)]
+mod viewport_fixtures;
+#[cfg(test)]
+mod viewport_touch_fixtures;
 /// Complete single-stream Ogg/Vorbis assets decoded during preparation.
 pub mod vorbis_decode;
 #[cfg(test)]
