@@ -742,8 +742,10 @@ room admission. Its room key comes from the validated request path, never a
 message-selected route. Assign a nonreused participant lease, send Admitted
 before any snapshot on that participant's ordered stream, and publish complete
 room snapshots to every current host after successful join/seal/preparation.
-After admission accept only Seal, Ready and Leave bound to that exact stream
-lease. A forged server message, repeated Join, malformed input or closed peer
+After admission accept Seal, Ready and Leave bound to that exact stream lease.
+After validated Prepared membership, the control integration below additionally
+accepts actual clock probes, ClockReady and Accept. A forged server message,
+repeated Join, malformed input or closed peer
 must release and close the whole affected room, without harming other rooms.
 
 Outgoing frames and incoming owner commands remain bounded. A slow or closed
@@ -755,9 +757,9 @@ its complete read/write uses the configured I/O deadline. Waiting expiry,
 disconnect and server stop close exact owned resources and join their tasks;
 late task completions cannot revive or remove a replacement same-key room.
 
-This server route delivers admission and readiness only. Multi-host start/clock
-agreement, gameplay progress/fanout, final ACKs and native/browser gameplay
-callers remain required. Source/compile-only evidence cannot prove endpoint,
+The server additionally composes software clock/start controls as specified
+below. Gameplay progress/fanout, final ACKs and native/browser gameplay callers
+remain required. Source/compile-only evidence cannot prove endpoint,
 TLS, browser interoperability, physical sync or performance acceptance. Author
 deterministic I/O, ownership and refusal fixtures for deferred execution.
 
@@ -862,10 +864,10 @@ state. Existing admission bounds, prefix ownership and coalesced remainder
 behavior remain intact.
 
 These frames establish a portable wire boundary for the common multi-host
-coordinator. They do not enable software start on their own. Admission-only
-server/client owners shall refuse them until real probe/start handling is
-composed; unexpected controls must not grant readiness, consume a different
-lease, or bypass the Worker's output activation fence. No remote ACK, physical
+coordinator. They do not enable software start on their own. Admission-only client owners shall refuse them until migrated to the composed
+client; the actual server integration below handles them through real probe/start
+state. Unexpected controls must not grant readiness, consume a different lease,
+or bypass the Worker's output activation fence. No remote ACK, physical
 synchronization, progress/final-ACK support or interoperability is inferred from
 codec or compile-only evidence.
 
@@ -931,3 +933,53 @@ integration before actual gameplay can start. Source and compile-only evidence
 do not establish interoperability, physical synchronization or final ACKs;
 keep the Worker's room activation fence until a real committed output schedule
 is delivered.
+
+
+## Actual WebTransport room clock and start handling
+
+Group-mode serve creates PreparedRoom control ownership only from the actual
+registry Prepared snapshot. Queue the snapshot before control frames on each
+ordered stream. Every stream owns a RoomClockExchange; the room owns one
+RoomStartCoordinator and its immutable admitted lease roster. Install estimates
+only after the full symmetric probe/write barriers. Actual peer ClockReady may
+precede the local estimate. Pump actual control transitions after input and full
+write events; never fabricate periodic clock advancement or readiness.
+
+Outgoing QueuedFrame retains shared immutable bytes and an optional exact opaque
+nonreused per-stream control write ID. Reader/writer commands are bound to the
+actual admitted lease. Capture elapsed receive time immediately after a whole
+message and write-completion time immediately after successful write_all, before
+awaiting the bounded actor channel. Partial/failed writes produce no receipt.
+Correlate a complete receipt to its actual child clock/start frame. Admission
+and snapshot queueing grant no control-write evidence. Backpressure or protocol
+failure closes the whole affected room and releases exact registry tickets.
+Other rooms and replacement same-key leases survive stale callbacks.
+
+The common clock/client receive_at and written_at APIs separate original
+observation timestamps from current monotonic processing time. Require ordered
+nonnegative read captures no later than processing time, and complete writes
+no earlier than frame admission and no later than processing time. Preserve
+original t1/t3 for ClockProbes; process start freshness/deadline checks against
+current time. Existing APIs supply the same value for both clocks. Reject invalid
+observations atomically; do not retimestamp an old genuine read at actor dequeue.
+
+An exact Accept may arrive while its server Propose write-completion command is
+still queued; an exact Commit may likewise precede the client's local Accept
+completion notification. Retain at most one matching pending response for that
+exact in-flight frame, preflight through copies of the actual StartAgreement,
+and grant neither write credit nor committed schedule until the real complete
+write receipt. Duplicate pending controls, wrong echoes and unrelated phases
+remain refusal paths. Do not interpret the peer response as a local write ACK.
+
+Each Prepared room has a checked, fixed finite handshake deadline of its actual
+Prepared processing time plus the existing --setup-ms duration. This is separate
+from waiting-room TTL and does not reset on fragments or controls. Expiry closes
+the exact whole room until all actual Commit writes complete; a committed room
+no longer uses this handshake timer. Shutdown still closes sessions, fences
+controls, and joins setup/peer tasks before disposing retained resources.
+
+This source integration establishes server software-start handling, not playable
+room acceptance. Admission-only browser/native adapters still need migration to
+RoomPlayClient, actual committed output activation and progress/final ACKs. TLS,
+browser/native interoperability, physical synchronization and performance remain
+unverified under the user's execution deferral.
