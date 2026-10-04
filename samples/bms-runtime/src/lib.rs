@@ -178,6 +178,9 @@ mod multiplayer_webtransport_client_fixtures;
 mod multiplayer_webtransport_fixtures;
 /// Common queue, rolling BGM and mixer construction/replenishment.
 pub mod native_audio;
+/// Owned native background scanning and CPU catalog preparation.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native_catalog;
 /// Shared native chart loading, section slicing and retained-lane coverage.
 pub mod native_chart;
 /// Shared native local-cohort gameplay and per-player report ownership.
@@ -217,6 +220,8 @@ pub mod playback_pause;
 pub mod player;
 /// Bounded chart catalog and exact compiled lane display data.
 pub mod player_chart;
+#[cfg(test)]
+mod player_chart_scan_fixtures;
 #[cfg(feature = "graphics")]
 mod playfield_gpu;
 /// Shared playfield partitions for rendering and projected physical touch routing.

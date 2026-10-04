@@ -394,10 +394,53 @@ pub struct ChartLibrary {
     pub diagnostics: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScanStage {
+    #[default]
+    Traversal,
+    Reading,
+    Parsing,
+    Complete,
+}
+
+/// Coalescible counters only; partial chart lists never cross this boundary.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScanProgress {
+    pub stage: ScanStage,
+    pub directories: usize,
+    pub entries: usize,
+    pub charts: usize,
+    pub bytes: u64,
+}
+
+fn scan_boundary(
+    progress: &mut ScanProgress,
+    stage: ScanStage,
+    checkpoint: &mut impl FnMut(ScanProgress) -> bool,
+) -> Result<(), PlayerChartError> {
+    progress.stage = stage;
+    if checkpoint(*progress) {
+        Ok(())
+    } else {
+        Err(PlayerChartError("library scan cancelled".into()))
+    }
+}
+
 /// Scans an explicit directory without following symlinks or loading WAV files.
 /// Limits: 128 directories, depth eight, 1024 chart files, 8192 directory entries
 /// and 64 MiB aggregate advertised chart bytes (individual reader cap: 8 MiB).
 pub fn scan_library(root: &Path) -> Result<ChartLibrary, PlayerChartError> {
+    scan_library_with(root, |_| true)
+}
+
+/// Cooperative cancellation around traversal, bounded reads and parsing. A
+/// false checkpoint returns no partial catalog and cannot interrupt a syscall.
+pub fn scan_library_with(
+    root: &Path,
+    mut checkpoint: impl FnMut(ScanProgress) -> bool,
+) -> Result<ChartLibrary, PlayerChartError> {
+    let mut progress = ScanProgress::default();
+    scan_boundary(&mut progress, ScanStage::Traversal, &mut checkpoint)?;
     let metadata = fs::symlink_metadata(root)
         .map_err(|error| PlayerChartError(format!("{}: {error}", root.display())))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -410,12 +453,10 @@ pub fn scan_library(root: &Path) -> Result<ChartLibrary, PlayerChartError> {
         diagnostics: Vec::new(),
     };
     let mut pending = vec![(root.to_path_buf(), 0usize)];
-    let mut directories = 1usize;
-    let mut visited = 0usize;
-    let mut files = 0usize;
-    let mut bytes = 0u64;
+    progress.directories = 1;
     let mut entry_limit = false;
     'scan: while let Some((directory, depth)) = pending.pop() {
+        scan_boundary(&mut progress, ScanStage::Traversal, &mut checkpoint)?;
         let reader = match fs::read_dir(&directory) {
             Ok(reader) => reader,
             Err(error) => {
@@ -427,14 +468,15 @@ pub fn scan_library(root: &Path) -> Result<ChartLibrary, PlayerChartError> {
         };
         let mut paths = Vec::new();
         for entry in reader {
-            if visited == 8192 {
+            scan_boundary(&mut progress, ScanStage::Traversal, &mut checkpoint)?;
+            if progress.entries == 8192 {
                 library
                     .diagnostics
                     .push("library directory-entry limit reached (8192)".into());
                 entry_limit = true;
                 break;
             }
-            visited += 1;
+            progress.entries += 1;
             match entry {
                 Ok(entry) => paths.push(entry.path()),
                 Err(error) => library
@@ -445,6 +487,7 @@ pub fn scan_library(root: &Path) -> Result<ChartLibrary, PlayerChartError> {
         paths.sort();
         let mut children = Vec::new();
         for path in paths {
+            scan_boundary(&mut progress, ScanStage::Traversal, &mut checkpoint)?;
             let metadata = match fs::symlink_metadata(&path) {
                 Ok(metadata) => metadata,
                 Err(error) => {
@@ -458,13 +501,13 @@ pub fn scan_library(root: &Path) -> Result<ChartLibrary, PlayerChartError> {
                 continue;
             }
             if metadata.is_dir() {
-                if depth == 8 || directories == 128 {
+                if depth == 8 || progress.directories == 128 {
                     library.diagnostics.push(format!(
                         "{}: library directory/depth limit reached",
                         path.display()
                     ));
                 } else {
-                    directories += 1;
+                    progress.directories += 1;
                     children.push((path, depth + 1));
                 }
                 continue;
@@ -482,13 +525,13 @@ pub fn scan_library(root: &Path) -> Result<ChartLibrary, PlayerChartError> {
             {
                 continue;
             }
-            if files == 1024 {
+            if progress.charts == 1024 {
                 library
                     .diagnostics
                     .push("library chart-file limit reached (1024)".into());
                 break 'scan;
             }
-            files += 1;
+            progress.charts += 1;
             if metadata.len() > 8 * 1024 * 1024 {
                 library.diagnostics.push(format!(
                     "{}: BMS text exceeds parser byte cap",
@@ -496,14 +539,26 @@ pub fn scan_library(root: &Path) -> Result<ChartLibrary, PlayerChartError> {
                 ));
                 continue;
             }
-            if bytes + metadata.len() > 64 * 1024 * 1024 {
+            if progress.bytes + metadata.len() > 64 * 1024 * 1024 {
                 library
                     .diagnostics
                     .push("library aggregate chart-byte limit reached (64 MiB)".into());
                 break 'scan;
             }
-            bytes += metadata.len();
-            match crate::competition_live::load_chart(&path) {
+            progress.bytes += metadata.len();
+            scan_boundary(&mut progress, ScanStage::Reading, &mut checkpoint)?;
+            // Same bounded decoder and seed-zero parser as load_chart, with a
+            // cancellation boundary between the real read and real parse.
+            let options = beatkernel_bms::ParseOptions::default();
+            let text = fs::File::open(&path).and_then(|mut file| {
+                crate::chart_text::read_chart_text(&mut file, options.max_bytes)
+            });
+            scan_boundary(&mut progress, ScanStage::Parsing, &mut checkpoint)?;
+            let chart = text.map_err(|error| error.to_string()).and_then(|text| {
+                beatkernel_bms::parse_seeded(&text, options, 0).map_err(|error| error.to_string())
+            });
+            scan_boundary(&mut progress, ScanStage::Traversal, &mut checkpoint)?;
+            match chart {
                 Ok(chart) => library.entries.push(LibraryEntry {
                     title: chart
                         .metadata
@@ -532,6 +587,7 @@ pub fn scan_library(root: &Path) -> Result<ChartLibrary, PlayerChartError> {
     library.entries.sort_by(|left, right| {
         (&left.title, &left.artist, &left.path).cmp(&(&right.title, &right.artist, &right.path))
     });
+    scan_boundary(&mut progress, ScanStage::Complete, &mut checkpoint)?;
     Ok(library)
 }
 
