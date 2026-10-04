@@ -235,6 +235,10 @@ pub mod replay_playback;
 pub mod replay_render;
 /// Incremental presentation of validated recorded judging operations.
 pub mod replay_visual;
+/// Retained participant-scoped room scores and bounded borrowed pages.
+pub mod room_opponent_hud;
+#[cfg(test)]
+mod room_opponent_hud_fixtures;
 /// Retained bounded summaries for the common competition scoreboard.
 pub mod saved_opponent_hud;
 #[cfg(test)]
