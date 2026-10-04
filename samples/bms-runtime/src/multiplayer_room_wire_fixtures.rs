@@ -1,21 +1,31 @@
-//! Deferred BKMR codec fixtures; no session, stream, or start agreement is simulated.
+//! Deferred BKMR v2 codec fixtures; actual start agreements remain the timing authority.
 use super::*;
+use crate::multiplayer_clock::{ClockFilter, ClockSample};
+use crate::multiplayer_start::{StartAgreement, StartMessage, StartPolicy, StartRole};
 
 const JOIN: &[u8] = &[
-    b'B', b'K', b'M', b'R', 1, 0, 1, 16, 0, 0, 0, 3, 0, 0, 0, 0, 255, 17, 2, 255, 255, 255, 255, 4,
+    b'B', b'K', b'M', b'R', 2, 0, 1, 16, 0, 0, 0, 3, 0, 0, 0, 0, 255, 17, 2, 255, 255, 255, 255, 4,
     3, 2, 1,
 ];
 const ADMITTED: &[u8] = &[
-    b'B', b'K', b'M', b'R', 1, 0, 2, 8, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    b'B', b'K', b'M', b'R', 2, 0, 2, 8, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
 ];
 const SNAPSHOT: &[u8] = &[
-    b'B', b'K', b'M', b'R', 1, 0, 3, 42, 0, 0, 0, 1, 8, 7, 6, 5, 4, 3, 2, 1, 2, 0x11, 0x22, 0x33,
+    b'B', b'K', b'M', b'R', 2, 0, 3, 42, 0, 0, 0, 1, 8, 7, 6, 5, 4, 3, 2, 1, 2, 0x11, 0x22, 0x33,
     0x44, 0x55, 0x66, 0x77, 0x88, 1, 1, 255, 255, 255, 255, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2, 255, 255,
     255, 255, 7, 0, 0, 0,
 ];
-const SEAL: &[u8] = &[b'B', b'K', b'M', b'R', 1, 0, 4, 0, 0, 0, 0];
-const READY: &[u8] = &[b'B', b'K', b'M', b'R', 1, 0, 5, 0, 0, 0, 0];
-const LEAVE: &[u8] = &[b'B', b'K', b'M', b'R', 1, 0, 6, 0, 0, 0, 0];
+const SEAL: &[u8] = &[b'B', b'K', b'M', b'R', 2, 0, 4, 0, 0, 0, 0];
+const READY: &[u8] = &[b'B', b'K', b'M', b'R', 2, 0, 5, 0, 0, 0, 0];
+const LEAVE: &[u8] = &[b'B', b'K', b'M', b'R', 2, 0, 6, 0, 0, 0, 0];
+const PING: &[u8] = &[
+    b'B', b'K', b'M', b'R', 2, 0, 7, 16, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    8, 7, 6, 5, 4, 3, 2, 1,
+];
+const PONG: &[u8] = &[
+    b'B', b'K', b'M', b'R', 2, 0, 8, 32, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    8, 7, 6, 5, 4, 3, 2, 1, 3, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0,
+];
 
 fn join() -> RoomMessage {
     RoomMessage::Join {
@@ -93,7 +103,7 @@ fn maximum_identity_and_two_three_four_sixty_four_host_rosters_keep_full_width_s
     assert_eq!(encoded.len(), 65_808);
     assert_eq!(
         &encoded[..11],
-        &[b'B', b'K', b'M', b'R', 1, 0, 1, 5, 1, 1, 0]
+        &[b'B', b'K', b'M', b'R', 2, 0, 1, 5, 1, 1, 0]
     );
     assert_eq!(&encoded[11..15], &[0, 0, 1, 0]);
     assert_eq!(decode_message(&encoded).unwrap(), maximum);
@@ -165,6 +175,7 @@ fn wrong_protocol_version_tag_size_and_whole_frame_extent_are_rejected() {
         (6, 1),
         (0, 0),
         (7, 0),
+        (13, 0),
         (255, 0),
     ] {
         let mut header = SEAL.to_vec();
@@ -175,12 +186,15 @@ fn wrong_protocol_version_tag_size_and_whole_frame_extent_are_rejected() {
         assert!(decoder.push(&header).is_err());
         assert!(decoder.needed().is_err());
     }
-    for (offset, byte) in [(0, b'X'), (3, b'P'), (4, 0), (4, 2), (5, 1)] {
+    for (offset, byte) in [(0, b'X'), (3, b'P'), (4, 0), (4, 1), (4, 3), (5, 1)] {
         let mut bad = ADMITTED.to_vec();
         bad[offset] = byte;
         assert!(decode_message(&bad).is_err());
     }
     for literal in [JOIN, ADMITTED, SNAPSHOT, SEAL, READY, LEAVE] {
+        let mut old_version = literal.to_vec();
+        old_version[4] = 1;
+        assert!(decode_message(&old_version).is_err());
         for end in [0, 1, 10, literal.len() - 1] {
             assert!(decode_message(&literal[..end]).is_err());
         }
@@ -450,4 +464,357 @@ fn malformed_headers_stop_before_body_admission_and_semantic_failures_retain_the
             "semantic refusal must not silently reset the stream"
         );
     }
+}
+
+#[test]
+fn literal_v2_controls_preserve_full_width_sequences_and_independent_clock_domains() {
+    let ping = RoomMessage::ClockPing {
+        sequence: 0x8877_6655_4433_2211,
+        sent_ns: 0x0102_0304_0506_0708,
+    };
+    let pong = RoomMessage::ClockPong {
+        sequence: 0x8877_6655_4433_2211,
+        sent_ns: 0x0102_0304_0506_0708,
+        received_ns: 3,
+        replied_ns: 9,
+    };
+    for (message, literal) in [(ping, PING), (pong, PONG)] {
+        assert_eq!(encode_message(&message).unwrap(), literal);
+        assert_eq!(decode_message(literal).unwrap(), message);
+    }
+    let value = 0x0102_0304_0506_0708;
+    for (message, tag) in [
+        (StartMessage::ClockReady(value), 9),
+        (StartMessage::Propose(value), 10),
+        (StartMessage::Accept(value), 11),
+        (StartMessage::Commit(value), 12),
+    ] {
+        let literal = [
+            b'B', b'K', b'M', b'R', 2, 0, tag, 8, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1,
+        ];
+        assert_eq!(
+            encode_message(&RoomMessage::Start(message)).unwrap(),
+            literal
+        );
+        assert_eq!(
+            decode_message(&literal).unwrap(),
+            RoomMessage::Start(message)
+        );
+    }
+    for sequence in [1u64, 8, 9, u64::MAX] {
+        for sent_ns in [0, 72_000_000_000_000, 604_800_000_000_000, i64::MAX] {
+            for message in [
+                RoomMessage::ClockPing { sequence, sent_ns },
+                RoomMessage::ClockPong {
+                    sequence,
+                    sent_ns,
+                    received_ns: 0,
+                    replied_ns: 0,
+                },
+                RoomMessage::ClockPong {
+                    sequence,
+                    sent_ns,
+                    received_ns: i64::MAX,
+                    replied_ns: i64::MAX,
+                },
+            ] {
+                assert_eq!(
+                    decode_message(&encode_message(&message).unwrap()).unwrap(),
+                    message
+                );
+            }
+        }
+    }
+    for (sent_ns, received_ns, replied_ns) in [(1000, 3, 9), (3, 1000, 1006)] {
+        let message = RoomMessage::ClockPong {
+            sequence: 1,
+            sent_ns,
+            received_ns,
+            replied_ns,
+        };
+        assert_eq!(
+            decode_message(&encode_message(&message).unwrap()).unwrap(),
+            message,
+            "local send and remote receive have independent origins"
+        );
+    }
+    for value in [0, 72_000_000_000_000, 604_800_000_000_000, i64::MAX] {
+        for start in [
+            StartMessage::ClockReady(value),
+            StartMessage::Propose(value),
+            StartMessage::Accept(value),
+            StartMessage::Commit(value),
+        ] {
+            let message = RoomMessage::Start(start);
+            assert_eq!(
+                decode_message(&encode_message(&message).unwrap()).unwrap(),
+                message
+            );
+        }
+    }
+}
+
+#[test]
+fn invalid_control_extents_and_values_refuse_before_allocation_or_retain_the_owned_malformed_frame()
+{
+    let mut invalid = vec![
+        RoomMessage::ClockPing {
+            sequence: 0,
+            sent_ns: 0,
+        },
+        RoomMessage::ClockPing {
+            sequence: 1,
+            sent_ns: -1,
+        },
+        RoomMessage::ClockPong {
+            sequence: 0,
+            sent_ns: 0,
+            received_ns: 0,
+            replied_ns: 0,
+        },
+        RoomMessage::ClockPong {
+            sequence: 1,
+            sent_ns: -1,
+            received_ns: 0,
+            replied_ns: 0,
+        },
+        RoomMessage::ClockPong {
+            sequence: 1,
+            sent_ns: 0,
+            received_ns: -1,
+            replied_ns: 0,
+        },
+        RoomMessage::ClockPong {
+            sequence: 1,
+            sent_ns: 0,
+            received_ns: 0,
+            replied_ns: -1,
+        },
+        RoomMessage::ClockPong {
+            sequence: 1,
+            sent_ns: 100,
+            received_ns: 2,
+            replied_ns: 1,
+        },
+    ];
+    for value in [-1, i64::MIN] {
+        invalid.extend(
+            [
+                StartMessage::ClockReady(value),
+                StartMessage::Propose(value),
+                StartMessage::Accept(value),
+                StartMessage::Commit(value),
+            ]
+            .map(RoomMessage::Start),
+        );
+    }
+    for message in invalid {
+        assert!(encode_message(&message).is_err());
+    }
+
+    for (tag, size) in [(7u8, 16u32), (8, 32), (9, 8), (10, 8), (11, 8), (12, 8)] {
+        for wrong in [0, size - 1, size + 1, 65_798, u32::MAX] {
+            let mut header = SEAL.to_vec();
+            header[6] = tag;
+            header[7..11].copy_from_slice(&wrong.to_le_bytes());
+            let mut chunk = header.clone();
+            chunk.extend_from_slice(&[0xAA; 64]);
+            let mut decoder = RoomFrameDecoder::new();
+            assert!(decoder.push(&chunk).is_err());
+            assert_eq!(decoder.bytes, header);
+            assert!(decoder.needed().is_err());
+            assert!(decoder.take().is_err());
+            assert!(decoder.push(PING).is_err());
+            assert_eq!(decoder.bytes, header);
+        }
+    }
+    let mut malformed = Vec::new();
+    for literal in [PING, PONG] {
+        let mut zero_sequence = literal.to_vec();
+        zero_sequence[11..19].fill(0);
+        malformed.push(zero_sequence);
+        let mut negative_sent = literal.to_vec();
+        negative_sent[19..27].copy_from_slice(&(-1i64).to_le_bytes());
+        malformed.push(negative_sent);
+    }
+    for range in [27..35, 35..43] {
+        let mut negative = PONG.to_vec();
+        negative[range].copy_from_slice(&(-1i64).to_le_bytes());
+        malformed.push(negative);
+    }
+    let mut backwards = PONG.to_vec();
+    backwards[27..35].copy_from_slice(&10i64.to_le_bytes());
+    malformed.push(backwards);
+    for tag in 9..=12 {
+        let mut frame = vec![b'B', b'K', b'M', b'R', 2, 0, tag, 8, 0, 0, 0];
+        frame.extend_from_slice(&(-1i64).to_le_bytes());
+        malformed.push(frame);
+    }
+    for frame in malformed {
+        assert!(decode_message(&frame).is_err());
+        let mut decoder = RoomFrameDecoder::new();
+        feed_fragment(&mut decoder, &frame);
+        assert_eq!(decoder.needed().unwrap(), 0);
+        assert_eq!(decoder.take(), Err(RoomWireError::InvalidMessage));
+        assert_eq!(decoder.bytes, frame);
+        assert_eq!(decoder.push(READY).unwrap(), 0);
+        assert_eq!(decoder.take(), Err(RoomWireError::InvalidMessage));
+        assert_eq!(decoder.bytes, frame);
+    }
+    let controls = [
+        PING.to_vec(),
+        PONG.to_vec(),
+        encode_message(&RoomMessage::Start(StartMessage::Commit(0))).unwrap(),
+    ];
+    for frame in controls {
+        let mut old = frame.clone();
+        old[4] = 1;
+        assert!(decode_message(&old).is_err());
+        let mut bilateral = frame.clone();
+        bilateral[3] = b'P';
+        assert!(decode_message(&bilateral).is_err());
+        let mut trailing = frame.clone();
+        trailing.push(0);
+        assert!(decode_message(&trailing).is_err());
+        for end in [0, 10, frame.len() - 1] {
+            assert!(decode_message(&frame[..end]).is_err());
+        }
+    }
+}
+
+fn start_through_wire(message: StartMessage) -> StartMessage {
+    let frame = encode_message(&RoomMessage::Start(message)).unwrap();
+    let mut decoder = RoomFrameDecoder::new();
+    for byte in frame.chunks(1) {
+        assert_eq!(decoder.push(byte).unwrap(), 1);
+    }
+    let Some(RoomMessage::Start(decoded)) = decoder.take().unwrap() else {
+        panic!("actual StartMessage lost its variant");
+    };
+    assert_eq!(decoded, message);
+    decoded
+}
+
+#[test]
+fn fragmented_and_coalesced_controls_preserve_actual_start_agreement_receipts_without_granting_timing_authority()
+ {
+    let controls = [
+        RoomMessage::ClockPing {
+            sequence: u64::MAX,
+            sent_ns: i64::MAX,
+        },
+        RoomMessage::ClockPong {
+            sequence: u64::MAX,
+            sent_ns: i64::MAX,
+            received_ns: 0,
+            replied_ns: 1,
+        },
+        RoomMessage::Start(StartMessage::ClockReady(0)),
+        RoomMessage::Start(StartMessage::Propose(i64::MAX)),
+        RoomMessage::Start(StartMessage::Accept(i64::MAX)),
+        RoomMessage::Start(StartMessage::Commit(i64::MAX)),
+    ];
+    let mut stream = Vec::new();
+    for message in &controls {
+        let frame = encode_message(message).unwrap();
+        stream.extend_from_slice(&frame);
+        for split in 0..=frame.len() {
+            let mut decoder = RoomFrameDecoder::new();
+            feed_fragment(&mut decoder, &frame[..split]);
+            assert_eq!(
+                decoder.needed().unwrap(),
+                if split < 11 {
+                    11 - split
+                } else {
+                    frame.len() - split
+                }
+            );
+            if split != frame.len() {
+                assert_eq!(decoder.take().unwrap(), None);
+            }
+            feed_fragment(&mut decoder, &frame[split..]);
+            assert_eq!(decoder.push(PING).unwrap(), 0);
+            assert_eq!(decoder.take().unwrap(), Some(message.clone()));
+            assert_eq!(decoder.needed().unwrap(), 11);
+        }
+    }
+    stream.extend_from_slice(LEAVE);
+    let mut decoder = RoomFrameDecoder::new();
+    let mut offset = 0;
+    for expected in controls.into_iter().chain([RoomMessage::Leave]) {
+        while decoder.needed().unwrap() > 0 {
+            let count = decoder.push(&stream[offset..]).unwrap();
+            assert!(count > 0);
+            offset += count;
+        }
+        assert_eq!(decoder.push(&stream[offset..]).unwrap(), 0);
+        assert_eq!(decoder.take().unwrap(), Some(expected));
+    }
+    assert_eq!(offset, stream.len());
+
+    let policy = StartPolicy {
+        lead_ns: 1000,
+        min_remaining_ns: 100,
+        max_age_ns: 10_000,
+        max_uncertainty_ns: 100,
+        max_release_lateness_ns: 25,
+    };
+    let mut host_clock = ClockFilter::new();
+    host_clock
+        .observe(ClockSample::new(100, 160, 180, 140).unwrap())
+        .unwrap();
+    let mut join_clock = ClockFilter::new();
+    join_clock
+        .observe(ClockSample::new(100, 60, 80, 140).unwrap())
+        .unwrap();
+    let mut host = StartAgreement::new_at(StartRole::Host, policy, 100).unwrap();
+    let mut join = StartAgreement::new_at(StartRole::Join, policy, 300).unwrap();
+    host.prepare(host_clock.estimate().unwrap()).unwrap();
+    join.prepare(join_clock.estimate().unwrap()).unwrap();
+    let host_ready = host.next(1000).unwrap().unwrap();
+    let join_ready = join.next(1050).unwrap().unwrap();
+    host.written(host_ready, 1000).unwrap();
+    join.receive(start_through_wire(host_ready), 1050).unwrap();
+    join.written(join_ready, 1050).unwrap();
+    host.receive(start_through_wire(join_ready), 1000).unwrap();
+    let before = join;
+    assert!(
+        join.receive(start_through_wire(StartMessage::Propose(0)), 1051)
+            .is_err()
+    );
+    assert_eq!(
+        join, before,
+        "syntactically valid zero does not authorize an elapsed start target"
+    );
+    let proposal = host.next(1001).unwrap().unwrap();
+    assert_eq!(proposal, StartMessage::Propose(2301));
+    host.written(proposal, 1002).unwrap();
+    join.receive(start_through_wire(proposal), 1052).unwrap();
+    let accept = join.next(1053).unwrap().unwrap();
+    join.written(accept, 1053).unwrap();
+    let before = host;
+    assert!(
+        host.receive(start_through_wire(StartMessage::Accept(2302)), 1003)
+            .is_err()
+    );
+    assert_eq!(
+        host, before,
+        "codec acceptance cannot grant a mismatched proposal echo"
+    );
+    host.receive(start_through_wire(accept), 1003).unwrap();
+    let commit = host.next(1004).unwrap().unwrap();
+    host.written(commit, 1005).unwrap();
+    assert!(host.committed());
+    assert!(!join.committed());
+    join.receive(start_through_wire(commit), 1055).unwrap();
+    assert_eq!(host.take_schedule().unwrap().song_target_ns, 2301);
+    let schedule = join.take_schedule().unwrap();
+    assert_eq!(
+        (
+            schedule.song_target_ns,
+            schedule.target_ns,
+            schedule.uncertainty_ns
+        ),
+        (2351, 2051, 20)
+    );
 }

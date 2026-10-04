@@ -1,16 +1,17 @@
-//! Distinct BKMR v1 room-admission frames, without transport authorization.
+//! Distinct BKMR v2 room-admission and control frames, without authorization.
 //! Stream owners assign participant IDs; requests never choose an identity.
-//! Preparation snapshots do not establish a start, progress, or a final ACK.
+//! Frame validation does not establish a start, progress, or a final ACK.
 
 use crate::local_players::{PlayerId, MAX_LOCAL_PLAYERS};
 use crate::multiplayer_group::validate_roster;
 use crate::multiplayer_group_rooms::{GroupRoomMember, GroupRoomPhase};
 use crate::multiplayer_protocol::MAX_IDENTITY;
 use crate::multiplayer_rooms::ParticipantId;
+use crate::multiplayer_start::StartMessage;
 use std::fmt;
 
 const MAGIC: &[u8; 4] = b"BKMR";
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const HEADER_BYTES: usize = 11;
 const MAX_HOSTS: usize = 64;
 const MAX_PAYLOAD: usize = 4 + MAX_IDENTITY + 1 + 4 * MAX_LOCAL_PLAYERS;
@@ -34,6 +35,17 @@ pub enum RoomMessage {
     Seal,
     Ready,
     Leave,
+    ClockPing {
+        sequence: u64,
+        sent_ns: i64,
+    },
+    ClockPong {
+        sequence: u64,
+        sent_ns: i64,
+        received_ns: i64,
+        replied_ns: i64,
+    },
+    Start(StartMessage),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,8 +58,8 @@ pub enum RoomWireError {
 impl fmt::Display for RoomWireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::InvalidFrame => "invalid bounded BKMR v1 frame",
-            Self::InvalidMessage => "invalid room admission message",
+            Self::InvalidFrame => "invalid bounded BKMR v2 frame",
+            Self::InvalidMessage => "invalid room admission or control message",
             Self::Allocation => "room message allocation failed",
         })
     }
@@ -104,6 +116,15 @@ pub(crate) fn validate_snapshot(
     Ok(length)
 }
 
+fn start_fields(message: StartMessage) -> (u8, i64) {
+    match message {
+        StartMessage::ClockReady(time) => (9, time),
+        StartMessage::Propose(time) => (10, time),
+        StartMessage::Accept(time) => (11, time),
+        StartMessage::Commit(time) => (12, time),
+    }
+}
+
 fn message_extent(message: &RoomMessage) -> Result<(u8, usize), RoomWireError> {
     Ok(match message {
         RoomMessage::Join { identity, players } => {
@@ -127,6 +148,32 @@ fn message_extent(message: &RoomMessage) -> Result<(u8, usize), RoomWireError> {
         RoomMessage::Seal => (4, 0),
         RoomMessage::Ready => (5, 0),
         RoomMessage::Leave => (6, 0),
+        RoomMessage::ClockPing { sequence, sent_ns } => {
+            if *sequence == 0 || *sent_ns < 0 {
+                return Err(RoomWireError::InvalidMessage);
+            }
+            (7, 16)
+        }
+        RoomMessage::ClockPong {
+            sequence,
+            sent_ns,
+            received_ns,
+            replied_ns,
+        } => {
+            // Sent is on the probing host's clock; only the responder's two
+            // timestamps can be ordered here. Probe ownership checks the echo.
+            if *sequence == 0 || *sent_ns < 0 || *received_ns < 0 || *replied_ns < *received_ns {
+                return Err(RoomWireError::InvalidMessage);
+            }
+            (8, 32)
+        }
+        RoomMessage::Start(message) => {
+            let (tag, time) = start_fields(*message);
+            if time < 0 {
+                return Err(RoomWireError::InvalidMessage);
+            }
+            (tag, 8)
+        }
     })
 }
 
@@ -176,6 +223,24 @@ pub fn encode_message(message: &RoomMessage) -> Result<Vec<u8>, RoomWireError> {
             }
         }
         RoomMessage::Seal | RoomMessage::Ready | RoomMessage::Leave => {}
+        RoomMessage::ClockPing { sequence, sent_ns } => {
+            frame.extend_from_slice(&sequence.to_le_bytes());
+            frame.extend_from_slice(&sent_ns.to_le_bytes());
+        }
+        RoomMessage::ClockPong {
+            sequence,
+            sent_ns,
+            received_ns,
+            replied_ns,
+        } => {
+            frame.extend_from_slice(&sequence.to_le_bytes());
+            frame.extend_from_slice(&sent_ns.to_le_bytes());
+            frame.extend_from_slice(&received_ns.to_le_bytes());
+            frame.extend_from_slice(&replied_ns.to_le_bytes());
+        }
+        RoomMessage::Start(message) => {
+            frame.extend_from_slice(&start_fields(*message).1.to_le_bytes())
+        }
     }
     Ok(frame)
 }
@@ -212,6 +277,9 @@ fn read_header(frame: &[u8]) -> Result<(u8, usize), RoomWireError> {
         2 => length == 8,
         3 => (24..=MAX_SNAPSHOT_PAYLOAD).contains(&length),
         4..=6 => length == 0,
+        7 => length == 16,
+        8 => length == 32,
+        9..=12 => length == 8,
         _ => false,
     };
     if !valid_length {
@@ -315,10 +383,33 @@ pub fn decode_message(frame: &[u8]) -> Result<RoomMessage, RoomWireError> {
         4 => RoomMessage::Seal,
         5 => RoomMessage::Ready,
         6 => RoomMessage::Leave,
+        7 => RoomMessage::ClockPing {
+            sequence: u64::from_le_bytes(read_array(&mut payload)?),
+            sent_ns: i64::from_le_bytes(read_array(&mut payload)?),
+        },
+        8 => RoomMessage::ClockPong {
+            sequence: u64::from_le_bytes(read_array(&mut payload)?),
+            sent_ns: i64::from_le_bytes(read_array(&mut payload)?),
+            received_ns: i64::from_le_bytes(read_array(&mut payload)?),
+            replied_ns: i64::from_le_bytes(read_array(&mut payload)?),
+        },
+        9..=12 => {
+            let time = i64::from_le_bytes(read_array(&mut payload)?);
+            RoomMessage::Start(match tag {
+                9 => StartMessage::ClockReady(time),
+                10 => StartMessage::Propose(time),
+                11 => StartMessage::Accept(time),
+                12 => StartMessage::Commit(time),
+                _ => return Err(RoomWireError::InvalidFrame),
+            })
+        }
         _ => return Err(RoomWireError::InvalidFrame),
     };
     if !payload.is_empty() {
         return Err(RoomWireError::InvalidMessage);
+    }
+    if tag >= 7 {
+        message_extent(&message)?;
     }
     Ok(message)
 }
