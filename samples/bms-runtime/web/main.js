@@ -31,6 +31,37 @@ let preparing = false;
 let hasPreview = false;
 let audioModule = null;
 let activePlay = null;
+let roomResults = null;
+
+function clearRoomResults() {
+  const previous = roomResults;
+  roomResults = null;
+  if (previous?.rpc) {
+    clearTimeout(previous.rpc.timer);
+    previous.rpc.reject(new Error("Room Results were replaced."));
+    previous.rpc = null;
+  }
+}
+
+function roomResultsMetadata(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || typeof value.failed !== "boolean" || !Number.isInteger(value.pages) || value.pages < 1 || value.pages > 1008
+    || !Number.isInteger(value.page) || value.page < 0 || value.page >= value.pages) {
+    throw new Error("Room Results page metadata unavailable.");
+  }
+  return { scorePage: value.page, scorePages: value.pages, scoreFailed: value.failed };
+}
+
+function retainRoomResults(session) {
+  clearRoomResults();
+  if (!session.room || session.owner !== owner || !worker || session.cleanupError !== null) return;
+  const metadata = session.roomResultsNotice ?? session.finalScore?.roomResults;
+  if (metadata === null || metadata === undefined) return;
+  let scores;
+  try { scores = roomResultsMetadata(metadata); }
+  catch { scores = { scorePage: 0, scorePages: 0, scoreFailed: true }; }
+  roomResults = { id: session.id, owner, ...scores, rpc: null, scoreChanging: false };
+}
 let lastReplay = null;
 let capturedReplays = [];
 let replayURL = null;
@@ -370,13 +401,15 @@ function controls() {
     || room.snapshot.members[0].participant !== room.participant || room.sealRequested;
   ui["room-ready"].disabled = roomBusy || room.snapshot?.phase !== 1 || !ownMember || ownMember.prepared || room.readyRequested;
   ui["room-leave"].disabled = roomBusy;
-  const scoresVisible = room && (room.scorePages > 0 || room.scoreFailed) && activePlay.phase !== "closing";
+  const scores = room && activePlay.phase !== "closing" ? room : !playing ? roomResults : null;
+  const scoresVisible = scores && (scores.scorePages > 0 || scores.scoreFailed);
   for (const id of ["room-score-prev", "room-score-next", "room-score-page"]) ui[id].hidden = !scoresVisible;
-  const scoresBusy = !scoresVisible || room.scoreFailed || activePlay.rpc !== null || room.scoreChanging || room.leaving;
-  ui["room-score-prev"].disabled = scoresBusy || room.scorePage === 0;
-  ui["room-score-next"].disabled = scoresBusy || room.scorePage + 1 >= room.scorePages;
+  const scoresBusy = !scoresVisible || scores.scoreFailed || (playing ? activePlay.rpc !== null : scores.rpc !== null)
+    || scores.scoreChanging || scores.leaving || busy || importing || preparing;
+  ui["room-score-prev"].disabled = scoresBusy || scores.scorePage === 0;
+  ui["room-score-next"].disabled = scoresBusy || scores.scorePage + 1 >= scores.scorePages;
   ui["room-score-page"].textContent = scoresVisible
-    ? room.scoreFailed ? "Room scores unavailable." : `Room scores ${room.scorePage + 1} / ${room.scorePages}` : "";
+    ? scores.scoreFailed ? "Room scores unavailable." : `Room ${playing ? "scores" : "results"} ${scores.scorePage + 1} / ${scores.scorePages}` : "";
   ui.export.disabled = playing || busy || lastReplay === null;
   ui["replay-file"].disabled = !initialized || importing || preparing || playing || busy;
   ui["replay-play"].disabled = ui.play.disabled || selectedReplay === null;
@@ -410,6 +443,7 @@ function controls() {
   for (const button of opponentButtons) button.disabled = recordsDisabled;
 }
 function stop() {
+  clearRoomResults();
   revokeReplayURL();
   closeRecords();
   cancelHidPermission();
@@ -466,6 +500,7 @@ function prepare() {
     if (!/^\d{1,20}$/.test(seed) || BigInt(seed) > 0xffffffffffffffffn) throw new Error("Chart seed must fit an unsigned 64-bit integer.");
     if (!ui.chart.value) throw new Error("Select a chart first.");
     selectId = ++serial;
+    clearRoomResults();
     preparing = true;
     canvas.hidden = true;
     controls();
@@ -588,6 +623,7 @@ function choose(event) {
   if (files.length > 32768) return status("Select no more than 32,768 files.", true);
   void releaseLocalSources("Song library changed. Discover local sources again.");
   importId = ++serial;
+  clearRoomResults();
   importing = true;
   controls();
   status("Checking the selected files…");
@@ -605,6 +641,8 @@ byId("seek-form").addEventListener("submit", event => {
   try {
     const ns = nanoseconds(ui.position.value);
     seekId = ++serial;
+    clearRoomResults();
+    controls();
     worker.postMessage({ kind: "seek", id: seekId, selectedId, ns });
   } catch (error) { status(error.message, true); }
 });
@@ -883,6 +921,43 @@ function roomControl(operation) {
 
 async function changeRoomScorePage(delta) {
   const session = activePlay;
+  if (!session) {
+    const results = roomResults;
+    if (!results || results.owner !== owner || !worker || results.scoreFailed || results.rpc
+      || results.scoreChanging || importing || preparing || recordsOperation || hidOwnershipFailed) return;
+    const page = results.scorePage + delta;
+    if (!Number.isInteger(page) || page < 0 || page >= results.scorePages) return;
+    const rpcId = ++serial;
+    if (!Number.isSafeInteger(rpcId)) return;
+    results.scoreChanging = true;
+    try {
+      const response = await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          if (results.rpc?.rpcId !== rpcId) return;
+          results.rpc = null;
+          reject(new Error("Room Results page request timed out."));
+        }, 10000);
+        results.rpc = { rpcId, timer, resolve, reject };
+        controls();
+        try { worker.postMessage({ kind: "play-room-page", playId: results.id, rpcId, page }); }
+        catch (error) { clearTimeout(timer); results.rpc = null; reject(error); }
+      });
+      if (roomResults !== results || results.owner !== owner || activePlay) return;
+      if (response?.kind !== "room-page" || response.page !== page || response.pages !== results.scorePages) {
+        throw new Error("Room Results page response did not match its request.");
+      }
+      results.scorePage = page;
+    } catch (error) {
+      if (roomResults === results && results.owner === owner && !activePlay) {
+        results.scoreFailed = true;
+        ui["multiplayer-status"].textContent += ` Room Results display unavailable: ${String(error.message).slice(0, 4096)}`;
+      }
+    } finally {
+      results.scoreChanging = false;
+      if (roomResults === results && results.owner === owner) controls();
+    }
+    return;
+  }
   const room = session?.room;
   if (!room || session.owner !== owner || session.phase === "closing" || room.leaving || room.scoreFailed
     || room.scoreChanging || session.rpc || !room.scorePages) return;
@@ -1000,6 +1075,7 @@ async function play(mode = "live") {
     preview: { title: ui.title.textContent, details: ui.details.textContent, position: ui.position.value } }, acquired,
     { localPlan, localSources: localPlan && localPlan.automatic !== true ? new Set(localPlan.sources) : null, localReplays: null, localScores: null, recordLimits: null,
       localPage: localPlan?.page ?? 0, pageChanging: false, pageInputWaiter: null, lastAckSequence: 0n });
+  clearRoomResults();
   activePlay = session;
   controls();
   status(mode === "replay" ? "Preparing recorded replay and audio…" : "Preparing playable chart and audio…");
@@ -1600,8 +1676,38 @@ function finalLocalPeerText(peers, players) {
 
 function receivePlay(data) {
   const session = activePlay;
+  const results = roomResults;
+  if (!session && results?.id === data.playId && results.owner === owner) {
+    if (data.kind === "play-reply" && results.rpc?.rpcId === data.rpcId) {
+      const request = results.rpc;
+      results.rpc = null;
+      clearTimeout(request.timer);
+      if (typeof data.error === "string") request.reject(new Error(data.error));
+      else request.resolve(data.result);
+    } else if (data.kind === "play-room-results") {
+      try {
+        const metadata = roomResultsMetadata(data);
+        if (!metadata.scoreFailed || metadata.scorePages !== results.scorePages) throw new Error("Invalid Results failure notice.");
+        Object.assign(results, metadata);
+      } catch { results.scoreFailed = true; }
+      if (results.rpc) {
+        const request = results.rpc;
+        results.rpc = null;
+        clearTimeout(request.timer);
+        request.reject(new Error("Room Results display unavailable."));
+      }
+      controls();
+    }
+    return;
+  }
   if (!session || data.playId !== session.id) return;
-  if (data.kind === "play-opponents") {
+  if (data.kind === "play-room-results") {
+    try {
+      roomResultsMetadata(data);
+      if (data.failed !== true) throw new Error("Invalid Results failure notice.");
+      session.roomResultsNotice = { page: data.page, pages: data.pages, failed: true };
+    } catch { session.roomResultsNotice = { page: 0, pages: 0, failed: true }; }
+  } else if (data.kind === "play-opponents") {
     receiveOpponents(session, data);
   } else if (data.kind === "play-multiplayer") {
     receiveMultiplayer(session, data.event);
@@ -1823,6 +1929,7 @@ function stopPlay(reason, failed = false, completed = false) {
           showCapturedReplays(true);
         }
         activePlay = null;
+        retainRoomResults(session);
         session.opponentSelection = null;
         controls();
         if (session.owner === owner || failed) status(reason + result, failed);

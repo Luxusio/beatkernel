@@ -5021,6 +5021,130 @@ test("joined room drain outcomes remain distinct while the natural cleanup wait 
   }
 });
 
+async function stoppedRoomResults(h, { count = 4, metadata = { page: 1, pages: 2, failed: false }, beforeTerminal = null } = {}) {
+  await h.preview(); h.get("record").checked = true;
+  const { start, worker } = await openRoomLobby(h);
+  const roster = roomRoster(start, { phase: 2, count });
+  if (count === 64) for (const member of roster.snapshot.members) if (member.participant !== ROOM_PARTICIPANT)
+    member.players = Uint32Array.from({ length: 64 }, (_, index) => 0xffffffff - index);
+  await roomEvent(h, start, roster);
+  await roomEvent(h, start, { kind: "score-pages", page: 0, pages: count === 64 ? 1008 : 2 });
+  await roomEvent(h, start, roomStart()); await h.reply(worker.last("play-activate"), null);
+  h.click("stop"); await flush();
+  if (beforeTerminal) await beforeTerminal(start, worker);
+  const player = start.localPlanWords[0];
+  const terminal = localFinal(start, {
+    roomResults: metadata,
+    room: { participant: ROOM_PARTICIPANT, finalQueued: true, finalWritten: false,
+      finalAcknowledged: false, localComplete: false, finalDrain: "cancelled", error: null, peers: [] },
+    replays: [{ player, replay: Uint8Array.of(66, 75, 82, 1), replayError: null, replayComplete: false }],
+  });
+  await h.receive(terminal);
+  return { start, worker, terminal, player };
+}
+
+test("joined room Results use bounded metadata and acknowledged Worker pages without recreating lobby or Window score work", async () => {
+  for (const count of [4, 64]) {
+    const stopping = deferred(), h = await harness({ stopGate: stopping });
+    const pages = count === 64 ? 1008 : 2;
+    const { start, worker, terminal, player } = await stoppedRoomResults(h, {
+      count, metadata: { page: pages - 1, pages, failed: false },
+    });
+    assert.equal(h.get("room-score-page").hidden, true, "Worker final data cannot bypass joined audio cleanup");
+    assert.equal(h.get("captured-replay").disabled, true);
+    stopping.resolve(); await flush();
+    assert.equal(h.get("room-score-page").textContent, `Room results ${pages} / ${pages}`);
+    assert.equal(h.get("room-score-page").children.length, 0);
+    assert.equal(h.get("room-score-prev").disabled, false); assert.equal(h.get("room-score-next").disabled, true);
+    for (const id of ["room-seal", "room-ready", "room-leave"]) {
+      assert.equal(h.get(id).hidden, true); assert.equal(h.get(id).disabled, true);
+    }
+    const status = h.get("multiplayer-status").textContent, local = content(h.get("local-results"));
+    assert.match(status, /full write unconfirmed.*Coordinated room drain cancelled/);
+    h.get("captured-replay").value = String(player); h.get("captured-replay").emit("change");
+    assert.equal(h.get("export").disabled, false);
+    const display = watchPlayDisplay(h), layout = h.layoutReads;
+    const inputs = worker.messages("play-step").length, renders = worker.messages("play-render").length;
+    h.click("room-score-prev"); await flush();
+    const request = worker.last("play-room-page");
+    assert.equal(request.playId, start.playId); assert.equal(request.page, pages - 2);
+    assert.ok(request.rpcId > worker.last("play-activate").rpcId);
+    assert.equal(h.get("room-score-page").textContent, `Room results ${pages} / ${pages}`);
+    assert.equal(h.get("room-score-prev").disabled, true); assert.equal(h.get("room-score-next").disabled, true);
+    const choices = worker.messages("play-room-page").length;
+    h.click("room-score-prev"); h.click("room-score-next");
+    assert.equal(worker.messages("play-room-page").length, choices);
+    await h.receive({ kind: "play-reply", playId: start.playId, rpcId: request.rpcId - 1,
+      result: { kind: "room-page", page: pages - 2, pages } });
+    assert.equal(h.get("room-score-page").textContent, `Room results ${pages} / ${pages}`);
+    await h.reply(request, { kind: "room-page", page: pages - 2, pages });
+    assert.equal(h.get("room-score-page").textContent, `Room results ${pages - 1} / ${pages}`);
+    await h.advance(100);
+    await roomEvent(h, start, { kind: "score-pages", page: 0, pages });
+    await h.receive(terminal);
+    assert.equal(h.get("room-score-page").textContent, `Room results ${pages - 1} / ${pages}`);
+    assert.equal(h.get("multiplayer-status").textContent, status); assert.equal(content(h.get("local-results")), local);
+    assert.equal(worker.messages("play-step").length, inputs); assert.equal(worker.messages("play-render").length, renders);
+    assert.equal(h.layoutReads, layout); assert.deepEqual(display, []);
+    assert.equal(worker.messages("play-room-leave").length, 0); assert.equal(h.audio.stopStarts, 1);
+    h.click("room-score-next"); await flush();
+    const pending = worker.last("play-room-page");
+    const next = await h.begin();
+    assert.notEqual(next.playId, start.playId);
+    assert.equal(h.get("room-score-page").hidden, true);
+    const freshStatus = h.get("multiplayer-status").textContent;
+    await h.reply(pending, { kind: "room-page", page: pages - 1, pages });
+    await h.receive({ kind: "play-room-results", playId: start.playId, page: 0, pages, failed: true, error: "obsolete renderer" });
+    assert.equal(h.get("multiplayer-status").textContent, freshStatus);
+    assert.equal(h.get("room-score-page").hidden, true);
+    h.click("stop"); await flush(); await h.receive(localFinal(next)); await h.close();
+  }
+});
+
+test("room Results metadata, page and renderer failures affect only retained presentation and never invalidate a local recording", async () => {
+  for (const fault of ["metadata", "failed", "closing-notice", "notice", "reply", "refusal", "timeout", "seek"]) {
+    const h = await harness();
+    const metadata = fault === "metadata" ? { page: 1, pages: 1009, failed: false }
+      : { page: 1, pages: 2, failed: fault === "failed" };
+    const { start, worker, player } = await stoppedRoomResults(h, {
+      metadata,
+      beforeTerminal: fault === "closing-notice" ? async start => h.receive({
+        kind: "play-room-results", playId: start.playId, page: 1, pages: 2, failed: true, error: "late joined draw failed",
+      }) : null,
+    });
+    const local = content(h.get("local-results"));
+    h.get("captured-replay").value = String(player); h.get("captured-replay").emit("change");
+    assert.equal(h.get("export").disabled, false);
+    if (["notice", "reply", "refusal", "timeout", "seek"].includes(fault)) {
+      h.click("room-score-prev"); await flush(); const request = worker.last("play-room-page");
+      assert.ok(request);
+      if (fault === "notice") await h.receive({ kind: "play-room-results", playId: start.playId,
+        page: 1, pages: 2, failed: true, error: "renderer surface lost" });
+      if (fault === "reply") await h.reply(request, { kind: "room-page", page: 1, pages: 2 });
+      if (fault === "refusal") await h.receive({ kind: "play-reply", playId: start.playId,
+        rpcId: request.rpcId, error: "archive projection refused" });
+      if (fault === "timeout") await h.advance(10001);
+      if (fault === "seek") {
+        h.get("position").value = "0"; h.get("seek-form").emit("submit"); await flush();
+        await h.reply(request, { kind: "room-page", page: 0, pages: 2 });
+        assert.equal(h.get("room-score-page").hidden, true);
+      }
+    }
+    if (fault !== "seek") {
+      assert.match(h.get("room-score-page").textContent, /unavailable/i);
+      assert.equal(h.get("room-score-prev").disabled, true); assert.equal(h.get("room-score-next").disabled, true);
+    }
+    assert.equal(content(h.get("local-results")), local);
+    assert.equal(h.get("export").disabled, false); assert.equal(h.get("play").disabled, false);
+    assert.equal(worker.messages("play-stop").length, 1); assert.equal(h.audio.stopStarts, 1);
+    assert.equal(worker.terminations, 0); assert.equal(worker.messages("play-room-leave").length, 0);
+    assert.match(h.get("multiplayer-status").textContent, /Coordinated room drain cancelled/);
+    h.click("export"); await flush();
+    assert.equal(h.downloads.length, 1); assert.match(h.downloads[0].filename, /prefix\.bkr$/);
+    await h.close();
+  }
+});
+
 test("room URL, bounded roster and committed schedule refusals preserve cleanup and never reinterpret queue success as start", async () => {
   for (const url of ["http://example.test/rooms/a", "https://example.test/competition",
     "https://example.test/rooms/a?extra=1", "https://example.test/rooms/a#fragment",

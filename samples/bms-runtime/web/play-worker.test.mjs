@@ -68,6 +68,7 @@ async function workerHarness(options = {}) {
   const roomSessions = [];
   const roomChannels = [];
   const roomWrappers = [];
+  const roomResults = [];
   let networkNow = 1000;
   let timerId = 0;
   let receive;
@@ -130,6 +131,7 @@ async function workerHarness(options = {}) {
     gameDraws = [];
     replayDraws = [];
     localDraws = [];
+    resultDraws = [];
     resize(...extent) { this.extents.push(extent); }
     set_chart(prepared) {
       assert.equal(prepared.moved, false);
@@ -141,7 +143,55 @@ async function workerHarness(options = {}) {
     draw_game(game) { assert.equal(game.frees, 0); this.gameDraws.push(game); }
     draw_replay(replay) { assert.equal(replay.frees, 0); this.replayDraws.push(replay); }
     draw_local_game(game, page) { assert.equal(game.frees, 0); this.localDraws.push({ game, page }); }
+    draw_room_results(results) {
+      results.live();
+      if (options.roomResultsDrawError) throw new Error(options.roomResultsDrawError);
+      this.resultDraws.push({ results, page: results.page });
+    }
     needs_redraw() { return false; }
+  }
+  // Generated binding edge only. The portable Rust fixture owns roster/prefix
+  // semantics; this records actual Worker ownership and the bounded page calls.
+  class BrowserRoomResults {
+    constructor(participant, words) {
+      if (options.roomResultsConstructError) throw new Error(options.roomResultsConstructError);
+      assert.ok(words instanceof Uint32Array);
+      this.participant = participant; this.roster = words.slice();
+      this.updates = []; this.selections = []; this.frees = 0; this.frozen = false;
+      this.pageValue = 0; this.failedValue = false;
+      let remotePlayers = 0;
+      for (let offset = 0; offset < words.length;) {
+        const host = BigInt(words[offset]) | (BigInt(words[offset + 1]) << 32n);
+        const count = words[offset + 2];
+        if (host !== participant) remotePlayers += count;
+        offset += 3 + count;
+      }
+      this.pagesValue = Math.ceil(remotePlayers / 4);
+      options.onRoomResultsConstruct?.(this);
+      roomResults.push(this);
+    }
+    live() { assert.equal(this.frees, 0, "retained Results binding was already freed"); }
+    update(participant, sequence, finalPrefix, words) {
+      this.live(); assert.equal(this.frozen, false);
+      if (options.roomResultsUpdateError) throw new Error(options.roomResultsUpdateError);
+      this.updates.push({ participant, sequence, finalPrefix, words: words.slice() });
+    }
+    freeze(page, cancelled, error, failed) {
+      this.live(); assert.equal(this.frozen, false);
+      if (options.roomResultsFreezeError) throw new Error(options.roomResultsFreezeError);
+      this.freezeArgs = { page, cancelled, error, failed };
+      this.pageValue = page; this.failedValue = failed; this.frozen = true;
+    }
+    set_page(page) {
+      this.live(); assert.equal(this.frozen, true);
+      if (this.pageError || options.roomResultsPageError) throw new Error(this.pageError ?? options.roomResultsPageError);
+      assert.ok(Number.isInteger(page) && page >= 0 && page < this.pagesValue);
+      this.selections.push(page); this.pageValue = page;
+    }
+    get page() { this.live(); return this.pageValue; }
+    get pages() { this.live(); return this.pagesValue; }
+    get failed() { this.live(); return this.failedValue; }
+    free() { this.live(); assert.equal(++this.frees, 1); }
   }
   class BrowserGame {
     static new_physical_contact(prepared, ...args) {
@@ -720,7 +770,7 @@ async function workerHarness(options = {}) {
     clearTimeout(id) { timers.delete(id); timerDelays.delete(id); },
   });
   self.performance = context.performance;
-  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView", "BrowserGame", "BrowserReplay", "BrowserMultiplayer", "BrowserLocalGame", "BrowserRoomClient"], function () {
+  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView", "BrowserGame", "BrowserReplay", "BrowserMultiplayer", "BrowserLocalGame", "BrowserRoomClient", "BrowserRoomResults"], function () {
     this.setExport("default", async () => { if (options.initGate) await options.initGate.promise; });
     this.setExport("BrowserLibrary", BrowserLibrary);
     this.setExport("BrowserView", BrowserView);
@@ -729,6 +779,7 @@ async function workerHarness(options = {}) {
     this.setExport("BrowserMultiplayer", BrowserMultiplayer);
     this.setExport("BrowserLocalGame", options.missingLocalExport ? undefined : BrowserLocalGame);
     this.setExport("BrowserRoomClient", options.missingRoomExport ? undefined : BrowserRoomClient);
+    this.setExport("BrowserRoomResults", options.missingRoomResultsExport ? undefined : BrowserRoomResults);
   }, { context });
   const network = new SyntheticModule(["BrowserMultiplayerOwner"], function () {
     this.setExport("BrowserMultiplayerOwner", BrowserMultiplayerOwner);
@@ -764,7 +815,7 @@ async function workerHarness(options = {}) {
   await worker.evaluate();
   return {
     messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, contactConstructions, localConstructions, locals, timers, networks, networkSessions,
-    roomSessions, roomChannels, roomWrappers,
+    roomSessions, roomChannels, roomWrappers, roomResults,
     setNetworkNow(value) { assert.ok(value >= networkNow); networkNow = value; },
     post(request) { receive({ data: request }); },
     async send(request) { receive({ data: request }); await flushJobs(); },
@@ -964,9 +1015,9 @@ async function queueRoomStart(h, schedule = { targetNs: 2000000000n, songTargetN
   await roomReceive(h, () => session.frames.push({ kind: 1, id: 17n, bytes: new Uint8Array(11) }));
   assert.equal(h.of("play-room").some(row => row.event.kind === "start"), false);
 }
-async function committedRoom(h, schedule) {
+async function committedRoom(h, schedule, members = null) {
   await requestRoom(h);
-  await preparedRoomReceipt(h);
+  await preparedRoomReceipt(h, members);
   await queueRoomStart(h, schedule);
   h.roomChannels.at(-1).writes.at(-1).gate.resolve(); await flushJobs();
   return h.of("play-room").find(row => row.event.kind === "start")?.event;
@@ -1410,9 +1461,11 @@ test("room HUD bridges every prepared participant and player with exact words an
     assert.deepEqual(game.calls.filter(call => call[0].startsWith("local-touch")), contactSetup,
       "room score membership, page changes and disconnect never remap local contact geometry");
     assert.equal(game.frees, 1);
-    const posted = h.messages.length, hudCalls = game.roomHudCalls.length;
-    await requestRoom(h, "play-room-page", { page: 0 });
-    assert.equal(h.messages.length, posted); assert.equal(game.roomHudCalls.length, hudCalls);
+    const hudCalls = game.roomHudCalls.length;
+    const resultPage = await requestRoom(h, "play-room-page", { page: 0 });
+    assert.deepEqual(roomReply(h, resultPage).result, { kind: "room-page", page: 0, pages });
+    assert.equal(h.roomResults.length, 1); assert.equal(h.roomResults[0].page, 0);
+    assert.equal(game.roomHudCalls.length, hudCalls, "joined pages use the archive, never the freed live HUD");
   }
 });
 
@@ -1453,7 +1506,11 @@ test("room HUD capability and binding failures fence only presentation and prese
 test("a completed output publishes one final room prefix outside cadence while actual write and read receipts remain distinct", async () => {
   let complete = false;
   const h = await roomPrepared({ observeOutput: () => complete });
-  const game = h.locals[0], event = await committedRoom(h);
+  const game = h.locals[0], event = await committedRoom(h, undefined, options.roomMembers ?? null);
+  if (options.roomInitialPage !== undefined) {
+    const rpc = await requestRoom(h, "play-room-page", { page: options.roomInitialPage });
+    assert.equal(roomReply(h, rpc).result.page, options.roomInitialPage);
+  }
   assert.equal((await h.rpc("play-activate", { hostNs: event.targetHostNs,
     targetHostNs: event.targetHostNs, startFrame: START })).result, null);
   const session = h.roomSessions[0], channel = h.roomChannels[0];
@@ -1635,6 +1692,160 @@ test("natural room drain retains peer and receipt callbacks after gameplay dispo
   assert.deepEqual(session.credits, credited); assert.equal(session.received.length, received);
   assert.equal(session.requests.includes("leave"), false);
   assert.equal(h.of("play-stopped").length, 1); assert.equal(h.of("play-error").length, 0);
+});
+
+async function completeRoomDrain({ h, session, channel }) {
+  channel.writes.at(-1).gate.resolve(); await flushJobs();
+  await roomReceive(h, () => { session.finalAcknowledged = true; session.progressComplete = true; });
+  let receivedComplete = false;
+  session.onWritten = id => { if (id === 52n && receivedComplete) session.drainComplete = true; };
+  await roomReceive(h, () => { receivedComplete = true; });
+  assert.equal(session.drainComplete, false);
+  channel.writes.at(-1).gate.resolve(); await flushJobs();
+}
+
+test("joined room Results freeze the latest accepted peer prefix after gameplay disposal and retain one bounded paged archive", async () => {
+  const members = [
+    { participant: 9007199254740993n, players: Uint32Array.of(800, 4, 0xffffffff), prepared: false },
+    { participant: 18446744073709551615n, players: Uint32Array.of(0xffffffff), prepared: false },
+    { participant: 18446744073709551614n, players: Uint32Array.of(0xffffffff, 7, 9), prepared: false },
+  ];
+  const fixture = await naturalRoomDrain({ roomHoldAfterClose: true, roomMembers: members,
+    roomHudPages: 2, roomInitialPage: 1 });
+  const { h, game, session, channel } = fixture;
+  const gameCalls = game.calls.length, hudCalls = game.roomHudCalls.length;
+  const first = new Uint32Array([800, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0,
+    4, 0, 0, 2, 0, 0, 0, 2, 0, 2, 0, 0xffffffff, 0, 0, 3, 0, 0, 0, 3, 0, 3, 0]);
+  await roomReceive(h, () => session.peerProgress.push({ participant: members[0].participant,
+    sequence: 1n, finalPrefix: false, words: first }));
+  const latest = new Uint32Array(Array.from(members[0].players).flatMap(player => [
+    player, 0xffffffff, 0x7fffffff, 0xffffffff, 0xffffffff, 0, 0, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff,
+  ]));
+  const held = latest.slice();
+  await roomReceive(h, () => session.peerProgress.push({ participant: members[0].participant,
+    sequence: 18446744073709551615n, finalPrefix: true, words: latest }));
+  latest.fill(0);
+  assert.equal(h.roomResults.length, 0); assert.equal(h.of("play-stopped").length, 0);
+  await completeRoomDrain(fixture);
+  assert.equal(channel.closes, 1); assert.equal(session.frees, 1);
+  assert.equal(h.roomResults.length, 0, "archive construction waits for the retained read continuation to join");
+  channel.reads.at(-1).gate.resolve(Uint8Array.of(17)); await flushJobs();
+  const terminal = h.of("play-stopped").at(-1), archive = h.roomResults[0];
+  assert.deepEqual(terminal.roomResults, { page: 1, pages: 2, failed: false });
+  assert.equal(terminal.room.finalDrain, "complete"); assert.equal(terminal.replays[0].replayComplete, true);
+  assert.equal(archive.participant, 18446744073709551615n);
+  assert.deepEqual(archive.roster, new Uint32Array(members.flatMap(member => [
+    Number(member.participant & 0xffffffffn), Number(member.participant >> 32n), member.players.length, ...member.players,
+  ])));
+  assert.deepEqual(archive.updates, [{ participant: members[0].participant,
+    sequence: 18446744073709551615n, finalPrefix: true, words: held }]);
+  assert.deepEqual(archive.freezeArgs, { page: 1, cancelled: false, error: null, failed: false });
+  assert.equal(game.calls.length, gameCalls); assert.equal(game.roomHudCalls.length, hudCalls);
+  await h.tick();
+  assert.deepEqual(h.views[0].resultDraws.at(-1), { results: archive, page: 1 });
+  for (const page of [0, 1, 0]) {
+    const rpc = await requestRoom(h, "play-room-page", { page });
+    assert.deepEqual(roomReply(h, rpc).result, { kind: "room-page", page, pages: 2 });
+    await h.tick();
+    assert.deepEqual(h.views[0].resultDraws.at(-1), { results: archive, page });
+    assert.equal(h.roomResults.length, 1); assert.equal(archive.updates.length, 1);
+  }
+  const selections = [...archive.selections], draws = h.views[0].resultDraws.length;
+  for (const page of [-1, 2, 0.5, "1"]) {
+    const rpc = await requestRoom(h, "play-room-page", { page }); assert.ok(roomReply(h, rpc).error);
+  }
+  const lastRpc = h.rpcId;
+  await h.send({ kind: "play-room-page", playId: 7, rpcId: lastRpc, page: 1 });
+  assert.ok(h.of("play-reply").at(-1).error, "reusing an old Results RPC does not adopt another page");
+  await h.send({ kind: "play-room-page", playId: 6, rpcId: lastRpc + 1, page: 1 });
+  assert.deepEqual(archive.selections, selections); assert.equal(archive.page, 0);
+  assert.equal(h.views[0].resultDraws.length, draws); assert.equal(archive.frees, 0);
+  assert.equal(h.of("play-room-results").length, 0); assert.equal(h.of("play-error").length, 0);
+  await h.send(startRequest({ playId: 8, rpcId: 1 }));
+  assert.equal(archive.frees, 1); assert.equal(h.games.length, 1);
+  const messages = h.messages.length;
+  await h.send({ kind: "play-room-page", playId: 7, rpcId: lastRpc + 2, page: 1 });
+  assert.equal(h.messages.length, messages); assert.equal(h.games[0].frees, 0);
+  await h.send({ kind: "play-stop", playId: 8 });
+  assert.equal(archive.frees, 1);
+});
+
+test("retained room archive and rendering faults remain presentation-only and every discard fences one joined binding", async () => {
+  for (const options of [
+    { missingRoomResultsExport: true }, { roomResultsConstructError: "archive allocation refused" },
+    { roomResultsFreezeError: "freeze refused" }, { roomResultsUpdateError: "retained prefix refused" },
+    { roomResultsDrawError: "renderer unavailable" }, { roomResultsPageError: "page projection refused" },
+  ]) {
+    const fixture = await naturalRoomDrain(options), { h, session } = fixture;
+    await roomReceive(h, () => session.peerProgress.push({ participant: 9007199254740993n,
+      sequence: 1n, finalPrefix: false, words: new Uint32Array([
+        800, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0xffffffff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      ]) }));
+    await completeRoomDrain(fixture);
+    const terminal = h.of("play-stopped").at(-1);
+    assert.equal(terminal.released, true); assert.equal(terminal.replays[0].replayComplete, true);
+    assert.equal(terminal.room.finalDrain, "complete"); assert.equal(terminal.room.error, null);
+    const replay = terminal.replays[0].replay.slice();
+    if (options.roomResultsDrawError) await h.tick();
+    if (options.roomResultsPageError) {
+      const rpc = await requestRoom(h, "play-room-page", { page: 0 }); assert.ok(roomReply(h, rpc).error);
+    }
+    if (options.roomResultsDrawError || options.roomResultsPageError) {
+      const notice = h.of("play-room-results").at(-1);
+      assert.deepEqual({ playId: notice.playId, page: notice.page, pages: notice.pages, failed: notice.failed },
+        { playId: 7, page: 0, pages: 1, failed: true });
+    } else assert.equal(terminal.roomResults.failed, true);
+    assert.ok(h.roomResults.every(archive => archive.frees === 1));
+    assert.equal(h.of("fatal").length, 0); assert.equal(h.of("play-error").length, 0);
+    assert.deepEqual(terminal.replays[0].replay, replay); assert.equal(h.locals[0].frees, 1);
+    await h.send({ kind: "seek", id: 9, selectedId: 2, ns: "0" });
+    assert.ok(h.roomResults.every(archive => archive.frees === 1));
+  }
+  {
+    const h = await roomPrepared(), event = await committedRoom(h);
+    await h.rpc("play-activate", { hostNs: event.targetHostNs, targetHostNs: event.targetHostNs, startFrame: START });
+    const session = h.roomSessions[0];
+    await roomReceive(h, () => session.peerProgress.push({ participant: 9007199254740993n,
+      sequence: 1n, finalPrefix: false, words: new Uint32Array([
+        800, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0xffffffff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      ]) }));
+    await h.send(step({ watermark: "invalid original time" }));
+    const failure = h.of("play-error").at(-1);
+    assert.equal(failure.released, true); assert.equal(failure.replays[0].replayComplete, false);
+    assert.deepEqual(failure.roomResults, { page: 0, pages: 1, failed: false });
+    assert.equal(h.roomResults[0].freezeArgs.cancelled, true);
+    assert.equal(h.roomResults[0].updates[0].finalPrefix, false);
+    assert.equal(h.locals[0].frees, 1); assert.equal(session.frees, 1);
+    const rpc = await requestRoom(h, "play-room-page", { page: 0 }); assert.ok(roomReply(h, rpc).result);
+    await h.send({ kind: "seek", id: 10, selectedId: 2, ns: "0" });
+    assert.equal(h.roomResults[0].frees, 1);
+  }
+  for (const discard of ["select", "seek", "import", "fatal", "replacement-during-join"]) {
+    const fixture = await naturalRoomDrain({ roomHoldAfterClose: true });
+    const { h, channel } = fixture;
+    if (discard === "replacement-during-join") {
+      await h.send(startRequest({ playId: 8, rpcId: 1 }));
+      assert.equal(h.games.length, 0); assert.equal(h.roomResults.length, 0);
+      for (const write of channel.writes) write.gate.resolve();
+      channel.reads.at(-1).gate.resolve(Uint8Array.of(1)); await flushJobs();
+      assert.equal(h.roomResults.length, 0, "obsolete cleanup cannot install an archive over the replacement");
+      assert.equal(h.games.length, 1); await h.send({ kind: "play-stop", playId: 8 });
+      continue;
+    }
+    await completeRoomDrain(fixture);
+    channel.reads.at(-1).gate.resolve(Uint8Array.of(1)); await flushJobs();
+    const archive = h.roomResults[0]; assert.equal(archive.frees, 0);
+    if (discard === "select") await h.send({ kind: "select", id: 8, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "0" });
+    if (discard === "seek") await h.send({ kind: "seek", id: 8, selectedId: 2, ns: "0" });
+    if (discard === "import") await h.send({ kind: "import", id: 8, files: [selectedFile("other/chart.bms")] });
+    if (discard === "fatal") await h.send({ kind: "resize", width: -1, height: 720 });
+    assert.equal(archive.frees, 1);
+    const selections = archive.selections.length;
+    await h.send({ kind: "play-room-page", playId: 7, rpcId: ++h.rpcId, page: 0 });
+    assert.equal(archive.selections.length, selections); assert.equal(archive.frees, 1);
+  }
 });
 
 test("room drain failure preserves genuine local completion while actual gameplay cleanup failure remains separate", async () => {

@@ -9,7 +9,7 @@ import { snapshotHidDevices, hidSetupFromProfile } from "./hid-profile.mjs";
 import { AudioCommandClient } from "./audio-command-client.mjs";
 import { snapshotGamepadSetup, snapshotGamepadDevices, automaticGamepadSetup, gamepadSetupFromProfile, GamepadAdapter } from "./gamepad-profile.mjs";
 import { snapshotLocalPlan, localBindingWords } from "./local-play-model.mjs";
-const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserView } = runtime;
+const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserRoomResults, BrowserView } = runtime;
 let ready = null;
 let view = null;
 let library = null;
@@ -26,6 +26,8 @@ let failed = false;
 let extent = [0, 0];
 let play = null;
 let roomFinalization = null;
+let roomResults = null;
+let roomResultsEpoch = {};
 let lastPlayId = 0;
 const I64_MAX = 9223372036854775807n;
 const U64_MAX = 18446744073709551615n;
@@ -34,6 +36,29 @@ const NO_OPPONENTS = Object.freeze([]);
 
 function report(kind, fields = {}, transfer = []) { self.postMessage({ kind, ...fields }, transfer); }
 function message(error) { return String(error?.message ?? error).slice(0, 4096); }
+function discardRoomResults() {
+  roomResultsEpoch = {};
+  const previous = roomResults;
+  roomResults = null;
+  if (previous?.binding) {
+    const binding = previous.binding;
+    previous.binding = null;
+    try { binding.free(); } catch { /* Presentation disposal cannot change a joined gameplay outcome. */ }
+  }
+  stopRedraw();
+}
+function roomResultsMetadata(results) {
+  return results ? { page: results.page, pages: results.pages, failed: results.failed } : null;
+}
+function roomResultsFailure(results, error) {
+  if (roomResults !== results) return;
+  results.failed = true;
+  const binding = results.binding;
+  results.binding = null;
+  try { binding?.free(); } catch {}
+  stopRedraw();
+  report("play-room-results", { playId: results.id, ...roomResultsMetadata(results), error: message(error) });
+}
 function stopRedraw() {
   if (redraw === null) return;
   if (redraw.animation) self.cancelAnimationFrame(redraw.id);
@@ -43,6 +68,7 @@ function stopRedraw() {
 function fatal(error) {
   if (failed) return;
   failed = true;
+  discardRoomResults();
   cancelRoomFinalization();
   if (play) failPlay(play, error);
   stopRedraw();
@@ -51,21 +77,24 @@ function fatal(error) {
 }
 
 function scheduleDraw(reset = true) {
-  if (failed || !view || (!selectedId && !play?.game) || extent.includes(0)) return;
+  if (failed || !view || (!selectedId && !play?.game && !roomResults?.binding) || extent.includes(0)) return;
   if (reset) retries = 0;
   if (redraw !== null) return;
   const draw = () => {
     redraw = null;
+    const results = !play?.game ? roomResults : null;
     try {
       if (play?.game && play.mode === "replay") view.draw_replay(play.game);
       else if (play?.game && play.localPlan) view.draw_local_game(play.game, play.localPage);
       else if (play?.game) view.draw_game(play.game);
+      else if (results?.binding) view.draw_room_results(results.binding);
+      else if (results) return;
       else view.draw();
       if (view.needs_redraw()) {
         if (++retries <= 3) scheduleDraw(false);
         else report("render-wait", { selectedId, ...(play ? { playId: play.id } : {}) });
       } else report("drawn", { selectedId, ...(play ? { playId: play.id } : {}) });
-    } catch (error) { fatal(error); }
+    } catch (error) { if (results) roomResultsFailure(results, error); else fatal(error); }
   };
   // Only schedules presentation. Its timestamp is never a song/audio clock.
   if (typeof self.requestAnimationFrame === "function") {
@@ -699,20 +728,7 @@ function configureRoomHud(state, room) {
     const game = state.game;
     if (["configure_room_hud", "update_room_hud", "set_room_hud_status", "set_room_hud_page", "room_hud_pages", "disable_room_hud"]
       .some(name => typeof game[name] !== "function")) throw new Error("Room score display binding unavailable.");
-    let length = 0, remote = 0;
-    for (const [participant, players] of room.peerPlayers) {
-      length += 3 + players.length;
-      if (participant !== room.participant) remote += players.length;
-    }
-    if (!integer(length, 8, 4288) || !integer(remote, 1, 4032)) throw new Error("Invalid room display roster extent.");
-    const words = new Uint32Array(length);
-    let offset = 0;
-    for (const [participant, players] of room.peerPlayers) {
-      words[offset++] = Number(participant & 0xffffffffn);
-      words[offset++] = Number(participant >> 32n);
-      words[offset++] = players.length;
-      words.set(players, offset); offset += players.length;
-    }
+    const { words, remote } = roomRosterWords(room);
     game.configure_room_hud(room.participant, words);
     const pages = game.room_hud_pages();
     if (!integer(pages, 1, 1008) || pages !== Math.ceil(remote / 4)) throw new Error("Room display returned an incorrect page count.");
@@ -720,6 +736,65 @@ function configureRoomHud(state, room) {
     scheduleDraw();
     return true;
   } catch (error) { roomHudFailure(state, room, error); return false; }
+}
+
+function roomRosterWords(room) {
+  if (!room.peerPlayers || !unsigned(room.participant) || room.participant === 0n) throw new Error("Prepared room roster unavailable.");
+  let length = 0, remote = 0;
+  for (const [participant, players] of room.peerPlayers) {
+    length += 3 + players.length;
+    if (participant !== room.participant) remote += players.length;
+  }
+  if (!integer(length, 8, 4288) || !integer(remote, 1, 4032)) throw new Error("Invalid room display roster extent.");
+  const words = new Uint32Array(length);
+  let offset = 0;
+  for (const [participant, players] of room.peerPlayers) {
+    words[offset++] = Number(participant & 0xffffffffn);
+    words[offset++] = Number(participant >> 32n);
+    words[offset++] = players.length;
+    words.set(players, offset); offset += players.length;
+  }
+  return { words, remote };
+}
+
+function retainRoomResults(state, natural) {
+  const room = state.room;
+  if (failed || state.resultsEpoch !== roomResultsEpoch || play !== null || !room.peerPlayers) return;
+  let binding = null;
+  const results = { id: state.id, lastRpc: state.lastRpc, binding: null,
+    page: room.hudPage, pages: 0, failed: room.hudFailed };
+  try {
+    const { words, remote } = roomRosterWords(room);
+    results.pages = Math.ceil(remote / 4);
+    if (!integer(results.page, 0, results.pages - 1)) throw new Error("Invalid retained room page.");
+    if (typeof BrowserRoomResults !== "function" || typeof view?.draw_room_results !== "function") {
+      throw new Error("Retained room Results binding unavailable.");
+    }
+    binding = new BrowserRoomResults(room.participant, words);
+    for (const participant of room.peerPlayers.keys()) {
+      const prefix = room.peers.get(participant);
+      if (prefix) binding.update(participant, prefix.sequence, prefix.finalPrefix,
+        roomProgressWords(prefix.words, room.peerPlayers.get(participant), "retained room progress"));
+    }
+    const causes = [room.failure, room.cleanupError].filter(cause => cause !== null);
+    // Bound Unicode text by at most 4096 UTF-8 bytes without changing the
+    // operational diagnostics retained by the actual terminal room outcome.
+    const diagnostic = causes.length === 0 ? null : Array.from(causes.map(message).join("; ")
+      .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")).slice(0, 1024).join("");
+    binding.freeze(results.page, !natural || room.finalDrain === "cancelled", diagnostic, results.failed);
+    if (binding.page !== results.page || binding.pages !== results.pages || binding.failed !== results.failed) {
+      throw new Error("Retained room Results changed their actual page metadata.");
+    }
+    results.binding = binding;
+    binding = null;
+  } catch {
+    results.failed = true;
+  } finally {
+    try { binding?.free(); } catch {}
+  }
+  roomResults = results;
+  state.roomResults = results;
+  scheduleDraw();
 }
 
 function sendRoomProgress(state, final = false) {
@@ -775,7 +850,7 @@ function closeRoom(room) {
 
 function roomCallbacksCurrent(state, room) {
   return state.room === room && !room.disposed && !room.leaving
-    && (play === state || (roomFinalization?.state === state && room.draining));
+    && (play === state || roomFinalization?.state === state);
 }
 
 function cancelRoomFinalization() {
@@ -815,6 +890,7 @@ function finishRoom(state, natural) {
     const cleanupError = await closeRoom(room);
     if ((cleanupError || room.failure !== null) && room.finalDrain === "complete") room.finalDrain = "failed";
     room.draining = false;
+    retainRoomResults(state, natural);
     return cleanupError;
   }).finally(() => { if (roomFinalization === pending) roomFinalization = null; });
   return pending.promise;
@@ -1128,7 +1204,7 @@ function failPlay(state, error, request = null) {
     released: cleanupError === null && roomError === null,
     replay, replayComplete: false, replayError, ...score, ...(replays ? { replays } : {}),
     ...(state.network ? { multiplayer: multiplayerOutcome(state.network) } : {}),
-    ...(state.room ? { room: roomOutcome(state.room) } : {}),
+    ...(state.room ? { room: roomOutcome(state.room), roomResults: roomResultsMetadata(state.roomResults) } : {}),
     ...(savedOpponents ? { savedOpponents } : {}) }, replayTransfers(replay, replays));
   if (roomClosing) void roomClosing.then(finished).catch(fatal);
   else finished(null);
@@ -1164,7 +1240,7 @@ function stopPlay(state, request) {
     const cleanupFailure = cleanupError ?? roomError;
     if (replays) for (const row of replays) row.replayComplete = !cleanupFailure && completed && row.replay !== null && row.replayError === null;
     const result = { replay, replayError, ...score, ...(multiplayer ? { multiplayer } : {}),
-      ...(state.room ? { room: roomOutcome(state.room) } : {}),
+      ...(state.room ? { room: roomOutcome(state.room), roomResults: roomResultsMetadata(state.roomResults) } : {}),
       ...(savedOpponents ? { savedOpponents } : {}), ...(replays ? { replays } : {}) };
     if (cleanupFailure) report("play-error", { playId: state.id, message: message(cleanupFailure), released: false,
       ...result, replayComplete: false }, replayTransfers(replay, replays));
@@ -1906,8 +1982,10 @@ function handlePlay(request) {
   }
   if (request.kind === "play-start" && play === null) {
     if (request.playId <= lastPlayId) return;
+    discardRoomResults();
     const priorRoom = cancelRoomFinalization();
     const state = {
+      resultsEpoch: roomResultsEpoch, roomResults: null,
       id: request.playId, startRpcId: identity(request.rpcId) ? request.rpcId : null,
       game: null, keys: null, active: false, origin: null, startFrame: null,
       batch: null, commandClient: null, commandPumping: false, audioPumping: false,
@@ -1933,8 +2011,28 @@ function handlePlay(request) {
     })().catch(fatal);
     return;
   }
+  if (roomResults?.id === request.playId && play === null) {
+    const results = roomResults;
+    try {
+      rpc(results, request, true);
+      if (request.kind !== "play-room-page") throw new Error("Joined room Results accept only page requests.");
+      if (results.failed || !results.binding) throw new Error("Room Results display unavailable.");
+      if (!integer(request.page, 0, results.pages - 1)) throw new Error("Invalid room Results page.");
+      try {
+        results.binding.set_page(request.page);
+        if (results.binding.page !== request.page || results.binding.pages !== results.pages
+          || results.binding.failed !== false) throw new Error("Room Results page changed its admitted metadata.");
+        results.page = request.page;
+      } catch (error) { roomResultsFailure(results, error); throw error; }
+      reply(results, request, { kind: "room-page", page: results.page, pages: results.pages });
+      scheduleDraw();
+    } catch (error) {
+      closeAudioHandoff(request);
+      if (identity(request.rpcId)) report("play-reply", { playId: results.id, rpcId: request.rpcId, error: message(error) });
+    }
+    return;
+  }
   if (request.kind === "play-stop" && roomFinalization?.state.id === request.playId) {
-    if (request.completed !== undefined && typeof request.completed !== "boolean") return;
     if (request.completed !== undefined && typeof request.completed !== "boolean") return;
     if (request.completed !== true) cancelRoomFinalization();
     return;
@@ -2067,16 +2165,16 @@ self.addEventListener("message", event => {
   if (request.kind.startsWith("play-")) { handlePlay(request); return; }
   if (request.kind === "import" || request.kind === "accept-library") {
     if (play) report("import-error", { id: request.id, message: "Stop gameplay before changing the selected library." });
-    else if (request.kind === "import") queueImport(request);
+    else if (request.kind === "import") { discardRoomResults(); queueImport(request); }
     else acceptLibrary(request);
   }
   else if (request.kind === "select") {
     if (play) report("selection-error", { id: request.id, message: "Stop gameplay before changing the preview chart." });
-    else void selectChart(request).catch(fatal);
+    else { discardRoomResults(); void selectChart(request).catch(fatal); }
   }
   else if (request.kind === "seek") {
     if (play) report("seek-error", { id: request.id, selectedId, message: "Stop gameplay before seeking the preview." });
-    else void seek(request).catch(fatal);
+    else { discardRoomResults(); void seek(request).catch(fatal); }
   }
   else if (request.kind === "resize") void resize(request).catch(fatal);
   else if (play) failPlay(play, new Error("Unknown Worker request."));
