@@ -1,7 +1,176 @@
 // Deferred canonical acquisition encoding; no browser, WASM or device execution.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { encodeKeyboardEvent, keyboardBindingWords, encodeTouchEvent, touchBindingWords, projectTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
+import { encodeKeyboardEvent, keyboardBindingWords, encodeTouchEvent, touchBindingWords, projectTouchEvent, encodeRawHidEvent,
+  encodePointerEvent, encodePointerButtonEvent } from "./physical-input.mjs";
+
+const pointer = fields => ({ kind: "pointer", pointerType: "mouse",
+  hostNs: 0x0102030405060708n, source: 0xfedcba9876543210n, sequence: 0x8877665544332211n,
+  code: 0x12345678, control: 0x90abcdef, mode: 1, x: 1.5, y: -2.25, ...fields });
+const pointerButton = fields => ({ kind: "pointer-button", pointerType: "pen",
+  hostNs: 0x0102030405060708n, source: 0xfedcba9876543210n, sequence: 0x8877665544332211n,
+  code: 0x12345678, control: 0x90abcdef, state: 2, ...fields });
+
+test("mouse Pointer and pen Button use literal core BKPI layouts with distinct metadata and binding controls", () => {
+  // Independent from the JS implementation: crates/beatkernel/src/input/codec.rs
+  // writes tag, EventMeta, Native control, then position/mode or button state.
+  const mouse = Uint8Array.from([
+    66, 75, 80, 73, 1, 0, 3,
+    0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+    8, 7, 6, 5, 4, 3, 2, 1, 0x4e, 0x49, 0x57, 0,
+    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    1, 0x55, 0x4f, 0x4d, 0x57, 1, 0x78, 0x56, 0x34, 0x12,
+    1, 0x4e, 0x49, 0x57, 0, 8, 7, 6, 5, 4, 3, 2, 1,
+    0, 1, 0x55, 0x4f, 0x4d, 0x57, 0xef, 0xcd, 0xab, 0x90,
+    0, 0, 0xc0, 0x3f, 0, 0, 0x10, 0xc0, 1,
+  ]);
+  const pen = Uint8Array.from([
+    66, 75, 80, 73, 1, 0, 0,
+    0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe,
+    8, 7, 6, 5, 4, 3, 2, 1, 0x4e, 0x49, 0x57, 0,
+    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    1, 0x4e, 0x45, 0x50, 0x57, 1, 0x78, 0x56, 0x34, 0x12,
+    1, 0x4e, 0x49, 0x57, 0, 8, 7, 6, 5, 4, 3, 2, 1,
+    0, 1, 0x4e, 0x45, 0x50, 0x57, 0xef, 0xcd, 0xab, 0x90, 2,
+  ]);
+  const point = pointer(), button = pointerButton();
+  const pointBytes = encodePointerEvent(point), buttonBytes = encodePointerButtonEvent(button);
+  assert.equal(pointBytes.length, 77); assert.equal(buttonBytes.length, 69);
+  assert.deepEqual(pointBytes, mouse); assert.deepEqual(buttonBytes, pen);
+  point.x = 9; point.pointerType = "pen"; point.hostNs = 0n; point.control = 0;
+  button.state = 0; button.code = 0; button.source = 3n;
+  assert.deepEqual(pointBytes, mouse); assert.deepEqual(buttonBytes, pen);
+  assert.notEqual(pointBytes.buffer, buttonBytes.buffer);
+  const again = encodePointerEvent(pointer());
+  pointBytes.fill(0);
+  assert.deepEqual(again, mouse, "separate encodings own separate storage");
+});
+
+test("both pointer namespaces retain full integer provenance, exact modes and states, and canonical finite f32 bits", () => {
+  for (const [pointerType, namespace] of [["mouse", 0x574d4f55], ["pen", 0x5750454e]]) {
+    for (const [hostNs, source, sequence, code, control] of [
+      [0n, 3n, 0n, 0, 0xffffffff],
+      [9007199254740993n, 9007199254740993n, 9007199254740993n, 0xffffffff, 0],
+      [9223372036854775807n, 18446744073709551615n, 18446744073709551615n, 0xffffffff, 0xffffffff],
+    ]) {
+      const provenance = { pointerType, hostNs, source, sequence, code, control };
+      for (const mode of [0, 1]) for (const [x, y, xBits, yBits] of [
+        [1 / 3, -0, 0x3eaaaaab, 0x80000000],
+        [3.4028234663852886e38, -3.4028234663852886e38, 0x7f7fffff, 0xff7fffff],
+        [Number.MIN_VALUE, -Number.MIN_VALUE, 0, 0x80000000],
+      ]) {
+        const bytes = encodePointerEvent(pointer({ ...provenance, mode, x, y }));
+        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        assert.equal(bytes.length, 77); assert.equal(bytes[6], 3);
+        assert.equal(view.getBigUint64(7, true), source);
+        assert.equal(view.getBigInt64(15, true), hostNs);
+        assert.equal(view.getUint32(23, true), 0x0057494e);
+        assert.equal(view.getBigUint64(27, true), sequence);
+        assert.equal(view.getUint32(36, true), namespace);
+        assert.equal(view.getUint32(41, true), code);
+        assert.equal(view.getUint32(46, true), 0x0057494e);
+        assert.equal(view.getBigInt64(50, true), hostNs);
+        assert.equal(bytes[58], 0, "no fabricated original-clock conversion");
+        assert.equal(bytes[59], 1, "the binding remains a Native control");
+        assert.equal(view.getUint32(60, true), namespace);
+        assert.equal(view.getUint32(64, true), control);
+        assert.equal(view.getUint32(68, true), xBits);
+        assert.equal(view.getUint32(72, true), yBits);
+        assert.equal(bytes[76], mode);
+      }
+      for (const state of [0, 1, 2]) {
+        const bytes = encodePointerButtonEvent(pointerButton({ ...provenance, state }));
+        const view = new DataView(bytes.buffer);
+        assert.equal(bytes.length, 69); assert.equal(bytes[6], 0);
+        assert.equal(view.getBigUint64(7, true), source);
+        assert.equal(view.getBigInt64(15, true), hostNs);
+        assert.equal(view.getBigUint64(27, true), sequence);
+        assert.equal(view.getUint32(36, true), namespace);
+        assert.equal(view.getUint32(41, true), code);
+        assert.equal(view.getBigInt64(50, true), hostNs);
+        assert.equal(view.getUint32(60, true), namespace);
+        assert.equal(view.getUint32(64, true), control);
+        assert.equal(bytes[68], state);
+      }
+    }
+  }
+});
+
+test("pointer encoders refuse malformed acquisition domains and f32 overflow without coercion, clamping or state fallback", () => {
+  const common = [
+    ["pointerType", [undefined, null, "touch", "Mouse", "", 0]],
+    ["hostNs", [undefined, null, 0, "0", -1n, 9223372036854775808n]],
+    ["source", [undefined, null, 3, "3", -1n, 0n, 1n, 2n, 18446744073709551616n]],
+    ["sequence", [undefined, null, 0, "0", -1n, 18446744073709551616n]],
+    ["code", [undefined, null, -1, 4294967296, 1.5, NaN, Infinity, 0n, "0"]],
+    ["control", [undefined, null, -1, 4294967296, 1.5, NaN, Infinity, 0n, "0"]],
+  ];
+  for (const [encode, make, kind] of [[encodePointerEvent, pointer, "pointer"],
+    [encodePointerButtonEvent, pointerButton, "pointer-button"]]) {
+    for (const [field, values] of common) for (const value of values) {
+      const event = make({ [field]: value }), before = { ...event };
+      assert.throws(() => encode(event), `${kind}.${field}`);
+      assert.deepEqual(event, before);
+    }
+    for (const value of [undefined, null, [], "event", 1]) assert.throws(() => encode(value));
+    for (const value of [undefined, null, "touch", kind === "pointer" ? "pointer-button" : "pointer"]) {
+      assert.throws(() => encode(make({ kind: value })));
+    }
+    let coerced = 0;
+    const coercion = { valueOf() { coerced++; return 3; }, toString() { coerced++; return "mouse"; } };
+    for (const field of ["pointerType", "hostNs", "source", "sequence", "code", "control"]) {
+      assert.throws(() => encode(make({ [field]: coercion })));
+    }
+    assert.equal(coerced, 0);
+  }
+  for (const field of ["x", "y"]) for (const value of [undefined, null, "1", 1n, NaN, Infinity, -Infinity,
+    3.5e38, -3.5e38, Number.MAX_VALUE]) assert.throws(() => encodePointerEvent(pointer({ [field]: value })));
+  for (const value of [undefined, null, -1, 2, 0.5, NaN, "0", 0n, true]) {
+    assert.throws(() => encodePointerEvent(pointer({ mode: value })));
+  }
+  for (const value of [undefined, null, -1, 3, 0.5, NaN, "0", 0n, true]) {
+    assert.throws(() => encodePointerButtonEvent(pointerButton({ state: value })));
+  }
+  assert.equal(encodePointerEvent(pointer({ mode: 0, x: -0, y: 0 })).length, 77);
+  assert.equal(encodePointerButtonEvent(pointerButton({ state: 0 })).length, 69);
+});
+
+test("every pointer DTO field is acquired once before validation and the resulting packet never retains caller getters", () => {
+  for (const [encode, values] of [[encodePointerEvent, pointer()], [encodePointerButtonEvent, pointerButton()]]) {
+    const reads = new Map(), event = {};
+    for (const [name, value] of Object.entries(values)) Object.defineProperty(event, name, {
+      get() { const count = (reads.get(name) ?? 0) + 1; reads.set(name, count); return count === 1 ? value : null; },
+    });
+    const bytes = encode(event), view = new DataView(bytes.buffer);
+    assert.deepEqual([...reads].sort(), Object.keys(values).map(name => [name, 1]).sort());
+    assert.equal(view.getBigUint64(7, true), 0xfedcba9876543210n);
+    assert.equal(view.getBigInt64(15, true), 0x0102030405060708n);
+    assert.equal(view.getBigUint64(27, true), 0x8877665544332211n);
+    assert.equal(view.getUint32(41, true), 0x12345678);
+    assert.equal(view.getUint32(64, true), 0x90abcdef);
+    if (values.kind === "pointer") {
+      assert.equal(view.getUint32(68, true), 0x3fc00000);
+      assert.equal(view.getUint32(72, true), 0xc0100000);
+      assert.equal(bytes[76], 1);
+    } else assert.equal(bytes[68], 2);
+    for (const name of Object.keys(values)) void event[name];
+    values.hostNs = 0n; values.source = 3n; values.control = 0;
+    assert.equal(view.getBigInt64(15, true), 0x0102030405060708n);
+    assert.equal(view.getBigUint64(7, true), 0xfedcba9876543210n);
+    assert.equal(view.getUint32(64, true), 0x90abcdef);
+    const throwing = values.kind === "pointer" ? pointer() : pointerButton();
+    const failure = new Error("original acquisition getter failed");
+    Object.defineProperty(throwing, "source", { get() { throw failure; } });
+    assert.throws(() => encode(throwing));
+    const invalidReads = new Map(), invalid = {};
+    for (const [name, value] of Object.entries(values)) Object.defineProperty(invalid, name, {
+      get() { invalidReads.set(name, (invalidReads.get(name) ?? 0) + 1); return name === "kind" ? "touch" : value; },
+    });
+    assert.throws(() => encode(invalid));
+    assert.deepEqual([...invalidReads].sort(), Object.keys(values).map(name => [name, 1]).sort(),
+      "all required fields are captured once before semantic validation");
+  }
+});
 
 const hid = fields => ({ kind: "hid", hostNs: 0x0102030405060708n, source: 0xfedcba9876543210n,
   sequence: 0x8877665544332211n, reportId: 0x7f, data: Uint8Array.from([0x7f, 0, 0xff, 0x80]), ...fields });

@@ -1,9 +1,11 @@
-// Canonical core BKPI v1 boundaries for browser keyboard, touch and HID adapters.
+// Canonical core BKPI v1 boundaries for browser physical input adapters.
 // Historical key IDs are adapter codes, not USB HID usage values. Source 1 is
 // the Window keyboard aggregate; the browser does not identify each keyboard.
 const KEYBOARD_BACKEND = 0x574b4559;
 const TOUCH_BACKEND = 0x57544f55;
 const HID_BACKEND = 0x57484944;
+const MOUSE_BACKEND = 0x574d4f55;
+const PEN_BACKEND = 0x5750454e;
 const HOST_DOMAIN = 0x57494e;
 const I64_MAX = 9223372036854775807n;
 const U64_MAX = 18446744073709551615n;
@@ -82,6 +84,66 @@ export function touchBindingWords(lanes) {
 
 function finiteFloat(value) {
   return typeof value === "number" && Number.isFinite(value) && Number.isFinite(Math.fround(value));
+}
+
+function pointerPacket(snapshot, kind, tag, length) {
+  const { pointerType, hostNs, source, sequence, code, control } = snapshot;
+  if (snapshot.kind !== kind || (pointerType !== "mouse" && pointerType !== "pen")
+    || typeof hostNs !== "bigint" || hostNs < 0n || hostNs > I64_MAX
+    || typeof source !== "bigint" || source < 3n || source > U64_MAX
+    || typeof sequence !== "bigint" || sequence < 0n || sequence > U64_MAX
+    || !Number.isInteger(code) || code < 0 || code > 0xffffffff
+    || !Number.isInteger(control) || control < 0 || control > 0xffffffff) {
+    throw new Error("Pointer input requires a mouse or pen and bounded acquisition identity and control.");
+  }
+  const backend = pointerType === "mouse" ? MOUSE_BACKEND : PEN_BACKEND;
+  const bytes = new Uint8Array(length);
+  const view = new DataView(bytes.buffer);
+  bytes.set([0x42, 0x4b, 0x50, 0x49]);
+  view.setUint16(4, 1, true);
+  view.setUint8(6, tag);
+  view.setBigUint64(7, source, true);
+  view.setBigInt64(15, hostNs, true);
+  view.setUint32(23, HOST_DOMAIN, true);
+  view.setBigUint64(27, sequence, true);
+  view.setUint8(35, 1); // NativeEventMeta present.
+  view.setUint32(36, backend, true);
+  view.setUint8(40, 1); // Native event code is independent of binding control.
+  view.setUint32(41, code, true);
+  view.setUint8(45, 1);
+  view.setUint32(46, HOST_DOMAIN, true);
+  view.setBigInt64(50, hostNs, true);
+  // Byte 58: acquisition is already HOST time, without an original clock point.
+  view.setUint8(59, 1); // PhysicalControlId::Native.
+  view.setUint32(60, backend, true);
+  view.setUint32(64, control, true);
+  return bytes;
+}
+
+export function encodePointerEvent(event) {
+  if (!event || typeof event !== "object" || Array.isArray(event)) throw new Error("Invalid pointer event.");
+  // Read every caller field once before validation or packet allocation.
+  const { kind, pointerType, hostNs, source, sequence, code, control, mode, x, y } = event;
+  if ((mode !== 0 && mode !== 1) || !finiteFloat(x) || !finiteFloat(y)) {
+    throw new Error("Pointer input requires absolute or relative mode and finite float32 coordinates.");
+  }
+  const bytes = pointerPacket({ kind, pointerType, hostNs, source, sequence, code, control }, "pointer", 3, 77);
+  const view = new DataView(bytes.buffer);
+  view.setFloat32(68, x, true);
+  view.setFloat32(72, y, true);
+  view.setUint8(76, mode);
+  return bytes;
+}
+
+export function encodePointerButtonEvent(event) {
+  if (!event || typeof event !== "object" || Array.isArray(event)) throw new Error("Invalid pointer button event.");
+  const { kind, pointerType, hostNs, source, sequence, code, control, state } = event;
+  if (state !== 0 && state !== 1 && state !== 2) {
+    throw new Error("Pointer button input requires Down, Up or Repeat state.");
+  }
+  const bytes = pointerPacket({ kind, pointerType, hostNs, source, sequence, code, control }, "pointer-button", 0, 69);
+  new DataView(bytes.buffer).setUint8(68, state);
+  return bytes;
 }
 
 function validateTouch(event) {
