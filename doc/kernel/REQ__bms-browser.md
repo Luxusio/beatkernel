@@ -2,6 +2,36 @@
 
 ## Common room drain binding
 
+The Worker-owned BrowserRoomOwner provides one idempotent, bounded drain
+operation. Wait for genuine local receipt completion, explicitly request common
+Ready, then wait for genuine drain_complete. Use a fixed deadline covering both
+stages; duplicates share the promise and never repeat Ready. Preserve separate
+local completion and drain receipts, validating any changed status and publishing
+only change-driven Worker callbacks. No success from queued frames or EOF.
+Close/cancellation rejects pending drain and joins its I/O continuations; a
+successful drain lets its caller close and join transport without sending Leave.
+
+Only genuine natural gameplay completion enters this drain. Queue the final
+actual progress before releasing game/sample ownership, then wait with a
+separate bounded network lifetime. Retain accepted peer summaries and final
+receipts without accessing freed game state. Explicit Stop, failure and Leave
+cancel promptly. A replacement play or handled Worker failure cancels an old
+pending drain;
+late continuations affect only their original result.
+New gameplay preparation waits for the cancelled owner's tracked cleanup;
+surfaced cleanup failure blocks that preparation, while ordinary network drain
+failure with successful cleanup permits replacement. A matching old-play Leave
+may cancel the pending drain but must not report a fabricated Leave write.
+Final room outcomes distinguish coordinated completion, cancellation and failed drain; drain failure
+alone must not invalidate a locally completed replay or claim leaked resources.
+Actual joined cleanup failure still affects release success. Window displays
+the final outcome event only; no per-frame room score or rendering loop.
+Give a natural room stop's host watchdog enough time for the fixed drain
+deadline and cleanup margin; explicit cancellation keeps its shorter deadline.
+Joining the owner's tracked API continuations does not prove underlying browser
+transport cancellation or operating-system resource release. Surface cleanup
+API failures separately without inventing completion of best-effort teardown.
+
 BrowserRoomClient exposes explicit request_drain and drain_complete backed by
 the common RoomPlay/progress owner. Premature and repeated requests refuse as
 recoverable state errors without failing a healthy facade. DrainComplete uses
@@ -9,9 +39,9 @@ the original capture and exact participant/final sequence, and cannot grant
 completion before the real Ready full write. Fatal facade failures and close
 revoke completion. Preserve the existing write-ID space and metadata revision;
 drain traffic must not copy whole rosters or publish periodic Window updates.
-The binding neither sends Leave nor closes transport automatically. Browser
-Owner/Worker joining of successful drain and transport cleanup is separate
-required integration.
+The binding neither sends Leave nor closes transport automatically. The
+Worker-owned lifecycle described above joins successful drain and tracked
+transport cleanup separately from common completion authority.
 
 ## Actual Worker room gameplay progress
 
@@ -35,9 +65,9 @@ proof that it was transmitted or acknowledged.
 
 Capture a final local prefix before game disposal; genuine natural completion
 may publish final immediately regardless of ordinary cadence. Explicit Stop
-remains cancellation and joins room cleanup. Until coordinated room shutdown
-exists, natural room stop also reports cancelled final drain rather than
-claiming every host received its results. Local receipt completion never sends
+remains cancellation and joins room cleanup. Natural room stop uses the bounded
+coordinated drain described above; a queued final or local receipt completion
+alone cannot imply its success. Local receipt completion never sends
 Leave or authorizes a room-wide close.
 
 Before activation, room failure cancels preparation and pending start waits.
@@ -47,8 +77,8 @@ updates only event-driven connection status and keeps the active session alive.
 Invalid browser control metadata still fails closed. Stale callbacks and failed
 publication cannot affect a replacement owner or revive a stopped session.
 
-Known ceiling: Multi-host competitive HUD and coordinated room final drain are
-not connected by this publisher. Generated bindings, runtime browser/TLS,
+Known ceiling: Multi-host competitive HUD is not connected by this publisher.
+Coordinated drain now has a Worker caller, but generated bindings, runtime browser/TLS,
 device/audio and performance acceptance remain unverified.
 
 ## Worker room progress bridge
@@ -79,8 +109,8 @@ receipt without additional progress credit. Join actual channel operations and
 free the WASM owner exactly once on cancellation or failure.
 
 Known ceiling: Gameplay publication uses the actual Worker caller described
-above. Competitive multi-host HUD and coordinated whole-room final shutdown
-still require application integration. Generated
+above. Competitive multi-host HUD still requires application integration. The
+coordinated final drain has a Worker caller; generated
 bindings, browser execution, TLS interoperability, devices/audio and performance
 acceptance remain unverified; bridge source and compilation cannot prove them.
 

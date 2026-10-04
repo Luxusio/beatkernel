@@ -53,8 +53,8 @@ remains independent of transport-terminal ordering.
 
 Known ceiling: Common drain wire/state components and the actual server's
 retirement handling, RoomPlay/I/O and WASM drain bindings do not prove live
-transport close semantics. Browser Owner/Worker final drain integration, native
-application activation and live interoperability remain required. Remote scores remain self-reported display
+transport close semantics. Browser Owner/Worker final drain has a source caller;
+native application activation and live interoperability remain required. Remote scores remain self-reported display
 data, not ranked score authority.
 
 ## Common client progress and local final-receipt boundary
