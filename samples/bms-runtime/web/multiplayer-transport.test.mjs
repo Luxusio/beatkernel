@@ -170,6 +170,59 @@ function assertReleased(h, transport, io) {
   assert.equal(h.timers.size, 0);
 }
 
+test("explicit room prefix bounds preserve defaults, owned writes, and coalesced suffixes", async () => {
+  const h = await harness();
+  const roomBound = 65808;
+  for (const maxPrefixBytes of [0, -1, roomBound + 1, 1.5, NaN, Infinity, null, "65808"]) {
+    await failure(h.opening({ maxPrefixBytes }).result, "validation");
+    assert.equal(h.transports.length, 0);
+  }
+
+  const ordinary = await h.opened();
+  await failure(attempt(() => ordinary.owner.readPrefix(roomBound)), "validation");
+  await failure(attempt(() => ordinary.owner.write(new Uint8Array(roomBound))), "validation");
+  assert.equal(ordinary.io.reads.length, 0);
+  assert.equal(ordinary.io.writes.length, 0);
+  ordinary.owner.close();
+  assertReleased(h, ordinary.transport, ordinary.io);
+
+  const room = await h.opened({ maxPrefixBytes: roomBound });
+  await failure(attempt(() => room.owner.readPrefix(roomBound + 1)), "validation");
+  await failure(attempt(() => room.owner.write(new Uint8Array(roomBound + 1))), "validation");
+  const chunk = new Uint8Array(roomBound + 4);
+  chunk[0] = 0x42;
+  chunk[roomBound - 1] = 0x7f;
+  chunk.set([1, 2, 3, 4], roomBound);
+  const reading = attempt(() => room.owner.readPrefix(roomBound));
+  room.io.reads[0].resolve({ done: false, value: chunk });
+  const prefix = await success(reading);
+  assert.equal(prefix.byteLength, roomBound);
+  assert.equal(prefix[0], 0x42);
+  assert.equal(prefix[roomBound - 1], 0x7f);
+  const suffix = await success(attempt(() => room.owner.readPrefix(4)));
+  assert.deepEqual([...suffix], [1, 2, 3, 4]);
+  assert.equal(room.io.reads.length, 1);
+
+  const writing = attempt(() => room.owner.write(prefix));
+  prefix.fill(0);
+  assert.equal(room.io.writes[0].bytes.byteLength, roomBound);
+  assert.equal(room.io.writes[0].bytes[0], 0x42);
+  assert.equal(room.io.writes[0].bytes[roomBound - 1], 0x7f);
+  assert.equal(writing.state, "pending");
+  room.io.writes[0].gate.resolve();
+  await success(writing);
+  room.owner.close();
+  assertReleased(h, room.transport, room.io);
+
+  const small = await h.opened({ maxPrefixBytes: 8 });
+  await failure(attempt(() => small.owner.readPrefix(9)), "validation");
+  await failure(attempt(() => small.owner.write(new Uint8Array(9))), "validation");
+  assert.equal(small.io.reads.length, 0);
+  assert.equal(small.io.writes.length, 0);
+  small.owner.close();
+  assertReleased(h, small.transport, small.io);
+});
+
 test("setup validates before construction and owns exactly one stream after actual readiness", async () => {
   const h = await harness();
   for (const url of ["", "http://example.test/", "/relative", "https://user:secret@example.test/",

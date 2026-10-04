@@ -1,7 +1,8 @@
-// Reliable byte transport only. The Rust Session owns BKMP interpretation,
+// Reliable byte transport only. Rust sessions own protocol interpretation,
 // write receipts, probes and start agreement; this module never creates them.
 const OWNER = Symbol("WebTransportChannel");
-const MAX_PREFIX = 65547;
+const DEFAULT_PREFIX = 65547;
+const MAX_PREFIX = 65808;
 const MAX_CHUNK = 1024 * 1024;
 
 export class WebTransportChannelError extends Error {
@@ -30,9 +31,11 @@ function configuration(url, options) {
   if (options === null || typeof options !== "object") {
     throw new WebTransportChannelError("validation", "open", "Invalid WebTransport options.");
   }
-  const { signal, setupTimeoutMs = 10000, ioTimeoutMs = 10000 } = options;
+  const { signal, setupTimeoutMs = 10000, ioTimeoutMs = 10000,
+    maxPrefixBytes = DEFAULT_PREFIX } = options;
   if (typeof url !== "string" || !url.length || url.length > 4096
     || !integer(setupTimeoutMs, 1, 60000) || !integer(ioTimeoutMs, 1, 60000)
+    || !integer(maxPrefixBytes, 1, MAX_PREFIX)
     || (signal !== undefined && (signal === null || typeof signal.aborted !== "boolean"
       || typeof signal.addEventListener !== "function" || typeof signal.removeEventListener !== "function"))) {
     throw new WebTransportChannelError("validation", "open", "Invalid bounded WebTransport configuration.");
@@ -49,7 +52,7 @@ function configuration(url, options) {
   if (typeof factory !== "function") {
     throw new WebTransportChannelError("unavailable", "open", "WebTransport is unavailable.");
   }
-  return { url: address.href, factory, signal, setupTimeoutMs, ioTimeoutMs };
+  return { url: address.href, factory, signal, setupTimeoutMs, ioTimeoutMs, maxPrefixBytes };
 }
 
 export class WebTransportChannel {
@@ -172,8 +175,8 @@ export class WebTransportChannel {
   async readPrefix(maxBytes) {
     this.#ensureOpen();
     if (this.#reading) throw new WebTransportChannelError("busy", "read", "A WebTransport read is already pending.");
-    if (!integer(maxBytes, 1, MAX_PREFIX)) {
-      throw new WebTransportChannelError("validation", "read", "Read prefix must be between 1 and 65547 bytes.");
+    if (!integer(maxBytes, 1, this.#config.maxPrefixBytes)) {
+      throw new WebTransportChannelError("validation", "read", `Read prefix must be between 1 and ${this.#config.maxPrefixBytes} bytes.`);
     }
     this.#reading = true;
     try {
@@ -218,8 +221,8 @@ export class WebTransportChannel {
     this.#ensureOpen();
     if (this.#writing) throw new WebTransportChannelError("busy", "write", "A WebTransport write is already pending.");
     if (!(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer)
-      || !integer(bytes.byteLength, 1, MAX_PREFIX)) {
-      throw new WebTransportChannelError("validation", "write", "Write requires 1–65547 bytes in a Uint8Array.");
+      || !integer(bytes.byteLength, 1, this.#config.maxPrefixBytes)) {
+      throw new WebTransportChannelError("validation", "write", `Write requires 1–${this.#config.maxPrefixBytes} bytes in a Uint8Array.`);
     }
     // Copy only this bounded view before any await. Caller mutation cannot alter
     // an admitted frame, and no caller buffer is transferred or detached.
