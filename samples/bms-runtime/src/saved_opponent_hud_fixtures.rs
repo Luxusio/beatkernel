@@ -453,3 +453,147 @@ fn resetting_real_recordings_refreshes_the_prefix_but_terminal_hud_failure_canno
     assert!(initially_failed.update(&saved(header)).is_err());
     assert!(initially_failed.snapshot().is_none());
 }
+
+#[test]
+fn independent_member_huds_keep_exact_peer_frontiers_and_failure_latches_separate() {
+    use crate::local_players::PlayerId;
+    let (source, header, bytes) = recording(false);
+    let mut opponents = saved(header);
+    opponents
+        .add(&source, &bytes, OpponentKind::Own, "actual saved prefix")
+        .unwrap();
+    opponents.advance_to(ts(HIT)).unwrap();
+    let players = [PlayerId(7), PlayerId(u32::MAX), PlayerId(91), PlayerId(15)];
+    let mut members: Vec<_> = players
+        .into_iter()
+        .map(|player| (player, SavedOpponentHud::default()))
+        .collect();
+    for (_, hud) in &mut members {
+        hud.update(&opponents).unwrap();
+        hud.update_peer(0, &[]).unwrap();
+    }
+    let peers = [
+        Progress {
+            song_ns: i64::MIN,
+            hits: u64::MAX,
+            misses: 0,
+            combo: u64::MAX,
+            max_combo: u64::MAX,
+        },
+        Progress {
+            song_ns: -1,
+            hits: 0,
+            misses: u64::MAX,
+            combo: 0,
+            max_combo: 0,
+        },
+        Progress {
+            song_ns: 604_800_000_000_001,
+            hits: 9_007_199_254_740_993,
+            misses: 0,
+            combo: 7,
+            max_combo: 9_007_199_254_740_993,
+        },
+    ];
+    // Values belong to separate common owners; the browser's explicit admission
+    // and PlayerId lookup remain a distinct, unexecuted WASM boundary.
+    for (index, peer) in peers.into_iter().enumerate() {
+        validate_progress(None, peer).unwrap();
+        members[index].1.update_peer(1, &peer_words(peer)).unwrap();
+    }
+    let before: Vec<_> = members
+        .iter()
+        .map(|(_, hud)| hud.snapshot().unwrap().clone())
+        .collect();
+    assert_eq!(
+        members
+            .iter()
+            .map(|(player, _)| *player)
+            .collect::<Vec<_>>(),
+        players
+    );
+    for index in 0..3 {
+        assert_eq!(
+            before[index].network.as_ref().unwrap().progress,
+            Some(peers[index])
+        );
+    }
+    assert_eq!(
+        before[3].network.as_ref().unwrap().status,
+        NetworkStatus::Waiting
+    );
+    assert!(before[3].network.as_ref().unwrap().progress.is_none());
+    members[0].1.mark_peer_failed();
+    members[1].1.mark_failed();
+    assert!(members[0].1.snapshot().unwrap().network.is_none());
+    assert_eq!(members[0].1.snapshot().unwrap().ghosts, before[0].ghosts);
+    assert!(members[1].1.snapshot().unwrap().ghosts.is_empty());
+    assert_eq!(members[1].1.snapshot().unwrap().network, before[1].network);
+    assert_eq!(members[2].1.snapshot(), Some(&before[2]));
+    assert_eq!(members[3].1.snapshot(), Some(&before[3]));
+    assert!(members[0].1.update_peer(3, &[]).is_err());
+    assert!(members[1].1.update(&opponents).is_err());
+    let regressed = Progress {
+        song_ns: peers[2].song_ns - 1,
+        ..peers[2]
+    };
+    assert!(members[2].1.update_peer(2, &peer_words(regressed)).is_err());
+    assert_eq!(members[2].1.snapshot(), Some(&before[2]));
+    members[1].1.update_peer(2, &[]).unwrap();
+    members[2].1.update_peer(3, &[]).unwrap();
+    assert_eq!(
+        members[1]
+            .1
+            .snapshot()
+            .unwrap()
+            .network
+            .as_ref()
+            .unwrap()
+            .progress,
+        Some(peers[1])
+    );
+    assert_eq!(
+        members[2]
+            .1
+            .snapshot()
+            .unwrap()
+            .network
+            .as_ref()
+            .unwrap()
+            .progress,
+        Some(peers[2])
+    );
+    assert!(members[2].1.update_peer(1, &peer_words(peers[2])).is_err());
+    let late = Progress {
+        song_ns: i64::MAX,
+        hits: 1,
+        misses: 0,
+        combo: 1,
+        max_combo: 1,
+    };
+    members[3].1.update_peer(1, &peer_words(late)).unwrap();
+    opponents.advance_to(ts(5_000_000_000)).unwrap();
+    for index in [0, 2, 3] {
+        members[index].1.update(&opponents).unwrap();
+        assert_eq!(
+            (
+                members[index].1.snapshot().unwrap().ghosts[0].hits,
+                members[index].1.snapshot().unwrap().ghosts[0].misses
+            ),
+            (1, 0)
+        );
+    }
+    assert_eq!(
+        members[3]
+            .1
+            .snapshot()
+            .unwrap()
+            .network
+            .as_ref()
+            .unwrap()
+            .progress,
+        Some(late)
+    );
+    assert_eq!(opponents.encoded_bytes(), bytes.len());
+    assert_eq!(opponents.opponents()[0].recorded_until(), Some(ts(HIT)));
+}

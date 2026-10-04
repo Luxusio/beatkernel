@@ -82,6 +82,13 @@ fn prepared() -> PreparedBms {
     .unwrap()
 }
 fn owner(offset: i64) -> StepLocalGameplay {
+    owner_with_members(offset, &PLAYERS, &SOURCES)
+}
+fn owner_with_members(
+    offset: i64,
+    players: &[PlayerId],
+    sources: &[DeviceId],
+) -> StepLocalGameplay {
     let config = StepGameplayConfig {
         host_origin: point(11, 10_000_000_000),
         output_origin: point(22, 0),
@@ -95,14 +102,14 @@ fn owner(offset: i64) -> StepLocalGameplay {
         telemetry_capacity: 8,
     };
     let plan = ResolvedInputPlan::new(
-        PLAYERS
+        players
             .iter()
             .copied()
-            .zip(SOURCES.iter().copied().map(Some))
+            .zip(sources.iter().copied().map(Some))
             .collect(),
     )
     .unwrap();
-    let bindings = SOURCES
+    let bindings = sources
         .iter()
         .map(|source| {
             BindingMap::from_bindings([Binding {
@@ -165,6 +172,302 @@ fn recorded_members() -> [Vec<u8>; 2] {
         game.take_replay(PLAYERS[0]).unwrap().unwrap(),
         game.take_replay(PLAYERS[1]).unwrap().unwrap(),
     ]
+}
+
+#[test]
+fn four_member_peer_and_saved_geometry_does_not_change_actual_cohort_capture_or_judgment() {
+    use crate::{
+        browser_input::TouchInputSetup,
+        multiplayer_protocol::Progress,
+        player::NetworkStatus,
+        playfield_layout::{
+            local_field_bounds_with_comparison_space, local_touch_bounds_with_comparison_space,
+        },
+    };
+    use beatkernel::input::{BackendId, ContactId, Position2, TouchEvent, TouchPhase, TouchRoute};
+    let players = [PLAYERS[0], PLAYERS[1], PLAYERS[2], PlayerId(15)];
+    let sources = [SOURCES[0], SOURCES[1], SOURCES[2], DeviceId(4)];
+    let recordings = recorded_members();
+    let source = prepared().source;
+    let mut live = owner_with_members(0, &players, &sources);
+    let mut untouched = owner_with_members(0, &players, &sources);
+    assert_eq!(live.players(), players);
+    assert_eq!(untouched.players(), players);
+    let header = live
+        .competition_header(players[0], limits(), u64::MAX)
+        .unwrap();
+    let mut saved = SavedOpponents::new(header, limits(), 8, 64 << 20).unwrap();
+    // All eight saved records belong to one member in this actual four-member
+    // cohort, which shares one transport/output. The second cohort is the
+    // identical-input baseline, not an alternative per-player game owner.
+    for index in 0..8 {
+        saved
+            .add(
+                &source,
+                &recordings[index % 2],
+                if index % 2 == 0 {
+                    OpponentKind::Own
+                } else {
+                    OpponentKind::Other
+                },
+                &format!("saved {index}"),
+            )
+            .unwrap();
+    }
+    for owner in [&mut live, &mut untouched] {
+        for player in players {
+            owner.configure_capture(player, limits(), u64::MAX).unwrap();
+        }
+        owner.activate(point(11, 10_000_000_000)).unwrap();
+        input(owner, 0, 0, 1, ButtonState::Down);
+        input(owner, 1, 0, 1, ButtonState::Down);
+    }
+    saved
+        .advance_to(live.member_song_time(players[0]).unwrap())
+        .unwrap();
+    let hashes: Vec<_> = players
+        .iter()
+        .map(|player| live.judge(*player).unwrap().stable_hash().unwrap())
+        .collect();
+    let scores: Vec<_> = players
+        .iter()
+        .map(|player| live.score(*player).unwrap().clone())
+        .collect();
+    let songs: Vec<_> = players
+        .iter()
+        .map(|player| live.member_song_time(*player))
+        .collect();
+    let mut hud: Vec<_> = players
+        .iter()
+        .map(|_| SavedOpponentHud::default())
+        .collect();
+    hud[0].update(&saved).unwrap();
+    for member in [0, 1, 2] {
+        hud[member].update_peer(0, &[]).unwrap();
+    }
+    let words = [
+        0,
+        0x8000_0000,
+        u32::MAX,
+        u32::MAX,
+        0,
+        0,
+        u32::MAX,
+        u32::MAX,
+        u32::MAX,
+        u32::MAX,
+    ];
+    let reported = Progress {
+        song_ns: i64::MIN,
+        hits: u64::MAX,
+        misses: 0,
+        combo: u64::MAX,
+        max_combo: u64::MAX,
+    };
+    hud[0].update_peer(1, &words).unwrap();
+    let combined = hud[0].snapshot().unwrap().clone();
+    assert_eq!(combined.ghosts.len(), 8);
+    assert_eq!(combined.network.as_ref().unwrap().progress, Some(reported));
+    assert_eq!(
+        hud[1].snapshot().unwrap().network.as_ref().unwrap().status,
+        NetworkStatus::Waiting
+    );
+    assert!(hud[3].snapshot().is_none());
+    let sibling = hud[1].snapshot().unwrap().clone();
+    assert!(hud[0].update_peer(2, &words[..9]).is_err());
+    assert_eq!(hud[0].snapshot(), Some(&combined));
+    assert_eq!(hud[1].snapshot(), Some(&sibling));
+    // Independent failure histories consume the same genuine saved prefix;
+    // no fixture substitutes for BrowserLocalGame's admission or touch lock.
+    let mut peer_disabled = SavedOpponentHud::default();
+    peer_disabled.update(&saved).unwrap();
+    peer_disabled.update_peer(1, &words).unwrap();
+    peer_disabled.mark_peer_failed();
+    hud[0].mark_failed();
+    assert_eq!(peer_disabled.snapshot().unwrap().ghosts, combined.ghosts);
+    assert!(peer_disabled.snapshot().unwrap().network.is_none());
+    assert!(hud[0].snapshot().unwrap().ghosts.is_empty());
+    assert_eq!(hud[0].snapshot().unwrap().network, combined.network);
+    assert_eq!(hud[1].snapshot(), Some(&sibling));
+
+    let reserved = [140, 28, 28, 0];
+    for (slot, expected) in [
+        [34, 312, 430, 44],
+        [496, 312, 430, 44],
+        [34, 588, 430, 44],
+        [496, 588, 430, 44],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            local_field_bounds_with_comparison_space(4, slot, 140).unwrap(),
+            expected
+        );
+        let touch = local_touch_bounds_with_comparison_space(&[0x11], 4, slot, 140).unwrap();
+        assert_eq!(
+            touch,
+            vec![
+                expected[0] as f32,
+                (expected[1] + 4) as f32,
+                (expected[0] + expected[2]) as f32,
+                (expected[1] + expected[3]) as f32
+            ]
+        );
+    }
+    assert!(local_field_bounds_with_comparison_space(4, 0, 141).is_err());
+    let touch = local_touch_bounds_with_comparison_space(&[0x11], 4, 0, reserved[0]).unwrap();
+    let mut setup =
+        TouchInputSetup::new(&[0x11, 1, 0, 0, 1, 0x5754_4f55, 0], &touch, &[0x11], 256).unwrap();
+    let original = PhysicalInputEvent::Touch(TouchEvent {
+        meta: EventMeta::new(DeviceId(0), point(11, 10_100_000_000), u64::MAX),
+        control: PhysicalControlId::Native {
+            backend: BackendId(0x5754_4f55),
+            code: 0,
+        },
+        contact: ContactId(u64::MAX),
+        phase: TouchPhase::Down,
+        position: Position2 { x: 1.25, y: 2.5 },
+        pressure: Some(0.5),
+    });
+    let routed = setup
+        .router
+        .route_at(&original, Position2 { x: 35.0, y: 317.0 })
+        .unwrap();
+    assert_eq!(
+        routed,
+        TouchRoute::Bound(beatkernel::input::GameInputEvent {
+            game_control: GameControlId(0x11),
+            physical: original
+        })
+    );
+
+    #[cfg(feature = "graphics")]
+    {
+        use crate::{
+            bga_render::BgaFrame,
+            player_chart::PlayerChart,
+            scene::Scene,
+            ui::organisms::{LocalPlayerView, local_player_views_with_reserved_comparison_space},
+        };
+        let prepared = prepared();
+        let chart = PlayerChart::from_compiled(&prepared.source, &prepared.compiled.chart).unwrap();
+        let compose = |first| {
+            let views: Vec<_> = players
+                .iter()
+                .enumerate()
+                .map(|(index, player)| LocalPlayerView {
+                    player: *player,
+                    chart: Some(&chart),
+                    song_time: live.member_song_time(*player),
+                    score: live.score(*player).unwrap(),
+                    last_judge: None,
+                    recent_results: &[],
+                    pressed_lanes: 0,
+                    note_progress: None,
+                    competition: if index == 0 {
+                        first
+                    } else {
+                        hud[index].snapshot()
+                    },
+                })
+                .collect();
+            for (index, view) in views.iter().enumerate() {
+                assert!(std::ptr::eq(
+                    view.score,
+                    live.score(players[index]).unwrap()
+                ));
+            }
+            let mut scene = Scene::new(960, 720);
+            local_player_views_with_reserved_comparison_space(
+                &mut scene,
+                &views,
+                2_000_000_000,
+                0,
+                true,
+                &[BgaFrame::default(); 4],
+                &reserved,
+            )
+            .unwrap();
+            scene
+        };
+        let before = compose(Some(&combined));
+        let no_peer = compose(peer_disabled.snapshot());
+        let no_saved = compose(hud[0].snapshot());
+        let band = |scene: &Scene, top: f32, height: f32| {
+            scene
+                .rectangles()
+                .iter()
+                .filter(|rectangle| {
+                    let [x, y, width, h] = rectangle.bounds;
+                    x >= 34.0 && x + width <= 464.0 && y >= top && y + h <= top + height
+                })
+                .map(|rectangle| {
+                    (
+                        rectangle.bounds.map(f32::to_bits),
+                        rectangle.color.map(f32::to_bits),
+                        rectangle.uv.map(f32::to_bits),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let saved_rows = band(&before, 172.0, 112.0);
+        let peer_rows = band(&before, 284.0, 28.0);
+        assert!(!saved_rows.is_empty());
+        assert!(!peer_rows.is_empty());
+        assert_eq!(band(&no_peer, 172.0, 112.0), saved_rows);
+        assert_eq!(
+            band(&no_saved, 284.0, 28.0),
+            peer_rows,
+            "saved failure cannot move the healthy peer into the failed saved reservation"
+        );
+        for scene in [&before, &no_peer, &no_saved] {
+            assert_eq!(scene.playfields().len(), 4);
+            for (slot, frame) in scene.playfields().iter().enumerate() {
+                let area =
+                    local_touch_bounds_with_comparison_space(&[0x11], 4, slot, reserved[slot])
+                        .unwrap();
+                assert_eq!(frame.top, area[1]);
+                assert!(frame.bottom <= area[3]);
+                assert!(frame.bottom > frame.top);
+            }
+            assert_eq!(scene.playfields()[0].top, touch[1]);
+        }
+    }
+    assert_eq!(
+        players
+            .iter()
+            .map(|player| live.judge(*player).unwrap().stable_hash().unwrap())
+            .collect::<Vec<_>>(),
+        hashes
+    );
+    assert_eq!(
+        players
+            .iter()
+            .map(|player| live.score(*player).unwrap().clone())
+            .collect::<Vec<_>>(),
+        scores
+    );
+    assert_eq!(
+        players
+            .iter()
+            .map(|player| live.member_song_time(*player))
+            .collect::<Vec<_>>(),
+        songs
+    );
+    for owner in [&mut live, &mut untouched] {
+        input(owner, 0, 1, 2, ButtonState::Up);
+        input(owner, 0, 1_000_000_000, 3, ButtonState::Down);
+        owner.fail();
+    }
+    for player in players {
+        let observed = live.take_replay(player).unwrap().unwrap();
+        let baseline = untouched.take_replay(player).unwrap().unwrap();
+        assert_eq!(
+            observed, baseline,
+            "passive comparison state must not change any member's actual capture bytes"
+        );
+    }
 }
 
 #[test]
@@ -384,7 +687,7 @@ fn member_admission_and_presentation_failures_preserve_sibling_prefixes_and_actu
         [496, 560, 430, 72]
     );
     assert!(local_field_bounds_with_comparison_space(3, 1, -1).is_err());
-    assert!(local_touch_bounds_with_comparison_space(&[0x11], 3, 1, 113).is_err());
+    assert!(local_touch_bounds_with_comparison_space(&[0x11], 3, 1, 141).is_err());
     assert!(second.advance_to(ts(-1)).is_err());
     second_hud.mark_failed();
     assert!(second_hud.snapshot().is_none());
