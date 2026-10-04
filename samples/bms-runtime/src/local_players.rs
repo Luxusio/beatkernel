@@ -27,6 +27,100 @@ pub enum InputPlan {
     Automatic { player: PlayerId },
     Assigned(Vec<(PlayerId, String)>),
 }
+
+/// Immutable canonical input ownership after host attachment resolution.
+/// Sources are session identities, without native paths or platform tags.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedInputPlan {
+    members: Vec<(PlayerId, Option<DeviceId>)>,
+}
+
+impl ResolvedInputPlan {
+    /// One member may use automatic routing; multiple members need distinct exact sources.
+    pub fn new(members: Vec<(PlayerId, Option<DeviceId>)>) -> Result<Self, String> {
+        validate_source_routes(members.iter().copied())?;
+        Ok(Self { members })
+    }
+
+    pub fn members(&self) -> &[(PlayerId, Option<DeviceId>)] {
+        &self.members
+    }
+
+    /// Four u32 words per member: player, selector (0 automatic/1 exact), source low/high.
+    /// Automatic rows require zero source words; an exact DeviceId(0) remains valid.
+    pub fn from_words(words: &[u32]) -> Result<Self, String> {
+        if words.is_empty() || words.len() > MAX_LOCAL_PLAYERS * 4 || words.len() % 4 != 0 {
+            return Err("local source plan requires 1..64 complete four-word rows".into());
+        }
+        let mut members = Vec::new();
+        members
+            .try_reserve_exact(words.len() / 4)
+            .map_err(|_| "local source plan allocation failed")?;
+        for row in words.chunks_exact(4) {
+            let source = match row[1] {
+                0 if row[2] == 0 && row[3] == 0 => None,
+                0 => return Err("automatic local source must have zero payload words".into()),
+                1 => Some(DeviceId(u64::from(row[2]) | (u64::from(row[3]) << 32))),
+                _ => return Err("unknown local source selector".into()),
+            };
+            members.push((PlayerId(row[0]), source));
+        }
+        Self::new(members)
+    }
+
+    /// Preserve member order and all source bits in the bounded numeric host bridge.
+    pub fn to_words(&self) -> Vec<u32> {
+        let mut words = Vec::with_capacity(self.members.len() * 4);
+        for (player, source) in &self.members {
+            let (selector, value) = match source {
+                None => (0, 0),
+                Some(source) => (1, source.0),
+            };
+            words.extend_from_slice(&[player.0, selector, value as u32, (value >> 32) as u32]);
+        }
+        words
+    }
+}
+
+/// Shared bounded setup validation for host plans and actual Runtime members.
+pub(crate) fn validate_source_routes(
+    routes: impl IntoIterator<Item = (PlayerId, Option<DeviceId>)>,
+) -> Result<(), String> {
+    let mut seen = [(PlayerId(0), None); MAX_LOCAL_PLAYERS];
+    let mut count = 0;
+    let mut automatic = false;
+    for (player, source) in routes {
+        if count == MAX_LOCAL_PLAYERS {
+            return Err("local runtime requires 1..64 members".into());
+        }
+        if player.0 == 0 {
+            return Err("local player identity must be positive".into());
+        }
+        if seen[..count].iter().any(|(prior, _)| *prior == player) {
+            return Err("duplicate local player identity".into());
+        }
+        if let Some(source) = source {
+            if seen[..count]
+                .iter()
+                .any(|(_, prior)| *prior == Some(source))
+            {
+                return Err("local input device is assigned more than once".into());
+            }
+        } else {
+            automatic = true;
+        }
+        seen[count] = (player, source);
+        count += 1;
+    }
+    if count == 0 {
+        return Err("local runtime requires 1..64 members".into());
+    }
+    if count > 1 && automatic {
+        return Err("multiple local players require exact devices".into());
+    }
+    Ok(())
+}
+
 impl LocalPlayers {
     pub fn new(host: SettingsHost, capacity: usize) -> Result<Self, String> {
         if !(1..=MAX_LOCAL_PLAYERS).contains(&capacity) {
@@ -195,22 +289,30 @@ impl InputPlan {
         if !(2..=MAX_LOCAL_PLAYERS).contains(&assignments.len()) {
             return Err("invalid assigned player count".into());
         }
-        let mut resolved = Vec::with_capacity(assignments.len());
-        let mut identities = std::collections::BTreeSet::new();
-        for (player, identity) in assignments {
-            if !valid_identity(identity)
-                || !identities.insert(identity.as_str())
-                || resolved.iter().any(|(existing, _)| existing == player)
+        // Refuse the complete native draft before invoking any attachment lookup.
+        for (index, (player, identity)) in assignments.iter().enumerate() {
+            if player.0 == 0
+                || !valid_identity(identity)
+                || assignments[..index]
+                    .iter()
+                    .any(|(prior, path)| prior == player || path == identity)
             {
                 return Err("invalid or duplicate local input route".into());
             }
+        }
+        let mut resolved = Vec::new();
+        resolved
+            .try_reserve_exact(assignments.len())
+            .map_err(|_| "local source resolution allocation failed")?;
+        for (player, identity) in assignments {
             let source = lookup(identity)?;
-            if resolved.iter().any(|(_, existing)| *existing == source) {
-                return Err(
-                    "multiple native identities resolve to the same physical source".into(),
-                );
-            }
             resolved.push((*player, source));
+            // Preserve the real lookup prefix: stop at the first source alias.
+            validate_source_routes(
+                resolved
+                    .iter()
+                    .map(|(player, source)| (*player, Some(*source))),
+            )?;
         }
         Ok(resolved)
     }

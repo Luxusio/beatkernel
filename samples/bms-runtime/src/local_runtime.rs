@@ -1,5 +1,5 @@
 //! Local cohorts execute the existing Runtime with one transport and audio owner.
-use crate::local_players::{MAX_LOCAL_PLAYERS, PlayerId};
+use crate::local_players::{PlayerId, validate_source_routes};
 use beatkernel::{
     audio::{AudioCommand, CommandProducer, CommandPushError, VoiceId, command_queue},
     input::{BindingMap, DeviceId, DeviceSelector, PhysicalInputEvent, Position2, TouchRouter},
@@ -123,9 +123,7 @@ impl RuntimeGroup {
         telemetry_capacity: usize,
         reserved_bgm_voices: &[VoiceId],
     ) -> Result<Self, String> {
-        if !(1..=MAX_LOCAL_PLAYERS).contains(&configs.len()) {
-            return Err("local runtime requires 1..64 members".into());
-        }
+        validate_source_routes(configs.iter().map(|config| (config.player, config.device)))?;
         if telemetry_capacity > 65_536
             || telemetry_capacity
                 .checked_mul(configs.len())
@@ -133,22 +131,10 @@ impl RuntimeGroup {
         {
             return Err("local telemetry exceeds per-member/aggregate sample capacity".into());
         }
-        let multiple = configs.len() > 1;
-        let mut players = HashSet::new();
-        let mut devices = HashSet::new();
         let reserved: HashSet<_> = reserved_bgm_voices.iter().copied().collect();
         let mut voices = HashMap::new();
         for config in &configs {
-            if !players.insert(config.player) {
-                return Err("duplicate local player identity".into());
-            }
-            if multiple && config.device.is_none() {
-                return Err("multiple local players require exact devices".into());
-            }
             if let Some(device) = config.device {
-                if !devices.insert(device) {
-                    return Err("local input device is assigned more than once".into());
-                }
                 if config
                     .bindings
                     .bindings()
