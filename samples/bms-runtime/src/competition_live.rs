@@ -3,9 +3,10 @@ use crate::{
     competition::{Competition, OpponentKind},
     local_players::PlayerId,
     multiplayer::{
-        Multiplayer, MultiplayerEvent, MultiplayerOptions, Progress,
+        GroupMultiplayer, MultiplayerEvent, MultiplayerNotice, MultiplayerOptions, Progress,
         competition_identity_for_section,
     },
+    multiplayer_group::{GroupPrefix, MemberProgress, validate_members, validate_roster},
     multiplayer_quic::QuicCredentials,
     player::{self, CompetitionSnapshot, GhostSnapshot, NetworkSnapshot, NetworkStatus},
     replay_capture::LiveReplayCapture,
@@ -309,7 +310,7 @@ pub fn load_chart_with_seed(path: &Path, seed: u64) -> Result<BmsChart> {
 pub struct LiveCompetition {
     player: PlayerId,
     competition: Competition,
-    network: Option<Multiplayer>,
+    network: Option<GroupMultiplayer>,
     last_publish: Option<i64>,
     last_display: Option<i64>,
     network_failed: bool,
@@ -490,14 +491,20 @@ impl LiveCompetition {
             ..MultiplayerOptions::default()
         };
         let network = match &options.network {
-            Some(NetworkRole::Host(address)) => {
-                Some(Multiplayer::host(*address, identity, settings)?)
-            }
-            Some(NetworkRole::Join(address)) => {
-                Some(Multiplayer::join(*address, identity, settings)?)
-            }
+            Some(NetworkRole::Host(address)) => Some(GroupMultiplayer::host(
+                *address,
+                identity,
+                vec![player],
+                settings,
+            )?),
+            Some(NetworkRole::Join(address)) => Some(GroupMultiplayer::join(
+                *address,
+                identity,
+                vec![player],
+                settings,
+            )?),
             Some(NetworkRole::WebTransport { url, role, origin }) => {
-                Some(Multiplayer::webtransport(
+                Some(GroupMultiplayer::webtransport(
                     crate::multiplayer_webtransport_client::WebTransportOptions {
                         url: url.clone(),
                         origin: origin.clone(),
@@ -509,6 +516,7 @@ impl LiveCompetition {
                             .ok_or("WebTransport requires --mp-ca")?,
                     },
                     identity,
+                    vec![player],
                     settings,
                 )?)
             }
@@ -561,7 +569,10 @@ impl LiveCompetition {
                 ghosts,
                 network: self.network_status.map(|status| NetworkSnapshot {
                     status,
-                    progress: self.network.as_ref().and_then(Multiplayer::remote_progress),
+                    progress: self.network.as_ref().and_then(|network| {
+                        selected_remote_member(network.remote_roster(), network.remote_progress())
+                            .map(|member| member.progress)
+                    }),
                 }),
             },
         )?;
@@ -577,6 +588,9 @@ impl LiveCompetition {
         let mut disconnected = false;
         if let Some(network) = &mut self.network {
             for event in network.poll() {
+                let MultiplayerNotice::Session(event) = event else {
+                    continue;
+                };
                 match event {
                     MultiplayerEvent::Connected => {
                         self.network_status = Some(NetworkStatus::Waiting);
@@ -604,13 +618,16 @@ impl LiveCompetition {
                     .is_none_or(|last| i128::from(song) - i128::from(last) >= 50_000_000)
             {
                 let score = self.competition.score();
-                match network.try_publish(Progress {
-                    song_ns: song,
-                    hits: score.hits,
-                    misses: score.misses,
-                    combo: score.combo,
-                    max_combo: score.max_combo,
-                }) {
+                match network.try_publish(vec![MemberProgress {
+                    player: self.player,
+                    progress: Progress {
+                        song_ns: song,
+                        hits: score.hits,
+                        misses: score.misses,
+                        combo: score.combo,
+                        max_combo: score.max_combo,
+                    },
+                }]) {
                     Ok(()) => self.last_publish = Some(song),
                     Err(error) => {
                         eprintln!("multiplayer unavailable: {error}; local play continues");
@@ -634,8 +651,13 @@ impl LiveCompetition {
                     opponent.recorded_until()
                 );
             }
-            if let Some(remote) = self.network.as_ref().and_then(Multiplayer::remote_progress) {
-                println!("competition remote={remote:?} (peer reported)");
+            if let Some(remote) = self.network.as_ref().and_then(|network| {
+                selected_remote_member(network.remote_roster(), network.remote_progress())
+            }) {
+                println!(
+                    "competition remote player={} progress={:?} (peer reported)",
+                    remote.player.0, remote.progress
+                );
             }
             self.last_display = Some(second);
         }
@@ -662,7 +684,9 @@ impl LiveCompetition {
         self.await_network_start(service, false)
     }
     pub fn committed_start_schedule(&self) -> Option<crate::multiplayer_start::StartSchedule> {
-        self.network.as_ref().and_then(Multiplayer::start_schedule)
+        self.network
+            .as_ref()
+            .and_then(GroupMultiplayer::start_schedule)
     }
     /// Brackets a caller's actual native host read without inventing a clock relation.
     pub fn native_host_bracket(
@@ -682,7 +706,7 @@ impl LiveCompetition {
     pub fn network_clock_now_ns(&self) -> Result<Option<i64>> {
         self.network
             .as_ref()
-            .map(Multiplayer::clock_now_ns)
+            .map(GroupMultiplayer::clock_now_ns)
             .transpose()
             .map_err(Into::into)
     }
@@ -702,7 +726,8 @@ impl LiveCompetition {
                     return Ok(false);
                 }
                 for event in network.poll() {
-                    if let MultiplayerEvent::Disconnected(error) = event {
+                    if let MultiplayerNotice::Session(MultiplayerEvent::Disconnected(error)) = event
+                    {
                         return Err(error.into());
                     }
                 }
@@ -783,14 +808,17 @@ impl LiveCompetition {
         }
         if let Some(network) = &mut self.network {
             for event in network.poll() {
-                if let MultiplayerEvent::Disconnected(error) = event {
+                if let MultiplayerNotice::Session(MultiplayerEvent::Disconnected(error)) = event {
                     eprintln!("multiplayer final disconnect: {error}");
                     self.network_failed = true;
                 }
             }
             if !self.network_failed && network.is_ready() {
                 if let Some(progress) = terminal_prefix {
-                    if let Err(error) = network.finish_delivery(progress) {
+                    if let Err(error) = network.finish_delivery(vec![MemberProgress {
+                        player: self.player,
+                        progress,
+                    }]) {
                         eprintln!("multiplayer terminal prefix was not acknowledged: {error}");
                         self.network_failed = true;
                     } else {
@@ -798,14 +826,20 @@ impl LiveCompetition {
                     }
                 }
             }
-            if let Some(remote) = network.remote_final_progress() {
+            if let Some(remote) =
+                selected_remote_member(network.remote_roster(), network.remote_final_progress())
+            {
                 println!(
-                    "competition peer terminal prefix={remote:?}; self-reported, not a final ranking"
+                    "competition peer player={} terminal prefix={:?}; self-reported, not a final ranking",
+                    remote.player.0, remote.progress
                 );
             }
-            if let Some(remote) = network.remote_progress() {
+            if let Some(remote) =
+                selected_remote_member(network.remote_roster(), network.remote_progress())
+            {
                 println!(
-                    "competition last peer-reported prefix={remote:?}; independent song time, not a final ranking"
+                    "competition last peer-reported player={} prefix={:?}; independent song time, not a final ranking",
+                    remote.player.0, remote.progress
                 );
             }
             if let Err(error) = network.stop() {
@@ -823,6 +857,31 @@ impl LiveCompetition {
         }
     }
 }
+
+// The accepted roster fixes the sole local member's comparison target. Even a
+// valid first row cannot hide an invalid or differently ordered later member.
+fn selected_remote_member(
+    roster: Option<&[PlayerId]>,
+    prefix: Option<&GroupPrefix>,
+) -> Option<MemberProgress> {
+    let roster = roster?;
+    validate_roster(roster).ok()?;
+    let prefix = prefix?;
+    validate_members(None, &prefix.members).ok()?;
+    if roster.len() != prefix.members.len()
+        || roster
+            .iter()
+            .zip(&prefix.members)
+            .any(|(player, member)| *player != member.player)
+    {
+        return None;
+    }
+    prefix.members.first().copied()
+}
+
+#[cfg(test)]
+#[path = "competition_live_group_fixtures.rs"]
+mod group_fixtures;
 
 fn display_basename(label: &str) -> String {
     // Accept either platform separator without exposing directories in the UI.
