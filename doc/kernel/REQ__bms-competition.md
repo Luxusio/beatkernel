@@ -33,8 +33,9 @@ boundary and does not authorize whole-room Leave/closure: the current server's
 Leave closes the whole immutable room, so coordinated room-wide final shutdown
 must be added before automatic application final drain can safely use it.
 Explicit Leave/Stop still fence publication and further progress/ACK traffic.
-Browser bindings/Worker/gameplay/HUD/final drain and native app room activation
-remain follow-on integrations; no complete multiplayer acceptance is inferred.
+Browser bindings and Worker gameplay publication expose this common boundary in
+source. Multi-host HUD/final drain and native app room activation remain follow-
+on integrations; no complete multiplayer acceptance is inferred.
 
 ## Room progress relay and actual server acknowledgement ownership
 
@@ -75,8 +76,9 @@ an ACK captured before the frame could have been delivered. Retain this floor
 after the frame's full write as well as while it is in flight.
 Existing opaque per-peer write IDs span control and relay frames. Queue failure,
 invalid/stale traffic and disconnect retain whole-room exact-lease cleanup;
-other rooms survive. Client/Worker/native gameplay publication, remote HUD and
-joined final-drain integration remain required before claiming full multiplayer.
+other rooms survive. Native gameplay room activation, remote multi-host HUD and
+coordinated final-drain integration remain required before claiming full
+multiplayer; browser publication alone does not establish runtime acceptance.
 
 ## Participant-scoped room progress wire
 
@@ -97,13 +99,15 @@ message before allocating its exact frame. Header validation bounds nested
 payloads before body acquisition. Codec validation establishes no start,
 membership, sequence chronology, delivery or acknowledgement authority.
 
-The actual owners must later gate upload on committed start, preserve exact
+The actual owners gate upload on committed start, preserve exact
 frozen rosters and monotonic sequences/counters, bound/coalesce peer fanout and
 record each recipient's genuine acknowledgement only for the original final
 prefix. Full stream writes alone are not application acknowledgement. Self-
 reported progress is presentation data, never trusted ranking or local judge
-input. Until those owner/server/Worker/native integrations are complete, room
-progress and final acknowledgement remain unavailable to the application.
+input. The common client/server and browser Worker expose progress and local
+receipt history in source. Native application activation, multi-host score HUD
+and coordinated final room shutdown remain required; compilation does not prove
+runtime interoperability or complete multiplayer behavior.
 
 ## Shared timed room stream driver
 

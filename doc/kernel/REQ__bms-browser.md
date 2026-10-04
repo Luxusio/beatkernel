@@ -1,5 +1,43 @@
 # Browser host and shared selected-file preparation
 
+## Actual Worker room gameplay progress
+
+Publish actual BrowserLocalGame progress_words through the current room owner
+only after the game's genuine committed activation. Freeze the exact local
+roster during room setup and verify each bounded eleven-word row against it.
+Reuse the existing 250 ms network publication cadence; acquire member words
+only after cadence admission, using the existing Worker network clock for
+throttling without replacing input or output provenance. Successful local steps
+and genuine output observations drive publication, with no new Window polling,
+network timer or gameplay rendering loop.
+
+Retain one latest accepted peer DTO per other Prepared participant within the
+Worker, preserving participant, sequence, final flag and exact member words.
+Accepted peer updates and receipt transitions never advance or replace local
+judgment, input chronology, output evidence or recordings. Keep peer data out
+of periodic Window updates. Export a bounded room outcome only at stop/failure,
+distinguishing local final publication admission, actual final full write,
+genuine aggregate ACK and local receipt completion. A queued final is not
+proof that it was transmitted or acknowledged.
+
+Capture a final local prefix before game disposal; genuine natural completion
+may publish final immediately regardless of ordinary cadence. Explicit Stop
+remains cancellation and joins room cleanup. Until coordinated room shutdown
+exists, natural room stop also reports cancelled final drain rather than
+claiming every host received its results. Local receipt completion never sends
+Leave or authorizes a room-wide close.
+
+Before activation, room failure cancels preparation and pending start waits.
+After activation, report room disconnection once, fence further publication and
+join channel cleanup while continuing local play/audio/capture. The Window
+updates only event-driven connection status and keeps the active session alive.
+Invalid browser control metadata still fails closed. Stale callbacks and failed
+publication cannot affect a replacement owner or revive a stopped session.
+
+Known ceiling: Multi-host competitive HUD and coordinated room final drain are
+not connected by this publisher. Generated bindings, runtime browser/TLS,
+device/audio and performance acceptance remain unverified.
+
 ## Worker room progress bridge
 
 Expose the common RoomPlayClient progress path through BrowserRoomClient and
@@ -27,8 +65,9 @@ Explicit Leave drains any already admitted progress frame through its exact
 receipt without additional progress credit. Join actual channel operations and
 free the WASM owner exactly once on cancellation or failure.
 
-Known ceiling: Gameplay publication, competitive multi-host HUD and coordinated
-whole-room final shutdown still require application integration. Generated
+Known ceiling: Gameplay publication uses the actual Worker caller described
+above. Competitive multi-host HUD and coordinated whole-room final shutdown
+still require application integration. Generated
 bindings, browser execution, TLS interoperability, devices/audio and performance
 acceptance remain unverified; bridge source and compilation cannot prove them.
 
@@ -67,9 +106,9 @@ schedules and stale owners. Leaving/cancellation must settle pending waits and
 join actual Worker/audio/input cleanup without reviving another play session.
 Lobby controls must not contend with another pending playback RPC, and must
 disable on closure or completed start. No periodic DOM gameplay HUD or protocol
-implementation returns to Window. Room progress/final acknowledgement and
-multi-host competitive score presentation remain follow-on requirements, so
-the lobby must not claim those features or runtime interoperability are complete.
+implementation returns to Window. Actual Worker publication and local receipt
+status do not establish competitive multi-host score presentation or coordinated
+final drain; those integrations and runtime interoperability remain unproven.
 
 ## Local gameplay binding boundary
 
