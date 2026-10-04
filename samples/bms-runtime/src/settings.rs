@@ -1,6 +1,10 @@
 //! Bounded drafts of existing native options, with no device or file ownership.
 use std::collections::BTreeSet;
 
+#[cfg(test)]
+#[path = "settings_room_fixtures.rs"]
+mod room_fixtures;
+
 pub const MAX_FIELDS: usize = 128;
 pub const MAX_VALUE_BYTES: usize = 4096;
 pub const MAX_TOTAL_BYTES: usize = 64 * 1024;
@@ -41,6 +45,7 @@ pub fn overlay_native_args(
             "--mp-host"
                 | "--mp-join"
                 | "--mp-webtransport"
+                | "--mp-room"
                 | "--mp-role"
                 | "--mp-origin"
                 | "--mp-cert"
@@ -52,7 +57,7 @@ pub fn overlay_native_args(
     let replaces_network = overrides.chunks_exact(2).any(|pair| {
         matches!(
             pair[0].as_str(),
-            "--mp-host" | "--mp-join" | "--mp-webtransport"
+            "--mp-host" | "--mp-join" | "--mp-webtransport" | "--mp-room"
         )
     });
     let merged: Vec<_> = base
@@ -183,8 +188,13 @@ const COMMON: &[Spec] = &[
     ),
     (
         "--mp-webtransport",
-        "WEBTRANSPORT ROOM URL",
+        "BILATERAL WEBTRANSPORT URL",
         "Optional HTTPS /rooms/KEY relay URL; choose this or raw QUIC host/join. Requires the webtransport build feature.",
+    ),
+    (
+        "--mp-room",
+        "MULTI-HOST ROOM URL",
+        "Optional HTTPS /rooms/KEY URL for 2..64 hosts. Requires origin, CA trust, native GUI and the webtransport build feature; room admission chooses the Seal owner.",
     ),
     (
         "--mp-role",
