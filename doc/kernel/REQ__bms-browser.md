@@ -1239,7 +1239,7 @@ at least three and must not overlap admitted HID sources. Controls must fit
 the configured device's button/axis counts. Worker snapshots setup before
 asynchronous acquisition and uses exact source native bindings in backend
 `0x57475044`, with control codes respectively index, `0x10000 + index`,
-`0x20000 + index` and `0x30000 + index`. Only pressed-button bindings satisfy
+`0x20000 + index` and `0x30000 + index`. Pressed and touched button bindings satisfy
 ordinary press-chart lane coverage. No implicit axis-to-key threshold exists.
 
 Worker retains bound control levels per source and emits canonical BKPI Button
@@ -1267,7 +1267,7 @@ Worker; Window remains responsible for browser-required acquisition only.
 
 Known ceiling: Automatic standard solo Window forwarding is implemented in
 source as described below. Explicit nonstandard page profile selection also has a source implementation
-as described below. This does not prove browser/device/capture/replay acceptance. Axis/touched bindings do
+as described below. This does not prove browser/device/capture/replay acceptance. Axis bindings do
 not imply support by ordinary press judgment. Late sampled changes are refused
 by the existing committed-prefix contract; polling cannot recover unobserved
 intermediate transitions. Browser input latency needs actual measurement.
@@ -1337,7 +1337,10 @@ complete three-word rows: lane, type, index) and optional exact `id`, `mapping`,
 descriptions are bounded to 1024 code units; mapping is empty or standard,
 button count 0–128, axis count 0–64. Types are the existing pressed button,
 absolute stick axis, analog button value and touched button namespaces.
-Only pressed-button bindings prove ordinary press-chart coverage.
+Pressed and touched button bindings prove ordinary press-chart coverage. A
+touched control uses its own true/false contact signal and native control code;
+it does not alias the pressed field or synthesize keyboard input. This Gamepad
+button contact signal is distinct from position-bearing PointerEvent touch.
 
 Worker snapshots actual source descriptors before asynchronous reads. Every
 profile is validated, including unmatched ones. For each owned source, zero

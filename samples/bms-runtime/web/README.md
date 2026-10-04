@@ -960,7 +960,11 @@ live setup. Clear profile restores standard automatic bindings. Replay ignores
 this draft. Version 1 uses profiles with optional exact product `id`, `mapping`,
 button count `buttons` and axis count `axes`, and mandatory triples of lane,
 control type and index in `bindingWords`. Types 0–3 mean pressed button, stick
-axis, analog button value and touched button; axes remain typed axes. For example:
+axis, analog button value and touched button. Pressed and touched controls both
+cover press-chart lanes using their own canonical Button signals. Axes remain
+typed axes and do not provide ordinary press coverage. The touched field is a
+boolean Gamepad button contact signal, separate from pointer-position touch.
+For example:
 
 ```json
 {
