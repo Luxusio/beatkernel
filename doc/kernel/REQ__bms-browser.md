@@ -1379,9 +1379,9 @@ requested live snapshot before admission/activation, and verify it again in the
 Window prepared response. A recorded replay ignores the live draft and uses
 its decoded section start.
 
-Original decoding retains the existing 1296-sample cap. Section preparation can
+Original decoding uses the shared3844-sample default for the base62 namespace. Section preparation can
 add at most 4096 overlapping BGM suffixes, so the output host admits a bounded
-5392 samples while retaining its existing 64 MiB asset and 256 MiB aggregate
+7940 samples while retaining its existing 64 MiB asset and 256 MiB aggregate
 PCM budgets. No full-buffer copy is added at launch. Original-song graphics,
 actual section-aware capture/competition identity and existing cleanup/drain
 remain authoritative. Browser source integration still requires later generated
@@ -2008,3 +2008,22 @@ native drivers, generated binding compatibility, browser execution or physical
 audio/performance acceptance. Natural completion and disconnect policy for
 fully competing multi-host gameplay remain required; do not present a closed
 room or local full write as remote application acknowledgement.
+
+## PCM value validation ownership
+
+The Window audio host validates upload metadata, count/byte bounds, exclusive
+non-resizable ArrayBuffer backing and detachment, but must not traverse every
+PCM value. AudioWorklet validates finite values before invoking insert_sample;
+Rust insertion remains independently authoritative. Window forwards the original
+transferable buffer without a full PCM copy. Preserve host sample identity/byte
+accounting only after a correlated successful ACK. Non-finite PCM rejection is
+an asynchronous remote sample error after transfer, followed by terminal fencing
+and actual joined AudioHost cleanup; it cannot be retried with the consumed buffer.
+Metadata errors still reject before transfer. Single-pending and generation/sequence
+ownership, timeouts, stop races and deallocation rules remain unchanged.
+
+Author deferred actual host and Worklet fixtures for NaN/+Infinity/-Infinity,
+metadata bounds, valid and empty buffers, ACK accounting and stop/deallocation.
+Source inspection does not prove browser responsiveness or measured latency.
+This removes the Window value scan; setup PCM messages still pass through Window,
+and direct Worker-to-Worklet sample upload remains a later ownership migration.
