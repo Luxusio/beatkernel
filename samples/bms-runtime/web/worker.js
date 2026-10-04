@@ -229,14 +229,42 @@ function networkNow() {
   return millisecondsToNanos(self.performance.timeOrigin) + millisecondsToNanos(self.performance.now());
 }
 
-function multiplayerConfiguration(value, mode) {
+function networkWords(value, minimum, maximum, stride, name) {
+  if (!(value instanceof Uint32Array) || !(value.buffer instanceof ArrayBuffer)
+    || value.buffer.resizable === true || !integer(value.length, minimum, maximum)
+    || value.length % stride !== 0 || value.byteLength !== value.length * 4) {
+    throw new Error(`Invalid bounded ${name}.`);
+  }
+  new Uint32Array(value.buffer, value.byteOffset, value.length); // Reject detached storage, including empty mappings.
+  const snapshot = new Uint32Array(value.length);
+  snapshot.set(value);
+  return snapshot;
+}
+
+function multiplayerConfiguration(value, mode, localPlan) {
   if (value === undefined) return null;
   if (mode !== "live" || !value || typeof value !== "object" || typeof value.host !== "boolean"
     || typeof value.url !== "string" || value.url.length === 0 || value.url.length > 4096
     || !hostTime(value.windowOriginNs)) throw new Error("Invalid live multiplayer configuration.");
   const url = new URL(value.url);
   if (url.protocol !== "https:" || url.username || url.password || url.hash || url.href.length > 4096) throw new Error("Multiplayer requires a bounded HTTPS WebTransport URL without credentials or a fragment.");
+  const localPlayers = localPlan ? Uint32Array.from(localPlan.members, member => member.player) : null;
+  let peerTargets = null;
+  if (value.peerTargets !== undefined) {
+    if (localPlayers === null) throw new Error("Peer targets require local group gameplay.");
+    peerTargets = networkWords(value.peerTargets, 0, 128, 2, "local peer targets");
+    const selected = new Set();
+    for (let index = 0; index < peerTargets.length; index += 2) {
+      if (!localPlayers.includes(peerTargets[index]) || selected.has(peerTargets[index]) || peerTargets[index + 1] === 0) {
+        throw new Error("Peer targets require distinct admitted local players and positive remote players.");
+      }
+      selected.add(peerTargets[index]);
+    }
+  }
   return { url: url.href, host: value.host, windowOriginNs: value.windowOriginNs,
+    localPlayers, peerTargets, remoteRoster: null, finalGroup: null,
+    peers: localPlayers === null ? null : Array.from(localPlayers, player => ({ player, remotePlayer: null,
+      peerStatus: 0, peerPrefix: null, peerFinal: false, peerHudError: null })),
     owner: null, controller: null, requested: false, rpcId: null, start: null,
     disposed: false, stopping: false, failure: null, pending: null, lastProgress: null,
     remote: null, remoteTimer: null, lastRemote: null, finalWritten: false, finalAcknowledged: false,
@@ -250,12 +278,15 @@ function peerOutcome(network) {
 
 function multiplayerOutcome(network) {
   return { finalWritten: network.finalWritten, finalAcknowledged: network.finalAcknowledged,
-    error: network.failure === null ? null : message(network.failure), peer: peerOutcome(network) };
+    error: network.failure === null ? null : message(network.failure),
+    ...(network.peers === null ? { peer: peerOutcome(network) }
+      : { peers: network.peers.map(peer => ({ player: peer.player, remotePlayer: peer.remotePlayer, ...peerOutcome(peer) })) }) };
 }
 
-function updatePeerHud(state, progress = null) {
+function updatePeerHud(state, progress = null, member = null) {
   const network = state.network;
-  if (!state.game || !network || network.disposed || network.peerHudError !== null || play !== state) return;
+  const peer = member ?? network;
+  if (!state.game || !network || network.disposed || peer.peerHudError !== null || play !== state) return;
   try {
     const words = new Uint32Array(progress === null ? 0 : 10);
     if (progress !== null) {
@@ -266,15 +297,25 @@ function updatePeerHud(state, progress = null) {
         words[index++] = Number(bits >> 32n);
       }
     }
-    state.game.update_peer_hud(network.peerStatus, words);
+    if (member === null) state.game.update_peer_hud(peer.peerStatus, words);
+    else state.game.update_peer_hud(member.player, peer.peerStatus, words);
     scheduleDraw();
   } catch (error) {
-    network.peerHudError = message(error) || "Peer presentation failed.";
-    try { state.game.disable_peer_hud(); }
-    catch (cause) { network.peerHudError = message(`${network.peerHudError}; disable peer HUD: ${message(cause)}`); }
-    report("play-multiplayer", { playId: state.id, event: { kind: "peer-display-unavailable", error: network.peerHudError } });
+    peer.peerHudError = message(error) || "Peer presentation failed.";
+    try {
+      if (member === null) state.game.disable_peer_hud();
+      else state.game.disable_peer_hud(member.player);
+    } catch (cause) { peer.peerHudError = message(`${peer.peerHudError}; disable peer HUD: ${message(cause)}`); }
+    report("play-multiplayer", { playId: state.id, event: { kind: "peer-display-unavailable", error: peer.peerHudError,
+      ...(member === null ? {} : { player: member.player }) } });
     scheduleDraw();
   }
+}
+
+function updateNetworkHud(state) {
+  const network = state.network;
+  if (network.peers === null) updatePeerHud(state, network.peerPrefix);
+  else for (const peer of network.peers) updatePeerHud(state, peer.peerPrefix, peer);
 }
 
 function clearRemoteProgress(network) {
@@ -287,6 +328,7 @@ function closeNetwork(network) {
   if (!network || network.disposed) return;
   network.disposed = true;
   if (network.peerStatus !== 2) network.peerStatus = 3;
+  if (network.peers !== null) for (const peer of network.peers) if (peer.peerStatus !== 2) peer.peerStatus = 3;
   clearRemoteProgress(network);
   const owner = network.owner;
   network.owner = null;
@@ -299,7 +341,8 @@ function networkFailure(state, error) {
   if (!network || network.disposed) return;
   network.failure ??= error;
   network.peerStatus = 2;
-  updatePeerHud(state, network.peerPrefix);
+  if (network.peers !== null) for (const peer of network.peers) peer.peerStatus = 2;
+  updateNetworkHud(state);
   closeNetwork(network);
   if (play !== state) return;
   if (!state.active) failPlay(state, error);
@@ -311,6 +354,93 @@ function progressSnapshot(score) {
     throw new Error("Actual multiplayer score is unavailable.");
   }
   return { songNs: score.songNs, hits: score.hits, misses: score.misses, combo: score.combo, maxCombo: score.maxCombo };
+}
+
+function groupWords(value, players, name) {
+  const words = networkWords(value, 11, 704, 11, name);
+  if (words.length !== players.length * 11) throw new Error(`${name} differs from the admitted roster.`);
+  for (let index = 0; index < players.length; index++) {
+    if (words[index * 11] !== players[index]) throw new Error(`${name} changed the admitted player order.`);
+  }
+  return words;
+}
+
+function groupProgressSnapshot(state) {
+  if (!state.game || state.network.localPlayers === null) throw new Error("Actual local group progress is unavailable.");
+  return groupWords(state.game.progress_words(), state.network.localPlayers, "local group progress");
+}
+
+function retainFinalGroup(state) {
+  if (!state.network || state.network.localPlayers === null) return;
+  try { state.network.finalGroup = groupProgressSnapshot(state); }
+  catch (error) { state.network.failure ??= error; }
+}
+
+function groupIdentity(state) {
+  let identity = null;
+  for (const player of state.network.localPlayers) {
+    const bytes = state.game.competition_identity(player);
+    if (!(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer)
+      || bytes.buffer.resizable === true || !integer(bytes.byteLength, 1, 65536)) {
+      throw new Error("Local competition identity must be nonempty bounded ordinary bytes.");
+    }
+    new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    if (identity === null) {
+      identity = new Uint8Array(bytes.byteLength);
+      identity.set(bytes);
+    } else if (bytes.byteLength !== identity.byteLength || bytes.some((value, index) => value !== identity[index])) {
+      throw new Error("Local members require the same canonical competition identity.");
+    }
+  }
+  return identity;
+}
+
+function acceptGroupRoster(network, value) {
+  if (network.peers === null || network.remoteRoster !== null) throw new Error("Unexpected or repeated remote group roster.");
+  const players = networkWords(value, 1, 64, 1, "remote group roster");
+  const seen = new Set();
+  for (const player of players) {
+    if (player === 0 || seen.has(player)) throw new Error("Remote group roster requires positive distinct players.");
+    seen.add(player);
+  }
+  const targets = new Map();
+  if (network.peerTargets === null) {
+    for (let index = 0; index < Math.min(network.peers.length, players.length); index++) {
+      targets.set(network.peers[index].player, players[index]);
+    }
+  } else for (let index = 0; index < network.peerTargets.length; index += 2) {
+    if (!seen.has(network.peerTargets[index + 1])) throw new Error("An explicit peer target is absent from the remote roster.");
+    targets.set(network.peerTargets[index], network.peerTargets[index + 1]);
+  }
+  network.remoteRoster = players;
+  for (const peer of network.peers) peer.remotePlayer = targets.get(peer.player) ?? null;
+}
+
+function acceptGroupProgress(state, event) {
+  const network = state.network;
+  if (network.peers === null || network.remoteRoster === null || !unsigned(event.sequence)) {
+    throw new Error("Group progress requires its admitted roster and exact sequence.");
+  }
+  const words = groupWords(event.words, network.remoteRoster, "remote group progress");
+  if (network.peerStatus >= 2 || network.peerFinal) return;
+  const prefixes = new Map();
+  for (let offset = 0; offset < words.length; offset += 11) {
+    const value = at => BigInt(words[offset + at]) | (BigInt(words[offset + at + 1]) << 32n);
+    prefixes.set(words[offset], { songNs: BigInt.asIntN(64, value(1)), hits: value(3),
+      misses: value(5), combo: value(7), maxCombo: value(9) });
+  }
+  const final = event.kind === "group-final-progress";
+  for (const peer of network.peers) if (peer.remotePlayer !== null) {
+    peer.peerPrefix = prefixes.get(peer.remotePlayer);
+    peer.peerFinal = final;
+  }
+  if (!final) {
+    if (!network.stopping) { network.remote = true; publishRemoteProgress(state); }
+    return;
+  }
+  network.peerFinal = true;
+  clearRemoteProgress(network);
+  for (const peer of network.peers) if (peer.remotePlayer !== null) updatePeerHud(state, peer.peerPrefix, peer);
 }
 
 function publishRemoteProgress(state) {
@@ -328,7 +458,8 @@ function publishRemoteProgress(state) {
   const event = network.remote;
   network.remote = null;
   network.lastRemote = now;
-  updatePeerHud(state, event);
+  if (network.peers === null) updatePeerHud(state, event);
+  else for (const peer of network.peers) if (peer.remotePlayer !== null) updatePeerHud(state, peer.peerPrefix, peer);
 }
 
 function networkEvent(state, event) {
@@ -336,7 +467,14 @@ function networkEvent(state, event) {
   if (network.disposed || (play !== state && !network.stopping)) return;
   if (!event || typeof event.kind !== "string") throw new Error("Invalid actual multiplayer event.");
   let forwarded;
-  if (event.kind === "progress" || event.kind === "final-progress") {
+  if (event.kind === "roster") {
+    acceptGroupRoster(network, event.players);
+    return;
+  } else if (event.kind === "group-progress" || event.kind === "group-final-progress") {
+    acceptGroupProgress(state, event);
+    return;
+  } else if (event.kind === "progress" || event.kind === "final-progress") {
+    if (network.peers !== null) throw new Error("Scalar progress cannot describe a local group.");
     if (network.peerStatus >= 2 || network.peerFinal) return;
     const progress = progressSnapshot(event);
     network.peerPrefix = progress;
@@ -351,7 +489,8 @@ function networkEvent(state, event) {
   } else if (event.kind === "start") {
     if (network.stopping) return;
     if (!network.owner || network.start !== null || !hostTime(event.targetNs)
-      || !hostTime(event.songTargetNs) || !hostTime(event.uncertaintyNs)) throw new Error("Invalid committed multiplayer start.");
+      || !hostTime(event.songTargetNs) || !hostTime(event.uncertaintyNs)
+      || (network.localPlayers !== null && network.remoteRoster === null)) throw new Error("Invalid committed multiplayer start.");
     const offset = network.owner.origin - network.windowOriginNs;
     const targetHostNs = offset + event.targetNs;
     const songTargetHostNs = offset + event.songTargetNs;
@@ -370,7 +509,8 @@ function networkEvent(state, event) {
   } else if (event.kind === "connected") {
     if (network.peerStatus >= 2) return;
     network.peerStatus = 1;
-    updatePeerHud(state);
+    if (network.peers !== null) for (const peer of network.peers) peer.peerStatus = 1;
+    updateNetworkHud(state);
     forwarded = { kind: event.kind };
   } else if (event.kind === "ready") forwarded = { kind: event.kind };
   else if (event.kind === "clock") {
@@ -392,8 +532,11 @@ async function networkReady(state, request) {
   let session = null;
   try {
     network.controller = new AbortController();
-    session = new BrowserMultiplayer(state.game.competition_identity(), network.host, 100000000n);
+    session = network.localPlayers === null
+      ? new BrowserMultiplayer(state.game.competition_identity(), network.host, 100000000n)
+      : BrowserMultiplayer.new_group(groupIdentity(state), network.localPlayers, network.host, 100000000n);
     const opening = BrowserMultiplayerOwner.open(network.url, { session, now: networkNow,
+      ...(network.localPlayers === null ? {} : { group: true }),
       signal: network.controller.signal,
       onEvent: event => networkEvent(state, event),
       onClose: error => networkFailure(state, error) });
@@ -418,7 +561,9 @@ function sendProgress(state, score) {
   try {
     const now = networkNow();
     if (network.lastProgress !== null && now - network.lastProgress < PROGRESS_INTERVAL_NS) return;
-    const pending = Promise.resolve(network.owner.submit(progressSnapshot(score), false));
+    const pending = Promise.resolve(network.localPlayers === null
+      ? network.owner.submit(progressSnapshot(score), false)
+      : network.owner.submit_group(groupProgressSnapshot(state), false));
     network.pending = pending;
     network.lastProgress = now;
     pending.then(() => { if (network.pending === pending) network.pending = null; }, error => {
@@ -441,7 +586,11 @@ async function drainNetwork(state, score) {
     const drain = (async () => {
       if (network.pending !== null) await network.pending;
       ensureOpen();
-      await owner.submit(progressSnapshot(score), true);
+      if (network.localPlayers === null) await owner.submit(progressSnapshot(score), true);
+      else {
+        if (network.finalGroup === null) throw new Error("Actual final local group progress is unavailable.");
+        await owner.submit_group(network.finalGroup, true);
+      }
       network.finalWritten = true; // Local full-write completion, separately from peer ACK.
       ensureOpen();
       await owner.wait_final_ack();
@@ -517,6 +666,7 @@ function failPlay(state, error, request = null) {
   if (play !== state) return;
   const score = statistics(state);
   const savedOpponents = finalOpponents(state);
+  retainFinalGroup(state);
   play = null; // Invalidates a still-awaiting preparation before releasing owners.
   stopRedraw();
   closeNetwork(state.network);
@@ -541,6 +691,7 @@ function stopPlay(state, request) {
     || state.renderObservation !== null)) throw new Error("Natural stop has no current completion evidence.");
   const score = statistics(state);
   const savedOpponents = finalOpponents(state);
+  retainFinalGroup(state);
   play = null;
   stopRedraw();
   if (state.network) {
@@ -688,10 +839,9 @@ async function preparePlay(state, request) {
     const timing = state.mode === "live" ? validateTiming(request.timing) : null;
     const requestedStart = state.mode === "live" ? validateStart(request.startNs) : null;
     const requestedEnd = state.mode === "live" ? validateEnd(requestedStart, request.endNs) : undefined;
-    state.network = multiplayerConfiguration(request.multiplayer, state.mode);
+    state.network = multiplayerConfiguration(request.multiplayer, state.mode, state.localPlan);
     const opponents = state.mode === "live" && request.opponents !== undefined
       ? validateSelections(request.opponents) : NO_OPPONENTS;
-    if (state.localPlan && state.network) throw new Error("Local gameplay cannot yet combine network opponents.");
     validateOpponentTargets(opponents, state.localPlan ? state.localPlan.members.map(member => member.player) : null);
     state.opponentSelections = opponents;
     state.localOpponentErrors = new Map();
@@ -806,8 +956,12 @@ async function preparePlay(state, request) {
       || typeof Game?.prototype?.disable_saved_opponent_hud !== "function")) {
       throw new Error("The gameplay binding does not provide retained saved comparison presentation.");
     }
-    if (state.network && (typeof BrowserGame?.prototype?.update_peer_hud !== "function"
-      || typeof BrowserGame?.prototype?.disable_peer_hud !== "function")) {
+    if (state.network && (typeof Game?.prototype?.update_peer_hud !== "function"
+      || typeof Game?.prototype?.disable_peer_hud !== "function"
+      || typeof Game?.prototype?.competition_identity !== "function"
+      || (state.localPlan && (typeof Game?.prototype?.configure_peer_hud !== "function"
+        || typeof Game?.prototype?.progress_words !== "function"
+        || typeof BrowserMultiplayer?.new_group !== "function")))) {
       throw new Error("The gameplay binding does not provide retained peer presentation.");
     }
     if (state.mode === "live" && !state.physicalInput && requestedEnd !== undefined && typeof BrowserGame.new_section !== "function") {
@@ -836,8 +990,9 @@ async function preparePlay(state, request) {
       }
       metadata.localPlayers = Array.from(actual);
       metadata.localPage = state.localPage;
+      if (state.network) state.network.localPlayers = networkWords(actual, 1, 64, 1, "actual local network roster");
     }
-    if (state.network) updatePeerHud(state);
+    if (state.network && !state.localPlan) updatePeerHud(state);
     if (state.physicalInput) metadata.inputMode = request.inputMode;
     if (hid !== null) {
       state.game.configure_hid_devices(hid.deviceWords, hid.fieldWords, hid.axisParams);
@@ -867,6 +1022,10 @@ async function preparePlay(state, request) {
         : state.game.add_saved_opponent(new Uint8Array(bytes), opponent.own, opponent.label);
       if (index !== expected) throw new Error("Actual saved opponent admission count changed.");
       state.opponentCount++;
+    }
+    if (state.network && state.localPlan) {
+      for (const player of state.network.localPlayers) state.game.configure_peer_hud(player);
+      updateNetworkHud(state);
     }
     if (state.touchInput) {
       const width = state.game.touch_width;
