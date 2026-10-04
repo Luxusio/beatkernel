@@ -831,7 +831,6 @@ async function play(mode = "live") {
   let releasedSources = null;
   if (mode === "live" && localRoster.players.length > 1) {
     try {
-      if (ui.multiplayer.checked) throw new Error("Local players currently cannot combine network opponents.");
       validateOpponentTargets(opponents.snapshot(), localRoster.players);
       retained = localSetup;
       if (!retained || retained.phase !== "ready" || retained.owner !== owner) throw new Error("Discover and assign local input sources before playing.");
@@ -859,7 +858,7 @@ async function play(mode = "live") {
     tickId: 0, tickPending: null, commandsPending: true, startFrame: null,
     origin: null, lastHost: 0n, stopping: null, renderId: 0, renderPending: null,
     workerStarted: false, workerReleased: false, workerStop: null, finalScore: null,
-    completionReady: false, completionTick: null, cleanupError: null, peerDisplayFailed: false,
+    completionReady: false, completionTick: null, cleanupError: null, peerDisplayFailed: false, peerDisplayFailures: new Set(),
     recordReplay: mode === "live" && ui.record.checked === true, replay: null, replayError: null, naturalFinishRequested: false,
     replayFile: mode === "replay" ? selectedReplay : null,
     opponentSelection: mode === "live" && opponents.size ? opponents.snapshot() : null,
@@ -1260,13 +1259,21 @@ function pumpPresentation(session) {
 function receiveMultiplayer(session, event) {
   if (!session.multiplayer || session.phase === "closing" || session.owner !== owner || !event) return;
   const field = ui["multiplayer-status"];
-  if (event.kind === "progress" || event.kind === "final-progress") return;
+  if (["progress", "final-progress", "roster", "group-progress", "group-final-progress"].includes(event.kind)) return;
   if (event.kind === "peer-display-unavailable") {
-    if (session.peerDisplayFailed) return;
-    session.peerDisplayFailed = true;
+    let label = "Peer";
+    if (session.localPlan) {
+      if (!Number.isInteger(event.player) || event.player < 1 || event.player > 0xffffffff
+        || !session.localPlan.players.includes(event.player) || session.peerDisplayFailures.has(event.player)) return;
+      session.peerDisplayFailures.add(event.player);
+      label = `Player ${event.player} peer`;
+    } else {
+      if (session.peerDisplayFailed) return;
+      session.peerDisplayFailed = true;
+    }
     const reason = typeof event.error === "string" && event.error.length > 0 && event.error.length <= 4096
       ? event.error : "Invalid peer presentation failure notice.";
-    field.textContent = `Peer display unavailable: ${reason} Local play and multiplayer transport continue.`;
+    field.textContent = `${label} display unavailable: ${reason} Local play and multiplayer transport continue.`;
   } else if (event.kind === "disconnected") {
     field.textContent = `Multiplayer disconnected: ${String(event.error ?? "Connection lost").slice(0, 4096)}${session.phase === "playing" ? " · local play continues." : "."}`;
   } else if (event.kind === "connected") field.textContent = "Connected · checking compatible setup and readiness…";
@@ -1275,30 +1282,58 @@ function receiveMultiplayer(session, event) {
   else if (event.kind === "final-acknowledged") field.textContent = "Peer acknowledged the final score prefix.";
 }
 
+function checkedPeerText(peer) {
+  if (!peer || typeof peer !== "object" || Array.isArray(peer)
+    || !["waiting", "connected", "disconnected", "stopped"].includes(peer.status)
+    || typeof peer.final !== "boolean"
+    || !(peer.error === null || (typeof peer.error === "string" && peer.error.length > 0 && peer.error.length <= 4096))) {
+    throw new Error("Final peer summary unavailable or malformed.");
+  }
+  const display = peer.error === null ? "" : ` Live peer display unavailable: ${peer.error}`;
+  if (peer.progress === null) {
+    if (peer.final) throw new Error("A final peer prefix has no reported progress.");
+    return ` Peer status ${peer.status} · no received score prefix.${display}`;
+  }
+  const row = peer.progress;
+  if (!row || typeof row !== "object" || Array.isArray(row) || peer.status === "waiting"
+    || typeof row.songNs !== "bigint" || row.songNs < -9223372036854775808n || row.songNs > 9223372036854775807n
+    || [row.hits, row.misses, row.combo, row.maxCombo].some(value => typeof value !== "bigint" || value < 0n || value > 18446744073709551615n)
+    || row.combo > row.maxCombo || row.maxCombo > row.hits || row.hits + row.misses > 18446744073709551615n) {
+    throw new Error("Final peer score prefix was malformed.");
+  }
+  return ` Peer self-reported${peer.final ? " final prefix" : " prefix"} · ${peer.status} · ${seconds(row.songNs.toString())} s`
+    + ` · Hits ${row.hits} · Misses ${row.misses} · Combo ${row.combo} · Max combo ${row.maxCombo}.${display}`;
+}
+
 function finalPeerText(peer) {
   try {
-    if (!peer || typeof peer !== "object" || Array.isArray(peer)
-      || !["waiting", "connected", "disconnected", "stopped"].includes(peer.status)
-      || typeof peer.final !== "boolean"
-      || !(peer.error === null || (typeof peer.error === "string" && peer.error.length > 0 && peer.error.length <= 4096))) {
-      throw new Error("Final peer summary unavailable or malformed.");
-    }
-    const display = peer.error === null ? "" : ` Live peer display unavailable: ${peer.error}`;
-    if (peer.progress === null) {
-      if (peer.final) throw new Error("A final peer prefix has no reported progress.");
-      return ` Peer status ${peer.status} · no received score prefix.${display}`;
-    }
-    const row = peer.progress;
-    if (!row || typeof row !== "object" || Array.isArray(row) || peer.status === "waiting"
-      || typeof row.songNs !== "bigint" || row.songNs < -9223372036854775808n || row.songNs > 9223372036854775807n
-      || [row.hits, row.misses, row.combo, row.maxCombo].some(value => typeof value !== "bigint" || value < 0n || value > 18446744073709551615n)
-      || row.combo > row.maxCombo || row.maxCombo > row.hits || row.hits + row.misses > 18446744073709551615n) {
-      throw new Error("Final peer score prefix was malformed.");
-    }
-    return ` Peer self-reported${peer.final ? " final prefix" : " prefix"} · ${peer.status} · ${seconds(row.songNs.toString())} s`
-      + ` · Hits ${row.hits} · Misses ${row.misses} · Combo ${row.combo} · Max combo ${row.maxCombo}.${display}`;
+    return checkedPeerText(peer);
   } catch (error) {
     return ` ${String(error.message).slice(0, 4096)} Local result unchanged.`;
+  }
+}
+
+function finalLocalPeerText(peers, players) {
+  try {
+    if (!Array.isArray(peers) || peers.length < 1 || peers.length > 64 || peers.length !== players.length) {
+      throw new Error("Invalid local peer roster.");
+    }
+    for (let index = 0; index < players.length; index++) {
+      const peer = peers[index];
+      if (!peer || typeof peer !== "object" || Array.isArray(peer)
+        || !Number.isInteger(peer.player) || peer.player < 1 || peer.player > 0xffffffff
+        || peer.player !== players[index]
+        || !(peer.remotePlayer === null || (Number.isInteger(peer.remotePlayer) && peer.remotePlayer >= 1 && peer.remotePlayer <= 0xffffffff))
+        || (peer.remotePlayer === null && (peer.progress !== null || peer.final !== false))) {
+        throw new Error("Invalid local peer assignment.");
+      }
+    }
+    // Build the entire result before its single DOM assignment. A malformed
+    // sibling never publishes an apparently accepted partial group summary.
+    return peers.map(peer => ` Player ${peer.player} · ${peer.remotePlayer === null
+      ? "unassigned remote player" : `remote Player ${peer.remotePlayer}`}.${checkedPeerText(peer)}`).join("");
+  } catch {
+    return " Final local peer summaries unavailable or malformed. Local result unchanged.";
   }
 }
 
@@ -1477,7 +1512,8 @@ function stopPlay(reason, failed = false, completed = false) {
             ? "Final score prefix written and acknowledged by the peer."
             : outcome?.finalWritten === true ? `Final score prefix written · peer ACK unavailable${outcome.error ? `: ${String(outcome.error).slice(0, 4096)}` : "."}`
               : `Multiplayer ended without a confirmed final score write${outcome?.error ? `: ${String(outcome.error).slice(0, 4096)}` : "."}`;
-          ui["multiplayer-status"].textContent = localOutcome + finalPeerText(outcome?.peer);
+          ui["multiplayer-status"].textContent = localOutcome + (session.localPlan
+            ? finalLocalPeerText(outcome?.peers, session.localPlan.players) : finalPeerText(outcome?.peer));
         }
         const result = !session.localPlan && score && typeof score.hits === "bigint" && typeof score.misses === "bigint"
           ? ` Hits ${score.hits} · Misses ${score.misses} · Combo ${score.combo ?? "unavailable"}.` : "";
