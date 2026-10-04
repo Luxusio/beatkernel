@@ -292,6 +292,38 @@ impl BrowserLocalGame {
             .configure_touch_router(PlayerId(player), setup.router)
             .map_err(error)
     }
+
+    /// Prepared lane regions for this member's actual visible field. Coordinates
+    /// remain global scene coordinates, separately from original pointer payloads.
+    pub fn touch_bounds(&self, player: u32, page: u32) -> Result<Vec<f32>, JsValue> {
+        let count = self.members.len();
+        let page_size = crate::ui::organisms::LOCAL_PLAYERS_PER_PAGE;
+        let page = page as usize;
+        if page >= count.div_ceil(page_size) {
+            return Err(error("invalid local touch page"));
+        }
+        let index = self
+            .members
+            .iter()
+            .position(|member| member.player == PlayerId(player))
+            .ok_or_else(|| error("unknown local touch player"))?;
+        let first = page * page_size;
+        let visible = (count - first).min(page_size);
+        if index < first || index >= first + visible {
+            return Err(error("touch player is not on the visible local page"));
+        }
+        crate::playfield_layout::local_touch_bounds(&self.chart.lanes, visible, index - first)
+            .map_err(error)
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn touch_width(&self) -> u32 {
+        crate::playfield_layout::LOGICAL_EXTENT[0]
+    }
+    #[wasm_bindgen(getter)]
+    pub fn touch_height(&self) -> u32 {
+        crate::playfield_layout::LOGICAL_EXTENT[1]
+    }
     pub fn configure_hid_devices(
         &mut self,
         device_words: Vec<u32>,

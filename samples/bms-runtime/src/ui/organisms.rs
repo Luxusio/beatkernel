@@ -303,15 +303,13 @@ fn page_range(count: usize, page: usize) -> Result<std::ops::Range<usize>, Strin
 }
 
 fn panel_bounds(index: usize, count: usize) -> Bounds {
-    let columns = if count == 1 { 1 } else { 2 };
-    let rows = if count <= 2 { 1 } else { 2 };
-    let width = (912 - (columns - 1) * 12) / columns;
-    let height = (540 - (rows - 1) * 12) / rows;
+    let [x, y, width, height] = crate::playfield_layout::local_panel_bounds(count, index)
+        .expect("validated local page and visible slot");
     Bounds {
-        x: 24 + (index % columns) as i64 * (width + 12) as i64,
-        y: 100 + (index / columns) as i64 * (height + 12) as i64,
-        width: width as i64,
-        height: height as i64,
+        x,
+        y,
+        width,
+        height,
     }
 }
 
@@ -609,6 +607,8 @@ pub fn local_player_views_with_background(
             competition_summary(scene, snapshot, line(72, summary_height))?;
         }
         let field_offset = 72 + summary_height;
+        let [field_x, field_y, field_width, field_height] =
+            crate::playfield_layout::local_field_bounds(count, index)?;
         match (player.chart, player.song_time) {
             (Some(chart), Some(now)) => playfield_in_with_background(
                 scene,
@@ -616,10 +616,10 @@ pub fn local_player_views_with_background(
                 now,
                 lookahead,
                 Bounds {
-                    x: bounds.x + 10,
-                    y: bounds.y + field_offset,
-                    width: bounds.width - 20,
-                    height: bounds.height - field_offset - 8,
+                    x: field_x,
+                    y: field_y + summary_height,
+                    width: field_width,
+                    height: field_height - summary_height,
                 },
                 player.recent_results,
                 player.pressed_lanes,
