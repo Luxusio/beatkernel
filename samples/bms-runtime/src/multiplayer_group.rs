@@ -22,22 +22,37 @@ pub struct GroupPrefix {
     pub members: Vec<MemberProgress>,
 }
 
-fn validate_snapshot(members: &[MemberProgress]) -> Result<(), MultiplayerError> {
-    if members.is_empty() || members.len() > MAX_LOCAL_PLAYERS {
+fn validate_player_ids(
+    players: impl ExactSizeIterator<Item = PlayerId> + Clone,
+) -> Result<(), MultiplayerError> {
+    if players.len() == 0 || players.len() > MAX_LOCAL_PLAYERS {
         return Err(MultiplayerError::Protocol(
             "group progress requires 1..64 members".into(),
         ));
     }
-    for (index, member) in members.iter().enumerate() {
-        if member.player.0 == 0
-            || members[..index]
-                .iter()
-                .any(|previous| previous.player == member.player)
+    for (index, player) in players.clone().enumerate() {
+        if player.0 == 0
+            || players
+                .clone()
+                .take(index)
+                .any(|previous| previous == player)
         {
             return Err(MultiplayerError::Protocol(
                 "group progress requires positive unique player identities".into(),
             ));
         }
+    }
+    Ok(())
+}
+
+/// Validate a setup roster independently of any reported score payload.
+pub fn validate_roster(players: &[PlayerId]) -> Result<(), MultiplayerError> {
+    validate_player_ids(players.iter().copied())
+}
+
+fn validate_snapshot(members: &[MemberProgress]) -> Result<(), MultiplayerError> {
+    validate_player_ids(members.iter().map(|member| member.player))?;
+    for member in members {
         validate_progress(None, member.progress)?;
     }
     Ok(())
@@ -186,4 +201,32 @@ pub fn encode_words(members: &[MemberProgress]) -> Result<Vec<u32>, MultiplayerE
         }
     }
     Ok(words)
+}
+
+/// Decode exact browser rows before admitting any group progress to a session.
+pub fn decode_words(words: &[u32]) -> Result<Vec<MemberProgress>, MultiplayerError> {
+    if words.is_empty() || words.len() > MAX_LOCAL_PLAYERS * 11 || words.len() % 11 != 0 {
+        return Err(MultiplayerError::Protocol(
+            "invalid group word extent".into(),
+        ));
+    }
+    let mut members = Vec::new();
+    members
+        .try_reserve_exact(words.len() / 11)
+        .map_err(|_| MultiplayerError::Protocol("group word decoding allocation failed".into()))?;
+    for row in words.chunks_exact(11) {
+        let value = |index| u64::from(row[index]) | (u64::from(row[index + 1]) << 32);
+        members.push(MemberProgress {
+            player: PlayerId(row[0]),
+            progress: Progress {
+                song_ns: value(1) as i64,
+                hits: value(3),
+                misses: value(5),
+                combo: value(7),
+                max_combo: value(9),
+            },
+        });
+    }
+    validate_members(None, &members)?;
+    Ok(members)
 }

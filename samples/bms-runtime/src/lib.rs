@@ -119,6 +119,8 @@ pub mod multiplayer_group;
 #[cfg(test)]
 mod multiplayer_group_fixtures;
 #[cfg(test)]
+mod multiplayer_group_session_fixtures;
+#[cfg(test)]
 mod multiplayer_identity_fixtures;
 /// Shared framed multiplayer data and state, independent of transport I/O.
 pub mod multiplayer_protocol;

@@ -1,9 +1,9 @@
 //! Shared BKMP v6 framing and progress state, independent of transport and clocks.
 //! Peer progress is self-reported display data, not authenticated scoring.
 use crate::multiplayer_clock::{ClockFilter, ClockSample, OffsetEstimate};
-use crate::multiplayer_start::{
-    StartAgreement, StartMessage, StartPolicy, StartRole, StartSchedule,
-};
+use crate::local_players::{PlayerId, MAX_LOCAL_PLAYERS};
+use crate::multiplayer_group::{self, GroupPrefix, MemberProgress};
+use crate::multiplayer_start::{StartAgreement, StartMessage, StartPolicy, StartRole, StartSchedule};
 use std::{collections::VecDeque, fmt};
 
 pub(crate) const MAGIC: &[u8; 4] = b"BKMP";
@@ -56,6 +56,13 @@ pub enum MultiplayerEvent {
     /// Exact local final was acknowledged and any parsed peer ack was written.
     FinalAcknowledged,
     Disconnected(MultiplayerError),
+}
+
+/// Group-only observations share the Session's bounded lifecycle event budget.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GroupEvent {
+    Roster(Vec<PlayerId>),
+    Progress(GroupPrefix),
 }
 
 /// Encode a bounded v6 frame without changing the tag or payload.
@@ -328,7 +335,7 @@ impl Protocol {
             None
         }
     }
-    pub(crate) fn outgoing(&mut self, message: Outgoing) -> Result<Vec<u8>, MultiplayerError> {
+    fn next_outgoing_sequence(&self) -> Result<u64, MultiplayerError> {
         if !self.ready() {
             return Err(MultiplayerError::Protocol(
                 "bilateral readiness required".into(),
@@ -339,20 +346,47 @@ impl Protocol {
                 "progress after local final".into(),
             ));
         }
-        validate_progress(self.local, message.progress)?;
-        let next = self
-            .tx_sequence
+        self.tx_sequence
             .checked_add(1)
-            .ok_or_else(|| MultiplayerError::Protocol("sequence exhausted".into()))?;
+            .ok_or_else(|| MultiplayerError::Protocol("sequence exhausted".into()))
+    }
+    fn commit_outgoing(&mut self, next: u64, final_prefix: bool) {
+        if final_prefix {
+            self.local_final = Some(self.tx_sequence);
+        }
+        self.tx_sequence = next;
+    }
+    fn next_incoming_sequence(&self) -> Result<u64, MultiplayerError> {
+        if !self.ready() {
+            return Err(MultiplayerError::Protocol(
+                "data before bilateral readiness".into(),
+            ));
+        }
+        if self.remote_final {
+            return Err(MultiplayerError::Protocol(
+                "progress after peer final".into(),
+            ));
+        }
+        self.rx_sequence
+            .checked_add(1)
+            .ok_or_else(|| MultiplayerError::Protocol("sequence exhausted".into()))
+    }
+    fn commit_incoming(&mut self, next: u64, final_prefix: bool) {
+        if final_prefix {
+            self.pending_ack = Some(self.rx_sequence);
+            self.remote_final = true;
+        }
+        self.rx_sequence = next;
+    }
+    pub(crate) fn outgoing(&mut self, message: Outgoing) -> Result<Vec<u8>, MultiplayerError> {
+        let next = self.next_outgoing_sequence()?;
+        validate_progress(self.local, message.progress)?;
         let bytes = if message.final_prefix {
             prefix_frame(3, self.tx_sequence, message.progress)
         } else {
             progress_frame(self.tx_sequence, message.progress)
         };
-        if message.final_prefix {
-            self.local_final = Some(self.tx_sequence);
-        }
-        self.tx_sequence = next;
+        self.commit_outgoing(next, message.final_prefix);
         self.local = Some(message.progress);
         Ok(bytes)
     }
@@ -377,21 +411,9 @@ impl Protocol {
                 Ok(None)
             }
             2 | 3 => {
-                if self.remote_final {
-                    return Err(MultiplayerError::Protocol(
-                        "progress after peer final".into(),
-                    ));
-                }
+                let next = self.next_incoming_sequence()?;
                 let progress = parse_progress(payload, self.rx_sequence, self.remote)?;
-                let next = self
-                    .rx_sequence
-                    .checked_add(1)
-                    .ok_or_else(|| MultiplayerError::Protocol("sequence exhausted".into()))?;
-                if tag == 3 {
-                    self.pending_ack = Some(self.rx_sequence);
-                    self.remote_final = true;
-                }
-                self.rx_sequence = next;
+                self.commit_incoming(next, tag == 3);
                 self.remote = Some(progress);
                 Ok(Some(if tag == 3 {
                     MultiplayerEvent::FinalProgress(progress)
@@ -430,7 +452,7 @@ impl Protocol {
         if tag == 5 {
             self.local_ready_written = true;
         }
-        if tag == 3 {
+        if tag == 3 || tag == 13 {
             self.local_final_written = true;
         }
         if tag == 4 {
@@ -474,6 +496,93 @@ struct InFlight {
     start: Option<StartMessage>,
 }
 
+struct GroupState {
+    setup: Vec<u8>,
+    local_roster: Vec<PlayerId>,
+    remote_roster: Option<Vec<PlayerId>>,
+    local: Option<GroupPrefix>,
+    remote: Option<GroupPrefix>,
+}
+
+fn copy_group_slice<T: Copy>(values: &[T]) -> Result<Vec<T>, MultiplayerError> {
+    let mut copy = Vec::new();
+    copy.try_reserve_exact(values.len())
+        .map_err(|_| MultiplayerError::Protocol("group snapshot allocation failed".into()))?;
+    copy.extend_from_slice(values);
+    Ok(copy)
+}
+
+fn encode_group_setup(identity: &[u8], players: &[PlayerId]) -> Result<Vec<u8>, MultiplayerError> {
+    multiplayer_group::validate_roster(players)?;
+    let size = identity
+        .len()
+        .checked_add(12 + players.len() * 4)
+        .filter(|size| *size <= MAX_IDENTITY)
+        .ok_or(MultiplayerError::InvalidOptions)?;
+    if identity.is_empty() {
+        return Err(MultiplayerError::InvalidOptions);
+    }
+    let mut payload = Vec::new();
+    payload
+        .try_reserve_exact(size)
+        .map_err(|_| MultiplayerError::Protocol("group setup allocation failed".into()))?;
+    payload.extend_from_slice(b"BKGC");
+    payload.extend_from_slice(&1_u16.to_le_bytes());
+    payload.extend_from_slice(&(players.len() as u16).to_le_bytes());
+    payload.extend_from_slice(&(identity.len() as u32).to_le_bytes());
+    payload.extend_from_slice(identity);
+    for player in players {
+        payload.extend_from_slice(&player.0.to_le_bytes());
+    }
+    Ok(payload)
+}
+
+fn decode_group_setup(payload: &[u8], identity: &[u8]) -> Result<Vec<PlayerId>, MultiplayerError> {
+    if payload.len() < 12
+        || payload.len() > MAX_IDENTITY
+        || &payload[..4] != b"BKGC"
+        || u16::from_le_bytes([payload[4], payload[5]]) != 1
+    {
+        return Err(MultiplayerError::Protocol(
+            "invalid group setup header".into(),
+        ));
+    }
+    let count = usize::from(u16::from_le_bytes([payload[6], payload[7]]));
+    let identity_len =
+        u32::from_le_bytes([payload[8], payload[9], payload[10], payload[11]]) as usize;
+    if count == 0 || count > MAX_LOCAL_PLAYERS || identity_len == 0 {
+        return Err(MultiplayerError::Protocol(
+            "invalid group setup extent".into(),
+        ));
+    }
+    let identity_end = 12_usize
+        .checked_add(identity_len)
+        .filter(|end| end.checked_add(count * 4) == Some(payload.len()))
+        .ok_or_else(|| MultiplayerError::Protocol("invalid group setup extent".into()))?;
+    if &payload[12..identity_end] != identity {
+        return Err(MultiplayerError::IncompatibleSetup);
+    }
+    let mut players = Vec::new();
+    players
+        .try_reserve_exact(count)
+        .map_err(|_| MultiplayerError::Protocol("group roster allocation failed".into()))?;
+    for row in payload[identity_end..].chunks_exact(4) {
+        players.push(PlayerId(u32::from_le_bytes([
+            row[0], row[1], row[2], row[3],
+        ])));
+    }
+    multiplayer_group::validate_roster(&players)?;
+    Ok(players)
+}
+
+fn matches_group_roster(players: &[PlayerId], members: &[MemberProgress]) -> bool {
+    players.len() == members.len()
+        && players
+            .iter()
+            .zip(members)
+            .all(|(player, member)| *player == member.player)
+}
+
 /// Transport-independent session orchestration. All times are supplied by the
 /// caller on one nonnegative, monotonic session clock. No acoustic timing is
 /// inferred from probes or complete local writes.
@@ -481,7 +590,7 @@ struct InFlight {
 /// There is one in-flight frame and at most eight pending events. Drain events
 /// after each operation, especially after `written` and before reading EOF.
 /// Errors fence every mutating operation with the original failure; already
-/// queued events remain available through `poll_event`.
+/// queued events remain available through `poll_event` and `poll_group_event`.
 pub struct Session {
     identity: Vec<u8>,
     identity_sent: bool,
@@ -495,6 +604,8 @@ pub struct Session {
     in_flight: Option<InFlight>,
     application_slot: bool,
     events: VecDeque<MultiplayerEvent>,
+    group_events: VecDeque<GroupEvent>,
+    group: Option<GroupState>,
     failure: Option<MultiplayerError>,
 }
 
@@ -523,8 +634,35 @@ impl Session {
             in_flight: None,
             application_slot: false,
             events: VecDeque::with_capacity(8),
+            group_events: VecDeque::new(),
+            group: None,
             failure: None,
         })
+    }
+
+    /// Negotiate independent ordered rosters under the same canonical gameplay
+    /// identity, clock probes, committed start and complete-write ownership.
+    pub fn new_group(
+        identity: Vec<u8>,
+        players: Vec<PlayerId>,
+        role: StartRole,
+        policy: StartPolicy,
+        preroll_ns: i64,
+    ) -> Result<Self, MultiplayerError> {
+        let setup = encode_group_setup(&identity, &players)?;
+        let mut session = Self::new(identity, role, policy, preroll_ns)?;
+        session
+            .group_events
+            .try_reserve_exact(8)
+            .map_err(|_| MultiplayerError::Protocol("group event allocation failed".into()))?;
+        session.group = Some(GroupState {
+            setup,
+            local_roster: players,
+            remote_roster: None,
+            local: None,
+            remote: None,
+        });
+        Ok(session)
     }
 
     fn operate<T>(
@@ -552,10 +690,15 @@ impl Session {
         Ok(())
     }
 
-    fn event(&mut self, event: MultiplayerEvent) -> Result<(), MultiplayerError> {
-        if self.events.len() == 8 {
+    fn event_capacity(&self, additional: usize) -> Result<(), MultiplayerError> {
+        if self.events.len() + self.group_events.len() + additional > 8 {
             return Err(MultiplayerError::QueueFull);
         }
+        Ok(())
+    }
+
+    fn event(&mut self, event: MultiplayerEvent) -> Result<(), MultiplayerError> {
+        self.event_capacity(1)?;
         self.events.push_back(event);
         Ok(())
     }
@@ -613,6 +756,45 @@ impl Session {
         })
     }
 
+    fn receive_group_progress(&mut self, tag: u8, payload: &[u8]) -> Result<(), MultiplayerError> {
+        if !self.start.committed() {
+            return Err(MultiplayerError::Protocol(
+                "group progress before committed start".into(),
+            ));
+        }
+        self.event_capacity(1)?;
+        let group = self.group.as_mut().ok_or_else(|| {
+            MultiplayerError::Protocol("group progress on a scalar session".into())
+        })?;
+        let roster = group
+            .remote_roster
+            .as_deref()
+            .ok_or_else(|| MultiplayerError::Protocol("peer group roster required".into()))?;
+        let next = self.protocol.next_incoming_sequence()?;
+        let prefix = multiplayer_group::decode_prefix(
+            payload,
+            self.protocol.rx_sequence,
+            group
+                .remote
+                .as_ref()
+                .map(|previous| previous.members.as_slice()),
+        )?;
+        if prefix.final_prefix != (tag == 13) || !matches_group_roster(roster, &prefix.members) {
+            return Err(MultiplayerError::Protocol(
+                "group progress differs from its tag or admitted roster".into(),
+            ));
+        }
+        let retained = GroupPrefix {
+            sequence: prefix.sequence,
+            final_prefix: prefix.final_prefix,
+            members: copy_group_slice(&prefix.members)?,
+        };
+        self.protocol.commit_incoming(next, prefix.final_prefix);
+        group.remote = Some(retained);
+        self.group_events.push_back(GroupEvent::Progress(prefix));
+        Ok(())
+    }
+
     /// Accept one complete decoded frame. Transport framing and deadlines remain
     /// the caller's responsibility; every phase/order check lives here.
     pub fn receive(&mut self, tag: u8, payload: &[u8], now: i64) -> Result<(), MultiplayerError> {
@@ -625,10 +807,21 @@ impl Session {
                 ));
             }
             if !session.connected {
-                if tag != 1 {
+                let setup_tag = if session.group.is_some() { 14 } else { 1 };
+                if tag != setup_tag {
                     return Err(MultiplayerError::Protocol("expected setup".into()));
                 }
-                if payload != session.identity.as_slice() {
+                if session.group.is_some() {
+                    let roster = decode_group_setup(payload, &session.identity)?;
+                    let event_roster = copy_group_slice(&roster)?;
+                    session.event_capacity(2)?;
+                    if let Some(group) = &mut session.group {
+                        group.remote_roster = Some(roster);
+                    }
+                    session
+                        .group_events
+                        .push_back(GroupEvent::Roster(event_roster));
+                } else if payload != session.identity.as_slice() {
                     return Err(MultiplayerError::IncompatibleSetup);
                 }
                 session.connected = true;
@@ -654,7 +847,14 @@ impl Session {
                     .start
                     .receive(parse_start_frame(tag, payload)?, now)
                     .map_err(|error| MultiplayerError::Protocol(error.to_string()))?;
+            } else if tag == 12 || tag == 13 {
+                session.receive_group_progress(tag, payload)?;
             } else {
+                if matches!(tag, 2 | 3) && session.group.is_some() {
+                    return Err(MultiplayerError::Protocol(
+                        "scalar progress on a group session".into(),
+                    ));
+                }
                 if matches!(tag, 2 | 3) && !session.start.committed() {
                     return Err(MultiplayerError::Protocol(
                         "progress before committed start".into(),
@@ -678,7 +878,10 @@ impl Session {
                 return Ok(WriteStep::Waiting);
             }
             if !session.identity_sent {
-                let bytes = frame(1, &session.identity);
+                let bytes = match &session.group {
+                    Some(group) => frame(14, &group.setup),
+                    None => frame(1, &session.identity),
+                };
                 let admitted = session.admit(bytes, None)?;
                 session.identity_sent = true;
                 return Ok(WriteStep::Frame(admitted));
@@ -731,6 +934,11 @@ impl Session {
     ) -> Result<OutboundFrame, MultiplayerError> {
         self.operate(|session| {
             session.observe_now(now)?;
+            if session.group.is_some() {
+                return Err(MultiplayerError::Protocol(
+                    "scalar progress on a group session".into(),
+                ));
+            }
             if !session.application_slot
                 || session.in_flight.is_some()
                 || !session.start.committed()
@@ -745,6 +953,56 @@ impl Session {
                 final_prefix,
             })?;
             session.admit(bytes, None)
+        })
+    }
+
+    /// Consume one application slot for the entire immutable local roster.
+    /// The existing final ACK names this single group sequence after full write.
+    pub fn send_group_progress(
+        &mut self,
+        members: Vec<MemberProgress>,
+        final_prefix: bool,
+        now: i64,
+    ) -> Result<OutboundFrame, MultiplayerError> {
+        self.operate(|session| {
+            session.observe_now(now)?;
+            let group = session.group.as_ref().ok_or_else(|| {
+                MultiplayerError::Protocol("group progress on a scalar session".into())
+            })?;
+            if !session.application_slot
+                || session.in_flight.is_some()
+                || !session.start.committed()
+            {
+                return Err(MultiplayerError::Protocol(
+                    "application write slot required".into(),
+                ));
+            }
+            if !matches_group_roster(&group.local_roster, &members) {
+                return Err(MultiplayerError::Protocol(
+                    "group progress changed the local roster".into(),
+                ));
+            }
+            multiplayer_group::validate_members(
+                group
+                    .local
+                    .as_ref()
+                    .map(|previous| previous.members.as_slice()),
+                &members,
+            )?;
+            let next = session.protocol.next_outgoing_sequence()?;
+            let sequence = session.protocol.tx_sequence;
+            let payload = multiplayer_group::encode_prefix(sequence, final_prefix, &members)?;
+            let admitted =
+                session.admit(frame(if final_prefix { 13 } else { 12 }, &payload), None)?;
+            session.protocol.commit_outgoing(next, final_prefix);
+            if let Some(group) = &mut session.group {
+                group.local = Some(GroupPrefix {
+                    sequence,
+                    final_prefix,
+                    members,
+                });
+            }
+            Ok(admitted)
         })
     }
 
@@ -774,6 +1032,33 @@ impl Session {
 
     pub fn poll_event(&mut self) -> Option<MultiplayerEvent> {
         self.events.pop_front()
+    }
+
+    /// Drain one group observation, including observations retained after failure.
+    pub fn poll_group_event(&mut self) -> Option<GroupEvent> {
+        self.group_events.pop_front()
+    }
+
+    pub fn local_roster(&self) -> Option<&[PlayerId]> {
+        self.group
+            .as_ref()
+            .map(|group| group.local_roster.as_slice())
+    }
+
+    pub fn remote_roster(&self) -> Option<&[PlayerId]> {
+        self.group
+            .as_ref()
+            .and_then(|group| group.remote_roster.as_deref())
+    }
+
+    /// Last locally admitted whole-cohort frame, not a complete-write receipt.
+    pub fn local_group_progress(&self) -> Option<&GroupPrefix> {
+        self.group.as_ref().and_then(|group| group.local.as_ref())
+    }
+
+    /// Last fully validated remote cohort; still readable after a later failure.
+    pub fn remote_group_progress(&self) -> Option<&GroupPrefix> {
+        self.group.as_ref().and_then(|group| group.remote.as_ref())
     }
 
     /// True after the peer supplied exactly the expected identity.

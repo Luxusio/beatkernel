@@ -193,3 +193,56 @@ fn malformed_payload_or_later_member_regression_never_admits_a_sibling_prefix() 
         [member(7, 10, 2, 0, 2, 2), member(u32::MAX, 20, 3, 1, 1, 3)]
     );
 }
+
+#[test]
+fn browser_word_decoder_admits_only_complete_valid_rosters_without_narrowing() {
+    use crate::multiplayer_group::{decode_words, validate_roster};
+    let literal = [
+        7, 0, 0x80000000, 0xffffffff, 0xffffffff, 0, 0, 0xffffffff, 0xffffffff, 0xffffffff,
+        0xffffffff, 0xffffffff, 0xffffffff, 0x7fffffff, 0, 0, 0xffffffff, 0xffffffff, 0, 0, 0, 0,
+    ];
+    let expected = [
+        member(7, i64::MIN, u64::MAX, 0, u64::MAX, u64::MAX),
+        member(u32::MAX, i64::MAX, 0, u64::MAX, 0, 0),
+    ];
+    assert_eq!(decode_words(&literal).unwrap(), expected);
+    assert_eq!(
+        encode_words(&decode_words(&literal).unwrap()).unwrap(),
+        literal
+    );
+    for words in [
+        &literal[..0],
+        &literal[..1],
+        &literal[..10],
+        &literal[..12],
+        &literal[..21],
+    ] {
+        assert!(decode_words(words).is_err());
+    }
+    for (index, value) in [(0, 0), (11, 7), (5, 1), (14, 1), (18, 1)] {
+        let mut malformed = literal;
+        malformed[index] = value;
+        assert!(decode_words(&malformed).is_err());
+    }
+    let roster: Vec<_> = (1..=64).map(PlayerId).collect();
+    validate_roster(&roster).unwrap();
+    let rows: Vec<_> = roster
+        .iter()
+        .map(|player| member(player.0, -1, 0, 0, 0, 0))
+        .collect();
+    let mut maximum = encode_words(&rows).unwrap();
+    assert_eq!(maximum.len(), 704);
+    assert_eq!(decode_words(&maximum).unwrap(), rows);
+    maximum.push(0);
+    assert!(decode_words(&maximum).is_err());
+    for invalid in [
+        vec![],
+        vec![PlayerId(0)],
+        vec![PlayerId(7), PlayerId(7)],
+        (1..=65).map(PlayerId).collect(),
+    ] {
+        assert!(validate_roster(&invalid).is_err());
+    }
+    validate_roster(&[PlayerId(u32::MAX)]).unwrap();
+    assert_eq!(decode_words(&literal).unwrap(), expected);
+}
