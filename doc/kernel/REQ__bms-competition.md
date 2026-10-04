@@ -896,3 +896,38 @@ still own deadlines, cancellation and stream lifetime. Actual server/client
 composition into RoomStartCoordinator/StartAgreement and Worker activation
 remains required; source/compile evidence does not prove playable multi-host
 start or physical audio synchronization.
+
+
+## Common room client admission-to-start ownership
+
+RoomPlayClient composes the actual RoomClientSession, RoomClockExchange and
+Join-role StartAgreement in the existing BMS application crate. Admission-only
+clients preserve their current behavior; the composed owner handles BKMR clock
+and start traffic only after validated Prepared membership and local Ready
+full-write evidence. Constructor configuration supplies actual local preroll
+and checked StartPolicy. No platform-specific judging or protocol branch is added.
+
+One global nonreused write ID space and one in-flight slot cover admission,
+clock and start frames; exact receipts dispatch to the child that admitted the
+frame. Neither queued nor partially written Ready/ClockReady/Accept establishes
+completion. Polling uses actual caller elapsed time; receipt handling preserves
+original observation time and rejects local regression without advancing the
+accepted baseline. A checked peer ClockReady may arrive after Prepared before
+local probes finish, using the existing StartAgreement readiness semantics.
+Install only the fully completed clock exchange estimate before local ClockReady
+or proposals. Retain original peer receive timestamps, never actor dequeue time.
+
+A matching Commit after the client's complete Accept yields the existing
+StartSchedule exactly once, translated through the client's measured offset and
+actual preroll. A Leave request prevents further clock/start scheduling; Stop
+fences mutation and schedule extraction. Admission requests still retain their
+existing roster, creator, preparation and complete-write guards. Rejected
+operations preserve accepted state and chronology. Transport adapters own
+physical full-write observation, finite deadlines, cancellation and disposal.
+
+This common owner is required composition groundwork. Browser WASM/Worker,
+native timed transport drivers and the real multi-host server still require
+integration before actual gameplay can start. Source and compile-only evidence
+do not establish interoperability, physical synchronization or final ACKs;
+keep the Worker's room activation fence until a real committed output schedule
+is delivered.
