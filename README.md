@@ -148,6 +148,12 @@ renderer. Native responsiveness still requires runtime acceptance.
 Catalog rows can also be clicked; Start, Cancel, Return and Exit buttons use
 the same session commands. Mouse hit testing follows the rendered logical
 viewport and never contributes gameplay input timestamps.
+Native and browser scenes now fit a centered viewport while keeping their
+logical aspect ratio, with whole-pixel rounding. Native menu hits and wheel
+scaling share that geometry. Browser touch forwards original CSS samples and
+cached backing extents for Worker/WASM projection; held contacts retain their
+lane across resize and release outside the visible field. Device/GPU behavior
+and measured performance remain unverified.
 `--gpu-backend auto|vulkan|dx12|metal|gl` selects graphics discovery;
 `--present fifo|immediate|mailbox` selects presentation (default FIFO), with errors
 for unsupported explicit choices. `--ui-fps` and `--ui-lookahead-ms` control drawing.

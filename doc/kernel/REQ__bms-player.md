@@ -175,8 +175,8 @@ Menu interaction is built bottom-up from logical hit rectangles and a
 press/release/cancel state, then a button molecule and screen composition.
 A click activates only when press and release hit the same enabled control;
 focus loss, resize, suspension and close cancel an armed gesture. Physical
-pointer positions map through the same logical-to-physical stretch as rendering;
-non-finite/outside positions and zero-sized windows cannot activate controls.
+pointer positions map through the same centered contained viewport as rendering;
+bars, non-finite/outside positions and zero-sized windows cannot activate controls.
 Clicking a catalog row selects it. Start, Cancel, Return and Exit buttons use
 the existing session commands, with cleanup still required before another run.
 Pointer events are menu commands only and never produce gameplay timestamps.
@@ -308,8 +308,8 @@ unavailable backends return errors. `--present fifo|immediate|mailbox` defaults
 to FIFO and rejects unsupported explicit modes, rather than silently changing
 the request. `--ui-fps 30..240` limits redraw scheduling (default 120);
 `--ui-lookahead-ms 100..10000` controls note display (default 2000). Presentation
-may further limit actual frame rate. Surface resize scales the fixed logical
-960x720 scene; zero-size frames are skipped. Lost surfaces are recreated;
+may further limit actual frame rate. Surface resize contains the fixed logical
+960x720 scene with whole-pixel aspect fitting; zero-size frames are skipped. Lost surfaces are recreated;
 outdated surfaces reconfigure, timeout/occlusion skip a frame, fatal GPU errors
 request cancellation and wait for game cleanup before exit.
 
@@ -365,6 +365,39 @@ native or browser graphics/audio/input. WASM has existing unused native cadence
 warnings; macOS's transitive block 0.1.6 has a Rust future-incompatibility warning.
 
 ## Known ceiling
+
+### Aspect-preserving viewport and input
+
+Render the complete logical scene inside one centered, aspect-preserving pixel
+viewport on native and browser surfaces. The surrounding bars retain the normal
+surface clear color and never become menu hit regions. Rectangles, fonts, BGA
+and GPU note instances use the same viewport. Keep this transform independent
+of gameplay clocks, chart identity, judgment and native backend selection.
+
+Use one portable integer-bounded viewport primitive for GPU presentation, native
+menu pointer conversion and pixel-wheel scaling. Reject zero extents and
+nonfinite coordinates; menu edges are half-open. Round the contained dimension
+down to whole pixels, with a one-pixel minimum on nonzero surfaces. Center any
+odd remainder deterministically; tiny extents necessarily quantize the ratio.
+
+Browser Window forwards original touch coordinates, CSS extents and the cached
+requested backing extent from the same acquisition observation. It does no lane
+hit testing or rendering. Worker/WASM converts the original point through the
+same viewport before existing contact routing. Preserve raw encoded payload,
+timestamp, source, sequence, pressure and contact ownership. Bar or captured
+off-surface points project outside logical bounds rather than clamping to a
+lane, so held contacts still receive their genuine Up/Cancel. Resize/page changes
+never rebind an existing held contact. Refuse invalid geometry explicitly.
+Worker validates all touch projections using the common scalar WASM preflight
+before admitting any event in that batch. The validation path must not mutate
+game state or allocate a projected-point array; actual admission reuses the same
+portable calculation. An additional touch-only crossing is explicit and awaits
+performance measurement.
+
+Retain the existing explicit projected-input API for callers that already own
+logical coordinates. Generated bindings and actual native/browser/DPI/resize,
+GPU and touch-device acceptance remain deferred; compile-only fixture evidence
+does not prove pixel or performance correctness.
 
 ### Asynchronous native catalog startup
 
@@ -431,8 +464,10 @@ Native filesystem/window/device/performance acceptance remains unverified.
   acceptance before claiming complete playback.
 - WASM renderer compilation is source evidence only; browser startup, adapters
   and actual browser rendering/audio/input remain future work.
-- Logical geometry stretches to the physical surface — introduce letterboxing
-  when aspect-preserving presentation is required.
+- The common centered viewport contains logical geometry with whole-pixel
+  fitting; tiny surfaces necessarily quantize its aspect ratio. Captured browser
+  touch geometry records the requested backing extent, which can precede a
+  queued resize's actual presentation. Native/browser/DPI acceptance is deferred.
 - Shader validation and native/browser rendering remain unexecuted — verify
   when the user's execution deferral is lifted.
 - Alternating textures create separate contiguous draw batches — use texture
@@ -1033,7 +1068,7 @@ until authorized, while fixture authorship continues alongside implementation.
 Catalog navigation supports Up/Down, PageUp/Down by fifteen displayed rows, and
 Home/End within the current search projection. Focused search Home/End moves
 the text cursor. Vertical wheel input over a visible chart row navigates that
-projection; native pixel deltas follow the renderer's physical/logical stretch.
+projection; native pixel deltas follow the renderer's contained viewport scale.
 Fractional deltas accumulate, each event admits at most fifteen steps, and
 positive vertical deltas move earlier. Nonfinite input and lifecycle/focus/query
 changes clear the remainder. Inactive/hidden views and other controls cannot

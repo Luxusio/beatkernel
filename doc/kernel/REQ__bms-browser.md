@@ -180,6 +180,27 @@ acceptance remain unverified; bridge source and compilation cannot prove them.
 
 ## Browser main-thread input ownership
 
+Browser presentation contains the logical scene in the common centered pixel
+viewport instead of stretching it. Worker/WASM touch projection uses that same
+portable viewport. Window snapshots original CSS coordinates and extents plus
+the cached requested backing extent at acquisition; no DOM geometry query,
+logical projection or lane lookup is added to the input callback. Keep all raw
+payload and clock provenance intact. Reject missing or invalid backing geometry
+on the actual Play path rather than silently reverting to stretch. Captured
+bar/off-surface Move/Up/Cancel keeps unclipped projected positions so common
+contact ownership can release its original lane. Existing explicitly projected
+input APIs remain available to callers that already own logical coordinates.
+Actual browser/DPI/resize/pointer capture and generated binding acceptance
+requires later execution.
+
+Before any gameplay input in a batch mutates state, Worker validates each touch
+point through an allocation-free scalar WASM preflight using the same portable
+projection as admission. Match the encoded float32 raw coordinates. This adds
+one bounded touch-only validation crossing; it does not copy/decode the payload
+or return a newly allocated projection array. Extreme valid-looking geometry
+that would overflow projection must reject the batch before its earlier inputs
+are admitted. Actual main-thread and Worker performance still needs measurement.
+
 The browser Window acquires keyboard, touch/pointer, HID and Gamepad input.
 Keep browser-required permission prompts, user activation, lifecycle, resize
 notifications and event-driven setup/results DOM there. Gameplay canvas and HUD

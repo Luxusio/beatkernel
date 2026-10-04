@@ -818,15 +818,25 @@ are not silently merged for competition.
 Window collects genuine canvas touch pointers, original event timestamps,
 native pointer provenance, generated contact identities, coordinates and
 pressure. It retains pointer capture through release/cancel and shares the
-bounded acquisition queue and sequence with keyboard input. Cached surface
-dimensions avoid per-event layout queries. No lane selection or canonical
+bounded acquisition queue and sequence with keyboard input. Cached CSS and
+requested backing dimensions are captured together without per-event layout
+queries. No lane selection or canonical
 packet serialization happens in the input callback.
 
 Worker serializes canonical BKPI Touch packets, validates the entire mixed
-batch before gameplay adoption, and supplies projected hit coordinates
-separately to `input_blob_at`. Regions and dimensions come from the same
-Rust layout used by rendering. Moving outside a lane keeps the original
-contact owner. Physical coordinates and acquisition time remain in captures.
+batch before gameplay adoption, and passes original packets and CSS/backing
+extents to `input_blob_on_surface`. Its scalar `preflight_touch_surface` uses
+the same portable Rust projection before any input is admitted, without
+allocating a projected-point array. Renderer, native menu input and touch share
+one centered pixel viewport that preserves scene aspect with whole-pixel
+rounding. Bars cannot acquire lanes; held contact release/cancel works outside
+the field. Physical coordinates and acquisition time remain in captures.
+The explicit logical-coordinate `input_blob_at` API remains available.
+
+Requested backing geometry may precede a queued resize's actual presentation;
+the acquisition does not identify an exact displayed frame. Tiny surfaces
+quantize the aspect ratio, and the extra touch-only validation crossing still
+requires measured performance acceptance.
 
 Missing pointer-capture or contact-runtime capabilities fail explicitly.
 This bridge has source changes and deferred fixtures; generated bindings,
