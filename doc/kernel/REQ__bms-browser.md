@@ -2094,3 +2094,23 @@ Author independent actual main/Worker fixtures for successful solo/local/replay
 flow, ACK gating, count/byte validation, stop while awaiting ACK, stale owners,
 transfer/timeout failures and endpoint cleanup. JS-only source/whitespace
 inspection; execution and formal review/QA remain deferred.
+
+## Bounded sample-upload admission
+
+The aggregate upload RPC needs a finite 10-second admission deadline until
+Worker proves ownership of the transferred endpoint. Worker emits exactly one
+play-samples-admitted notification carrying playId, rpcId and the actual prepared
+count, after adopting AudioSampleClient and launching its first sample or end
+request. It is neither insertion ACK nor EOS completion. Window correlates the
+current upload RPC and exact expected count, clears only that admission timer,
+and continues to await the genuine final samples-uploaded receipt. It must not
+finish, hand off commands or activate from admission evidence alone.
+
+Malformed/duplicate current admission and success before admission reject and
+join cleanup; stale play/rpc notifications cannot cancel a current timer or
+revive a stopped owner. A worker that never adopts times out and uses existing
+stop/join/forced-release behavior. Individual actual sample/end ACK deadlines
+remain authoritative after admission; no whole-bank timer, per-sample Window
+progress, polling or PCM payloads. Author independent actual host/Worker fixtures
+for absent admission, malformed/stale/duplicate admission, genuine single-owner
+admission, EOS gating and cancellation/replacement, under execution deferral.
