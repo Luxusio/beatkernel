@@ -1,5 +1,35 @@
 # Shared BMS asset preparation
 
+## Missing static image filename variants
+
+Static `ImageAssets` preparation uses `AssetPathPolicy::ImageVariants` on both
+contained filesystem and scoped selected-file sources. An existing literal
+always wins, even when its encoded data is unsupported or damaged; resource
+decoding never triggers another filename search. Only a genuinely absent
+literal permits BMP/PNG/JPG/JPEG extension variants. Recognized original
+families come first, followed by remaining families in BMP, PNG, JPG, JPEG
+order; extensionless references use that default order. Try all ASCII extension
+case combinations in deterministic mask order, at most 40 candidates, excluding
+the exact original spelling. Preserve directory and Unicode stem spelling.
+Unknown extensions, including video extensions, remain literal-only.
+
+`Exact` remains the default general path policy and audio lookup retains its
+existing order. Selected images are identified by resolved contained keys, so
+aliases still decode once and retain shared raw/cropped/keyed pixels under the
+existing budgets. Missing selections stay blank with a retained reason; unsafe
+paths, non-files, permission failures, symlink escapes, dangling links and
+exhausted limits still reject preparation. A reference whose directory entry
+exists but cannot canonicalize because its target is absent reports InvalidData,
+including under audio lookup; it cannot become an ordinary missing-image blank
+or permit variant search. Never search around such failures. Original BMP
+definitions and compiled chart/replay identity are unchanged. No per-frame IO
+or main-thread browser decoding is introduced.
+
+Author independent filesystem and selected-file fixtures for literal priority,
+all case combinations, family order, scope and unsafe paths, plus actual image
+bank fixtures for signatures, unavailable literals, alias reuse and budgets.
+These fixtures and platform/browser playback remain deferred execution.
+
 The final BMS sample exposes `PreparedBms`, `ChannelPolicy`, `load_prepared` and
 an optional off-thread `AssetDecoder` extension. Preparation owns parsed source,
 actual BPM/STOP compilation, an immutable sample bank, head/instant sound

@@ -1,5 +1,16 @@
 # BMS desktop player
 
+## Static image filename compatibility
+
+Shared native/browser image preparation admits supported missing-filename
+variants through the exact priority, containment, literal-error and budget
+contract in [shared preparation](REQ__bms-preparation.md#missing-static-image-filename-variants).
+A missing `background.bmp` can select `background.png`; an existing damaged
+`background.bmp` retains its unavailable status. Original chart references,
+gameplay/replay identity, crop definitions, Layer transparency, atomic native
+publication and Worker-owned browser decoding keep their existing semantics.
+Actual image rendering and platform acceptance require later execution.
+
 ## Portable finite live ownership
 
 An explicit finite StepGameplay setup must use the existing SoloRuntime logical
@@ -1366,8 +1377,8 @@ and defined BMP00, outside audio/input/frame callbacks. Undefined references,
 missing files and damaged/unsupported encoded images have explicit unavailable
 reasons and later render blank; visual-only failures need not cancel audio.
 Unsafe paths, escapes, nonfiles, access errors and configured capacity/aggregate
-limits reject preparation atomically. Reuse exact contained path resolution;
-no filename-extension replacement yet. Deduplicate canonical files and share
+limits reject preparation atomically. Reuse contained path resolution and the
+missing-only image variant policy above. Deduplicate canonical files and share
 immutable decoded RGBA data across image IDs. Do not equate CPU asset count
 with the renderer's concurrent texture slots.
 
