@@ -1,5 +1,45 @@
 # Unified BMS application and competition
 
+## Coordinated room drain protocol
+
+Extend BKMR v2 additively with DrainReady (tag 16) and DrainComplete (tag 17),
+each carrying a positive participant ID and that participant's exact positive
+final upload sequence as two little-endian u64 words. Preserve tags 1..15 and
+the existing frame cap. Codec validity alone grants no drain or close authority.
+
+The common client explicitly requests drain only after genuine local receipt
+completion: own final full write, aggregate ACK, all peer finals and all local
+recipient ACK full writes. Admit one DrainReady frame in the existing write-ID
+space. Accept only the matching own DrainComplete captured at or after actual
+DrainReady admission. Hold one matching early notice until the actual Ready
+full-write receipt; duplicates and unrelated/pre-admission notices refuse
+atomically. Stop revokes completion authority without fabricating receipts.
+
+The common relay receives readiness from the actual admitted lease, requiring
+the payload participant to match that lease and the exact immutable final
+sequence. Its original capture must follow that recipient's actual aggregate
+ACK admission. Credit readiness only after that exact aggregate ACK's full
+write; one matching early readiness may wait behind the in-flight aggregate.
+Only after every aggregate ACK full write and every genuine host readiness may
+the relay admit DrainComplete for each participant. Track each actual complete-
+notice full write separately, reusing the existing per-recipient write IDs.
+Provide additive timed relay APIs; legacy untimed calls cannot authorize drain
+readiness without original capture/admission observations.
+
+Transport composition must preserve the exact outer receipt mapping, original
+capture floors and bounded immutable membership. Once all hosts are genuinely
+ready, a client receiving its Complete notice may finish independently; the
+actual server must tolerate that recipient's expected closure while continuing
+the other Complete writes. Earlier disconnect/Leave remains whole-room
+cancellation. Do not wire automatic application closure before this server
+ownership rule and common/client binding integration exist.
+
+Known ceiling: Common drain wire/state components do not prove transport close
+semantics. Actual server expected-close handling, RoomPlay/I/O and browser
+bindings/Worker final drain integration, native application activation and live
+interoperability remain required. Remote scores remain self-reported display
+data, not ranked score authority.
+
 ## Common client progress and local final-receipt boundary
 
 Compose one RoomProgressClient with RoomPlayClient and its native timed stream
