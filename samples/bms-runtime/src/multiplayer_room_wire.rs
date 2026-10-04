@@ -1,9 +1,11 @@
-//! Distinct BKMR v2 room-admission and control frames, without authorization.
-//! Stream owners assign participant IDs; requests never choose an identity.
-//! Frame validation does not establish a start, progress, or a final ACK.
+//! Distinct BKMR v2 room-admission, control and progress frames.
+//! Stream owners assign source participants; an upload never chooses its source.
+//! Codec validation grants no membership, start, delivery or final-ACK authority.
 
 use crate::local_players::{PlayerId, MAX_LOCAL_PLAYERS};
-use crate::multiplayer_group::validate_roster;
+use crate::multiplayer_group::{
+    GroupPrefix, append_validated_prefix, decode_prefix, validate_roster, validated_prefix_extent,
+};
 use crate::multiplayer_group_rooms::{GroupRoomMember, GroupRoomPhase};
 use crate::multiplayer_protocol::MAX_IDENTITY;
 use crate::multiplayer_rooms::ParticipantId;
@@ -17,6 +19,8 @@ const MAX_HOSTS: usize = 64;
 const MAX_PAYLOAD: usize = 4 + MAX_IDENTITY + 1 + 4 * MAX_LOCAL_PLAYERS;
 const MAX_FRAME_BYTES: usize = HEADER_BYTES + MAX_PAYLOAD;
 const MAX_SNAPSHOT_PAYLOAD: usize = 10 + MAX_HOSTS * (10 + 4 * MAX_LOCAL_PLAYERS);
+const MIN_PROGRESS_PAYLOAD: usize = 56;
+const MAX_PROGRESS_PAYLOAD: usize = 2828;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RoomMessage {
@@ -46,6 +50,15 @@ pub enum RoomMessage {
         replied_ns: i64,
     },
     Start(StartMessage),
+    Progress(GroupPrefix),
+    PeerProgress {
+        participant: ParticipantId,
+        prefix: GroupPrefix,
+    },
+    FinalAck {
+        participant: ParticipantId,
+        sequence: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +138,13 @@ fn start_fields(message: StartMessage) -> (u8, i64) {
     }
 }
 
+fn progress_extent(prefix: &GroupPrefix) -> Result<usize, RoomWireError> {
+    if prefix.sequence == 0 {
+        return Err(RoomWireError::InvalidMessage);
+    }
+    validated_prefix_extent(&prefix.members).map_err(|_| RoomWireError::InvalidMessage)
+}
+
 fn message_extent(message: &RoomMessage) -> Result<(u8, usize), RoomWireError> {
     Ok(match message {
         RoomMessage::Join { identity, players } => {
@@ -173,6 +193,25 @@ fn message_extent(message: &RoomMessage) -> Result<(u8, usize), RoomWireError> {
                 return Err(RoomWireError::InvalidMessage);
             }
             (tag, 8)
+        }
+        RoomMessage::Progress(prefix) => (13, progress_extent(prefix)?),
+        RoomMessage::PeerProgress {
+            participant,
+            prefix,
+        } => {
+            if participant.0 == 0 {
+                return Err(RoomWireError::InvalidMessage);
+            }
+            (14, 8 + progress_extent(prefix)?)
+        }
+        RoomMessage::FinalAck {
+            participant,
+            sequence,
+        } => {
+            if participant.0 == 0 || *sequence == 0 {
+                return Err(RoomWireError::InvalidMessage);
+            }
+            (15, 16)
         }
     })
 }
@@ -241,6 +280,33 @@ pub fn encode_message(message: &RoomMessage) -> Result<Vec<u8>, RoomWireError> {
         RoomMessage::Start(message) => {
             frame.extend_from_slice(&start_fields(*message).1.to_le_bytes())
         }
+        RoomMessage::Progress(prefix) => {
+            append_validated_prefix(
+                &mut frame,
+                prefix.sequence,
+                prefix.final_prefix,
+                &prefix.members,
+            );
+        }
+        RoomMessage::PeerProgress {
+            participant,
+            prefix,
+        } => {
+            frame.extend_from_slice(&participant.0.to_le_bytes());
+            append_validated_prefix(
+                &mut frame,
+                prefix.sequence,
+                prefix.final_prefix,
+                &prefix.members,
+            );
+        }
+        RoomMessage::FinalAck {
+            participant,
+            sequence,
+        } => {
+            frame.extend_from_slice(&participant.0.to_le_bytes());
+            frame.extend_from_slice(&sequence.to_le_bytes());
+        }
     }
     Ok(frame)
 }
@@ -280,6 +346,15 @@ fn read_header(frame: &[u8]) -> Result<(u8, usize), RoomWireError> {
         7 => length == 16,
         8 => length == 32,
         9..=12 => length == 8,
+        13 => {
+            (MIN_PROGRESS_PAYLOAD..=MAX_PROGRESS_PAYLOAD).contains(&length)
+                && (length - 12) % 44 == 0
+        }
+        14 => {
+            (8 + MIN_PROGRESS_PAYLOAD..=8 + MAX_PROGRESS_PAYLOAD).contains(&length)
+                && (length - 20) % 44 == 0
+        }
+        15 => length == 16,
         _ => false,
     };
     if !valid_length {
@@ -302,6 +377,24 @@ fn read_players(payload: &mut &[u8]) -> Result<Vec<PlayerId>, RoomWireError> {
     }
     validate_roster(&players).map_err(|_| RoomWireError::InvalidMessage)?;
     Ok(players)
+}
+
+fn read_prefix(payload: &mut &[u8]) -> Result<GroupPrefix, RoomWireError> {
+    let length = payload.len();
+    let bytes = read_bytes(payload, length)?;
+    // Read only the shared schema's sequence here; its actual decoder owns all
+    // nested schema, flag, extent, ordered-player and counter validation.
+    let sequence = u64::from_le_bytes(
+        bytes
+            .get(4..12)
+            .ok_or(RoomWireError::InvalidMessage)?
+            .try_into()
+            .map_err(|_| RoomWireError::InvalidMessage)?,
+    );
+    if sequence == 0 {
+        return Err(RoomWireError::InvalidMessage);
+    }
+    decode_prefix(bytes, sequence, None).map_err(|_| RoomWireError::InvalidMessage)
 }
 
 /// Decode exactly one complete frame. Trailing bytes belong to another frame
@@ -403,12 +496,27 @@ pub fn decode_message(frame: &[u8]) -> Result<RoomMessage, RoomWireError> {
                 _ => return Err(RoomWireError::InvalidFrame),
             })
         }
+        13 => RoomMessage::Progress(read_prefix(&mut payload)?),
+        14 => {
+            let participant = ParticipantId(u64::from_le_bytes(read_array(&mut payload)?));
+            if participant.0 == 0 {
+                return Err(RoomWireError::InvalidMessage);
+            }
+            RoomMessage::PeerProgress {
+                participant,
+                prefix: read_prefix(&mut payload)?,
+            }
+        }
+        15 => RoomMessage::FinalAck {
+            participant: ParticipantId(u64::from_le_bytes(read_array(&mut payload)?)),
+            sequence: u64::from_le_bytes(read_array(&mut payload)?),
+        },
         _ => return Err(RoomWireError::InvalidFrame),
     };
     if !payload.is_empty() {
         return Err(RoomWireError::InvalidMessage);
     }
-    if tag >= 7 {
+    if matches!(tag, 7..=12 | 15) {
         message_extent(&message)?;
     }
     Ok(message)

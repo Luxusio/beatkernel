@@ -93,11 +93,32 @@ pub fn encode_prefix(
     final_prefix: bool,
     members: &[MemberProgress],
 ) -> Result<Vec<u8>, MultiplayerError> {
-    validate_members(None, members)?;
+    let length = validated_prefix_extent(members)?;
     let mut payload = Vec::new();
     payload
-        .try_reserve_exact(HEADER_BYTES + members.len() * MEMBER_BYTES)
+        .try_reserve_exact(length)
         .map_err(|_| MultiplayerError::Protocol("group prefix allocation failed".into()))?;
+    append_validated_prefix(&mut payload, sequence, final_prefix, members);
+    Ok(payload)
+}
+
+/// Validate the complete member prefix before a containing frame allocates.
+/// Sequence policy belongs to the caller; the original group codec permits zero.
+pub(crate) fn validated_prefix_extent(
+    members: &[MemberProgress],
+) -> Result<usize, MultiplayerError> {
+    validate_members(None, members)?;
+    Ok(HEADER_BYTES + members.len() * MEMBER_BYTES)
+}
+
+/// Append directly into a caller's reserved frame. The caller must first use
+/// `validated_prefix_extent` and reserve that much additional capacity.
+pub(crate) fn append_validated_prefix(
+    payload: &mut Vec<u8>,
+    sequence: u64,
+    final_prefix: bool,
+    members: &[MemberProgress],
+) {
     payload.push(1);
     payload.push(u8::from(final_prefix));
     payload.extend_from_slice(&(members.len() as u16).to_le_bytes());
@@ -114,7 +135,6 @@ pub fn encode_prefix(
             payload.extend_from_slice(&value.to_le_bytes());
         }
     }
-    Ok(payload)
 }
 
 fn read_word(bytes: &[u8]) -> Result<u64, MultiplayerError> {

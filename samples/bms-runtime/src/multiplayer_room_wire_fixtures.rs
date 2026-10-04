@@ -1,6 +1,11 @@
 //! Deferred BKMR v2 codec fixtures; actual start agreements remain the timing authority.
 use super::*;
 use crate::multiplayer_clock::{ClockFilter, ClockSample};
+use crate::multiplayer_group::{GroupPrefix, MemberProgress};
+use crate::multiplayer_group_rooms::{GroupRoomPolicy, GroupRoomRegistry};
+use crate::multiplayer_protocol::Progress;
+use crate::multiplayer_room_client::RoomClientSession;
+use crate::multiplayer_room_play::RoomPlayClient;
 use crate::multiplayer_start::{StartAgreement, StartMessage, StartPolicy, StartRole};
 
 const JOIN: &[u8] = &[
@@ -26,6 +31,31 @@ const PONG: &[u8] = &[
     b'B', b'K', b'M', b'R', 2, 0, 8, 32, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
     8, 7, 6, 5, 4, 3, 2, 1, 3, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0,
 ];
+
+// Independent schema-1 golden: one full-width player, sequence and counters.
+const PROGRESS: &[u8] = &[
+    b'B', b'K', b'M', b'R', 2, 0, 13, 56, 0, 0, 0, 1, 0, 1, 0, 255, 255, 255, 255, 255, 255, 255,
+    255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 127, 255, 255, 255, 255, 255, 255,
+    255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 8, 7, 6, 5, 4, 3, 2, 1, 255, 255, 255, 255, 255, 255, 255,
+    255,
+];
+
+fn progress_prefix() -> GroupPrefix {
+    GroupPrefix {
+        sequence: u64::MAX,
+        final_prefix: false,
+        members: vec![MemberProgress {
+            player: PlayerId(u32::MAX),
+            progress: Progress {
+                song_ns: i64::MAX,
+                hits: u64::MAX,
+                misses: 0,
+                combo: 0x0102_0304_0506_0708,
+                max_combo: u64::MAX,
+            },
+        }],
+    }
+}
 
 fn join() -> RoomMessage {
     RoomMessage::Join {
@@ -817,4 +847,367 @@ fn fragmented_and_coalesced_controls_preserve_actual_start_agreement_receipts_wi
         ),
         (2351, 2051, 20)
     );
+}
+
+#[test]
+fn literal_progress_upload_peer_and_final_ack_preserve_full_width_original_fields() {
+    let ordinary = RoomMessage::Progress(progress_prefix());
+    assert_eq!(encode_message(&ordinary).unwrap(), PROGRESS);
+    assert_eq!(decode_message(PROGRESS).unwrap(), ordinary);
+    let mut final_prefix = progress_prefix();
+    final_prefix.final_prefix = true;
+    let mut final_literal = PROGRESS.to_vec();
+    final_literal[12] = 1;
+    let final_upload = RoomMessage::Progress(final_prefix.clone());
+    assert_eq!(encode_message(&final_upload).unwrap(), final_literal);
+    assert_eq!(decode_message(&final_literal).unwrap(), final_upload);
+
+    let peer = RoomMessage::PeerProgress {
+        participant: ParticipantId(0x8877_6655_4433_2211),
+        prefix: final_prefix,
+    };
+    let mut peer_literal = vec![
+        b'B', b'K', b'M', b'R', 2, 0, 14, 64, 0, 0, 0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88,
+    ];
+    peer_literal.extend_from_slice(&final_literal[11..]);
+    assert_eq!(encode_message(&peer).unwrap(), peer_literal);
+    let decoded = decode_message(&peer_literal).unwrap();
+    peer_literal.fill(0);
+    assert_eq!(decoded, peer, "the decoded prefix owns its member storage");
+    let ack = RoomMessage::FinalAck {
+        participant: ParticipantId(u64::MAX),
+        sequence: u64::MAX,
+    };
+    let ack_literal = [
+        b'B', b'K', b'M', b'R', 2, 0, 15, 16, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+        255, 255, 255, 255, 255, 255, 255,
+    ];
+    assert_eq!(encode_message(&ack).unwrap(), ack_literal);
+    assert_eq!(decode_message(&ack_literal).unwrap(), ack);
+
+    for song_ns in [i64::MIN, 72_000_000_000_000, 604_800_000_000_000, i64::MAX] {
+        let mut prefix = progress_prefix();
+        prefix.members[0].progress.song_ns = song_ns;
+        let mut expected = PROGRESS.to_vec();
+        expected[27..35].copy_from_slice(&song_ns.to_le_bytes());
+        let message = RoomMessage::Progress(prefix);
+        assert_eq!(encode_message(&message).unwrap(), expected);
+        assert_eq!(decode_message(&expected).unwrap(), message);
+    }
+}
+
+#[test]
+fn progress_bounds_and_whole_member_validation_reject_malformed_headers_and_payloads() {
+    for (tag, length) in [
+        (13, 55u32),
+        (13, 57),
+        (13, 2829),
+        (14, 63),
+        (14, 65),
+        (14, 2837),
+        (15, 15),
+        (15, 17),
+        (16, 0),
+        (13, u32::MAX),
+    ] {
+        let mut header = vec![b'B', b'K', b'M', b'R', 2, 0, tag];
+        header.extend_from_slice(&length.to_le_bytes());
+        let mut arriving = header.clone();
+        arriving.extend_from_slice(PROGRESS);
+        let mut decoder = RoomFrameDecoder::new();
+        assert!(decoder.push(&arriving).is_err());
+        assert_eq!(
+            decoder.bytes, header,
+            "no body admitted for an invalid extent"
+        );
+        assert!(decoder.take().is_err());
+    }
+
+    let mut malformed = Vec::new();
+    for (offset, value) in [(11, 0), (11, 2), (12, 2), (13, 0), (13, 2), (13, 65)] {
+        let mut frame = PROGRESS.to_vec();
+        frame[offset] = value;
+        malformed.push(frame);
+    }
+    for (start, end) in [(15, 23), (23, 27), (59, 67)] {
+        let mut frame = PROGRESS.to_vec();
+        frame[start..end].fill(0);
+        malformed.push(frame);
+    }
+    let mut overflow = PROGRESS.to_vec();
+    overflow[43] = 1; // hits MAX plus one miss cannot be a cumulative total.
+    malformed.push(overflow);
+    let mut pair = progress_prefix();
+    pair.members.push(MemberProgress {
+        player: PlayerId(7),
+        ..pair.members[0]
+    });
+    let valid_pair = encode_message(&RoomMessage::Progress(pair)).unwrap();
+    for id in [0u32, u32::MAX] {
+        let mut frame = valid_pair.clone();
+        frame[67..71].copy_from_slice(&id.to_le_bytes());
+        malformed.push(frame);
+    }
+    let valid_peer = encode_message(&RoomMessage::PeerProgress {
+        participant: ParticipantId(u64::MAX),
+        prefix: progress_prefix(),
+    })
+    .unwrap();
+    for range in [11..19, 23..31] {
+        let mut frame = valid_peer.clone();
+        frame[range].fill(0);
+        malformed.push(frame);
+    }
+    let valid_ack = encode_message(&RoomMessage::FinalAck {
+        participant: ParticipantId(1),
+        sequence: 1,
+    })
+    .unwrap();
+    for range in [11..19, 19..27] {
+        let mut frame = valid_ack.clone();
+        frame[range].fill(0);
+        malformed.push(frame);
+    }
+    for frame in malformed {
+        assert!(decode_message(&frame).is_err());
+    }
+    for frame in [PROGRESS.to_vec(), valid_peer, valid_ack] {
+        let mut trailing = frame.clone();
+        trailing.push(0);
+        assert!(decode_message(&trailing).is_err());
+        assert!(decode_message(&frame[..frame.len() - 1]).is_err());
+        let mut old = frame.clone();
+        old[4] = 1;
+        assert!(decode_message(&old).is_err());
+        let mut bilateral = frame;
+        bilateral[3] = b'P';
+        assert!(decode_message(&bilateral).is_err());
+    }
+
+    let mut maximum = progress_prefix();
+    maximum.members = (0..64)
+        .map(|index| MemberProgress {
+            player: PlayerId(u32::MAX - index),
+            ..maximum.members[0]
+        })
+        .collect();
+    for (message, expected_length) in [
+        (RoomMessage::Progress(maximum.clone()), 2839),
+        (
+            RoomMessage::PeerProgress {
+                participant: ParticipantId(u64::MAX),
+                prefix: maximum.clone(),
+            },
+            2847,
+        ),
+    ] {
+        let bytes = encode_message(&message).unwrap();
+        assert_eq!(bytes.len(), expected_length);
+        assert_eq!(decode_message(&bytes).unwrap(), message);
+    }
+    let mut invalid = vec![maximum.clone()];
+    invalid[0].members.push(MemberProgress {
+        player: PlayerId(1),
+        ..maximum.members[0]
+    });
+    let mut empty = maximum.clone();
+    empty.members.clear();
+    invalid.push(empty);
+    let mut zero_sequence = maximum.clone();
+    zero_sequence.sequence = 0;
+    let legacy = crate::multiplayer_group::encode_prefix(0, false, &zero_sequence.members).unwrap();
+    assert_eq!(
+        crate::multiplayer_group::decode_prefix(&legacy, 0, None).unwrap(),
+        zero_sequence,
+        "the existing group codec keeps its zero-based sequence contract"
+    );
+    invalid.push(zero_sequence);
+    let mut duplicate = maximum.clone();
+    duplicate.members[63].player = duplicate.members[0].player;
+    invalid.push(duplicate);
+    let mut bad_later = maximum;
+    bad_later.members[63].progress.misses = 1;
+    invalid.push(bad_later);
+    for prefix in invalid {
+        assert!(encode_message(&RoomMessage::Progress(prefix.clone())).is_err());
+        assert!(
+            encode_message(&RoomMessage::PeerProgress {
+                participant: ParticipantId(1),
+                prefix,
+            })
+            .is_err()
+        );
+    }
+    for message in [
+        RoomMessage::PeerProgress {
+            participant: ParticipantId(0),
+            prefix: progress_prefix(),
+        },
+        RoomMessage::FinalAck {
+            participant: ParticipantId(0),
+            sequence: 1,
+        },
+        RoomMessage::FinalAck {
+            participant: ParticipantId(1),
+            sequence: 0,
+        },
+    ] {
+        assert!(encode_message(&message).is_err());
+    }
+}
+
+#[test]
+fn progress_fragments_coalescing_and_semantic_failure_retain_exact_owned_frames() {
+    let mut final_prefix = progress_prefix();
+    final_prefix.final_prefix = true;
+    let messages = [
+        RoomMessage::Progress(progress_prefix()),
+        RoomMessage::Progress(final_prefix.clone()),
+        RoomMessage::PeerProgress {
+            participant: ParticipantId(u64::MAX),
+            prefix: final_prefix,
+        },
+        RoomMessage::FinalAck {
+            participant: ParticipantId(u64::MAX),
+            sequence: u64::MAX,
+        },
+    ];
+    let mut stream = Vec::new();
+    for message in &messages {
+        let frame = encode_message(message).unwrap();
+        stream.extend_from_slice(&frame);
+        for split in 0..=frame.len() {
+            let mut decoder = RoomFrameDecoder::new();
+            feed_fragment(&mut decoder, &frame[..split]);
+            assert_eq!(
+                decoder.needed().unwrap(),
+                if split < 11 {
+                    11 - split
+                } else {
+                    frame.len() - split
+                }
+            );
+            if split < frame.len() {
+                assert_eq!(decoder.take().unwrap(), None);
+            }
+            feed_fragment(&mut decoder, &frame[split..]);
+            assert_eq!(decoder.push(LEAVE).unwrap(), 0);
+            assert_eq!(decoder.take().unwrap(), Some(message.clone()));
+            assert_eq!(decoder.needed().unwrap(), 11);
+        }
+    }
+    let mut decoder = RoomFrameDecoder::new();
+    let mut offset = 0;
+    for message in messages {
+        while decoder.needed().unwrap() > 0 {
+            offset += decoder.push(&stream[offset..]).unwrap();
+        }
+        assert_eq!(decoder.take().unwrap(), Some(message));
+    }
+    assert_eq!(offset, stream.len());
+    let mut malformed = PROGRESS.to_vec();
+    malformed[12] = 2;
+    for byte in malformed.chunks(1) {
+        assert_eq!(decoder.push(byte).unwrap(), 1);
+    }
+    assert_eq!(decoder.take(), Err(RoomWireError::InvalidMessage));
+    assert_eq!(decoder.bytes, malformed);
+    assert_eq!(decoder.needed().unwrap(), 0);
+    assert_eq!(decoder.push(LEAVE).unwrap(), 0);
+    assert_eq!(decoder.take(), Err(RoomWireError::InvalidMessage));
+    assert_eq!(decoder.bytes, malformed);
+}
+
+#[test]
+fn syntactic_progress_and_ack_do_not_authorize_existing_prepared_client_owners() {
+    let identity = b"progress-wire-scope";
+    let players = [PlayerId(u32::MAX)];
+    let mut registry = GroupRoomRegistry::new(GroupRoomPolicy::new(1, 2, 8, 1000).unwrap());
+    let creator = registry.join("room", identity, &[PlayerId(7)], 0).unwrap();
+    let own = registry.join("room", identity, &players, 0).unwrap();
+    let snapshot = |registry: &GroupRoomRegistry| {
+        let room = registry.room("room").unwrap();
+        RoomMessage::Snapshot {
+            members: room.members.to_vec(),
+            phase: room.phase,
+            deadline_ns: room.deadline_ns,
+        }
+    };
+    let policy = StartPolicy {
+        lead_ns: 1000,
+        min_remaining_ns: 100,
+        max_age_ns: 10_000,
+        max_uncertainty_ns: 100,
+        max_release_lateness_ns: 25,
+    };
+    let mut admission = RoomClientSession::new(identity, &players).unwrap();
+    let mut play = RoomPlayClient::new(identity, &players, policy, 0).unwrap();
+    let admission_join = admission.poll_write().unwrap().unwrap();
+    let play_join = play.poll_write(0).unwrap().unwrap();
+    let expected_join = RoomMessage::Join {
+        identity: identity.to_vec(),
+        players: players.to_vec(),
+    };
+    assert_eq!(
+        decode_message(&admission_join.bytes).unwrap(),
+        expected_join
+    );
+    assert_eq!(decode_message(&play_join.bytes).unwrap(), expected_join);
+    admission.written(admission_join.id).unwrap();
+    play.written(play_join.id, 0).unwrap();
+    for message in [
+        RoomMessage::Admitted {
+            participant: own.id,
+        },
+        snapshot(&registry),
+    ] {
+        let frame = encode_message(&message).unwrap();
+        admission.receive(decode_message(&frame).unwrap()).unwrap();
+        play.receive(decode_message(&frame).unwrap(), 0).unwrap();
+    }
+    registry.seal(creator.id, 1).unwrap();
+    admission.receive(snapshot(&registry)).unwrap();
+    play.receive(snapshot(&registry), 1).unwrap();
+    admission.request_ready().unwrap();
+    play.request_ready().unwrap();
+    let admission_ready = admission.poll_write().unwrap().unwrap();
+    let play_ready = play.poll_write(2).unwrap().unwrap();
+    assert_eq!(admission_ready.bytes, READY);
+    assert_eq!(play_ready.bytes, READY);
+    admission.written(admission_ready.id).unwrap();
+    play.written(play_ready.id, 2).unwrap();
+    registry.ready(creator.id, 2).unwrap();
+    registry.ready(own.id, 2).unwrap();
+    admission.receive(snapshot(&registry)).unwrap();
+    play.receive(snapshot(&registry), 2).unwrap();
+    assert_eq!(admission.room().unwrap().phase, GroupRoomPhase::Prepared);
+    assert_eq!(play.room().unwrap().phase, GroupRoomPhase::Prepared);
+
+    let mut final_prefix = progress_prefix();
+    final_prefix.final_prefix = true;
+    for message in [
+        RoomMessage::Progress(progress_prefix()),
+        RoomMessage::Progress(final_prefix.clone()),
+        RoomMessage::PeerProgress {
+            participant: own.id,
+            prefix: final_prefix,
+        },
+        RoomMessage::FinalAck {
+            participant: own.id,
+            sequence: u64::MAX,
+        },
+    ] {
+        let bytes = encode_message(&message).unwrap();
+        assert_eq!(decode_message(&bytes).unwrap(), message);
+        let prior_admission = admission.clone();
+        let prior_play = play.clone();
+        assert!(admission.receive(decode_message(&bytes).unwrap()).is_err());
+        assert!(play.receive(decode_message(&bytes).unwrap(), 3).is_err());
+        assert_eq!(admission, prior_admission);
+        assert_eq!(play, prior_play);
+        assert_eq!(play.take_schedule(), None);
+        assert!(!admission.leave_written());
+        assert!(!play.leave_written());
+    }
 }
