@@ -604,15 +604,17 @@ function createSessionPointers(session) {
     isCurrent: () => inputOwnerCurrent(session),
     onBatch: batch => {
       if (!inputOwnerCurrent(session) || session.phase !== "playing" || session.mode !== "live") return;
-      if (!Array.isArray(batch) || batch.length < 1 || batch.length > 33) throw new Error("Invalid pointer acquisition batch.");
+      if (!Array.isArray(batch) || batch.length < 1 || batch.length > 1024) throw new Error("Invalid pointer acquisition batch.");
       const accepted = [];
       let sequence = session.pointerSequence ?? null;
+      let previousHost = null;
       for (const sample of batch) {
         if (!sample || typeof sample !== "object" || Array.isArray(sample)) throw new Error("Invalid pointer acquisition sample.");
         const { kind, pointerType, hostNs, source, sequence: currentSequence, code, control } = sample;
         if ((kind !== "pointer" && kind !== "pointer-button")
           || !session.pointerOwner.devices.some(device => device.source === source && device.pointerType === pointerType)
           || typeof hostNs !== "bigint" || hostNs < 0n || hostNs > 9223372036854775807n
+          || (previousHost !== null && hostNs < previousHost)
           || typeof currentSequence !== "bigint" || currentSequence < 0n || currentSequence > 18446744073709551615n
           || (sequence !== null && currentSequence <= sequence) || currentSequence > session.sequence
           || !Number.isInteger(code) || code < 0 || code > 0xffffffff) throw new Error("Pointer acquisition identity changed.");
@@ -624,6 +626,7 @@ function createSessionPointers(session) {
           throw new Error("Invalid acquired pointer position or button state.");
         }
         sequence = currentSequence;
+        previousHost = hostNs;
         const admitted = session.pointerSources?.get(source);
         if (!admitted || (kind === "pointer-button" && !admitted.controls.has(control))) continue;
         if (hostNs < session.lastHost) throw new Error("Pointer input arrived behind the accepted gameplay watermark.");

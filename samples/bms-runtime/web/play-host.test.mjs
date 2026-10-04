@@ -1851,8 +1851,24 @@ function enablePointers(h) {
 }
 function nativePointer(fields = {}) {
   return { pointerType: "mouse", pointerId: -7, timeStamp: 1300.125, offsetX: 123.5, offsetY: -2.25, buttons: 1,
-    getCoalescedEvents() { assert.fail("mouse/pen owner must acquire only dispatched samples"); },
     getPredictedEvents() { assert.fail("predicted pointer samples cannot enter gameplay"); }, ...fields };
+}
+function nativePointerChild(fields = {}) {
+  const sample = { pointerType: "mouse", pointerId: -7, isPrimary: true, timeStamp: 1300,
+    clientX: 1000, clientY: 2000, buttons: 0, ...fields };
+  for (const key of ["offsetX", "offsetY"]) Object.defineProperty(sample, key, {
+    get() { assert.fail("coalesced pointer children have no authoritative canvas offset"); },
+  });
+  return sample;
+}
+function nativePointerHistory(children, fields = {}) {
+  return nativePointer({ timeStamp: 1400, buttons: 0, isPrimary: true,
+    offsetX: 100, offsetY: 200, clientX: 1000, clientY: 2000,
+    getCoalescedEvents() { return children; }, ...fields });
+}
+function expandedPointerHistory() {
+  return Array.from({ length: 256 }, (_, index) => nativePointerChild({ timeStamp: 1300 + index / 8,
+    clientX: 1000 + index, buttons: index % 2 ? 0 : 7 }));
 }
 function pointerListenerCount(canvas) {
   return ["pointerdown", "pointermove", "pointerup", "pointercancel", "lostpointercapture"]
@@ -2043,6 +2059,119 @@ test("pointer admission, whole-batch queue limits and capture cleanup refuse saf
   assert.equal(dirty.get("play").disabled, true);
   assert.equal(dirty.workers[0].messages("play-step").length, beforeClose, "failed cleanup still cannot publish synthetic releases");
   await dirty.close();
+});
+
+test("Window coalesced pointer histories preserve every original DTO across bounded Worker chunks and null intermediate watermarks", async () => {
+  const h = await harness({ pointerSupported: true }); await h.preview(); enablePointers(h);
+  const session = await h.launch(), worker = h.workers[0], canvas = h.get("canvas");
+  const display = watchPlayDisplay(h), layout = h.layoutReads;
+  h.setNow(1400);
+  const children = expandedPointerHistory(); let calls = 0, receiver;
+  const dispatched = canvas.emit("pointermove", nativePointerHistory(children, {
+    getCoalescedEvents() { calls++; receiver = this; return children; },
+  }));
+  assert.equal(calls, 1); assert.equal(receiver, dispatched);
+  assert.equal(worker.messages("play-step").length, 1, "one frozen acquisition triggers one initial pump");
+  children[0].clientX = -999; children.length = 0;
+  const chunks = [];
+  for (let index = 0; index < 4; index++) {
+    const request = worker.last("play-step"); chunks.push(request);
+    assert.equal(request.events.length, 256);
+    assert.equal(request.watermark, index === 3 ? 1388000000n : null);
+    if (index) assert.ok(request.tickId > chunks[index - 1].tickId);
+    await pointerStepDone(h, request);
+  }
+  assert.equal(worker.messages("play-step").length, 4);
+  const events = chunks.flatMap(request => request.events);
+  assert.equal(events.length, 1024); assert.equal(events[0].sequence, 1n); assert.equal(events.at(-1).sequence, 1024n);
+  assert.deepEqual(events.slice(0, 4).map(row => [row.kind, row.control, row.state, row.hostNs]), [
+    ["pointer", 0, undefined, 1300000000n], ["pointer-button", 1, 0, 1300000000n],
+    ["pointer-button", 2, 0, 1300000000n], ["pointer-button", 3, 0, 1300000000n],
+  ]);
+  assert.deepEqual(events.slice(-4).map(row => [row.control, row.state, row.hostNs]),
+    [[0, undefined, 1331875000n], [1, 1, 1331875000n], [2, 1, 1331875000n], [3, 1, 1331875000n]]);
+  assert.equal(events[0].x, 100); assert.equal(events[1020].x, 355);
+  assert.ok(events.every(row => row.source === 3n && row.pointerType === "mouse" && row.code === 4294967289));
+  assert.equal(events.some(row => row.hostNs === 1400000000n), false, "the dispatched parent is not appended to nonempty history");
+  h.setNow(1401);
+  canvas.emit("pointermove", nativePointerHistory([
+    nativePointerChild({ pointerType: "pen", pointerId: 17, isPrimary: false, timeStamp: 1400.25, clientX: 998, buttons: 2 }),
+    nativePointerChild({ pointerType: "pen", pointerId: 17, isPrimary: false, timeStamp: 1400.5, clientX: 1003, buttons: 0 }),
+  ], { pointerType: "pen", pointerId: 17, isPrimary: false, timeStamp: 1401 }));
+  const pen = worker.last("play-step");
+  assert.deepEqual(pen.events.map(row => [row.kind, row.control, row.state, row.hostNs, row.sequence]), [
+    ["pointer", 0, undefined, 1400250000n, 1025n], ["pointer-button", 2, 0, 1400250000n, 1026n],
+    ["pointer", 0, undefined, 1400500000n, 1027n], ["pointer-button", 2, 1, 1400500000n, 1028n],
+  ]);
+  assert.equal(pen.events[0].x, 98); assert.equal(pen.events[2].x, 103);
+  assert.ok(pen.events.every(row => row.source === 4n && row.code === 17));
+  await pointerStepDone(h, pen);
+  assert.equal(h.layoutReads, layout); assert.deepEqual(display, []);
+  h.click("stop"); await flush(); await h.receive(finalScore(session.id)); await h.close();
+});
+
+test("Window rejects malformed, over-budget, late or retired pointer histories without publishing a valid prefix", async () => {
+  const malformed = [
+    children => { children[1].pointerType = "pen"; }, children => { children[1].buttons = 1; },
+    children => { children[0].timeStamp = 1300.0000002; children[1].timeStamp = 1300.0000001; },
+    (children, parent) => { parent.getCoalescedEvents = () => ({ length: 2 }); },
+    (children, parent) => { parent.getCoalescedEvents = () => Array.from({ length: 257 }, () => nativePointerChild()); },
+    (children, parent) => { const tooMany = expandedPointerHistory(); tooMany[255].buttons = 8;
+      parent.buttons = 8; parent.getCoalescedEvents = () => tooMany; },
+  ];
+  for (const mutate of malformed) {
+    const h = await harness({ pointerSupported: true }); await h.preview(); enablePointers(h);
+    const session = await h.launch(), worker = h.workers[0]; h.setNow(1400);
+    const children = [nativePointerChild(), nativePointerChild({ timeStamp: 1300.125 })], parent = nativePointerHistory(children);
+    mutate(children, parent); h.get("canvas").emit("pointermove", parent); await flush();
+    assert.equal(worker.messages("play-step").length, 0); assert.equal(worker.last("play-stop").playId, session.id);
+    await h.receive(finalScore(session.id)); await h.close();
+  }
+  for (const overflow of [false, true]) {
+    const h = await harness({ pointerSupported: true }); await h.preview(); enablePointers(h);
+    const session = await h.launch(), worker = h.workers[0], canvas = h.get("canvas");
+    h.setNow(1300);
+    h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1300 });
+    const first = worker.last("play-step");
+    h.window.emit("keyup", { code: "KeyZ", timeStamp: 1300.125 });
+    const children = expandedPointerHistory();
+    for (const row of children) row.timeStamp += 0.25;
+    children[255].buttons = 1; // 255 four-DTO samples + final position and two actual Up edges = 1023.
+    h.setNow(1400); canvas.emit("pointermove", nativePointerHistory(children, { buttons: 1 }));
+    assert.equal(worker.messages("play-stop").length, 0);
+    assert.equal(worker.messages("play-step").length, 1, "the in-flight keyboard request retains the exact shared pending boundary");
+    if (overflow) {
+      canvas.emit("pointermove", nativePointer({ timeStamp: 1400, buttons: 1 })); await flush();
+      assert.equal(worker.last("play-stop").playId, session.id);
+      await pointerStepDone(h, first);
+      assert.equal(worker.messages("play-step").length, 1, "overflow discards the queued history instead of flushing a partial prefix");
+    } else {
+      await pointerStepDone(h, first);
+      const accepted = [];
+      for (let index = 0; index < 4; index++) {
+        const request = worker.last("play-step"); assert.equal(request.events.length, 256);
+        accepted.push(...request.events); assert.equal(request.watermark, index === 3 ? 1388000000n : null);
+        await pointerStepDone(h, request);
+      }
+      assert.equal(accepted.length, 1024); assert.equal(accepted[0].key, 2); assert.equal(accepted[0].down, false);
+      assert.equal(accepted.filter(row => row.kind === "pointer" || row.kind === "pointer-button").length, 1023);
+      h.click("stop"); await flush();
+    }
+    await h.receive(finalScore(session.id)); await h.close();
+  }
+  const late = await harness({ pointerSupported: true }); await late.preview(); enablePointers(late);
+  const committed = await late.launch(), worker = late.workers[0]; late.setNow(1400);
+  late.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1400 });
+  await pointerStepDone(late, worker.last("play-step"));
+  late.get("canvas").emit("pointermove", nativePointerHistory([nativePointerChild(), nativePointerChild({ timeStamp: 1400 })])); await flush();
+  assert.equal(worker.messages("play-step").length, 1, "a current parent cannot retime a child behind the global frontier");
+  await late.receive(finalScore(committed.id));
+  const next = await late.launch(), canvas = late.get("canvas"), before = worker.messages("play-step").length;
+  canvas.emit("pointermove", nativePointerHistory([nativePointerChild()], {
+    getCoalescedEvents() { late.click("stop"); return [nativePointerChild()]; },
+  })); await flush();
+  assert.equal(worker.messages("play-step").length, before, "native callback cancellation cannot publish its stale history");
+  await late.receive(finalScore(next.id)); await late.close();
 });
 
 test("live HID discovers authorized interfaces automatically and queues original reports beside touch and keyboard without Window interpretation", async () => {

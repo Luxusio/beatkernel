@@ -4,7 +4,7 @@ const U64_MAX = 18446744073709551615n;
 const unsigned = value => typeof value === "bigint" && value >= 0n && value <= U64_MAX;
 const finiteFloat = value => typeof value === "number" && Number.isFinite(value) && Number.isFinite(Math.fround(value));
 
-// Dispatched Window samples only. Sources identify mouse/pen aggregates, not hardware.
+// Window samples and available movement history. Sources identify aggregates, not hardware.
 export class PointerInputOwner {
   #target;
   #nextSequence;
@@ -94,22 +94,77 @@ export class PointerInputOwner {
       if ((!release && (!finiteFloat(x) || !finiteFloat(y)))
         || !Number.isInteger(buttons) || buttons < 0 || buttons > 0xffffffff
         || (previous && timestampMs < previous.timestampMs)) throw new Error("Invalid pointer sample or acquisition chronology.");
-      if (buttons !== 0 && !previous && this.#pointers.size >= 64) throw new Error("Active pointer capacity exceeded.");
-      let before = 0;
-      let after = buttons;
-      for (const [id, pointer] of this.#pointers) {
-        if (pointer.pointerType !== pointerType) continue;
-        before = (before | pointer.buttons) >>> 0;
-        if (id !== pointerId) after = (after | pointer.buttons) >>> 0;
+      let history = [{ timestampMs, hostNs, x, y, buttons }];
+      if (name === "pointermove") {
+        const getCoalescedEvents = event.getCoalescedEvents;
+        if (!this.#current()) return;
+        if (getCoalescedEvents !== undefined && getCoalescedEvents !== null) {
+          if (typeof getCoalescedEvents !== "function") throw new Error("Invalid coalesced pointer acquisition method.");
+          const children = getCoalescedEvents.call(event);
+          if (!this.#current()) return;
+          if (!Array.isArray(children)) throw new Error("Coalesced pointer history must be an array.");
+          const count = children.length;
+          if (!this.#current()) return;
+          if (!Number.isInteger(count) || count < 0 || count > 256) throw new Error("Invalid coalesced pointer history length or more than 256 samples.");
+          if (count !== 0) {
+            const primary = event.isPrimary;
+            const clientX = event.clientX;
+            const clientY = event.clientY;
+            if (!this.#current()) return;
+            if (typeof primary !== "boolean" || typeof clientX !== "number" || !Number.isFinite(clientX)
+              || typeof clientY !== "number" || !Number.isFinite(clientY)) throw new Error("Invalid coalesced pointer parent anchor.");
+            history = [];
+            let lastTime = previous?.timestampMs ?? 0;
+            for (let index = 0; index < count; index++) {
+              const child = children[index];
+              if (!this.#current()) return;
+              if (!child || typeof child !== "object" || Array.isArray(child)) throw new Error("Invalid coalesced pointer sample.");
+              // Coalesced children are not dispatched; their offset coordinates
+              // do not identify this target. Snapshot native fields exactly once.
+              const { pointerId: childId, pointerType: childType, isPrimary: childPrimary,
+                timeStamp: childTime, clientX: childX, clientY: childY, buttons: childButtons } = child;
+              if (!this.#current()) return;
+              if (childId !== pointerId || childType !== pointerType || childPrimary !== primary
+                || typeof childTime !== "number" || !Number.isFinite(childTime) || childTime < lastTime || childTime > timestampMs
+                || typeof childX !== "number" || !Number.isFinite(childX) || typeof childY !== "number" || !Number.isFinite(childY)
+                || !Number.isInteger(childButtons) || childButtons < 0 || childButtons > 0xffffffff) {
+                throw new Error("Coalesced pointer identity, chronology or sample fields changed.");
+              }
+              const projectedX = x + (childX - clientX);
+              const projectedY = y + (childY - clientY);
+              if (!finiteFloat(projectedX) || !finiteFloat(projectedY)) throw new Error("Coalesced pointer position exceeds finite float32 coordinates.");
+              history.push({ timestampMs: childTime, hostNs: millisecondsToNanos(childTime),
+                x: projectedX, y: projectedY, buttons: childButtons });
+              lastTime = childTime;
+            }
+            if (history.at(-1).buttons !== buttons) throw new Error("Coalesced pointer final buttons differ from the dispatched mask.");
+          }
+        }
       }
+      if (!previous && this.#pointers.size >= 64 && history.some(sample => sample.buttons !== 0)) throw new Error("Active pointer capacity exceeded.");
+      let otherButtons = 0;
+      for (const [id, pointer] of this.#pointers) {
+        if (id !== pointerId && pointer.pointerType === pointerType) otherButtons = (otherButtons | pointer.buttons) >>> 0;
+      }
+      let before = (otherButtons | (previous?.buttons ?? 0)) >>> 0;
       const source = this.#devices[pointerType === "mouse" ? 0 : 1].source;
       const code = pointerId >>> 0;
       const samples = [];
-      if (!release) samples.push({ kind: "pointer", pointerType, hostNs, source, code, control: 0, mode: 0, x, y });
-      for (let bit = 0; bit < 32; bit++) {
-        const wasDown = (before & (1 << bit)) !== 0;
-        const down = (after & (1 << bit)) !== 0;
-        if (wasDown !== down) samples.push({ kind: "pointer-button", pointerType, hostNs, source, code, control: bit + 1, state: down ? 0 : 1 });
+      for (const sample of history) {
+        const { hostNs, x, y } = sample;
+        if (!release) {
+          if (samples.length === 1024) throw new Error("Expanded pointer batch exceeds 1024 events.");
+          samples.push({ kind: "pointer", pointerType, hostNs, source, code, control: 0, mode: 0, x, y });
+        }
+        const after = (otherButtons | sample.buttons) >>> 0;
+        for (let bit = 0; bit < 32; bit++) {
+          const wasDown = (before & (1 << bit)) !== 0;
+          const down = (after & (1 << bit)) !== 0;
+          if (wasDown === down) continue;
+          if (samples.length === 1024) throw new Error("Expanded pointer batch exceeds 1024 events.");
+          samples.push({ kind: "pointer-button", pointerType, hostNs, source, code, control: bit + 1, state: down ? 0 : 1 });
+        }
+        before = after;
       }
       for (const sample of samples) {
         if (!this.#current()) return;
@@ -121,20 +176,21 @@ export class PointerInputOwner {
         Object.freeze(sample);
       }
       Object.freeze(samples);
-      if (buttons !== 0) this.#pointers.set(pointerId, { pointerType, buttons, timestampMs });
+      if (buttons !== 0) this.#pointers.set(pointerId, { pointerType, buttons, timestampMs: history.at(-1).timestampMs });
       else this.#pointers.delete(pointerId);
       if (buttons !== 0 && !this.#captures.has(pointerId)) {
         this.#captures.add(pointerId);
         try { this.#target.setPointerCapture(pointerId); }
         finally {
-          if (!this.#current()) this.#release(pointerId);
+          if (!this.#current()) { this.#release(pointerId); this.#notify(); }
         }
       } else if (buttons === 0 && this.#captures.delete(pointerId) && name !== "lostpointercapture") this.#release(pointerId);
       if (this.#cleanupFailure !== null) throw this.#cleanupFailure;
       if (!this.#current()) return;
       if (samples.length !== 0) this.#onBatch(samples);
     } catch (cause) {
-      this.#fail(new Error("Pointer acquisition failed.", { cause }));
+      if (!this.#closed) this.#fail(new Error("Pointer acquisition failed.", { cause }));
+      else this.#notify(); // Preserve a cleanup error observed after a native callback closed ownership.
     } finally { this.#busy = false; }
   }
 

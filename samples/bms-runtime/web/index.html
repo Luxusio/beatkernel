@@ -66,7 +66,7 @@
       <label><input id="pointer-input" type="checkbox" disabled> Mouse and pen buttons for live play</label>
       <details class="binding-editor"><summary>Mouse and pen bindings</summary>
         <div id="pointer-bindings" aria-label="Live lane mouse and pen button bindings"></div>
-        <p class="hint">Each button can bind one lane per type. Buttons 1/2/3 mean left or tip, right or barrel, and middle. Window mouse and pen are aggregate sources, not hardware identities. Acquires dispatched absolute positions and button changes; button bindings drive lanes. Pressure, tilt, relative pointer lock and coalesced history are not captured. Replay uses recorded input. These choices are separate from portable keyboard settings.</p>
+        <p class="hint">Each button can bind one lane per type. Buttons 1/2/3 mean left or tip, right or barrel, and middle. Window mouse and pen are aggregate sources, not hardware identities. Acquires absolute positions and button changes, including available coalesced movement history; button bindings drive lanes. Pressure, tilt, relative pointer lock and predicted input are not captured. Replay uses recorded input. These choices are separate from portable keyboard settings.</p>
       </details>
       <div class="replay-controls"><label><input id="hid-input" type="checkbox" disabled> Use HID profile for live play</label>
         <button id="hid-authorize" type="button" disabled>Authorize HID devices</button>
