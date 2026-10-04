@@ -1,5 +1,34 @@
 # Native Windows BMS sample composition
 
+## Retained room Results pages
+
+After the actual native room network owner joins, retain one bounded immutable
+archive of the prepared remote host/player roster and their last accepted
+reported prefixes. Capture it once from the actual competition HUD after the
+post-join poll, preserving full participant identity, player order, final-prefix
+flags, missing values and genuine error/cancellation evidence. A retained prefix
+is not a verified ranking, and cleanup success cannot make it final.
+If the final joined snapshot contains a newer core-accepted prefix after live
+presentation disconnected, retention still applies the exact original
+roster/sequence/progress/finality validation. This read-only retention step cannot
+reconnect the live HUD, clear failures or grant protocol authority.
+
+Native Results can page through every archived remote score using local UI
+state, without sending network commands, reopening controls or retaining a
+network thread. Seal, Ready and Leave remain closed. Rendering borrows at most
+four cached rows; normal frame publication shares the archive through Arc and
+does not copy its complete roster. Preserve the last selected live page when
+results first arrive, reject invalid pages atomically, and use fresh ownership
+on retry so old results cannot affect replacement play. Failed presentation
+remains explicitly unavailable instead of manufacturing missing scores.
+
+Cancellation or protocol failure may still retain accepted prefixes for review,
+with the actual diagnostic visible. Archive construction/publication failure
+must not change local judging or conceal the joined network outcome. Deferred
+fixtures cover partial final pages, full-width identity, terminal/cancelled
+paging, archive isolation and actual post-join publication. Live GUI/network
+acceptance remains unverified.
+
 ## Native application room mode
 
 An explicit `--mp-room URL` selects multi-host WebTransport rooms independently
@@ -70,9 +99,9 @@ The adapter reuses the network thread and common native output-start machinery.
 The native player bridge, lobby controls and selected-page HUD have source
 implementations. Application room-mode selection, actual solo/cohort room-owner
 instantiation and finite/whole-song completion gates now have shared source
-integration. Live lobby/output/network acceptance remains pending. Closed Results
-retains only the selected score page; browsing all final pages still requires an
-explicit retained-result owner.
+integration. Joined Results now has a bounded immutable archive and local paging
+through every prepared remote host/player row. Live lobby/output/network and
+Results interaction acceptance remains pending.
 
 Native multi-host room networking must reuse `RoomPlayClient` and `RoomPlayIo`
 on one dedicated network thread, independent of Windows/macOS/Linux adapters.
@@ -95,10 +124,10 @@ progress storage retain existing bounds; do not clone full room state every tick
 
 This source phase provides the shared network owner and actual WebTransport
 connector. Native lobby controls and score presentation now connect to the
-competition adapter through the existing player channel. Actual app selection,
-cohort activation and natural finalization callers still require room-owner
-integration before native multi-host play is available. Runtime, generated
-bindings, live TLS/device and performance acceptance
+competition adapter through the existing player channel. Actual application
+selection, solo/cohort activation and natural finalization callers now route
+through the shared native room owner. Runtime, generated bindings, live
+TLS/device and performance acceptance
 remain deferred; compilation alone does not prove them.
 
 ## Local Windows groups

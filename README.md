@@ -1066,6 +1066,15 @@ room option and replace the whole transport family when changing modes. See the
 [room routing contract](doc/changes/CHANGE__native-room-app-routing.md).
 Live lobby, TLS/device execution and measured performance remain unverified.
 
+After native room cleanup joins, graphical Results retains one immutable archive
+of all prepared remote players' last accepted reported prefixes. Previous/next
+score-page controls browse this archive locally, including cancelled or failed
+sessions with their actual diagnostics. Seal, Ready and Leave stay closed; no
+network session is retained or reopened for paging. Missing values and actual
+final-prefix flags remain distinct from verified rankings. See the
+[retained Results contract](doc/changes/CHANGE__native-room-results.md).
+Results GUI interaction remains unverified.
+
 
 Browser saved-opponent competition uses the common replay judge and a bounded
 portable owner. The page selects local stored or imported recordings as Own/Other
