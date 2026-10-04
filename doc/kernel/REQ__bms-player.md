@@ -2021,3 +2021,41 @@ return, cancellation/close and exactly one join/install. Add source-linked
 fixtures without opening windows/devices. Scoped formatting plus exactly four
 compile-only checks after both terminal STOPPED finals are authorized; actual
 assertions, app/device/runtime and formal review/QA remain deferred.
+
+## Owned native renderer preparation
+
+After profile/CLI preparation, create the native wgpu instance and window
+surface on the window owner, then transfer their owned handles to a cancellable
+preparation thread for actual adapter/device/pipeline initialization. The UI
+must not `block_on` renderer preparation. Reuse the existing owned preparation
+worker with nonblocking completion polling and exactly one actual join; no new
+crate or executor framework. Return the instance and renderer together.
+
+While preparation is pending, retain the native window with a loading title,
+fence gameplay Start, navigation, stale hits and drawing, and keep Escape,
+close, focus, resize, suspend and occlusion handling reachable. Catalog/font
+preparation may run independently but must not publish before renderer adoption
+on an eligible active surface. Resize and atlas upload use current UI state at
+adoption, not stale size or font snapshots. Publish renderer/font ownership
+only after that adoption preflight succeeds; initialization/adoption errors
+close explicitly without a silent backend or default-presentation fallback.
+
+Hide/occlusion retains a ready owned result until eligibility returns. Suspend
+retires and cancels the preparation generation; its delayed success/error must
+be discarded after join, even after resume. Resume starts fresh preparation
+only after the retired owner has joined. Close cancels and waits for renderer
+preparation alongside all existing owners; unexpected exit also joins. Late
+results may never resurrect a closed/replaced surface. Poll only pending
+ownership, retaining event-driven idle behavior after completion.
+
+Known ceiling: native instance/surface creation and adoption resize/texture
+upload remain window-owner calls. Cooperative cancellation cannot interrupt a
+driver call already in progress. Actual cross-platform surface/device/thread
+behavior and responsiveness require deferred device/GPU acceptance.
+
+Independent source fixtures must use real owned-thread/channel gates for
+pending input/navigation, error/retirement/close/hidden retention and replacement
+isolation, without inventing a fake successful GPU renderer. Actual successful
+GPU creation/adoption remains a later integration run. Both writers must return
+terminal STOPPED before scoped format and exactly four compile-only checks;
+assertions, native/browser execution and formal review/QA remain deferred.
