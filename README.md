@@ -298,6 +298,8 @@ discards the pending edit. Paste preserves spaces and enforces the field's byte
 and control-character limits; multiline text is rejected. Committed text uses
 whole Unicode graphemes for cursor movement, selection and deletion, retaining
 UTF-8 byte positions for native IME. Mouse/word selection remains pending.
+Editable text windows also preserve whole grapheme boundaries within their
+existing scalar budgets; see [window limits](doc/changes/CHANGE__grapheme-windows.md).
 Native clipboard calls have no hard timeout and may
 delay closing; real desktop acceptance is deferred. Linux availability depends
 on supported Wayland data-control or X11/XWayland, and clipboard persistence after

@@ -340,10 +340,23 @@ the committed caret forward to the next whole-cluster boundary. Selection
 endpoints must remain whole-cluster boundaries. Native preedit cursor/selection
 keeps the platform's original ordered scalar byte endpoints, even inside a
 cluster; ordinary edits of such a preview normalize endpoints before mutation.
-Keep the 4096-byte field bound and atomic validation. Segmentation runs only on
-editor commands, without per-frame caches or work in gameplay/audio callbacks.
-Visible windows and font decorations retain scalar metrics in this phase;
-grapheme-safe clipping and complex-script shaping remain separate work.
+Keep the 4096-byte field bound and atomic validation. Editing segmentation runs
+on editor commands; window segmentation runs when input geometry is repainted.
+Retained fields reuse geometry between actual updates, without a new per-frame
+cache or work in gameplay/audio callbacks.
+Visible borrowed windows begin and end on full-string extended grapheme
+boundaries while decorations retain scalar/advance metrics and native internal
+IME endpoints. Bitmap windows retain the requested scalar budget: omit a whole
+cluster that cannot fit; if the caret's cluster cannot fit, show an empty window
+at that caret. At an ordinary byte boundary, the caret's cluster is the preceding
+one, or the following one at the start of the field. Supplied-font windows retain
+the 1024-scalar draw budget, with an explicit error when the caret's cluster
+exceeds it for positive width. Zero-width windows remain empty. Pixel clipping may
+crop a whole admitted cluster wider than the field; do not split its text slice.
+Prefer complete composition when its enclosing clusters fit both budgets;
+otherwise keep the caret's cluster and native cursor visibility. Complex-script
+shaping and fallback remain separate work. Projection borrows cached text and
+glyph metrics without allocation, atlas mutation or per-note reactive work.
 
 The borrowed visible projection clips selected ranges to scalar columns and the
 existing focused text-field renderer highlights them. Equality changes repaint
@@ -491,7 +504,7 @@ Native filesystem/window/device/performance acceptance remains unverified.
   batch are rendered per frame (65,536 UI rectangles). Note overlap and geometry
   capacity overflow report an error — revise admission for denser layouts.
 - Supplied fonts render catalog titles/artists and editable fields; remaining
-  labels and noneditable metadata use bitmap glyphs. Shaping, grapheme-safe clipping
+  labels and noneditable metadata use bitmap glyphs. Shaping
   and fallback fonts remain pending; native visual acceptance is deferred.
 - Full-song completion now has source integration; native presentation and
   full-queue admission behavior remain unexecuted — verify these boundaries,
@@ -909,7 +922,7 @@ the 1024-scalar draw window even for long or zero-advance input. Font-generation
 changes invalidate input nodes; cached identical updates leave retained nodes
 idle. Full renderer recovery uploads the latest CPU atlas, creates a new texture
 identity and rebinds fields/rebuilds Selection; surface-only recovery retains it.
-Font fallback, shaping, grapheme-safe clipping and native visual acceptance remain
+Font fallback, shaping and native visual acceptance remain
 unfinished. Source fixtures cover these boundaries for later execution.
 
 Portable font preparation accepts caller-provided TrueType/OpenType bytes and

@@ -22,9 +22,10 @@ new texture identity. No new crate or dependency is introduced.
 
 Glyph preparation can copy the bounded atlas and upload pixels on a cache miss;
 this is not an allocation-free UI claim. Audio/gameplay owners and retained paint
-effects do no font parsing, rasterization or cache mutation. Shaping, grapheme
-clipping and fallback fonts remain separate work; committed grapheme editing is
-now specified in [whole-grapheme editing](CHANGE__grapheme-editing.md).
+effects do no font parsing, rasterization or cache mutation. Shaping and fallback
+fonts remain separate work; committed grapheme editing is specified in
+[whole-grapheme editing](CHANGE__grapheme-editing.md), and borrowed field windows
+in [whole-grapheme input windows](CHANGE__grapheme-windows.md).
 Missing characters use the
 supplied font's glyph zero. Labels and noneditable record metadata retain bitmap
 text. Actual GPU pixels and keyboard/IME behavior remain unverified.

@@ -29,8 +29,10 @@ link/run the player or exercise physical inputs.
 
 ## Known ceiling
 
-Visible text windows and font decorations still use scalar metrics; shaping,
-grapheme-safe clipping, mouse/word selection and font fallback remain pending.
+Visible text windows and font decorations still use scalar metrics; whole-cluster
+window boundaries are subsequently implemented in
+[whole-grapheme input windows](CHANGE__grapheme-windows.md). Shaping,
+mouse/word selection and font fallback remain pending.
 Native keyboard/IME behavior and performance require later execution. Source
 fixtures and compile-only checks do not establish runtime acceptance. Tests,
 formal reviews and QA remain deferred by the user; the full player task remains
