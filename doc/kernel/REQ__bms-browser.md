@@ -91,6 +91,53 @@ new session or resurrect a disposed owner.
 Source fixtures and compilation do not prove browser presentation, network
 interoperability or performance acceptance.
 
+## Dedicated Worker-to-Worklet command ownership
+
+The continuous command path shall use a transferred MessagePort, avoiding
+Window command validation, copies and per-batch ACK relay. Introduce the bounded
+transport component before changing its gameplay caller. AudioContext creation,
+user activation and actual output timestamp acquisition remain host operations.
+The existing host polling path retains its own sequence and output evidence.
+
+AudioHost.openCommandPort() is a once-only handoff after allocation and before
+arming, with no pending host operation. It transfers one MessageChannel endpoint
+to the actual processor using a correlated host control ACK, and returns the
+other endpoint with generation, queue capacity and timeout metadata. Unsupported
+MessageChannel, repeated handoff, wrong phase and failed attachment refuse
+explicitly. After handoff, host commands() refuses; there is one command producer.
+Setup/sample/finish/arm/poll/stop remain on the host control lane. No retry or
+fallback resumes host command authority after a transferred attachment.
+
+The processor command lane has an independent safe integer sequence, initially
+zero, accepts only bounded command batches and preserves the actual Rust enqueue
+admitted-prefix count. Both lanes share the same structural command preflight
+and enqueue operation. Generation mismatch, wrong operation, sequence gaps,
+malformed records and failed admission fence the audio owner. A failed batch is
+never retried, split, silently dropped or acknowledged as successful. Terminal
+failure reaches both endpoints, while host stop remains the sole deallocation
+route and explicitly closes the command endpoint.
+
+The Worker-side AudioCommandClient owns at most one pending operation, validates
+and snapshots the exact seven command fields, correlates generation/sequence and
+full or rejected-prefix ACKs, and has a bounded timeout. It preserves lossless
+BigInt command fields and returns actual admitted evidence. Malformed response,
+terminal, message error, timeout or explicit close permanently fences this client,
+settles its pending promise and detaches/closes its port. No close, late message
+or old generation can revive a disposed owner. Closing the client does not claim
+that the AudioContext or Rust processor has been released; joined host cleanup
+still owns that evidence.
+
+This component does not by itself migrate the live/replay gameplay caller or
+prove browser execution, input delay, real audio or main-thread performance.
+Caller integration is the next dependent part of the already planned host bridge
+migration. Existing output/presentation and completion barriers remain required.
+
+API basis: the [HTML channel messaging specification](https://html.spec.whatwg.org/multipage/web-messaging.html#channel-messaging)
+defines transferred endpoints and queued message delivery; the
+[Web Audio specification](https://webaudio.github.io/web-audio-api/#dom-audioworkletprocessor-port)
+defines the node/processor MessagePort and recommends explicit port closure.
+These API contracts do not establish implementation or performance acceptance.
+
 ## Finite live section controls
 
 Live start and optional end use original-song decimal seconds with at most nine
@@ -257,8 +304,10 @@ workload fits every capacity. Source fixtures remain authored and unexecuted.
 
 Browser finite practice is developed in dependent stages: exact output fence,
 common stepped gameplay/recorded section completion, then Window/Worker end
-controls. Output component support alone does not implement the user-facing
-finite practice feature. The current page still launches unlimited output.
+controls. These source stages are connected for finite live and recorded replay
+sections: the page forwards the actual configured frame endpoint to the output
+owner. Ordinary playback remains unlimited. Browser execution and exact physical
+output acceptance remain unverified.
 
 WorkletAudioBuilder::finish_at admits an immutable optional exclusive Mixer
 playback frame endpoint; ordinary finish retains unlimited behavior. AudioHost

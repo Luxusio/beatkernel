@@ -164,6 +164,24 @@ Windows/macOS checks do not establish current native QUIC cross compilation. Tes
 generation, browser/Worker/GPU execution, audio/timing acceptance and formal
 review/QA remain deferred; the full player task stays open.
 
+## Dedicated command port component
+
+The next part of host-bridge migration introduces `AudioHost.openCommandPort()`
+and `AudioCommandClient` in `audio-command-client.mjs`. The host transfers one
+MessageChannel endpoint to the actual Worklet after allocation and before arm,
+and returns the peer port with generation, queue capacity and timeout metadata.
+The client permits one bounded pending command batch, preserves exact BigInt
+fields and correlates actual full or rejected-prefix ACKs. Both host and port
+routes share Worklet command admission, with independent control sequences.
+Host commands cannot resume after the handoff; no failed prefix is retried.
+Host stop retains deallocation and context-cleanup responsibility.
+
+This component has source and deferred fixtures before its caller migration. The page still
+uses the existing Window command bridge; it will not claim a direct gameplay
+path until Worker ownership and joined cleanup are connected. Output timestamp
+acquisition and actual presentation evidence remain required. Browser, audio,
+fixture execution and measured performance are deferred.
+
 ## AudioWorklet component
 
 The separate `browser-audio` feature exports the existing Rust Mixer through a
@@ -656,8 +674,8 @@ acquisition is intended to support keyboard, touch/pointer and HID through commo
 physical-event types, preserving acquisition time and source identity. The live
 keyboard route is connected.
 Touch and profile-based WebHID launch also have source implementations. Saved
-opponent counters use the Worker HUD described below; network opponent HUD and
-remaining host-bridge work are pending. Main-thread performance is unmeasured.
+opponent and network peer counters use the Worker HUDs described below. Remaining
+host-bridge migration is pending. Main-thread performance is unmeasured.
 
 
 The physical browser API is authored beside the existing keyboard API.
