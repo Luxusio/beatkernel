@@ -2149,3 +2149,53 @@ remain authoritative after admission; no whole-bank timer, per-sample Window
 progress, polling or PCM payloads. Author independent actual host/Worker fixtures
 for absent admission, malformed/stale/duplicate admission, genuine single-owner
 admission, EOS gating and cancellation/replacement, under execution deferral.
+
+## Portable browser settings files
+
+Add explicit Save settings and Load settings file controls, available on an
+initialized idle browser owner. A load replaces the complete validated draft
+atomically; errors leave all previous values intact. Store version 1 with kind
+`beatkernel-browser-settings`, separate from native player and device profiles.
+Use `settings-profile.mjs` exports `snapshotBrowserSettings`,
+`encodeBrowserSettings` and asynchronous `decodeBrowserSettings`.
+
+The exact schema contains kind/version, `timing` with string earlyMs/lateMs/
+offsetMs, `output` with string latency/latencyMs/rate, `capacities` with the
+existing five named string capacities, `section` with string startSeconds/
+endSeconds and `bindings` with all eighteen unique supported [lane, key-code]
+rows, including empty codes for unbound lanes. Require exact keys and the
+existing timing/output/capacity/section/binding validators; validate stored
+custom latency even when a category is selected. Preserve decimal spellings
+and canonicalize binding row order. Never serialize device/source/contact IDs,
+files, chart/replay/opponent selection, local assignments, permission handles
+or network credentials as settings. Live/replay continue their existing rules.
+
+Worker owns File reads, strict UTF-8 decoding, JSON parsing, full validation and
+JSON encoding. Bound metadata and actual file/encoded bytes to 16 KiB; reject
+foreign kind/version, missing/unknown fields, invalid UTF-8, oversized actual
+reads and invalid values explicitly. Standard JSON object decoding applies;
+no chart/asset/GPU/audio work occurs during settings processing.
+
+Window captures a bounded draft on the actual user action and sends one
+correlated request. Use `settings-profile-save` (settings DTO) or
+`settings-profile-load` (File), a fresh safe-integer id, and response
+`settings-profile-saved` (bytes), `settings-profile-loaded` (settings DTO) or
+`settings-profile-error` (message). Window verifies the bounded returned DTO
+before any DOM assignment, and downloads the Worker-produced bytes through
+browser URL APIs. No Window File reading, JSON parsing/encoding, periodic
+settings updates, gameplay rendering or background automatic writes.
+
+Fence overlapping settings actions and Start/configuration changes while a
+request is pending. Do not load into active/preparing/importing gameplay,
+retained local source ownership or another host operation. Bound response wait
+to ten seconds; reject stale ids/owners, draft changes, malformed responses and
+late results after shutdown/replacement. Timeout cannot interrupt native File
+reading; Worker retains its one operation until actual settlement and discards
+obsolete publication. Settings errors are local and must not close the renderer
+or mutate assets. Revoke download URLs on replacement/shutdown and bounded
+expiry. Display event-driven completion/error status, then restore controls.
+
+Author independent model and actual host/Worker fixtures for roundtrip/limits,
+no Window reads/JSON work, atomic draft application, correlation/deadline,
+busy/stale/replacement and future launch propagation. Actual browser/file/UI
+acceptance and measured responsiveness remain deferred.
