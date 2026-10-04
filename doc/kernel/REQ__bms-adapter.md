@@ -2,7 +2,7 @@
 
 `beatkernel-bms` is a separate MIT crate depending only on the core `beatkernel` crate. It reads already-decoded UTF-8 BMS text, returns SourceChart plus adapter-owned lane/sample/audio mappings and BGM events, and creates existing builtin Instant/Hold rules. Platform acquisition, sample decoding, sound devices and judging remain outside parsing. The file-loading example bounds file reads and compiles actual parsed content; the parser performs no asset IO. Legacy Shift-JIS conversion belongs before this text boundary; the application shared decoder has an explicit UTF-8-first/strict-Shift-JIS fallback policy and explicit mode API.
 
-Supported syntax is case-insensitive: base BPM (default 130), WAVxx base36 IDs/paths, direct hexadecimal BPM channel03, extended base36 BPMxx/channel08, STOPxx/channel09, decimal measure-length channel02, layered BGM01, visible player channels11..19/21..29, paired LNTYPE1 and cell-span LNTYPE2 channels51..59/61..69, and LNOBJ endpoints on visible channels. Channel16/26 are scratch lanes; other channels keep their numeric lane identity rather than assuming a fixed key layout. LNTYPE1 holds pair successive nonzero markers per lane, including across measures; only the head sample is sounded, and the tail token is retained as metadata. Dangling/overlapping/malformed holds are rejected. Mines, invisible notes, unsupported timing/scroll/warp extensions, and unrecognized commands/channels fail with line diagnostics. Listed descriptive headers are preserved. BMPxx resource definitions and Base04/Poor06/Layer07 selections are retained and compiled separately; unsupported BGA crop directives remain explicit visual warnings.
+Directive names are case-insensitive; resource tokens use the selectable radix defined below (default base36): base BPM (default 130), WAVxx IDs/paths, direct hexadecimal BPM channel03, extended BPMxx/channel08, STOPxx/channel09, decimal measure-length channel02, layered BGM01, visible player channels11..19/21..29, paired LNTYPE1 and cell-span LNTYPE2 channels51..59/61..69, and LNOBJ endpoints on visible channels. Channel16/26 are scratch lanes; other channels keep their numeric lane identity rather than assuming a fixed key layout. LNTYPE1 holds pair successive nonzero markers per lane, including across measures; only the head sample is sounded, and the tail token is retained as metadata. Dangling/overlapping/malformed holds are rejected. Mines, invisible notes, unsupported timing/scroll/warp extensions, and unrecognized commands/channels fail with line diagnostics. Listed descriptive headers are preserved. BMPxx resource definitions and Base04/Poor06/Layer07 selections are retained and compiled separately; unsupported BGA crop directives remain explicit visual warnings.
 
 Measure duration is exactly four quarter beats times its rational length. Tokens divide that measure into equal rational positions; global quarter-beat positions use checked i128 arithmetic. The minimum integer beat-grid resolution is the LCM of reduced rational denominators, with an explicit caller cap and checked conversion to core u32/i64 ticks. Decimal values never pass through floats. STOP units are 1/48 of one quarter beat, independent of measure length; duration uses the tempo active at that beat, after a same-beat BPM change. STOP durations quantize to integer nanoseconds once. Notes/BGM at a STOP use its pre-STOP timestamp, matching the core chart compiler.
 
@@ -16,7 +16,7 @@ Sources: the format creator Urao Yane's [original BMS format specification](http
 
 ## LNOBJ long notes
 
-A case-insensitive LNOBJ header selects one nonzero two-digit base36 endpoint token in visible channels. After exact channel merging, each endpoint closes the immediately preceding non-endpoint visible object on its own lane, including across measures. Earlier ordinary notes and a final ordinary note remain instants. Orphan or consecutive endpoints reject at the original endpoint line. The marker becomes retained tail metadata, never a separate judged object; only the head requires a WAV definition and sounds a keysound. This explicit mute-tail policy differs from original RDM, which may play a defined LNOBJ marker as BGM. Layered channel01 remains ordinary BGM and requires its own WAV reference.
+A case-insensitive LNOBJ header selects one nonzero two-digit selected-radix endpoint token in visible channels. After exact channel merging, each endpoint closes the immediately preceding non-endpoint visible object on its own lane, including across measures. Earlier ordinary notes and a final ordinary note remain instants. Orphan or consecutive endpoints reject at the original endpoint line. The marker becomes retained tail metadata, never a separate judged object; only the head requires a WAV definition and sounds a keysound. This explicit mute-tail policy differs from original RDM, which may play a defined LNOBJ marker as BGM. Layered channel01 remains ordinary BGM and requires its own WAV reference.
 
 Disjoint LNOBJ and LNTYPE1 holds share existing Hold rules and exact BPM/STOP compilation. Same-lane overlapping or touching hold ranges and visible objects inside a hold reject. Duplicate LNOBJ headers follow existing Reject/LastWins policy; malformed/zero markers reject. Existing raw-event/final-item/grid bounds still apply. Source: extension creator [RDM long-note documentation](https://nvyu.net/rdm/jp/rby_ex.php). Parser/player/live-replay fixtures are prepared for later execution; compilation is not native acceptance.
 
@@ -38,7 +38,7 @@ The [format memo author's SWITCH extension documentation](https://saxxonpike.git
 
 ## Independent visual resources and timing
 
-ImageId is a separate base36 BMP namespace, including BMP00 initial poor
+ImageId is a separate selected-radix BMP namespace, including BMP00 initial poor
 resource. Definitions retain exact opaque nonempty paths; there is no parser
 asset IO. BgaChannel Base/Poor/Layer/Layer2 correspond to04/06/07/0A. Zero row tokens
 are rests and do not clear previous selections. Undefined nonzero BMP
@@ -90,7 +90,7 @@ Accept channels0B..0E with nonzero hexadecimal byte tokens mapped to Base/Layer/
 
 
 ## Static BGA crop definitions
-Accept selected #BGAxx source x1 y1 x2 y2 dx dy and #@BGAxx source sx sy w h dx dy into a separate BgaCrop map. IDs00..ZZ, source one/two ASCII base36 digits (one padded); signed i32 coordinates, positive half-open extents and checked sugar endpoints. Separate BMP/crop duplicate namespaces use existing reject/last-wins and seeded branches/line caps. Crop definitions take precedence for selected IDs, including00 initialPoor; their source refers only to original BMP definitions, never another crop. Preserve gameplay/timing/audio/replay identity for unmoved gameplay lines; no IO or recursive graph. The app produces default256x256 transparent RGBA canvases (explicit CANVASSIZE below), clamps negative source origin before drawing at dx/dy and clips actual source plus destination. This explicit bounded policy does not claim inclusive BM98 endpoints, oversized-canvas spill, historical decimal source indexing or full conformance. Unsupported video/ARGB RGB/color-key remain pending. Parser/pure-pixel/identity fixtures authored for later execution.
+Accept selected #BGAxx source x1 y1 x2 y2 dx dy and #@BGAxx source sx sy w h dx dy into a separate BgaCrop map. IDs and source use the selected radix (default00..ZZ); source one/two ASCII digits (one padded); signed i32 coordinates, positive half-open extents and checked sugar endpoints. Separate BMP/crop duplicate namespaces use existing reject/last-wins and seeded branches/line caps. Crop definitions take precedence for selected IDs, including00 initialPoor; their source refers only to original BMP definitions, never another crop. Preserve gameplay/timing/audio/replay identity for unmoved gameplay lines; no IO or recursive graph. The app produces default256x256 transparent RGBA canvases (explicit CANVASSIZE below), clamps negative source origin before drawing at dx/dy and clips actual source plus destination. This explicit bounded policy does not claim inclusive BM98 endpoints, oversized-canvas spill, historical decimal source indexing or full conformance. Unsupported video/ARGB RGB/color-key remain pending. Parser/pure-pixel/identity fixtures authored for later execution.
 
 
 ## Explicit canvas-size header
@@ -142,3 +142,31 @@ buttons and contacts. Rules share the same compiled chart and timing profiles;
 contact holds retain exact source/surface/contact ownership and cancellation.
 Selecting contact rules is explicit and must remain distinguishable in replay
 and competition identity. Legacy rules() remains button-only.
+
+## Selectable resource radix (#BASE)
+
+Resolve selected conditional payload with the existing seed and physical limits
+before discovering a file-wide #BASE. Accept decimal 16, 36 or 62 only, default
+36, using the existing Reject/LastWins duplicate policy. A late selected header
+applies to earlier and later resource definitions and rows; discarded headers
+have no effect. Keep original physical line diagnostics and seeded outcomes.
+
+Apply the chosen radix to two-character WAV/BMP/BPM/STOP/BGA destinations,
+LNOBJ and corresponding BGM/note/long-note/tempo/STOP/visual reference rows.
+Crop sources retain their explicit one-or-two-character policy with this radix.
+16 and 36 are case-insensitive; 62 uses digits then uppercase then lowercase,
+with distinct uppercase/lowercase resource suffixes. Directive names remain
+case-insensitive. Channel identities, measure numbers/lengths, direct BPM03 and
+opacity0B..0E retain their existing encodings. Zero stays an empty row token and
+BMP00 keeps its initial Poor role. Generic ImageId/BgaCrop values admit at most
+3843; parser digit validation enforces the selected radix's narrower range.
+Do not introduce audio IO or runtime per-frame parsing.
+
+Author independent deferred fixtures for late headers, selected branches,
+duplicates, digits/case, all reference namespaces, direct-BPM/opacity exceptions,
+long notes, limits and original-line errors. Compile-only checks are not runtime
+or executed-test acceptance. The extension compatibility reference is the
+[BMS Library loader](https://github.com/j-son3/bms-library/blob/master/src/com/lmt/lib/bms/BmsLoader.java)
+and its [radix definitions](https://github.com/j-son3/bms-library/blob/master/src/com/lmt/lib/bms/BmsInt.java).
+This describes our explicit strict compatibility policy, not universal BMS
+implementation behavior; implementation remains independently written MIT.

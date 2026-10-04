@@ -1372,7 +1372,7 @@ with the renderer's concurrent texture slots.
 
 Bound encoded inputs and decoded extents/output before admission and enforce
 a cumulative decoded bank budget. Defaults: encoded/output64MiB, dimensions
-4096, referenced IDs1296 and bank64MiB. Bank budget configurable up to256MiB;
+4096, referenced IDs3844 (the selectable base62 namespace, including00) and bank64MiB. Bank budget configurable up to256MiB;
 extent up to16384 remains subject to per-image64MiB output. Limits constrain
 encoded/output/retained storage, not a hard total-process peak: decoder buffers
 and RGBA conversion can coexist. Author codec and real filesystem/prepared
