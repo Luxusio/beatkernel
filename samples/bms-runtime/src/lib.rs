@@ -128,6 +128,8 @@ mod multiplayer_identity_fixtures;
 pub mod multiplayer_protocol;
 #[cfg(test)]
 mod multiplayer_protocol_fixtures;
+/// Common room admission state and bounded explicit Read/Write driving.
+pub mod multiplayer_room_client;
 #[cfg(test)]
 mod multiplayer_room_fixtures;
 /// Distinct bounded BKMR room admission messages and incremental framing.

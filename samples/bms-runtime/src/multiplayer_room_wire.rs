@@ -54,7 +54,7 @@ impl fmt::Display for RoomWireError {
 }
 impl std::error::Error for RoomWireError {}
 
-fn validate_snapshot(
+pub(crate) fn validate_snapshot(
     members: &[GroupRoomMember],
     phase: GroupRoomPhase,
     deadline_ns: Option<i64>,

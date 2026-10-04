@@ -167,6 +167,24 @@ mod native {
         pub fn role(&self) -> StartRole {
             self.options.role
         }
+        /// Validate BKMR identity/roster before connecting the existing trusted
+        /// endpoint. The caller drives admission, deadlines and stream disposal.
+        /// The endpoint's bilateral start role does not grant room authority;
+        /// only the actual first admitted participant may seal the room.
+        pub fn connect_room(
+            self,
+            identity: &[u8],
+            players: &[crate::local_players::PlayerId],
+            stop: &AtomicBool,
+            deadline: Instant,
+        ) -> io::Result<crate::multiplayer_room_client::RoomClientIo<WebTransportStream>> {
+            let session = crate::multiplayer_room_client::RoomClientSession::new(identity, players)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            let stream = self.connect(stop, deadline)?;
+            Ok(crate::multiplayer_room_client::RoomClientIo::new(
+                session, stream,
+            ))
+        }
         pub fn connect(
             self,
             stop: &AtomicBool,
