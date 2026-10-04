@@ -368,7 +368,7 @@ function controls() {
   ui["local-discover"].disabled = recordsDisabled || localRoster.players.length === 1;
   ui["local-release"].disabled = playing || localSetup === null;
   for (const field of localFields) field.disabled = recordsDisabled || localSetup?.phase !== "ready";
-  ui["local-page"].disabled = activePlay ? activePlay.phase !== "playing" || !activePlay.localPlan
+  ui["local-page"].disabled = activePlay ? activePlay.phase !== "playing" || !activePlay.localPlan || activePlay.localPlan.automatic === true
     || activePlay.pageChanging || activePlay.rpc !== null
     : recordsDisabled || localRoster.players.length === 1;
   ui["captured-replay"].disabled = playing || busy || capturedReplays.length === 0;
@@ -780,7 +780,7 @@ function playRpc(session, kind, fields = {}, transfer = []) {
 async function changeLocalPage() {
   const session = activePlay;
   if (!session) return;
-  if (!session.localPlan || session.phase !== "playing" || session.pageChanging || session.rpc) {
+  if (!session.localPlan || session.localPlan.automatic === true || session.phase !== "playing" || session.pageChanging || session.rpc) {
     ui["local-page"].value = String(session.localPage);
     return;
   }
@@ -846,7 +846,10 @@ async function play(mode = "live") {
       if (touchIndex >= 0 && Math.floor(touchIndex / 4) !== localPlan.page) throw new Error("The touch player must be on the visible starting page.");
       localSetup = null;
     } catch (error) { status(String(error.message).slice(0, 4096), true); return; }
-  } else if (localSetup) releasedSources = releaseLocalSources();
+  } else {
+    if (mode === "live" && ui.multiplayer.checked === true) localPlan = localRoster.snapshot([], 0, true);
+    if (localSetup) releasedSources = releaseLocalSources();
+  }
   const acquired = retained ? { sequence: retained.sequence, nextSource: retained.nextSource,
     gamepadOwner: retained.gamepadOwner, gamepadDevices: retained.gamepadDevices,
     hidOwner: retained.hidOwner, hidDevices: retained.hidDevices } : {};
@@ -865,12 +868,16 @@ async function play(mode = "live") {
     opponentCount: mode === "live" ? opponents.size : 0, opponentsFailed: false, opponentError: null,
     chartPath: ui.chart.value,
     preview: { title: ui.title.textContent, details: ui.details.textContent, position: ui.position.value } }, acquired,
-    { localPlan, localSources: localPlan ? new Set(localPlan.sources) : null, localReplays: null, localScores: null, recordLimits: null,
+    { localPlan, localSources: localPlan && localPlan.automatic !== true ? new Set(localPlan.sources) : null, localReplays: null, localScores: null, recordLimits: null,
       localPage: localPlan?.page ?? 0, pageChanging: false, pageInputWaiter: null, lastAckSequence: 0n });
   activePlay = session;
   controls();
   status(mode === "replay" ? "Preparing recorded replay and audio…" : "Preparing playable chart and audio…");
   try {
+    if (session.localPlan?.automatic === true && session.opponentSelection) {
+      session.opponentSelection = Object.freeze(session.opponentSelection.map(entry =>
+        Object.freeze({ ...entry, player: session.localPlan.players[0] })));
+    }
     session.touchInput = mode === "live" && ui["touch-input"].checked === true;
     if (session.touchInput && (typeof window.PointerEvent !== "function"
       || typeof session.canvas.setPointerCapture !== "function" || typeof session.canvas.releasePointerCapture !== "function")) {
@@ -936,14 +943,14 @@ async function play(mode = "live") {
       if (activePlay !== session || session.owner !== owner || session.phase === "closing") return;
       session.hidDevices = snapshotHidDevices(devices.map(({ source, device }) => ({ source, vendorId: device.vendorId, productId: device.productId })));
     }
-    if (session.localPlan) {
+    if (session.localSources) {
       session.hidDevices = session.hidDevices?.filter(device => session.localSources.has(device.source)) ?? null;
       session.gamepadDevices = session.gamepadDevices?.filter(device => session.localSources.has(device.source)) ?? null;
     }
-    session.requestHid = session.hidOwner !== null && (!session.localPlan || session.hidDevices?.length > 0);
-    session.requestGamepad = session.gamepadOwner !== null && (!session.localPlan || session.gamepadDevices?.length > 0);
-    if (session.localPlan && !session.requestHid) session.hidSources = new Set();
-    if (session.localPlan && !session.requestGamepad) session.gamepadSources = new Set();
+    session.requestHid = session.hidOwner !== null && (!session.localSources || session.hidDevices?.length > 0);
+    session.requestGamepad = session.gamepadOwner !== null && (!session.localSources || session.gamepadDevices?.length > 0);
+    if (session.localSources && !session.requestHid) session.hidSources = new Set();
+    if (session.localSources && !session.requestGamepad) session.gamepadSources = new Set();
     session.workerStarted = true;
     const source = mode === "replay" ? { mode, replayFile: session.replayFile }
       : { mode, inputMode: session.inputMode, seed: ui.seed.value, recordReplay: session.recordReplay, timing: session.timing, startNs: session.startNs,
@@ -969,7 +976,7 @@ async function play(mode = "live") {
       const count = prepared.hidSourceCount;
       const sources = prepared.hidSources;
       if (!Number.isInteger(count) || count < 1 || count > 16 || !Array.isArray(sources) || sources.length !== count
-        || (session.localPlan && count !== session.hidDevices.length)) {
+        || (session.localSources && count !== session.hidDevices.length)) {
         throw new Error("Preparation omitted the exact admitted HID sources.");
       }
       const admitted = new Set();
@@ -986,8 +993,8 @@ async function play(mode = "live") {
     if (session.requestGamepad) {
       const sources = prepared.gamepadSources;
       const custom = session.gamepadProfileFile !== null;
-      const eligible = custom || session.localPlan ? session.gamepadDevices : session.gamepadDevices.filter(device => device.mapping === "standard" && device.buttons >= 9);
-      if (!Array.isArray(sources) || (session.localPlan ? sources.length !== eligible.length
+      const eligible = custom || session.localSources ? session.gamepadDevices : session.gamepadDevices.filter(device => device.mapping === "standard" && device.buttons >= 9);
+      if (!Array.isArray(sources) || (session.localSources ? sources.length !== eligible.length
         : custom ? sources.length < 1 || sources.length > eligible.length : sources.length !== eligible.length)) {
         throw new Error("Preparation omitted the admitted Gamepad profile sources.");
       }
@@ -1525,7 +1532,8 @@ function stopPlay(reason, failed = false, completed = false) {
           showLocalResults(session, failed);
           localRoster.clearSources();
           showLocalRoster();
-          ui["local-status"].textContent = "Local input sources released. Discover again before the next local session.";
+          ui["local-status"].textContent = session.localPlan.automatic === true ? "Automatic input sources released."
+            : "Local input sources released. Discover again before the next local session.";
         } else if (session.replay !== null) {
           revokeReplayURL();
           lastReplay = { bytes: session.replay.bytes, complete: session.replay.complete && !failed, id: session.id,

@@ -28,13 +28,18 @@ export class LocalRoster {
   }
   selected(player) { return this.#sources.get(player) ?? null; }
   clearSources() { this.#sources.clear(); }
-  snapshot(ownedSources, page = 0) {
-    if (this.#players.length === 1) return null;
+  snapshot(ownedSources, page = 0, includeSolo = false) {
+    if (typeof includeSolo !== "boolean") throw new Error("Invalid automatic local plan option.");
+    if (!Number.isInteger(page) || page < 0 || page >= Math.ceil(this.#players.length / 4)) throw new Error("Invalid local player page.");
+    if (this.#players.length === 1) {
+      if (!includeSolo) return null;
+      return Object.freeze({ words: new Uint32Array([this.#players[0], 0, 0, 0]), players: this.players,
+        sources: Object.freeze([]), page: 0, automatic: true });
+    }
     if (!Array.isArray(ownedSources) || ownedSources.length > 34
       || Array.from(ownedSources).some(source => !sourceId(source)) || new Set(ownedSources).size !== ownedSources.length) {
       throw new Error("Invalid acquired source inventory.");
     }
-    if (!Number.isInteger(page) || page < 0 || page >= Math.ceil(this.#players.length / 4)) throw new Error("Invalid local player page.");
     const sources = this.#players.map(player => this.selected(player));
     if (sources.some(source => source === null || !ownedSources.includes(source)) || new Set(sources).size !== sources.length) {
       throw new Error("Assign one distinct acquired source to every local player.");
