@@ -778,3 +778,222 @@ fn unconfigured_samples_keep_stateless_binding_compatibility_and_clear_only_disc
         2,
     );
 }
+
+#[test]
+fn page_remap_preserves_bound_and_unbound_contacts_and_disabled_acquisition_survives_clone() {
+    let mut router = TouchRouter::new(lanes(), 4).unwrap();
+    assert!(router.new_contacts_enabled());
+    bound(
+        &mut router,
+        &touch(u64::MAX, surface(1), u64::MAX, TouchPhase::Down, 2.0, 2.0),
+        1,
+    );
+    assert_eq!(
+        router
+            .route(&touch(u64::MAX, surface(1), 2, TouchPhase::Down, -1.0, 2.0))
+            .unwrap(),
+        TouchRoute::Ignored
+    );
+    let mut moved = lanes();
+    for row in &mut moved {
+        row.min.x += 100.0;
+        row.max.x += 100.0;
+    }
+    router.set_new_contacts_enabled(false);
+    router.remap_regions(moved.clone()).unwrap();
+    assert_eq!(router.regions(), moved);
+    assert_eq!(router.active_contacts(), 2);
+    // A hidden-page contact gets retained unbound, rather than falling back to
+    // the static map or acquiring a lane after the page becomes visible again.
+    assert_eq!(
+        router
+            .route(&touch(
+                u64::MAX,
+                surface(1),
+                3,
+                TouchPhase::Down,
+                112.0,
+                2.0
+            ))
+            .unwrap(),
+        TouchRoute::Ignored
+    );
+    let mut cloned = router.try_clone().unwrap();
+    assert!(!cloned.new_contacts_enabled());
+    assert_eq!(cloned.max_contacts(), 4);
+    assert_eq!(cloned.active_contacts(), 3);
+    assert_eq!(cloned.regions(), moved);
+    router.set_new_contacts_enabled(true);
+    for (contact, phase) in [
+        (2, TouchPhase::Down),
+        (2, TouchPhase::Move),
+        (3, TouchPhase::Down),
+        (3, TouchPhase::Move),
+    ] {
+        assert_eq!(
+            router
+                .route(&touch(u64::MAX, surface(1), contact, phase, 102.0, 2.0))
+                .unwrap(),
+            TouchRoute::Ignored
+        );
+    }
+    bound(
+        &mut router,
+        &touch(u64::MAX, surface(1), u64::MAX, TouchPhase::Move, 112.0, 2.0),
+        1,
+    );
+    bound(
+        &mut router,
+        &touch(u64::MAX, surface(1), 4, TouchPhase::Down, 112.0, 2.0),
+        2,
+    );
+    assert_eq!(
+        cloned
+            .route(&touch(
+                u64::MAX,
+                surface(1),
+                4,
+                TouchPhase::Down,
+                112.0,
+                2.0
+            ))
+            .unwrap(),
+        TouchRoute::Ignored
+    );
+    bound(
+        &mut router,
+        &touch(u64::MAX, surface(1), u64::MAX, TouchPhase::Up, -50.0, 2.0),
+        1,
+    );
+    bound(
+        &mut cloned,
+        &touch(
+            u64::MAX,
+            surface(1),
+            u64::MAX,
+            TouchPhase::Cancel,
+            112.0,
+            2.0,
+        ),
+        1,
+    );
+    for contact in [2, 3] {
+        assert_eq!(
+            router
+                .route(&touch(
+                    u64::MAX,
+                    surface(1),
+                    contact,
+                    TouchPhase::Up,
+                    102.0,
+                    2.0
+                ))
+                .unwrap(),
+            TouchRoute::Ignored
+        );
+    }
+    bound(
+        &mut router,
+        &touch(u64::MAX, surface(1), 4, TouchPhase::Up, 102.0, 2.0),
+        2,
+    );
+    assert_eq!(router.active_contacts(), 0);
+    assert_eq!(
+        cloned.active_contacts(),
+        3,
+        "routing a clone does not release another owner's contacts"
+    );
+    bound(
+        &mut router,
+        &touch(u64::MAX, surface(1), 3, TouchPhase::Down, 102.0, 2.0),
+        1,
+    );
+}
+
+#[test]
+fn page_remap_rejects_identity_or_extent_changes_atomically_without_losing_held_release() {
+    let original = lanes();
+    let mut router = TouchRouter::new(original.clone(), 2).unwrap();
+    bound(
+        &mut router,
+        &touch(0, surface(1), 9, TouchPhase::Down, 2.0, 2.0),
+        1,
+    );
+    router.set_new_contacts_enabled(false);
+    let mut candidates = vec![
+        Vec::new(),
+        vec![original[0]],
+        original.iter().copied().rev().collect(),
+    ];
+    for changed in [
+        region(
+            DeviceSelector::Exact(DeviceId(0)),
+            surface(1),
+            1,
+            position(0.0, 0.0),
+            position(10.0, 10.0),
+        ),
+        region(
+            DeviceSelector::Any,
+            surface(2),
+            1,
+            position(0.0, 0.0),
+            position(10.0, 10.0),
+        ),
+        region(
+            DeviceSelector::Any,
+            surface(1),
+            3,
+            position(0.0, 0.0),
+            position(10.0, 10.0),
+        ),
+    ] {
+        let mut rows = original.clone();
+        rows[0] = changed;
+        candidates.push(rows);
+    }
+    for rows in candidates {
+        assert_eq!(
+            router.remap_regions(rows),
+            Err(TouchRoutingError::RegionIdentityChanged)
+        );
+        assert_eq!(router.regions(), original);
+        assert_eq!(router.active_contacts(), 1);
+        assert!(!router.new_contacts_enabled());
+    }
+    for (index, maximum) in [(0, position(f32::NAN, 10.0)), (1, position(10.0, 10.0))] {
+        let mut rows = original.clone();
+        rows[index].max = maximum;
+        assert!(matches!(
+            router.remap_regions(rows),
+            Err(TouchRoutingError::InvalidRegion { .. })
+        ));
+        assert_eq!(router.regions(), original);
+        assert_eq!(router.active_contacts(), 1);
+    }
+    let mut overlapping = original.clone();
+    overlapping[1].min.x = 9.0;
+    assert_eq!(
+        router.remap_regions(overlapping),
+        Err(TouchRoutingError::OverlappingRegions {
+            first: 0,
+            second: 1
+        })
+    );
+    assert_eq!(router.regions(), original);
+    assert!(!router.new_contacts_enabled());
+    bound(
+        &mut router,
+        &touch(0, surface(1), 9, TouchPhase::Up, 19.0, 2.0),
+        1,
+    );
+    assert_eq!(router.active_contacts(), 0);
+    let mut empty = TouchRouter::new(Vec::new(), 1).unwrap();
+    empty.remap_regions(Vec::new()).unwrap();
+    assert_eq!(
+        empty
+            .route(&touch(0, surface(1), 1, TouchPhase::Down, 2.0, 2.0))
+            .unwrap(),
+        TouchRoute::Unconfigured
+    );
+}

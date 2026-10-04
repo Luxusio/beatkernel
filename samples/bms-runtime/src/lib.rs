@@ -231,6 +231,8 @@ mod step_replay_fixtures;
 pub mod texture;
 #[cfg(test)]
 mod touch_gameplay_fixtures;
+#[cfg(test)]
+mod touch_page_fixtures;
 /// Atomic Design-style presentation compositions, independent of native I/O.
 #[cfg(feature = "graphics")]
 pub mod ui;

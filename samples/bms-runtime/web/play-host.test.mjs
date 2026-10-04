@@ -615,6 +615,123 @@ function localFinal(start, overrides = {}) {
     replays: players.map(player => ({ player, replay: null, replayError: null, replayComplete: false })), ...overrides });
 }
 
+async function pagedTouchSession() {
+  const h = await harness({ touchSupported: true, gamepads: [nativeGamepad(0), nativeGamepad(1), nativeGamepad(2)] });
+  await h.preview(); await localCount(h, 5); h.click("local-discover"); await flush();
+  const sources = h.get("local-source-1").children.filter(option => option.textContent.startsWith("Gamepad ")).map(option => BigInt(option.value));
+  assert.equal(sources.length, 3);
+  localAssign(h, 1, 1n); localAssign(h, 2, 2n);
+  sources.forEach((source, index) => localAssign(h, index + 3, source));
+  const session = await h.launch();
+  h.setNow(1300);
+  return { h, session, worker: h.workers[0], surface: h.get("canvas") };
+}
+
+test("touch paging waits for the acquired input prefix while retaining held releases and original sample metadata", async () => {
+  const { h, session, worker, surface } = await pagedTouchSession();
+  const pointer = (type, fields = {}) => surface.emit(type, { pointerType: "touch", pointerId: -2,
+    timeStamp: 1300, offsetX: 120.25, offsetY: 180.5, pressure: 0.375, ...fields });
+  const ack = request => h.receive({ kind: "play-step-done", playId: session.id, tickId: request.tickId,
+    songNs: 1n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
+  assert.equal(h.get("local-page").disabled, false);
+  const layoutReads = h.layoutReads;
+  pointer("pointerdown"); const down = worker.last("play-step"), original = down.events.find(event => event.kind === "touch");
+  pointer("pointermove", { timeStamp: 1300.125, offsetX: 200.5 });
+  assert.equal(worker.last("play-step"), down);
+  h.get("local-page").value = "1"; h.get("local-page").emit("change"); await flush();
+  assert.equal(h.get("local-page").disabled, true); assert.equal(worker.messages("play-page").length, 0);
+  const captures = h.captures.length;
+  pointer("pointerdown", { pointerId: 91, timeStamp: 1300.25 });
+  assert.equal(h.captures.length, captures, "a new contact is suppressed during the page transition");
+  await h.receive({ kind: "play-step-done", playId: session.id - 1, tickId: down.tickId,
+    songNs: 1n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
+  assert.equal(worker.messages("play-page").length, 0);
+  await ack(down);
+  const moved = worker.last("play-step"), move = moved.events.find(event => event.kind === "touch");
+  assert.ok(moved.tickId > down.tickId); assert.equal(move.phase, 1); assert.equal(move.contact, original.contact);
+  assert.equal(move.hostNs, 1300125000n); assert.equal(move.x, 200.5);
+  assert.equal(worker.messages("play-page").length, 0, "the first ACK alone does not cover the already queued Move");
+  await ack(moved);
+  const page = worker.last("play-page"); assert.ok(page); assert.equal(page.page, 1);
+  const posts = worker.posts.map(post => post.value);
+  assert.ok(posts.indexOf(page) > posts.indexOf(moved));
+  assert.equal(h.releases.length, 0, "remapping cannot synthesize contact release");
+  pointer("pointerup", { timeStamp: 1300.5, offsetX: -10.25, pressure: 0 });
+  const released = worker.last("play-step"), up = released.events.find(event => event.kind === "touch");
+  assert.equal(up.phase, 2); assert.equal(up.contact, original.contact); assert.equal(up.code, 0xfffffffe);
+  assert.equal(up.hostNs, 1300500000n); assert.equal(up.x, -10.25); assert.equal(up.width, original.width);
+  assert.equal(h.releases.length, 1); assert.equal(h.releases[0].id, -2);
+  assert.equal(released.events.filter(event => event.kind === "touch").length, 1, "synchronous lost capture must not manufacture Cancel");
+  pointer("pointerdown", { pointerId: 92, timeStamp: 1300.625 });
+  assert.equal(h.captures.length, captures);
+  await ack(released); await h.reply(page, { kind: "local-page", page: 1, touchVisible: false });
+  assert.equal(h.get("local-page").value, "1"); assert.equal(h.get("local-page").disabled, false);
+  assert.match(h.get("local-status").textContent, /unbound.*offscreen.*held contacts retain/);
+  pointer("pointerdown", { pointerId: 93, timeStamp: 1300.75 });
+  const hidden = worker.last("play-step"), hiddenDown = hidden.events.find(event => event.kind === "touch");
+  assert.equal(hiddenDown.phase, 0); assert.equal(hiddenDown.contact, original.contact + 1n);
+  assert.equal(hiddenDown.hostNs, 1300750000n); assert.equal(hiddenDown.sequence > up.sequence, true);
+  await ack(hidden);
+  h.get("local-page").value = "0"; h.get("local-page").emit("change"); await flush();
+  const back = worker.last("play-page"); await h.reply(back, { kind: "local-page", page: 0, touchVisible: true });
+  pointer("pointerup", { pointerId: 93, timeStamp: 1300.875 });
+  const hiddenUp = worker.last("play-step");
+  assert.equal(hiddenUp.events.find(event => event.kind === "touch").contact, hiddenDown.contact);
+  await ack(hiddenUp);
+  assert.equal(h.layoutReads, layoutReads); assert.equal(worker.messages("play-stop").length, 0);
+  h.click("stop"); await flush(); await h.receive(localFinal(session.start)); await h.close();
+});
+
+test("page choice errors preserve held input but cancellation and invalid visibility cannot apply a late page", async () => {
+  for (const fault of ["choice-error", "wrong-visibility", "cancel-before-ack", "cancel-pending-rpc"]) {
+    const { h, session, worker, surface } = await pagedTouchSession();
+    surface.emit("pointerdown", { pointerType: "touch", pointerId: 7, timeStamp: 1300,
+      offsetX: 100, offsetY: 200, pressure: 0.5 });
+    const down = worker.last("play-step");
+    h.get("local-page").value = "1"; h.get("local-page").emit("change"); await flush();
+    const ack = () => h.receive({ kind: "play-step-done", playId: session.id, tickId: down.tickId,
+      songNs: 1n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
+    if (fault === "cancel-before-ack") {
+      h.click("stop"); await flush();
+      const status = h.get("local-status").textContent;
+      await ack();
+      assert.equal(worker.messages("play-page").length, 0); assert.equal(h.get("local-status").textContent, status);
+      await h.receive(localFinal(session.start));
+    } else {
+      await ack(); const page = worker.last("play-page"); assert.ok(page);
+      if (fault === "choice-error") {
+        await h.receive({ kind: "play-reply", playId: session.id, rpcId: page.rpcId, error: "actual remap refused" });
+        assert.equal(h.get("local-page").value, "0"); assert.equal(h.get("local-page").disabled, false);
+        assert.match(h.get("local-status").textContent, /Page unchanged.*actual remap refused/);
+        assert.equal(h.releases.length, 0); assert.equal(worker.messages("play-stop").length, 0);
+        surface.emit("pointerup", { pointerType: "touch", pointerId: 7, timeStamp: 1300.5,
+          offsetX: 800, offsetY: 700, pressure: 0 });
+        const release = worker.last("play-step");
+        assert.equal(release.events.find(event => event.kind === "touch").contact, down.events.find(event => event.kind === "touch").contact);
+        await h.receive({ kind: "play-step-done", playId: session.id, tickId: release.tickId,
+          songNs: 2n, hits: 1n, misses: 0n, combo: 1n, preOriginInputs: 0 });
+        h.click("stop"); await flush(); await h.receive(localFinal(session.start));
+      } else if (fault === "wrong-visibility") {
+        await h.reply(page, { kind: "local-page", page: 1, touchVisible: true });
+        assert.equal(worker.last("play-stop").playId, session.id);
+        await h.receive(localFinal(session.start));
+        assert.match(h.get("status").textContent, /page response.*identity/i);
+      } else {
+        h.click("stop"); await flush();
+        const status = h.get("local-status").textContent;
+        await h.reply(page, { kind: "local-page", page: 1, touchVisible: false });
+        assert.equal(h.get("local-status").textContent, status);
+        await h.receive(localFinal(session.start));
+      }
+    }
+    assert.equal(h.releases.filter(release => release.id === 7).length, 1);
+    assert.equal(worker.messages("play-page").length, fault === "cancel-before-ack" ? 0 : 1);
+    assert.match(h.get("local-status").textContent, /sources released/);
+    assert.equal(h.get("play").disabled, false);
+    await h.close();
+  }
+});
+
 test("local discovery retains actual mixed-device owners through one synchronous plan snapshot and filters unassigned acquisitions", async () => {
   const opening = deferred(), chosen = nativeGamepad(0), ignored = nativeGamepad(1, { id: chosen.id });
   const h = await harness({ gamepads: [chosen, ignored], hidSupported: true,

@@ -406,6 +406,12 @@ async function workerHarness(options = {}) {
       this.calls.push(["local-touch", player, words.slice(), bounds.slice(), maximum]);
       if (options.localTouchSetupError) throw new Error(options.localTouchSetupError);
     }
+    set_touch_page(player, page) {
+      this.live(); assert.ok(this.memberIds.includes(player));
+      this.calls.push(["local-touch-page", player, page]);
+      if (options.localTouchPageError?.(player, page)) throw new Error("actual page remap refused");
+      return options.localTouchVisibility?.(player, page) ?? Math.floor(this.memberIds.indexOf(player) / 4) === page;
+    }
     configure_capture(player, ...limits) {
       this.live(); assert.ok(this.memberIds.includes(player));
       this.calls.push(["member-capture", player, ...limits]);
@@ -424,6 +430,7 @@ async function workerHarness(options = {}) {
   if (options.missingLocalConstructor) BrowserLocalGame.new_physical = undefined;
   if (options.missingLocalInputBlob) BrowserLocalGame.prototype.input_blob = undefined;
   if (options.missingLocalSavedHud) BrowserLocalGame.prototype.disable_saved_opponent_hud = undefined;
+  if (options.missingLocalTouchPage) BrowserLocalGame.prototype.set_touch_page = undefined;
   class BrowserReplay extends BrowserGame {
     constructor(prepared, ...args) {
       super(prepared, ...args);
@@ -851,7 +858,7 @@ test("local players snapshot exact sources and share one PCM, command and report
   assert.equal(h.of("play-commands").length, 0);
 });
 
-test("local capability and coverage refusals preserve prepared ownership while valid page changes and touch-page locks remain recoverable", async () => {
+test("local capability and coverage refusals preserve prepared ownership while ordinary and touch page changes remain recoverable", async () => {
   for (const request of [
     localRequest({ inputMode: undefined }), replayRequest(replayFile().file, { localPlanWords: localPlan([[7, null]]) }),
     localRequest({ multiplayer: multiplayer() }),
@@ -887,14 +894,53 @@ test("local capability and coverage refusals preserve prepared ownership while v
     assert.equal((await h.rpc("play-page", { page: 2 })).error.includes("page"), true);
     assert.equal(h.of("play-error").length, 0); assert.equal(game.frees, 0);
     const changed = await h.rpc("play-page", { page: 1 });
-    if (contact) assert.match(changed.error, /touch.*page/i);
-    else assert.deepEqual(changed.result, { kind: "local-page", page: 1 });
-    await h.tick(); assert.equal(h.views[0].localDraws.at(-1).page, contact ? 0 : 1);
-    assert.deepEqual((await h.rpc("play-page", { page: 0 })).result, { kind: "local-page", page: 0 });
+    assert.deepEqual(changed.result, { kind: "local-page", page: 1, ...(contact ? { touchVisible: false } : {}) });
+    await h.tick(); assert.equal(h.views[0].localDraws.at(-1).page, 1);
+    assert.deepEqual((await h.rpc("play-page", { page: 0 })).result, { kind: "local-page", page: 0, ...(contact ? { touchVisible: true } : {}) });
     assert.equal((await h.rpc("play-sample")).result.kind, "sample");
     assert.equal(game.frees, 0); assert.equal(h.of("play-error").length, 0);
     await h.send({ kind: "play-stop", playId: 7 });
     assert.ok(h.of("play-stopped").at(-1).replays.every(row => row.replay === null && row.replayComplete === false));
+  }
+});
+
+test("local touch page RPC retains the input owner and rejects failed or contradictory remap receipts without resetting contacts", async () => {
+  const request = () => localRequest({ keyPairs: new Uint32Array(),
+    localPlanWords: localPlan([[91, 2n], [2, 3n], [88, 4n], [7, 5n], [0xffffffff, 6n]]),
+    hidSetup: hidSetup([3n, 4n, 5n, 6n]), recordReplay: true });
+  let refused = false;
+  const h = await active({ startRequest: request(), localTouchPageError: () => refused });
+  const game = h.locals[0], first = touchEvent({ contact: 0xffffffffffffffffn });
+  await h.send(step({ events: [first] }));
+  assert.deepEqual((await h.rpc("play-page", { page: 1 })).result, { kind: "local-page", page: 1, touchVisible: false });
+  await h.tick(); assert.equal(h.views[0].localDraws.at(-1).page, 1);
+  const hidden = touchEvent({ sequence: 2n, contact: 77n, hostNs: ORIGIN + 1n });
+  const release = touchEvent({ sequence: 3n, phase: 2, contact: first.contact, hostNs: ORIGIN + 2n, x: -50 });
+  await h.send(step({ tickId: 2, watermark: ORIGIN + 2n, events: [hidden, release] }));
+  const inputs = game.calls.filter(call => call[0] === "touch");
+  assert.deepEqual(inputs.map(call => call[1]), [first, hidden, release].map(encodeTouchEvent));
+  assert.equal(game.calls.filter(call => call[0] === "local-touch").length, 1, "paging never installs a fresh contact owner");
+  assert.equal(game.calls.filter(call => call[0] === "member-capture").length, 5);
+  assert.ok(game.calls.findIndex(call => call[0] === "touch") < game.calls.findIndex(call => call[0] === "local-touch-page"));
+  assert.deepEqual((await h.rpc("play-page", { page: 0 })).result, { kind: "local-page", page: 0, touchVisible: true });
+  refused = true;
+  assert.match((await h.rpc("play-page", { page: 1 })).error, /actual page remap refused/);
+  await h.tick(); assert.equal(h.views[0].localDraws.at(-1).page, 0);
+  assert.equal(h.of("play-error").length, 0); assert.equal(game.stops, 0); assert.equal(game.frees, 0);
+  const calls = game.calls.filter(call => call[0] === "local-touch-page").length;
+  assert.ok((await h.rpc("play-page", { page: 2 })).error);
+  assert.equal(game.calls.filter(call => call[0] === "local-touch-page").length, calls);
+  await h.send({ kind: "play-stop", playId: 7 }); assert.equal(game.stops, 1); assert.equal(game.frees, 1);
+  assert.ok(h.of("play-stopped").at(-1).replays.every(row => row.replay !== null && !row.replayComplete));
+
+  const missing = await catalogWorker({ missingLocalTouchPage: true }); await missing.send(request());
+  assert.equal(missing.localConstructions.length, 0); assert.equal(missing.preparedOwners.at(-1).frees, 1);
+  assert.match(missing.of("play-reply").at(-1).error, /contact routing/);
+  for (const value of [true, "false"]) {
+    const mismatch = await active({ startRequest: request(), localTouchVisibility: () => value });
+    await mismatch.rpc("play-page", { page: 1 });
+    assert.equal(mismatch.of("play-error").length, 1);
+    assert.equal(mismatch.locals[0].stops, 1); assert.equal(mismatch.locals[0].frees, 1);
   }
 });
 
