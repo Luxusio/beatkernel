@@ -44,6 +44,16 @@ function selectedControllerProfile(size = 128) {
 function chooseControllerProfile(h, file) {
   h.get("hid-profile").files = [file]; h.get("hid-profile").emit("change");
 }
+function selectedGamepadProfile(size = 128) {
+  const file = new File(["{\"version\":1}"], "nonstandard-gamepad.json");
+  Object.defineProperty(file, "size", { value: size });
+  let reads = 0;
+  file.arrayBuffer = () => { reads++; throw new Error("Window must not read or interpret Gamepad profiles"); };
+  return { file, get reads() { return reads; } };
+}
+function chooseGamepadProfile(h, file) {
+  h.get("gamepad-profile").files = [file]; h.get("gamepad-profile").emit("change");
+}
 function nativeGamepad(index = 0, fields = {}) {
   return { index, id: "standard gamepad", mapping: "standard", connected: true, timestamp: 1000,
     axes: [0.12345678901234568],
@@ -202,7 +212,8 @@ async function harness(faults = {}) {
     "opponents-list", "opponents-status", "opponents-results", "judge-early", "judge-late", "judge-offset", "live-start", "live-end",
     "bindings", "bindings-reset", "output-latency", "output-latency-ms", "output-rate",
     "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input",
-    "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status"]) {
+    "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status",
+    "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear"]) {
     elements.set(id, new Element(id === "chart" || id === "records" ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
@@ -258,6 +269,7 @@ async function harness(faults = {}) {
       // File endpoint here; this fake Worker never acquires its bytes.
       if (value.replayFile instanceof File) posted.replayFile = value.replayFile;
       if (value.hidProfileFile instanceof File) posted.hidProfileFile = value.hidProfileFile;
+      if (value.gamepadProfileFile instanceof File) posted.gamepadProfileFile = value.gamepadProfileFile;
       if (Array.isArray(value.opponents)) posted.opponents = value.opponents.map((entry, index) => ({
         ...posted.opponents[index], file: entry.file,
       }));
@@ -975,7 +987,7 @@ test("unavailable or unsupported Gamepads preserve keyboard play while replay ne
     const attachment = await h.prepared(start); await h.reply(attachment, null); await h.reply(worker.last("play-activate"), null);
     h.setNow(1300); await h.advance(8);
     assert.deepEqual(worker.last("play-step").events, [], "unsupported layouts never become guessed key bindings");
-    assert.match(h.get("keys").textContent, /0 standard Gamepad/);
+    assert.match(h.get("keys").textContent, /0 automatic standard Gamepad/);
     h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
     h.faults.gamepads = [nativeGamepad()];
     chooseRecording(h, [selectedRecording().file]);
@@ -1047,6 +1059,99 @@ test("Gamepad source admission, disconnection, reentrant cancellation and failed
   assert.equal(setup.window.listeners.get("gamepadconnected")?.size ?? 0, 0);
   assert.equal(setup.window.listeners.get("gamepaddisconnected")?.size ?? 0, 0);
   await setup.close();
+});
+
+test("custom Gamepad profiles remain immutable metadata across gesture setup, replay isolation and an explicit return to automatic mapping", async () => {
+  const opening = deferred(), pad = nativeGamepad(0, { id: "custom pad", mapping: "", buttons: nativeGamepad().buttons.slice(0, 2) });
+  const h = await harness({ gamepads: [pad, nativeGamepad(1)], gamepadAdmittedSources: [3n], openGate: opening });
+  const preview = await h.preview(), selected = selectedGamepadProfile(), replacement = selectedGamepadProfile(256);
+  assert.equal(h.get("gamepad-profile").disabled, false); assert.equal(h.get("gamepad-profile-clear").disabled, true);
+  chooseGamepadProfile(h, selected.file);
+  const label = h.get("gamepad-profile-name").textContent;
+  for (const file of [selectedGamepadProfile(0).file, selectedGamepadProfile(1048577).file, { size: 128, name: "not a File" }]) {
+    chooseGamepadProfile(h, file); assert.equal(h.get("gamepad-profile-name").textContent, label);
+  }
+  for (const lane of [...Array.from({ length: 9 }, (_, index) => 0x11 + index), ...Array.from({ length: 9 }, (_, index) => 0x21 + index)]) {
+    h.get(`binding-${lane.toString(16)}`).value = "";
+  }
+  const worker = h.workers[0]; h.click("play");
+  assert.equal(h.opens[0].gesture, true); assert.equal(h.gamepadReads, 1);
+  assert.equal(worker.messages("play-start").length, 0);
+  assert.equal(h.get("gamepad-profile").disabled, true); assert.equal(h.get("gamepad-profile-clear").disabled, true);
+  chooseGamepadProfile(h, replacement.file); h.get("gamepad-profile-clear").emit("click");
+  opening.resolve(h.audio); await flush(); delete h.faults.openGate;
+  const start = worker.last("play-start");
+  assert.equal(start.gamepadProfileFile, selected.file); assert.equal(start.keyPairs.length, 0);
+  assert.deepEqual(start.gamepadDevices[0], { source: 3n, index: 0, id: "custom pad", mapping: "", buttons: 2, axes: 1 });
+  const attachment = await h.prepared(start); await h.reply(attachment, null); await h.reply(worker.last("play-activate"), null);
+  assert.match(h.get("keys").textContent, /1 profile-configured Gamepad.*1 unmatched/);
+  const layout = h.layoutReads, writes = watchPlayDisplay(h);
+  h.setNow(1300.125); pad.timestamp = 1300.0625;
+  pad.buttons[1] = { value: 0.12345678901234566, pressed: true, touched: true };
+  await h.advance(8);
+  const input = worker.last("play-step").events;
+  assert.equal(input.length, 1); assert.equal(input[0].kind, "gamepad"); assert.equal(input[0].source, 3n);
+  assert.equal(input[0].hostNs, 1300062500n); assert.equal(input[0].buttons[1].value, 0.12345678901234566);
+  assert.equal(Object.hasOwn(input[0], "key"), false); assert.equal(Object.hasOwn(input[0], "bytes"), false);
+  assert.equal(h.layoutReads, layout); assert.deepEqual(writes, []);
+  h.click("stop"); await flush(); await h.receive(finalScore(start.playId));
+  assert.equal(h.get("position").value, preview.position); assert.equal(h.get("gamepad-profile-name").textContent, label);
+  assert.equal(h.get("gamepad-profile-clear").disabled, false);
+  chooseRecording(h, [selectedRecording().file]);
+  const reads = h.gamepadReads, replay = await h.launch(0, "replay");
+  assert.equal(Object.hasOwn(replay.start, "gamepadProfileFile"), false); assert.equal(Object.hasOwn(replay.start, "gamepadDevices"), false);
+  await h.advance(8); assert.equal(h.gamepadReads, reads);
+  h.click("stop"); await flush(); await h.receive(finalScore(replay.id));
+  assert.equal(h.get("gamepad-profile-name").textContent, label);
+  h.click("gamepad-profile-clear"); h.click("bindings-reset"); delete h.faults.gamepadAdmittedSources;
+  assert.equal(h.get("gamepad-profile-clear").disabled, true);
+  const automatic = await h.launch();
+  assert.equal(Object.hasOwn(automatic.start, "gamepadProfileFile"), false);
+  assert.match(h.get("keys").textContent, /1 automatic standard Gamepad/);
+  assert.equal(selected.reads, 0); assert.equal(replacement.reads, 0);
+  h.click("stop"); await flush(); await h.receive(finalScore(automatic.id)); await h.close();
+});
+
+test("custom Gamepad admission refuses missing source proof before PCM and joins failed or cancelled owners without fallback or stale callbacks", async () => {
+  const custom = index => nativeGamepad(index, { mapping: "", buttons: nativeGamepad().buttons.slice(0, 2) });
+  const unsupported = await harness(); await unsupported.preview();
+  assert.equal(unsupported.get("gamepad-profile").disabled, true);
+  chooseGamepadProfile(unsupported, selectedGamepadProfile().file);
+  const ordinary = await unsupported.launch(); assert.equal(Object.hasOwn(ordinary.start, "gamepadProfileFile"), false);
+  unsupported.click("stop"); await flush(); await unsupported.receive(finalScore(ordinary.id)); await unsupported.close();
+  for (const sources of [undefined, [], [3], [99n], [3n, 3n]]) {
+    const h = await harness({ gamepads: [custom(0)] }); await h.preview();
+    const selected = selectedGamepadProfile(); chooseGamepadProfile(h, selected.file);
+    const start = await h.begin(), worker = h.workers[0];
+    await h.reply(start, { kind: "prepared", title: "Invalid custom source proof", samples: 1, lanes: [0x11],
+      startNs: 0n, opponentCount: 0, ...(sources === undefined ? {} : { gamepadSources: sources }) });
+    assert.equal(worker.messages("play-sample").length, 0); assert.equal(h.audio.samples.length, 0);
+    assert.equal(worker.last("play-stop").playId, start.playId);
+    await h.receive(finalScore(start.playId)); assert.equal(h.get("play").disabled, false);
+    assert.match(h.get("gamepad-profile-name").textContent, /nonstandard-gamepad/); assert.equal(selected.reads, 0); await h.close();
+  }
+  const first = custom(0), ignored = custom(1), h = await harness({ gamepads: [first, ignored], gamepadAdmittedSources: [3n] });
+  await h.preview(); const selected = selectedGamepadProfile(); chooseGamepadProfile(h, selected.file);
+  const worker = h.workers[0], refused = await h.begin();
+  await h.receive({ kind: "play-reply", playId: refused.playId, rpcId: refused.rpcId, error: "No Gamepad profile matched the actual device." });
+  assert.equal(worker.messages("play-start").length, 1); assert.equal(worker.messages("play-sample").length, 0);
+  await h.receive(finalScore(refused.playId));
+  const pending = await h.begin(), stale = [...h.window.listeners.get("gamepaddisconnected")][0];
+  assert.equal(pending.gamepadProfileFile, selected.file, "a refused profile remains selected for an explicit retry");
+  first.connected = false; h.window.emit("gamepaddisconnected", { gamepad: first }); await flush();
+  assert.equal(worker.last("play-stop").playId, pending.playId, "a nonstandard candidate still owns preparation before matching returns");
+  await h.reply(pending, { kind: "prepared", inputMode: "physical", startNs: 0n, samples: 1, lanes: [0x11], gamepadSources: [3n] });
+  assert.equal(worker.messages("play-sample").length, 0, "late preparation cannot resurrect the cancelled owner");
+  await h.receive(finalScore(pending.playId));
+  const nextPad = custom(0), nextIgnored = custom(1); h.faults.gamepads = [nextPad, nextIgnored];
+  const next = await h.launch(), messages = worker.posts.length;
+  stale({ gamepad: first }); await flush(); assert.equal(worker.posts.length, messages);
+  nextIgnored.connected = false; h.window.emit("gamepaddisconnected", { gamepad: nextIgnored }); await flush();
+  assert.equal(worker.messages("play-stop").filter(request => request.playId === next.id).length, 0);
+  nextPad.connected = false; h.window.emit("gamepaddisconnected", { gamepad: nextPad }); await flush();
+  assert.equal(worker.last("play-stop").playId, next.id);
+  assert.equal(worker.messages("play-step").length, 0, "disconnect does not invent a release or substitute input");
+  await h.receive(finalScore(next.id)); assert.equal(selected.reads, 0); await h.close();
 });
 
 test("HID permission remains an explicit gesture, retains profile metadata only and joins cancelled native ownership without stale page updates", async () => {

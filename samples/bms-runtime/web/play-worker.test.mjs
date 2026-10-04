@@ -1314,6 +1314,96 @@ test("automatic setup and per-source draft ordering refuse conflicting modes or 
   assert.equal(prefix.of("play-step-done").length, 1); assertReleased(prefix);
 });
 
+function selectedGamepadProfile(acquire, suppliedBytes) {
+  const bytes = suppliedBytes ?? new TextEncoder().encode(JSON.stringify({ version: 1, profiles: [{ id: "custom pad", mapping: "", buttons: 2, axes: 1,
+    bindingWords: [0x11, 0, 1, 0x12, 0, 0, 0x11, 1, 0] }] }));
+  const file = new FileType([bytes], "gamepad.json"); let reads = 0;
+  file.arrayBuffer = () => { reads++; return acquire ? acquire() : Promise.resolve(bytes.slice().buffer); };
+  return { file, bytes, get reads() { return reads; } };
+}
+const customGamepadDevices = () => [{ source: GAMEPAD_SOURCE, index: 7, id: "custom pad", mapping: "", buttons: 2, axes: 1 },
+  { source: 3n, index: 0, id: "unmatched pad", mapping: "standard", buttons: 9, axes: 0 }];
+
+test("Worker reads one custom Gamepad profile against pre-await descriptors and forwards explicit nonstandard bindings through physical ownership", async () => {
+  for (const inputMode of ["physical", "physical-contact"]) {
+    const gate = deferred(), selected = selectedGamepadProfile(() => gate.promise), devices = customGamepadDevices();
+    const h = await catalogWorker();
+    h.post(startRequest({ inputMode, keyPairs: new Uint32Array(), gamepadProfileFile: selected.file, gamepadDevices: devices, recordReplay: true }));
+    devices[0].source = 4n; devices[0].id = "changed after submission"; devices[0].buttons = 0;
+    await flushJobs();
+    assert.equal(selected.reads, 1); assert.equal(h.games.length, 0);
+    assert.equal(h.preparedOwners.length, 1, "profile acquisition precedes any gameplay preparation");
+    gate.resolve(selected.bytes.slice().buffer); await flushJobs();
+    const prepared = h.of("play-reply").at(-1).result;
+    assert.equal(prepared.kind, "prepared"); assert.deepEqual(prepared.gamepadSources, [GAMEPAD_SOURCE]);
+    assert.equal(prepared.inputMode, inputMode);
+    const construction = (inputMode === "physical" ? h.physicalConstructions : h.contactConstructions)[0];
+    assert.deepEqual(Array.from(construction.args[5]), [
+      0x11, 1, 0x44332211, 0x88776655, 1, 0x57475044, 1,
+      0x12, 1, 0x44332211, 0x88776655, 1, 0x57475044, 0,
+      0x11, 1, 0x44332211, 0x88776655, 1, 0x57475044, 0x10000,
+    ]);
+    const game = h.games[0];
+    assert.equal(game.calls.filter(call => call[0] === "capture").length, 1);
+    assert.equal(game.calls.filter(call => call[0] === "sample").length, 0);
+    await h.send({ kind: "play-activate", playId: 7, rpcId: 2, hostNs: GAMEPAD_HOST, startFrame: START });
+    await h.send(step({ events: [gamepadEvent({ id: "custom pad", mapping: "" })], watermark: GAMEPAD_HOST }));
+    const blobs = inputCalls(game).filter(call => call[0] === "blob");
+    assert.deepEqual(blobs.map(call => new DataView(call[1].buffer).getUint32(64, true)), [0, 0x10000]);
+    assert.ok(blobs.every(call => new DataView(call[1].buffer).getBigUint64(7, true) === GAMEPAD_SOURCE));
+    assert.equal(selected.reads, 1);
+    await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+    assert.deepEqual(game.disposals, ["stop", "take", "free"]);
+  }
+});
+
+test("custom Gamepad profile refusal and cancelled reads cannot construct fallback or stale owners", async () => {
+  for (const alter of [request => { request.inputMode = undefined; },
+    request => { request.mode = "replay"; request.replayFile = replayFile().file; },
+    request => { request.gamepadSetup = gamepadSetup(); }, request => { delete request.gamepadDevices; },
+    request => { request.gamepadDevices[0].source = 3; },
+    request => { request.gamepadProfileFile = { size: 1, arrayBuffer() { assert.fail("not a genuine File"); } }; }]) {
+    const selected = selectedGamepadProfile(), h = await catalogWorker();
+    const request = startRequest({ inputMode: "physical", gamepadProfileFile: selected.file, gamepadDevices: customGamepadDevices() }); alter(request);
+    await h.send(request);
+    assert.equal(selected.reads, 0); assert.equal(h.games.length + h.replays.length, 0); assert.equal(h.of("play-error").length, 1);
+  }
+  for (const size of [0, 1048577, 1.5]) {
+    const selected = selectedGamepadProfile(); Object.defineProperty(selected.file, "size", { value: size });
+    const h = await catalogWorker();
+    await h.send(startRequest({ inputMode: "physical", gamepadProfileFile: selected.file, gamepadDevices: customGamepadDevices() }));
+    assert.equal(selected.reads, 0); assert.equal(h.games.length, 0);
+  }
+  for (const acquire of [() => Promise.resolve(new Uint8Array(1)), () => Promise.resolve(new ArrayBuffer(1)),
+    () => Promise.reject(new Error("Gamepad profile read denied"))]) {
+    const selected = selectedGamepadProfile(acquire), h = await catalogWorker();
+    await h.send(startRequest({ inputMode: "physical", gamepadProfileFile: selected.file, gamepadDevices: customGamepadDevices() }));
+    assert.equal(selected.reads, 1); assert.equal(h.games.length, 0); assert.equal(h.of("play-error").length, 1);
+  }
+  for (const bytes of [Uint8Array.from([0xc3, 0x28]), new TextEncoder().encode('{"version":1,"profiles":[{"id":"absent","bindingWords":[17,0,0]}]}'),
+    new TextEncoder().encode('{"version":1,"profiles":[{"bindingWords":[17,0,0]},{"bindingWords":[18,0,1]}]}')]) {
+    const selected = selectedGamepadProfile(null, bytes), h = await catalogWorker();
+    await h.send(startRequest({ inputMode: "physical", gamepadProfileFile: selected.file, gamepadDevices: customGamepadDevices() }));
+    assert.equal(selected.reads, 1); assert.equal(h.games.length, 0); assert.equal(h.of("play-error").length, 1);
+  }
+  const gate = deferred(), selected = selectedGamepadProfile(() => gate.promise), h = await catalogWorker();
+  await h.send(startRequest({ inputMode: "physical", gamepadProfileFile: selected.file, gamepadDevices: customGamepadDevices() }));
+  assert.equal(selected.reads, 1); assert.equal(h.games.length, 0);
+  await h.send({ kind: "play-stop", playId: 7 });
+  await h.send(startRequest({ playId: 8 }));
+  const messages = h.messages.length, next = h.games[0];
+  gate.resolve(selected.bytes.slice().buffer); await flushJobs();
+  assert.equal(h.messages.length, messages); assert.equal(h.games.length, 1); assert.equal(next.stops, 0);
+  assert.equal(h.preparedOwners.length, 2, "late profile bytes do not cause another chart preparation");
+  await h.send({ kind: "play-stop", playId: 8 });
+  const consumed = await catalogWorker({ physicalConstructError: "genuine consuming constructor refused custom bindings" });
+  const refused = selectedGamepadProfile();
+  await consumed.send(startRequest({ inputMode: "physical", gamepadProfileFile: refused.file, gamepadDevices: customGamepadDevices() }));
+  assert.equal(consumed.physicalConstructions.length, 1); assert.equal(consumed.games.length, 0);
+  assert.equal(consumed.preparedOwners.at(-1).moved, true); assert.equal(consumed.preparedOwners.at(-1).frees, 0);
+  assert.equal(consumed.of("play-error").length, 1);
+});
+
 const HID_SOURCE = 18446744073709551615n;
 function hidSetup(sources = [HID_SOURCE]) {
   const bindingWords = [], deviceWords = [], fieldWords = [], axisParams = [];

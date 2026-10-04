@@ -2,7 +2,7 @@
 // core BKPI v1 field offsets, without browser devices or a simulated judge.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { GamepadAdapter, automaticGamepadSetup, snapshotGamepadSetup } from "./gamepad-profile.mjs";
+import { GamepadAdapter, automaticGamepadSetup, gamepadSetupFromProfile, snapshotGamepadDevices, snapshotGamepadSetup } from "./gamepad-profile.mjs";
 
 const SOURCE = 0x8877665544332211n;
 const SEQUENCE = 0x0102030405060708n;
@@ -222,4 +222,77 @@ test("automatic standard profiles bind nine genuine buttons with exact sources a
   assert.throws(() => automaticGamepadSetup([ignored, { ...ignored, source: 4n }]));
   assert.throws(() => automaticGamepadSetup([ignored, { ...ignored, index: 1 }]));
   assert.throws(() => automaticGamepadSetup(new Array(1)));
+});
+
+const profileBytes = value => new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value));
+const profileDocument = (...profiles) => ({ version: 1, profiles });
+const customProfile = (fields = {}) => ({ id: "非標準 controller", mapping: "", buttons: 2, axes: 1,
+  bindingWords: [0x11, 0, 1, 0x12, 1, 0, 0x13, 2, 0, 0x14, 3, 1], ...fields });
+const customDevice = (source = SOURCE, index = 7, fields = {}) => ({ source, index, id: "非標準 controller", mapping: "", buttons: 2, axes: 1, ...fields });
+
+test("custom profiles snapshot real descriptors and preserve device order, full identities and explicit physical control types", () => {
+  const raw = [customDevice(9n, 0, { id: "unmatched standard", mapping: "standard", buttons: 9 }), customDevice(), customDevice(3n, 1)];
+  const devices = snapshotGamepadDevices(raw);
+  raw[1].source = 4n; raw[1].id = "mutated"; raw.length = 0;
+  assert.ok(Object.isFrozen(devices) && devices.every(Object.isFrozen));
+  assert.equal(devices[1].source, SOURCE); assert.equal(devices[1].id, "非標準 controller");
+  const bytes = profileBytes(profileDocument(customProfile(), customProfile({ id: "unused profile" })));
+  const output = gamepadSetupFromProfile(bytes, devices);
+  assert.deepEqual(output.sources, [SOURCE, 3n]);
+  assert.deepEqual(output.devices, [{ source: SOURCE, buttons: 2, axes: 1 }, { source: 3n, buttons: 2, axes: 1 }]);
+  assert.deepEqual(output.lanes, [0x11], "axes and touched controls retain their physical type instead of gaining press coverage");
+  assert.deepEqual(Array.from(output.bindingWords), [
+    0x11, 0x44332211, 0x88776655, 0, 1, 0x12, 0x44332211, 0x88776655, 1, 0,
+    0x13, 0x44332211, 0x88776655, 2, 0, 0x14, 0x44332211, 0x88776655, 3, 1,
+    0x11, 3, 0, 0, 1, 0x12, 3, 0, 1, 0, 0x13, 3, 0, 2, 0, 0x14, 3, 0, 3, 1,
+  ]);
+  assert.deepEqual(Array.from(output.physicalWords.slice(0, 7)), [0x11, 1, 0x44332211, 0x88776655, 1, 0x57475044, 1]);
+  assert.deepEqual(Array.from(output.physicalWords.slice(-7)), [0x14, 1, 3, 0, 1, 0x57475044, 0x30001]);
+  const owner = new GamepadAdapter(output);
+  const packets = owner.decode(sample({ mapping: "", id: "非標準 controller", buttons: [button(false), button(true)] }));
+  assert.deepEqual(packets.map(code), [1, 0x10000, 0x20000]);
+  const backing = new Uint8Array(bytes.length + 4); backing.set(bytes, 2);
+  assert.deepEqual(gamepadSetupFromProfile(backing.subarray(2, -2), devices).sources, [SOURCE, 3n]);
+  const maximum = new Uint8Array(1048576).fill(32); maximum.set(bytes);
+  assert.deepEqual(gamepadSetupFromProfile(maximum, devices).sources, [SOURCE, 3n]);
+  const rows = Array.from({ length: 128 }, (_, index) => [0x11, 0, index]).flat();
+  const broad = profileDocument({ bindingWords: rows });
+  const pair = [customDevice(SOURCE, 0, { buttons: 128 }), customDevice(3n, 1, { buttons: 128 })];
+  assert.equal(gamepadSetupFromProfile(profileBytes(broad), pair).bindingWords.length, 256 * 5);
+  assert.throws(() => gamepadSetupFromProfile(profileBytes(profileDocument({ bindingWords: [...rows, 0x12, 3, 0] })), pair));
+});
+
+test("profile files refuse malformed UTF-8, ambiguous or unmatched selection and every invalid row including unused profiles", () => {
+  const devices = [customDevice()];
+  for (const bytes of [new Uint8Array(), new Uint8Array(1048577), Uint8Array.from([0xc3, 0x28]),
+    profileBytes("{"), profileBytes("null"), profileBytes('{"version":1,"profiles":[]} trailing'), [1, 2]]) {
+    assert.throws(() => gamepadSetupFromProfile(bytes, devices));
+  }
+  const detached = profileBytes(profileDocument(customProfile())); structuredClone(detached.buffer, { transfer: [detached.buffer] });
+  assert.throws(() => gamepadSetupFromProfile(detached, devices));
+  const invalid = [
+    { version: 2, profiles: [customProfile()] }, { ...profileDocument(customProfile()), extra: true },
+    profileDocument(), profileDocument(...Array.from({ length: 17 }, () => customProfile())),
+    profileDocument(customProfile({ extra: true })), profileDocument(customProfile({ id: 1 })),
+    profileDocument(customProfile({ id: "x".repeat(1025) })), profileDocument(customProfile({ mapping: "vendor" })),
+    profileDocument(customProfile({ buttons: 129 })), profileDocument(customProfile({ axes: 65 })),
+    profileDocument(customProfile({ bindingWords: [] })), profileDocument(customProfile({ bindingWords: [0x11, 0] })),
+    profileDocument(customProfile({ bindingWords: [0x20, 0, 0] })), profileDocument(customProfile({ bindingWords: [0x11, 4, 0] })),
+    profileDocument(customProfile({ bindingWords: [0x11, 0, 2] })), profileDocument(customProfile({ bindingWords: [0x11, 1, 1] })),
+    profileDocument(customProfile({ bindingWords: [0x11, 0, 0, 0x11, 0, 0] })),
+    profileDocument(customProfile(), { id: "unused", bindingWords: [0x11, 0, 128] }),
+    profileDocument(customProfile(), { id: "unused", bindingWords: [0x11, 1, 64] }),
+    profileDocument(customProfile(), { id: "unused", axes: 0, bindingWords: [0x11, 1, 0] }),
+    profileDocument(customProfile({ id: "no matching product" })),
+    profileDocument(customProfile(), { bindingWords: [0x11, 0, 0] }),
+  ];
+  for (const value of invalid) assert.throws(() => gamepadSetupFromProfile(profileBytes(value), devices));
+  for (const value of [-1, 0x100000000, 0.5, "1", null]) {
+    assert.throws(() => gamepadSetupFromProfile(profileBytes(profileDocument(customProfile({ bindingWords: [0x11, 0, value] }))), devices));
+  }
+  const dynamicBounds = profileBytes(profileDocument({ bindingWords: [0x11, 0, 127] }));
+  assert.throws(() => gamepadSetupFromProfile(dynamicBounds, devices), "statically valid controls still require actual matched device capacity");
+  for (const raw of [new Array(1), [customDevice(2n)], [customDevice(), customDevice(SOURCE, 0)],
+    [customDevice(), customDevice(3n, 7)], [customDevice(SOURCE, 64)]]) assert.throws(() => snapshotGamepadDevices(raw));
+  assert.throws(() => gamepadSetupFromProfile(profileBytes(profileDocument(customProfile())), []));
 });
