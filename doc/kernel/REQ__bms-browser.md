@@ -2199,3 +2199,33 @@ Author independent model and actual host/Worker fixtures for roundtrip/limits,
 no Window reads/JSON work, atomic draft application, correlation/deadline,
 busy/stale/replacement and future launch propagation. Actual browser/file/UI
 acceptance and measured responsiveness remain deferred.
+
+## Canonical mouse and pen packet component
+
+Extend the shared `physical-input.mjs` boundary with `encodePointerEvent` and
+`encodePointerButtonEvent`. The first encodes a genuine core BKPI v1 Pointer
+variant (tag 3), preserving absolute mode 0 or relative mode 1 and finite f32
+position/displacement. The second encodes a genuine Button variant (tag 0),
+preserving Down 0, Up 1 or Repeat 2. Never convert mouse/pen samples to touch
+contacts or keyboard controls. These functions are Worker-side byte encoding
+components, not Window acquisition or a finished gameplay adapter.
+
+Both DTOs require `pointerType` mouse or pen, original nonnegative i64 `hostNs`,
+full u64 `sequence`, full u64 `source` at least 3, and u32 native `code` and
+`control`. Position DTO kind is pointer; button DTO kind is pointer-button.
+Use distinct Native namespaces 0x574d4f55 (Window mouse) and 0x5750454e (Window
+pen), and preserve the original code in native event metadata independently of
+the binding control. Store the original HOST acquisition clock in metadata;
+do not replace it with Worker arrival time. Snapshot all fields once before
+validation and encoding so caller mutation cannot alter an admitted packet.
+Malformed identities, unknown types/modes/states and non-finite or overflowing
+f32 samples refuse without coercion or truncation. Each result owns its bytes.
+
+The existing core Pointer schema represents position/displacement; it has no
+pressure, tilt, contact or button-state fields. Do not claim that these two
+packet types retain those additional pen attributes. Browser acquisition,
+source allocation, coalesced mouse/pen history, profile routing, Worker batch
+ingestion and live/replay/competition integration remain separate required
+work. Independent deferred fixtures pin literal core-layout packets, full-width
+identities, modes/button states, distinct namespaces, immutable snapshots and
+refusals. Execution and end-to-end input acceptance remain deferred.
