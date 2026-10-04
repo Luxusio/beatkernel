@@ -1,4 +1,4 @@
-//! Nonblocking control-side ownership of the actual solo runtime and BGM queue.
+//! Nonblocking control-side ownership of actual solo/local runtimes and one BGM queue.
 //! Hosts supply clock relations and genuine completed-render cursors. This
 //! module does not sample a platform clock or infer delivery from admission.
 use crate::{
@@ -6,17 +6,21 @@ use crate::{
     bgm::{BgmConfig, BgmFeedError, BgmFeedReport, BgmFeeder},
     competition::{CompetitionError, ScoreSummary},
     completion::{CompletionError, SongCompletion},
-    local_runtime::{GroupError, SoloRuntime},
+    local_players::{PlayerId, ResolvedInputPlan},
+    local_preparation::{PreparedLocalMembers, prepare_local_members},
+    local_runtime::{GroupError, InputResult, PlayerReport, RuntimeGroup, SoloRuntime},
     native_judge::NativeJudgeConfig,
     replay_audio::{ReplayAudioError, before_endpoint, completed_render_cursor, section_end_frame},
     replay_capture::{CaptureError, LiveReplayCapture, setup_input_header},
 };
 use beatkernel::{
     audio::{
-        AudioCommand, AudioCounters, AudioLimits, CommandConsumer, QueuePopError, RenderReport,
-        SampleBank, command_queue,
+        AudioCommand, AudioCounters, AudioLimits, CommandConsumer, CommandPushError, QueuePopError,
+        RenderReport, SampleBank, command_queue,
     },
+    chart::ObjectId,
     input::{BindingMap, PhysicalInputEvent, Position2, TouchRouter},
+    interaction::InteractionState,
     judge::JudgeEngine,
     replay::{ReplayHeader, codec::ReplayCodecLimits},
     runtime::{RuntimeProcessingClock, RuntimeReport},
@@ -199,12 +203,86 @@ impl fmt::Display for StepGameplayError {
 }
 impl Error for StepGameplayError {}
 
+enum InputSetup {
+    Solo(BindingMap),
+    Local(ResolvedInputPlan, Vec<BindingMap>),
+}
+
+enum RuntimeSetup {
+    Solo {
+        bindings: BindingMap,
+        judge: JudgeEngine,
+    },
+    Local {
+        members: PreparedLocalMembers,
+        primary: PlayerId,
+    },
+}
+
+/// Both paths retain one authoritative transport and producer. Scalar gameplay
+/// is admitted only for Solo; Local operations are owned by StepLocalGameplay.
+enum RuntimeOwner {
+    Solo(SoloRuntime),
+    Local {
+        group: RuntimeGroup,
+        primary: PlayerId,
+    },
+}
+
+impl RuntimeOwner {
+    fn solo_mut(&mut self) -> Result<&mut SoloRuntime, StepGameplayError> {
+        match self {
+            Self::Solo(runtime) => Ok(runtime),
+            Self::Local { .. } => Err(StepGameplayError::InvalidConfiguration(
+                "scalar gameplay cannot operate a local cohort",
+            )),
+        }
+    }
+
+    fn judge(&self) -> &JudgeEngine {
+        match self {
+            Self::Solo(runtime) => runtime.judge(),
+            Self::Local { group, primary } => group
+                .member_judge(*primary)
+                .expect("prepared primary belongs to the private cohort"),
+        }
+    }
+
+    fn transport_mut(&mut self) -> &mut Transport {
+        match self {
+            Self::Solo(runtime) => runtime.transport_mut(),
+            Self::Local { group, .. } => group.transport_mut(),
+        }
+    }
+
+    fn enqueue_audio(&mut self, command: AudioCommand) -> Result<(), CommandPushError> {
+        match self {
+            Self::Solo(runtime) => runtime.enqueue_audio(command),
+            Self::Local { group, .. } => group.enqueue_audio(command),
+        }
+    }
+
+    fn set_processing_clock(&mut self, clock: RuntimeProcessingClock) {
+        match self {
+            Self::Solo(runtime) => runtime.set_processing_clock(clock),
+            Self::Local { group, .. } => group.set_processing_clock(clock),
+        }
+    }
+
+    fn set_song_end(&mut self, end: Timestamp) -> Result<(), String> {
+        match self {
+            Self::Solo(runtime) => runtime.set_song_end(end),
+            Self::Local { group, .. } => group.set_song_end(end),
+        }
+    }
+}
+
 /// Sole runtime producer and queue consumer, outside every audio callback.
 ///
 /// The caller owns the returned PCM bank and the remote output lifecycle. This
 /// owner never treats a command ACK, a UI tick or failure as playback completion.
 pub struct StepGameplay {
-    runtime: SoloRuntime,
+    runtime: RuntimeOwner,
     consumer: CommandConsumer,
     bgm: BgmFeeder,
     completion: Option<SongCompletion>,
@@ -291,9 +369,27 @@ impl StepGameplay {
     /// Own the actual section runtime with an explicit, replayable input mode.
     /// Bindings retain original physical events; the selected core rules judge them.
     pub fn new_section_with_input_mode(
-        mut prepared: PreparedBms,
+        prepared: PreparedBms,
         config: StepGameplayConfig,
         bindings: BindingMap,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+    ) -> Result<(Self, SampleBank), StepGameplayError> {
+        Self::build(
+            prepared,
+            config,
+            InputSetup::Solo(bindings),
+            start,
+            end,
+            input_mode,
+        )
+    }
+
+    fn build(
+        mut prepared: PreparedBms,
+        config: StepGameplayConfig,
+        input: InputSetup,
         start: Timestamp,
         end: Option<Timestamp>,
         input_mode: BmsInputMode,
@@ -407,9 +503,23 @@ impl StepGameplay {
         } else {
             None
         };
-        let rules = prepared.source.rules_with_input_mode(input_mode);
-        let judge = JudgeEngine::new(prepared.compiled.chart, rules, profile)
-            .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
+        // Local voice reservation sees original BGM IDs before section mapping
+        // or filtering. The legacy solo branch retains its original sound IDs.
+        let runtime_setup = match input {
+            InputSetup::Solo(bindings) => {
+                let rules = prepared.source.rules_with_input_mode(input_mode);
+                let judge = JudgeEngine::new(prepared.compiled.chart, rules, profile)
+                    .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
+                RuntimeSetup::Solo { bindings, judge }
+            }
+            InputSetup::Local(plan, bindings) => {
+                let primary = plan.members()[0].0;
+                let members =
+                    prepare_local_members(&prepared, &plan, bindings, profile, input_mode)
+                        .map_err(StepGameplayError::Setup)?;
+                RuntimeSetup::Local { members, primary }
+            }
+        };
         let bgm_count = prepared.bgm_commands.len();
         if let Some(end) = end {
             for command in &prepared.bgm_commands {
@@ -513,17 +623,35 @@ impl StepGameplay {
         })?;
         let (producer, consumer) = command_queue(config.command_capacity)
             .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
-        let mut runtime = SoloRuntime::new(
-            config.host_origin.domain,
-            config.output_origin.domain,
-            Transport::new(config.host_origin.timestamp, song, Rate::NORMAL),
-            bindings,
-            judge,
-            producer,
-            prepared.sounds,
-            config.telemetry_capacity,
-        )
-        .map_err(StepGameplayError::Setup)?;
+        let transport = Transport::new(config.host_origin.timestamp, song, Rate::NORMAL);
+        let mut runtime = match runtime_setup {
+            RuntimeSetup::Solo { bindings, judge } => RuntimeOwner::Solo(
+                SoloRuntime::new(
+                    config.host_origin.domain,
+                    config.output_origin.domain,
+                    transport,
+                    bindings,
+                    judge,
+                    producer,
+                    prepared.sounds,
+                    config.telemetry_capacity,
+                )
+                .map_err(StepGameplayError::Setup)?,
+            ),
+            RuntimeSetup::Local { members, primary } => RuntimeOwner::Local {
+                group: RuntimeGroup::new(
+                    config.host_origin.domain,
+                    config.output_origin.domain,
+                    transport,
+                    producer,
+                    members.configs,
+                    config.telemetry_capacity,
+                    &members.reserved,
+                )
+                .map_err(StepGameplayError::Setup)?,
+                primary,
+            },
+        };
         // Profiling is not a clock source. In particular, no std::time::Instant
         // is sampled by core processing on browser or other nonblocking hosts.
         runtime.set_processing_clock(RuntimeProcessingClock::Disabled);
@@ -571,6 +699,16 @@ impl StepGameplay {
         }
     }
 
+    fn ensure_solo(&self) -> Result<(), StepGameplayError> {
+        if matches!(self.runtime, RuntimeOwner::Solo(_)) {
+            Ok(())
+        } else {
+            Err(StepGameplayError::InvalidConfiguration(
+                "scalar gameplay cannot operate a local cohort",
+            ))
+        }
+    }
+
     fn reset_drain(&mut self) {
         if let Some(completion) = &mut self.completion {
             completion.reset_drain();
@@ -584,6 +722,7 @@ impl StepGameplay {
         limits: ReplayCodecLimits,
         chart_seed: u64,
     ) -> Result<ReplayHeader, StepGameplayError> {
+        self.ensure_solo()?;
         self.ensure_usable()?;
         if self.started {
             return Err(StepGameplayError::InvalidConfiguration(
@@ -632,6 +771,7 @@ impl StepGameplay {
         limits: ReplayCodecLimits,
         chart_seed: u64,
     ) -> Result<(), StepGameplayError> {
+        self.ensure_solo()?;
         self.ensure_usable()?;
         if self.started || self.capture.is_some() {
             return Err(StepGameplayError::InvalidConfiguration(
@@ -659,6 +799,7 @@ impl StepGameplay {
     /// further gameplay. Disabled or already consumed capture returns None.
     /// Encoding failure also consumes this export attempt; no operations retry.
     pub fn take_replay(&mut self) -> Result<Option<Vec<u8>>, StepGameplayError> {
+        self.ensure_solo()?;
         if !self.failed {
             return Err(StepGameplayError::InvalidConfiguration(
                 "replay export requires a stopped or fenced runtime",
@@ -802,6 +943,7 @@ impl StepGameplay {
     /// Installs spatial contact routing while this contact-mode owner is pristine.
     /// Setup refusal leaves gameplay/capture unchanged and does not fence the owner.
     pub fn configure_touch_router(&mut self, router: TouchRouter) -> Result<(), StepGameplayError> {
+        self.ensure_solo()?;
         self.ensure_usable()?;
         if self.started || self.activated || self.input_mode != BmsInputMode::ButtonOrContact {
             return Err(StepGameplayError::InvalidConfiguration(
@@ -809,6 +951,7 @@ impl StepGameplay {
             ));
         }
         self.runtime
+            .solo_mut()?
             .configure_touch_router(router)
             .map_err(StepGameplayError::Setup)
     }
@@ -832,14 +975,14 @@ impl StepGameplay {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<RuntimeReport, StepGameplayError> {
+        self.ensure_solo()?;
         self.ensure_usable()?;
         self.started = true;
         self.correction_watermark = None;
+        let runtime = self.runtime.solo_mut()?;
         let result = match position {
-            Some(position) => self
-                .runtime
-                .process_input_at(event, position, mapper, audio_at),
-            None => self.runtime.process_input(event, mapper, audio_at),
+            Some(position) => runtime.process_input_at(event, position, mapper, audio_at),
+            None => runtime.process_input(event, mapper, audio_at),
         };
         self.observe(result)
     }
@@ -850,10 +993,11 @@ impl StepGameplay {
         mapper: &dyn ClockMapper,
         audio_at: ClockPoint,
     ) -> Result<RuntimeReport, StepGameplayError> {
+        self.ensure_solo()?;
         self.ensure_usable()?;
         self.started = true;
         self.correction_watermark = None;
-        let result = self.runtime.advance_to(host, mapper, audio_at);
+        let result = self.runtime.solo_mut()?.advance_to(host, mapper, audio_at);
         let report = self.observe(result)?;
         self.correction_watermark = Some(host);
         Ok(report)
@@ -945,6 +1089,16 @@ impl StepGameplay {
         rendered: Option<RenderReport>,
         presented: Option<ClockPoint>,
     ) -> Result<bool, StepGameplayError> {
+        self.ensure_solo()?;
+        self.observe_completion_ready(rendered, presented, true)
+    }
+
+    fn observe_completion_ready(
+        &mut self,
+        rendered: Option<RenderReport>,
+        presented: Option<ClockPoint>,
+        members_ready: bool,
+    ) -> Result<bool, StepGameplayError> {
         let normalized = self.validate_completion_evidence(rendered, presented)?;
         let actual = rendered
             .filter(|report| report.frames != 0)
@@ -982,14 +1136,15 @@ impl StepGameplay {
             // setup. Presentation remains the real uncapped output observation.
             let nanos = (i128::from(frame) * 1_000_000_000 + i128::from(self.sample_rate) - 1)
                 / i128::from(self.sample_rate);
-            return Ok(commands_resolved
+            return Ok(members_ready
+                && commands_resolved
                 && actual.is_some_and(|report| report.playback_end_physical_frame == Some(frame))
                 && self.song == end
                 && self
                     .last_presented
                     .is_some_and(|at| i128::from(at.as_nanos()) >= nanos));
         }
-        if self.pending.is_some() || self.consumer.available_up_to(1) != 0 {
+        if !members_ready || self.pending.is_some() || self.consumer.available_up_to(1) != 0 {
             self.reset_drain();
             return Ok(false);
         }
@@ -1201,6 +1356,520 @@ impl StepGameplay {
     }
     pub fn failed(&self) -> bool {
         self.failed
+    }
+}
+
+/// Additional failure while observing one member's already committed report.
+/// Judge/audio errors remain in the corresponding original PlayerReport.
+#[derive(Debug)]
+pub struct StepLocalMemberFailure {
+    pub player: PlayerId,
+    pub score_error: Option<CompetitionError>,
+    pub capture_error: Option<CaptureError>,
+}
+
+/// Local failure retains the complete committed group prefix and every member's
+/// postprocessing failure. Nothing here rolls back or retries runtime operations.
+#[derive(Debug)]
+pub enum StepLocalGameplayError {
+    Control(StepGameplayError),
+    UnknownPlayer(PlayerId),
+    Operation {
+        group_error: Option<GroupError>,
+        reports: Vec<PlayerReport>,
+        member_errors: Vec<StepLocalMemberFailure>,
+    },
+}
+
+impl From<StepGameplayError> for StepLocalGameplayError {
+    fn from(error: StepGameplayError) -> Self {
+        Self::Control(error)
+    }
+}
+
+impl fmt::Display for StepLocalGameplayError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Control(error) => write!(f, "{error}"),
+            Self::UnknownPlayer(player) => write!(f, "unknown local player {}", player.0),
+            Self::Operation {
+                group_error,
+                reports,
+                member_errors,
+            } => write!(
+                f,
+                "local operation failed: {group_error:?}; {} committed reports, {} member failures",
+                reports.len(),
+                member_errors.len(),
+            ),
+        }
+    }
+}
+impl Error for StepLocalGameplayError {}
+
+struct LocalMemberState {
+    player: PlayerId,
+    score: ScoreSummary,
+    capture: Option<LiveReplayCapture>,
+    song: Timestamp,
+}
+
+/// Independent actual member judges/scores/captures over the same nonblocking
+/// audio, clock and completion controller used by StepGameplay. The returned
+/// SampleBank stays solely owned by the caller; no PCM is copied for members.
+pub struct StepLocalGameplay {
+    control: StepGameplay,
+    players: Vec<PlayerId>,
+    members: Vec<LocalMemberState>,
+    objects: Vec<ObjectId>,
+    member_error_scratch: Vec<StepLocalMemberFailure>,
+}
+
+impl fmt::Debug for StepLocalGameplay {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StepLocalGameplay")
+            .field("players", &self.players)
+            .field("control", &self.control)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StepLocalGameplay {
+    /// Own an already selected chart and its resolved source routes. Even a
+    /// one-member local owner uses common local voice remapping; existing solo
+    /// constructors retain their original sound IDs and command order.
+    pub fn new_section(
+        prepared: PreparedBms,
+        config: StepGameplayConfig,
+        plan: ResolvedInputPlan,
+        bindings: Vec<BindingMap>,
+        start: Timestamp,
+        end: Option<Timestamp>,
+        input_mode: BmsInputMode,
+    ) -> Result<(Self, SampleBank), StepLocalGameplayError> {
+        let mut players = Vec::new();
+        let mut members = Vec::new();
+        let mut objects = Vec::new();
+        let mut member_error_scratch = Vec::new();
+        players
+            .try_reserve_exact(plan.members().len())
+            .map_err(|_| StepGameplayError::AllocationFailed)?;
+        members
+            .try_reserve_exact(plan.members().len())
+            .map_err(|_| StepGameplayError::AllocationFailed)?;
+        member_error_scratch
+            .try_reserve_exact(plan.members().len())
+            .map_err(|_| StepGameplayError::AllocationFailed)?;
+        objects
+            .try_reserve_exact(prepared.compiled.chart.objects().len())
+            .map_err(|_| StepGameplayError::AllocationFailed)?;
+        players.extend(plan.members().iter().map(|&(player, _)| player));
+        objects.extend(
+            prepared
+                .compiled
+                .chart
+                .objects()
+                .iter()
+                .map(|object| object.id),
+        );
+        let (control, bank) = StepGameplay::build(
+            prepared,
+            config,
+            InputSetup::Local(plan, bindings),
+            start,
+            end,
+            input_mode,
+        )?;
+        members.extend(players.iter().map(|&player| LocalMemberState {
+            player,
+            score: ScoreSummary::default(),
+            capture: None,
+            song: control.song,
+        }));
+        Ok((
+            Self {
+                control,
+                players,
+                members,
+                objects,
+                member_error_scratch,
+            },
+            bank,
+        ))
+    }
+
+    fn group(&self) -> &RuntimeGroup {
+        match &self.control.runtime {
+            RuntimeOwner::Local { group, .. } => group,
+            RuntimeOwner::Solo(_) => unreachable!("local constructor owns a cohort"),
+        }
+    }
+
+    fn group_mut(&mut self) -> &mut RuntimeGroup {
+        match &mut self.control.runtime {
+            RuntimeOwner::Local { group, .. } => group,
+            RuntimeOwner::Solo(_) => unreachable!("local constructor owns a cohort"),
+        }
+    }
+
+    fn member_index(&self, player: PlayerId) -> Result<usize, StepLocalGameplayError> {
+        self.players
+            .iter()
+            .position(|&candidate| candidate == player)
+            .ok_or(StepLocalGameplayError::UnknownPlayer(player))
+    }
+
+    pub fn players(&self) -> &[PlayerId] {
+        &self.players
+    }
+    pub fn score(&self, player: PlayerId) -> Option<&ScoreSummary> {
+        self.members
+            .iter()
+            .find(|member| member.player == player)
+            .map(|member| &member.score)
+    }
+    pub fn judge(&self, player: PlayerId) -> Option<&JudgeEngine> {
+        self.group().member_judge(player)
+    }
+    pub fn member_song_time(&self, player: PlayerId) -> Option<Timestamp> {
+        self.members
+            .iter()
+            .find(|member| member.player == player)
+            .map(|member| member.song)
+    }
+    pub fn song_time(&self) -> Timestamp {
+        self.control.song_time()
+    }
+    pub fn end_ns(&self) -> Option<i64> {
+        self.control.end_ns()
+    }
+    pub fn playback_end_frame(&self) -> Option<u64> {
+        self.control.playback_end_frame()
+    }
+    pub fn input_setup_available(&self) -> bool {
+        self.control.input_setup_available()
+    }
+    pub fn failed(&self) -> bool {
+        self.control.failed()
+    }
+    pub fn bgm_report(&self) -> BgmFeedReport {
+        self.control.bgm_report()
+    }
+
+    pub fn configure_touch_router(
+        &mut self,
+        player: PlayerId,
+        router: TouchRouter,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control.ensure_usable()?;
+        self.member_index(player)?;
+        if !self.input_setup_available() || self.control.input_mode != BmsInputMode::ButtonOrContact
+        {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "touch routing requires an unactivated, unprocessed contact-mode runtime",
+            )
+            .into());
+        }
+        self.group_mut()
+            .configure_touch_router(player, router)
+            .map_err(StepGameplayError::Setup)?;
+        Ok(())
+    }
+
+    pub fn competition_header(
+        &self,
+        player: PlayerId,
+        limits: ReplayCodecLimits,
+        chart_seed: u64,
+    ) -> Result<ReplayHeader, StepLocalGameplayError> {
+        self.control.ensure_usable()?;
+        self.member_index(player)?;
+        if self.control.started {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "competition identity requires an unprocessed runtime",
+            )
+            .into());
+        }
+        setup_input_header(
+            self.judge(player).expect("checked member"),
+            self.control.host_domain,
+            limits,
+            self.control.start,
+            chart_seed,
+            None,
+            self.control.input_mode,
+        )
+        .map_err(|error| {
+            StepGameplayError::Capture {
+                error,
+                report: None,
+            }
+            .into()
+        })
+    }
+
+    pub fn competition_identity(
+        &self,
+        player: PlayerId,
+        limits: ReplayCodecLimits,
+        chart_seed: u64,
+    ) -> Result<Vec<u8>, StepLocalGameplayError> {
+        let header = self.competition_header(player, limits, chart_seed)?;
+        crate::multiplayer::competition_identity_for_section(
+            &header,
+            env!("CARGO_PKG_VERSION"),
+            limits,
+            self.control.end,
+        )
+        .map_err(|error| StepGameplayError::Setup(error.to_string()).into())
+    }
+
+    pub fn configure_capture(
+        &mut self,
+        player: PlayerId,
+        limits: ReplayCodecLimits,
+        chart_seed: u64,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control.ensure_usable()?;
+        let index = self.member_index(player)?;
+        if self.control.started || self.members[index].capture.is_some() {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "capture configuration requires an unprocessed, unconfigured runtime",
+            )
+            .into());
+        }
+        let capture = LiveReplayCapture::new_with_input_mode(
+            self.judge(player).expect("checked member"),
+            self.control.host_domain,
+            limits,
+            self.control.start,
+            chart_seed,
+            self.control.end,
+            self.control.input_mode,
+        )
+        .map_err(|error| StepGameplayError::Capture {
+            error,
+            report: None,
+        })?;
+        self.members[index].capture = Some(capture);
+        Ok(())
+    }
+
+    /// Export each accepted member prefix once after the entire owner is fenced.
+    pub fn take_replay(
+        &mut self,
+        player: PlayerId,
+    ) -> Result<Option<Vec<u8>>, StepLocalGameplayError> {
+        let index = self.member_index(player)?;
+        if !self.control.failed {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "replay export requires a stopped or fenced runtime",
+            )
+            .into());
+        }
+        self.members[index]
+            .capture
+            .take()
+            .map(LiveReplayCapture::into_bytes)
+            .transpose()
+            .map_err(|error| {
+                StepGameplayError::Capture {
+                    error,
+                    report: None,
+                }
+                .into()
+            })
+    }
+
+    pub fn process_input(
+        &mut self,
+        event: PhysicalInputEvent,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+    ) -> Result<InputResult, StepLocalGameplayError> {
+        self.process_input_with_position(event, None, mapper, audio_at)
+    }
+
+    pub fn process_input_at(
+        &mut self,
+        event: PhysicalInputEvent,
+        position: Position2,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+    ) -> Result<InputResult, StepLocalGameplayError> {
+        self.process_input_with_position(event, Some(position), mapper, audio_at)
+    }
+
+    fn process_input_with_position(
+        &mut self,
+        event: PhysicalInputEvent,
+        position: Option<Position2>,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+    ) -> Result<InputResult, StepLocalGameplayError> {
+        self.control.ensure_usable()?;
+        let errors = std::mem::take(&mut self.member_error_scratch);
+        let result = match position {
+            Some(position) => self
+                .group_mut()
+                .process_input_at(event, position, mapper, audio_at),
+            None => self.group_mut().process_input(event, mapper, audio_at),
+        };
+        match result {
+            // Unknown acquisition sources neither lock setup nor invalidate a
+            // successfully accepted common clock-correction watermark.
+            Ok(ignored @ InputResult::Ignored { .. }) => {
+                self.member_error_scratch = errors;
+                Ok(ignored)
+            }
+            Ok(InputResult::Processed(reports)) => self
+                .finish_reports(Ok(reports), errors)
+                .map(InputResult::Processed),
+            Err(error) => self
+                .finish_reports(Err(error), errors)
+                .map(InputResult::Processed),
+        }
+    }
+
+    pub fn advance_to(
+        &mut self,
+        host: ClockPoint,
+        mapper: &dyn ClockMapper,
+        audio_at: ClockPoint,
+    ) -> Result<Vec<PlayerReport>, StepLocalGameplayError> {
+        self.control.ensure_usable()?;
+        let errors = std::mem::take(&mut self.member_error_scratch);
+        let result = self.group_mut().advance_to(host, mapper, audio_at);
+        let reports = self.finish_reports(result, errors)?;
+        self.control.correction_watermark = Some(host);
+        Ok(reports)
+    }
+
+    fn finish_reports(
+        &mut self,
+        result: Result<Vec<PlayerReport>, GroupError>,
+        mut member_errors: Vec<StepLocalMemberFailure>,
+    ) -> Result<Vec<PlayerReport>, StepLocalGameplayError> {
+        self.control.started = true;
+        self.control.correction_watermark = None;
+        let (reports, group_error) = match result {
+            Ok(reports) => (reports, None),
+            Err(error) => (error.completed_reports.clone(), Some(error)),
+        };
+        let mut reported_failure = false;
+        for PlayerReport { player, report } in &reports {
+            self.control.song = report.song_time;
+            if !report.audio_commands.is_empty() {
+                self.control.reset_drain();
+            }
+            let member = self
+                .members
+                .iter_mut()
+                .find(|member| member.player == *player)
+                .expect("group reports only prepared members");
+            member.song = report.song_time;
+            let score_error = member.score.observe(&report.judge_events).err();
+            let capture_error = member
+                .capture
+                .as_mut()
+                .and_then(|capture| capture.record_report(report).err());
+            reported_failure |= report.judge_error.is_some() || !report.audio_failures.is_empty();
+            if score_error.is_some() || capture_error.is_some() {
+                member_errors.push(StepLocalMemberFailure {
+                    player: *player,
+                    score_error,
+                    capture_error,
+                });
+            }
+        }
+        if group_error.is_some() || reported_failure || !member_errors.is_empty() {
+            self.control.fail();
+            Err(StepLocalGameplayError::Operation {
+                group_error,
+                reports,
+                member_errors,
+            })
+        } else {
+            self.member_error_scratch = member_errors;
+            Ok(reports)
+        }
+    }
+
+    pub fn configure_output_clock(
+        &mut self,
+        config: DisciplineConfig,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control
+            .configure_output_clock(config)
+            .map_err(Into::into)
+    }
+    pub fn observe_output_clock(
+        &mut self,
+        pair: ClockPair,
+    ) -> Result<ObservationAdmission, StepLocalGameplayError> {
+        self.control.observe_output_clock(pair).map_err(Into::into)
+    }
+    pub fn update_output_clock(
+        &mut self,
+        host: ClockPoint,
+    ) -> Result<Option<DisciplineUpdate>, StepLocalGameplayError> {
+        self.control.update_output_clock(host).map_err(Into::into)
+    }
+    pub fn activate(&mut self, host_origin: ClockPoint) -> Result<(), StepLocalGameplayError> {
+        self.control.activate(host_origin).map_err(Into::into)
+    }
+    /// The rendered cursor has exactly the caller-evidence contract of StepGameplay.
+    pub fn feed_audio(
+        &mut self,
+        rendered_frames: u64,
+        budget: usize,
+    ) -> Result<BgmFeedReport, StepLocalGameplayError> {
+        self.control
+            .feed_audio(rendered_frames, budget)
+            .map_err(Into::into)
+    }
+    pub fn take_commands(
+        &mut self,
+        max: usize,
+    ) -> Result<Option<StepAudioBatch>, StepLocalGameplayError> {
+        self.control.take_commands(max).map_err(Into::into)
+    }
+    pub fn acknowledge(
+        &mut self,
+        sequence: u64,
+        admitted: usize,
+        success: bool,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control
+            .acknowledge(sequence, admitted, success)
+            .map_err(Into::into)
+    }
+
+    pub fn observe_completion(
+        &mut self,
+        rendered: Option<RenderReport>,
+        presented: Option<ClockPoint>,
+    ) -> Result<bool, StepLocalGameplayError> {
+        self.control.ensure_usable()?;
+        let ready = match self.control.end {
+            Some(end) => self.members.iter().all(|member| member.song == end),
+            None => self.players.iter().all(|&player| {
+                let judge = self.judge(player).expect("prepared member");
+                self.objects
+                    .iter()
+                    .all(|&id| judge.state(id) == Some(InteractionState::Completed))
+            }),
+        };
+        // Admission of real output remains mandatory even while another member
+        // is not ready. The shared implementation adopts valid evidence and
+        // resets drain readiness without fabricating progress for that member.
+        self.control
+            .observe_completion_ready(rendered, presented, ready)
+            .map_err(Into::into)
+    }
+
+    pub fn fail(&mut self) {
+        self.control.fail();
     }
 }
 

@@ -210,7 +210,7 @@ pub mod settings;
 pub mod settings_profile;
 #[cfg(test)]
 mod source_preparation_fixtures;
-/// Nonblocking actual solo runtime and bounded outgoing audio ownership.
+/// Nonblocking solo/local runtimes with shared bounded outgoing audio ownership.
 pub mod step_gameplay;
 #[cfg(test)]
 mod step_gameplay_fixtures;
