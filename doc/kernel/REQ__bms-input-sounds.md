@@ -62,3 +62,60 @@ original invisible SampleId values when allocating BGM suffix sample identities
 so that a keysound-only resource cannot be overwritten by a practice music tail.
 This typed preparation prerequisite does not remove source asset admission's
 invisible playback guard.
+
+## Runtime installation and replay selection
+
+InputSoundTimeline::markers() exposes a read-only slice of its validated sorted
+markers for preparation-time voice checks. RuntimeGroup::configure_input_sounds
+(Vec<(PlayerId,InputSoundTimeline)>)->Result<(),String> installs exactly one
+timeline for every member, in source-plan order, at most once before processing
+and while unpoisoned. Validate all rows and all voices before touching any member.
+Fallback voices cannot overlap existing gameplay or reserved BGM voices or other
+members' fallback voices; intentional reuse within one member is retained. A
+failed validation leaves every member and the setup lock unchanged. Actual
+private Runtime owners install through configure_input_sounds after complete
+preflight. SoloRuntime::configure_input_sounds(InputSoundTimeline) delegates to
+the same one-member operation. Existing constructor/callback behavior remains.
+
+local_preparation::prepare_local_input_sounds(prepared:&PreparedBms,
+members:&[MemberConfig],reserved:&[VoiceId])
+->Result<Vec<(PlayerId,InputSoundTimeline)>,String> returns empty for no invisible
+data. Otherwise compile the real InputSoundPlan once, require its samples in the
+shared PCM bank, and allocate member fallback voices strictly after all actual
+gameplay and reserved voices. Preserve lane replacement aliases and exact times,
+controls, samples and gain. No PCM is copied. Local binding coverage includes
+invisible lanes alongside visible lanes. No MemberConfig/PreparedLocalMembers
+field or existing native helper interface is changed.
+
+Actual stepped solo builds and validates its plan against PCM before moving
+prepared data and installs it in its SoloRuntime. The local path builds member
+plans against prepared configs before moving them and installs them atomically
+in RuntimeGroup. Empty sources preserve the unconfigured legacy path. Both use
+the original full invisible timeline even in practice; ordinary hits still take
+priority and endpoint/advance behavior belongs to the existing core runtime.
+
+Replay audio prepares the same timeline and verifies its samples. For nonempty
+invisible data, reconstruct a pristine compatible actual judge and process each
+original bound record/advance in order. Query real freshness before mutation and
+pass its actual per-operation results to command_for_press. Map a selected
+command's original unoffset song time to the caller's output origin/start/preroll
+once, using existing checked wide arithmetic and exclusive rounded endpoint.
+Duplicate/repeated/down-held inputs and advances cannot invent sounds. Existing
+ordinary-hit/BGM planning, chronological ordering and full-log results/hash stay
+exact; replay selection must not infer freshness from input labels alone.
+Original physical output times/queue failures are not in logical recordings and
+cannot be reconstructed by this audio plan. Sources without invisible data keep
+their existing planning path.
+
+This connects typed prepared data to actual stepped sound admission/replay plans.
+Source asset preparation remains guarded until original sample loading, native
+solo/cohort/capture and all remaining callers are integrated. Tests and actual
+audio/device verification remain deferred.
+
+Unlimited song completion must not finish before the last invisible selection.
+Use its checked original song timestamp plus one nanosecond as a lower bound
+for the existing terminal-input frontier, without adding a judged object or
+result. Calibration extent also includes referenced invisible PCM duration at
+each selection. Actual output drain still decides audible completion after
+accepted inputs; no automatic Play is emitted at an invisible marker. Finite
+sections retain their explicit endpoint and rounded frame policy.
