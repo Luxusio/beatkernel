@@ -48,6 +48,46 @@ pub fn room_opponent_footer(
     }
     Ok(())
 }
+
+/// Native room page leaves x=620..960 available for existing local-player
+/// controls. Only the selected four cached rows are read; field geometry stays fixed.
+pub fn room_presentation_footer(
+    scene: &mut Scene,
+    room: &crate::room_presentation::RoomPresentation,
+) -> Result<(), String> {
+    use crate::scene::ClipRect;
+    let heading = ClipRect::new([0, 646, 300, 17])?;
+    super::atoms::text_clipped(
+        scene,
+        12,
+        646,
+        &room.heading,
+        1,
+        if room.failed { 0xff8e8e } else { 0x9bb1cf },
+        heading,
+    )?;
+    if let Some(error) = &room.error {
+        super::atoms::text_clipped(
+            scene,
+            312,
+            646,
+            error,
+            1,
+            0xff8e8e,
+            ClipRect::new([300, 646, 300, 17])?,
+        )?;
+    }
+    for (index, row) in room.rows.iter().take(4).enumerate() {
+        let x = 12 + (index % 2) * 300;
+        let y = 663 + (index / 2) * 27;
+        let clip = ClipRect::new([x as i64, y as i64, 288, 27])?;
+        super::atoms::text_clipped(scene, x, y, &row.label, 1, 0xf0f4ff, clip)?;
+        for (line, text) in row.counters.iter().enumerate() {
+            super::atoms::text_clipped(scene, x, y + 9 * (line + 1), text, 1, 0x9bb1cf, clip)?;
+        }
+    }
+    Ok(())
+}
 #[cfg(test)]
 fn note_y(time: Timestamp, now: Timestamp, lookahead: i64) -> i64 {
     project_note(time, now, lookahead, TOP, LINE).clamp(-10_000, 10_000)

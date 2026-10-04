@@ -7,6 +7,9 @@ mod clipboard_fixtures;
 #[path = "font_fixture.rs"]
 mod font_fixture;
 #[cfg(test)]
+#[path = "desktop_room_fixtures.rs"]
+mod room_fixtures;
+#[cfg(test)]
 use beatkernel_bms_runtime::bga::BgaState;
 use beatkernel_bms_runtime::ui::{
     atoms::{rect, text},
@@ -33,6 +36,7 @@ use beatkernel_bms_runtime::{
     local_setup::LocalSetup,
     panel_scope::{PanelScope, TaskPermit},
     player, player_chart,
+    room_presentation::RoomUiAction,
     practice::PracticeStart,
     practice_loop::PracticeLoop,
     presentation_settings::PresentationSettings,
@@ -237,12 +241,44 @@ struct Game {
 }
 
 impl Game {
+    fn room_action_allowed(&self, action: RoomUiAction) -> bool {
+        if self.replay
+            || self.joined
+            || self.cancelling
+            || self.prepared_retry.is_some()
+            || self.viewer.room_pending()
+        {
+            return false;
+        }
+        self.snapshot.as_ref().is_some_and(|snapshot| {
+            !snapshot.cancelled
+                && matches!(
+                    snapshot.status,
+                    player::PlayerStatus::Loading | player::PlayerStatus::Playing
+                )
+                && snapshot
+                    .room
+                    .as_ref()
+                    .is_some_and(|room| room.allows(action))
+        })
+    }
+    fn request_room(&self, action: RoomUiAction) -> Result<u64, String> {
+        if !self.room_action_allowed(action) {
+            return Err("room control is unavailable".into());
+        }
+        self.viewer
+            .request_room(action)
+            .map_err(|error| error.to_string())
+    }
     fn pause_target(&self) -> Option<bool> {
         if self.joined || self.cancelling || self.prepared_retry.is_some() {
             return None;
         }
         let snapshot = self.snapshot.as_ref()?;
-        if snapshot.cancelled || snapshot.status != player::PlayerStatus::Playing {
+        if snapshot.cancelled
+            || snapshot.status != player::PlayerStatus::Playing
+            || snapshot.room.is_some()
+        {
             return None;
         }
         match snapshot.pause {
@@ -270,7 +306,10 @@ impl Game {
             return None;
         }
         let snapshot = self.snapshot.as_ref()?;
-        if snapshot.status != player::PlayerStatus::Playing || snapshot.cancelled {
+        if snapshot.status != player::PlayerStatus::Playing
+            || snapshot.cancelled
+            || snapshot.room.is_some()
+        {
             return None;
         }
         let nanos = snapshot.song_time?.as_nanos();
@@ -345,7 +384,13 @@ impl Game {
             })
     }
     fn practice_restart_available(&self) -> bool {
-        !self.replay && self.practice_bookmark.is_some() && self.retry_available()
+        !self.replay
+            && self
+                .snapshot
+                .as_ref()
+                .is_none_or(|snapshot| snapshot.room.is_none())
+            && self.practice_bookmark.is_some()
+            && self.retry_available()
     }
     fn cancel(&mut self) {
         self.prepared_retry = None;
@@ -2611,6 +2656,32 @@ impl Desktop {
             return;
         }
         match id.0 {
+            90..=94
+                if matches!(
+                    self.navigator.route(),
+                    ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
+                ) =>
+            {
+                if let Some(game) = &self.game {
+                    let page = game
+                        .snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.room.as_ref())
+                        .map_or(0, |room| room.page);
+                    let action = match id.0 {
+                        90 => RoomUiAction::Seal,
+                        91 => RoomUiAction::Ready,
+                        92 => RoomUiAction::Leave,
+                        93 => RoomUiAction::Page(page.saturating_sub(1)),
+                        _ => RoomUiAction::Page(page.saturating_add(1)),
+                    };
+                    if let Err(error) = game.request_room(action) {
+                        self.failure = Some(error);
+                    }
+                }
+                self.gesture.cancel();
+                self.invalidate_hits();
+            }
             6 if matches!(
                 self.navigator.route(),
                 ScreenRoute::Play { .. } | ScreenRoute::Results { .. }
@@ -2871,6 +2942,12 @@ impl Desktop {
     }
     fn collect_game(&mut self) {
         if let Some(game) = &mut self.game {
+            for _ in 0..beatkernel_bms_runtime::room_presentation::ROOM_UI_CAPACITY {
+                match game.viewer.take_room_reply() {
+                    Ok(Some(_)) => {} // PlayerViewer caches this exact correlated notice once.
+                    Ok(None) | Err(_) => break,
+                }
+            }
             if let Some(snapshot) = game.viewer.take_latest() {
                 if let (Some(window), Some(chart)) = (&self.window, &snapshot.chart) {
                     window.set_title(&window_title(&chart.title, &chart.artist));
@@ -4038,6 +4115,51 @@ impl Desktop {
                 .as_ref()
                 .ok_or("session screen data unavailable")?;
             draw_game_with_background(pixels, game, self.options.lookahead, &backgrounds)?;
+            let room = game
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.room.as_ref());
+            if let Some(room) = room {
+                for (id, label, action, meaningful) in [
+                    (ControlId(90), "ROOM SEAL", RoomUiAction::Seal, true),
+                    (ControlId(91), "ROOM READY", RoomUiAction::Ready, true),
+                    (ControlId(92), "ROOM LEAVE", RoomUiAction::Leave, true),
+                    (
+                        ControlId(93),
+                        "ROOM PREVIOUS",
+                        RoomUiAction::Page(room.page.saturating_sub(1)),
+                        room.pages > 0 && room.page > 0,
+                    ),
+                    (
+                        ControlId(94),
+                        "ROOM NEXT",
+                        RoomUiAction::Page(room.page.saturating_add(1)),
+                        room.page + 1 < room.pages,
+                    ),
+                ] {
+                    let bounds = room_control_bounds(id).expect("known room control");
+                    if meaningful && game.room_action_allowed(action) {
+                        control(
+                            pixels,
+                            &mut self.hits,
+                            &self.gesture,
+                            point,
+                            id,
+                            bounds,
+                            label,
+                        );
+                    } else {
+                        molecules::button(pixels, bounds, label, false, false);
+                    }
+                }
+                if let Some(notice) = game.viewer.room_notice() {
+                    let clip = beatkernel_bms_runtime::scene::ClipRect::new([300, 646, 300, 17])?;
+                    rect(pixels, 300, 646, 300, 17, 0x10151e);
+                    beatkernel_bms_runtime::ui::atoms::text_clipped(
+                        pixels, 312, 646, &notice, 1, 0x9bb1cf, clip,
+                    )?;
+                }
+            }
             let count = game.snapshot.as_ref().map_or(0, |s| s.players.len());
             if count > organisms::LOCAL_PLAYERS_PER_PAGE {
                 if game.local_page > 0 {
@@ -4108,7 +4230,7 @@ impl Desktop {
                     if paused { "PAUSE F9" } else { "RESUME F9" },
                 );
             }
-            if !game.replay {
+            if !game.replay && room.is_none() {
                 let mark_bounds = Bounds {
                     x: 550,
                     y: 20,
@@ -4738,6 +4860,42 @@ fn control(
     hits.push((id, bounds));
 }
 
+fn room_control_bounds(id: ControlId) -> Option<Bounds> {
+    Some(match id.0 {
+        90 => Bounds {
+            x: 550,
+            y: 20,
+            width: 110,
+            height: 30,
+        },
+        91 => Bounds {
+            x: 670,
+            y: 20,
+            width: 110,
+            height: 30,
+        },
+        92 => Bounds {
+            x: 790,
+            y: 20,
+            width: 140,
+            height: 30,
+        },
+        93 => Bounds {
+            x: 620,
+            y: 695,
+            width: 150,
+            height: 24,
+        },
+        94 => Bounds {
+            x: 780,
+            y: 695,
+            width: 150,
+            height: 24,
+        },
+        _ => return None,
+    })
+}
+
 fn window_title(title: &str, artist: &str) -> String {
     format!("{title} — {artist} — BeatKernel")
         .chars()
@@ -4878,27 +5036,32 @@ fn draw_game_with_background(
             game.local_comparisons,
             backgrounds,
         )?;
-        text(
-            pixels,
-            24,
-            665,
-            &format!(
-                "PLAYERS {}  PAGE {}/{}  PGUP/PGDN{}",
-                snapshot.players.len(),
-                game.local_page + 1,
-                snapshot
-                    .players
-                    .len()
-                    .div_ceil(organisms::LOCAL_PLAYERS_PER_PAGE),
-                if local_comparisons_available(&snapshot.players) {
-                    "  C COMPARISONS"
-                } else {
-                    ""
-                }
-            ),
-            1,
-            0x9bb1cf,
-        );
+        if snapshot.room.is_none() {
+            text(
+                pixels,
+                24,
+                665,
+                &format!(
+                    "PLAYERS {}  PAGE {}/{}  PGUP/PGDN{}",
+                    snapshot.players.len(),
+                    game.local_page + 1,
+                    snapshot
+                        .players
+                        .len()
+                        .div_ceil(organisms::LOCAL_PLAYERS_PER_PAGE),
+                    if local_comparisons_available(&snapshot.players) {
+                        "  C COMPARISONS"
+                    } else {
+                        ""
+                    }
+                ),
+                1,
+                0x9bb1cf,
+            );
+        }
+        if let Some(room) = &snapshot.room {
+            organisms::room_presentation_footer(pixels, room)?;
+        }
         return Ok(());
     }
     if let Some(competition) = snapshot
@@ -4921,20 +5084,25 @@ fn draw_game_with_background(
             snapshot.note_progress.as_ref(),
             backgrounds[0],
         )?;
-        text(
-            pixels,
-            24,
-            665,
-            &format!("SONG {:.3} S", now.as_nanos() as f64 / 1e9),
-            2,
-            0x9bb1cf,
-        );
+        if snapshot.room.is_none() {
+            text(
+                pixels,
+                24,
+                665,
+                &format!("SONG {:.3} S", now.as_nanos() as f64 / 1e9),
+                2,
+                0x9bb1cf,
+            );
+        }
         if let Some(event) = snapshot.last_judge {
             if (i128::from(now.as_nanos()) - i128::from(event.at.as_nanos())).abs() <= 700_000_000 {
                 let (label, color) = beatkernel_bms_runtime::timing_display::judge_label(&event);
                 text(pixels, 160, 550, &label, 2, color);
             }
         }
+    }
+    if let Some(room) = &snapshot.room {
+        organisms::room_presentation_footer(pixels, room)?;
     }
     Ok(())
 }
