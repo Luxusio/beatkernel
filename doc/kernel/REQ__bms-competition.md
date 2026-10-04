@@ -148,10 +148,12 @@ that exact final frame's admission. A later actor processing time cannot validat
 an ACK captured before the frame could have been delivered. Retain this floor
 after the frame's full write as well as while it is in flight.
 Existing opaque per-peer write IDs span control and relay frames. Queue failure,
-invalid/stale traffic and disconnect retain whole-room exact-lease cleanup;
-other rooms survive. Native gameplay room activation, remote multi-host HUD and
-coordinated final-drain integration remain required before claiming full
-multiplayer; browser publication alone does not establish runtime acceptance.
+invalid traffic and early disconnect retain whole-room exact-lease cleanup;
+other rooms survive. Eligible drain retirement and stale terminal events use
+the coordinated drain rules above. Native gameplay room activation, native
+multi-host HUD and coordinated final-drain integration remain required before
+claiming full multiplayer; browser HUD/publication/drain source integration
+does not establish runtime acceptance.
 
 ## Participant-scoped room progress wire
 

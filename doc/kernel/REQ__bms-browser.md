@@ -1,5 +1,41 @@
 # Browser host and shared selected-file preparation
 
+## Worker-owned multi-host score HUD
+
+Show accepted multi-host reported scores through the existing OffscreenCanvas
+renderer. Reuse the fixed footer below the local fields; never shrink, shift or
+reconfigure note/touch geometry when room membership, score page or connection
+status changes. Present at most four remote player entries per page, in frozen
+Prepared host order and each host's exact player order. Distinguish identical
+player IDs on different hosts using the positive full u64 participant identity.
+Include every other Prepared host and all its players, including 64 hosts with
+64 local players each; do not substitute a single peer or aggregate counters.
+
+One portable retained HUD owner stores the bounded roster and latest scores.
+Validate exact source roster, positive increasing sequence, common monotonic
+progress and immutable final state atomically. Local rows are excluded from
+the remote pages. Unknown/unrelated updates and out-of-range pages preserve the
+old presentation. Labels and counter text update on actual admitted changes;
+rendering borrows only the selected page without sorting, scanning or copying
+all remote rows per frame. Display full integer counters without f64 conversion
+or summing unrelated scores. Waiting and disconnected presentation remain
+distinct from local judging and ranked score authority.
+
+Bound the WASM roster words before copying: repeat participant low/high u32,
+player count and that host's player IDs, at most 64 hosts and 4288 words
+(17152 bytes). Configuration verifies the actual admitted participant's roster
+against the current local game. Progress reuses at most 64 eleven-word member
+rows (704 words); participant and positive sequence remain full u64 values. Page replies
+carry the exact selected page and bounded page count, at most 1008 pages.
+
+The Worker configures from actual accepted Prepared membership before start,
+updates only on accepted room progress, and redraws existing retained scenes.
+HUD failure hides only that presentation and reports an event-driven error;
+local gameplay/audio/capture and network receipt handling continue. During final
+drain retain network summaries without touching freed game/HUD bindings. The
+Window supplies score-page controls and status only through user events and
+correlated Worker replies. No periodic Window score transfer/rendering loop.
+
 ## Common room drain binding
 
 The Worker-owned BrowserRoomOwner provides one idempotent, bounded drain
@@ -77,8 +113,8 @@ updates only event-driven connection status and keeps the active session alive.
 Invalid browser control metadata still fails closed. Stale callbacks and failed
 publication cannot affect a replacement owner or revive a stopped session.
 
-Known ceiling: Multi-host competitive HUD is not connected by this publisher.
-Coordinated drain now has a Worker caller, but generated bindings, runtime browser/TLS,
+Known ceiling: Multi-host HUD and coordinated drain have Worker callers, but
+generated bindings, runtime browser/TLS,
 device/audio and performance acceptance remain unverified.
 
 ## Worker room progress bridge
@@ -109,8 +145,8 @@ receipt without additional progress credit. Join actual channel operations and
 free the WASM owner exactly once on cancellation or failure.
 
 Known ceiling: Gameplay publication uses the actual Worker caller described
-above. Competitive multi-host HUD still requires application integration. The
-coordinated final drain has a Worker caller; generated
+above. Competitive multi-host HUD and coordinated final drain have Worker
+callers; generated
 bindings, browser execution, TLS interoperability, devices/audio and performance
 acceptance remain unverified; bridge source and compilation cannot prove them.
 
