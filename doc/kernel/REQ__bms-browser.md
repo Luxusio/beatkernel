@@ -1,5 +1,37 @@
 # Browser host and shared selected-file preparation
 
+## Worker room progress bridge
+
+Expose the common RoomPlayClient progress path through BrowserRoomClient and
+the Worker-owned BrowserRoomOwner. Reuse the existing eleven-u32 member rows
+from BrowserLocalGame progress_words; preserve ordered player IDs, signed i64
+song time and full u64 counters without floating-point conversion. Bound arrays
+to 1..64 complete rows before generated WASM glue copies them. Genuine common
+commitment remains publication authority. Ordinary unsent publications may
+coalesce; final publication is irreversible and wire sequences belong to actual
+frame admission rather than JavaScript calls.
+
+Deliver participant-labelled peer updates only after successful common
+admission. Export one bounded pending update identity and materialize only that
+participant's current accepted prefix, rather than cloning all host histories
+on every I/O poll. Preserve source participant and exact original sequence.
+Validate DTO shape and frozen roster before callback delivery. Callbacks remain
+within the Worker, with no per-frame Window score or HUD update loop.
+
+Expose own final full-write, genuine aggregate ACK and local receipt completion
+separately. Observe receipt transitions after real read/write completion and
+wake existing bounded I/O on publication, without periodic network timers or
+synthetic write credit. A local completion waiter must reject on cancellation
+and must not send Leave, close/free the owner or authorize whole-room closure.
+Explicit Leave drains any already admitted progress frame through its exact
+receipt without additional progress credit. Join actual channel operations and
+free the WASM owner exactly once on cancellation or failure.
+
+Known ceiling: Gameplay publication, competitive multi-host HUD and coordinated
+whole-room final shutdown still require application integration. Generated
+bindings, browser execution, TLS interoperability, devices/audio and performance
+acceptance remain unverified; bridge source and compilation cannot prove them.
+
 ## Browser main-thread input ownership
 
 The browser Window acquires keyboard, touch/pointer, HID and Gamepad input.
