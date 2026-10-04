@@ -72,3 +72,40 @@ Its rules identity is beatkernel-bms/press-judge/v1. Unknown modes/tags fail.
 ButtonOnly keeps exact v1-v4 bytes and builtin rule identity. Header/file budgets
 include all new bytes before allocation. Record actual bound physical variants,
 original times and provenance; never translate contacts to keyboard events.
+## Invisible input-sound identity extension
+
+input_sounds::InputSoundIdentity::from_source(&BmsChart)
+-> Result<Option<InputSoundIdentity>,String> returns None for no invisible
+selections, preserving legacy setup exactly. For a nonempty timeline it validates
+actual compile_invisible and wav_gain and fingerprints its semantic selections.
+Opaque Copy/Eq identity exposes fingerprint()->u64. Canonical bytes are the
+ASCII domain beatkernel-bms/input-sounds/v1, u64 marker count, u32 f32 gain bits,
+then ascending (logical control, song timestamp) records of u32 control, signed
+i64 nanoseconds and full u64 sample, all little-endian. Duplicate control/time
+positions reject. Streaming FNV-1a64 uses offset 14695981039346656037 and prime
+1099511628211 with defined wrapping arithmetic. Source row order, ordinal, line,
+asset filenames, voice remapping, native devices and output clocks are excluded.
+This is a noncryptographic compatibility fingerprint like the existing judge
+identity; it is not proof of asset contents or a security/authentication digest.
+
+replay_capture::setup_input_sound_header takes the existing setup_input_header
+arguments followed by Option<InputSoundIdentity>. None returns the exact legacy
+header. Some emits chart_identity=bms-judge-setup/v2: followed by the existing
+pristine judge hash u64 and input-sound fingerprint u64. Options/rules/header
+envelope versions are unchanged. Full header/file limits still validate the
+additional bytes; no unbounded data or encoded marker table goes into metadata.
+LiveReplayCapture::new_with_input_sounds takes the existing new_with_input_mode
+arguments followed by that identity, with the same atomic setup and capture
+behavior. Existing constructors keep their legacy output.
+
+Actual StepGameplay and its shared StepLocalGameplay controller retain the
+identity computed from the selected source before moving preparation fields.
+Solo and member competition_header and configure_capture use the new APIs.
+Replay setup validation computes the same identity from source_at's source and
+compares the complete canonical header before replay operations. A changed,
+missing or injected invisible selection or changed WAV gain must mismatch;
+legacy headers cannot authorize an invisible source. Practice retains selections
+before the start so they remain part of the identity and active-key selection.
+
+This does not enable invisible audio. Asset/runtime installation and replay
+command selection are pending; the shared preparation admission guard remains.

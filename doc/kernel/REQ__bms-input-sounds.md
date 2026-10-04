@@ -54,3 +54,11 @@ REQ__judge.md and selected by stepped solo/local and replay construction for
 invisible contact-mode sources. It tracks contact ownership independently of
 remaining visible objects. This prerequisite alone does not install sounds or
 make the existing replay identity source-aware.
+
+Practice preparation accepts an original invisible selection even when the
+selected section retains no judged object or BGM command. Empty ordinary
+sections with no invisible selection keep their existing rejection. Reserve all
+original invisible SampleId values when allocating BGM suffix sample identities
+so that a keysound-only resource cannot be overwritten by a practice music tail.
+This typed preparation prerequisite does not remove source asset admission's
+invisible playback guard.

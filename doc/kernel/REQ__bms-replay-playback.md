@@ -78,3 +78,14 @@ Legacy tuple decoders refuse v5 even without an end because they cannot retain
 its mode. Reject noncanonical mode 0, unknown mode/end tags, invalid extents and
 profile windows. Finite competition identity retains mode in the base header
 and an external endpoint; a header already carrying an end is refused there.
+## Invisible input-sound identity
+
+Canonical setup comparison uses the source-aware chart identity extension in
+REQ__bms-replay-capture.md. Recompile actual invisible selections and WAV gain
+from the original selected source, preserving selections earlier than section
+start, before comparing headers or applying operations. A legacy judge-only
+header cannot authorize a nonempty invisible timeline. A source with no
+invisible selections retains its exact legacy header; injected, removed or
+changed selections and changed invisible gain must reject as setup mismatches.
+This validation establishes compatibility metadata, not PCM content identity.
+Actual invisible sound planning remains a separate pending integration.
