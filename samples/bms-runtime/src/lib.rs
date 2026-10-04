@@ -93,6 +93,8 @@ pub mod local_players;
 pub mod local_runtime;
 /// Graphical local-player draft using typed keyboard metadata and stable IDs.
 pub mod local_setup;
+#[cfg(test)]
+mod local_source_plan_fixtures;
 /// Complete MPEG Layer III assets and declared encoder timing during preparation.
 pub mod mp3_decode;
 #[cfg(test)]
