@@ -221,6 +221,8 @@ pub mod native_gameplay;
 /// One shared network/start owner over actual native local-member prefixes.
 pub mod native_group_competition;
 #[cfg(test)]
+mod native_invisible_audio_fixtures;
+#[cfg(test)]
 mod native_invisible_identity_fixtures;
 /// Shared native profile, completion and optional capture configuration.
 pub mod native_judge;

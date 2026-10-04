@@ -491,7 +491,9 @@ mod native {
         transport::{Rate, Transport},
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
-    use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio, prepare_audio};
+    use beatkernel_bms_runtime::native_audio::{
+        NativeAudioConfig, PreparedNativeAudio, prepare_audio, prepare_input_sounds,
+    };
     use beatkernel_bms_runtime::{
         ChannelPolicy,
         native_chart::{NativeChartConfig, prepare_chart},
@@ -759,6 +761,7 @@ mod native {
             bindings: &options.bindings,
         })?;
         println!("prepared practice section={section:?}");
+        let input_sounds = prepare_input_sounds(&prepared)?;
         let judge_config = NativeJudgeConfig {
             early: options.early,
             late: options.late,
@@ -960,6 +963,9 @@ mod native {
                 prepared.sounds,
                 4096,
             )?;
+            if let Some(timeline) = input_sounds {
+                runtime.configure_input_sounds(timeline)?;
+            }
             if let Some(end) = options.end_ns {
                 runtime.set_song_end(Timestamp::from_nanos(end))?;
             }

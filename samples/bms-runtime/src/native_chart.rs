@@ -33,7 +33,7 @@ pub fn prepare_chart(
         )
     })
 }
-fn prepare_with(
+pub(crate) fn prepare_with(
     config: NativeChartConfig<'_>,
     load: impl FnOnce(&NativeChartConfig<'_>) -> NativeGameplayResult<PreparedBms>,
 ) -> NativeGameplayResult<(PreparedBms, SectionReport)> {
@@ -41,11 +41,15 @@ fn prepare_with(
         return Err("practice start must be nonnegative".into());
     }
     let (prepared, section) = prepare_at(load(&config)?, config.start, config.limits)?;
-    for note in &prepared.source.notes {
-        if !config.bindings.contains_key(&note.lane.channel()) {
-            return Err(
-                format!("missing --bind for BMS channel {:02X}", note.lane.channel()).into(),
-            );
+    for lane in prepared
+        .source
+        .notes
+        .iter()
+        .map(|note| note.lane)
+        .chain(prepared.source.invisible.iter().map(|event| event.lane))
+    {
+        if !config.bindings.contains_key(&lane.channel()) {
+            return Err(format!("missing --bind for BMS channel {:02X}", lane.channel()).into());
         }
     }
     Ok((prepared, section))

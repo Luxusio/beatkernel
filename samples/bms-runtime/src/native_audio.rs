@@ -1,6 +1,8 @@
 //! Common owner-thread queue/BGM/mixer composition; no native device operations.
 use crate::{
+    PreparedBms,
     bgm::{BgmConfig, BgmFeeder},
+    input_sounds::InputSoundPlan,
     native_gameplay::NativeGameplayResult,
 };
 use beatkernel::{
@@ -8,8 +10,31 @@ use beatkernel::{
         AudioCommand, AudioLimits, CommandProducer, CommandPushError, Mixer, MixerConfig,
         RenderReport, SampleBank, command_queue, command_queue_with_start_gate,
     },
+    runtime::input_sound::InputSoundTimeline,
     time::{ClockPoint, Duration, Timestamp},
 };
+/// Validate native press sounds before moving PCM or starting output ownership.
+/// Empty invisible sources retain the unconfigured legacy runtime path.
+pub fn prepare_input_sounds(
+    prepared: &PreparedBms,
+) -> NativeGameplayResult<Option<InputSoundTimeline>> {
+    if prepared.source.invisible.is_empty() {
+        return Ok(None);
+    }
+    let plan = InputSoundPlan::prepare(
+        &prepared.source,
+        &prepared.sounds,
+        &prepared.bgm_commands,
+        beatkernel_bms::ParseOptions::default().max_objects,
+    )?;
+    for &sample in plan.samples() {
+        if prepared.bank.get(sample).is_none() {
+            return Err("native input sound sample is missing from PCM bank".into());
+        }
+    }
+    Ok(Some(plan.timeline()))
+}
+
 pub const LIVE_COMMAND_RESERVE: usize = 1024;
 #[derive(Clone, Copy, Debug)]
 pub struct NativeAudioConfig {
