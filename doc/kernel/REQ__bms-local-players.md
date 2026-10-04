@@ -90,8 +90,10 @@ scalar session and scalar progress cannot be sent on a group session. The actual
 browser Worker checks every member's canonical identity, opens one group owner,
 publishes whole-cohort progress and maps the accepted remote roster into
 per-member peer HUDs as specified by the [browser contract](REQ__bms-browser.md).
-Page launch, native group callers and multi-host room integration remain
-required follow-on work; current UI still refuses local network combinations.
+The Page launches admitted local cohorts using the same committed audio/start
+handshake and reports bounded per-member final results. Automatic one-player
+group launch, native group callers and multi-host room integration remain
+required follow-on work.
 No group codec call creates a connection, start receipt or final acknowledgement.
 Complete browser/native callers remain unfinished; tests authored and compile checks
 cannot prove network acceptance.

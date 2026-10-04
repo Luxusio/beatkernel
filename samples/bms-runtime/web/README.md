@@ -25,13 +25,17 @@ prefixes. Assign each saved opponent to a current player using its target select
 in the selected-opponents list. Clear local targets before solo playback. The
 whole session admits at most eight records and 64 MiB; each target's comparisons
 advance on Worker from its actual frontier. Comparison failure keeps that
-member's reserved display/touch geometry fixed. Local network combinations
-currently refuse explicitly.
-The Rust local binding also provides per-member peer HUD admission and exact
-progress updates for the upcoming network connection integration. Saved and
+member's reserved display/touch geometry fixed. An admitted local cohort can
+enable Multiplayer to use one shared group connection and committed start.
+The Worker sends actual per-member progress and pairs frozen local/remote
+roster order for peer HUD presentation; surplus local members remain unassigned.
+The Rust local binding provides per-member peer HUD admission and exact
+progress updates. Saved and
 peer rows reserve separate space before touch setup; display failures preserve
-that geometry and the other comparison type. This binding groundwork does not
-enable local network play in the page or Worker.
+that geometry and the other comparison type. The Page shows each member's own
+validated final peer summary once at termination. The ordinary one-player
+network Page path still uses scalar mode and cannot negotiate with a group
+peer; automatic one-player group launch remains unfinished.
 These page paths are source integrations with deferred fixtures; generated
 bindings, browser/device/audio execution and measured performance are unverified.
 
@@ -77,7 +81,9 @@ software targets back to that same coordinate system. `request_ready` follows
 actual preparation. `submit(progress, finalPrefix)` resolves a complete local
 write, while `wait_final_ack` observes the separate final application ACK.
 One submission and one final waiter are permitted. The Worker instantiates
-this owner for explicit multiplayer live Play; solo and replay remain local.
+this owner for explicit multiplayer live Play. Group sessions use `group: true`
+and `submit_group(words, finalPrefix)` on the same loops and acknowledgement
+barriers. Replay and live play with Multiplayer disabled remain local.
 
 An integrating owner requests readiness after preparation, reads at most
 `needed_bytes()` using `readPrefix`, then passes that bounded prefix to

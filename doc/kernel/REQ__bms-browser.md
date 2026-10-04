@@ -1491,8 +1491,8 @@ its own display; saved failure hides only saved rows. Failure indicators stay
 within their respective reserved space and do not alter render/touch geometry.
 Invalid or unadmitted updates and duplicate/late admission preserve accepted
 state. No update changes another member, advances gameplay or creates network
-evidence. The page still refuses local-network combinations; the actual Worker
-group connection and common start path is specified below. These APIs
+evidence. The Page and Worker group connection and common start paths are
+specified below. These APIs
 and deferred fixtures do not establish browser runtime acceptance.
 
 The local binding's progress_words reads all actual members in frozen order:
@@ -1504,7 +1504,7 @@ available for the retained final prefix after gameplay failure. The portable
 whole-cohort payload codec is specified by
 [local input ownership](REQ__bms-local-players.md); the scalar BKMP v6 Session
 now has an explicit group mode. Worker publishes actual group prefixes through
-the shared owner; Page launch remains separate integration. BrowserMultiplayer
+the shared owner; Page launches its admitted local cohort. BrowserMultiplayer
 exposes new_group, send_group_progress with exact
 member words and poll_group_event with typed roster/progress words and an exact
 BigInt sequence. The old scalar DTO and constructor remain compatible. Both
@@ -1565,8 +1565,34 @@ Capture a retained actual final group word snapshot before disposing the game,
 then release local ownership and await the existing shared full-write/final-ACK
 drain. Snapshot failure must still release the game and report network failure.
 Cancellation and late connection completion cannot access freed owners. The
-Window local-network launch controls and real browser/device/transport
-acceptance remain follow-on work.
+real browser/device/transport acceptance remain follow-on work.
+
+### Local group Page launch and final results
+
+The Page permits the existing live multiplayer option with an admitted local
+source plan. It freezes and forwards that plan with the normal network setup,
+then uses the existing audio-preparation and committed-start activation
+handshake. Invalid or missing distinct sources still refuse launch. Rendering,
+judging and periodic group scores remain on Worker; Window ignores group
+roster/progress notifications and does not build a periodic member HUD.
+
+Peer display failures are correlated to an exact admitted local player and
+reported at most once per member. Unknown/missing member IDs must not change
+the live group status; scalar notices retain their existing behavior. Final
+group results validate multiplayer.peers as a bounded exact array in frozen
+local order, with positive remote IDs or null and each existing peer summary's
+exact types and counter constraints. A null remote ID cannot carry a score or
+final prefix. Render each member's own validated remote prefix, lifecycle and
+display error once at termination. Never use the scalar peer field as a group
+fallback. A malformed group summary preserves local scores/replays and reports
+comparison unavailability. Stale owner/late stop receipts cannot overwrite the
+current session's result.
+
+Known ceiling: The ordinary one-player Page network path still uses scalar
+mode. A group peer and a scalar peer cannot negotiate with each other; source
+integration for an automatic one-player group Page path remains required.
+Native group transport callers, multi-host rooms and actual runtime/performance
+acceptance are also unfinished.
 
 ## Touch-aware local page changes
 
