@@ -795,3 +795,41 @@ retention limits. Explicit limits must apply to both reads and owned writes.
 Client admission/readiness is not a committed shared music start or final ACK.
 Generated browser bindings, browser room owner/UI, native gameplay composition,
 multi-host clock/start/progress/ACK and interoperability remain required.
+
+
+## Prepared multi-host software-start coordinator
+
+Compose the existing checked StartAgreement, ClockFilter estimates and StartPolicy
+for an actual Prepared room snapshot with 2..64 immutable ordered participants.
+Reject other phases, missing preparation, duplicate/zero participants, invalid
+local rosters/identity and retained waiting deadlines. The coordinator owns the
+server reference clock; participants retain their original clock origins.
+Per-stream participant identity comes from its real admitted lease, never from
+an untrusted player-selected message field.
+
+Each participant supplies an actual server-local offset estimate and its real
+nonnegative preroll. Retain separate peer estimates and one in-flight start
+message per participant. Full ClockReady writes and actual peer ClockReady
+receipts are prerequisites for selecting one common server song-start target.
+Use checked arithmetic over the lead, maximum real preroll and uncertainty;
+validate every estimate's chronology, age and uncertainty before proposing.
+No per-peer polling time may silently choose a different song-start target.
+
+Every exact proposal must be completely written before accepting that peer's
+echo. Withhold every Commit until all frozen participants' exact Accepts have
+actually arrived. Complete-write credit applies only to the matching admitted
+message. Whole-cohort committed state requires all complete Commit writes.
+Rejected unknown peers, ordering, echoes, clock regressions, stale estimates,
+negative prerolls and overflow preserve accepted state atomically. Stop fences
+all further requests. No transport wait, platform branch or hardware clock is
+introduced into the common coordinator.
+
+Each client still maps the same server song target through its own checked
+StartAgreement Join estimate and actual preroll. A coordinator full write is
+not a remote application acknowledgement, and partial Commit delivery cannot
+be made atomic across arbitrary network loss. This protocol establishes bounded
+software agreement, not physical audio synchronization or ranked authority.
+Actual probe/wire/server/client/Worker/page composition, genuine participant
+progress/final ACKs and native/browser interoperability remain required follow-up
+work. The component must not weaken the existing gameplay activation fence
+until a real committed schedule is composed into the output owner.
