@@ -6,6 +6,9 @@ use crate::{
     note_progress::NoteProgress,
     player_chart::PlayerChart,
     pressed_keys::{PressedKeys, validate_mask},
+    room_presentation::{
+        RoomPresentation, RoomUiAction, RoomUiReply, RoomUiRequest, ROOM_UI_CAPACITY,
+    },
 };
 use beatkernel::{
     chart::CompiledChart, input::GameInputEvent, judge::JudgeEvent, runtime::RuntimeReport,
@@ -14,6 +17,8 @@ use beatkernel::{
 use beatkernel_bms::BmsChart;
 use std::{
     cell::RefCell,
+    collections::VecDeque,
+    io,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -249,6 +254,8 @@ pub struct PlayerSnapshot {
     pub pause: PauseState,
     /// Native finite endpoint presented and input drained; cleanup status is separate.
     pub completed_end: Option<Timestamp>,
+    /// Shared admission metadata and only the selected room score page.
+    pub room: Option<Arc<RoomPresentation>>,
 }
 impl Default for PlayerSnapshot {
     fn default() -> Self {
@@ -266,6 +273,7 @@ impl Default for PlayerSnapshot {
             cancelled: false,
             pause: PauseState::Unavailable,
             completed_end: None,
+            room: None,
         }
     }
 }
@@ -273,6 +281,51 @@ struct Shared {
     latest: Mutex<Option<PlayerSnapshot>>,
     cancel: AtomicBool,
     pause_requested: AtomicBool,
+    room_closed: AtomicBool,
+    room: Mutex<RoomControls>,
+}
+struct RoomControls {
+    next_id: Option<u64>,
+    presentation: Option<Arc<RoomPresentation>>,
+    queued: VecDeque<RoomUiRequest>,
+    in_flight: Vec<u64>,
+    replies: VecDeque<RoomUiReply>,
+    notice: Option<Arc<str>>,
+}
+impl RoomControls {
+    fn settle(&mut self, message: &str) {
+        for request in self.queued.drain(..) {
+            self.replies.push_back(RoomUiReply {
+                id: request.id,
+                result: Err(message.into()),
+            });
+        }
+        for id in self.in_flight.drain(..) {
+            self.replies.push_back(RoomUiReply {
+                id,
+                result: Err(message.into()),
+            });
+        }
+    }
+}
+fn room_lock_error<T>(error: std::sync::TryLockError<T>) -> io::Error {
+    match error {
+        std::sync::TryLockError::WouldBlock => {
+            io::Error::new(io::ErrorKind::WouldBlock, "room controls are busy")
+        }
+        std::sync::TryLockError::Poisoned(_) => io::Error::other("room controls are unavailable"),
+    }
+}
+fn settle_room(shared: &Shared, controls: &mut RoomControls) -> bool {
+    if shared.cancel.load(Ordering::Acquire) {
+        controls.settle("room request cancelled");
+        true
+    } else if shared.room_closed.load(Ordering::Acquire) {
+        controls.settle("room controls closed");
+        true
+    } else {
+        false
+    }
 }
 /// Sendable attachment token; native input/window objects never cross threads.
 #[derive(Clone)]
@@ -286,10 +339,89 @@ pub fn channel() -> (PlayerPublisher, PlayerViewer) {
         latest: Mutex::new(Some(PlayerSnapshot::default())),
         cancel: AtomicBool::new(false),
         pause_requested: AtomicBool::new(false),
+        room_closed: AtomicBool::new(false),
+        room: Mutex::new(RoomControls {
+            next_id: Some(1),
+            presentation: None,
+            queued: VecDeque::with_capacity(ROOM_UI_CAPACITY),
+            in_flight: Vec::with_capacity(ROOM_UI_CAPACITY),
+            replies: VecDeque::with_capacity(ROOM_UI_CAPACITY),
+            notice: None,
+        }),
     });
     (PlayerPublisher(shared.clone()), PlayerViewer(shared))
 }
 impl PlayerViewer {
+    /// UI identity is distinct from the network owner's command identity.
+    pub fn request_room(&self, action: RoomUiAction) -> io::Result<u64> {
+        let mut controls = self.0.room.try_lock().map_err(room_lock_error)?;
+        if settle_room(&self.0, &mut controls) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "room controls are cancelled or closed",
+            ));
+        }
+        if !controls
+            .presentation
+            .as_ref()
+            .is_some_and(|room| room.allows(action))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "room action is unavailable in this snapshot",
+            ));
+        }
+        if controls.queued.len() + controls.in_flight.len() + controls.replies.len()
+            >= ROOM_UI_CAPACITY
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "room request results are full",
+            ));
+        }
+        let id = controls
+            .next_id
+            .ok_or_else(|| io::Error::other("room UI identity exhausted"))?;
+        controls.queued.push_back(RoomUiRequest { id, action });
+        controls.next_id = id.checked_add(1);
+        controls.notice = Some(format!("ROOM REQUEST {id} PENDING").into());
+        Ok(id)
+    }
+    pub fn take_room_reply(&self) -> io::Result<Option<RoomUiReply>> {
+        let mut controls = self.0.room.try_lock().map_err(room_lock_error)?;
+        settle_room(&self.0, &mut controls);
+        let reply = controls.replies.pop_front();
+        if let Some(reply) = &reply {
+            let message = match &reply.result {
+                Ok(()) => format!("ROOM REQUEST {} ACCEPTED", reply.id),
+                Err(error) => format!(
+                    "ROOM REQUEST {}: {}",
+                    reply.id,
+                    error
+                        .chars()
+                        .take(512)
+                        .map(|ch| if ch.is_control() { ' ' } else { ch })
+                        .collect::<String>()
+                ),
+            };
+            controls.notice = Some(message.into());
+        }
+        Ok(reply)
+    }
+    pub fn room_pending(&self) -> bool {
+        self.0.room.try_lock().map_or(true, |controls| {
+            !controls.queued.is_empty()
+                || !controls.in_flight.is_empty()
+                || !controls.replies.is_empty()
+        })
+    }
+    pub fn room_notice(&self) -> Option<Arc<str>> {
+        self.0
+            .room
+            .try_lock()
+            .ok()
+            .and_then(|controls| controls.notice.clone())
+    }
     /// UI-side desired state; actual boundaries remain native-owner authority.
     pub fn pause_requested(&self) -> bool {
         self.0.pause_requested.load(Ordering::Acquire)
@@ -336,6 +468,7 @@ struct Session {
     last_publish: Option<Instant>,
     chart_published: bool,
     pause_dirty: bool,
+    room_dirty: bool,
 }
 thread_local! { static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) }; }
 
@@ -394,6 +527,7 @@ pub fn with_publisher<T>(
             last_publish: None,
             chart_published: false,
             pause_dirty: false,
+            room_dirty: false,
         });
         Ok::<(), String>(())
     })?;
@@ -402,6 +536,14 @@ pub fn with_publisher<T>(
     let result = run();
     SESSION.with(|session| {
         if let Some(mut current) = session.borrow_mut().take() {
+            current
+                .publisher
+                .0
+                .room_closed
+                .store(true, Ordering::Release);
+            if let Ok(mut controls) = current.publisher.0.room.lock() {
+                settle_room(&current.publisher.0, &mut controls);
+            }
             current.snapshot.cancelled = current.publisher.0.cancel.load(Ordering::Acquire);
             current.snapshot.status = match &result {
                 Ok(_) => PlayerStatus::Finished,
@@ -417,6 +559,118 @@ pub fn with_publisher<T>(
         }
     });
     result
+}
+
+/// Game-thread UI request acquisition. Cancellation settles queued and already
+/// acquired requests; it never turns an old request into a replacement action.
+pub fn take_room_request() -> io::Result<Option<RoomUiRequest>> {
+    SESSION.with(|session| {
+        let session = session.borrow();
+        let Some(current) = session.as_ref() else {
+            return Ok(None);
+        };
+        let mut controls = current
+            .publisher
+            .0
+            .room
+            .try_lock()
+            .map_err(room_lock_error)?;
+        if settle_room(&current.publisher.0, &mut controls) {
+            return Ok(None);
+        }
+        let request = controls.queued.pop_front();
+        if let Some(request) = request {
+            controls.in_flight.push(request.id);
+        }
+        Ok(request)
+    })
+}
+pub fn reply_room(reply: RoomUiReply) -> io::Result<()> {
+    if reply.id == 0
+        || reply
+            .result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.len() > 4096)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid bounded room UI result",
+        ));
+    }
+    SESSION.with(|session| {
+        let session = session.borrow();
+        let Some(current) = session.as_ref() else {
+            return Ok(());
+        };
+        let mut controls = current
+            .publisher
+            .0
+            .room
+            .try_lock()
+            .map_err(room_lock_error)?;
+        if settle_room(&current.publisher.0, &mut controls) {
+            return Ok(());
+        }
+        let index = controls
+            .in_flight
+            .iter()
+            .position(|id| *id == reply.id)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unknown room UI result identity",
+                )
+            })?;
+        controls.in_flight.remove(index);
+        controls.replies.push_back(reply);
+        Ok(())
+    })
+}
+pub fn close_room_controls() {
+    SESSION.with(|session| {
+        if let Some(current) = session.borrow().as_ref() {
+            current
+                .publisher
+                .0
+                .room_closed
+                .store(true, Ordering::Release);
+            if let Ok(mut controls) = current.publisher.0.room.try_lock() {
+                settle_room(&current.publisher.0, &mut controls);
+            }
+        }
+    });
+}
+pub fn publish_room(room: Arc<RoomPresentation>) -> Result<(), String> {
+    room.validate()?;
+    SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        let Some(current) = session.as_mut() else {
+            return Ok(());
+        };
+        let changed = current
+            .snapshot
+            .room
+            .as_ref()
+            .is_none_or(|old| !Arc::ptr_eq(old, &room));
+        if changed {
+            current.snapshot.room = Some(room);
+            current.room_dirty = true;
+        }
+        if current.room_dirty {
+            current.publish_latest(true);
+        }
+        Ok(())
+    })
+}
+pub fn retry_room_publication() {
+    SESSION.with(|session| {
+        if let Some(current) = session.borrow_mut().as_mut() {
+            if current.room_dirty {
+                current.publish_latest(true);
+            }
+        }
+    });
 }
 
 /// Records an actual native presented/drained finite endpoint. Call only after
@@ -791,6 +1045,16 @@ impl Session {
         self.sync_pressed();
     }
     fn publish_latest(&mut self, force: bool) {
+        let room_published = if self.room_dirty {
+            if let Ok(mut controls) = self.publisher.0.room.try_lock() {
+                controls.presentation = self.snapshot.room.clone();
+                true
+            } else {
+                false
+            }
+        } else {
+            true
+        };
         if force
             || self
                 .last_publish
@@ -801,10 +1065,15 @@ impl Session {
                 *slot = Some(self.snapshot.clone());
                 self.last_publish = Some(Instant::now());
                 self.pause_dirty = false;
+                self.room_dirty &= !room_published;
             }
         }
     }
 }
+
+#[cfg(test)]
+#[path = "room_presentation_fixtures.rs"]
+mod room_presentation_fixtures;
 
 #[cfg(test)]
 mod fixtures {

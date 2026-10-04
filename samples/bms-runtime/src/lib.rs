@@ -245,6 +245,8 @@ pub mod replay_visual;
 pub mod room_opponent_hud;
 #[cfg(test)]
 mod room_opponent_hud_fixtures;
+/// Portable bounded room lobby actions and the selected cached score page.
+pub mod room_presentation;
 /// Retained bounded summaries for the common competition scoreboard.
 pub mod saved_opponent_hud;
 #[cfg(test)]
