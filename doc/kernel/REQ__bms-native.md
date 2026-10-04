@@ -1,5 +1,31 @@
 # Native Windows BMS sample composition
 
+## Native application room mode
+
+An explicit `--mp-room URL` selects multi-host WebTransport rooms independently
+of bilateral `--mp-webtransport` and raw QUIC host/join. It requires the existing
+`--mp-origin` and CA trust options, refuses mixed transport/role/host-credential
+options, and does not invent a host role: actual admission order determines who
+may Seal. Existing settings/profile fields must preserve this selection and
+replace the whole network-option family when changing transport.
+
+Both solo and local-cohort native apps must construct the same shared room
+network/competition owner and reuse their existing output-start, gameplay and
+cleanup paths. Interactive room mode requires an attached native GUI publisher;
+refuse a headless launch before endpoint/credential/output acquisition rather
+than waiting for unavailable lobby controls. WebTransport-disabled and WASM
+native routes refuse explicitly. Existing bilateral modes retain their protocol.
+
+Natural room finalization must be authorized at the actual common gameplay
+completion gates: finite presented/drained endpoint with committed input, or
+actual whole-song completion with native output evidence. Cancellation, a wall
+time limit and successful cleanup alone are not completion. This proof belongs
+to the shared native owner and is passed to the room backend; UI status and
+`Result::Ok` cannot substitute for it. One local host's actual ordered member
+prefix is published, then the existing coordinated drain/join machinery runs.
+No Windows/macOS/Linux-specific room protocol is introduced. Source routing
+still requires live UI/TLS/device and measured-performance acceptance.
+
 ## Shared native multi-host room network owner
 
 ### Native room competition and output-start adapter
@@ -21,8 +47,8 @@ with nonoverlapping controls and clipped cached score text. Membership and score
 page changes must not change local note/input field geometry. The competition
 owner services this bridge during lobby/start waiting, gameplay polling and
 joined finalization. UI score or bridge failure must not change local judgment or
-network protocol authority. App mode selection and actual solo/cohort callers
-remain required until they instantiate the room adapter.
+network protocol authority. Explicit application room selection routes solo and
+local-cohort preparation through the same native competition network backend.
 
 The game-owned native room adapter must implement `NativeStartAgreement` over
 the actual `NativeRoomNetwork` committed schedule and original elapsed clock.
@@ -42,8 +68,11 @@ final. Successful completion requires the common final/drain receipts and joined
 cleanup, while protocol and cleanup failures remain separately inspectable.
 The adapter reuses the network thread and common native output-start machinery.
 The native player bridge, lobby controls and selected-page HUD have source
-implementations. Platform app room-mode selection, actual solo/cohort room-owner
-instantiation and finite completion callers still require concrete integration.
+implementations. Application room-mode selection, actual solo/cohort room-owner
+instantiation and finite/whole-song completion gates now have shared source
+integration. Live lobby/output/network acceptance remains pending. Closed Results
+retains only the selected score page; browsing all final pages still requires an
+explicit retained-result owner.
 
 Native multi-host room networking must reuse `RoomPlayClient` and `RoomPlayIo`
 on one dedicated network thread, independent of Windows/macOS/Linux adapters.

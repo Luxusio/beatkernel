@@ -1048,6 +1048,24 @@ documented commands for later execution. Raw QUIC flags and WebTransport cannot
 be combined. Native networking uses the same worker and BKMP session across
 platforms. See the [native adapter contract](doc/changes/CHANGE__native-webtransport.md).
 
+For multi-host rooms (two to 64 hosts), the graphical native player instead
+selects the explicit room route:
+
+```sh
+cargo run -p beatkernel-bms-runtime --features webtransport -- player --chart path/to/chart.bms --mp-room https://localhost:9001/rooms/example --mp-origin http://localhost:8080 --mp-ca trusted-ca.pem
+```
+
+This is a command for later execution. Room mode requires the graphical lobby
+and refuses headless `play`; do not supply `--mp-role` or mixed transport flags.
+The first actually admitted participant may Seal, and each participant explicitly
+chooses Ready after membership freezes. Solo and local-cohort play use the same
+room owner and existing native output/gameplay paths. Only actual natural
+gameplay completion authorizes final publication and coordinated drain; stopping
+or reaching a wall-time limit only joins cleanup. Native settings preserve the
+room option and replace the whole transport family when changing modes. See the
+[room routing contract](doc/changes/CHANGE__native-room-app-routing.md).
+Live lobby, TLS/device execution and measured performance remain unverified.
+
 
 Browser saved-opponent competition uses the common replay judge and a bounded
 portable owner. The page selects local stored or imported recordings as Own/Other
