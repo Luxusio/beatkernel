@@ -123,6 +123,7 @@ fn run_cohort_interval(
             conflicting,
         },
         NativeCohortSession {
+            network: None,
             group: &mut f.group,
             states: &mut f.states,
             merger: &mut f.merger,

@@ -11,6 +11,9 @@ use crate::{
     local_players::PlayerId,
     local_runtime::{InputResult, PlayerReport, RuntimeGroup},
     native_end::NativeEnd,
+    native_group_competition::NativeGroupCompetition,
+    multiplayer_group::{MemberProgress, validate_members},
+    multiplayer::Progress,
     native_gameplay::{
         MAX_PENDING_INPUT_EVENTS, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
     },
@@ -23,9 +26,7 @@ use beatkernel::{
     telemetry::InputDeliveryTelemetry,
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Timestamp},
 };
-use beatkernel_platform::audio::presentation::discipline::{
-    DisciplineConfig, PresentationDiscipline,
-};
+use beatkernel_platform::audio::presentation::discipline::{DisciplineConfig, PresentationDiscipline};
 use std::{
     collections::VecDeque,
     path::{Path, PathBuf},
@@ -33,6 +34,7 @@ use std::{
 };
 pub struct NativeCohortSession<'a> {
     pub group: &'a mut RuntimeGroup,
+    pub network: Option<&'a mut NativeGroupCompetition>,
     pub states: &'a mut [PlayerState],
     pub merger: &'a mut InputMerger,
     pub bgm: &'a mut BgmFeeder,
@@ -81,12 +83,18 @@ fn process<D: NativeGameplayDevice>(
 ) -> NativeGameplayResult<()> {
     let at = schedule(device, session, config)?;
     match session.group.process_input(event, &ExplicitDomains, at) {
-        Ok(InputResult::Processed(reports)) => observe_reports(&reports, session.states),
+        Ok(InputResult::Processed(reports)) => {
+            observe_reports(&reports, session.states, session.network.as_deref_mut())
+        }
         Ok(InputResult::Ignored { device }) => {
             Err(format!("merged source {device:?} has no cohort owner").into())
         }
         Err(error) => {
-            if let Err(observation) = observe_reports(&error.completed_reports, session.states) {
+            if let Err(observation) = observe_reports(
+                &error.completed_reports,
+                session.states,
+                session.network.as_deref_mut(),
+            ) {
                 eprintln!("partial cohort observation: {observation}");
             }
             Err(error.into())
@@ -101,9 +109,13 @@ fn advance<D: NativeGameplayDevice>(
 ) -> NativeGameplayResult<()> {
     let audio_at = schedule(device, session, config)?;
     match session.group.advance_to(at, &ExplicitDomains, audio_at) {
-        Ok(reports) => observe_reports(&reports, session.states),
+        Ok(reports) => observe_reports(&reports, session.states, session.network.as_deref_mut()),
         Err(error) => {
-            if let Err(observation) = observe_reports(&error.completed_reports, session.states) {
+            if let Err(observation) = observe_reports(
+                &error.completed_reports,
+                session.states,
+                session.network.as_deref_mut(),
+            ) {
                 eprintln!("partial cohort deadline observation: {observation}");
             }
             Err(error.into())
@@ -129,6 +141,25 @@ pub struct PlayerState {
     pub completion: Option<SongCompletion>,
     pub score: ScoreSummary,
     pub last_song: Timestamp,
+}
+
+/// Snapshot every member's retained committed prefix without advancing gameplay.
+pub fn member_progress(states: &[PlayerState]) -> NativeGameplayResult<Vec<MemberProgress>> {
+    let members = states
+        .iter()
+        .map(|state| MemberProgress {
+            player: state.player,
+            progress: Progress {
+                song_ns: state.last_song.as_nanos(),
+                hits: state.score.hits,
+                misses: state.score.misses,
+                combo: state.score.combo,
+                max_combo: state.score.max_combo,
+            },
+        })
+        .collect::<Vec<_>>();
+    validate_members(None, &members)?;
+    Ok(members)
 }
 
 /// A candidate watermark is insufficient: every member requires the same
@@ -172,6 +203,7 @@ pub fn replay_path(base: &Path, player: PlayerId) -> NativeGameplayResult<PathBu
 fn observe_reports(
     reports: &[PlayerReport],
     states: &mut [PlayerState],
+    network: Option<&mut NativeGroupCompetition>,
 ) -> NativeGameplayResult<()> {
     let mut failures = Vec::new();
     for tagged in reports {
@@ -206,6 +238,12 @@ fn observe_reports(
                 "player{} committed partial report judge={:?}, audio={:?}",
                 tagged.player.0, tagged.report.judge_error, tagged.report.audio_failures
             );
+        }
+    }
+    if let Some(network) = network {
+        match member_progress(states).and_then(|members| network.observe(&members)) {
+            Ok(()) => {}
+            Err(error) => failures.push(format!("shared competition: {error}")),
         }
     }
     if let Err(error) = player::publish_local_reports(reports) {
@@ -856,6 +894,7 @@ mod fixtures {
             run_cohort(
                 &mut self.device,
                 NativeCohortSession {
+                    network: None,
                     group: &mut self.group,
                     states: &mut self.states,
                     merger: &mut self.merger,

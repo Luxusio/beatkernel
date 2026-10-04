@@ -9,6 +9,7 @@ use crate::{
     local_preparation::{PreparedLocalMembers, prepare_local_members},
     local_runtime::{MemberConfig, RuntimeGroup},
     native_cohort::{PlayerState, replay_path},
+    native_group_competition::NativeGroupCompetition,
     native_gameplay::NativeGameplayResult,
     native_judge::{NativeJudgeConfig, capture_limits, prepare_capture},
     replay_capture::LiveReplayCapture,
@@ -53,6 +54,7 @@ pub struct PreparedCohort {
     pub states: Vec<PlayerState>,
     pub save_paths: Vec<(PlayerId, Option<PathBuf>)>,
     pub reserved: Vec<VoiceId>,
+    pub network: Option<NativeGroupCompetition>,
 }
 /// Builds all pure per-member state before opponent loading can touch a file.
 pub fn prepare_cohort(
@@ -61,7 +63,7 @@ pub fn prepare_cohort(
     competition: &CompetitionOptions,
     config: &CohortPreparation<'_>,
 ) -> NativeGameplayResult<PreparedCohort> {
-    admit_cohort(assignments.len(), competition.network.is_some())?;
+    admit_cohort(assignments.len(), false)?;
     if config.host == config.output
         || config.start.as_nanos() < 0
         || !(0..=10_000_000_000).contains(&config.preroll)
@@ -159,10 +161,12 @@ pub fn prepare_cohort(
         });
         save_paths.push((player, path));
     }
+    let mut saved_options = competition.clone();
+    saved_options.network = None;
     for (state, member) in states.iter_mut().zip(&configs) {
         state.competition = LiveCompetition::prepare_for_at_with_chart_seed(
             state.player,
-            competition,
+            &saved_options,
             &prepared.source,
             &member.judge,
             config.host,
@@ -170,7 +174,22 @@ pub fn prepare_cohort(
             config.chart_seed,
         )?;
     }
+    let network = if competition.network.is_some() {
+        NativeGroupCompetition::prepare(
+            competition,
+            &prepared.source,
+            &configs,
+            config.host,
+            config.start,
+            config.chart_seed,
+            config.end,
+            config.preroll,
+        )?
+    } else {
+        None
+    };
     Ok(PreparedCohort {
+        network,
         configs,
         states,
         save_paths,

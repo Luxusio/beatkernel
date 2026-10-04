@@ -299,6 +299,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         .map(|(index, &(player, _))| (player, selected[index]))
         .collect();
     let PreparedCohort {
+        network: _,
         configs,
         mut states,
         save_paths,
@@ -413,6 +414,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             run_cohort(
                 &mut device,
                 NativeCohortSession {
+                    network: None,
                     group: &mut group,
                     states: &mut states,
                     merger: &mut merger,

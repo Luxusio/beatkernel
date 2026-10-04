@@ -425,9 +425,7 @@ fn validate_finite_modes(
     competition: &beatkernel_bms_runtime::competition_live::CompetitionOptions,
 ) -> Result<()> {
     options.playback_end()?;
-    if !options.local_inputs.is_empty() && competition.network.is_some() {
-        return Err("network competition currently supports one local participant only".into());
-    }
+    let _ = competition; // Network cohorts use the common committed-start owner.
     Ok(())
 }
 
@@ -454,7 +452,7 @@ pub(crate) fn run_args(args: &[String]) -> Result<()> {
         beatkernel_bms_runtime::competition_live::CompetitionOptions::extract(args)?;
     if args.is_empty() || args == ["--help"] {
         println!(
-            "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned, strictly after start, and supports solo network peers with the same section endpoint or offline local 2..64; it completes a finite prefix after native presentation and input drain, without forcing unfinished notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; network competition is not yet supported for local groups. Native float32 ALSA, no fallback. Physical timing Unknown."
+            "linux_bms --chart PATH (--evdev NODE | repeated --local-input NODE | repeated --local-player ID:PATH) --alsa ENDPOINT --rate HZ --channels N --period-frames N --buffer-frames N [--seconds N] --bind channelHEX:HIDusageHEX [--bind ...]\nOptions: --record-replay PATH --replay-max-records N --replay-max-bytes N --early-ns N --late-ns N --input-offset-ns N --chart-seed DECIMAL_U64 --start-ns N --end-ns N --preroll-ns N --bgm-lookahead-ns N --advance-lag-ns N --voices N --channel-policy exact|mono-stereo\nBounds: start unsigned0..9223372036854775807ns, BGM lookahead positive i64 ns, seconds 1..3600, preroll 0..10000000000 ns, advance lag 0..1000000000 ns, voices 1..4096. Defaults: chart seed0, replay disabled, max records 1000000, max bytes 67108864, BGM lookahead3000000000ns, windows 150000000 ns, offset 0 ns, preroll 3000000000 ns, advance lag 2000000 ns, voices 256, exact channels. Optional --end-ns is unsigned, strictly after start, and supports solo or local-cohort network peers with the same section endpoint; it completes a finite prefix after native presentation and input drain, without forcing unfinished notes. Missing --seconds plays the full song through terminal judging and reported native audio presentation; --seconds is a diagnostic loop cutoff after startup. Solo exact one-node bindings; repeated --local-input assigns sequential player IDs to 2..64 devices; repeated --local-player ID:PATH preserves unique positive u32 IDs. Do not mix local forms or --evdev. Exact paths retain colons after the first ID separator. Local cohorts share lane bindings and output. Local replay paths gain .p<ID>.bkr; The winit/wgpu graphical player uses these same native options/local panels; local groups use one shared QUIC/WebTransport connection and committed native start. Native float32 ALSA, no fallback. Physical timing Unknown."
         );
         return Ok(());
     }
@@ -493,9 +491,7 @@ mod native {
         transport::{Rate, Transport},
     };
     use beatkernel_bms_runtime::local_runtime::SoloRuntime as Runtime;
-    use beatkernel_bms_runtime::native_audio::{
-        NativeAudioConfig, PreparedNativeAudio, prepare_audio,
-    };
+    use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio, prepare_audio};
     use beatkernel_bms_runtime::{
         ChannelPolicy,
         native_chart::{NativeChartConfig, prepare_chart},
@@ -668,7 +664,7 @@ mod native {
         }
     }
     // The owner drains bounded batches; the audio callback never waits on input.
-    fn startup_input(
+    pub(super) fn startup_input(
         input: &mut EvdevDevice,
         before_origin: &mut u64,
         retained: Option<&mut VecDeque<PhysicalInputEvent>>,
@@ -1078,7 +1074,7 @@ mod fixtures {
         assert!(validate_args(&duplicate).is_err());
     }
     #[test]
-    fn finite_solo_network_is_admitted_while_local_groups_stay_offline() {
+    fn finite_solo_and_local_group_network_are_admitted() {
         let mut local = args();
         let index = local.iter().position(|flag| flag == "--evdev").unwrap();
         local.drain(index..index + 2);
@@ -1097,12 +1093,7 @@ mod fixtures {
         network.extend(["--end-ns".into(), "2000000".into()]);
         assert!(validate_args(&network).is_ok());
         local.extend(["--mp-host".into(), "127.0.0.1:39001".into()]);
-        assert!(
-            validate_args(&local)
-                .unwrap_err()
-                .to_string()
-                .contains("one local participant")
-        );
+        assert!(validate_args(&local).is_ok());
     }
 
     #[test]
