@@ -2,7 +2,7 @@ import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
 import { PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, renderedCursor } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
-import { validateSelections, validateOpponentSnapshot } from "./saved-opponents.mjs";
+import { validateSelections, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
 import { keyboardBindingWords, encodeKeyboardEvent, touchBindingWords, encodeTouchEvent, projectTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
 import { snapshotHidDevices, hidSetupFromProfile } from "./hid-profile.mjs";
 import { AudioCommandClient } from "./audio-command-client.mjs";
@@ -691,7 +691,11 @@ async function preparePlay(state, request) {
     state.network = multiplayerConfiguration(request.multiplayer, state.mode);
     const opponents = state.mode === "live" && request.opponents !== undefined
       ? validateSelections(request.opponents) : NO_OPPONENTS;
-    if (state.localPlan && (state.network || opponents.length)) throw new Error("Local gameplay cannot yet combine network or saved opponents.");
+    if (state.localPlan && state.network) throw new Error("Local gameplay cannot yet combine network opponents.");
+    validateOpponentTargets(opponents, state.localPlan ? state.localPlan.members.map(member => member.player) : null);
+    state.opponentSelections = opponents;
+    state.localOpponentErrors = new Map();
+    state.localOpponentNotified = new Set();
     let replayFile = null;
     let replaySize = 0;
     if (state.mode === "replay") {
@@ -796,9 +800,9 @@ async function preparePlay(state, request) {
       || typeof Game?.prototype?.input_hid_blob !== "function")) {
       throw new Error("The gameplay binding does not provide HID profile ownership.");
     }
-    if (opponents.length && (typeof BrowserGame?.prototype?.add_saved_opponent !== "function"
-      || typeof BrowserGame?.prototype?.saved_opponents !== "function"
-      || typeof BrowserGame?.prototype?.disable_saved_opponent_hud !== "function")) {
+    if (opponents.length && (typeof Game?.prototype?.add_saved_opponent !== "function"
+      || typeof Game?.prototype?.saved_opponents !== "function"
+      || typeof Game?.prototype?.disable_saved_opponent_hud !== "function")) {
       throw new Error("The gameplay binding does not provide retained saved comparison presentation.");
     }
     if (state.network && (typeof BrowserGame?.prototype?.update_peer_hud !== "function"
@@ -834,6 +838,35 @@ async function preparePlay(state, request) {
     }
     if (state.network) updatePeerHud(state);
     if (state.physicalInput) metadata.inputMode = request.inputMode;
+    if (hid !== null) {
+      state.game.configure_hid_devices(hid.deviceWords, hid.fieldWords, hid.axisParams);
+      state.hidSources = hid.sources;
+      metadata.hidSourceCount = hid.sources.size;
+      metadata.hidSources = [...hid.sources];
+    }
+    if (gamepad !== null) {
+      state.gamepadAdapter = gamepadAdapter;
+      metadata.gamepadSources = state.localPlan && !state.localPlan.members.some(member => member.source === null)
+        ? gamepad.sources.filter(source => state.localPlan.members.some(member => member.source === source)) : gamepad.sources;
+    }
+    const output = replayOutputFromMetadata(startNs, state.game.end_ns, state.game.playback_end_frame, request.rate);
+    if (state.mode === "live" && output.endNs !== requestedEnd) throw new Error("Actual live section end differs from its request.");
+    if (output.endFrame !== undefined) {
+      metadata.endNs = output.endNs;
+      metadata.endFrame = output.endFrame;
+    }
+    for (const opponent of opponents) {
+      const bytes = await opponent.file.arrayBuffer();
+      // A stopped owner may have freed its game during this unabortable read.
+      if (failed || play !== state) return;
+      if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== opponent.file.size) throw new Error("Opponent recording returned an invalid buffer or changed size.");
+      const expected = state.localPlan ? state.opponentSelections.slice(0, state.opponentCount).filter(entry => entry.player === opponent.player).length : state.opponentCount;
+      const index = state.localPlan
+        ? state.game.add_saved_opponent(opponent.player, new Uint8Array(bytes), opponent.own, opponent.label)
+        : state.game.add_saved_opponent(new Uint8Array(bytes), opponent.own, opponent.label);
+      if (index !== expected) throw new Error("Actual saved opponent admission count changed.");
+      state.opponentCount++;
+    }
     if (state.touchInput) {
       const width = state.game.touch_width;
       const height = state.game.touch_height;
@@ -861,32 +894,6 @@ async function preparePlay(state, request) {
       }
       state.touchWidth = width;
       state.touchHeight = height;
-    }
-    if (hid !== null) {
-      state.game.configure_hid_devices(hid.deviceWords, hid.fieldWords, hid.axisParams);
-      state.hidSources = hid.sources;
-      metadata.hidSourceCount = hid.sources.size;
-      metadata.hidSources = [...hid.sources];
-    }
-    if (gamepad !== null) {
-      state.gamepadAdapter = gamepadAdapter;
-      metadata.gamepadSources = state.localPlan && !state.localPlan.members.some(member => member.source === null)
-        ? gamepad.sources.filter(source => state.localPlan.members.some(member => member.source === source)) : gamepad.sources;
-    }
-    const output = replayOutputFromMetadata(startNs, state.game.end_ns, state.game.playback_end_frame, request.rate);
-    if (state.mode === "live" && output.endNs !== requestedEnd) throw new Error("Actual live section end differs from its request.");
-    if (output.endFrame !== undefined) {
-      metadata.endNs = output.endNs;
-      metadata.endFrame = output.endFrame;
-    }
-    for (const opponent of opponents) {
-      const bytes = await opponent.file.arrayBuffer();
-      // A stopped owner may have freed its game during this unabortable read.
-      if (failed || play !== state) return;
-      if (!(bytes instanceof ArrayBuffer) || bytes.byteLength !== opponent.file.size) throw new Error("Opponent recording returned an invalid buffer or changed size.");
-      const index = state.game.add_saved_opponent(new Uint8Array(bytes), opponent.own, opponent.label);
-      if (index !== state.opponentCount) throw new Error("Actual saved opponent admission count changed.");
-      state.opponentCount++;
     }
     if (state.mode === "replay") {
       const recordedUntilNs = state.game.recorded_until_ns ?? null;
@@ -1118,9 +1125,27 @@ function disableOpponents(state, error) {
   if (state.opponentsFailed) return state.opponentError;
   state.opponentsFailed = true;
   state.opponentError = message(error) || "Saved comparison failed.";
-  try { state.game.disable_saved_opponent_hud(); }
+  try {
+    if (state.localPlan) for (const member of state.localPlan.members) state.game.disable_saved_opponent_hud(member.player);
+    else state.game.disable_saved_opponent_hud();
+  }
   catch (cause) { state.opponentError = message(`${state.opponentError}; disable saved HUD: ${message(cause)}`); }
   return state.opponentError;
+}
+
+function readLocalOpponents(state) {
+  const groups = validateLocalOpponentSnapshot(state.game.saved_opponents(), state.localPlan.members.map(member => member.player), state.opponentSelections);
+  return groups.map(group => {
+    const prior = state.localOpponentErrors.get(group.player);
+    if (prior) return { player: group.player, opponents: null, error: prior };
+    if (group.error !== null) {
+      state.localOpponentErrors.set(group.player, group.error);
+      try { state.game.disable_saved_opponent_hud(group.player); }
+      catch (error) { state.localOpponentErrors.set(group.player, message(error)); }
+      return { player: group.player, opponents: null, error: state.localOpponentErrors.get(group.player) };
+    }
+    return group;
+  });
 }
 
 function finalOpponents(state) {
@@ -1128,6 +1153,7 @@ function finalOpponents(state) {
   if (state.opponentsFailed) return { opponents: null, error: state.opponentError };
   try {
     // Read once before stop/free. The binding uses only the actual local frontier.
+    if (state.localPlan) return { localOpponents: readLocalOpponents(state), opponents: null, error: null };
     return { opponents: validateOpponentSnapshot(state.game.saved_opponents(), state.opponentCount), error: null };
   } catch (error) {
     return { opponents: null, error: disableOpponents(state, error) };
@@ -1143,7 +1169,13 @@ function publishOpponents(state) {
     if (state.lastOpponents !== null && now - state.lastOpponents < PROGRESS_INTERVAL_NS) return;
     state.lastOpponents = now;
     // The getter refreshes the retained Rust HUD. Normal counters stay here.
-    validateOpponentSnapshot(state.game.saved_opponents(), state.opponentCount);
+    if (state.localPlan) {
+      const groups = readLocalOpponents(state);
+      for (const group of groups) if (group.error !== null && !state.localOpponentNotified.has(group.player)) {
+        state.localOpponentNotified.add(group.player);
+        report("play-opponents", { playId: state.id, player: group.player, opponents: null, error: group.error });
+      }
+    } else validateOpponentSnapshot(state.game.saved_opponents(), state.opponentCount);
   } catch (error) {
     report("play-opponents", { playId: state.id, opponents: null, error: disableOpponents(state, error) });
   }

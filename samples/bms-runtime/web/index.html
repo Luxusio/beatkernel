@@ -77,7 +77,7 @@
           <label>Visible players <select id="local-page" disabled><option value="0">Player 1</option></select></label></div>
         <div id="local-sources" aria-label="Local player source assignments"></div>
         <p id="local-status" class="hint" role="status" aria-live="polite">One player uses inputs automatically. No source selection is needed.</p>
-        <p class="hint">For two to 64 players, discover inputs and assign a distinct acquired source to each player. Keyboard and touch each count as one source. HID and Gamepad profiles must cover each assigned player's chart lanes. Four players appear per page; a page with active touch routing stays fixed. Local play currently excludes network and saved opponents. Sources are released after play; discover again for another local session.</p>
+        <p class="hint">For two to 64 players, discover inputs and assign a distinct acquired source to each player. Keyboard and touch each count as one source. HID and Gamepad profiles must cover each assigned player's chart lanes. Four players appear per page; a page with active touch routing stays fixed. Assign saved opponents to their comparison player in the selected list. Local network play remains unavailable. Sources are released after play; discover again for another local session.</p>
       </details>
       <p><button id="play" type="button" disabled>Play live</button> <button id="stop" type="button" disabled>Stop</button></p>
       <div class="replay-controls"><label><input id="multiplayer" type="checkbox" disabled> Multiplayer live play</label>
@@ -104,7 +104,7 @@
         <label>Opponent label <input id="opponents-label" type="text" maxlength="256" placeholder="Recording filename" disabled></label>
         <button id="opponents-add" type="button" disabled>Add current replay as opponent</button>
         <button id="opponents-clear" type="button" disabled>Clear opponents</button></div>
-      <p class="hint">Compare up to eight saved recordings during live play (64 MiB total). Select Own or Other and an optional label before adding. These labels are not verified identities. Replay playback ignores this list; saved prefixes stop where their recording ends.</p>
+      <p class="hint">Compare up to eight saved recordings during live play (64 MiB total). Select Own or Other and an optional label before adding. For local play, choose a target player for each selected recording; clear targets before solo play. These labels are not verified identities. Replay playback ignores this list; saved prefixes stop where their recording ends.</p>
       <ul id="opponents-list" class="opponent-list" aria-label="Selected saved opponents"></ul>
       <p id="opponents-status" class="hint" role="status" aria-live="polite">No saved opponents selected.</p>
       <ul id="opponents-results" class="opponent-list" aria-label="Saved recording comparison results"></ul>

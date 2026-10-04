@@ -20,7 +20,9 @@ function descriptor(value) {
   if (!value || !(value.file instanceof File) || typeof value.own !== "boolean") throw new TypeError("An opponent needs an actual File and explicit Own/Other choice.");
   const size = value.file.size;
   if (!Number.isSafeInteger(size) || size < 1 || size > OPPONENT_LIMITS.bytes) throw new RangeError("Opponent recording must contain 1 byte to 64 MiB.");
-  return Object.freeze({ file: value.file,
+  const player = value.player ?? null;
+  if (player !== null && (!Number.isInteger(player) || player < 1 || player > 0xffffffff)) throw new TypeError("Invalid saved opponent player.");
+  return Object.freeze({ file: value.file, ...(player === null ? {} : { player }),
     sourceKey: text(value.sourceKey, OPPONENT_LIMITS.sourceKeyBytes, "source key"),
     own: value.own, label: text(value.label, OPPONENT_LIMITS.labelBytes, "label") });
 }
@@ -56,6 +58,12 @@ export class SavedOpponentSelection {
     this.#entries = Object.freeze(this.#entries.filter((_, position) => position !== index));
     return true;
   }
+  setPlayer(sourceKey, player) {
+    const index = this.#entries.findIndex(entry => entry.sourceKey === sourceKey);
+    if (index < 0) throw new Error("Selected saved opponent is no longer available.");
+    const next = this.#entries.map((entry, position) => position === index ? { ...entry, player } : entry);
+    this.#entries = validateSelections(next);
+  }
   clear() { this.#entries = Object.freeze([]); }
   snapshot() { return Object.freeze(this.#entries.slice()); }
 }
@@ -88,5 +96,44 @@ export function validateOpponentSnapshot(value, expectedCount) {
     return Object.freeze({ kind: row.kind, label: text(row.label, OPPONENT_LIMITS.labelBytes, "label"),
       songNs: row.songNs, recordedUntilNs: row.recordedUntilNs,
       hits: row.hits, misses: row.misses, combo: row.combo, maxCombo: row.maxCombo });
+  }));
+}
+
+export function validateOpponentTargets(selections, players = null) {
+  if (!Array.isArray(selections) || selections.length > OPPONENT_LIMITS.count
+    || (players !== null && (!Array.isArray(players) || players.length < 1 || players.length > 64
+      || Array.from(players).some(player => !Number.isInteger(player) || player < 1 || player > 0xffffffff)
+      || new Set(players).size !== players.length))) throw new Error("Invalid saved comparison roster or selections.");
+  for (const entry of selections) {
+    if (!entry || (players === null ? entry.player != null : !players.includes(entry.player))) {
+      throw new Error("Assign each saved opponent to a current local player, or clear its target for solo play.");
+    }
+  }
+}
+
+export function validateLocalOpponentSnapshot(value, players, selections) {
+  validateOpponentTargets(selections, players);
+  if (!Array.isArray(value) || value.length !== players.length
+    || Array.from(value).some((row, index) => !row || row.player !== players[index])) {
+    throw new Error("Saved opponent member ownership changed.");
+  }
+  return Object.freeze(Array.from(value, row => {
+    const selected = selections.filter(entry => entry.player === row.player);
+    const count = selected.length;
+    try {
+      if (row.error !== null) {
+        if (typeof row.error !== "string" || row.error.length < 1 || row.error.length > 4096 || row.opponents !== null) throw new Error("Invalid member comparison failure.");
+        return Object.freeze({ player: row.player, opponents: null, error: row.error });
+      }
+      const opponents = count === 0
+        ? Array.isArray(row.opponents) && row.opponents.length === 0 ? Object.freeze([]) : null
+        : validateOpponentSnapshot(row.opponents, count);
+      if (opponents === null) throw new Error("Unexpected member saved opponents.");
+      if (opponents.some((opponent, index) => opponent.label !== selected[index].label
+        || opponent.kind !== (selected[index].own ? "own" : "other"))) throw new Error("Member saved recording selection changed.");
+      return Object.freeze({ player: row.player, opponents, error: null });
+    } catch (error) {
+      return Object.freeze({ player: row.player, opponents: null, error: String(error.message).slice(0, 4096) });
+    }
   }));
 }

@@ -5,7 +5,7 @@ import { HidInputOwner } from "./hid-input.mjs";
 import { GamepadInputOwner } from "./gamepad-input.mjs";
 import { LocalRoster, validateLocalPrepared, localReplayReceipt } from "./local-play-host.mjs";
 import { snapshotHidDevices } from "./hid-profile.mjs";
-import { SavedOpponentSelection, opponentLabel, validateOpponentSnapshot } from "./saved-opponents.mjs";
+import { SavedOpponentSelection, opponentLabel, validateOpponentSnapshot, validateOpponentTargets, validateLocalOpponentSnapshot } from "./saved-opponents.mjs";
 import { KEY_BINDINGS, KEY_CHOICES, PLAY_PCM_SAMPLES, snapshotBindings, bindingsFor, timingFromMilliseconds, audioOutputFromFields, audioLimitsFromFields, sectionFromSeconds, validateStart, replayOutputFromMetadata, millisecondsToNanos, startProjection, committedStartProjection } from "./play-model.mjs";
 
 const byId = id => document.getElementById(id);
@@ -816,12 +816,17 @@ async function changeLocalPage() {
 async function play(mode = "live") {
   if (!initialized || !hasPreview || !audioModule || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || localDiscovery || localCleanup) return;
   if (mode === "replay" && selectedReplay === null) return;
+  if (mode === "live" && localRoster.players.length === 1) {
+    try { validateOpponentTargets(opponents.snapshot()); }
+    catch (error) { status(String(error.message).slice(0, 4096), true); return; }
+  }
   let retained = null;
   let localPlan = null;
   let releasedSources = null;
   if (mode === "live" && localRoster.players.length > 1) {
     try {
-      if (ui.multiplayer.checked || opponents.size) throw new Error("Local players currently cannot combine network or saved opponents.");
+      if (ui.multiplayer.checked) throw new Error("Local players currently cannot combine network opponents.");
+      validateOpponentTargets(opponents.snapshot(), localRoster.players);
       retained = localSetup;
       if (!retained || retained.phase !== "ready" || retained.owner !== owner) throw new Error("Discover and assign local input sources before playing.");
       if (retained.touchInput !== (ui["touch-input"].checked === true)
@@ -1003,6 +1008,7 @@ async function play(mode = "live") {
     const opponentCount = prepared.opponentCount === undefined ? 0 : prepared.opponentCount;
     if (!Number.isInteger(opponentCount) || opponentCount !== (session.opponentSelection?.length ?? 0)) throw new Error("Prepared saved opponent count changed.");
     session.opponentCount = opponentCount;
+    session.opponentTargets = session.opponentSelection ?? [];
     session.opponentSelection = null;
     ui.title.textContent = prepared.title || ui.chart.value;
     ui.details.textContent = `${prepared.artist || "Unknown artist"} · ${prepared.notes} notes · ${prepared.samples} sounds · ${session.audio.sampleRate} Hz output · start ${seconds(preparedStart.toString())} s`
@@ -1610,7 +1616,25 @@ function showOpponentSelection() {
       controls();
     });
     opponentButtons.push(button);
-    row.append(label, button);
+    const target = document.createElement("select");
+    target.id = `opponent-player-${entry.sourceKey}`;
+    target.setAttribute("aria-label", `Comparison player for ${entry.label}`);
+    target.append(new Option("Solo / choose local player", ""));
+    if (localRoster.players.length > 1) for (const player of localRoster.players) target.append(new Option(`Player ${player}`, String(player)));
+    if (entry.player != null && !localRoster.players.includes(entry.player)) target.append(new Option(`Removed player ${entry.player}`, String(entry.player)));
+    target.value = entry.player == null ? "" : String(entry.player);
+    target.addEventListener("change", () => {
+      if (activePlay || recordsOperation || importing || preparing || hidPermission || hidOwnershipFailed) return;
+      try {
+        const player = target.value === "" ? null : Number(target.value);
+        if (player !== null && (localRoster.players.length === 1 || !localRoster.players.includes(player))) throw new Error("Choose a current local player.");
+        opponents.setPlayer(entry.sourceKey, player);
+        showOpponentSelection();
+        controls();
+      } catch (error) { target.value = entry.player == null ? "" : String(entry.player); opponentStatus(error.message, true); }
+    });
+    opponentButtons.push(target);
+    row.append(label, target, button);
     rows.append(row);
   }
   ui["opponents-list"].replaceChildren(rows);
@@ -1621,6 +1645,11 @@ function receiveOpponents(session, data) {
   // Actual periodic counters are rendered by the Worker-owned common HUD.
   if (data.error === null) return;
   try {
+    if (session.localPlan && data.player !== undefined) {
+      if (!session.localPlan.players.includes(data.player) || typeof data.error !== "string" || data.error.length < 1 || data.error.length > 4096 || data.opponents !== null) throw new Error("Invalid member comparison failure message.");
+      opponentStatus(`Player ${data.player} comparisons stopped: ${data.error} Other members continue.`, true);
+      return;
+    }
     if (typeof data.error !== "string" || data.error.length === 0 || data.error.length > 4096 || data.opponents !== null) throw new Error("Invalid saved comparison failure message.");
     throw new Error(data.error);
   } catch (error) {
@@ -1638,6 +1667,22 @@ function finalOpponentResults(session, result) {
     if (result.error !== null) {
       if (typeof result.error !== "string" || result.error.length === 0 || result.error.length > 4096 || result.opponents !== null) throw new Error("Invalid final saved comparison failure.");
       throw new Error(result.error);
+    }
+    if (session.localPlan) {
+      const groups = validateLocalOpponentSnapshot(result.localOpponents, session.localPlan.players, session.opponentTargets ?? session.opponentSelection ?? []);
+      const rows = document.createDocumentFragment();
+      for (const group of groups) {
+        if (group.error !== null) {
+          const item = document.createElement("li"); item.textContent = `Player ${group.player} · Comparison unavailable: ${group.error}`; rows.append(item);
+        } else for (const row of group.opponents) {
+          const item = document.createElement("li");
+          item.textContent = `Player ${group.player} · ${row.kind === "own" ? "Own" : "Other"} · ${row.label} · Hits ${row.hits} · Misses ${row.misses} · Combo ${row.combo} · Best ${row.maxCombo}`;
+          rows.append(item);
+        }
+      }
+      ui["opponents-results"].replaceChildren(rows);
+      opponentStatus("Final saved comparison prefixes by local player. Labels are not verified identities.");
+      return;
     }
     const rows = validateOpponentSnapshot(result.opponents, session.opponentCount);
     if (opponentResultRows.length !== rows.length) {
