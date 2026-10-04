@@ -1,5 +1,6 @@
 //! Bounded physical bindings and canonical input decoding for browser owners.
 //! Acquisition, permissions and device report interpretation belong to adapters.
+use crate::local_players::{PlayerId, ResolvedInputPlan};
 use beatkernel::{
     input::{
         BackendId, Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId,
@@ -59,6 +60,72 @@ impl PhysicalInputSetup {
             }
         }
         Ok(Self { bindings, limits })
+    }
+}
+
+/// Complete local source ownership and per-member physical maps in plan order.
+/// The aggregate row budget applies across all members, not once per member.
+#[derive(Debug)]
+pub struct LocalPhysicalInputSetup {
+    pub plan: ResolvedInputPlan,
+    pub bindings: Vec<BindingMap>,
+    pub limits: CodecLimits,
+}
+
+impl LocalPhysicalInputSetup {
+    /// Eight words per binding: stable player ID followed by the existing seven
+    /// physical identity words. Exact member routes require matching selectors.
+    pub fn new(
+        plan_words: &[u32],
+        binding_words: &[u32],
+        lanes: &[u8],
+        max_encoded: u32,
+        max_payload: u32,
+    ) -> Result<Self, String> {
+        let plan = ResolvedInputPlan::from_words(plan_words)?;
+        if binding_words.len() > 256 * 8 || binding_words.len() % 8 != 0 {
+            return Err(
+                "local physical bindings require at most 256 complete eight-word rows".into(),
+            );
+        }
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(plan.members().len())
+            .map_err(|_| "local binding row allocation failed")?;
+        rows.resize_with(plan.members().len(), Vec::new);
+        for row in binding_words.chunks_exact(8) {
+            let index = plan
+                .members()
+                .iter()
+                .position(|&(player, _)| player == PlayerId(row[0]))
+                .ok_or("physical binding references an unknown local player")?;
+            let binding = decode_binding(&row[1..])?;
+            if let Some(source) = plan.members()[index].1 {
+                if binding.device != DeviceSelector::Exact(source) {
+                    return Err(
+                        "assigned player's physical bindings must select its exact source".into(),
+                    );
+                }
+            }
+            rows[index]
+                .try_reserve(7)
+                .map_err(|_| "local binding row allocation failed")?;
+            rows[index].extend_from_slice(&row[1..]);
+        }
+        let mut bindings = Vec::new();
+        bindings
+            .try_reserve_exact(rows.len())
+            .map_err(|_| "local binding map allocation failed")?;
+        let mut limits = None;
+        for words in rows {
+            let input = PhysicalInputSetup::new(&words, lanes, max_encoded, max_payload)?;
+            bindings.push(input.bindings);
+            limits = Some(input.limits);
+        }
+        Ok(Self {
+            plan,
+            bindings,
+            limits: limits.expect("resolved plans contain at least one member"),
+        })
     }
 }
 

@@ -1868,6 +1868,19 @@ impl StepLocalGameplay {
             .map_err(Into::into)
     }
 
+    /// Validate genuine output evidence before a browser adapter publishes BGM
+    /// commands. Admission and member completion remain the shared owner's job.
+    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
+    pub(crate) fn validate_completion_evidence(
+        &mut self,
+        rendered: Option<RenderReport>,
+        presented: Option<ClockPoint>,
+    ) -> Result<Option<ClockPoint>, StepLocalGameplayError> {
+        self.control
+            .validate_completion_evidence(rendered, presented)
+            .map_err(Into::into)
+    }
+
     pub fn fail(&mut self) {
         self.control.fail();
     }
