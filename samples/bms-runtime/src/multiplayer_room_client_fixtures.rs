@@ -116,7 +116,7 @@ fn literal_join_owned_inputs_and_exact_complete_receipts_preserve_full_width_ids
     assert_eq!(
         join.bytes,
         [
-            b'B', b'K', b'M', b'R', 1, 0, 1, 16, 0, 0, 0, 3, 0, 0, 0, 0, 255, 17, 2, 255, 255, 255,
+            b'B', b'K', b'M', b'R', 2, 0, 1, 16, 0, 0, 0, 3, 0, 0, 0, 0, 255, 17, 2, 255, 255, 255,
             255, 4, 3, 2, 1,
         ]
     );
@@ -792,4 +792,64 @@ fn eof_write_zero_transport_and_protocol_failures_fence_without_late_receipt_or_
     assert!(driver.step().is_err());
     assert_eq!(script.borrow().read_calls, reads);
     assert_eq!(retained(driver.session()), before);
+}
+
+#[test]
+fn admission_only_client_refuses_clock_start_controls_without_changing_prepared_ownership() {
+    use crate::multiplayer_start::StartMessage;
+    let mut session = admitted(false);
+    session
+        .receive(snapshot(
+            vec![host(OTHER), host(SELF)],
+            GroupRoomPhase::Frozen,
+        ))
+        .unwrap();
+    session.request_ready().unwrap();
+    completed_write(&mut session, RoomMessage::Ready);
+    session
+        .receive(snapshot(
+            vec![
+                GroupRoomMember {
+                    prepared: true,
+                    ..host(OTHER)
+                },
+                GroupRoomMember {
+                    prepared: true,
+                    ..host(SELF)
+                },
+            ],
+            GroupRoomPhase::Prepared,
+        ))
+        .unwrap();
+    let retained_snapshot = retained(&session);
+    for message in [
+        RoomMessage::ClockPing {
+            sequence: u64::MAX,
+            sent_ns: 0,
+        },
+        RoomMessage::ClockPong {
+            sequence: u64::MAX,
+            sent_ns: i64::MAX,
+            received_ns: 0,
+            replied_ns: 0,
+        },
+        RoomMessage::Start(StartMessage::ClockReady(0)),
+        RoomMessage::Start(StartMessage::Propose(i64::MAX)),
+        RoomMessage::Start(StartMessage::Accept(i64::MAX)),
+        RoomMessage::Start(StartMessage::Commit(i64::MAX)),
+    ] {
+        let bytes = encode_message(&message).unwrap();
+        assert_eq!(u16::from_le_bytes(bytes[4..6].try_into().unwrap()), 2);
+        assert_eq!(
+            session.receive(decode_message(&bytes).unwrap()),
+            Err(RoomClientError::InvalidState)
+        );
+        assert_eq!(session.participant(), Some(SELF));
+        assert_eq!(retained(&session), retained_snapshot);
+        assert_eq!(session.poll_write().unwrap(), None);
+        assert!(!session.leave_written());
+    }
+    session.request_leave().unwrap();
+    assert_eq!(completed_write(&mut session, RoomMessage::Leave), 3);
+    assert!(session.leave_written());
 }

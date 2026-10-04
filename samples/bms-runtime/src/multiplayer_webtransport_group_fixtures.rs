@@ -324,6 +324,20 @@ fn stream_bound_requests_reject_forged_messages_and_release_only_the_exact_curre
         },
         RoomMessage::Seal,
         RoomMessage::Ready,
+        RoomMessage::ClockPing {
+            sequence: 1,
+            sent_ns: 0,
+        },
+        RoomMessage::ClockPong {
+            sequence: 1,
+            sent_ns: 100,
+            received_ns: 0,
+            replied_ns: 0,
+        },
+        RoomMessage::Start(crate::multiplayer_start::StartMessage::ClockReady(0)),
+        RoomMessage::Start(crate::multiplayer_start::StartMessage::Propose(100)),
+        RoomMessage::Start(crate::multiplayer_start::StartMessage::Accept(100)),
+        RoomMessage::Start(crate::multiplayer_start::StartMessage::Commit(100)),
     ];
     for message in forbidden {
         let mut registry = registry(3);
