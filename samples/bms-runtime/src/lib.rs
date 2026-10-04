@@ -249,6 +249,10 @@ pub mod room_opponent_hud;
 mod room_opponent_hud_fixtures;
 /// Portable room lobby actions, cached score pages and immutable joined Results.
 pub mod room_presentation;
+/// Portable bounded reconstruction of immutable joined room Results.
+pub mod room_results_builder;
+#[cfg(test)]
+mod room_results_builder_fixtures;
 /// Retained bounded summaries for the common competition scoreboard.
 pub mod saved_opponent_hud;
 #[cfg(test)]

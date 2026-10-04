@@ -220,6 +220,24 @@ impl BrowserCanvas {
         self.renderer.render(&self.scene)
     }
 
+    pub(crate) fn present_room_results(
+        &mut self,
+        page: &crate::room_presentation::RoomPresentation,
+    ) -> Result<(), String> {
+        if self.renderer.needs_surface_recreation() {
+            let surface = self
+                .instance
+                .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(self.canvas.clone()))
+                .map_err(|error| format!("recreate browser canvas surface: {error}"))?;
+            self.renderer.replace_surface(surface)?;
+        }
+        self.backgrounds
+            .sync_presentations(None, &[], &mut self.renderer)?;
+        self.scene.clear();
+        organisms::room_presentation_footer(&mut self.scene, page)?;
+        self.renderer.render(&self.scene)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn present(
         &mut self,

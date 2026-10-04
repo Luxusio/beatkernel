@@ -495,7 +495,6 @@ impl BrowserLocalGame {
     /// Freeze actual Prepared host/player metadata without changing any field
     /// or touch geometry. Rows are [host low, host high, count, players...].
     pub fn configure_room_hud(&mut self, own: u64, words: Vec<u32>) -> Result<(), JsValue> {
-        use crate::multiplayer_group_rooms::GroupRoomMember;
         use crate::multiplayer_rooms::ParticipantId;
         if self.room_hud.is_some()
             || self.room_hud_disabled
@@ -507,36 +506,7 @@ impl BrowserLocalGame {
                 "room HUD requires pristine bounded Prepared membership",
             ));
         }
-        let mut members = Vec::new();
-        members
-            .try_reserve_exact(64)
-            .map_err(|_| error("room HUD roster allocation failed"))?;
-        let mut offset = 0;
-        while offset < words.len() {
-            let header = words
-                .get(offset..offset + 3)
-                .ok_or_else(|| error("incomplete room HUD host"))?;
-            let participant = ParticipantId(u64::from(header[0]) | (u64::from(header[1]) << 32));
-            let count = header[2] as usize;
-            if !(1..=64).contains(&count) || members.len() == 64 {
-                return Err(error("room HUD roster exceeds bounds"));
-            }
-            offset += 3;
-            let source = words
-                .get(offset..offset + count)
-                .ok_or_else(|| error("incomplete room HUD players"))?;
-            let mut players = Vec::new();
-            players
-                .try_reserve_exact(count)
-                .map_err(|_| error("room HUD player allocation failed"))?;
-            players.extend(source.iter().map(|&player| PlayerId(player)));
-            members.push(GroupRoomMember {
-                id: participant,
-                players,
-                prepared: true,
-            });
-            offset += count;
-        }
+        let members = crate::room_results_builder::decode_room_roster(&words).map_err(error)?;
         let own_member = members
             .iter()
             .find(|member| member.id == ParticipantId(own))

@@ -21,6 +21,69 @@ use crate::{
 
 const LOOKAHEAD_NS: i64 = 2_000_000_000;
 
+/// Joined presentation only. It owns no game, samples, transport or clocks.
+#[wasm_bindgen]
+pub struct BrowserRoomResults {
+    builder: crate::room_results_builder::RoomResultsBuilder,
+}
+#[wasm_bindgen]
+impl BrowserRoomResults {
+    #[wasm_bindgen(constructor)]
+    pub fn new(own: u64, words: Vec<u32>) -> Result<Self, JsValue> {
+        Ok(Self {
+            builder: crate::room_results_builder::RoomResultsBuilder::new(
+                crate::multiplayer_rooms::ParticipantId(own),
+                &words,
+            )
+            .map_err(js_error)?,
+        })
+    }
+    pub fn update(
+        &mut self,
+        participant: u64,
+        sequence: u64,
+        final_prefix: bool,
+        words: Vec<u32>,
+    ) -> Result<(), JsValue> {
+        self.builder
+            .update(
+                crate::multiplayer_rooms::ParticipantId(participant),
+                sequence,
+                final_prefix,
+                &words,
+            )
+            .map_err(js_error)
+    }
+    pub fn freeze(
+        &mut self,
+        page: u32,
+        cancelled: bool,
+        error: Option<String>,
+        failed: bool,
+    ) -> Result<(), JsValue> {
+        self.builder
+            .freeze(page as usize, cancelled, error, failed)
+            .map_err(js_error)
+    }
+    pub fn set_page(&mut self, page: u32) -> Result<(), JsValue> {
+        self.builder.set_page(page as usize).map_err(js_error)
+    }
+    #[wasm_bindgen(getter)]
+    pub fn page(&self) -> u32 {
+        self.builder
+            .presentation()
+            .map_or(0, |page| page.page as u32)
+    }
+    #[wasm_bindgen(getter)]
+    pub fn pages(&self) -> u32 {
+        self.builder.pages() as u32
+    }
+    #[wasm_bindgen(getter)]
+    pub fn failed(&self) -> bool {
+        self.builder.failed()
+    }
+}
+
 fn js_error(error: impl std::fmt::Display) -> JsValue {
     js_sys::Error::new(&error.to_string()).into()
 }
@@ -350,7 +413,15 @@ impl BrowserView {
             .map_err(js_error)
     }
 
+    pub fn draw_room_results(&mut self, results: &BrowserRoomResults) -> Result<(), JsValue> {
+        let page = results
+            .builder
+            .presentation()
+            .ok_or_else(|| js_error("room Results are not frozen"))?;
+        self.canvas.present_room_results(page).map_err(js_error)
+    }
+
     pub fn needs_redraw(&self) -> bool {
-        self.current.is_some() && self.canvas.needs_redraw()
+        self.canvas.needs_redraw()
     }
 }
