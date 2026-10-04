@@ -61,7 +61,7 @@ enum Request {
     Leave,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct AcceptedRoom {
     members: Vec<GroupRoomMember>,
     phase: GroupRoomPhase,
@@ -78,7 +78,7 @@ fn copy_slice<T: Copy>(values: &[T]) -> Result<Vec<T>, RoomClientError> {
 
 /// One local admission identity, one queued or in-flight request, and the latest
 /// accepted snapshot. Rejected calls preserve accepted state and write IDs.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomClientSession {
     identity: Vec<u8>,
     players: Vec<PlayerId>,

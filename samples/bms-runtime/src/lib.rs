@@ -139,6 +139,10 @@ pub mod multiplayer_room_clock;
 mod multiplayer_room_clock_fixtures;
 #[cfg(test)]
 mod multiplayer_room_fixtures;
+/// Common client composition from room admission through committed start.
+pub mod multiplayer_room_play;
+#[cfg(test)]
+mod multiplayer_room_play_fixtures;
 /// Shared prepared multi-host software-start coordination.
 pub mod multiplayer_room_start;
 #[cfg(test)]
