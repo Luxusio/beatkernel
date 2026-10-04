@@ -55,6 +55,36 @@ This shared bridge is a prerequisite for browser local play. It does not make
 the current solo browser owner, device-assignment UI or multi-field rendering
 complete. Actual browser/device/runtime acceptance remains deferred.
 
+### Common prepared members
+
+Prepare members from the actual PreparedBms, resolved source plan, one supplied
+BindingMap per member in retained plan order, an explicit JudgeProfile and
+BmsInputMode. The common builder owns no files, native handles, permissions or
+settings hosts. It uses the existing compiled chart, BMS interaction rules and
+VoiceAllocator; it does not reparse charts, decode assets, copy PCM or create
+another judge implementation. Each member gets independent existing judge
+state and sounds; the original SampleIds and PCM bank remain shared.
+
+Validate binding-map count, exact source selectors for assigned members and
+coverage of the chart's lane controls before creating members. Scan source
+notes once to collect the at most eighteen distinct lanes, then validate each
+member against that bounded set rather than rescanning every note per member.
+Coverage here
+means configured controls; host-specific Button/Axis/Touch admission remains
+the acquisition/setup contract. Automatic solo can retain Any/exact bindings.
+Reject nonfinite SoundBinding gains and non-Play prepared BGM commands. BGM
+Play gain validation remains with the existing downstream BgmFeeder. Reserve the
+actual BGM voices, allocate disjoint per-member key-sound voices in member order,
+and preserve same-member voice replacements and all other sound fields.
+Allocation/namespace failure exposes no partially prepared cohort.
+
+Native cohort preparation uses this same builder with ButtonOnly rules and
+its existing keyboard maps. Host-owned capture/completion/opponent loading
+remains outside the common builder. Existing native source/device constraints,
+recording identities and voice order must be preserved. This common prepared
+member layer precedes browser group ownership and is not a playable browser
+multi-player claim.
+
 Player IDs survive roster growth and shrink for retained members. A solo roster
 uses automatic input and clears previous explicit assignments. Each member of
 an N>=2 roster must have a unique nonempty bounded native input identity before
