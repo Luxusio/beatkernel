@@ -310,18 +310,7 @@ async function harness(faults = {}) {
       if (faults.commandPortGate) await faults.commandPortGate.promise;
       return faults.commandDescriptor ? faults.commandDescriptor(descriptor) : descriptor;
     },
-    async poll() {
-      this.polls++;
-      traces.push(["poll"]);
-      if (faults.pollGate) await faults.pollGate.promise;
-      if (faults.renderReport) return structuredClone(faults.renderReport);
-      const words = new Uint32Array(56);
-      words[50] = 1;
-      const start = this.arms.at(-1) ?? 0n;
-      words[52] = Number(start & 0xffffffffn);
-      words[53] = Number(start >> 32n);
-      return { available: false, words };
-    },
+    poll() { this.polls++; assert.fail("Window must not poll or relay Worklet report words"); },
     stop() {
       this.stopCalls++;
       if (!this.stopping) {
@@ -584,7 +573,7 @@ test("live and replay transfer one real command descriptor after PCM finish and 
     assert.equal(audio.arms.length, 1); assert.equal(activation.startFrame, audio.arms[0]);
     await h.reply(activation, null);
     h.setNow(1300); await h.advance(8);
-    assert.equal(audio.polls, 1); assert.ok(worker.last("play-render"));
+    assert.equal(audio.polls, 0); assert.ok(worker.last("play-render"));
     assert.equal(worker.messages("play-step").length, mode === "live" ? 1 : 0);
     assert.equal(worker.messages("play-commands").length, 0);
     assert.equal(worker.messages("play-ack").length, 0); assert.deepEqual(audio.commandsSeen, []);
@@ -695,6 +684,117 @@ test("natural completion requires the latest issued tick and settled direct comm
     await replay.receive(finalScore(playing.id));
     assert.match(replay.get("status").textContent, /malformed/);
     await replay.close();
+  }
+});
+
+test("live and replay send only the original presentation pair while one Worker report remains outstanding", async () => {
+  for (const mode of ["live", "replay"]) {
+    const h = await harness({ outputEvidence: { contextTime: 1.5, performanceTime: 1499.875 } });
+    await h.preview(); if (mode === "replay") chooseRecording(h, [selectedRecording().file]);
+    const session = await h.launch(0, mode), worker = h.workers[0];
+    h.setNow(1500); await h.advance(8);
+    const first = worker.last("play-render");
+    assert.deepEqual(first, { kind: "play-render", playId: session.id, renderId: 1,
+      presentedNs: 250000000n, presentedHostNs: 1499875000n });
+    assert.equal(h.audio.polls, 0); assert.equal(h.audio.outputReads, 1);
+    const transfer = worker.posts.find(entry => entry.value === first);
+    assert.equal(transfer.transferCount, 0, "Window has no Worklet report buffer to transfer");
+    h.faults.outputEvidence = { contextTime: 1.75, performanceTime: 1750 };
+    await h.advance(248);
+    assert.equal(worker.messages("play-render").length, 1);
+    assert.equal(h.audio.outputReads, 1, "a pending observation is neither replaced nor reacquired");
+    assert.equal(h.audio.polls, 0);
+    if (mode === "live") {
+      const firstTick = worker.last("play-step");
+      h.window.emit("keydown", { code: "KeyZ", repeat: false, timeStamp: 1756 });
+      await h.receive({ kind: "play-step-done", playId: session.id, tickId: firstTick.tickId,
+        commandsPending: false, songNs: 0n, hits: 0n, misses: 0n, combo: 0n, preOriginInputs: 0 });
+      const input = worker.last("play-step");
+      assert.equal(input.events[0].hostNs, 1756000000n); assert.equal(input.events[0].sequence, 1n);
+      assert.equal(worker.last("play-render"), first, "input keeps its own provenance while the output read waits");
+    } else assert.equal(worker.messages("play-step").length, 0);
+    await h.receive({ kind: "play-render-done", playId: session.id, renderId: first.renderId,
+      completed: false, commandsPending: mode === "live" });
+    await h.advance(8);
+    const second = worker.last("play-render");
+    assert.equal(second.renderId, 2); assert.equal(second.presentedNs, 500000000n);
+    assert.equal(second.presentedHostNs, 1750000000n); assert.equal(Object.hasOwn(second, "report"), false);
+    await h.receive({ kind: "play-render-done", playId: session.id, renderId: second.renderId, completed: false });
+    h.faults.outputFailure = Object.assign(new Error("temporarily unavailable"), { code: "unavailable" });
+    await h.advance(8);
+    const absent = worker.last("play-render");
+    assert.equal(absent.presentedNs, null); assert.equal(absent.presentedHostNs, null);
+    assert.equal(Object.hasOwn(absent, "report"), false);
+    assert.equal(h.audio.polls, 0); assert.deepEqual(h.audio.commandsSeen, []);
+    assert.equal(worker.messages("play-commands").length, 0); assert.equal(worker.messages("play-ack").length, 0);
+    h.click("stop"); await flush(); await h.receive(finalScore(session.id)); await h.close();
+  }
+});
+
+test("report request transport failures and Worker deadlines use joined cleanup without a host poll fallback", async () => {
+  for (const failure of ["worker", "timeout", "post"]) {
+    const stopGate = deferred(), h = await harness({ stopGate }); await h.preview();
+    chooseRecording(h, [selectedRecording().file]);
+    const session = await h.launch(0, "replay"), worker = h.workers[0];
+    if (failure === "post") worker.failKind = "play-render";
+    await h.advance(8);
+    if (failure === "worker") await h.receive({ ...finalScore(session.id), kind: "play-error", released: true,
+      message: "Actual direct report shape was refused" });
+    else if (failure === "timeout") {
+      const first = worker.last("play-render");
+      await h.advance(10000);
+      assert.equal(worker.messages("play-render").length, 1);
+      assert.equal(worker.last("play-render"), first);
+    }
+    assert.equal(h.audio.polls, 0); assert.equal(h.audio.outputReads, 1);
+    assert.equal(h.audio.stopStarts, 1); assert.equal(h.get("replay-play").disabled, true);
+    assert.equal(worker.messages("play-commands").length, 0); assert.equal(worker.messages("play-ack").length, 0);
+    if (failure !== "worker") {
+      assert.equal(worker.last("play-stop").completed, false);
+      await h.receive(finalScore(session.id));
+    }
+    assert.equal(h.get("play").disabled, true);
+    stopGate.resolve(); await flush();
+    assert.equal(h.get("play").disabled, false);
+    assert.equal(h.get("status").dataset.error, "true");
+    assert.match(h.get("status").textContent, failure === "worker" ? /Actual direct report shape was refused/
+      : failure === "timeout" ? /Audio report Worker stopped responding/ : /injected Worker post failure/);
+    await h.close();
+  }
+});
+
+test("cancelled direct observations cannot finish a closing session or a later playback owner", async () => {
+  for (const transition of ["stop", "pagehide"]) {
+    const stopGate = deferred(), h = await harness({ stopGate }); await h.preview();
+    const session = await h.launch(), oldWorker = h.workers[0], oldAudio = h.audio;
+    await h.advance(8);
+    const pending = oldWorker.last("play-render");
+    const late = { kind: "play-render-done", playId: session.id, renderId: pending.renderId,
+      completed: true, commandsPending: false, observedTick: oldWorker.last("play-step").tickId };
+    if (transition === "stop") { h.click("stop"); await flush(); }
+    else { h.window.emit("pagehide"); h.window.emit("pageshow", { persisted: true }); await flush(); }
+    await h.receive(late, oldWorker);
+    assert.equal(oldAudio.polls, 0); assert.equal(oldAudio.stopStarts, 1);
+    assert.equal(oldWorker.messages("play-stop").at(-1)?.completed ?? false, false);
+    await h.receive(finalScore(session.id), oldWorker);
+    stopGate.resolve(); await flush();
+    if (transition === "pagehide") { assert.equal(oldWorker.terminations, 1); await h.preview(); }
+    chooseRecording(h, [selectedRecording().file]);
+    const next = await h.launch(0, "replay"), currentWorker = h.workers.at(-1), audio = h.audio;
+    assert.ok(next.id > session.id);
+    await h.advance(8);
+    const current = currentWorker.last("play-render");
+    const stops = currentWorker.messages("play-stop").length;
+    await h.receive(late, oldWorker);
+    assert.equal(currentWorker.messages("play-stop").length, stops);
+    assert.equal(audio.stopStarts, 0); assert.equal(audio.polls, 0);
+    await h.receive({ kind: "play-render-done", playId: next.id, renderId: current.renderId,
+      completed: true, commandsPending: false, observedTick: 0 });
+    assert.equal(currentWorker.last("play-stop").completed, true);
+    await h.receive(finalScore(next.id));
+    assert.match(h.get("status").textContent, /Recorded replay ended/);
+    assert.equal(audio.stopStarts, 1); assert.equal(audio.polls, 0);
+    await h.close();
   }
 });
 
@@ -1950,7 +2050,7 @@ test("input and render reports each have one in-flight request and watermarks ca
   await h.advance(40);
   assert.equal(worker.messages("play-step").length, 1);
   assert.equal(worker.messages("play-render").length, 1);
-  assert.equal(h.audio.polls, 1);
+  assert.equal(h.audio.polls, 0);
   h.setNow(1300);
   for (let index = 0; index < 600; index++) {
     h.window.emit(index % 2 === 0 ? "keydown" : "keyup", { code: "KeyZ", repeat: false, timeStamp: 1300 });
@@ -1979,7 +2079,7 @@ test("input and render reports each have one in-flight request and watermarks ca
   const report = worker.last("play-render");
   await h.receive({ kind: "play-render-done", playId: session.id, renderId: report.renderId, completed: false });
   await h.advance(8);
-  assert.equal(h.audio.polls, 2);
+  assert.equal(h.audio.polls, 0);
   assert.equal(worker.messages("play-render").length, 2);
   assert.equal(worker.messages("play-step").length, 4, "the unacknowledged final input batch still fences another step");
   await h.close();
@@ -2066,25 +2166,23 @@ test("natural completion joins captured input and command admission before the n
   await h.close();
 });
 
-test("output observations follow poll, retain actual time without extrapolation and drop regressing points", async () => {
-  const pollGate = deferred();
-  const h = await harness({ pollGate, outputEvidence: { contextTime: 1.3, performanceTime: 1300 } });
+test("output observations retain original time without host polling or extrapolation and drop regressing points", async () => {
+  const h = await harness({ outputEvidence: { contextTime: 1.3, performanceTime: 1300 } });
   await h.preview();
   const session = await h.launch();
   h.setNow(1300);
   await h.advance(8);
   const worker = h.workers[0];
-  assert.equal(h.audio.polls, 1);
-  assert.equal(h.audio.outputReads, 0, "pending poll has no matching presentation query yet");
-  assert.equal(worker.messages("play-render").length, 0);
-  pollGate.resolve();
-  await flush();
+  assert.equal(h.audio.polls, 0);
+  assert.equal(h.audio.outputReads, 1);
+  assert.equal(worker.messages("play-render").length, 1);
   const first = worker.last("play-render");
   assert.equal(first.presentedNs, 50000000n, "8 ms of host delay does not advance output evidence");
   assert.equal(first.presentedHostNs, 1300000000n);
-  const pollIndex = h.traces.findIndex(row => row[0] === "poll");
   const outputIndex = h.traces.findIndex(row => row[0] === "output-timestamp");
-  assert.ok(outputIndex > pollIndex);
+  const requestIndex = h.traces.findIndex(row => row[0] === "post" && row[1] === "play-render");
+  assert.ok(outputIndex >= 0 && outputIndex < requestIndex);
+  assert.equal(Object.hasOwn(first, "report"), false);
   await h.receive({ kind: "play-render-done", playId: session.id, renderId: first.renderId, completed: false });
   h.faults.outputEvidence = { contextTime: 1.29, performanceTime: 1308 };
   await h.advance(8);

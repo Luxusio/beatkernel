@@ -568,7 +568,7 @@ function commandPort() {
       const request = this.posts.at(-1);
       assert.ok(request);
       this.onmessage?.({ data: { kind: "ack", generation: request.generation, sequence: request.sequence,
-        operation: "commands", status: 0, admitted: request.commands.length, error: null, report: null, ...fields } });
+        operation: request.kind, status: 0, admitted: request.commands?.length ?? 0, error: null, report: null, ...fields } });
       await flushJobs();
     },
   };
@@ -614,18 +614,25 @@ test("direct live and replay commands wait for actual client ACKs using core ide
     if (mode === "live") await h.send(step({ events: [
       { hostNs: ORIGIN, key: 2, down: true, sequence: 1n },
     ] }));
-    else await h.send({ kind: "play-render", playId: 7, renderId: 1,
-      report: renderReport(), presentedNs: null });
+    else {
+      await h.send({ kind: "play-render", playId: 7, renderId: 1, presentedNs: null, presentedHostNs: null });
+      assert.equal(port.posts.at(-1).kind, "poll");
+      await port.acknowledge({ report: renderReport() });
+    }
     const receipt = h.of(mode === "live" ? "play-step-done" : "play-render-done").at(-1);
     assert.equal(receipt.commandsPending, true);
     if (mode === "replay") assert.equal(receipt.observedTick, 0);
-    assert.equal(port.posts.length, 2); assert.equal(port.posts[1].sequence, 2);
+    assert.equal(port.posts.length, mode === "live" ? 2 : 3);
+    assert.equal(port.posts.at(-1).kind, "commands");
+    assert.equal(port.posts.at(-1).sequence, mode === "live" ? 2 : 3);
     assert.equal(h.of("play-commands").length, 0, "no batch returns through Window");
     await port.acknowledge();
     assert.deepEqual(game.calls.filter(row => row[0] === "ack").at(-1), ["ack", coreSequence + 1n, 1, true]);
     complete = true;
     await h.send({ kind: "play-render", playId: 7, renderId: 2,
-      report: renderReport(), presentedNs: null, presentedHostNs: null });
+      presentedNs: null, presentedHostNs: null });
+    assert.equal(port.posts.at(-1).kind, "poll");
+    await port.acknowledge({ report: renderReport() });
     const final = h.of("play-render-done").at(-1);
     assert.equal(final.completed, true); assert.equal(final.commandsPending, false);
     assert.equal(final.observedTick, mode === "live" ? 1 : 0);
@@ -704,6 +711,149 @@ test("direct audio admission closes refused endpoints and excludes legacy pulls 
   assert.equal(stale.closes, 1); assert.equal(stale.starts, 0);
   assert.equal(h.games[0].stops, 0); assert.equal(h.of("play-error").length, 0);
   await h.send({ kind: "play-stop", playId: 7 });
+});
+
+async function directActive(options = {}) {
+  const port = commandPort();
+  const h = await started({ ...options,
+    beforeFree(game) { assert.equal(port.closes, 1); options.beforeFree?.(game); } });
+  const rpcId = await attachCommands(h, port);
+  assert.deepEqual(h.of("play-reply").find(value => value.rpcId === rpcId).result,
+    { kind: "audio-ready", commandsPending: false });
+  await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START });
+  return { h, port, game: h.replays[0] ?? h.games[0] };
+}
+
+function directObservation(fields = {}) {
+  return { kind: "play-render", playId: 7, renderId: 1, presentedNs: null, presentedHostNs: null, ...fields };
+}
+
+test("actual direct polls fairly retire reports between retained command ACK and new live or replay batches", async () => {
+  for (const mode of ["live", "replay"]) {
+    let outputs = 0;
+    const first = batch(9007199254740993n), waiting = batch(9007199254740994n), fed = batch(9007199254740995n);
+    const { h, port, game } = await directActive({
+      ...(mode === "replay" ? { startRequest: replayRequest(replayFile().file) } : {}),
+      observeOutput(owner) { owner.batches.push(++outputs === 1 ? first : fed); return false; },
+    });
+    await h.send(directObservation());
+    assert.deepEqual(port.posts, [{ kind: "poll", generation: 7, sequence: 1 }]);
+    assert.equal(h.of("play-render-done").length, 0);
+    await port.acknowledge({ report: renderReport() });
+    assert.equal(port.posts.at(-1).kind, "commands"); assert.equal(port.posts.at(-1).sequence, 2);
+    assert.deepEqual(game.calls.filter(row => row[0] === "ack"), [], "a successful poll never acknowledges a core batch");
+    assert.equal(h.of("play-render-done").at(-1).commandsPending, true);
+    game.batches.push(waiting);
+    const probes = game.calls.filter(row => row[0] === "commands").length;
+    await h.send(directObservation({ renderId: 2 }));
+    assert.equal(port.posts.length, 2, "the in-flight command owns the one client slot");
+    assert.equal(game.calls.filter(row => row[0] === "commands").length, probes);
+    await port.acknowledge();
+    assert.deepEqual(game.calls.filter(row => row[0] === "ack"), [["ack", first.sequence, 2, true]]);
+    assert.deepEqual(port.posts.at(-1), { kind: "poll", generation: 7, sequence: 3 });
+    assert.equal(game.calls.filter(row => row[0] === "commands").length, probes,
+      "the waiting report must retire BGM credits before extracting another core batch");
+    await port.acknowledge({ report: renderReport({ cursor: 9007199254744000n }) });
+    assert.equal(outputs, 2);
+    assert.equal(port.posts.at(-1).kind, "commands"); assert.equal(port.posts.at(-1).sequence, 4);
+    assert.deepEqual(port.posts.at(-1).commands, waiting.commands);
+    const receipt = h.of("play-render-done").at(-1);
+    assert.equal(receipt.renderId, 2); assert.equal(receipt.commandsPending, true); assert.equal(receipt.observedTick, 0);
+    assert.equal(game.calls.filter(row => row[0] === "ack").length, 1);
+    await port.acknowledge();
+    assert.equal(port.posts.at(-1).sequence, 5); assert.deepEqual(port.posts.at(-1).commands, fed.commands);
+    await port.acknowledge();
+    assert.deepEqual(game.calls.filter(row => row[0] === "ack"), [
+      ["ack", first.sequence, 2, true], ["ack", waiting.sequence, 2, true], ["ack", fed.sequence, 2, true],
+    ]);
+    assert.deepEqual(port.posts.map(value => value.kind), ["poll", "commands", "poll", "commands", "commands"]);
+    assert.equal(h.of("play-commands").length, 0);
+    await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+  }
+});
+
+test("awaited reports preserve original presentation pairs and apply to the current input frontier before completion", async () => {
+  let complete = false;
+  const next = batch(9007199254741001n);
+  const { h, port, game } = await directActive({
+    input(owner) { owner.score.hits = 18n; owner.batches.push(next); },
+    observeOutput(owner) { assert.equal(owner.score.hits, 18n); return complete; },
+  });
+  const point = { output: 604800000000001n, host: ORIGIN + 3n };
+  const request = directObservation({ presentedNs: point.output, presentedHostNs: point.host });
+  await h.send(request);
+  request.presentedNs = 0n; request.presentedHostNs = 0n;
+  const probes = game.calls.filter(row => row[0] === "commands").length;
+  await h.send(step({ events: [{ hostNs: ORIGIN + 7n, key: 2, down: true, sequence: 18446744073709551615n }],
+    watermark: ORIGIN + 9n, audioNs: 604800000000003n }));
+  assert.equal(h.of("play-step-done").at(-1).commandsPending, true);
+  assert.equal(port.posts.length, 1); assert.equal(port.posts[0].kind, "poll");
+  assert.equal(game.calls.filter(row => row[0] === "commands").length, probes);
+  assert.equal(game.calls.filter(row => row[0] === "output").length, 0);
+  const actual = renderReport({ cursor: 9007199254746000n });
+  actual.words[24] = 0xffffffff; actual.words[25] = 0x80000000; // Transport preserves counters at full width.
+  await port.acknowledge({ report: actual });
+  const output = game.calls.find(row => row[0] === "output");
+  assert.deepEqual(Array.from(output[1]), Array.from(actual.words)); assert.equal(output[2], point.output);
+  assert.deepEqual(game.calls.find(row => row[0] === "presentation"), ["presentation", point.output, point.host]);
+  assert.ok(game.calls.findIndex(row => row[0] === "advance") < game.calls.findIndex(row => row[0] === "output"));
+  const reply = h.of("play-render-done").at(-1);
+  assert.equal(reply.observedTick, 1); assert.equal(reply.commandsPending, true); assert.equal(reply.completed, false);
+  assert.equal(port.posts.at(-1).kind, "commands"); assert.deepEqual(port.posts.at(-1).commands, next.commands);
+  assert.equal(game.calls.filter(row => row[0] === "ack").length, 0);
+  await port.acknowledge();
+  complete = true;
+  await h.send(directObservation({ renderId: 2, presentedNs: point.output + 1n, presentedHostNs: point.host + 10n }));
+  assert.equal(h.of("play-render-done").length, 1);
+  await port.acknowledge({ report: renderReport({ cursor: 9007199254746257n }) });
+  const final = h.of("play-render-done").at(-1);
+  assert.equal(final.completed, true); assert.equal(final.commandsPending, false); assert.equal(final.observedTick, 1);
+  await h.send({ kind: "play-stop", playId: 7, completed: true });
+  assertReleased(h, { ...SCORE, hits: 18n });
+});
+
+test("direct report overlap, external payloads, bad evidence and cancelled polling fence without late writes or core ACKs", async () => {
+  for (const scenario of ["overlap", "duplicate", "stale", "external", "pair", "shape", "semantic", "rust",
+    "timeout", "terminal", "cancel", "pending-natural"]) {
+    const { h, port, game } = await directActive({ observeOutput() {
+      if (scenario === "rust") throw new Error("actual Rust output evidence refusal");
+      return scenario === "pending-natural";
+    } });
+    const stale = port.onmessage;
+    if (scenario === "external") await h.send(directObservation({ report: undefined }));
+    else if (scenario === "pair") await h.send(directObservation({ presentedNs: 1n }));
+    else {
+      await h.send(directObservation());
+      assert.equal(port.posts.at(-1).kind, "poll");
+      if (scenario === "overlap") await h.send(directObservation({ renderId: 2 }));
+      else if (scenario === "duplicate") await h.send(directObservation());
+      else if (scenario === "stale" || scenario === "pending-natural") {
+        await port.acknowledge({ report: renderReport() });
+        await h.send(directObservation({ renderId: scenario === "stale" ? 1 : 2 }));
+        if (scenario === "pending-natural") await h.send({ kind: "play-stop", playId: 7, completed: true });
+      } else if (scenario === "shape") await port.acknowledge({ report: { available: false, words: new Uint32Array(55) } });
+      else if (scenario === "semantic") await port.acknowledge({ report: renderReport({ start: START + 1n }) });
+      else if (scenario === "rust") await port.acknowledge({ report: renderReport() });
+      else if (scenario === "timeout") await h.runTimer(50);
+      else if (scenario === "terminal") {
+        port.onmessage({ data: { kind: "terminal", generation: 7, status: 9 } });
+        await flushJobs();
+      } else await h.send({ kind: "play-stop", playId: 7 });
+    }
+    if (scenario !== "cancel") assert.equal(h.of("play-error").length, 1);
+    if (scenario === "rust") assert.match(h.of("play-error").at(-1).message, /actual Rust output evidence refusal/);
+    assertReleased(h); assert.equal(port.closes, 1);
+    assert.deepEqual(game.calls.filter(row => row[0] === "ack"), [], "neither poll success nor rejection can consume a core batch");
+    if (scenario === "external" || scenario === "pair") assert.equal(port.posts.length, 0);
+    await h.send(startRequest({ playId: 8 }));
+    const calls = game.calls.length, messages = h.messages.length;
+    stale({ data: { kind: "ack", generation: 7, sequence: port.posts.at(-1)?.sequence ?? 1,
+      operation: "poll", status: 0, admitted: 0, error: null, report: renderReport() } });
+    await flushJobs();
+    assert.equal(game.calls.length, calls); assert.equal(h.messages.length, messages);
+    assert.equal(h.games[1].stops, 0);
+    await h.send({ kind: "play-stop", playId: 8 });
+  }
 });
 
 test("saved prefixes refresh the Worker HUD at most four times per second and export one final full-width snapshot before disposal", async () => {
