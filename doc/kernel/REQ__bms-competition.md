@@ -284,9 +284,11 @@ as files; the application does not silently upload or download them.
 
 ## Known ceiling
 
-- Two unauthenticated peers with independent local starts; section restart
-  requires a fresh connection. Add a room/start protocol and authoritative
-  result validation when synchronized or ranked online sessions are required.
+- One pair of unauthenticated network hosts, each with 1..64 local participants,
+  shares a software start commitment through the common native/browser group
+  path. Physical synchronization remains unproven. Section restart requires a
+  fresh connection. Multi-host room protocol and authoritative ranked result
+  validation remain unfinished.
 - Exact handshake identity is at most 64 KiB, sequences are u64, queues hold
   1..1024 snapshots (application default 32), worker polling is 5 ms and pending
   frames time out after 5 seconds by default. These are software controls, not
@@ -663,3 +665,37 @@ An explicit native profile override that selects a multiplayer transport
 replaces the previous role/credential/Origin family together. Unrelated audio,
 gameplay and timing settings remain. Credentials come from the new override;
 incomplete settings stay drafts until final preparation.
+
+## Multi-host room ownership foundation
+
+More than two network hosts requires a separate explicit multi-party room
+protocol. Retain the existing bilateral BKMP relay and Session compatibility;
+do not broadcast a bilateral setup/start/ACK frame to arbitrary recipients or
+merely raise its two-member limit. All room policy lives in the application's
+common modules, shared by QUIC and WebTransport adapters.
+
+GroupRoomRegistry admits 2..64 hosts per policy, each retaining its own ordered
+1..64 local PlayerIds and an exact bounded canonical setup identity. Local IDs
+may repeat across hosts: address a member by (ParticipantId, PlayerId), never
+remap IDs or aggregate scores. Registry-issued nonzero u64 participant leases
+are monotonic and never reused. Exact room keys, clock/TTL/ID arithmetic, capacity,
+identity and all roster validation precede membership mutation; rejection does
+not consume IDs or advance the accepted clock baseline. No eviction occurs.
+
+The first admitted host may explicitly seal a room containing at least two
+hosts. Sealing freezes ordered membership, prevents late joins and admits each
+host's one-shot preparation observation. Only all frozen hosts prepared removes
+the waiting deadline. This observation is not output calibration, a committed
+shared start, a full-write receipt or a final ACK. A waiting/sealed room expires
+at its original checked deadline; expiry/release returns every exact owned
+closure ticket. Releasing any live member closes the whole current room; stale
+leases cannot close a replacement same-key room. Irreversible stop returns all
+closure tickets and rejects late admission/sealing/readiness. The caller owns
+and closes actual resources; registry removal is not stream closure evidence.
+
+The model is a foundation, not playable multi-host networking. Explicit room
+wire negotiation, per-host software-clock/output start agreement, bounded
+fanout/backpressure, participant-scoped progress and real final ACK delivery,
+native/browser application integration and interoperability/performance remain
+required follow-on work. Author deterministic state/lease fixtures for later
+execution; source compilation cannot establish acceptance.
