@@ -91,8 +91,9 @@ browser Worker checks every member's canonical identity, opens one group owner,
 publishes whole-cohort progress and maps the accepted remote roster into
 per-member peer HUDs as specified by the [browser contract](REQ__bms-browser.md).
 The Page launches admitted local cohorts using the same committed audio/start
-handshake and reports bounded per-member final results. Automatic one-player
-group launch, native group callers and multi-host room integration remain
+handshake and reports bounded per-member final results. Network solo uses one
+automatic Any-source member without device selection; non-network solo keeps
+its existing route. Native group callers and multi-host room integration remain
 required follow-on work.
 No group codec call creates a connection, start receipt or final acknowledgement.
 Complete browser/native callers remain unfinished; tests authored and compile checks

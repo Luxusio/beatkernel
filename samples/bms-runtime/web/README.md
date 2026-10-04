@@ -33,9 +33,11 @@ The Rust local binding provides per-member peer HUD admission and exact
 progress updates. Saved and
 peer rows reserve separate space before touch setup; display failures preserve
 that geometry and the other comparison type. The Page shows each member's own
-validated final peer summary once at termination. The ordinary one-player
-network Page path still uses scalar mode and cannot negotiate with a group
-peer; automatic one-player group launch remains unfinished.
+validated final peer summary once at termination. One-player network play also
+uses the group path with an automatic Any-source member, without discovering
+or selecting a device. Ordinary non-network solo play keeps its existing path.
+Legacy scalar peers cannot negotiate with group peers; native application group
+callers still require integration before connecting to the Page's group path.
 These page paths are source integrations with deferred fixtures; generated
 bindings, browser/device/audio execution and measured performance are unverified.
 

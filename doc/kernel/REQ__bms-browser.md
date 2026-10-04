@@ -1588,11 +1588,29 @@ fallback. A malformed group summary preserves local scores/replays and reports
 comparison unavailability. Stale owner/late stop receipts cannot overwrite the
 current session's result.
 
-Known ceiling: The ordinary one-player Page network path still uses scalar
-mode. A group peer and a scalar peer cannot negotiate with each other; source
-integration for an automatic one-player group Page path remains required.
-Native group transport callers, multi-host rooms and actual runtime/performance
-acceptance are also unfinished.
+All live Page network sessions use the group path, including one player. A
+single player receives one stable actual roster ID with the Any selector and
+no device-discovery or selection step. LocalRoster.snapshot accepts an explicit
+includeSolo boolean, defaulting to false for existing non-network callers; when
+true for a single player it returns a frozen automatic plan with the exact
+(PlayerId, Any, 0, 0) row and page zero. Distinct exact sources remain mandatory
+for two or more players. Automatic scope must preserve every genuinely admitted
+keyboard/touch/HID/Gamepad source and the existing solo profile eligibility;
+do not filter those sources against an empty exact-source set. One-player group
+play exposes no page-changing control.
+
+The Page maps untargeted saved selections internally to that sole stable member
+without mutating the user's selections. Actual Worker metadata and results
+still use the full cohort schema for preparation, budgets, per-member captures,
+saved comparisons and peers; do not fabricate scalar aliases. A captured
+one-member replay can be selected/exported/saved through the existing local
+capture flow. Ordinary non-network solo and replay stay on their existing
+paths. Member counts differ between peers independently of protocol mode.
+
+Known ceiling: Legacy scalar and group Sessions remain incompatible by design.
+Native application network callers still require group integration to connect
+to the Page's default group path. Multi-host rooms and actual
+runtime/performance acceptance are also unfinished.
 
 ## Touch-aware local page changes
 
