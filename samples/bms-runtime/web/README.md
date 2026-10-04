@@ -14,8 +14,10 @@ their IDs when the count changes, and retired IDs are not reused.
 The common roster supports up to 64 members, subject to actual source availability
 and the combined 256-binding-row budget. Browser acquisition currently allows up
 to 16 HID interfaces and 16 Gamepads, plus keyboard and touch. Rendering uses
-four fields per page on the Worker. With a configured touch player, page changes
-remain restricted until contact routing can be remapped safely.
+four fields per page on the Worker. Page changes drain the acquired input prefix
+and remap touch geometry while retaining held contact lanes. New Downs pause
+during the change; contacts begun while the touch member is offscreen remain
+unbound until released, even if that member becomes visible again.
 
 Local recordings are separate member captures. Choose the captured player before
 download or library save; one member's export failure must retain other valid

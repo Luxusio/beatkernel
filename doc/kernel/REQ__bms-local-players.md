@@ -127,8 +127,8 @@ and retains the real admitted prefix without replaying its tail. Source/compile
 and authored fixtures are not runtime acceptance. Browser bindings and Worker
 renderer integration, page assignment and per-member record callers are
 implemented in source, including per-member saved comparisons. Local network
-competition, active-contact page remapping and browser acceptance remain
-requirements.
+competition and browser acceptance remain requirements; touch page remapping
+is implemented in source.
 
 Player IDs survive roster growth and shrink for retained members. A solo roster
 uses automatic input and clears previous explicit assignments. Each member of
@@ -308,8 +308,8 @@ Each captured member has an independent validated replay, completion label,
 score and export error. The page must offer explicit member selection for
 download or library save, retaining other valid prefixes when one export fails.
 Local playback must explicitly refuse unsupported network combinations and
-invalid saved-record targets before acquiring audio. Page changes remain subject to Worker's
-active-contact routing restriction. Authored fixtures and source inspections
+invalid saved-record targets before acquiring audio. Page changes preserve Worker's held-contact ownership while remapping visible
+geometry and disabling new contacts for hidden touch fields. Authored fixtures and source inspections
 are preparation for deferred browser acceptance, not execution evidence.
 
 ### Browser local saved-record competition

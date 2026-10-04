@@ -57,10 +57,11 @@ current bounded page. Page changes are presentation operations, not game-clock
 operations. Configure a selected touch member against its actual visible field
 before activation; do not use solo full-size bounds. Keep original pointer
 payload separate from projected routing coordinates. A touch member must be on
-the initial page; until active router remapping exists, refuse changing pages
-when a configured touch member's field would move.
+the initial page. Page changes remap only the configured geometry and new-contact
+admission. Held contacts retain their original destination through release; a
+hidden touch field admits new contacts as unbound until the member returns.
 Page choices use a correlated RPC. An invalid page or a currently unavailable
-touch-layout change returns a page-choice error while preserving the running
+touch-layout remap returns a page-choice error while preserving the running
 game. Malformed owner/RPC identities retain the existing protocol failure fence.
 
 Replies preserve each member's actual score/frontier independently, with null
@@ -1475,4 +1476,23 @@ The common renderer and touch helper share the shifted/shrunken field geometry.
 HUD failure keeps this region fixed and shows unavailable status, preserving
 active touch coordinates. Source integration and deferred fixtures do not prove
 browser execution, generated bindings or measured performance. Local network
-competition and active-contact page remapping remain follow-on work.
+competition remains follow-on work; touch page remapping is source-integrated
+but runtime acceptance is unverified.
+
+## Touch-aware local page changes
+
+The Window marks a page change pending, freezes the maximum sequence of its
+previously acquired queued/inflight input prefix, and waits for genuine step
+acknowledgements to cover it. Gaps from filtered acquisitions do not require
+fabricated input. No new touch Down enters the queue while pending, but existing
+Move/Up/Cancel retains original metadata. Cancel/stop releases the bounded waiter
+and cannot revive a stale page RPC. No transport or score state is reset.
+
+Worker invokes the actual member's set_touch_page before publishing a new page.
+A visible field uses common geometry, including immutable saved-comparison space;
+a hidden field disables new contact destinations while preserving all held
+ownership. The receipt includes validated actual touch visibility. Invalid
+geometry preserves the page and old routing; invalid visibility is a protocol
+failure. Playback uses already bound recorded events, preserving the original
+live spatial decision. Source/compile and deferred fixtures are not browser
+execution or measured latency evidence.

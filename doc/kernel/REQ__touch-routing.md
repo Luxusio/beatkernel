@@ -67,3 +67,19 @@ pixel and spans the lane background/label area. Worker projects from original
 canvas-relative CSS coordinates using the acquisition extent snapshot; it never
 replaces those physical coordinates or the acquisition timestamp. A layout
 projection failure rejects the whole batch before any gameplay adoption.
+
+Live layout remapping changes only validated region bounds and new-contact
+admission. Region selectors, surfaces and destinations retain their identities.
+Existing contacts keep their captured destination, including an unbound Down,
+until their original Up/Cancel. No remap synthesizes inputs, clears holds,
+changes clocks or resets replay capture. Disabling new contacts for a hidden
+field keeps configured routing and admits new Downs as unbound contacts; those
+contacts cannot become bound by returning to a visible page while held.
+
+The browser page drains its previously acquired input prefix before the page RPC
+and suppresses new touch Downs while the operation is pending. Existing contact
+updates/releases retain original provenance. The Worker atomically remaps to the
+actual visible field or disables new contacts while that member is offscreen.
+Replay retains actual bound GameInputEvents, so playback does not reconstruct a
+different spatial decision from a later layout. Invalid remaps preserve the old
+router and page. Runtime/browser acceptance remains deferred.
