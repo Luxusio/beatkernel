@@ -941,6 +941,43 @@ updates. The component and source bindings do not yet establish generated-glue,
 Worker/page lobby integration, multi-host starts/progress/final ACKs or browser
 interoperability. Prepare lifecycle fixtures for deferred execution.
 
+## Prepared gameplay room admission
+
+The existing game Worker owns room admission for one actual prepared live local
+game, including the automatic one-member Any-source plan. A nonlocal game has
+no actual player-ID roster and cannot invent one for room admission.
+Derive identity from its pristine common competition identity, after real sample
+and direct audio-command preparation, and retain the actual ordered local roster. Compare
+all local members' canonical identity before connecting. Never accept caller
+identity bytes, a preview title/path, or a made-up roster as setup evidence.
+
+Room RPC identities follow the existing monotonic play RPC ownership. Permit
+one admission attempt per play owner; refuse replay, activated gameplay and an
+existing bilateral network owner. Publish bounded accepted room snapshots only
+for the current play owner. Seal and Ready preserve the common creator/phase
+rules; recoverable local request refusals do not destroy prepared gameplay.
+Ready requires the live direct command endpoint and actual audio preparation
+acknowledgement and remains distinct
+from output activation. Neither Frozen nor Prepared authorizes a synchronized
+start by itself. Refuse output activation until a true multi-host start protocol
+is composed, rather than treating a room roster as a bilateral start schedule.
+
+Failed owner opening also joins its channel acquisition and any acquired channel
+read/write API continuations before rejecting, because no public owner handle is
+returned on failure. Cancellation/deadline fences ownership immediately; awaited
+cleanup can outlast that deadline when an acquisition API has not yet settled.
+Stop/failure fences late room callbacks and admission completion before freeing
+game ownership, aborts acquisition and joins room owner continuations before
+publishing terminal cleanup. A late-open owner must close and join without
+reviving stopped play. Refused configuration before ownership transfer closes
+and frees the locally held WASM handle once. Leave confirms only local complete
+write and still joins cleanup; no remote acknowledgement is inferred.
+
+This integration prepares the actual Worker lifecycle for the later page lobby
+and multi-host clock/start/progress/final-ACK composition. Do not expose a page
+start action that fabricates synchronization or claims these unfinished parts
+are playable. Source fixtures are authored for deferred execution.
+
 ## Explicit live multiplayer and output start
 
 Solo Play shall remain the default automatic audio path. An explicit live-only
