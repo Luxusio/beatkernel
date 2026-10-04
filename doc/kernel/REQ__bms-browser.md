@@ -1,5 +1,18 @@
 # Browser host and shared selected-file preparation
 
+## Common room drain binding
+
+BrowserRoomClient exposes explicit request_drain and drain_complete backed by
+the common RoomPlay/progress owner. Premature and repeated requests refuse as
+recoverable state errors without failing a healthy facade. DrainComplete uses
+the original capture and exact participant/final sequence, and cannot grant
+completion before the real Ready full write. Fatal facade failures and close
+revoke completion. Preserve the existing write-ID space and metadata revision;
+drain traffic must not copy whole rosters or publish periodic Window updates.
+The binding neither sends Leave nor closes transport automatically. Browser
+Owner/Worker joining of successful drain and transport cleanup is separate
+required integration.
+
 ## Actual Worker room gameplay progress
 
 Publish actual BrowserLocalGame progress_words through the current room owner

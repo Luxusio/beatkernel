@@ -52,12 +52,28 @@ received Leave or invalid control keeps cancellation authority. Deadline expiry
 remains independent of transport-terminal ordering.
 
 Known ceiling: Common drain wire/state components and the actual server's
-retirement handling do not prove live transport close semantics. RoomPlay/I/O
-and browser bindings/Worker final drain integration, native application
-activation and live interoperability remain required. Remote scores remain self-reported display
+retirement handling, RoomPlay/I/O and WASM drain bindings do not prove live
+transport close semantics. Browser Owner/Worker final drain integration, native
+application activation and live interoperability remain required. Remote scores remain self-reported display
 data, not ranked score authority.
 
 ## Common client progress and local final-receipt boundary
+
+RoomPlayClient exposes explicit request_drain and drain_complete through the
+same composed progress owner and external write-ID space. Requests before real
+local completion or repeated requests are recoverable local state refusals.
+Only a committed, non-leaving session accepts an exact DrainComplete using its
+original capture. An early notice still waits for the actual Ready full write.
+Stop and Leave revoke drain authority; request_drain does not send Leave or
+close a transport. The browser facade exposes these same operations, fencing
+completion after fatal failure or close.
+
+RoomPlayIo delegates the explicit request and completion status. Once genuine
+drain completion is observed it performs no further stream reads, writes or
+clock acquisition, retaining status until explicit Stop. In particular an
+early matching notice becoming complete on the real Ready full write skips the
+next read, so a subsequent EOF cannot overwrite success. Stream disposal and
+joined transport cleanup remain the caller's job. No new timers or I/O loops.
 
 Compose one RoomProgressClient with RoomPlayClient and its native timed stream
 driver. Initialize from the same immutable Prepared roster and actual admitted
