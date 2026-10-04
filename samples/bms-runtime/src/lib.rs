@@ -147,6 +147,10 @@ mod multiplayer_room_io_fixtures;
 pub mod multiplayer_room_play;
 #[cfg(test)]
 mod multiplayer_room_play_fixtures;
+/// Participant-scoped coalesced room progress and actual final recipient ACKs.
+pub mod multiplayer_room_progress;
+#[cfg(test)]
+mod multiplayer_room_progress_fixtures;
 /// Shared prepared multi-host software-start coordination.
 pub mod multiplayer_room_start;
 #[cfg(test)]
