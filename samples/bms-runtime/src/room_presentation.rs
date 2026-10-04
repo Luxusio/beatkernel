@@ -100,6 +100,149 @@ pub struct RoomScoreRow {
     pub counters: [String; 2],
 }
 
+fn validate_row(row: &RoomScoreRow, identity: (ParticipantId, PlayerId)) -> Result<(), String> {
+    if (row.participant, row.player) != identity
+        || row.label.len() > 128
+        || row.label.chars().any(char::is_control)
+        || row
+            .counters
+            .iter()
+            .any(|text| text.len() > 128 || text.chars().any(char::is_control))
+        || (row.final_prefix && row.progress.is_none())
+    {
+        return Err("room score row changed its actual host/player identity".into());
+    }
+    if let Some(progress) = row.progress {
+        validate_progress(None, progress).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Immutable joined-room history, shared through Arc. All remote identities
+/// and cached text are copied once; page projection copies at most four rows.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RoomResults {
+    lobby: Arc<RoomLobby>,
+    rows: Vec<RoomScoreRow>,
+    initial_page: usize,
+    cancelled: bool,
+    failed: bool,
+    error: Option<String>,
+}
+impl RoomResults {
+    pub fn new(
+        lobby: Arc<RoomLobby>,
+        hud: &RoomOpponentHud,
+        cancelled: bool,
+        error: Option<String>,
+    ) -> Result<Self, String> {
+        lobby.validate()?;
+        if lobby.phase != Some(GroupRoomPhase::Prepared)
+            || error
+                .as_ref()
+                .is_some_and(|text| text.len() > 4096 || text.chars().any(char::is_control))
+        {
+            return Err("room Results require bounded prepared metadata".into());
+        }
+        let expected = lobby
+            .members
+            .iter()
+            .filter(|host| Some(host.id) != lobby.participant)
+            .flat_map(|host| host.players.iter().map(move |player| (host.id, *player)));
+        let count = expected.clone().count();
+        if count == 0
+            || count > 4032
+            || hud.rows().len() != count
+            || hud.page_index() >= count.div_ceil(4)
+        {
+            return Err("room Results differ from the prepared roster".into());
+        }
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(count)
+            .map_err(|_| "room Results allocation failed")?;
+        for (row, identity) in hud.rows().iter().zip(expected) {
+            let row = RoomScoreRow {
+                participant: row.participant,
+                player: row.player,
+                progress: row.progress,
+                final_prefix: row.final_prefix,
+                label: row.label().to_owned(),
+                counters: row.counters().clone(),
+            };
+            validate_row(&row, identity)?;
+            rows.push(row);
+        }
+        Ok(Self {
+            lobby,
+            rows,
+            initial_page: hud.page_index(),
+            cancelled,
+            failed: hud.failed(),
+            error,
+        })
+    }
+    pub fn lobby(&self) -> &Arc<RoomLobby> {
+        &self.lobby
+    }
+    pub fn rows(&self) -> &[RoomScoreRow] {
+        &self.rows
+    }
+    pub fn initial_page(&self) -> usize {
+        self.initial_page
+    }
+    pub fn page_count(&self) -> usize {
+        self.rows.len().div_ceil(4)
+    }
+    pub fn cancelled(&self) -> bool {
+        self.cancelled
+    }
+    pub fn failed(&self) -> bool {
+        self.failed
+    }
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// Event-driven local selection. This never reopens any live room control.
+    pub fn project(&self, page: usize) -> Result<RoomPresentation, String> {
+        if page >= self.page_count() {
+            return Err("room Results page is out of range".into());
+        }
+        let mut rows = Vec::new();
+        if !self.failed {
+            let start = page * 4;
+            let selected = &self.rows[start..(start + 4).min(self.rows.len())];
+            rows.try_reserve_exact(selected.len())
+                .map_err(|_| "room Results page allocation failed")?;
+            rows.extend_from_slice(selected);
+        }
+        Ok(RoomPresentation {
+            lobby: self.lobby.clone(),
+            status: RoomStatus::Closed,
+            page,
+            pages: self.page_count(),
+            rows,
+            heading: if self.failed {
+                "ROOM SCORES UNAVAILABLE".into()
+            } else if self.cancelled {
+                format!(
+                    "ROOM REPORTED RESULTS - CANCELLED - {}/{}",
+                    page + 1,
+                    self.page_count()
+                )
+            } else {
+                format!(
+                    "ROOM REPORTED RESULTS - PAGE {}/{}",
+                    page + 1,
+                    self.page_count()
+                )
+            },
+            error: self.error.clone(),
+            failed: self.failed,
+        })
+    }
+}
+
 /// At most four already formatted rows. Building this never clones the full HUD.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RoomPresentation {
@@ -202,20 +345,7 @@ impl RoomPresentation {
             return Err("room score page is incomplete".into());
         }
         for (row, identity) in self.rows.iter().zip(expected) {
-            if (row.participant, row.player) != identity
-                || row.label.len() > 128
-                || row.label.chars().any(char::is_control)
-                || row
-                    .counters
-                    .iter()
-                    .any(|text| text.len() > 128 || text.chars().any(char::is_control))
-                || (row.final_prefix && row.progress.is_none())
-            {
-                return Err("room score row changed its actual host/player identity".into());
-            }
-            if let Some(progress) = row.progress {
-                validate_progress(None, progress).map_err(|error| error.to_string())?;
-            }
+            validate_row(row, identity)?;
         }
         Ok(())
     }
@@ -252,3 +382,7 @@ impl RoomPresentation {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "room_results_fixtures.rs"]
+mod results_fixtures;

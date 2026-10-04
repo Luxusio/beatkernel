@@ -7,7 +7,7 @@ use crate::{
     player_chart::PlayerChart,
     pressed_keys::{PressedKeys, validate_mask},
     room_presentation::{
-        RoomPresentation, RoomUiAction, RoomUiReply, RoomUiRequest, ROOM_UI_CAPACITY,
+        RoomPresentation, RoomResults, RoomUiAction, RoomUiReply, RoomUiRequest, ROOM_UI_CAPACITY,
     },
 };
 use beatkernel::{
@@ -256,6 +256,8 @@ pub struct PlayerSnapshot {
     pub completed_end: Option<Timestamp>,
     /// Shared admission metadata and only the selected room score page.
     pub room: Option<Arc<RoomPresentation>>,
+    /// Immutable room history attached only after the actual network owner joins.
+    pub room_results: Option<Arc<RoomResults>>,
 }
 impl Default for PlayerSnapshot {
     fn default() -> Self {
@@ -274,6 +276,7 @@ impl Default for PlayerSnapshot {
             pause: PauseState::Unavailable,
             completed_end: None,
             room: None,
+            room_results: None,
         }
     }
 }
@@ -648,6 +651,9 @@ pub fn publish_room(room: Arc<RoomPresentation>) -> Result<(), String> {
         let Some(current) = session.as_mut() else {
             return Ok(());
         };
+        if current.snapshot.room_results.is_some() {
+            return Err("joined room Results cannot be replaced by live presentation".into());
+        }
         let changed = current
             .snapshot
             .room
@@ -655,6 +661,35 @@ pub fn publish_room(room: Arc<RoomPresentation>) -> Result<(), String> {
             .is_none_or(|old| !Arc::ptr_eq(old, &room));
         if changed {
             current.snapshot.room = Some(room);
+            current.room_dirty = true;
+        }
+        if current.room_dirty {
+            current.publish_latest(true);
+        }
+        Ok(())
+    })
+}
+
+/// Called by the room controller after stop/join and its final retained poll.
+/// Archive failure is presentation-only; the caller preserves the real outcome.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn publish_room_results(results: Arc<RoomResults>) -> Result<(), String> {
+    let page = Arc::new(results.project(results.initial_page())?);
+    SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        let Some(current) = session.as_mut() else {
+            return Ok(());
+        };
+        if !current.publisher.0.room_closed.load(Ordering::Acquire) {
+            return Err("room Results require closed live controls".into());
+        }
+        if let Some(existing) = &current.snapshot.room_results {
+            if !Arc::ptr_eq(existing, &results) {
+                return Err("room Results archive is already attached".into());
+            }
+        } else {
+            current.snapshot.room_results = Some(results);
+            current.snapshot.room = Some(page);
             current.room_dirty = true;
         }
         if current.room_dirty {

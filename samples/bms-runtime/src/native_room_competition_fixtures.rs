@@ -1,5 +1,5 @@
-//! Deferred controller fixtures. The port is scripted; start and drain evidence
-//! below comes from the actual common owners, without sockets or native output.
+// Deferred controller fixtures. The port is scripted; start and drain evidence
+// below comes from the actual common owners, without sockets or native output.
 use super::*;
 use crate::{
     local_players::PlayerId,

@@ -14,7 +14,8 @@ use crate::{
     room_opponent_hud::{RoomHudStatus, RoomOpponentHud},
     player,
     room_presentation::{
-        RoomLobby, RoomPresentation, RoomStatus, RoomUiAction, RoomUiReply, ROOM_UI_CAPACITY,
+        RoomLobby, RoomPresentation, RoomResults, RoomStatus, RoomUiAction, RoomUiReply,
+        ROOM_UI_CAPACITY,
     },
 };
 use beatkernel::time::ClockPoint;
@@ -327,6 +328,9 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
     }
 
     fn accept_poll(&mut self, poll: NativeRoomPoll) -> io::Result<()> {
+        self.accept_poll_inner(poll, false)
+    }
+    fn accept_poll_inner(&mut self, poll: NativeRoomPoll, joined: bool) -> io::Result<()> {
         // Correlated results are validated as a whole before retiring any slot.
         if poll.replies.len() > self.pending.len()
             || poll.replies.iter().enumerate().any(|(index, reply)| {
@@ -400,7 +404,7 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
                 }
             }
         }
-        if self.hud_error.is_none() && self.failure.is_none() {
+        if self.hud_error.is_none() && (joined || self.failure.is_none()) {
             for (participant, prefix) in &self.snapshot.peers {
                 let previous = self
                     .peer_sequences
@@ -413,7 +417,12 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
                     continue;
                 };
                 let visible = hud.page().iter().any(|row| row.participant == *participant);
-                if let Err(error) = hud.update(*participant, prefix) {
+                let updated = if joined {
+                    hud.retain_after_join(*participant, prefix)
+                } else {
+                    hud.update(*participant, prefix)
+                };
+                if let Err(error) = updated {
                     self.hud_error = Some(error);
                     hud.mark_failed();
                     self.ui_dirty = true;
@@ -861,7 +870,7 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
         // refusals and any final accepted peer prefix for the original caller.
         match self.port.poll() {
             Ok(poll) => {
-                if let Err(error) = self.accept_poll(poll) {
+                if let Err(error) = self.accept_poll_inner(poll, true) {
                     self.fail_network(error);
                 }
             }
@@ -877,7 +886,63 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
         self.outcome = Some(outcome.clone());
         self.ui_dirty = true;
         self.publish_ui();
+        self.publish_results(&outcome);
         outcome
+    }
+
+    fn publish_results(&mut self, outcome: &NativeRoomOutcome) {
+        if !player::attached() || self.prepared.is_none() {
+            return;
+        }
+        let built = (|| -> Result<RoomResults, String> {
+            let hud = self.hud.as_ref().ok_or("joined room HUD is unavailable")?;
+            let lobby = self
+                .ui_presentation
+                .as_ref()
+                .ok_or("joined room metadata is unavailable")?
+                .lobby
+                .clone();
+            let mut diagnostics = Vec::new();
+            for (label, message) in [
+                (
+                    "display",
+                    self.ui_error.as_deref().or(self.hud_error.as_deref()),
+                ),
+                (
+                    "network",
+                    outcome.error.as_ref().map(|error| error.message.as_str()),
+                ),
+                (
+                    "cleanup",
+                    outcome
+                        .cleanup_error
+                        .as_ref()
+                        .map(|error| error.message.as_str()),
+                ),
+            ] {
+                if let Some(message) = message {
+                    let bounded: String = message
+                        .chars()
+                        .take(256)
+                        .map(|ch| if ch.is_control() { ' ' } else { ch })
+                        .collect();
+                    diagnostics.push(format!("{label}: {bounded}"));
+                }
+            }
+            let error = if diagnostics.is_empty() {
+                None
+            } else {
+                Some(diagnostics.join("; "))
+            };
+            RoomResults::new(lobby, hud, outcome.cancelled, error)
+        })();
+        let result = built.and_then(|archive| player::publish_room_results(Arc::new(archive)));
+        if let Err(error) = result {
+            // No mutation of failure/outcome: an archive is only presentation.
+            self.ui_error.get_or_insert(error);
+            self.ui_dirty = true;
+            self.publish_ui();
+        }
     }
 }
 
@@ -975,8 +1040,12 @@ impl<P: NativeRoomPort> Drop for NativeRoomCompetition<P> {
 }
 
 #[cfg(test)]
-#[path = "native_room_competition_fixtures.rs"]
-mod fixtures;
+mod fixtures {
+    include!("native_room_competition_fixtures.rs");
+    mod results {
+        include!("native_room_results_fixtures.rs");
+    }
+}
 
 #[cfg(test)]
 #[path = "native_room_ui_fixtures.rs"]

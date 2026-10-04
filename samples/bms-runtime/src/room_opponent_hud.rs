@@ -113,8 +113,28 @@ impl RoomOpponentHud {
         participant: ParticipantId,
         prefix: &GroupPrefix,
     ) -> Result<(), String> {
+        self.update_prefix(participant, prefix, false)
+    }
+
+    /// The native owner calls this only after joining and reading its retained
+    /// accepted prefixes. Disconnection still fences ordinary live updates.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn retain_after_join(
+        &mut self,
+        participant: ParticipantId,
+        prefix: &GroupPrefix,
+    ) -> Result<(), String> {
+        self.update_prefix(participant, prefix, true)
+    }
+
+    fn update_prefix(
+        &mut self,
+        participant: ParticipantId,
+        prefix: &GroupPrefix,
+        joined: bool,
+    ) -> Result<(), String> {
         self.ensure_live()?;
-        if self.status == RoomHudStatus::Disconnected {
+        if !joined && self.status == RoomHudStatus::Disconnected {
             return Err("room HUD is disconnected".into());
         }
         let index = self
@@ -207,6 +227,11 @@ impl RoomOpponentHud {
     }
     pub fn entry_count(&self) -> usize {
         self.rows.len()
+    }
+    /// Full retained history for a one-time joined Results archive. Live
+    /// drawing uses page(), which remains bounded to four visible rows.
+    pub fn rows(&self) -> &[RoomOpponentRow] {
+        &self.rows
     }
     pub fn page(&self) -> &[RoomOpponentRow] {
         if self.failed {
