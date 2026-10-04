@@ -24,7 +24,7 @@ test("profile snapshots retain exact source and native type namespaces with inde
   const raw = setup([[0x11, 0, 1], [0x12, 1, 0], [0x13, 2, 1], [0x14, 3, 0]]);
   const saved = snapshotGamepadSetup(raw);
   assert.deepEqual(saved.sources, [SOURCE]);
-  assert.deepEqual(saved.lanes, [0x11], "only pressed-button fields cover ordinary press-chart lanes");
+  assert.deepEqual(saved.lanes, [0x11, 0x14], "pressed and touched Button fields cover lanes; both axis kinds remain excluded");
   assert.deepEqual(Array.from(saved.physicalWords), [
     0x11, 1, 0x44332211, 0x88776655, 1, 0x57475044, 1,
     0x12, 1, 0x44332211, 0x88776655, 1, 0x57475044, 0x10000,
@@ -97,6 +97,40 @@ test("pressed and absolute-axis packets match independent BKPI bytes and bound d
   const positiveZero = deltas.decode({ ...start, sequence: SEQUENCE + 3n, axes: [0], buttons: [button(false), button(false)] });
   assert.equal(positiveZero.length, 1); assert.equal(code(positiveZero[0]), 0x10000);
   assert.equal(view(positiveZero[0]).getUint32(68, true), 0);
+});
+
+test("touched-only bindings cover press lanes through their own canonical Button namespace and original sample transitions", () => {
+  const saved = snapshotGamepadSetup(setup([[0x12, 3, 1]]));
+  assert.deepEqual(saved.lanes, [0x12]);
+  assert.deepEqual(Array.from(saved.physicalWords), [0x12, 1, 0x44332211, 0x88776655, 1, 0x57475044, 0x30001]);
+  const owner = new GamepadAdapter(saved);
+  const initial = sample({ buttons: [button(false), button(true, 1, false)] });
+  assert.deepEqual(owner.decode(initial), [], "initial untouched state emits no Up even when the independent pressed level is true");
+  assert.deepEqual(owner.decode({ ...initial, sequence: SEQUENCE + 1n,
+    buttons: [button(false), button(false, 0.75, false)] }), [], "unbound pressed/value changes cannot impersonate touched input");
+  const touch = { ...initial, sequence: SEQUENCE + 2n, timestampMs: 1234.125, hostNs: 1234125000n,
+    buttons: [button(false), button(false, 0, true)] };
+  const [down] = owner.decode(touch);
+  assert.equal(down.length, 69); assert.equal(down[6], 0);
+  assert.deepEqual(Array.from(down.slice(59)), [1, 0x44, 0x50, 0x47, 0x57, 1, 0, 3, 0, 0]);
+  const metadata = view(down);
+  assert.equal(metadata.getBigUint64(7, true), SOURCE);
+  assert.equal(metadata.getBigInt64(15, true), 1234125000n);
+  assert.equal(metadata.getUint32(23, true), 0x57494e);
+  assert.equal(metadata.getBigUint64(27, true), SEQUENCE + 2n);
+  assert.equal(down[35], 1); assert.equal(metadata.getUint32(36, true), 0x57475044);
+  assert.equal(down[40], 1); assert.equal(metadata.getUint32(41, true), 0x30001);
+  assert.equal(down[45], 1); assert.equal(metadata.getUint32(46, true), 0x57494e);
+  assert.equal(metadata.getBigInt64(50, true), 1234125000n); assert.equal(down[58], 0);
+  assert.deepEqual(owner.decode({ ...touch, sequence: SEQUENCE + 3n }), [], "equal-time unchanged contact level is not another Down");
+  const [up] = owner.decode({ ...touch, sequence: SEQUENCE + 4n, timestampMs: 1234.25, hostNs: 1234250000n,
+    buttons: [button(false), button(true, 1, false)] });
+  assert.equal(up.length, 69); assert.equal(up[6], 0); assert.equal(code(up), 0x30001); assert.equal(up[68], 1);
+  assert.equal(view(up).getBigUint64(7, true), SOURCE); assert.equal(view(up).getBigInt64(15, true), 1234250000n);
+  assert.equal(view(up).getBigUint64(27, true), SEQUENCE + 4n);
+  const pressed = new GamepadAdapter(setup([[0x11, 0, 1]]));
+  const [separate] = pressed.decode({ ...touch, buttons: [button(false), button(true, 1, true)] });
+  assert.equal(code(separate), 1, "pressed and touched retain distinct Native control identities on the same button");
 });
 
 test("forked batches and individual decode refusals leave prior levels and acquisition order unchanged", () => {
@@ -240,7 +274,7 @@ test("custom profiles snapshot real descriptors and preserve device order, full 
   const output = gamepadSetupFromProfile(bytes, devices);
   assert.deepEqual(output.sources, [SOURCE, 3n]);
   assert.deepEqual(output.devices, [{ source: SOURCE, buttons: 2, axes: 1 }, { source: 3n, buttons: 2, axes: 1 }]);
-  assert.deepEqual(output.lanes, [0x11], "axes and touched controls retain their physical type instead of gaining press coverage");
+  assert.deepEqual(output.lanes, [0x11, 0x14], "both Button kinds cover lanes while axis and button-value fields remain axes");
   assert.deepEqual(Array.from(output.bindingWords), [
     0x11, 0x44332211, 0x88776655, 0, 1, 0x12, 0x44332211, 0x88776655, 1, 0,
     0x13, 0x44332211, 0x88776655, 2, 0, 0x14, 0x44332211, 0x88776655, 3, 1,

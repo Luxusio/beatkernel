@@ -1137,6 +1137,49 @@ test("Worker snapshots exact Gamepad native bindings and sends mixed physical fa
   await ordinary.send({ kind: "play-stop", playId: 7 });
 });
 
+test("touched-only numeric and file profiles cover prepared lanes and route original Button transitions without keyboard fallback", async () => {
+  for (const fromFile of [false, true]) {
+    const selected = selectedGamepadProfile(null, new TextEncoder().encode(JSON.stringify({ version: 1,
+      profiles: [{ id: "custom pad", mapping: "", bindingWords: [0x11, 3, 0, 0x12, 3, 1] }] })));
+    const h = await catalogWorker();
+    await h.send(startRequest({ inputMode: "physical", keyPairs: new Uint32Array(),
+      ...(fromFile ? { gamepadProfileFile: selected.file, gamepadDevices: customGamepadDevices() }
+        : { gamepadSetup: gamepadSetup([[0x11, 3, 0], [0x12, 3, 1]]) }) }));
+    const prepared = h.of("play-reply").at(-1).result;
+    assert.equal(prepared.kind, "prepared"); assert.deepEqual(prepared.lanes, [0x11, 0x12]);
+    assert.deepEqual(prepared.gamepadSources, [GAMEPAD_SOURCE]);
+    assert.deepEqual(Array.from(h.physicalConstructions[0].args[5]), [
+      0x11, 1, 0x44332211, 0x88776655, 1, 0x57475044, 0x30000,
+      0x12, 1, 0x44332211, 0x88776655, 1, 0x57475044, 0x30001,
+    ]);
+    await h.send({ kind: "play-activate", playId: 7, rpcId: 2, hostNs: GAMEPAD_HOST, startFrame: START });
+    const idle = gamepadEvent({ id: "custom pad", mapping: "",
+      buttons: [{ value: 1, pressed: true, touched: false }, { value: 1, pressed: true, touched: false }] });
+    await h.send(step({ events: [idle], watermark: GAMEPAD_HOST }));
+    assert.deepEqual(inputCalls(h.games[0]).map(call => call[0]), ["advance"]);
+    const sequence = 0x0102030405060708n;
+    const down = { ...idle, sequence,
+      buttons: [{ value: 0, pressed: false, touched: false }, { value: 0, pressed: false, touched: true }] };
+    await h.send(step({ tickId: 2, events: [down], watermark: GAMEPAD_HOST }));
+    await h.send(step({ tickId: 3, events: [{ ...down, sequence: sequence + 1n }], watermark: GAMEPAD_HOST }));
+    await h.send(step({ tickId: 4, events: [{ ...idle, sequence: sequence + 2n, timestampMs: 1001, hostNs: 1001000000n }],
+      watermark: 1001000000n }));
+    const calls = inputCalls(h.games[0]), packets = calls.filter(call => call[0] === "blob").map(call => call[1]);
+    assert.deepEqual(calls.map(call => call[0]), ["advance", "blob", "advance", "advance", "blob", "advance"]);
+    assert.deepEqual(packets.map(bytes => [bytes.length, bytes[6], new DataView(bytes.buffer).getUint32(64, true), bytes[68]]),
+      [[69, 0, 0x30001, 0], [69, 0, 0x30001, 1]]);
+    for (const [index, bytes] of packets.entries()) {
+      const decoded = new DataView(bytes.buffer), hostNs = index === 0 ? GAMEPAD_HOST : 1001000000n;
+      assert.equal(decoded.getBigUint64(7, true), GAMEPAD_SOURCE);
+      assert.equal(decoded.getBigInt64(15, true), hostNs); assert.equal(decoded.getBigInt64(50, true), hostNs);
+      assert.equal(decoded.getBigUint64(27, true), sequence + BigInt(index * 2));
+      assert.equal(decoded.getUint32(36, true), 0x57475044); assert.equal(decoded.getUint32(41, true), 0x30001);
+    }
+    assert.equal(h.of("play-step-done").length, 4); assert.equal(selected.reads, fromFile ? 1 : 0);
+    await h.send({ kind: "play-stop", playId: 7 }); assertReleased(h);
+  }
+});
+
 test("Worker refuses invalid Gamepad ownership or batches atomically and keeps pre-origin, stale-noop and physical fanout barriers", async () => {
   for (const request of [startRequest({ gamepadSetup: gamepadSetup() }),
     replayRequest(replayFile().file, { gamepadSetup: gamepadSetup() }),
