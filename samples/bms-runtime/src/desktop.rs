@@ -10,6 +10,9 @@ mod clipboard_fixtures;
 #[path = "font_fixture.rs"]
 mod font_fixture;
 #[cfg(test)]
+#[path = "desktop_ime_area_fixtures.rs"]
+mod ime_area_fixtures;
+#[cfg(test)]
 #[path = "desktop_ime_fields_fixtures.rs"]
 mod ime_fields_fixtures;
 #[cfg(test)]
@@ -73,7 +76,7 @@ use std::{
 };
 use winit::{
     application::ApplicationHandler,
-    dpi::LogicalSize,
+    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{ElementState, Ime, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
     keyboard::{Key, KeyCode, ModifiersState, PhysicalKey},
@@ -1111,6 +1114,7 @@ struct ImeDraft {
     enabled: bool,
     composing: bool,
     preview: Option<LineEditor>,
+    cursor_area: Option<(WindowId, ImeTarget, [u32; 4])>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TextField {
@@ -1294,6 +1298,7 @@ impl Desktop {
         self.hits.clear();
         // A retained scene must restore hit regions even if its signals are equal.
         self.painted_reactive = None;
+        self.ime.cursor_area = None;
     }
     /// Prepare changed field glyphs at UI state boundaries, never in retained paint.
     fn sync_input_font(&mut self) {
@@ -3244,12 +3249,98 @@ impl Desktop {
     fn ime_target(&self) -> Option<ImeTarget> {
         self.text_target()
     }
+    /// Map the current painted field, rather than a second copy of its layout.
+    fn ime_cursor_area(&self, physical: [u32; 2]) -> Option<[u32; 4]> {
+        let target = self.ime_target()?;
+        if self.ime.target != Some(target)
+            || self.painted_reactive != Some(target.screen)
+            || physical.contains(&0)
+        {
+            return None;
+        }
+        let control = ControlId(match target.field {
+            ImeField::Search => 80,
+            ImeField::Setting(index) => 1000_u64.checked_add(u64::try_from(index).ok()?)?,
+            ImeField::Profile => 15,
+            ImeField::Display(index) => 40_000_u64.checked_add(u64::try_from(index).ok()?)?,
+            ImeField::PracticeStart => 70,
+            ImeField::PracticeEnd => 75,
+            ImeField::RecordDirectory => 58,
+        });
+        let bounds = self.hits.iter().find(|(id, _)| *id == control)?.1;
+        if bounds.x < 0 || bounds.y < 0 || bounds.width <= 0 || bounds.height <= 0 {
+            return None;
+        }
+        let right = bounds.x.checked_add(bounds.width)?;
+        let bottom = bounds.y.checked_add(bounds.height)?;
+        let [x, y, width, height] = beatkernel_bms_runtime::viewport::Viewport::new(
+            physical,
+            [WIDTH as u32, HEIGHT as u32],
+        )
+        .ok()?
+        .rect();
+        // Outward rounding keeps a positive painted field reachable on tiny
+        // surfaces. All arithmetic precedes clipping and remains checked.
+        let axis = |begin: i64, end: i64, origin: u32, fitted: u32, logical: u32, limit: u32| {
+            let logical = u64::from(logical);
+            let first = u64::try_from(begin).ok()?.checked_mul(u64::from(fitted))? / logical;
+            let last = u64::try_from(end)
+                .ok()?
+                .checked_mul(u64::from(fitted))?
+                .checked_add(logical - 1)?
+                / logical;
+            let first = u64::from(origin).checked_add(first)?.min(u64::from(limit));
+            let last = u64::from(origin).checked_add(last)?.min(u64::from(limit));
+            if first > i32::MAX as u64 || last > i32::MAX as u64 || last <= first {
+                return None;
+            }
+            Some([
+                u32::try_from(first).ok()?,
+                u32::try_from(last - first).ok()?,
+            ])
+        };
+        let [left, width] = axis(bounds.x, right, x, width, WIDTH as u32, physical[0])?;
+        let [top, height] = axis(bounds.y, bottom, y, height, HEIGHT as u32, physical[1])?;
+        Some([left, top, width, height])
+    }
+    fn publish_ime_cursor_area(&mut self) {
+        let Some(target) = self.ime_target() else {
+            self.ime.cursor_area = None;
+            return;
+        };
+        let candidate = self.window.as_ref().and_then(|window| {
+            let size = window.inner_size();
+            Some((
+                window.id(),
+                target,
+                self.ime_cursor_area([size.width, size.height])?,
+            ))
+        });
+        if candidate == self.ime.cursor_area {
+            return;
+        }
+        self.ime.cursor_area = None;
+        if let (Some(window), Some((_, _, [left, top, width, height]))) = (&self.window, candidate)
+        {
+            window.set_ime_cursor_area(
+                PhysicalPosition::new(left as i32, top as i32),
+                PhysicalSize::new(width, height),
+            );
+            self.ime.cursor_area = candidate;
+        }
+    }
     fn sync_ime(&mut self) {
         if !self.ui_ready() {
             self.modifiers = ModifiersState::empty();
         }
         let target = self.ime_target();
         if target == self.ime.target {
+            if target.is_none()
+                || self.painted_reactive != target.map(|target| target.screen)
+                || self.window.is_none()
+            {
+                self.ime.cursor_area = None;
+            }
             self.sync_clipboard();
             return;
         }
@@ -4676,6 +4767,7 @@ impl Desktop {
         self.render_scene()
     }
     fn render_scene(&mut self) -> Result<(), String> {
+        let mut presented = false;
         if let Some(renderer) = &mut self.renderer {
             renderer.render(&self.scene)?;
             if renderer.needs_surface_recreation() {
@@ -4689,6 +4781,12 @@ impl Desktop {
                     .map_err(|error| error.to_string())?;
                 renderer.replace_surface(surface)?;
             }
+            presented = !renderer.needs_redraw();
+        }
+        if presented {
+            self.publish_ime_cursor_area();
+        } else {
+            self.ime.cursor_area = None;
         }
         Ok(())
     }
@@ -4740,7 +4838,10 @@ impl ApplicationHandler for Desktop {
                     .with_title("BeatKernel BMS player")
                     .with_inner_size(LogicalSize::new(WIDTH as f64, HEIGHT as f64)),
             ) {
-                Ok(window) => self.window = Some(Arc::new(window)),
+                Ok(window) => {
+                    self.ime.cursor_area = None;
+                    self.window = Some(Arc::new(window));
+                }
                 Err(error) => {
                     self.fail(error);
                     return;
@@ -4849,6 +4950,13 @@ impl ApplicationHandler for Desktop {
                         self.fail(error);
                     }
                 }
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                self.catalog_wheel.reset();
+                self.gesture.cancel();
+                self.pointer = None;
+                // Winit resize sizes are already physical; do not multiply DPI.
+                self.invalidate_hits();
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = Some((position.x, position.y));
