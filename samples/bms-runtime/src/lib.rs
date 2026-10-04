@@ -94,6 +94,8 @@ pub mod font_text;
 pub mod graphics;
 /// Contained immutable visual assets prepared outside playback callbacks.
 pub mod image_assets;
+#[cfg(test)]
+mod image_base_fixtures;
 /// Fixed transparent crop canvases prepared from original image resources.
 pub mod image_crop;
 /// Bounded raster decoding during preparation, independent of GPU ownership.

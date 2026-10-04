@@ -101,7 +101,7 @@ pub struct BmsNote {
     pub object: ObjectId,
     /// Original player/lane identity.
     pub lane: BmsLane,
-    /// Head/instant keysound identity, equal to the base36 WAV index.
+    /// Head/instant keysound identity, equal to the selected-radix WAV index.
     pub sample: SampleId,
     /// Unsounded LNTYPE1 or LNOBJ endpoint token, even if WAV is undefined.
     /// LNTYPE2 uses a synthesized cell boundary and has no tail sample.
@@ -139,10 +139,11 @@ pub struct ScheduledBgm {
     /// Original source acquisition ordinal for equal-time ordering.
     pub ordinal: u64,
 }
-/// Opaque base36 BMP resource identity, including special initial Poor image 00.
+/// Opaque BMP resource identity, including special initial Poor image 00.
+/// Two selected-radix digits represent values through 3843 (base62).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ImageId(
-    /// Original numeric base36 image index.
+    /// Original numeric image index in the selected resource radix.
     pub u16,
 );
 /// Crop definition using half-open corners on the application-selected canvas.
@@ -156,10 +157,10 @@ pub struct BgaCrop {
     pub destination: [i32; 2],
 }
 impl BgaCrop {
-    /// Checks the base36 source range and strictly positive source extents.
+    /// Checks the two-digit base62 ceiling and strictly positive source extents.
     pub fn validate(&self) -> Result<(), String> {
-        if self.source.0 > 1295 {
-            return Err("BGA source identity exceeds two base36 digits".into());
+        if self.source.0 > 3843 {
+            return Err("BGA source identity exceeds two base62 digits".into());
         }
         let [x1, y1, x2, y2] = self.source_rect.map(i64::from);
         if x2 - x1 <= 0 || y2 - y1 <= 0 {
@@ -263,7 +264,8 @@ pub struct BmsWarning {
 pub struct BmsChart {
     /// Actual gameplay SourceChart; no BGM-only fake gameplay notes.
     pub source: SourceChart,
-    /// Exact WAV paths by case-insensitive base36 index; assets are not opened.
+    /// Exact WAV paths by selected-radix index; assets are not opened.
+    /// Base16/base36 ignore digit case; base62 preserves distinct letter cases.
     pub samples: BTreeMap<u16, String>,
     /// Exact opaque BMP paths, including optional initial Poor resource 00.
     pub images: BTreeMap<ImageId, String>,
@@ -552,7 +554,7 @@ pub enum BmsErrorKind {
     MissingDefinition {
         /// Definition kind (WAV, BPM or STOP).
         kind: &'static str,
-        /// Original numeric base36 index.
+        /// Original numeric index in the selected resource radix.
         index: u16,
     },
     /// Exact arithmetic or target representation overflow.
@@ -1000,7 +1002,7 @@ mod crop_fixtures {
         );
         assert!(
             BgaCrop {
-                source: ImageId(1296),
+                source: ImageId(3844),
                 source_rect: [0, 0, 1, 1],
                 destination: [0, 0]
             }

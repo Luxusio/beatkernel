@@ -56,23 +56,34 @@ fn code(token: &str, radix: u32, line: usize) -> Result<u16, BmsError> {
             BmsErrorKind::Syntax("index requires two ASCII digits"),
         ));
     }
-    u16::from_str_radix(token, radix)
-        .map_err(|_| fail(line, BmsErrorKind::Syntax("invalid index digit")))
+    index(token, radix, line)
 }
-fn crop(value: &str, sugar: bool, line: usize) -> Result<BgaCrop, BmsError> {
+fn index(token: &str, radix: u32, line: usize) -> Result<u16, BmsError> {
+    token.bytes().try_fold(0u16, |value, byte| {
+        let digit = match byte {
+            b'0'..=b'9' => u32::from(byte - b'0'),
+            b'A'..=b'Z' => u32::from(byte - b'A') + 10,
+            b'a'..=b'z' => u32::from(byte - b'a') + if radix == 62 { 36 } else { 10 },
+            _ => return Err(fail(line, BmsErrorKind::Syntax("invalid index digit"))),
+        };
+        if digit >= radix {
+            return Err(fail(line, BmsErrorKind::Syntax("invalid index digit")));
+        }
+        // Both callers admit at most two digits, with radix at most 62.
+        Ok(value * radix as u16 + digit as u16)
+    })
+}
+fn crop(value: &str, sugar: bool, radix: u32, line: usize) -> Result<BgaCrop, BmsError> {
     let mut fields = value.split_whitespace();
     let source = fields.next().unwrap_or("");
     if !(1..=2).contains(&source.len()) || !source.bytes().all(|byte| byte.is_ascii_alphanumeric())
     {
         return Err(fail(
             line,
-            BmsErrorKind::Syntax("BGA source requires one or two base36 digits"),
+            BmsErrorKind::Syntax("BGA source requires one or two resource digits"),
         ));
     }
-    let source = ImageId(
-        u16::from_str_radix(source, 36)
-            .map_err(|_| fail(line, BmsErrorKind::Syntax("invalid BGA source")))?,
-    );
+    let source = ImageId(index(source, radix, line)?);
     let mut coordinates = [0i32; 6];
     for coordinate in &mut coordinates {
         *coordinate = fields
@@ -171,13 +182,16 @@ fn update_resolution(
 }
 
 /// Parses the documented deterministic UTF-8 subset without asset IO.
+/// Selected BASE headers set a strict file-wide resource radix of 16, 36 or 62;
+/// absent headers default to 36, and late headers also govern earlier resources.
 /// Unsupported timing/gameplay commands reject with original line diagnostics.
 pub fn parse(text: &str, options: ParseOptions) -> Result<BmsChart, BmsError> {
     parse_seeded(text, options, 0)
 }
 
 /// Resolve conditional branches with the documented SplitMix64 seed before
-/// parsing selected payload. Discarded lines still obey physical input caps.
+/// discovering file-wide BASE and parsing selected payload. Discarded lines
+/// still obey physical input caps and never change the selected radix.
 pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsChart, BmsError> {
     if options.max_bytes == 0
         || options.max_lines == 0
@@ -190,6 +204,54 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
     }
     if text.len() > options.max_bytes {
         return Err(fail(0, BmsErrorKind::Limit("input bytes")));
+    }
+    // Resolve randomness exactly once. Borrow selected payload within the
+    // physical caps so a late BASE can govern the entire selected chart.
+    let mut selected = Vec::new();
+    let mut conditional = crate::conditional::Conditional::new(seed);
+    for (index, original) in text.trim_start_matches('\u{feff}').lines().enumerate() {
+        let line = index + 1;
+        if line > options.max_lines {
+            return Err(fail(line, BmsErrorKind::Limit("line count")));
+        }
+        if original.len() > options.max_line_bytes {
+            return Err(fail(line, BmsErrorKind::Limit("line bytes")));
+        }
+        let trimmed = original.trim();
+        let Some(command_line) = trimmed.strip_prefix('#') else {
+            continue;
+        };
+        if conditional.payload(command_line, line)? {
+            selected
+                .try_reserve(1)
+                .map_err(|_| fail(line, BmsErrorKind::Limit("selected payload allocation")))?;
+            selected.push((line, command_line));
+        }
+    }
+    conditional.finish()?;
+    let mut resource_radix = 36;
+    let mut radix_defined = false;
+    for &(line, command_line) in &selected {
+        let split = command_line
+            .find(char::is_whitespace)
+            .unwrap_or(command_line.len());
+        if command_line[..split].eq_ignore_ascii_case("BASE") {
+            if radix_defined && options.duplicates == DuplicatePolicy::Reject {
+                return Err(fail(line, BmsErrorKind::Duplicate("BASE")));
+            }
+            resource_radix = match command_line[split..].trim() {
+                "16" => 16,
+                "36" => 36,
+                "62" => 62,
+                _ => {
+                    return Err(fail(
+                        line,
+                        BmsErrorKind::Syntax("BASE requires 16, 36 or 62"),
+                    ));
+                }
+            };
+            radix_defined = true;
+        }
     }
     let mut base = Bpm::new(130, 1).expect("valid documented default");
     let mut base_defined = false;
@@ -206,22 +268,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
     let mut visual_rows = Vec::new();
     let mut raw_count = 0usize;
     let mut max_measure = 0usize;
-    let mut conditional = crate::conditional::Conditional::new(seed);
-    for (index, original) in text.trim_start_matches('\u{feff}').lines().enumerate() {
-        let line = index + 1;
-        if line > options.max_lines {
-            return Err(fail(line, BmsErrorKind::Limit("line count")));
-        }
-        if original.len() > options.max_line_bytes {
-            return Err(fail(line, BmsErrorKind::Limit("line bytes")));
-        }
-        let trimmed = original.trim();
-        let Some(command_line) = trimmed.strip_prefix('#') else {
-            continue;
-        };
-        if !conditional.payload(command_line, line)? {
-            continue;
-        }
+    for (line, command_line) in selected {
         if command_line.len() >= 6
             && command_line.as_bytes()[..3].iter().all(u8::is_ascii_digit)
             && command_line.as_bytes()[5] == b':'
@@ -273,7 +320,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
             let radix = if channel == 3 || matches!(channel, 0x0b..=0x0e) {
                 16
             } else {
-                36
+                resource_radix
             };
             let mut tokens = Vec::with_capacity(data.len() / 2);
             for token in data.as_bytes().chunks_exact(2) {
@@ -303,16 +350,20 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
         let split = command_line
             .find(char::is_whitespace)
             .unwrap_or(command_line.len());
-        let command = command_line[..split].to_ascii_uppercase();
+        let original_command = &command_line[..split];
+        let command = original_command.to_ascii_uppercase();
         let value = command_line[split..].trim();
-        if command == "BPM" {
+        if command == "BASE" {
+            // Already validated and resolved file-wide before resource parsing.
+            continue;
+        } else if command == "BPM" {
             if base_defined && options.duplicates == DuplicatePolicy::Reject {
                 return Err(fail(line, BmsErrorKind::Duplicate("base BPM")));
             }
             base = bpm(decimal(value, line)?, line)?;
             base_defined = true;
         } else if command.len() == 5 && command.starts_with("WAV") {
-            let id = code(&command[3..], 36, line)?;
+            let id = code(&original_command[3..], resource_radix, line)?;
             if value.is_empty() || value.contains('\0') {
                 return Err(fail(
                     line,
@@ -328,7 +379,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 options.duplicates,
             )?;
         } else if command.len() == 5 && command.starts_with("BPM") {
-            let id = code(&command[3..], 36, line)?;
+            let id = code(&original_command[3..], resource_radix, line)?;
             let tempo = bpm(decimal(value, line)?, line)?;
             define(
                 &mut tempos,
@@ -339,7 +390,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 options.duplicates,
             )?;
         } else if command.len() == 6 && command.starts_with("STOP") {
-            let id = code(&command[4..], 36, line)?;
+            let id = code(&original_command[4..], resource_radix, line)?;
             let duration = decimal(value, line)?;
             define(
                 &mut stops,
@@ -350,7 +401,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 options.duplicates,
             )?;
         } else if command == "LNOBJ" {
-            let marker = code(value, 36, line)?;
+            let marker = code(value, resource_radix, line)?;
             if marker == 0 {
                 return Err(fail(
                     line,
@@ -439,7 +490,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 options.duplicates,
             )?;
         } else if command.len() == 5 && command.starts_with("BMP") {
-            let id = ImageId(code(&command[3..], 36, line)?);
+            let id = ImageId(code(&original_command[3..], resource_radix, line)?);
             if value.is_empty() || value.contains('\0') {
                 return Err(fail(
                     line,
@@ -458,11 +509,15 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
             || (command.len() == 6 && command.starts_with("@BGA"))
         {
             let sugar = command.starts_with('@');
-            let id = ImageId(code(&command[if sugar { 4 } else { 3 }..], 36, line)?);
+            let id = ImageId(code(
+                &original_command[if sugar { 4 } else { 3 }..],
+                resource_radix,
+                line,
+            )?);
             define(
                 &mut bga_crops,
                 id,
-                crop(value, sugar, line)?,
+                crop(value, sugar, resource_radix, line)?,
                 line,
                 "BGA definition",
                 options.duplicates,
@@ -479,7 +534,6 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
             ));
         }
     }
-    conditional.finish()?;
     let cell_long_notes = matches!(metadata.get("LNTYPE").map(String::as_str), Some("2" | "02"));
     let mut origins = Vec::with_capacity(max_measure + 2);
     let mut durations = Vec::with_capacity(max_measure + 1);

@@ -15,8 +15,8 @@ use std::{
     sync::Arc,
 };
 
-/// Largest admitted number of base36 image references, including BMP00.
-pub const MAX_IMAGE_REFERENCES: usize = 36 * 36;
+/// Largest admitted number of two-digit base62 image references, including BMP00.
+pub const MAX_IMAGE_REFERENCES: usize = 62 * 62;
 /// Hard ceiling for retained decoded image data; decoder scratch is additional.
 pub const MAX_IMAGE_BANK_BYTES: u64 = 256 * 1024 * 1024;
 
