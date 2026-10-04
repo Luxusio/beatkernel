@@ -896,6 +896,20 @@ Preview time admission shall remain nonnegative. Browser storage, binding,
 audio and authored fixture execution remain deferred until scheduled.
 
 
+## Bounded room-frame byte transport
+
+The reliable WebTransport channel retains its 65547-byte default prefix limit.
+An explicit `maxPrefixBytes` option may select 1..65808 bytes, including the full
+BKMR room admission frame. Validate it before acquiring a transport and enforce
+it on read prefixes and owned write snapshots. Keep the fixed 1 MiB platform
+chunk/backing-buffer retention limit, single pending read/write ownership and
+existing cancellation/deadlines. The channel remains a byte adapter; Rust owns
+room interpretation, leases, preparation and complete-write receipts.
+
+This limit extension is a component for future browser room integration.
+Generated bindings and a Worker-owned room client are still required; it does
+not select group mode automatically or prove browser/server interoperability.
+
 ## Explicit live multiplayer and output start
 
 Solo Play shall remain the default automatic audio path. An explicit live-only

@@ -760,3 +760,38 @@ agreement, gameplay progress/fanout, final ACKs and native/browser gameplay
 callers remain required. Source/compile-only evidence cannot prove endpoint,
 TLS, browser interoperability, physical sync or performance acceptance. Author
 deterministic I/O, ownership and refusal fixtures for deferred execution.
+
+## Common room admission client
+
+The application shall use one transport-independent client for BKMR admission
+on native and browser transports. Preserve the requested canonical identity and
+local roster, emit Join once, and accept one assigned participant ID only after
+the full Join write receipt. Validate complete ordered snapshots before mutation:
+self must occur once with the exact local roster, collecting membership may
+only append, frozen membership and all rosters are immutable, preparation cannot
+regress, and the original deadline persists until the prepared phase. Server
+requests or duplicated admission are invalid responses.
+
+Only the first host may request Seal after at least two collecting hosts are
+observed. Ready requires a frozen roster and an explicit caller preparation
+declaration, once. Neither intention nor a partial write confirms preparation.
+Accept local preparation only after the full Ready write, and a creator's
+frozen roster only after its full Seal write. Leave fences new requests. Maintain
+one queued or in-flight frame with nonreused checked write IDs; mismatched write
+receipts and invalid messages cannot mutate accepted state.
+
+A bounded Read/Write driver retains the exact frame and offset across partial
+writes and WouldBlock, acknowledging only a complete frame. It preserves partial
+incoming frames and admits bounded work per step. Protocol/I/O failure or EOF
+fences the driver; its caller owns cancellation/deadlines and drops the actual
+stream. Native WebTransport shall expose this driver through its existing
+trusted endpoint connector, with no certificate bypass or second connection.
+Room creator authority comes from the server's first admitted host; the legacy
+bilateral start-role option does not choose or override that lease.
+The browser byte transport shall optionally admit prefixes up to the 65808-byte
+room-frame bound while retaining its existing 65547-byte default and fixed chunk
+retention limits. Explicit limits must apply to both reads and owned writes.
+
+Client admission/readiness is not a committed shared music start or final ACK.
+Generated browser bindings, browser room owner/UI, native gameplay composition,
+multi-host clock/start/progress/ACK and interoperability remain required.
