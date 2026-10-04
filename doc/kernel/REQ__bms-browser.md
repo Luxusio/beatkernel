@@ -89,8 +89,8 @@ the graphics/game Worker through OffscreenCanvas. Do not assemble scenes, draw
 gameplay canvases, update a DOM gameplay HUD each frame, judge inputs, decode
 assets or serialize gameplay/network data on the input acquisition thread.
 
-The Window collects supported keyboard, touch/pointer, HID and other physical
-input events and forwards a bounded, ordered prefix through the common input
+The Window collects supported keyboard, touch/pointer, HID, Gamepad and other
+physical input events and forwards a bounded, ordered prefix through the common input
 abstraction. Preserve acquisition timestamps, source/device/contact identities
 and original clock provenance; Worker arrival time cannot replace event time.
 Permission refusal, cancellation, disconnect, focus loss and released contacts
@@ -1503,7 +1503,16 @@ substitutes a shared frontier, samples a clock or advances gameplay. It remains
 available for the retained final prefix after gameplay failure. The portable
 whole-cohort payload codec is specified by
 [local input ownership](REQ__bms-local-players.md); the scalar BKMP v6 Session
-and current Worker/Page do not yet publish group payloads. Source compilation
+now has an explicit group mode; current Worker/Page do not yet publish group
+payloads. BrowserMultiplayer exposes new_group, send_group_progress with exact
+member words and poll_group_event with typed roster/progress words and an exact
+BigInt sequence. The old scalar DTO and constructor remain compatible. Both
+modes reuse actual readiness, clock/start and complete-write/final-ACK state.
+Group event polling shares the bounded pending-event budget and remains
+available for cleanup after failure. Before entering generated WASM glue, a
+host must bound roster and word inputs to 64 players and 704 words; the Rust
+decoder also validates exact extents, identities and scalar score semantics.
+Source compilation
 does not prove generated binding or network execution.
 
 ## Touch-aware local page changes

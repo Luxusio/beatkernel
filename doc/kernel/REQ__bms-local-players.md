@@ -65,9 +65,31 @@ counters retain their full widths, including signed minima and u64 maxima.
 
 This is a payload and actual-runtime snapshot component, independent of OS,
 transport handles, clock sampling and stream-write credit. The existing BKMP
-v6 Session still accepts scalar progress only. A group mode must subsequently
-negotiate remote roster/setup, carry these payloads, share one authoritative
-start/output mapping and preserve exact write/final acknowledgement ownership.
+v6 Session retains its scalar mode and adds an explicitly negotiated group
+mode. Group setup frame tag 14 uses a BKGC envelope (schema u16 1, count u16, canonical
+identity length u32, canonical identity bytes, then ordered u32 PlayerIds), all
+little endian after the four-byte marker. The complete setup payload remains
+within the existing 65536-byte bound. Match canonical gameplay identity while
+retaining each side's independently validated 1..64-member roster. Require
+the peer roster before readiness/probes/start and reject scalar/group mixing.
+Scalar setup retains tag 1 and arbitrary identity bytes, including a BKGC
+prefix; different setup tags distinguish modes without narrowing that contract.
+Group ordinary/final progress uses frame tags 12/13 with the whole-cohort
+payload, one shared StartAgreement and existing complete-write/ACK ownership.
+Final group ACK still names the exact outbound group sequence and is legal
+only after its complete local write. A final payload flag is not write credit.
+Invalid or changed roster, any bad member transition, wrong sequence, premature
+data and stale/duplicate credit fence the session without retrying frames.
+Retain committed events for cleanup. Separate group roster/progress events
+share the existing bounded eight-event budget with scalar lifecycle events,
+so legacy event consumers do not need new scalar enum cases.
+
+Browser bindings expose explicit group construction, exact word submission and
+group event polling on this same Session owner. Group APIs cannot be used on a
+scalar session and scalar progress cannot be sent on a group session. Host
+acquisition, group canonical identity selection, remote HUD target mapping,
+page/Worker/native transport callers and multi-host room integration remain
+required follow-on work; current UI still refuses local network combinations.
 No group codec call creates a connection, start receipt or final acknowledgement.
 Browser/native callers remain unfinished; tests authored and compile checks
 cannot prove network acceptance.
