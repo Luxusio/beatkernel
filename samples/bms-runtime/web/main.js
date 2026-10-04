@@ -369,7 +369,7 @@ function controls() {
   ui["local-release"].disabled = playing || localSetup === null;
   for (const field of localFields) field.disabled = recordsDisabled || localSetup?.phase !== "ready";
   ui["local-page"].disabled = activePlay ? activePlay.phase !== "playing" || !activePlay.localPlan
-    || activePlay.localSources.has(2n) || activePlay.pageChanging || activePlay.rpc !== null
+    || activePlay.pageChanging || activePlay.rpc !== null
     : recordsDisabled || localRoster.players.length === 1;
   ui["captured-replay"].disabled = playing || busy || capturedReplays.length === 0;
   ui["bindings-reset"].disabled = recordsDisabled;
@@ -780,7 +780,7 @@ function playRpc(session, kind, fields = {}, transfer = []) {
 async function changeLocalPage() {
   const session = activePlay;
   if (!session) return;
-  if (!session.localPlan || session.phase !== "playing" || session.pageChanging || session.rpc || session.localSources.has(2n)) {
+  if (!session.localPlan || session.phase !== "playing" || session.pageChanging || session.rpc) {
     ui["local-page"].value = String(session.localPage);
     return;
   }
@@ -792,14 +792,20 @@ async function changeLocalPage() {
   session.pageChanging = true;
   controls();
   try {
+    await drainPageInput(session);
+    if (activePlay !== session || session.owner !== owner || session.phase !== "playing") return;
     const result = await playRpc(session, "play-page", { page });
     if (activePlay !== session || session.owner !== owner || session.phase !== "playing") return;
-    if (result?.kind !== "local-page" || result.page !== page) {
+    const touchSlot = session.localPlan.sources.indexOf(2n);
+    const touchVisible = touchSlot >= 0 && Math.floor(touchSlot / 4) === page;
+    if (result?.kind !== "local-page" || result.page !== page
+      || (touchSlot >= 0 ? result.touchVisible !== touchVisible : result.touchVisible !== undefined)) {
       void stopPlay("Local page response changed its requested identity.", true);
       return;
     }
     session.localPage = page;
-    ui["local-status"].textContent = `Showing players ${session.localPlan.players.slice(page * 4, page * 4 + 4).join(", ")}.`;
+    ui["local-status"].textContent = `Showing players ${session.localPlan.players.slice(page * 4, page * 4 + 4).join(", ")}.`
+      + (touchSlot >= 0 && !touchVisible ? " New touch contacts are unbound while the touch player is offscreen; held contacts retain their lane." : "");
   } catch (error) {
     if (activePlay === session && session.owner === owner && session.phase === "playing") {
       ui["local-status"].textContent = `Page unchanged: ${String(error.message).slice(0, 4096)}`;
@@ -861,7 +867,7 @@ async function play(mode = "live") {
     chartPath: ui.chart.value,
     preview: { title: ui.title.textContent, details: ui.details.textContent, position: ui.position.value } }, acquired,
     { localPlan, localSources: localPlan ? new Set(localPlan.sources) : null, localReplays: null, localScores: null, recordLimits: null,
-      localPage: localPlan?.page ?? 0, pageChanging: false });
+      localPage: localPlan?.page ?? 0, pageChanging: false, pageInputWaiter: null, lastAckSequence: 0n });
   activePlay = session;
   controls();
   status(mode === "replay" ? "Preparing recorded replay and audio…" : "Preparing playable chart and audio…");
@@ -1119,6 +1125,7 @@ function touch(event, phase, surface, lost = false) {
     || surface !== canvas || surface !== session.canvas || session.owner !== owner) return;
   if (session.localSources && !session.localSources.has(2n)) return;
   if (!lost && event.pointerType !== "touch") return;
+  if (phase === 0 && session.pageChanging && !session.contacts.has(event.pointerId)) return;
   const id = event.pointerId;
   const previous = session.contacts.get(id);
   if (lost && !previous) return;
@@ -1180,11 +1187,35 @@ function outputTimestamp(session) {
 function finishPlay(session) {
   if (activePlay === session && session.phase === "playing" && session.completionReady
     && session.events.length === 0 && session.tickPending === null && session.renderPending === null
-    && !session.commandsPending && session.completionTick === session.tickId) {
+    && !session.commandsPending && !session.pageChanging && session.completionTick === session.tickId) {
     void stopPlay(session.mode === "replay" ? "Recorded replay ended."
       : session.endNs === undefined ? "Song completed." : "Section completed.", false, true);
   }
 }
+function settlePageInput(session) {
+  const waiter = session.pageInputWaiter;
+  if (!waiter || session.lastAckSequence < waiter.boundary) return;
+  session.pageInputWaiter = null;
+  clearTimeout(waiter.timer);
+  waiter.resolve();
+}
+
+function drainPageInput(session) {
+  let boundary = session.tickPending?.lastSequence ?? session.lastAckSequence;
+  for (const event of session.events) if (event.sequence > boundary) boundary = event.sequence;
+  if (session.lastAckSequence >= boundary) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const waiter = { boundary, resolve, reject, timer: null };
+    waiter.timer = setTimeout(() => {
+      if (session.pageInputWaiter !== waiter) return;
+      session.pageInputWaiter = null;
+      reject(new Error("Acquired input prefix did not finish before page change."));
+    }, 10000);
+    session.pageInputWaiter = waiter;
+    pumpInput(session);
+  });
+}
+
 function pumpInput(session) {
   if (activePlay !== session || session.mode !== "live" || session.phase !== "playing" || session.tickPending !== null || session.inputPumping) return;
   session.inputPumping = true;
@@ -1203,7 +1234,9 @@ function pumpInput(session) {
     if (!Number.isSafeInteger(tickId)) throw new Error("Gameplay step identity exhausted.");
     session.completionReady = false;
     const timer = setTimeout(() => { if (session.tickPending?.tickId === tickId) void stopPlay("Gameplay Worker stopped responding.", true); }, 10000);
-    session.tickPending = { tickId, timer, watermark, lastInput };
+    let lastSequence = session.lastAckSequence;
+    for (const event of events) if (event.sequence > lastSequence) lastSequence = event.sequence;
+    session.tickPending = { tickId, timer, watermark, lastInput, lastSequence };
     worker.postMessage({ kind: "play-step", playId: session.id, tickId, events, watermark, contextFrame: session.audio.currentFrame });
   } catch (error) { void stopPlay(`Playback failed: ${error.message}`, true); }
   finally { session.inputPumping = false; }
@@ -1315,6 +1348,8 @@ function receivePlay(data) {
     if (typeof data.commandsPending !== "boolean") { void stopPlay("Gameplay command ownership was malformed.", true); return; }
     clearTimeout(pending.timer);
     session.tickPending = null;
+    session.lastAckSequence = pending.lastSequence;
+    settlePageInput(session);
     session.lastHost = pending.watermark ?? pending.lastInput;
     session.commandsPending = data.commandsPending;
     if (data.commandsPending) session.completionReady = false;
@@ -1352,6 +1387,11 @@ function stopPlay(reason, failed = false, completed = false) {
   try { hidStopped = session.hidOwner?.close() ?? Promise.resolve(); }
   catch (error) { hidStopped = Promise.reject(error); }
   hidStopped.catch(() => {});
+  if (session.pageInputWaiter) {
+    clearTimeout(session.pageInputWaiter.timer);
+    session.pageInputWaiter.reject(new Error("Page input admission was cancelled."));
+    session.pageInputWaiter = null;
+  }
   session.controller.abort();
   clearInterval(session.timer);
   if (session.tickPending) clearTimeout(session.tickPending.timer);

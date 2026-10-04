@@ -2,7 +2,10 @@
 use crate::local_players::{PlayerId, validate_source_routes};
 use beatkernel::{
     audio::{AudioCommand, CommandProducer, CommandPushError, VoiceId, command_queue},
-    input::{BindingMap, DeviceId, DeviceSelector, PhysicalInputEvent, Position2, TouchRouter},
+    input::{
+        BindingMap, DeviceId, DeviceSelector, PhysicalInputEvent, Position2, TouchRegion,
+        TouchRouter,
+    },
     judge::JudgeEngine,
     runtime::{Runtime, RuntimeError, RuntimeProcessingClock, RuntimeReport, SoundBinding},
     telemetry::RuntimeTelemetry,
@@ -237,6 +240,43 @@ impl RuntimeGroup {
         member
             .runtime
             .configure_touch_router(router)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Layout control does not execute a member or alter shared chronology.
+    pub fn remap_touch_regions(
+        &mut self,
+        player: PlayerId,
+        regions: Vec<TouchRegion>,
+    ) -> Result<(), String> {
+        self.ensure_usable().map_err(|error| error.to_string())?;
+        let member = self
+            .members
+            .iter_mut()
+            .find(|member| member.player == player)
+            .ok_or_else(|| "touch routing player is not in this cohort".to_string())?;
+        member
+            .runtime
+            .remap_touch_regions(regions)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Hidden players keep existing bound/unbound contacts; only fresh contact
+    /// selection changes. Poisoned or absent owners refuse without mutation.
+    pub fn set_touch_routing_enabled(
+        &mut self,
+        player: PlayerId,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.ensure_usable().map_err(|error| error.to_string())?;
+        let member = self
+            .members
+            .iter_mut()
+            .find(|member| member.player == player)
+            .ok_or_else(|| "touch routing player is not in this cohort".to_string())?;
+        member
+            .runtime
+            .set_touch_routing_enabled(enabled)
             .map_err(|error| error.to_string())
     }
 

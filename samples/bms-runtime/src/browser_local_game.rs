@@ -22,7 +22,7 @@ use crate::{
 };
 use beatkernel::{
     audio::{PcmSample, SampleId},
-    input::{Binding, DeviceId, PhysicalInputEvent, Position2, codec::CodecLimits},
+    input::{Binding, DeviceId, PhysicalInputEvent, Position2, TouchRegion, codec::CodecLimits},
     judge::JudgeEvent,
     replay::codec::ReplayCodecLimits,
     time::{
@@ -63,6 +63,7 @@ pub(crate) struct BrowserLocalMember {
     opponent_error: Option<String>,
     source: Option<DeviceId>,
     pressed_owners: PressedKeys,
+    touch_regions: Option<Vec<TouchRegion>>,
 }
 
 impl BrowserLocalMember {
@@ -154,6 +155,7 @@ impl BrowserLocalGame {
                 opponents: None,
                 opponent_error: None,
                 pressed_owners: PressedKeys::default(),
+                touch_regions: None,
             });
         }
         let config = StepGameplayConfig {
@@ -416,11 +418,12 @@ impl BrowserLocalGame {
         bounds: Vec<f32>,
         max_contacts: u32,
     ) -> Result<(), JsValue> {
-        let member = self
+        let index = self
             .members
             .iter()
-            .find(|member| member.player == PlayerId(player))
+            .position(|member| member.player == PlayerId(player))
             .ok_or_else(|| error("unknown local player"))?;
+        let member = &self.members[index];
         if let Some(source) = member.source {
             if words.chunks_exact(7).any(|row| {
                 row[1] != 1 || (u64::from(row[2]) | (u64::from(row[3]) << 32)) != source.0
@@ -432,9 +435,76 @@ impl BrowserLocalGame {
         }
         let setup = TouchInputSetup::new(&words, &bounds, &self.chart.lanes, max_contacts)
             .map_err(error)?;
+        let mut regions = Vec::new();
+        regions
+            .try_reserve_exact(setup.router.regions().len())
+            .map_err(|_| error("local touch region snapshot allocation failed"))?;
+        regions.extend_from_slice(setup.router.regions());
         self.game
             .configure_touch_router(PlayerId(player), setup.router)
-            .map_err(error)
+            .map_err(error)?;
+        self.members[index].touch_regions = Some(regions);
+        Ok(())
+    }
+
+    /// Move only the configured router's bounds for a visible page. Hidden
+    /// members admit new contacts as unbound while retaining every held owner.
+    pub fn set_touch_page(&mut self, player: u32, page: u32) -> Result<bool, JsValue> {
+        let index = self
+            .members
+            .iter()
+            .position(|member| member.player == PlayerId(player))
+            .ok_or_else(|| error("unknown local touch player"))?;
+        let count = self.members.len();
+        let page_size = crate::ui::organisms::LOCAL_PLAYERS_PER_PAGE;
+        if page as usize >= count.div_ceil(page_size) {
+            return Err(error("invalid local touch page"));
+        }
+        let original = self.members[index]
+            .touch_regions
+            .as_ref()
+            .ok_or_else(|| error("local player has no configured touch router"))?;
+        let first = page as usize * page_size;
+        if index < first || index >= (first + page_size).min(count) {
+            self.game
+                .set_touch_routing_enabled(PlayerId(player), false)
+                .map_err(error)?;
+            return Ok(false);
+        }
+        let bounds = self.touch_bounds(player, page)?;
+        let mut regions = Vec::new();
+        regions
+            .try_reserve_exact(original.len())
+            .map_err(|_| error("local touch remapping allocation failed"))?;
+        for region in original {
+            let lane = self
+                .chart
+                .lanes
+                .iter()
+                .position(|lane| u32::from(*lane) == region.game_control.0)
+                .ok_or_else(|| {
+                    error("configured touch destination is absent from the prepared chart")
+                })?;
+            let offset = lane * 4;
+            regions.push(TouchRegion {
+                min: Position2 {
+                    x: bounds[offset],
+                    y: bounds[offset + 1],
+                },
+                max: Position2 {
+                    x: bounds[offset + 2],
+                    y: bounds[offset + 3],
+                },
+                ..*region
+            });
+        }
+        self.game
+            .remap_touch_regions(PlayerId(player), regions)
+            .map_err(error)?;
+        self.game
+            .set_touch_routing_enabled(PlayerId(player), true)
+            .map_err(error)?;
+        Ok(true)
     }
 
     /// Prepared lane regions for this member's actual visible field. Coordinates

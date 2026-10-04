@@ -793,7 +793,8 @@ async function preparePlay(state, request) {
     }
     if (state.touchInput && (typeof Game?.prototype?.configure_touch_regions !== "function"
       || typeof Game?.prototype?.input_blob_at !== "function"
-      || (state.localPlan && typeof Game?.prototype?.touch_bounds !== "function"))) {
+      || (state.localPlan && (typeof Game?.prototype?.touch_bounds !== "function"
+        || typeof Game?.prototype?.set_touch_page !== "function")))) {
       throw new Error("The gameplay binding does not provide contact routing ownership.");
     }
     if (hid !== null && (typeof Game?.prototype?.configure_hid_devices !== "function"
@@ -1319,11 +1320,17 @@ function handlePlay(request) {
       let reason = null;
       if (!state.localPlan || !state.game || !state.prepared) reason = "Wait for actual local player preparation before paging.";
       else if (!integer(request.page, 0, Math.ceil(state.localPlan.members.length / 4) - 1)) reason = "Invalid local player page.";
-      else if (state.touchPlayer !== null && request.page !== state.localPage) reason = "The configured touch player page cannot move during this session.";
+      let touchVisible;
+      if (reason === null && state.touchPlayer !== null && state.touchPlayer !== undefined) {
+        try { touchVisible = state.game.set_touch_page(state.touchPlayer, request.page); }
+        catch (error) { reason = message(error); }
+        const slot = state.localPlan.members.findIndex(member => member.player === state.touchPlayer);
+        if (reason === null && touchVisible !== (Math.floor(slot / 4) === request.page)) throw new Error("Local touch page returned invalid visibility.");
+      }
       if (reason !== null) report("play-reply", { playId: state.id, rpcId: request.rpcId, error: reason });
       else {
         state.localPage = request.page;
-        reply(state, request, { kind: "local-page", page: state.localPage });
+        reply(state, request, { kind: "local-page", page: state.localPage, ...(touchVisible === undefined ? {} : { touchVisible }) });
         scheduleDraw();
       }
       return;

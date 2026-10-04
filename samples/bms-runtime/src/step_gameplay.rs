@@ -19,7 +19,7 @@ use beatkernel::{
         RenderReport, SampleBank, command_queue,
     },
     chart::ObjectId,
-    input::{BindingMap, PhysicalInputEvent, Position2, TouchRouter},
+    input::{BindingMap, PhysicalInputEvent, Position2, TouchRegion, TouchRouter},
     interaction::InteractionState,
     judge::JudgeEngine,
     replay::{ReplayHeader, codec::ReplayCodecLimits},
@@ -1572,6 +1572,33 @@ impl StepLocalGameplay {
         }
         self.group_mut()
             .configure_touch_router(player, router)
+            .map_err(StepGameplayError::Setup)?;
+        Ok(())
+    }
+
+    /// Explicit layout changes preserve captures, reports and correction eligibility.
+    pub fn remap_touch_regions(
+        &mut self,
+        player: PlayerId,
+        regions: Vec<TouchRegion>,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control.ensure_usable()?;
+        self.member_index(player)?;
+        self.group_mut()
+            .remap_touch_regions(player, regions)
+            .map_err(StepGameplayError::Setup)?;
+        Ok(())
+    }
+
+    pub fn set_touch_routing_enabled(
+        &mut self,
+        player: PlayerId,
+        enabled: bool,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control.ensure_usable()?;
+        self.member_index(player)?;
+        self.group_mut()
+            .set_touch_routing_enabled(player, enabled)
             .map_err(StepGameplayError::Setup)?;
         Ok(())
     }
