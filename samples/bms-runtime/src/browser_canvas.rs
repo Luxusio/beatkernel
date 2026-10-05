@@ -234,6 +234,28 @@ impl BrowserCanvas {
         self.renderer.render(&self.scene)
     }
 
+    pub(crate) fn present_historical_record(
+        &mut self,
+        record: &crate::browser_historical_record::BrowserHistoricalRecord,
+    ) -> Result<(), String> {
+        if self.renderer.needs_surface_recreation() {
+            let surface = self
+                .instance
+                .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(self.canvas.clone()))
+                .map_err(|error| format!("recreate browser canvas surface: {error}"))?;
+            self.renderer.replace_surface(surface)?;
+        }
+        self.backgrounds
+            .sync_presentations(None, &[], &mut self.renderer)?;
+        let presentation = record
+            .presentation
+            .as_ref()
+            .ok_or("historical record display unavailable")?;
+        self.scene.clear();
+        presentation.compose(&mut self.scene)?;
+        self.renderer.render(&self.scene)
+    }
+
     pub(crate) fn present_completed_results(
         &mut self,
         results: &crate::browser_completed_results::BrowserCompletedResults,

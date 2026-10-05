@@ -860,3 +860,9 @@ mod record_association_fixtures;
 
 /// Pure catalog and recording preview values shared by presentation.
 pub mod record_model;
+
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
+pub mod browser_historical_record;
+/// Cached exact historical replay/archive identity presentation.
+#[cfg(feature = "graphics")]
+pub mod historical_record_presentation;

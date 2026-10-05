@@ -1,0 +1,1064 @@
+// Deferred actual idle Worker historical presentation ownership.
+// Actual Worker and numeric helpers; only generated WASM owners and browser APIs are mocked.
+import assert from "node:assert/strict";
+import { File as NodeFile } from "node:buffer";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+import { createContext, SourceTextModule, SyntheticModule } from "node:vm";
+import { encodeKeyboardEvent, encodeTouchEvent, encodeRawHidEvent } from "./physical-input.mjs";
+
+const FileType = globalThis.File ?? NodeFile;
+const ORIGIN = 9007199254740993n;
+const START = 9007199254741999n;
+const SCORE = { song_ns: 123456789012345n, hits: 17n, misses: 3n, combo: 9n, max_combo: 15n };
+const pairs = () => new Uint32Array([0x11, 2, 0x12, 3]);
+const command = (voice = 7n) => ({ kind: 0, voice, sample: 19n, at: 100000001n, gain: 0.5, value: 0n, denominator: 1n });
+const batch = sequence => ({ sequence, commands: [command(sequence), command(sequence + 1n)] });
+
+function startRequest(fields = {}) {
+  return { kind: "play-start", playId: 7, rpcId: 1, libraryId: 1, path: "song/chart.bms", rate: 48000,
+    seed: "18446744073709551615", keyPairs: pairs(), ...fields };
+}
+
+function replayFile(acquire = null, size = 6) {
+  const bytes = Uint8Array.from([66, 75, 82, 0, 255, 1]);
+  const file = new FileType([bytes], "original-recording.bkr");
+  let reads = 0;
+  Object.defineProperty(file, "size", { value: size });
+  file.arrayBuffer = () => { reads++; return acquire ? acquire() : Promise.resolve(bytes.slice().buffer); };
+  return { file, bytes, get reads() { return reads; } };
+}
+function replayRequest(file, fields = {}) {
+  return { kind: "play-start", playId: 7, rpcId: 1, libraryId: 1,
+    path: "song/chart.bms", rate: 48000, mode: "replay", replayFile: file, ...fields };
+}
+
+async function catalogWorker(options = {}) {
+  const h = await workerHarness(options);
+  await h.send({ kind: "init", canvas: { transferred: true } });
+  assert.equal(h.of("ready").length, 1);
+  await h.send({ kind: "import", id: 1, files: [selectedFile("song/chart.bms")] });
+  await h.send({ kind: "accept-library", id: 1 });
+  await h.send({ kind: "select", id: 2, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "0" });
+  await h.send({ kind: "resize", width: 640, height: 480 });
+  return h;
+}
+
+async function started(options = {}) {
+  const h = await catalogWorker(options);
+  await h.send(options.startRequest ?? startRequest(options.recordReplay === undefined ? {} : { recordReplay: options.recordReplay }));
+  assert.equal(h.of("play-reply").at(-1).result.kind, "prepared");
+  return withPlayRpc(h);
+}
+
+function withPlayRpc(h) {
+  h.rpcId = 1;
+  h.rpc = async (kind, fields = {}) => {
+    const rpcId = ++h.rpcId;
+    await h.send({ kind, playId: 7, rpcId, ...fields });
+    const reply = h.of("play-reply").find(value => value.rpcId === rpcId);
+    assert.ok(reply, `missing reply ${rpcId}`);
+    return reply;
+  };
+  return h;
+}
+
+async function active(options = {}) {
+  const h = await started(options);
+  const reply = await h.rpc("play-activate", { hostNs: ORIGIN, startFrame: START });
+  assert.equal(reply.result, null);
+  return h;
+}
+
+function step(fields = {}) {
+  return { kind: "play-step", playId: 7, tickId: 1, events: [], watermark: ORIGIN, audioNs: 100000000n, ...fields };
+}
+
+const multiplayer = () => ({ url: "https://example.test:4433/competition", host: true, windowOriginNs: 9000000000n });
+async function preparedNetwork(options = {}) {
+  const h = await started({ ...options, allowNetworkClock: true,
+    startRequest: options.startRequest ?? startRequest({ multiplayer: multiplayer() }) });
+  while ((await h.rpc("play-sample")).result.kind !== "samples-end") {}
+  for (;;) {
+    const value = (await h.rpc("play-commands")).result;
+    if (value === null) break;
+    await h.rpc("play-ack", { sequence: value.sequence, admitted: value.commands.length, success: true });
+  }
+  return h;
+}
+
+async function requestNetwork(h) {
+  const rpcId = ++h.rpcId;
+  await h.send({ kind: "play-network-ready", playId: 7, rpcId });
+  return rpcId;
+}
+
+async function activeNetwork(options = {}) {
+  const h = await preparedNetwork(options);
+  const rpcId = await requestNetwork(h);
+  const owner = h.networks[0];
+  if (options.networkRoster !== undefined) owner.emit({ kind: "roster", players: options.networkRoster });
+  owner.emit({ kind: "connected" }); owner.emit({ kind: "ready" });
+  owner.emit({ kind: "start", targetNs: 500000000n, songTargetNs: 600000000n, uncertaintyNs: 4n });
+  await flushJobs();
+  const reply = h.of("play-reply").find(value => value.rpcId === rpcId);
+  assert.equal(reply.result.targetHostNs, 2500000000n);
+  h.networkOrigin = 2500000100n;
+  const activated = await h.rpc("play-activate", { hostNs: h.networkOrigin,
+    startFrame: 123456n, targetHostNs: reply.result.targetHostNs });
+  assert.equal(activated.result, null);
+  return h;
+}
+
+async function completeOutput(h, fields = {}) {
+  await h.send({ kind: "play-render", playId: 7, renderId: 1,
+    presentedNs: 100000000n, presentedHostNs: ORIGIN, report: renderReport(), ...fields });
+  assert.equal(h.of("play-render-done").at(-1).completed, true);
+}
+async function showResults(h) {
+  const reply = await h.rpc("play-results-present");
+  assert.equal(reply.result.kind, "completed-results");
+  await h.tick();
+  return reply;
+}
+async function observeDone(h) {
+  await h.send({kind:"play-render",playId:7,renderId:1,presentedNs:100000000n,presentedHostNs:ORIGIN,report:renderReport()});
+  assert.equal(h.of("play-render-done").at(-1).completed,true);
+}
+function historicalRequest(id=1,fields={}){
+  return {kind:"historical-record-present",id,replayFile:new FileType([new Uint8Array([66,75,82,0])],"selected.bkr"),
+    completedArchive:new Uint8Array([66,75,82,69,83,85,76,84]),archivePlayer:4294967295,...fields};
+}
+test("idle Worker forwards opaque bytes and original player to binding and owns cached drawing/disposal",async()=>{
+  const h=await catalogWorker();await h.send(historicalRequest());
+  const reply=h.of("historical-record-result").at(-1);assert.equal(reply.id,1);assert.equal(reply.available,true);assert.equal(reply.error,null);
+  const binding=h.historicalOwners[0];assert.equal(binding.player,4294967295);
+  assert.deepEqual(Array.from(binding.replay),[66,75,82,0]);assert.deepEqual(Array.from(binding.archive),[66,75,82,69,83,85,76,84]);
+  await h.tick();assert.equal(h.views[0].historicalDraws.at(-1),binding);
+  await h.send({kind:"resize",width:800,height:600});await h.tick();assert.equal(h.views[0].historicalDraws.at(-1),binding);
+  await h.send({kind:"historical-record-clear",id:2});assert.equal(binding.frees,1);
+  await h.send({kind:"historical-record-clear",id:2});assert.equal(binding.frees,1);
+  assert.equal(h.games.length,0);assert.equal(h.replays.length,0);
+});
+test("legacy absent archives and binding diagnostics preserve idle replay selection without completed proof",async()=>{
+  const h=await catalogWorker();await h.send(historicalRequest(1,{completedArchive:undefined,archivePlayer:undefined}));
+  assert.equal(h.of("historical-record-result").at(-1).available,false);
+  assert.equal(h.of("historical-record-result").at(-1).error,null);
+  const bad=await catalogWorker({historicalDiagnostic:"mismatched archive header"});await bad.send(historicalRequest());
+  const refusal=bad.of("historical-record-result").at(-1);assert.equal(refusal.available,false);assert.match(refusal.error,/mismatched archive/);
+  assert.equal(bad.of("play-completed-results").length,0);assert.equal(bad.games.length,0);
+  const thrown=await catalogWorker({historicalError:"binding refused"});await thrown.send(historicalRequest());
+  assert.match(thrown.of("historical-record-result").at(-1).error,/binding refused/);assert.equal(thrown.of("fatal").length,0);
+});
+test("unabortable replay read cannot construct or replace results after clear or newer selection",async()=>{
+  for(const next of ["clear","select","newer"]){
+    const h=await catalogWorker();const gate=deferred();const selected=replayFile(()=>gate.promise);
+    await h.send(historicalRequest(1,{replayFile:selected.file}));assert.equal(selected.reads,1);assert.equal(h.historicalOwners.length,0);
+    if(next==="clear")await h.send({kind:"historical-record-clear",id:2});
+    else if(next==="select")await h.send({kind:"select",id:3,libraryId:1,path:"song/chart.bms",rate:48000,seed:"0"});
+    else await h.send(historicalRequest(2));
+    const owners=h.historicalOwners.length;const responses=h.of("historical-record-result").length;
+    gate.resolve(new Uint8Array([66,75,82,0]).buffer);await flushJobs();
+    assert.equal(h.historicalOwners.length,owners);assert.equal(h.of("historical-record-result").length,responses);
+    if(next==="newer")assert.equal(h.of("historical-record-result").at(-1).id,2);
+  }
+});
+test("new play invalidates historical lifetime and active gameplay refuses historical admission",async()=>{
+  const h=await catalogWorker();await h.send(historicalRequest());const binding=h.historicalOwners[0];
+  await h.send(startRequest());assert.equal(binding.frees,1);
+  const prepared=h.of("play-reply").at(-1);assert.equal(prepared.result.kind,"prepared");
+  await h.send(historicalRequest(2));const refusal=h.of("historical-record-result").at(-1);
+  assert.equal(refusal.available,false);assert.ok(refusal.error);assert.equal(h.historicalOwners.length,1);
+  assert.equal(h.games[0].stops,0);assert.equal(h.games[0].frees,0);
+  await h.send({kind:"play-stop",playId:7});assert.equal(h.games[0].frees,1);assert.equal(binding.frees,1);
+});
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+async function flushJobs() {
+  for (let index = 0; index < 32; index++) await Promise.resolve();
+}
+
+function selectedFile(path, acquire) {
+  const bytes = new TextEncoder().encode("#BPM 120");
+  const file = new FileType([bytes], path.split("/").at(-1));
+  file.arrayBuffer = acquire ?? (() => Promise.resolve(bytes.buffer));
+  return { file, path };
+}
+
+function renderReport({ available = true, cursor = 9007199254742999n, frames = 257n, start = START } = {}) {
+  const words = new Uint32Array(56);
+  const put = (index, value) => {
+    words[index * 2] = Number(value & 0xffffffffn);
+    words[index * 2 + 1] = Number(value >> 32n);
+  };
+  put(0, available ? 1n : 0n);
+  put(2, frames);
+  put(3, cursor - 129n);
+  put(4, 129n);
+  put(25, 1n);
+  put(26, start);
+  return { available, words };
+}
+
+async function workerHarness(options = {}) {
+  const historicalOwners=[];
+  const trace = [];
+  const completedOwners = [];
+  const messages = [];
+  const transfers = [];
+  const libraries = [];
+  const views = [];
+  const games = [];
+  const replays = [];
+  const sectionConstructions = [];
+  const physicalConstructions = [];
+  const contactConstructions = [];
+  const localConstructions = [];
+  const locals = [];
+  const preparedOwners = [];
+  const timers = new Map();
+  const timerDelays = new Map();
+  const networks = [];
+  const networkSessions = [];
+  const roomSessions = [];
+  const roomChannels = [];
+  const roomWrappers = [];
+  const roomResults = [];
+  let networkNow = 1000;
+  let timerId = 0;
+  let receive;
+  function makePrepared(path) {
+    const prepared = {
+      path, title: "Actual prepared metadata", artist: "Fixture", duration_ns: 604800000000000n,
+      start_ns: 0n,
+      note_count: 23, sample_count: 2, image_count: 1,
+      lanes: new Uint8Array(options.lanes ?? [0x11, 0x12]), moved: false, frees: 0,
+      free() { assert.equal(this.moved, false); assert.equal(++this.frees, 1); },
+    };
+    preparedOwners.push(prepared);
+    return prepared;
+  }
+  class BrowserHistoricalRecord {
+    constructor(replay,archive,player) {
+      trace.push("construct-historical");
+      assert.ok(replay instanceof Uint8Array);if(archive!=null)assert.ok(archive instanceof Uint8Array);
+      if(options.historicalError) throw new Error(options.historicalError);
+      this.replay=replay.slice(); this.archive=archive?.slice()??null; this.player=player; this.frees=0;
+      historicalOwners.push(this);
+    }
+    live(){assert.equal(this.frees,0);}
+    get available(){this.live();return this.archive!==null && !options.historicalDiagnostic;}
+    get error(){this.live();return options.historicalDiagnostic??null;}
+    free(){this.live();assert.equal(++this.frees,1);trace.push("free-historical");}
+  }
+  class BrowserLibrary {
+    files = [];
+    preparations = [];
+    replayPreparations = [];
+    frees = 0;
+    constructor(...limits) { this.limits = limits; libraries.push(this); }
+    add_file(path) { this.files.push(path); }
+    chart_paths() { return this.files.filter(path => /\.bms$/i.test(path)); }
+    prepare_chart(path, ...args) {
+      assert.equal(this.frees, 0);
+      assert.ok(this.files.includes(path));
+      this.preparations.push({ path, args });
+      return makePrepared(path);
+    }
+    prepare_chart_at(path, rate, channels, seed, startNs, ...limits) {
+      assert.equal(this.frees, 0);
+      assert.ok(this.files.includes(path));
+      this.preparations.push({ path, args: [rate, channels, seed, startNs, ...limits] });
+      const prepared = makePrepared(path);
+      prepared.start_ns = startNs;
+      return prepared;
+    }
+    prepare_replay_chart(path, bytes, ...args) {
+      assert.equal(this.frees, 0);
+      assert.ok(this.files.includes(path));
+      assert.ok(bytes instanceof Uint8Array);
+      this.replayPreparations.push({ path, bytes: bytes.slice(), args });
+      if (options.prepareReplayError) throw new Error(options.prepareReplayError);
+      const prepared = makePrepared(path);
+      if (Object.hasOwn(options, "replayStart")) prepared.start_ns = options.replayStart;
+      return prepared;
+    }
+    free() { assert.equal(++this.frees, 1); }
+  }
+  class BrowserView {
+    static async create() {
+      if (options.viewGate) await options.viewGate.promise;
+      const view = new BrowserView();
+      views.push(view);
+      return view;
+    }
+    current = null;
+    extents = [];
+    positions = [];
+    draws = 0;
+    gameDraws = [];
+    replayDraws = [];
+    localDraws = [];
+    resultDraws = [];
+    resize(...extent) { this.extents.push(extent); }
+    set_chart(prepared) {
+      assert.equal(prepared.moved, false);
+      prepared.moved = true;
+      this.current = prepared;
+    }
+    seek(ns) { this.positions.push(ns); }
+    draw() { this.draws++; }
+    draw_game(game) { assert.equal(game.frees, 0); this.gameDraws.push(game); }
+    draw_replay(replay) { assert.equal(replay.frees, 0); this.replayDraws.push(replay); }
+    draw_local_game(game, page) { assert.equal(game.frees, 0); this.localDraws.push({ game, page }); }
+    draw_room_results(results) {
+      results.live();
+      if (options.roomResultsDrawError) throw new Error(options.roomResultsDrawError);
+      this.resultDraws.push({ results, page: results.page });
+    }
+    draw_completed_results(results) { results.live(); trace.push('draw-results'); this.resultDraws.push({ results, page: results.page }); }
+    draw_completed_room_results(results, room) { this.draw_completed_results(results); room.live(); }
+    draw_historical_record(binding) { binding.live(); trace.push("draw-historical"); this.historicalDraws ??= []; this.historicalDraws.push(binding); }
+    needs_redraw() { return false; }
+  }
+  // Generated binding edge only. The portable Rust fixture owns roster/prefix
+  // semantics; this records actual Worker ownership and the bounded page calls.
+  class BrowserRoomResults {
+    constructor(participant, words) {
+      if (options.roomResultsConstructError) throw new Error(options.roomResultsConstructError);
+      assert.ok(words instanceof Uint32Array);
+      this.participant = participant; this.roster = words.slice();
+      this.updates = []; this.selections = []; this.frees = 0; this.frozen = false;
+      this.pageValue = 0; this.failedValue = false;
+      let remotePlayers = 0;
+      for (let offset = 0; offset < words.length;) {
+        const host = BigInt(words[offset]) | (BigInt(words[offset + 1]) << 32n);
+        const count = words[offset + 2];
+        if (host !== participant) remotePlayers += count;
+        offset += 3 + count;
+      }
+      this.pagesValue = Math.ceil(remotePlayers / 4);
+      options.onRoomResultsConstruct?.(this);
+      roomResults.push(this);
+    }
+    live() { assert.equal(this.frees, 0, "retained Results binding was already freed"); }
+    update(participant, sequence, finalPrefix, words) {
+      this.live(); assert.equal(this.frozen, false);
+      if (options.roomResultsUpdateError) throw new Error(options.roomResultsUpdateError);
+      this.updates.push({ participant, sequence, finalPrefix, words: words.slice() });
+    }
+    freeze(page, cancelled, error, failed) {
+      this.live(); assert.equal(this.frozen, false);
+      if (options.roomResultsFreezeError) throw new Error(options.roomResultsFreezeError);
+      this.freezeArgs = { page, cancelled, error, failed };
+      this.pageValue = page; this.failedValue = failed; this.frozen = true;
+    }
+    set_page(page) {
+      this.live(); assert.equal(this.frozen, true);
+      if (this.pageError || options.roomResultsPageError) throw new Error(this.pageError ?? options.roomResultsPageError);
+      assert.ok(Number.isInteger(page) && page >= 0 && page < this.pagesValue);
+      this.selections.push(page); this.pageValue = page;
+    }
+    get page() { this.live(); return this.pageValue; }
+    get pages() { this.live(); return this.pagesValue; }
+    get failed() { this.live(); return this.failedValue; }
+    free() { this.live(); assert.equal(++this.frees, 1); }
+  }
+  class BrowserCompletedResults {
+    constructor(players = [1]) { this.playersValue = players; this.pageValue = 0; this.mode = false; this.frees = 0; completedOwners.push(this); }
+    live() { assert.equal(this.frees, 0); }
+    get players() { this.live(); return new Uint32Array(this.playersValue); }
+    get page() { this.live(); return this.pageValue; }
+    get pages() { this.live(); return this.mode ? 3 : 1; }
+    get detail_pages() { this.live(); return 1; }
+    get comparison_pages() { this.live(); return 3; }
+    get comparisons() { this.live(); return this.mode; }
+    get has_comparisons() { this.live(); return true; }
+    get failed() { this.live(); return false; }
+    set_presentation(page, comparisons) {
+      this.live();
+      if (!Number.isInteger(page) || page < 0 || page >= (comparisons ? 3 : 1)) throw new Error("Result page outside retained packets");
+      this.pageValue = page; this.mode = comparisons; trace.push("page-results");
+    }
+    free() { this.live(); assert.equal(++this.frees, 1); trace.push("free-results"); }
+  }
+  class BrowserGame {
+    completed_archive() {
+      this.live(); assert.equal(this.stops, 0); assert.equal(this.replayTakes, 0);
+      assert.equal(this.memberReplayTakes?.size ?? 0,0);
+      trace.push("archive-export");
+      if (options.archiveError) throw new Error(options.archiveError);
+      return this.completedEvidence ? new Uint8Array(options.archiveBytes ?? [66,75,82,69,83,85,76,84]) : null;
+    }
+    static new_physical_contact(prepared, ...args) {
+      contactConstructions.push({ prepared, args });
+      if (options.contactConstructError) { prepared.moved = true; throw new Error(options.contactConstructError); }
+      const owner = new BrowserGame(prepared, ...args.slice(0, 6));
+      owner.physical = true; owner.contact = true;
+      return owner;
+    }
+    static new_physical(prepared, ...args) {
+      physicalConstructions.push({ prepared, args });
+      if (options.physicalConstructError) {
+        assert.equal(prepared.moved, false);
+        prepared.moved = true;
+        throw new Error(options.physicalConstructError);
+      }
+      const owner = new BrowserGame(prepared, ...args.slice(0, 6));
+      owner.physical = true;
+      return owner;
+    }
+    static new_section(prepared, ...args) {
+      sectionConstructions.push({ prepared, args });
+      if (options.sectionConstructError) {
+        assert.equal(prepared.moved, false);
+        prepared.moved = true;
+        throw new Error(options.sectionConstructError);
+      }
+      const owner = new BrowserGame(prepared, ...args.slice(0, -1));
+      owner.constructedEnd = args.at(-1);
+      return owner;
+    }
+    constructor(prepared, ...args) {
+      assert.equal(prepared.moved, false);
+      prepared.moved = true; // The generated consuming constructor owns even its Err argument.
+      if (options.constructError) throw new Error(options.constructError);
+      this.prepared = prepared;
+      this.args = args;
+      this.score = { ...SCORE };
+      this.calls = [];
+      this.endpointReads = { end: 0, frame: 0 };
+      this.frees = 0;
+      this.stops = 0;
+      this.disposals = [];
+      this.replayTakes = 0;
+      this.replayBytes = null;
+      this.saved = [];
+      this.savedReads = 0;
+      this.hudDisables = 0;
+      this.peerUpdates = [];
+      this.peerDisables = 0;
+      this.samples = (options.samples ?? [
+        { id: 19n, rate: 44100, pcm: new Float32Array([0.25, -0.25, 0.5, -0.5]) },
+        { id: 18446744073709551615n, rate: 96000, pcm: new Float32Array([1, -1]) },
+      ]).map(value => ({
+        ...value, channels: 2, takes: 0, frees: 0,
+        take_pcm() {
+          assert.equal(++this.takes, 1);
+          if (options.takeError) throw new Error(options.takeError);
+          return this.pcm;
+        },
+        free() { assert.equal(++this.frees, 1); if (options.sampleFreeError) throw new Error(options.sampleFreeError); },
+      }));
+      this.sampleIndex = 0;
+      this.batches = [...(options.batches ?? [])];
+      games.push(this);
+    }
+    live() { assert.equal(this.frees, 0, "binding must not be read after free"); }
+    get end_ns() {
+      this.live(); this.endpointReads.end++;
+      return options.gameEndGetter ? options.gameEndGetter(this) : options.gameEnd;
+    }
+    get playback_end_frame() {
+      this.live(); this.endpointReads.frame++;
+      return options.gameFrameGetter ? options.gameFrameGetter(this) : options.gameEndFrame;
+    }
+    get song_ns() { this.live(); return this.score.song_ns; }
+    get hits() { this.live(); return this.score.hits; }
+    get misses() { this.live(); return this.score.misses; }
+    get combo() { this.live(); return this.score.combo; }
+    get max_combo() { this.live(); return this.score.max_combo; }
+    get failed() { this.live(); return false; }
+    get touch_bounds() {
+      this.live();
+      if (options.touchBoundsError) throw new Error(options.touchBoundsError);
+      return Object.hasOwn(options, "touchBounds") ? options.touchBounds : new Float32Array([80, 110, 400, 634, 400, 110, 720, 634]);
+    }
+    get touch_width() { this.live(); return options.touchWidth ?? 960; }
+    get touch_height() { this.live(); return options.touchHeight ?? 720; }
+    configure_touch_regions(words, bounds, maximum) {
+      this.live(); assert.equal(this.contact, true);
+      this.calls.push(["touch-setup", words.slice(), bounds.slice(), maximum]);
+      if (options.touchSetupError) throw new Error(options.touchSetupError);
+    }
+    configure_hid_devices(devices, fields, parameters) {
+      this.live(); assert.equal(this.physical, true);
+      this.calls.push(["hid-setup", devices.slice(), fields.slice(), parameters.slice()]);
+      if (options.hidSetupError) throw new Error(options.hidSetupError);
+    }
+    competition_identity() {
+      this.live(); this.calls.push(["identity"]);
+      if (options.identityError) throw new Error(options.identityError);
+      return options.identityBytes ?? Uint8Array.from([66, 75, 82, 0, 255]);
+    }
+    add_saved_opponent(bytes, own, label) {
+      this.live(); this.calls.push(["add-opponent", bytes.slice(), own, label]);
+      this.saved.push({ own, label }); return this.saved.length - 1;
+    }
+    saved_opponents() {
+      this.live(); assert.equal(this.stops, 0, "final comparisons must be captured before disposal");
+      this.savedReads++; this.calls.push(["saved-opponents"]); this.disposals.push("opponents");
+      if (options.savedError) throw new Error(options.savedError);
+      return options.savedSnapshot?.(this) ?? this.saved.map(value => ({ kind: value.own ? "own" : "other", label: value.label,
+        songNs: this.score.song_ns, recordedUntilNs: -1n, hits: 1n, misses: 0n, combo: 1n, maxCombo: 1n }));
+    }
+    disable_saved_opponent_hud() {
+      this.live(); this.hudDisables++; this.calls.push(["disable-opponent-hud"]);
+      if (options.disableSavedError) throw new Error(options.disableSavedError);
+    }
+    update_peer_hud(status, words) {
+      this.live(); assert.equal(this.stops, 0, "disposed gameplay cannot receive HUD writes");
+      assert.ok(words instanceof Uint32Array);
+      this.peerUpdates.push({ status, words: words.slice() });
+      options.peerUpdate?.(this, status, words);
+    }
+    disable_peer_hud() {
+      this.live(); this.peerDisables++;
+      if (options.disablePeerError) throw new Error(options.disablePeerError);
+    }
+    sample_count() { this.live(); return options.sampleCount ?? this.samples.length; }
+    configure_capture(...limits) {
+      this.live();
+      this.calls.push(["capture", ...limits]);
+      if (options.captureError) throw new Error(options.captureError);
+    }
+    take_replay() {
+      this.live();
+      assert.equal(this.stops, 1, "capture export requires a stopped owner");
+      assert.equal(++this.replayTakes, 1);
+      trace.push("take-replay");
+      this.disposals.push("take");
+      if (options.replayError) throw new Error(options.replayError);
+      // Opaque binding output: actual codec/parity is covered by the Rust fixtures.
+      this.replayBytes = options.replayBytes ? options.replayBytes() : Uint8Array.from([66, 75, 82, 255, 0, 1]);
+      return this.replayBytes;
+    }
+    next_sample() { this.live(); this.calls.push(["sample"]); return this.samples[this.sampleIndex++] ?? null; }
+    activate(host) { this.live(); this.calls.push(["activate", host]); }
+    input(...args) {
+      this.live();
+      assert.notEqual(this.physical, true, "physical owners must not fall back to the legacy key method");
+      this.calls.push(["input", ...args]);
+      options.input?.(this, args);
+    }
+    input_blob(bytes, audioNs) {
+      this.live();
+      assert.equal(this.physical, true);
+      assert.ok(bytes instanceof Uint8Array);
+      this.calls.push(["blob", bytes.slice(), audioNs]);
+      options.inputBlob?.(this, bytes, audioNs);
+    }
+    input_blob_at(bytes, x, y, audioNs) {
+      assert.fail("Worker contact routing must use the shared surface projection binding");
+    }
+    preflight_touch_surface(x, y, cssWidth, cssHeight, surfaceWidth, surfaceHeight) {
+      this.live(); assert.equal(this.contact, true);
+      (this.touchPreflights ??= []).push([x, y, cssWidth, cssHeight, surfaceWidth, surfaceHeight]);
+      options.preflightTouchSurface?.(this, x, y, cssWidth, cssHeight, surfaceWidth, surfaceHeight);
+    }
+    input_blob_on_surface(bytes, cssWidth, cssHeight, surfaceWidth, surfaceHeight, audioNs) {
+      this.live(); assert.equal(this.contact, true);
+      this.calls.push(["touch", bytes.slice(), cssWidth, cssHeight, surfaceWidth, surfaceHeight, audioNs]);
+      options.inputBlobOnSurface?.(this, bytes, cssWidth, cssHeight, surfaceWidth, surfaceHeight, audioNs);
+    }
+    input_hid_blob(bytes, audioNs) {
+      this.live(); assert.equal(this.physical, true);
+      assert.ok(bytes instanceof Uint8Array);
+      this.calls.push(["hid", bytes.slice(), audioNs]);
+      options.inputHidBlob?.(this, bytes, audioNs);
+    }
+    advance(...args) { this.live(); this.calls.push(["advance", ...args]); options.advance?.(this, args); }
+    completed_results() { this.live(); trace.push('capture-results'); assert.equal(this.stops, 0); return this.completedEvidence ? new BrowserCompletedResults(this.memberIds ?? [1]) : null; }
+    observe_output(words, presentedNs) {
+      this.live();
+      this.calls.push(["output", words.slice(), presentedNs]);
+      this.completedEvidence = options.observeOutput?.(this, words, presentedNs) ?? false;
+      return this.completedEvidence;
+    }
+    observe_presentation(outputNs, hostNs) {
+      this.live();
+      this.calls.push(["presentation", outputNs, hostNs]);
+      options.observePresentation?.(this, outputNs, hostNs);
+    }
+    commands(max) { this.live(); this.calls.push(["commands", max]); return this.batches.shift() ?? null; }
+    acknowledge(...args) { this.live(); this.calls.push(["ack", ...args]); options.ack?.(this, args); }
+    stop() {
+      this.live();
+      assert.equal(++this.stops, 1);
+      this.disposals.push("stop"); trace.push("stop-game");
+      if (options.stopError) throw new Error(options.stopError);
+    }
+    free() {
+      options.beforeFree?.(this);
+      assert.equal(this.stops, 1);
+      assert.equal(++this.frees, 1);
+      this.disposals.push("free"); trace.push("free-game");
+      if (options.freeError) throw new Error(options.freeError);
+    }
+  }
+  if (options.missingSectionConstructor) BrowserGame.new_section = undefined;
+  if (options.missingDisableSavedHud) BrowserGame.prototype.disable_saved_opponent_hud = undefined;
+  if (options.missingPeerUpdate) BrowserGame.prototype.update_peer_hud = undefined;
+  if (options.missingPeerDisable) BrowserGame.prototype.disable_peer_hud = undefined;
+  if (options.missingPhysicalConstructor) BrowserGame.new_physical = undefined;
+  if (options.missingInputBlob) BrowserGame.prototype.input_blob = undefined;
+  if (options.missingContactConstructor) BrowserGame.new_physical_contact = undefined;
+  if (options.missingTouchSetup) BrowserGame.prototype.configure_touch_regions = undefined;
+  if (options.missingInputBlobOnSurface) BrowserGame.prototype.input_blob_on_surface = undefined;
+  if (options.missingPreflightTouchSurface) BrowserGame.prototype.preflight_touch_surface = undefined;
+  if (options.missingHidSetup) BrowserGame.prototype.configure_hid_devices = undefined;
+  if (options.missingInputHidBlob) BrowserGame.prototype.input_hid_blob = undefined;
+  class BrowserLocalGame extends BrowserGame {
+    static new_physical(prepared, ...args) {
+      localConstructions.push({ prepared, args });
+      if (options.localConstructError) { prepared.moved = true; throw new Error(options.localConstructError); }
+      return new BrowserLocalGame(prepared, ...args);
+    }
+    constructor(prepared, ...args) {
+      super(prepared, ...args);
+      assert.equal(games.pop(), this); locals.push(this);
+      this.physical = true; this.contact = args[8];
+      this.memberIds = Array.from(args[5]).filter((_, index) => index % 4 === 0);
+      this.memberScores = new Map(this.memberIds.map((player, index) => [player,
+        options.localScore?.(player, index) ?? { ...SCORE, hits: SCORE.hits + BigInt(index), max_combo: SCORE.max_combo + BigInt(index) }]));
+      this.memberCaptures = new Set(); this.memberReplayTakes = new Map(); this.memberReplayBytes = new Map();
+      this.memberSaved = new Map(this.memberIds.map(player => [player, []]));
+      this.memberHudDisables = new Map();
+      this.memberPeerConfigurations = [];
+      this.memberPeerUpdates = [];
+      this.memberPeerDisables = new Map();
+      this.groupProgressReads = 0;
+      this.roomHudCalls = [];
+    }
+    get players() { this.live(); return options.localPlayers ?? new Uint32Array(this.memberIds); }
+    memberValue(player, field) {
+      this.live(); assert.ok(this.memberScores.has(player));
+      this.calls.push(["member-score", player, field]);
+      return options.localValue ? options.localValue(this, player, field) : this.memberScores.get(player)[field];
+    }
+    hits(player) { return this.memberValue(player, "hits"); }
+    misses(player) { return this.memberValue(player, "misses"); }
+    combo(player) { return this.memberValue(player, "combo"); }
+    max_combo(player) { return this.memberValue(player, "max_combo"); }
+    member_song_ns(player) { return this.memberValue(player, "song_ns"); }
+    competition_identity(player) {
+      this.live(); assert.ok(this.memberIds.includes(player));
+      this.calls.push(["member-identity", player]);
+      if (options.localIdentityError?.(player)) throw new Error("member canonical identity refused");
+      return options.localIdentity?.(player) ?? Uint8Array.from([66, 75, 82, 0, 255]);
+    }
+    progress_words() {
+      this.live(); assert.equal(this.stops, 0, "final group prefix must precede disposal");
+      this.groupProgressReads++; this.calls.push(["group-progress"]); this.disposals.push("group-progress");
+      return options.localProgressWords?.(this)
+        ?? new Uint32Array(this.memberIds.flatMap(player => [player, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0]));
+    }
+    configure_peer_hud(player) {
+      this.live(); assert.ok(this.memberIds.includes(player));
+      this.calls.push(["local-peer-configure", player]); this.memberPeerConfigurations.push(player);
+      if (options.localPeerConfigureError?.(player)) throw new Error("member peer reservation refused");
+    }
+    configure_room_hud(participant, words) {
+      this.live(); assert.equal(this.stops, 0); assert.ok(words instanceof Uint32Array);
+      const call = ["configure", participant, words.slice()];
+      this.roomHudCalls.push(call); this.calls.push(["room-hud", ...call]);
+      if (options.roomHudConfigureError) throw new Error(options.roomHudConfigureError);
+    }
+    update_room_hud(participant, sequence, finalPrefix, words) {
+      this.live(); assert.equal(this.stops, 0); assert.ok(words instanceof Uint32Array);
+      const call = ["update", participant, sequence, finalPrefix, words.slice()];
+      this.roomHudCalls.push(call); this.calls.push(["room-hud", ...call]);
+      if (options.roomHudUpdateError) throw new Error(options.roomHudUpdateError);
+    }
+    set_room_hud_status(status) {
+      this.live(); assert.equal(this.stops, 0);
+      this.roomHudCalls.push(["status", status]); this.calls.push(["room-hud", "status", status]);
+      if (options.roomHudStatusError) throw new Error(options.roomHudStatusError);
+    }
+    set_room_hud_page(page) {
+      this.live(); assert.equal(this.stops, 0);
+      this.roomHudCalls.push(["page", page]); this.calls.push(["room-hud", "page", page]);
+      if (options.roomHudPageError) throw new Error(options.roomHudPageError);
+    }
+    room_hud_pages() { this.live(); return options.roomHudPages ?? 1; }
+    disable_room_hud() {
+      this.live(); assert.equal(this.stops, 0);
+      this.roomHudCalls.push(["disable"]); this.calls.push(["room-hud", "disable"]);
+      if (options.roomHudDisableError) throw new Error(options.roomHudDisableError);
+    }
+    update_peer_hud(player, status, words) {
+      this.live(); assert.equal(this.stops, 0); assert.ok(this.memberIds.includes(player));
+      assert.ok(words instanceof Uint32Array);
+      this.calls.push(["local-peer-update", player, status, words.slice()]);
+      this.memberPeerUpdates.push({ player, status, words: words.slice() });
+      options.localPeerUpdate?.(this, player, status, words);
+    }
+    disable_peer_hud(player) {
+      this.live(); assert.ok(this.memberIds.includes(player));
+      this.calls.push(["local-peer-disable", player]);
+      this.memberPeerDisables.set(player, (this.memberPeerDisables.get(player) ?? 0) + 1);
+      if (options.localDisablePeerError?.(player)) throw new Error("member peer hide refused");
+    }
+    add_saved_opponent(player, bytes, own, label) {
+      this.live(); assert.ok(this.memberSaved.has(player));
+      this.calls.push(["local-add-opponent", player, bytes.slice(), own, label]);
+      if (options.localAddSavedError?.(player, label)) throw new Error("actual member replay admission refused");
+      const rows = this.memberSaved.get(player); rows.push({ own, label });
+      return options.localSavedIndex?.(player, rows.length - 1) ?? rows.length - 1;
+    }
+    saved_opponents() {
+      this.live(); assert.equal(this.stops, 0, "member prefixes must be read before disposal");
+      this.savedReads++; this.calls.push(["local-saved-opponents"]); this.disposals.push("opponents");
+      const groups = this.memberIds.map(player => ({ player, error: null,
+        opponents: this.memberSaved.get(player).map(value => ({ kind: value.own ? "own" : "other", label: value.label,
+          songNs: this.memberScores.get(player).song_ns, recordedUntilNs: -1n,
+          hits: 1n, misses: 0n, combo: 1n, maxCombo: 1n })) }));
+      return options.localSavedSnapshot?.(this, groups) ?? groups;
+    }
+    disable_saved_opponent_hud(player) {
+      this.live(); assert.ok(this.memberSaved.has(player));
+      this.calls.push(["local-disable-opponent-hud", player]);
+      this.memberHudDisables.set(player, (this.memberHudDisables.get(player) ?? 0) + 1);
+      if (options.localDisableSavedError?.(player)) throw new Error("member HUD disable failed");
+    }
+    touch_bounds(player, page) {
+      this.live(); this.calls.push(["local-touch-bounds", player, page]);
+      return options.localTouchBounds ?? new Float32Array([34, 176, 249, 356, 249, 176, 464, 356]);
+    }
+    configure_touch_regions(player, words, bounds, maximum) {
+      this.live(); assert.equal(this.contact, true); assert.ok(this.memberIds.includes(player));
+      this.calls.push(["local-touch", player, words.slice(), bounds.slice(), maximum]);
+      if (options.localTouchSetupError) throw new Error(options.localTouchSetupError);
+    }
+    set_touch_page(player, page) {
+      this.live(); assert.ok(this.memberIds.includes(player));
+      this.calls.push(["local-touch-page", player, page]);
+      if (options.localTouchPageError?.(player, page)) throw new Error("actual page remap refused");
+      return options.localTouchVisibility?.(player, page) ?? Math.floor(this.memberIds.indexOf(player) / 4) === page;
+    }
+    configure_capture(player, ...limits) {
+      this.live(); assert.ok(this.memberIds.includes(player));
+      this.calls.push(["member-capture", player, ...limits]);
+      if (options.localCaptureError?.(player)) throw new Error("selected member capture setup refused");
+      this.memberCaptures.add(player);
+    }
+    take_replay(player) {
+      this.live(); assert.equal(this.stops, 1);
+      trace.push(`take-replay:${player}`);
+      assert.equal(this.memberReplayTakes.has(player), false); this.memberReplayTakes.set(player, 1);
+      this.disposals.push(`take:${player}`);
+      if (!this.memberCaptures.has(player)) return null;
+      const bytes = options.localReplayBytes ? options.localReplayBytes(player) : Uint8Array.from([66, 75, 82, player & 255]);
+      this.memberReplayBytes.set(player, bytes); return bytes;
+    }
+  }
+  if (options.missingLocalConstructor) BrowserLocalGame.new_physical = undefined;
+  if (options.missingLocalInputBlob) BrowserLocalGame.prototype.input_blob = undefined;
+  if (options.missingLocalSavedHud) BrowserLocalGame.prototype.disable_saved_opponent_hud = undefined;
+  if (options.missingLocalTouchPage) BrowserLocalGame.prototype.set_touch_page = undefined;
+  if (options.missingLocalIdentity) BrowserLocalGame.prototype.competition_identity = undefined;
+  if (options.missingLocalProgress) BrowserLocalGame.prototype.progress_words = undefined;
+  if (options.missingLocalPeerConfigure) BrowserLocalGame.prototype.configure_peer_hud = undefined;
+  if (options.missingLocalPeerUpdate) BrowserLocalGame.prototype.update_peer_hud = undefined;
+  if (options.missingLocalPeerDisable) BrowserLocalGame.prototype.disable_peer_hud = undefined;
+  if (options.missingRoomHudMethod) BrowserLocalGame.prototype[options.missingRoomHudMethod] = undefined;
+  class BrowserReplay extends BrowserGame {
+    constructor(prepared, ...args) {
+      super(prepared, ...args);
+      assert.equal(games.pop(), this);
+      this.endpointReads = { end: 0, frame: 0 };
+      replays.push(this);
+    }
+    get end_ns() {
+      this.live(); this.endpointReads.end++;
+      return options.replayEndGetter ? options.replayEndGetter(this) : options.replayEnd;
+    }
+    get playback_end_frame() {
+      this.live(); this.endpointReads.frame++;
+      return options.replayFrameGetter ? options.replayFrameGetter(this) : options.replayEndFrame;
+    }
+    get recorded_until_ns() { this.live(); return options.recordedUntil === undefined ? SCORE.song_ns : options.recordedUntil; }
+    activate() { assert.fail("replay must not activate a live transport"); }
+    input() { assert.fail("replay must not accept live input"); }
+    advance() { assert.fail("replay must not synthesize live advances"); }
+    observe_presentation() { assert.fail("replay must not discipline a live input clock"); }
+    configure_capture() { assert.fail("replay must not recapture a recording"); }
+    take_replay() { assert.fail("replay playback must not re-export its input bytes"); }
+    competition_identity() { assert.fail("replay playback must stay local"); }
+  }
+  class BrowserMultiplayer {
+    static new_group(identity, players, host, preroll) {
+      assert.ok(players instanceof Uint32Array);
+      const session = new BrowserMultiplayer(identity, host, preroll);
+      session.group = true; session.players = players.slice();
+      return session;
+    }
+    constructor(identity, host, preroll) {
+      this.identity = [...identity]; this.host = host; this.preroll = preroll;
+      this.closes = 0; this.frees = 0; networkSessions.push(this);
+      if (options.networkConstructError) throw new Error(options.networkConstructError);
+    }
+    close() { assert.equal(++this.closes, 1); }
+    free() { assert.equal(++this.frees, 1); }
+  }
+  if (options.missingNetworkGroupConstructor) BrowserMultiplayer.new_group = undefined;
+  class BrowserRoomClient {
+    static new_with_start(identity, players, preroll) {
+      const session = new BrowserRoomClient(identity, players);
+      session.preroll = preroll;
+      return session;
+    }
+    constructor(identity, players) {
+      this.identity = identity.slice(); this.players = players.slice();
+      this.closes = 0; this.frees = 0; this.revisionValue = 0n; this.participantValue = 0n;
+      this.dto = null; this.left = false; this.partial = false; this.need = 11;
+      this.credits = []; this.received = []; this.requests = [];
+      this.receiveTimes = []; this.writeTimes = []; this.pollTimes = []; this.schedules = [];
+      this.publications = []; this.peerProgress = [];
+      this.finalWritten = false; this.finalAcknowledged = false; this.progressComplete = false; this.drainComplete = false;
+      this.frames = [{ kind: 1, id: 1n, bytes: new Uint8Array(11) }];
+      roomSessions.push(this);
+      if (options.roomConstructError) throw new Error(options.roomConstructError);
+    }
+    live() { assert.equal(this.frees, 0, "room binding called after free"); }
+    request(kind) {
+      this.live(); this.requests.push(kind);
+      if (this.requestError) throw this.requestError;
+      this.onRequest?.(kind);
+    }
+    request_seal() { this.request("seal"); }
+    request_ready() { this.request("ready"); }
+    request_leave() { this.request("leave"); }
+    request_drain() { this.request("drain"); }
+    needed_bytes() { this.live(); return this.need; }
+    frame_pending() { this.live(); return this.partial; }
+    revision() { this.live(); return this.revisionValue; }
+    participant_id() { this.live(); return this.participantValue; }
+    has_snapshot() { this.live(); return this.dto !== null; }
+    leave_written() { this.live(); return this.left; }
+    snapshot() { this.live(); return this.dto; }
+    receive_bytes(bytes, captured, processing) {
+      this.live(); this.received.push([...bytes]);
+      this.receiveTimes.push({ captured, processing });
+      if (options.roomReceiveError) throw new Error(options.roomReceiveError);
+      this.onReceive?.(bytes);
+      return bytes.length;
+    }
+    next_write(processing) {
+      this.live();
+      this.pollTimes.push(processing);
+      const frame = this.frames.shift() ?? { kind: 0, id: 0n };
+      let freed = false;
+      const wrapper = {
+        frees: 0, takes: 0,
+        get kind() { assert.equal(freed, false); return frame.kind; },
+        get frame_id() { assert.equal(freed, false); return frame.id; },
+        take_bytes() { assert.equal(freed, false); assert.equal(this.takes++, 0); return frame.bytes; },
+        free() { assert.equal(freed, false); freed = true; this.frees++; },
+      };
+      roomWrappers.push(wrapper); return wrapper;
+    }
+    written(id, completed, processing) {
+      this.live(); this.credits.push(id); this.writeTimes.push({ id, completed, processing }); this.onWritten?.(id);
+    }
+    take_start() { this.live(); return this.schedules.shift() ?? null; }
+    publish_progress(words, finalPrefix) {
+      this.live();
+      assert.ok(words instanceof Uint32Array);
+      assert.equal(words.length, this.players.length * 11);
+      assert.equal(typeof finalPrefix, "boolean");
+      assert.deepEqual(Array.from(words).filter((_, index) => index % 11 === 0), [...this.players]);
+      if (this.publicationError) throw this.publicationError;
+      this.publications.push({ words: words.slice(), finalPrefix });
+      this.onPublish?.(words, finalPrefix);
+    }
+    take_peer_progress() { this.live(); return this.peerProgress.shift() ?? null; }
+    local_final_written() { this.live(); return this.finalWritten; }
+    local_final_acknowledged() { this.live(); return this.finalAcknowledged; }
+    peer_final_ack_written() { this.live(); return false; }
+    progress_complete() { this.live(); return this.progressComplete; }
+    drain_complete() { this.live(); return this.drainComplete; }
+    close() { this.live(); assert.equal(++this.closes, 1); }
+    free() { this.live(); assert.equal(++this.frees, 1); }
+  }
+  if (options.missingRoomMethod) BrowserRoomClient.prototype[options.missingRoomMethod] = undefined;
+  if (options.missingRoomStartConstructor) BrowserRoomClient.new_with_start = undefined;
+  // The actual room owner is loaded below. Only its byte channel is controlled.
+  class RoomChannel {
+    static async open(url, config) {
+      const channel = new RoomChannel(url, config); roomChannels.push(channel);
+      if (options.roomOpenGate) await options.roomOpenGate.promise;
+      if (options.roomOpenError) throw new Error(options.roomOpenError);
+      return channel;
+    }
+    constructor(url, config) {
+      this.url = url; this.config = config; this.reads = []; this.writes = [];
+      this.closes = 0; this.closed = false; this.activeReads = 0; this.activeWrites = 0;
+    }
+    readPrefix(max, waitForData) {
+      assert.equal(this.closed, false); assert.equal(this.activeReads++, 0);
+      const gate = deferred(); this.reads.push({ max, waitForData, gate });
+      return gate.promise.finally(() => { this.activeReads--; });
+    }
+    write(bytes) {
+      assert.equal(this.closed, false); assert.equal(this.activeWrites++, 0);
+      assert.ok(roomWrappers.every(value => value.frees === 1));
+      const gate = deferred(); this.writes.push({ bytes: [...bytes], gate });
+      return gate.promise.finally(() => { this.activeWrites--; });
+    }
+    close() {
+      this.closed = true; this.closes++;
+      if (!options.roomHoldAfterClose) {
+        for (const entry of [...this.reads, ...this.writes]) entry.gate.reject(new Error("room channel closed"));
+      }
+      if (options.roomCloseError) throw new Error(options.roomCloseError);
+    }
+  }
+  class BrowserMultiplayerOwner {
+    static async open(url, config) {
+      const owner = {
+        url, config, origin: config.now(), closed: false, closes: 0, readyCalls: 0,
+        submissions: [], ack: deferred(), ackCalls: 0,
+        request_ready() { assert.equal(this.closed, false); this.readyCalls++; },
+        submit(value, final) {
+          assert.equal(this.closed, false);
+          assert.notEqual(config.group, true, "local group sessions cannot use scalar submissions");
+          const gate = deferred();
+          this.submissions.push({ value: structuredClone(value), final, gate });
+          return gate.promise;
+        },
+        submit_group(value, final) {
+          assert.equal(this.closed, false); assert.equal(config.group, true);
+          assert.ok(value instanceof Uint32Array);
+          const gate = deferred();
+          this.submissions.push({ value: value.slice(), final, group: true, gate });
+          return gate.promise;
+        },
+        wait_final_ack() { this.ackCalls++; return this.ack.promise; },
+        emit(event) {
+          try { config.onEvent(event); }
+          catch (error) { this.disconnect(error); } // Script the owner's callback-failure edge, not protocol parsing.
+        },
+        disconnect(error = new Error("peer disconnected")) {
+          if (!this.closed) {
+            this.closed = true; this.closes++;
+            config.session.close(); config.session.free();
+          }
+          config.onClose(error);
+        },
+        close() {
+          if (this.closed) return;
+          this.disconnect(Object.assign(new Error("owner closed"), { code: "closed" }));
+        },
+      };
+      networks.push(owner);
+      try {
+        if (options.networkOpenGate) await options.networkOpenGate.promise;
+        if (options.networkOpenError) throw new Error(options.networkOpenError);
+        return owner;
+      } catch (error) { owner.disconnect(error); throw error; }
+    }
+  }
+  const self = {
+    isSecureContext: true, navigator: { gpu: {} },
+    postMessage(value, transfer = []) {
+      transfers.push([...transfer]);
+      messages.push(structuredClone(value, { transfer }));
+    },
+    addEventListener(name, callback) { assert.equal(name, "message"); receive = callback; },
+  };
+  const context = createContext({
+    self, File: FileType, TextEncoder, TextDecoder, Uint8Array, Uint32Array, Float32Array, ArrayBuffer, URL, AbortController, AbortSignal,
+    performance: { timeOrigin: 10000, now() {
+      if (!options.allowNetworkClock) throw new Error("Solo Worker timestamps cannot replace Window provenance");
+      return networkNow;
+    } },
+    setTimeout(callback, delay = 0) {
+      const id = ++timerId; timers.set(id, callback); timerDelays.set(id, delay); return id;
+    },
+    clearTimeout(id) { timers.delete(id); timerDelays.delete(id); },
+  });
+  self.performance = context.performance;
+  const wasm = new SyntheticModule(["default", "BrowserLibrary", "BrowserView", "BrowserGame", "BrowserReplay", "BrowserMultiplayer", "BrowserLocalGame", "BrowserRoomClient", "BrowserRoomResults", "BrowserCompletedResults", "BrowserHistoricalRecord"], function () {
+    this.setExport("default", async () => { if (options.initGate) await options.initGate.promise; });
+    this.setExport("BrowserHistoricalRecord",BrowserHistoricalRecord);
+    this.setExport("BrowserCompletedResults", BrowserCompletedResults);
+    this.setExport("BrowserLibrary", BrowserLibrary);
+    this.setExport("BrowserView", BrowserView);
+    this.setExport("BrowserGame", BrowserGame);
+    this.setExport("BrowserReplay", BrowserReplay);
+    this.setExport("BrowserMultiplayer", BrowserMultiplayer);
+    this.setExport("BrowserLocalGame", options.missingLocalExport ? undefined : BrowserLocalGame);
+    this.setExport("BrowserRoomClient", options.missingRoomExport ? undefined : BrowserRoomClient);
+    this.setExport("BrowserRoomResults", options.missingRoomResultsExport ? undefined : BrowserRoomResults);
+  }, { context });
+  const network = new SyntheticModule(["BrowserMultiplayerOwner"], function () {
+    this.setExport("BrowserMultiplayerOwner", BrowserMultiplayerOwner);
+  }, { context });
+  const resultsModel = new SourceTextModule(await readFile(new URL("./completed-results-model.mjs", import.meta.url), "utf8"), { context });
+  const helper = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
+  const playHelper = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
+  const settingsHelper = new SourceTextModule(await readFile(new URL("./settings-profile.mjs", import.meta.url), "utf8"), { context });
+  const opponentHelper = new SourceTextModule(await readFile(new URL("./saved-opponents.mjs", import.meta.url), "utf8"), { context });
+  const physicalHelper = new SourceTextModule(await readFile(new URL("./physical-input.mjs", import.meta.url), "utf8"), { context });
+  const hidProfileHelper = new SourceTextModule(await readFile(new URL("./hid-profile.mjs", import.meta.url), "utf8"), { context });
+  const gamepadProfileHelper = new SourceTextModule(await readFile(new URL("./gamepad-profile.mjs", import.meta.url), "utf8"), { context });
+  const pointerProfileHelper = new SourceTextModule(await readFile(new URL("./pointer-profile.mjs", import.meta.url), "utf8"), { context });
+  const commandClient = new SourceTextModule(await readFile(new URL("./audio-command-client.mjs", import.meta.url), "utf8"), { context });
+  const sampleClient = new SourceTextModule(await readFile(new URL("./audio-sample-client.mjs", import.meta.url), "utf8"), { context });
+  const localHelper = new SourceTextModule(await readFile(new URL("./local-play-model.mjs", import.meta.url), "utf8"), { context });
+  const roomOwner = new SourceTextModule(await readFile(new URL("./room-owner.mjs", import.meta.url), "utf8"), { context });
+  const roomTransport = new SyntheticModule(["WebTransportChannel"], function () {
+    this.setExport("WebTransportChannel", RoomChannel);
+  }, { context });
+  const worker = new SourceTextModule(await readFile(new URL("./worker.js", import.meta.url), "utf8"), { context });
+  await worker.link(specifier => {
+    if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
+    if (specifier === "./completed-results-model.mjs") return resultsModel;
+    if (specifier === "./host_model.mjs") return helper;
+    if (specifier === "./play-model.mjs") return playHelper;
+    if (specifier === "./settings-profile.mjs") return settingsHelper;
+    if (specifier === "./multiplayer-owner.mjs") return network;
+    if (specifier === "./saved-opponents.mjs") return opponentHelper;
+    if (specifier === "./physical-input.mjs") return physicalHelper;
+    if (specifier === "./hid-profile.mjs") return hidProfileHelper;
+    if (specifier === "./gamepad-profile.mjs") return gamepadProfileHelper;
+    if (specifier === "./pointer-profile.mjs") return pointerProfileHelper;
+    if (specifier === "./audio-command-client.mjs") return commandClient;
+    if (specifier === "./audio-sample-client.mjs") return sampleClient;
+    if (specifier === "./local-play-model.mjs") return localHelper;
+    if (specifier === "./room-owner.mjs") return roomOwner;
+    if (specifier === "./multiplayer-transport.mjs") return roomTransport;
+    throw new Error(`Unexpected import: ${specifier}`);
+  });
+  await worker.evaluate();
+  return {
+    historicalOwners, trace, completedOwners, messages, transfers, libraries, preparedOwners, views, games, replays, sectionConstructions, physicalConstructions, contactConstructions, localConstructions, locals, timers, networks, networkSessions,
+    roomSessions, roomChannels, roomWrappers, roomResults,
+    setNetworkNow(value) { assert.ok(value >= networkNow); networkNow = value; },
+    post(request) { receive({ data: request }); },
+    async send(request) { receive({ data: request }); await flushJobs(); },
+    async tick() {
+      const entry = timers.entries().next().value;
+      assert.ok(entry, "expected presentation callback");
+      timers.delete(entry[0]); entry[1](); await flushJobs();
+    },
+    async expireNetwork() {
+      const entry = [...timers].find(([id]) => timerDelays.get(id) === 2000);
+      assert.ok(entry, "expected finite final drain deadline");
+      timers.delete(entry[0]); timerDelays.delete(entry[0]); entry[1](); await flushJobs();
+    },
+    async runTimer(delay) {
+      const entry = [...timers].find(([id]) => timerDelays.get(id) === delay);
+      assert.ok(entry, `expected controlled ${delay} ms callback`);
+      timers.delete(entry[0]); timerDelays.delete(entry[0]); entry[1](); await flushJobs();
+    },
+    of(kind) { return messages.filter(value => value.kind === kind); },
+  };
+}

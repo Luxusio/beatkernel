@@ -413,6 +413,15 @@ impl BrowserView {
             .map_err(js_error)
     }
 
+    pub fn draw_historical_record(
+        &mut self,
+        record: &crate::browser_historical_record::BrowserHistoricalRecord,
+    ) -> Result<(), JsValue> {
+        self.canvas
+            .present_historical_record(record)
+            .map_err(js_error)
+    }
+
     pub fn draw_completed_results(
         &mut self,
         results: &crate::browser_completed_results::BrowserCompletedResults,

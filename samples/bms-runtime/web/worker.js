@@ -13,7 +13,7 @@ import { snapshotGamepadSetup, snapshotGamepadDevices, automaticGamepadSetup, ga
 import { snapshotLocalPlan, localBindingWords } from "./local-play-model.mjs";
 import { encodeBrowserSettings, decodeBrowserSettings } from "./settings-profile.mjs";
 import { snapshotPointerSetup } from "./pointer-profile.mjs";
-const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserRoomResults, BrowserView } = runtime;
+const { BrowserGame, BrowserLocalGame, BrowserLibrary, BrowserMultiplayer, BrowserReplay, BrowserRoomClient, BrowserRoomResults, BrowserHistoricalRecord, BrowserView } = runtime;
 let ready = null;
 let view = null;
 let library = null;
@@ -32,6 +32,9 @@ let play = null;
 let roomFinalization = null;
 let roomResults = null;
 let completedResults = null;
+let historicalRecord = null;
+let historicalEpoch = {};
+let lastHistoricalId = 0;
 let roomResultsEpoch = {};
 let lastPlayId = 0;
 let settingsOperation = null;
@@ -115,7 +118,80 @@ function completedResultsFailure(results, error) {
   report("play-completed-results", { playId: results.id, completedResults: completedResultsMetadata(results), error: message(error) });
 }
 
+function discardHistoricalRecord() {
+  historicalEpoch = {};
+  const previous = historicalRecord;
+  historicalRecord = null;
+  try { previous?.binding.free(); } catch { /* Historical display disposal has no gameplay outcome. */ }
+  stopRedraw();
+}
+function historicalReply(id, available, error = null) {
+  report("historical-record-result", { id, available, error: error === null ? null : message(error) });
+}
+function historicalRequestId(request) {
+  if (!identity(request.id)) return false;
+  if (request.id <= lastHistoricalId) { historicalReply(request.id, false, "Historical operation ID must increase."); return false; }
+  lastHistoricalId = request.id;
+  return true;
+}
+async function presentHistoricalRecord(request) {
+  if (!historicalRequestId(request)) return;
+  if (failed || !view || play || roomFinalization || importing || stagedLibrary || settingsOperation
+    || completedResults?.shown || roomResults) {
+    historicalReply(request.id, false, "Historical display requires an initialized idle preview.");
+    return;
+  }
+  discardHistoricalRecord();
+  const epoch = historicalEpoch;
+  const current = () => epoch === historicalEpoch && !failed && !play && !roomFinalization && !importing
+    && !stagedLibrary && !settingsOperation && !completedResults?.shown && !roomResults;
+  let binding = null;
+  try {
+    const file = request.replayFile;
+    const replaySize = file?.size;
+    if (!file || !Number.isSafeInteger(replaySize) || replaySize < 1 || replaySize > 64 * 1024 * 1024
+      || typeof file.arrayBuffer !== "function") throw new Error("Historical replay file exceeds its bound.");
+    const archive = request.completedArchive;
+    const player = request.archivePlayer;
+    if (archive != null) {
+      if (!(archive instanceof Uint8Array) || !(archive.buffer instanceof ArrayBuffer)
+        || archive.buffer.resizable === true || archive.byteOffset !== 0 || archive.byteLength !== archive.buffer.byteLength
+        || archive.byteLength < 1 || archive.byteLength > 5 * 1024 * 1024
+        || (player != null && (!Number.isInteger(player) || player < 1 || player > 0xffffffff))) {
+        throw new Error("Historical archive envelope is invalid.");
+      }
+    } else if (player != null) throw new Error("Historical player association requires archive bytes.");
+    await ready;
+    if (!current()) return;
+    const bytes = await file.arrayBuffer();
+    if (!current()) return;
+    if (!(bytes instanceof ArrayBuffer) || bytes.resizable === true || bytes.byteLength !== replaySize) {
+      throw new Error("Historical replay acquisition changed its bounded extent.");
+    }
+    binding = new BrowserHistoricalRecord(new Uint8Array(bytes), archive ?? undefined, player ?? undefined);
+    if (!current()) { const previous = binding; binding = null; previous.free(); return; }
+    const available = binding.available;
+    const error = binding.error;
+    if (typeof available !== "boolean" || !(error == null || (typeof error === "string" && error.length >= 1 && error.length <= 4096))
+      || (available && error != null)) throw new Error("Historical presentation returned invalid metadata.");
+    if (available) { historicalRecord = { id: request.id, binding }; binding = null; }
+    else { const previous = binding; binding = null; previous.free(); }
+    historicalReply(request.id, available, error ?? null);
+    scheduleDraw();
+  } catch (error) {
+    try { binding?.free(); } catch {}
+    if (current()) { historicalReply(request.id, false, error); scheduleDraw(); }
+  }
+}
+function clearHistoricalRecord(request) {
+  if (!historicalRequestId(request)) return;
+  discardHistoricalRecord();
+  historicalReply(request.id, false);
+  scheduleDraw();
+}
+
 function discardRoomResults() {
+  discardHistoricalRecord();
   discardCompletedResults();
   roomResultsEpoch = {};
   const previous = roomResults;
@@ -157,13 +233,14 @@ function fatal(error) {
 }
 
 function scheduleDraw(reset = true) {
-  if (failed || !view || (!selectedId && !play?.game && !roomResults?.binding && !completedResults?.shown) || extent.includes(0)) return;
+  if (failed || !view || (!selectedId && !play?.game && !roomResults?.binding && !completedResults?.shown && !historicalRecord?.binding) || extent.includes(0)) return;
   if (reset) retries = 0;
   if (redraw !== null) return;
   const draw = () => {
     redraw = null;
     const results = !play?.game ? roomResults : null;
     const completed = !play?.game && completedResults?.shown ? completedResults : null;
+    const historical = !play && !results && !completed ? historicalRecord : null;
     try {
       if (play?.game && play.mode === "replay") view.draw_replay(play.game);
       else if (play?.game && play.localPlan) view.draw_local_game(play.game, play.localPage);
@@ -174,12 +251,18 @@ function scheduleDraw(reset = true) {
       }
       else if (results?.binding) view.draw_room_results(results.binding);
       else if (results) return;
+      else if (historical?.binding) view.draw_historical_record(historical.binding);
       else view.draw();
       if (view.needs_redraw()) {
         if (++retries <= 3) scheduleDraw(false);
         else report("render-wait", { selectedId, ...(play ? { playId: play.id } : {}) });
       } else report("drawn", { selectedId, ...(play ? { playId: play.id } : {}) });
-    } catch (error) { if (completed) completedResultsFailure(completed, error); else if (results) roomResultsFailure(results, error); else fatal(error); }
+    } catch (error) {
+      if (completed) completedResultsFailure(completed, error);
+      else if (results) roomResultsFailure(results, error);
+      else if (historical) { discardHistoricalRecord(); historicalReply(historical.id, false, error); scheduleDraw(); }
+      else fatal(error);
+    }
   };
   // Only schedules presentation. Its timestamp is never a song/audio clock.
   if (typeof self.requestAnimationFrame === "function") {
@@ -2497,6 +2580,8 @@ self.addEventListener("message", event => {
     ready.catch(fatal);
     return;
   }
+  if (request.kind === "historical-record-clear") { clearHistoricalRecord(request); return; }
+  if (request.kind === "historical-record-present") { void presentHistoricalRecord(request); return; }
   if (request.kind === "settings-profile-save" || request.kind === "settings-profile-load") {
     void settingsProfile(request).catch(() => { /* An unavailable response port leaves Window's bounded deadline authoritative. */ });
     return;

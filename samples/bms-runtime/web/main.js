@@ -269,6 +269,8 @@ let replayURLTimer = null;
 let selectedReplay = null;
 let recordsStore = null;
 let recordsOperation = null;
+let historicalOperation = null;
+let historicalSelection = null;
 let selectedHidProfile = null;
 let selectedGamepadProfile = null;
 let hidPermission = null;
@@ -844,6 +846,7 @@ function prepare() {
 }
 
 function received(data) {
+  if (data?.kind === "historical-record-result") { receiveHistoricalRecord(data); return; }
   if ((settingsOperation && data?.id === settingsOperation.id)
     || (typeof data?.kind === "string" && data.kind.startsWith("settings-profile-"))) { receiveSettings(data); return; }
   if (data.kind.startsWith("play-")) { receivePlay(data); return; }
@@ -1074,6 +1077,7 @@ ui["replay-file"].addEventListener("change", event => {
       if (!Number.isSafeInteger(importedReplayId + 1)) throw new Error("Imported replay selection identity exhausted.");
       importedReplayKeys.set(file, `file:${++importedReplayId}`);
     }
+    clearHistoricalRecord();
     selectedReplay = file;
     selectedReplayKey = importedReplayKeys.get(file);
     ui["replay-name"].textContent = `${file.name.slice(0, 256)} · ${file.size} bytes · uses recorded seed and section`;
@@ -1410,6 +1414,7 @@ async function changeLocalPage() {
 async function play(mode = "live") {
   if (settingsOperation || !initialized || !hasPreview || !audioModule || importing || preparing || activePlay || recordsOperation || hidPermission || hidOwnershipFailed || localDiscovery || localCleanup) return;
   if (mode === "replay" && selectedReplay === null) return;
+  clearHistoricalRecord();
   if (mode === "live" && localRoster.players.length === 1) {
     try { validateOpponentTargets(opponents.snapshot()); }
     catch (error) { status(String(error.message).slice(0, 4096), true); return; }
@@ -2825,7 +2830,72 @@ function finalOpponentResults(session, result) {
   }
 }
 
+function settleHistorical(error, result) {
+  const pending = historicalOperation;
+  if (!pending) return;
+  historicalOperation = null;
+  clearTimeout(pending.timer);
+  pending.operation.controller.signal.removeEventListener("abort", pending.abort);
+  if (error) pending.reject(error); else pending.resolve(result);
+}
+function clearHistoricalRecord(reason = "Historical record display was cleared.") {
+  historicalSelection = null;
+  if (!hasPreview) canvas.hidden = true;
+  settleHistorical(new Error(reason));
+  if (worker) {
+    const id = ++serial;
+    try { worker.postMessage({ kind: "historical-record-clear", id }); } catch { /* Owner shutdown can already have released the Worker. */ }
+  }
+}
+function receiveHistoricalRecord(data) {
+  const pending = historicalOperation;
+  if (!pending || data.id !== pending.id || !recordCurrent(pending.operation)) {
+    if (historicalSelection?.id === data.id && historicalSelection.owner === owner && !activePlay
+      && data.available === false && typeof data.error === "string" && data.error.length >= 1 && data.error.length <= 4096) {
+      historicalSelection = null;
+      if (!hasPreview) canvas.hidden = true;
+      status(`Stored historical display unavailable: ${data.error} Selected replay remains available.`, true);
+    }
+    return;
+  }
+  if (typeof data.available !== "boolean" || !(data.error === null || (typeof data.error === "string" && data.error.length >= 1 && data.error.length <= 4096))
+    || (data.available && data.error !== null)) {
+    clearHistoricalRecord("Historical Worker response is invalid.");
+    return;
+  }
+  historicalSelection = data.available ? { id: pending.id, owner } : null;
+  if (data.available) canvas.hidden = false;
+  settleHistorical(null, { available: data.available, error: data.error });
+}
+function requestHistoricalRecord(operation, replayFile, completedArchive, archivePlayer) {
+  if (!recordCurrent(operation) || !worker) return Promise.reject(new Error("Historical operation was cancelled."));
+  if (completedArchive != null && (!(completedArchive instanceof Uint8Array) || !(completedArchive.buffer instanceof ArrayBuffer)
+    || completedArchive.buffer.resizable === true || completedArchive.byteOffset !== 0 || completedArchive.byteLength !== completedArchive.buffer.byteLength
+    || completedArchive.byteLength < 1 || completedArchive.byteLength > 5 * 1024 * 1024
+    || !Number.isInteger(archivePlayer) || archivePlayer < 1 || archivePlayer > 0xffffffff)) {
+    return Promise.reject(new Error("Stored historical archive envelope is invalid."));
+  }
+  if (completedArchive == null && archivePlayer != null) return Promise.reject(new Error("Stored historical player has no archive."));
+  const id = ++serial;
+  if (!Number.isSafeInteger(id) || id < 1) return Promise.reject(new Error("Historical operation identity exhausted."));
+  return new Promise((resolve, reject) => {
+    const abort = () => clearHistoricalRecord("Historical library operation was cancelled.");
+    const timer = setTimeout(() => {
+      if (historicalOperation?.id === id) clearHistoricalRecord("Historical display timed out; selected replay remains available.");
+    }, 10000);
+    historicalOperation = { id, operation, resolve, reject, abort, timer };
+    operation.controller.signal.addEventListener("abort", abort, { once: true });
+    if (!recordCurrent(operation)) { abort(); return; }
+    try {
+      worker.postMessage(completedArchive == null ? { kind: "historical-record-clear", id }
+        : { kind: "historical-record-present", id, replayFile, completedArchive, archivePlayer },
+      completedArchive == null ? [] : [completedArchive.buffer]);
+    } catch (error) { clearHistoricalRecord(String(error.message).slice(0, 4096)); }
+  });
+}
+
 function closeRecords() {
+  clearHistoricalRecord("Historical library operation was cancelled.");
   recordsOperation?.controller.abort();
   recordsOperation = null;
   const previous = recordsStore;
@@ -2863,6 +2933,7 @@ async function recordAction(action) {
   if ((action === "use" || action === "delete" || action === "opponent") && (!Number.isSafeInteger(id) || id < 1)) return;
   const operation = { owner, controller: new AbortController() };
   recordsOperation = operation;
+  if (action === "use") clearHistoricalRecord();
   controls();
   status(action === "save" ? "Saving the captured recording…" : "Opening saved records…");
   let committed = "";
@@ -2882,7 +2953,11 @@ async function recordAction(action) {
         selectedReplayKey = `record:${id}`;
         ui["replay-file"].value = "";
         ui["replay-name"].textContent = `${file.name} · ${file.size} bytes · matching chart: ${loaded.metadata.chartPath}`;
-        status("Saved replay selected. Prepare its matching chart, then choose Play replay.");
+        const historical = await requestHistoricalRecord(operation, file, loaded.completedArchive, loaded.archivePlayer);
+        if (!recordCurrent(operation)) return;
+        status("Saved replay selected. Prepare its matching chart, then choose Play replay."
+          + (historical.error ? ` Stored historical display unavailable: ${historical.error}`
+            : historical.available ? " Stored historical result displayed." : ""), historical.error !== null);
       }
     } else {
       if (action === "save") {
