@@ -232,6 +232,7 @@ fn archive_is_a_snapshot_and_failed_presentation_stays_unavailable_with_original
                     chart: Some(&chart),
                     song_time: Some(beatkernel::time::Timestamp::ZERO),
                     score: &scores[slot],
+                    gauge: None,
                     last_judge: None,
                     recent_results: &[],
                     pressed_lanes: 0,

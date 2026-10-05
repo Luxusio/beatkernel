@@ -5804,6 +5804,16 @@ fn draw_game_with_background(
         }
         return Ok(());
     }
+    molecules::gauge_hud(
+        pixels,
+        &snapshot.gauge,
+        Bounds {
+            x: 750,
+            y: 110,
+            width: 186,
+            height: 18,
+        },
+    )?;
     if let Some(competition) = snapshot
         .players
         .first()

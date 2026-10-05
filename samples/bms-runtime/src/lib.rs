@@ -94,6 +94,8 @@ pub mod font_text;
 pub mod gauge;
 #[cfg(test)]
 mod gauge_fixtures;
+#[cfg(test)]
+mod gauge_hud_fixtures;
 /// Reusable asynchronous native/Web GPU presentation, separate from game I/O.
 #[cfg(feature = "graphics")]
 pub mod graphics;

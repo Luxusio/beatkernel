@@ -565,6 +565,7 @@ pub struct LocalPlayerView<'a> {
     pub chart: Option<&'a PlayerChart>,
     pub song_time: Option<Timestamp>,
     pub score: &'a ScoreSummary,
+    pub gauge: Option<&'a crate::gauge::BmsGauge>,
     pub last_judge: Option<&'a JudgeEvent>,
     pub recent_results: &'a [JudgeEvent],
     pub pressed_lanes: u32,
@@ -578,6 +579,7 @@ impl<'a> From<&'a LocalPlayerSnapshot> for LocalPlayerView<'a> {
             chart: player.chart.as_deref(),
             song_time: player.song_time,
             score: &player.score,
+            gauge: Some(&player.gauge),
             last_judge: player.last_judge.as_ref(),
             recent_results: &player.recent_results,
             pressed_lanes: player.pressed_lanes,
@@ -748,7 +750,23 @@ fn local_player_views_with_background_impl(
         );
         if let Some(event) = player.last_judge.or_else(|| player.recent_results.last()) {
             let (label, color) = crate::timing_display::judge_label(event);
-            clipped_text(scene, line(56, 7), &label, 1, color);
+            let mut judge_bounds = line(56, 7);
+            if player.gauge.is_some() {
+                judge_bounds.width -= 100;
+            }
+            clipped_text(scene, judge_bounds, &label, 1, color);
+        }
+        if let Some(gauge) = player.gauge {
+            molecules::gauge_hud(
+                scene,
+                gauge,
+                Bounds {
+                    x: bounds.x + bounds.width - 100,
+                    y: bounds.y + 56,
+                    width: 90,
+                    height: 14,
+                },
+            )?;
         }
         let comparisons = if show { player.competition } else { None };
         let summary_height = comparisons

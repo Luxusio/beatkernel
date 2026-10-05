@@ -4,10 +4,75 @@ use super::interaction::Bounds;
 use super::text_input::{LineEditor, VisibleLine};
 use crate::{
     font_text::FontText,
+    gauge::{BmsGauge, GaugeFailure, GAUGE_UNITS_PER_PERCENT, MAX_GAUGE_UNITS},
     scene::{ClipRect, Scene},
     texture::TextureId,
 };
 use std::ops::RangeInclusive;
+
+/// Draws only the borrowed gauge snapshot; READY is not song completion.
+/// Bounds are validated before geometry and the ASCII label uses stack storage.
+pub fn gauge_hud(scene: &mut Scene, gauge: &BmsGauge, bounds: Bounds) -> Result<(), String> {
+    if bounds.x < 0 || bounds.y < 0 || bounds.width <= 0 || bounds.height < 14 {
+        return Err(
+            "gauge HUD requires nonnegative origin, positive width and height at least 14".into(),
+        );
+    }
+    let clip = ClipRect::new([bounds.x, bounds.y, bounds.width, bounds.height])?;
+    let text_x = usize::try_from(bounds.x.checked_add(2).ok_or("gauge label x overflow")?)
+        .map_err(|_| "gauge label x exceeds usize")?;
+    let text_y = usize::try_from(bounds.y.checked_add(2).ok_or("gauge label y overflow")?)
+        .map_err(|_| "gauge label y exceeds usize")?;
+    let bar_y = bounds
+        .y
+        .checked_add(bounds.height - 4)
+        .ok_or("gauge bar y overflow")?;
+    scene.status()?;
+
+    let snapshot = gauge.snapshot();
+    let (prefix, color) = match snapshot.failure {
+        Some(GaugeFailure::InstantDeath) => ("DEAD", 0xef6372),
+        Some(GaugeFailure::Depleted) => ("EMPTY", 0xd8b36b),
+        None if gauge.can_clear() => ("READY", 0x61d69a),
+        None => ("GAUGE", 0x4f92db),
+    };
+    let hundredths = snapshot.level_units / (GAUGE_UNITS_PER_PERCENT / 100);
+    let whole = hundredths / 100;
+    let mut label = [0u8; 16];
+    let mut length = prefix.len();
+    label[..length].copy_from_slice(prefix.as_bytes());
+    label[length] = b' ';
+    length += 1;
+    if whole >= 100 {
+        label[length] = b'1';
+        length += 1;
+    }
+    if whole >= 10 {
+        label[length] = b'0' + ((whole / 10) % 10) as u8;
+        length += 1;
+    }
+    label[length] = b'0' + (whole % 10) as u8;
+    label[length + 1] = b'.';
+    label[length + 2] = b'0' + ((hundredths / 10) % 10) as u8;
+    label[length + 3] = b'0' + (hundredths % 10) as u8;
+    label[length + 4] = b'%';
+    length += 5;
+    let label = std::str::from_utf8(&label[..length]).expect("gauge label is ASCII");
+    let filled = (i128::from(bounds.width) * i128::from(snapshot.level_units)
+        / i128::from(MAX_GAUGE_UNITS))
+    .clamp(0, i128::from(bounds.width)) as i64;
+    rect(
+        scene,
+        bounds.x,
+        bounds.y,
+        bounds.width,
+        bounds.height,
+        0x1f2d40,
+    );
+    rect(scene, bounds.x, bar_y, filled, 4, color);
+    super::atoms::text_clipped(scene, text_x, text_y, label, 1, color, clip)?;
+    scene.status()
+}
 
 /// A clipped line field; editing and focus belong to the menu owner.
 pub fn text_field(scene: &mut Scene, editor: &LineEditor, bounds: Bounds, focused: bool) {

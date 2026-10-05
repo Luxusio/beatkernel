@@ -306,6 +306,7 @@ fn cached_presentation_contains_only_four_qualified_rows_and_retains_shared_lobb
                     chart: Some(&chart),
                     song_time: Some(Timestamp::ZERO),
                     score: &scores[slot],
+                    gauge: None,
                     last_judge: None,
                     recent_results: &[],
                     pressed_lanes: 0,

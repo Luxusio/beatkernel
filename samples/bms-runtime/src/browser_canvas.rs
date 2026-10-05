@@ -13,7 +13,7 @@ use crate::{
     playfield_layout::LOGICAL_EXTENT,
     poor_background::PoorBackgroundPolicy,
     scene::Scene,
-    ui::{atoms, organisms},
+    ui::{atoms, molecules, organisms, interaction::Bounds},
 };
 
 pub(crate) struct BrowserCanvas {
@@ -64,7 +64,18 @@ impl BrowserCanvas {
         song: Timestamp,
         lookahead: i64,
     ) -> Result<(), String> {
-        self.present(chart, images, song, lookahead, &[], 0, None, None, None)
+        self.present(
+            chart,
+            images,
+            song,
+            lookahead,
+            &[],
+            0,
+            None,
+            None,
+            None,
+            None,
+        )
     }
 
     pub(crate) fn present_game(
@@ -81,6 +92,7 @@ impl BrowserCanvas {
             game.pressed,
             Some(&game.progress),
             Some(game.game.score()),
+            Some(game.game.gauge()),
             Some(&game.saved_hud),
         )
     }
@@ -99,6 +111,7 @@ impl BrowserCanvas {
             replay.replay.pressed_lanes(),
             Some(&replay.progress),
             Some(replay.replay.score()),
+            Some(replay.replay.gauge()),
             None,
         )
     }
@@ -131,6 +144,7 @@ impl BrowserCanvas {
                     .game
                     .score(member.player)
                     .expect("prepared local member"),
+                gauge: game.game.gauge(member.player),
                 last_judge: member.recent.last(),
                 recent_results: &member.recent,
                 pressed_lanes: member.pressed,
@@ -249,6 +263,7 @@ impl BrowserCanvas {
         pressed: u32,
         progress: Option<&crate::note_progress::NoteProgress>,
         score: Option<&crate::competition::ScoreSummary>,
+        gauge: Option<&crate::gauge::BmsGauge>,
         saved_hud: Option<&crate::saved_opponent_hud::SavedOpponentHud>,
     ) -> Result<(), String> {
         if lookahead <= 0 {
@@ -291,6 +306,18 @@ impl BrowserCanvas {
                 atoms::text(&mut self.scene, 750, 650, "SAVED COMPARISONS", 1, 0xff8e8e);
                 atoms::text(&mut self.scene, 750, 660, "UNAVAILABLE", 1, 0xff8e8e);
             }
+        }
+        if let Some(gauge) = gauge {
+            molecules::gauge_hud(
+                &mut self.scene,
+                gauge,
+                Bounds {
+                    x: 750,
+                    y: 110,
+                    width: 186,
+                    height: 18,
+                },
+            )?;
         }
         self.renderer.render(&self.scene)
     }

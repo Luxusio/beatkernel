@@ -81,7 +81,32 @@ These retained gauges are presentation state. Unattached native publication
 remains a no-op; headless termination policy must live in the actual game owner,
 not depend on whether a UI publisher is installed.
 
-Graphics/HUD, completion clear/fail decisions and
+## Common graphics HUD contract
+
+Native solo/local and browser Worker solo/local/replay render the same borrowed
+gauge state through a small common drawing component. Render a bounded bar and
+integer-derived percentage truncated to two decimals. READY denotes the current
+clear threshold predicate only; it must not claim the song has cleared. DEAD and
+EMPTY distinguish latched instant-death and depleted states. Recoverable zero
+remains GAUGE, not a failed state. Color and text both identify readiness/failure.
+
+Draw using existing rectangle/text atoms with a fixed stack label; do not clone
+gauge profiles, scan notes, advance replay/game state or allocate label strings.
+Require nonnegative origins, positive width and at least 14 logical pixels of
+height; validate dimensions/endpoints before mutation, clip the label to its component
+and calculate bar width with wide integer arithmetic. Repeated drawing reads the
+same snapshot without changing scores, gauges or replay frontiers. A preview
+without an actual owner does not invent an active-play gauge.
+
+Reserve an unused strip above solo counters and the right portion of each local
+member's existing judge header for the gauge. Clip the neighboring judge label
+to the remaining header width. Preserve playfield bounds, touch routing, saved/
+peer/room comparison reservations and page layout. Local gauges remain member
+specific across pages of up to four visible players and a roster of up to 64.
+Browser HUD drawing stays on OffscreenCanvas in Worker; no Window DOM gauge or
+new polling/render loop is permitted.
+
+Completion clear/fail decisions and
 actual per-player failure fencing/output cleanup still need integration.
 InstantDeath state alone does not establish playback termination. Keep the
 high-level mine file admission guard until those owners are connected. Author

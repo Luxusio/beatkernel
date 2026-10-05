@@ -310,6 +310,7 @@ fn status_failure_and_paging_preserve_the_fixed_local_field_and_touch_geometry()
                         chart: Some(&chart),
                         song_time: Some(Timestamp::ZERO),
                         score: &scores[slot],
+                        gauge: None,
                         last_judge: None,
                         recent_results: &[],
                         pressed_lanes: 0,
