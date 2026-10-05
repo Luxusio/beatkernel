@@ -1,0 +1,49 @@
+# Historical record association and native preview
+
+A pure shared policy associates a decoded whole result archive with the exact
+canonical ReplayHeader of a selected recording. An explicit original player ID
+must identify a matching row. Without an explicit ID, exactly one matching row
+is required; zero matches or multiple matching rows refuse association. A file
+name, row position, replay prefix, score or gauge threshold cannot select a
+player or create live completion evidence. Returned archive data stays historical
+and does not construct CompletedPlayResult. Header consistency is not
+authentication of editable recordings or proof of gameplay completion.
+
+Native record preview decodes canonical section setup and reconstructs only
+actual accepted operations, supporting original finite/unlimited extents while
+checking current draft profile, seed, start/end and input mode. It never adds a
+synthetic end advance or miss. Preview retains the exact optional end and prefix
+statistics independently of stored final gauge/outcome. Existing unlimited
+recordings remain compatible; incompatible drafts refuse the prefix.
+
+After a valid prefix is reconstructed, the native metadata worker may inspect
+the adjacent `.bkresult` sidecar appended to the whole selected replay filename.
+Absent sidecars leave the normal prefix preview usable. Bounded non-symlink
+regular-file reads and complete archive decoding precede pure association.
+Corrupt, oversized, mismatched or ambiguous sidecars retain the valid prefix and
+an explicit archive diagnostic; no historical row is accepted partially.
+
+The retained Records UI displays associated historical player ID, full/practice
+scope, outcome and exact gauge units separately from recomputed prefix scores.
+It caches this presentation and keeps filesystem/decoding out of rendering.
+Catalog/preview data declarations live in a pure record model; the UI imports
+those values instead of the filesystem adapter module. Existing adapter exports
+may retain compatibility while native composition roots select effect methods.
+No completion claim is inferred from a stored boolean or replay extent.
+
+Automatic adjacent lookup supports directly associated recording sidecars.
+Native local saves currently produce a whole-roster sidecar at the configured
+base path, so member-record lookup still requires explicit archive/player
+selection or durable association metadata in subsequent integration. The pure
+matcher supports explicit IDs now, including equal headers across players, but
+the UI must not guess those IDs from member filenames. Browser loaded-record
+presentation, rich score/timing/comparison archival, actual filesystem/GPU
+acceptance and race-free directory containment also remain unfinished.
+
+Independent deferred fixtures cover exact header fields and original IDs,
+ambiguous/missing rows, finite draft equality, long extents, recorded-prefix-only
+scores, historical display provenance and retained updates. No tests or real
+device/browser/filesystem/GPU execution run under the standing instruction.
+Scoped formatting and the exact four compile-only checks completed after both
+writers' terminal stop. All four checks exited zero; the eight fixture groups
+remain unexecuted. Compile evidence cannot establish execution or authentication.
