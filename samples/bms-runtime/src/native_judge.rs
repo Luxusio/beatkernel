@@ -4,6 +4,7 @@ use crate::{
     native_gameplay::NativeGameplayResult, replay_capture::LiveReplayCapture,
 };
 use beatkernel::{
+    chart::CompiledChart,
     input::CodecLimits,
     judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
     replay::codec::ReplayCodecLimits,
@@ -29,6 +30,21 @@ impl NativeJudgeConfig {
                 late: Duration::from_nanos(self.late),
             }],
             Duration::from_nanos(self.offset),
+        )?)
+    }
+    /// Constructs the actual source-aware pristine judge before native output
+    /// starts. Mine timing and identity use the common ButtonOnly composition.
+    pub fn judge(
+        &self,
+        source: &BmsChart,
+        chart: CompiledChart,
+    ) -> NativeGameplayResult<JudgeEngine> {
+        Ok(crate::mine_plan::prepare_judge(
+            source,
+            chart,
+            self.profile()?,
+            BmsInputMode::ButtonOnly,
+            beatkernel_bms::ParseOptions::default().max_objects,
         )?)
     }
     /// Finite sections use their own endpoint owner instead of a full-song deadline.

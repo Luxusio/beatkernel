@@ -547,7 +547,6 @@ mod native {
     use beatkernel::{
         audio::PcmLimits,
         input::{Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId},
-        judge::JudgeEngine,
         time::{ClockDomainId, Duration},
         transport::{Rate, Transport},
     };
@@ -972,8 +971,7 @@ mod native {
         if beatkernel_bms_runtime::player::cancelled() {
             return Ok(());
         }
-        let rules = prepared.source.rules();
-        let judge = JudgeEngine::new(prepared.compiled.chart, rules, judge_config.profile()?)?;
+        let judge = judge_config.judge(&prepared.source, prepared.compiled.chart)?;
         let mut competition =
             beatkernel_bms_runtime::competition_live::LiveCompetition::prepare_native_section_at_with_chart_seed(
                 &competition_options,
