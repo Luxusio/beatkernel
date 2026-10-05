@@ -976,6 +976,26 @@ impl StepGameplay {
     pub fn completed_archive(
         &self,
     ) -> Result<Option<Vec<u8>>, crate::result_archive::ArchiveError> {
+        self.completed_archive_impl(None)
+    }
+    pub fn completed_archive_with_comparisons(
+        &self,
+        rows: &[(
+            PlayerId,
+            Option<&crate::competition_presentation::CompetitionSnapshot>,
+        )],
+    ) -> Result<Option<Vec<u8>>, crate::result_archive::ArchiveError> {
+        self.completed_archive_impl(Some(rows))
+    }
+    fn completed_archive_impl(
+        &self,
+        comparisons: Option<
+            &[(
+                PlayerId,
+                Option<&crate::competition_presentation::CompetitionSnapshot>,
+            )],
+        >,
+    ) -> Result<Option<Vec<u8>>, crate::result_archive::ArchiveError> {
         if !self.capture_configured {
             return Ok(None);
         }
@@ -989,11 +1009,14 @@ impl StepGameplay {
                 "completed capture already consumed",
             ))?;
         let identity = completed_archive_identity(PlayerId(1), capture, self.gauge.profile())?;
-        let archive = crate::result_archive::ResultArchive::from_completed_with_scores(
+        let mut archive = crate::result_archive::ResultArchive::from_completed_with_scores(
             &[(PlayerId(1), result)],
             &[identity],
             &[(PlayerId(1), &self.score)],
         )?;
+        if let Some(rows) = comparisons {
+            archive.attach_comparisons(rows)?;
+        }
         Ok(Some(crate::result_archive::encode_archive(&archive)?))
     }
 
@@ -2032,6 +2055,26 @@ impl StepLocalGameplay {
     pub fn completed_archive(
         &self,
     ) -> Result<Option<Vec<u8>>, crate::result_archive::ArchiveError> {
+        self.completed_archive_impl(None)
+    }
+    pub fn completed_archive_with_comparisons(
+        &self,
+        rows: &[(
+            PlayerId,
+            Option<&crate::competition_presentation::CompetitionSnapshot>,
+        )],
+    ) -> Result<Option<Vec<u8>>, crate::result_archive::ArchiveError> {
+        self.completed_archive_impl(Some(rows))
+    }
+    fn completed_archive_impl(
+        &self,
+        comparisons: Option<
+            &[(
+                PlayerId,
+                Option<&crate::competition_presentation::CompetitionSnapshot>,
+            )],
+        >,
+    ) -> Result<Option<Vec<u8>>, crate::result_archive::ArchiveError> {
         use crate::result_archive::{ArchiveError, ResultArchive, MAX_PLAYERS, encode_archive};
         if !self.members.iter().any(|member| member.capture_configured) {
             return Ok(None);
@@ -2076,7 +2119,11 @@ impl StepLocalGameplay {
                     .ok_or(ArchiveError::Invalid("completed member missing result"))?,
             ));
         }
-        let archive = ResultArchive::from_completed_with_scores(&results, &identities, &scores)?;
+        let mut archive =
+            ResultArchive::from_completed_with_scores(&results, &identities, &scores)?;
+        if let Some(rows) = comparisons {
+            archive.attach_comparisons(rows)?;
+        }
         Ok(Some(encode_archive(&archive)?))
     }
 
@@ -2739,3 +2786,7 @@ fn completed_archive_identity(
 #[cfg(test)]
 #[path = "step_archived_score_fixtures.rs"]
 mod step_archived_score_fixtures;
+
+#[cfg(test)]
+#[path = "step_archived_comparison_fixtures.rs"]
+mod step_archived_comparison_fixtures;

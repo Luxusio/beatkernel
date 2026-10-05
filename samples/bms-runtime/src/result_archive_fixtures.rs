@@ -54,7 +54,10 @@ pub(crate) fn archive() -> ResultArchive {
 pub(crate) fn invalid_archive() -> ResultArchive {
     let mut entries = archive().entries().to_vec();
     entries[0].player = PlayerId(0);
-    ResultArchive { entries }
+    ResultArchive {
+        entries,
+        comparisons: None,
+    }
 }
 fn literal_replay() -> Vec<u8> {
     let mut out = b"BKREPLAY".to_vec();

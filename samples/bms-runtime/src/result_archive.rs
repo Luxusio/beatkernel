@@ -17,6 +17,7 @@ use beatkernel::{
 };
 
 pub const VERSION: u32 = 2;
+pub const COMPARISON_VERSION: u32 = 3;
 pub const LEGACY_VERSION: u32 = 1;
 pub const MAX_SCORE_GRADES: usize = 4096;
 pub const MAX_PLAYERS: usize = 64;
@@ -108,6 +109,12 @@ pub struct ArchiveEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResultArchive {
     entries: Vec<ArchiveEntry>,
+    comparisons: Option<
+        Vec<(
+            PlayerId,
+            Option<crate::competition_presentation::CompetitionSnapshot>,
+        )>,
+    >,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ArchiveError {
@@ -238,7 +245,10 @@ impl ResultArchive {
                 score: None,
             });
         }
-        let archive = Self { entries };
+        let archive = Self {
+            entries,
+            comparisons: None,
+        };
         validate(&archive)?;
         Ok(archive)
     }
@@ -297,16 +307,157 @@ impl ResultArchive {
                 .map(ArchivedScore::try_copy)
                 .transpose()?,
         });
-        Ok(Self { entries })
+        let mut projected = Self {
+            entries,
+            comparisons: None,
+        };
+        if let Some(comparisons) = &self.comparisons {
+            let (_, comparison) = comparisons
+                .iter()
+                .find(|(id, _)| *id == player)
+                .ok_or(ArchiveError::Invalid("comparison roster"))?;
+            projected.attach_comparisons(&[(player, comparison.as_ref())])?;
+        }
+        Ok(projected)
+    }
+    pub fn attach_comparisons(
+        &mut self,
+        rows: &[(
+            PlayerId,
+            Option<&crate::competition_presentation::CompetitionSnapshot>,
+        )],
+    ) -> Result<(), ArchiveError> {
+        validate(self)?;
+        if rows.len() != self.entries.len() {
+            return Err(ArchiveError::Invalid("comparison roster"));
+        }
+        for (index, (id, _)) in rows.iter().enumerate() {
+            if id.0 == 0
+                || rows[..index].iter().any(|(prior, _)| prior == id)
+                || !self.entries.iter().any(|entry| entry.player == *id)
+            {
+                return Err(ArchiveError::Invalid("comparison roster"));
+            }
+        }
+        let mut staged = Vec::new();
+        reserve(&mut staged, rows.len())?;
+        for entry in &self.entries {
+            let (_, snapshot) = rows
+                .iter()
+                .find(|(id, _)| *id == entry.player)
+                .ok_or(ArchiveError::Invalid("comparison roster"))?;
+            staged.push((entry.player, snapshot.map(copy_comparison).transpose()?));
+        }
+        encode_archive_parts(&self.entries, Some(&staged))?;
+        self.comparisons = Some(staged);
+        Ok(())
+    }
+    pub fn comparisons(
+        &self,
+    ) -> Option<
+        &[(
+            PlayerId,
+            Option<crate::competition_presentation::CompetitionSnapshot>,
+        )],
+    > {
+        self.comparisons.as_deref()
+    }
+    pub fn comparison(
+        &self,
+        player: PlayerId,
+    ) -> Option<&crate::competition_presentation::CompetitionSnapshot> {
+        self.comparisons
+            .as_ref()?
+            .iter()
+            .find(|(id, _)| *id == player)?
+            .1
+            .as_ref()
     }
     pub fn entries(&self) -> &[ArchiveEntry] {
         &self.entries
     }
 }
+fn validate_label(label: &str, stored: bool) -> Result<(), ArchiveError> {
+    if label.is_empty()
+        || label.len() > 256
+        || label.chars().count() > 64
+        || label.chars().any(char::is_control)
+        || (stored && (label.contains('/') || label.contains('\\')))
+    {
+        return Err(ArchiveError::Invalid("comparison label"));
+    }
+    Ok(())
+}
+fn validate_comparison(
+    snapshot: &crate::competition_presentation::CompetitionSnapshot,
+    stored: bool,
+) -> Result<(), ArchiveError> {
+    if snapshot.ghosts.len() > 8 {
+        return Err(ArchiveError::Invalid("comparison ghost count"));
+    }
+    for ghost in &snapshot.ghosts {
+        validate_label(&ghost.label, stored)?;
+        if ghost.combo > ghost.max_combo || ghost.max_combo > ghost.hits {
+            return Err(ArchiveError::Invalid("comparison counters"));
+        }
+    }
+    if let Some(network) = &snapshot.network {
+        if let Some(progress) = network.progress {
+            if network.status == crate::competition_presentation::NetworkStatus::Waiting {
+                return Err(ArchiveError::Invalid("waiting comparison progress"));
+            }
+            crate::multiplayer_protocol::validate_progress(None, progress)
+                .map_err(|_| ArchiveError::Invalid("comparison peer progress"))?;
+        }
+    }
+    Ok(())
+}
+fn copy_comparison(
+    snapshot: &crate::competition_presentation::CompetitionSnapshot,
+) -> Result<crate::competition_presentation::CompetitionSnapshot, ArchiveError> {
+    validate_comparison(snapshot, false)?;
+    let mut ghosts = Vec::new();
+    reserve(&mut ghosts, snapshot.ghosts.len())?;
+    for ghost in &snapshot.ghosts {
+        let basename = ghost.label.rsplit(['/', '\\']).next().unwrap_or("");
+        validate_label(basename, true)?;
+        let mut label = String::new();
+        label
+            .try_reserve_exact(basename.len())
+            .map_err(|_| ArchiveError::AllocationFailed)?;
+        label.push_str(basename);
+        ghosts.push(crate::competition_presentation::GhostSnapshot {
+            kind: ghost.kind,
+            label,
+            hits: ghost.hits,
+            misses: ghost.misses,
+            combo: ghost.combo,
+            max_combo: ghost.max_combo,
+            recorded_until: ghost.recorded_until,
+        });
+    }
+    Ok(crate::competition_presentation::CompetitionSnapshot {
+        ghosts,
+        network: snapshot.network.clone(),
+    })
+}
 fn validate(archive: &ResultArchive) -> Result<(), ArchiveError> {
     let entries = &archive.entries;
     if entries.is_empty() || entries.len() > MAX_PLAYERS {
         return Err(ArchiveError::Invalid("roster size"));
+    }
+    if let Some(comparisons) = &archive.comparisons {
+        if comparisons.len() != entries.len() {
+            return Err(ArchiveError::Invalid("comparison roster"));
+        }
+        for ((id, snapshot), entry) in comparisons.iter().zip(entries) {
+            if *id != entry.player {
+                return Err(ArchiveError::Invalid("comparison roster"));
+            }
+            if let Some(snapshot) = snapshot {
+                validate_comparison(snapshot, true)?;
+            }
+        }
     }
     for (index, entry) in entries.iter().enumerate() {
         if entry.score.is_some() != entries[0].score.is_some() {
@@ -389,16 +540,29 @@ impl Writer {
 }
 pub fn encode_archive(archive: &ResultArchive) -> Result<Vec<u8>, ArchiveError> {
     validate(archive)?;
+    encode_archive_parts(&archive.entries, archive.comparisons.as_deref())
+}
+fn encode_archive_parts(
+    entries: &[ArchiveEntry],
+    comparisons: Option<
+        &[(
+            PlayerId,
+            Option<crate::competition_presentation::CompetitionSnapshot>,
+        )],
+    >,
+) -> Result<Vec<u8>, ArchiveError> {
     let mut w = Writer(Vec::new());
     w.put(MAGIC)?;
-    let version = if archive.entries[0].score.is_some() {
+    let version = if comparisons.is_some() {
+        COMPARISON_VERSION
+    } else if entries[0].score.is_some() {
         VERSION
     } else {
         LEGACY_VERSION
     };
     w.put(&version.to_le_bytes())?;
-    w.put(&(archive.entries.len() as u32).to_le_bytes())?;
-    for e in &archive.entries {
+    w.put(&(entries.len() as u32).to_le_bytes())?;
+    for e in entries {
         let header = header_bytes(&e.header)?;
         w.put(&e.player.0.to_le_bytes())?;
         w.put(&(header.len() as u32).to_le_bytes())?;
@@ -437,7 +601,7 @@ pub fn encode_archive(archive: &ResultArchive) -> Result<Vec<u8>, ArchiveError> 
             PlayResultOutcome::Failed(GaugeFailure::InstantDeath) => 2,
             PlayResultOutcome::Failed(GaugeFailure::Depleted) => 3,
         }])?;
-        if version == VERSION {
+        if version != LEGACY_VERSION {
             match &e.score {
                 None => w.put(&[0])?,
                 Some(score) => {
@@ -447,7 +611,65 @@ pub fn encode_archive(archive: &ResultArchive) -> Result<Vec<u8>, ArchiveError> 
             }
         }
     }
+    if let Some(rows) = comparisons {
+        write_comparisons(&mut w, rows)?;
+    }
     Ok(w.0)
+}
+fn write_comparisons(
+    w: &mut Writer,
+    rows: &[(
+        PlayerId,
+        Option<crate::competition_presentation::CompetitionSnapshot>,
+    )],
+) -> Result<(), ArchiveError> {
+    use crate::{competition::OpponentKind, competition_presentation::NetworkStatus};
+    w.put(&(rows.len() as u32).to_le_bytes())?;
+    for (id, snapshot) in rows {
+        w.put(&id.0.to_le_bytes())?;
+        w.put(&[u8::from(snapshot.is_some())])?;
+        let Some(snapshot) = snapshot else {
+            continue;
+        };
+        w.put(&(snapshot.ghosts.len() as u32).to_le_bytes())?;
+        for ghost in &snapshot.ghosts {
+            w.put(&[match ghost.kind {
+                OpponentKind::Own => 0,
+                OpponentKind::Other => 1,
+            }])?;
+            w.put(&(ghost.label.len() as u32).to_le_bytes())?;
+            w.put(ghost.label.as_bytes())?;
+            for n in [ghost.hits, ghost.misses, ghost.combo, ghost.max_combo] {
+                w.put(&n.to_le_bytes())?;
+            }
+            w.put(&[u8::from(ghost.recorded_until.is_some())])?;
+            if let Some(time) = ghost.recorded_until {
+                w.put(&time.as_nanos().to_le_bytes())?;
+            }
+        }
+        w.put(&[u8::from(snapshot.network.is_some())])?;
+        if let Some(network) = &snapshot.network {
+            w.put(&[match network.status {
+                NetworkStatus::Waiting => 0,
+                NetworkStatus::Connected => 1,
+                NetworkStatus::Disconnected => 2,
+                NetworkStatus::Stopped => 3,
+            }])?;
+            w.put(&[u8::from(network.progress.is_some())])?;
+            if let Some(progress) = network.progress {
+                w.put(&progress.song_ns.to_le_bytes())?;
+                for n in [
+                    progress.hits,
+                    progress.misses,
+                    progress.combo,
+                    progress.max_combo,
+                ] {
+                    w.put(&n.to_le_bytes())?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 fn write_score(w: &mut Writer, score: &ArchivedScore) -> Result<(), ArchiveError> {
     for n in [score.hits, score.misses, score.combo, score.max_combo] {
@@ -575,6 +797,102 @@ fn read_score(r: &mut Reader<'_>) -> Result<ArchivedScore, ArchiveError> {
     score.validate()?;
     Ok(score)
 }
+fn read_comparisons(
+    r: &mut Reader<'_>,
+    expected: usize,
+) -> Result<
+    Vec<(
+        PlayerId,
+        Option<crate::competition_presentation::CompetitionSnapshot>,
+    )>,
+    ArchiveError,
+> {
+    use crate::{
+        competition::OpponentKind,
+        competition_presentation::{
+            CompetitionSnapshot, GhostSnapshot, NetworkSnapshot, NetworkStatus,
+        },
+    };
+    let count = r.u32()? as usize;
+    if count != expected || count > MAX_PLAYERS {
+        return Err(ArchiveError::Invalid("comparison roster"));
+    }
+    let mut rows = Vec::new();
+    reserve(&mut rows, count)?;
+    for _ in 0..count {
+        let player = PlayerId(r.u32()?);
+        let snapshot = match r.byte()? {
+            0 => None,
+            1 => {
+                let count = r.u32()? as usize;
+                if count > 8 {
+                    return Err(ArchiveError::Invalid("comparison ghost count"));
+                }
+                let mut ghosts = Vec::new();
+                reserve(&mut ghosts, count)?;
+                for _ in 0..count {
+                    let kind = match r.byte()? {
+                        0 => OpponentKind::Own,
+                        1 => OpponentKind::Other,
+                        _ => return Err(ArchiveError::Invalid("comparison kind tag")),
+                    };
+                    let length = r.u32()? as usize;
+                    if length == 0 || length > 256 {
+                        return Err(ArchiveError::Invalid("comparison label length"));
+                    }
+                    let text = std::str::from_utf8(r.take(length)?)
+                        .map_err(|_| ArchiveError::Invalid("comparison label UTF8"))?;
+                    validate_label(text, true)?;
+                    let mut label = String::new();
+                    label
+                        .try_reserve_exact(text.len())
+                        .map_err(|_| ArchiveError::AllocationFailed)?;
+                    label.push_str(text);
+                    ghosts.push(GhostSnapshot {
+                        kind,
+                        label,
+                        hits: r.u64()?,
+                        misses: r.u64()?,
+                        combo: r.u64()?,
+                        max_combo: r.u64()?,
+                        recorded_until: r.optional_i64()?.map(Timestamp::from_nanos),
+                    });
+                }
+                let network = match r.byte()? {
+                    0 => None,
+                    1 => {
+                        let status = match r.byte()? {
+                            0 => NetworkStatus::Waiting,
+                            1 => NetworkStatus::Connected,
+                            2 => NetworkStatus::Disconnected,
+                            3 => NetworkStatus::Stopped,
+                            _ => return Err(ArchiveError::Invalid("comparison status tag")),
+                        };
+                        let progress = match r.byte()? {
+                            0 => None,
+                            1 => Some(crate::multiplayer_protocol::Progress {
+                                song_ns: r.i64()?,
+                                hits: r.u64()?,
+                                misses: r.u64()?,
+                                combo: r.u64()?,
+                                max_combo: r.u64()?,
+                            }),
+                            _ => return Err(ArchiveError::Invalid("comparison progress tag")),
+                        };
+                        Some(NetworkSnapshot { status, progress })
+                    }
+                    _ => return Err(ArchiveError::Invalid("comparison network tag")),
+                };
+                let snapshot = CompetitionSnapshot { ghosts, network };
+                validate_comparison(&snapshot, true)?;
+                Some(snapshot)
+            }
+            _ => return Err(ArchiveError::Invalid("comparison snapshot tag")),
+        };
+        rows.push((player, snapshot));
+    }
+    Ok(rows)
+}
 pub fn decode_archive(bytes: &[u8]) -> Result<ResultArchive, ArchiveError> {
     if bytes.len() > MAX_ARCHIVE_BYTES {
         return Err(ArchiveError::TooLarge);
@@ -584,7 +902,7 @@ pub fn decode_archive(bytes: &[u8]) -> Result<ResultArchive, ArchiveError> {
         return Err(ArchiveError::Invalid("magic"));
     }
     let version = r.u32()?;
-    if version != VERSION && version != LEGACY_VERSION {
+    if version != VERSION && version != LEGACY_VERSION && version != COMPARISON_VERSION {
         return Err(ArchiveError::UnsupportedVersion(version));
     }
     let count = r.u32()? as usize;
@@ -658,7 +976,7 @@ pub fn decode_archive(bytes: &[u8]) -> Result<ResultArchive, ArchiveError> {
             3 => PlayResultOutcome::Failed(GaugeFailure::Depleted),
             _ => return Err(ArchiveError::Invalid("outcome tag")),
         };
-        let score = if version == VERSION {
+        let score = if version != LEGACY_VERSION {
             match r.byte()? {
                 0 => None,
                 1 => Some(read_score(&mut r)?),
@@ -682,10 +1000,18 @@ pub fn decode_archive(bytes: &[u8]) -> Result<ResultArchive, ArchiveError> {
             },
         });
     }
+    let comparisons = if version == COMPARISON_VERSION {
+        Some(read_comparisons(&mut r, count)?)
+    } else {
+        None
+    };
     if r.cursor != bytes.len() {
         return Err(ArchiveError::TrailingBytes);
     }
-    let archive = ResultArchive { entries };
+    let archive = ResultArchive {
+        entries,
+        comparisons,
+    };
     validate(&archive)?;
     Ok(archive)
 }
@@ -701,3 +1027,7 @@ pub(crate) mod member_fixtures;
 #[cfg(test)]
 #[path = "archived_score_fixtures.rs"]
 mod archived_score_fixtures;
+
+#[cfg(test)]
+#[path = "archived_comparison_fixtures.rs"]
+mod archived_comparison_fixtures;

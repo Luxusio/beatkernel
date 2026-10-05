@@ -112,8 +112,17 @@ pub struct BrowserLocalGame {
 impl BrowserLocalGame {
     /// Whole original completion archive; never promotes an exported replay prefix.
     pub fn completed_archive(&self) -> Result<Option<Vec<u8>>, JsValue> {
+        let mut comparisons = Vec::new();
+        comparisons
+            .try_reserve_exact(self.members.len())
+            .map_err(error)?;
+        comparisons.extend(
+            self.members
+                .iter()
+                .map(|member| (member.player, member.saved_hud.snapshot())),
+        );
         self.game
-            .completed_archive()
+            .completed_archive_with_comparisons(&comparisons)
             .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 

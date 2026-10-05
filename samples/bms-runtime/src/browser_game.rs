@@ -137,7 +137,10 @@ impl BrowserGame {
     /// Whole original completion archive; never promotes an exported replay prefix.
     pub fn completed_archive(&self) -> Result<Option<Vec<u8>>, JsValue> {
         self.game
-            .completed_archive()
+            .completed_archive_with_comparisons(&[(
+                crate::local_players::PlayerId(1),
+                self.saved_hud.snapshot(),
+            )])
             .map_err(|error| JsValue::from_str(&error.to_string()))
     }
 
