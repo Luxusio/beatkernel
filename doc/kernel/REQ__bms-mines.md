@@ -34,6 +34,37 @@ source and long-duration fixtures for deferred execution.
 
 ## Integration boundary
 
+### Shared retained mine rendering
+
+PlayerChart retains an immutable, separately typed PlayerMine timeline containing
+original full-width ordinal, ordered lane index, compiled timestamp and typed
+damage. Mines remain outside normal PlayerNote/object/progress/score identity.
+Use binary searches over the prepared timestamp order and reusable index scratch
+to query an inclusive visible window in wide integer arithmetic. Negative
+windows clear scratch; more than 2048 visible mines fail explicitly and clear
+scratch rather than silently dropping markers. Empty mine sources allocate no
+mine query backing storage. Query work depends on visible markers, not all
+historical mines.
+
+Scene and PlayfieldCache combine visible mines with existing note instances in
+the same retained GPU packet and ordered playfield batch. Nonfatal mines are red
+chips; instant-death mines are magenta chips, distinct from green normal heads.
+Reuse the existing head primitive and local-epoch drift/clip shader, without
+turning mines into scored notes or adding Window rendering. Each mine needs one
+instance; retain the normal-note 2048 and mine 2048 visibility budgets and size
+the common buffer for three normal primitives plus one mine primitive per cap.
+Prepared metadata, visible-set, bounds, lookahead or backward-time changes
+invalidate the cache; a stable visible set within its local epoch reuses the
+existing instance Arc. Validate both queries and lane references before changing
+the scene's playfield batch/cache. The actual solo and paged-local native/browser
+composers use this common Scene path; browser drawing stays in Worker.
+
+This draws the original timeline, without inventing hit/avoid flashes, judge
+advances, fatal stop policy or gauge outcomes. Author independent deferred
+window-oracle/cap/scratch, retained geometry/cache, real composer/local-page and
+long-time fixtures. Device/GPU/browser execution and measured performance remain
+unverified; complete source admission remains guarded.
+
 ### Mine lanes, practice eligibility and full-song completion
 
 PlayerChart prepares the sorted union of visible, invisible and mine lanes,
