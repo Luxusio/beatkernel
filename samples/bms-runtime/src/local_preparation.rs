@@ -91,14 +91,27 @@ pub fn prepare_local_members(
     configs
         .try_reserve_exact(plan.members().len())
         .map_err(|_| "local member allocation failed")?;
+    let pristine = prepare_judge(
+        &prepared.source,
+        prepared.compiled.chart.clone(),
+        profile,
+        input_mode,
+        beatkernel_bms::ParseOptions::default().max_objects,
+    )?;
+    let checkpoint = if plan.members().len() > 1 {
+        Some(pristine.snapshot().map_err(|error| error.to_string())?)
+    } else {
+        None
+    };
+    let mut first_judge = Some(pristine);
     for (&(player, device), bindings) in plan.members().iter().zip(bindings) {
-        let judge = prepare_judge(
-            &prepared.source,
-            prepared.compiled.chart.clone(),
-            profile.clone(),
-            input_mode,
-            beatkernel_bms::ParseOptions::default().max_objects,
-        )?;
+        let judge = match first_judge.take() {
+            Some(judge) => judge,
+            None => beatkernel::judge::JudgeEngine::from_snapshot(
+                checkpoint.as_ref().expect("multiple member checkpoint"),
+            )
+            .map_err(|error| error.to_string())?,
+        };
         let mut sounds = Vec::new();
         sounds
             .try_reserve_exact(prepared.sounds.len())

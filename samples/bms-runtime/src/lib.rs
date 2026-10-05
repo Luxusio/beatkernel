@@ -154,6 +154,8 @@ pub mod judge_feedback;
 pub mod live_pause;
 #[cfg(test)]
 mod local_fence_fixtures;
+#[cfg(test)]
+mod local_hazard_storage_fixtures;
 /// Bounded native input merging on one common host clock.
 pub mod local_input;
 /// Collection-based local player identity and unique native input assignment.

@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    sync::Arc,
 };
 
 use crate::{
@@ -92,7 +93,7 @@ impl std::error::Error for HazardError {
 /// Immutable markers sorted by time, preserving declaration order for ties.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HazardTimeline {
-    markers: Vec<HazardMarker>,
+    markers: Arc<[HazardMarker]>,
 }
 
 impl HazardTimeline {
@@ -109,7 +110,9 @@ impl HazardTimeline {
             }
         }
         markers.sort_by_key(|marker| marker.at);
-        Ok(Self { markers })
+        Ok(Self {
+            markers: Arc::from(markers),
+        })
     }
 
     /// Borrows the validated stable time ordering.
@@ -196,7 +199,7 @@ impl HazardState {
     pub(super) fn encode(&self, bytes: &mut Encoder) {
         let mut extension = Encoder::new(b"judge-hazards/v1");
         extension.u64(self.timeline.markers.len() as u64);
-        for marker in &self.timeline.markers {
+        for marker in self.timeline.markers.iter() {
             extension.u64(marker.id.0);
             extension.i64(marker.at.as_nanos());
             extension.u32(marker.control.0);
@@ -228,7 +231,7 @@ impl Clone for HazardState {
     fn clone(&self) -> Self {
         // A checkpoint may have a short last report but consume every remaining
         // marker in one later operation. Retain the original setup capacity.
-        let mut events = Vec::with_capacity(self.timeline.markers.len());
+        let mut events = Vec::with_capacity(self.events.capacity());
         events.extend_from_slice(&self.events);
         Self {
             timeline: self.timeline.clone(),

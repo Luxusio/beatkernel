@@ -1,6 +1,7 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeSet, BinaryHeap, HashMap, HashSet},
+    sync::Arc,
 };
 
 use crate::{
@@ -45,7 +46,7 @@ pub struct JudgeEngine {
     contact_enabled: bool,
     hazards: Option<HazardState>,
     effective_time: Option<Timestamp>,
-    initial_configuration: Result<Vec<u8>, SnapshotError>,
+    initial_configuration: Result<Arc<[u8]>, SnapshotError>,
 }
 
 impl JudgeEngine {
@@ -181,7 +182,7 @@ impl JudgeEngine {
         for index in 0..count {
             engine.refresh(index, None);
         }
-        engine.initial_configuration = engine.canonical_state_bytes();
+        engine.initial_configuration = engine.canonical_state_bytes().map(Arc::from);
         Ok(engine)
     }
 
@@ -197,6 +198,7 @@ impl JudgeEngine {
         let hazards = HazardState::new(timeline)?;
         let configuration = self
             .canonical_state_bytes_with_hazards(Some(&hazards))
+            .map(Arc::from)
             .map_err(HazardError::Snapshot)?;
         self.hazards = Some(hazards);
         self.initial_configuration = Ok(configuration);
@@ -810,6 +812,8 @@ impl JudgeEngine {
                     })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let mut deadlines = BinaryHeap::with_capacity(self.deadlines.capacity());
+        deadlines.extend(self.deadlines.iter().copied());
         let clone = Self {
             chart: self.chart.clone(),
             profile: self.profile.clone(),
@@ -822,7 +826,7 @@ impl JudgeEngine {
             custom_pending: self.custom_pending.clone(),
             identities: self.identities.clone(),
             // Preserve consumed-deadline suppression and exact dispatch indexes.
-            deadlines: self.deadlines.clone(),
+            deadlines,
             scheduled: self.scheduled.clone(),
             active: self.active.clone(),
             active_controls: self.active_controls.clone(),
@@ -837,3 +841,7 @@ impl JudgeEngine {
         Ok(clone)
     }
 }
+
+#[cfg(test)]
+#[path = "hazard_storage_fixtures.rs"]
+mod hazard_storage_fixtures;
