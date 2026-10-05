@@ -107,6 +107,19 @@ pub fn prepare_capture_for_source(
     chart_seed: u64,
     limits: Option<ReplayCodecLimits>,
 ) -> NativeGameplayResult<Option<LiveReplayCapture>> {
+    prepare_section_capture_for_source(source, judge, domain, start, chart_seed, None, limits)
+}
+
+/// Preserve the actual finite section endpoint in the pristine capture header.
+pub fn prepare_section_capture_for_source(
+    source: &BmsChart,
+    judge: &JudgeEngine,
+    domain: ClockDomainId,
+    start: Timestamp,
+    chart_seed: u64,
+    end: Option<Timestamp>,
+    limits: Option<ReplayCodecLimits>,
+) -> NativeGameplayResult<Option<LiveReplayCapture>> {
     let Some(limits) = limits else {
         return Ok(None);
     };
@@ -117,7 +130,7 @@ pub fn prepare_capture_for_source(
         limits,
         start,
         chart_seed,
-        None,
+        end,
         BmsInputMode::ButtonOnly,
         identity,
     )?))

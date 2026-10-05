@@ -14,7 +14,7 @@ use crate::{
     native_cohort::{PlayerState, member_progress, replay_path},
     native_group_competition::NativeGroupCompetition,
     native_gameplay::NativeGameplayResult,
-    native_judge::{NativeJudgeConfig, capture_limits, prepare_capture_for_source},
+    native_judge::{NativeJudgeConfig, capture_limits, prepare_section_capture_for_source},
     replay_capture::LiveReplayCapture,
 };
 use beatkernel::{
@@ -153,12 +153,13 @@ pub fn prepare_cohort(
             .record_replay
             .map(|path| replay_path(path, player))
             .transpose()?;
-        let capture = prepare_capture_for_source(
+        let capture = prepare_section_capture_for_source(
             &prepared.source,
             &member.judge,
             config.host,
             config.start,
             config.chart_seed,
+            config.end,
             limits,
         )?;
         let completion = judge_config.completion(prepared)?;
@@ -338,6 +339,61 @@ fn finalize_network(
 #[cfg(test)]
 #[path = "native_cohort_network_fixtures.rs"]
 mod network_fixtures;
+
+/// Retain the original typed owner error while attempting every replay and the sidecar.
+pub fn finish_cohort_with_results(
+    outcome: NativeGameplayResult<Option<Vec<(PlayerId, crate::play_result::CompletedPlayResult)>>>,
+    states: Vec<PlayerState>,
+    save_paths: Vec<(PlayerId, Option<PathBuf>)>,
+    mut failures: Vec<String>,
+    base_path: Option<&Path>,
+    save: impl FnMut(Option<LiveReplayCapture>, Option<&Path>, bool) -> NativeGameplayResult<()>,
+    save_archive: impl FnOnce(
+        &crate::result_archive::ResultArchive,
+        Option<&Path>,
+    ) -> NativeGameplayResult<()>,
+) -> NativeGameplayResult<()> {
+    let archive = (|| -> NativeGameplayResult<Option<crate::result_archive::ResultArchive>> {
+        if base_path.is_none() {
+            return Ok(None);
+        }
+        let has_completion = match &outcome {
+            Ok(results) => results.is_some(),
+            Err(error) => error
+                .downcast_ref::<crate::play_result::CompletedLocalPublicationError>()
+                .is_some(),
+        };
+        if has_completion && states.iter().all(|state| state.capture.is_none()) {
+            return Err("completed recording missing cohort captures".into());
+        }
+        if states.len() > MAX_LOCAL_PLAYERS {
+            return Err("completed archive roster exceeds bound".into());
+        }
+        let mut members = Vec::new();
+        members.try_reserve_exact(states.len())?;
+        for state in &states {
+            members.push(crate::native_completed_save::ArchiveMember {
+                player: state.player,
+                capture: state.capture.as_ref(),
+                profile: state.gauge.profile(),
+            });
+        }
+        crate::native_completed_save::cohort_archive(&outcome, &members)
+    })();
+    if outcome.is_err() {
+        failures.insert(
+            0,
+            "local session failed (original typed error retained)".into(),
+        );
+    }
+    crate::native_completed_save::finalize_completed_save(
+        outcome,
+        Ok(()),
+        archive,
+        || finish_cohort(states, save_paths, failures, save),
+        |archive| save_archive(archive, base_path),
+    )
+}
 
 /// Call after every native cleanup attempt. Match by ID, never positional zip.
 /// Ambiguous destinations are rejected rather than publishing a capture twice.

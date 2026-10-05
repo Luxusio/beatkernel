@@ -12,7 +12,7 @@ use beatkernel::{
 use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio, prepare_audio};
 use beatkernel_bms_runtime::native_cohort_setup::{
     CohortPreparation, PreparedCohort, activate_cohort_with_sounds, admit_cohort as admit_mode,
-    finish_cohort, finish_cohort_network, prepare_cohort,
+    finish_cohort, finish_cohort_with_results, finish_cohort_network, prepare_cohort,
 };
 use beatkernel_bms_runtime::native_start::{MAX_START_INPUT_EVENTS, NativeStartConfig, start_committed};
 use beatkernel_bms_runtime::{
@@ -30,7 +30,7 @@ use beatkernel_bms_runtime::{
     native_cohort::{PlayerState, replay_path},
 };
 use beatkernel_bms_runtime::{
-    native_cohort::{NativeCohortSession, run_cohort},
+    native_cohort::{NativeCohortSession, run_cohort_with_results},
     native_gameplay::{
         InputBatch, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult, retain_input,
     },
@@ -391,7 +391,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
     let mut before_origin = 0u64;
     let mut other_devices = 0u64;
     let mut retained = std::collections::VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
-    let outcome = (|| -> Result<()> {
+    let outcome = (|| -> Result<Option<Vec<(beatkernel_bms_runtime::local_players::PlayerId,beatkernel_bms_runtime::play_result::CompletedPlayResult)>>> {
         check_group(&input, &options.local_players, &selected)?;
         let (mut discipline, host_origin, playback_origin) = if let Some(network) = network.as_mut()
         {
@@ -428,7 +428,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 )?
             };
             let Some(started) = started else {
-                return Ok(());
+                return Ok(None);
             };
             let playback_origin = started.plan.selected_output();
             let mut discipline = PresentationDiscipline::new_with_playback_origin(
@@ -489,7 +489,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
                 assignments: &options.local_players,
                 retained: &mut retained,
             };
-            run_cohort(
+            run_cohort_with_results(
                 &mut device,
                 NativeCohortSession {
                     network: network.as_mut(),
@@ -545,9 +545,6 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         eprintln!("IOHID close error: {error}");
     }
     let mut failures = Vec::new();
-    if let Err(error) = outcome {
-        failures.push(format!("local session: {error}"));
-    }
     if let Err(error) = stop {
         failures.push(format!("output cleanup: {error}"));
     }
@@ -555,7 +552,20 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         failures.push(format!("input cleanup: {error}"));
     }
     finish_cohort_network(network.as_mut(), &states, &mut failures);
-    finish_cohort(states, save_paths, failures, save_capture)
+    finish_cohort_with_results(
+        outcome,
+        states,
+        save_paths,
+        failures,
+        options.record_replay.as_deref(),
+        save_capture,
+        |archive, path| {
+            beatkernel_bms_runtime::native_result_archive::save_sidecar(
+                archive,
+                path.ok_or("completed archive missing base replay path")?,
+            )
+        },
+    )
 }
 
 #[cfg(test)]

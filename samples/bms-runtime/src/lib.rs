@@ -842,3 +842,10 @@ pub mod result_archive;
 pub mod result_archive_store;
 #[cfg(test)]
 mod result_archive_store_fixtures;
+
+/// Typed completion association and explicit ordered replay/sidecar saving.
+pub mod native_completed_save;
+#[cfg(test)]
+mod native_completed_save_fixtures;
+#[cfg(test)]
+mod native_section_capture_fixtures;

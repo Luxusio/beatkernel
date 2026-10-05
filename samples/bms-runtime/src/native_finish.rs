@@ -31,6 +31,47 @@ pub fn finish_solo(
     saved?;
     Ok(())
 }
+/// Typed completion finalization with explicit replay and archive effects.
+pub fn finish_solo_with_result(
+    outcome: NativeGameplayResult<Option<crate::play_result::CompletedPlayResult>>,
+    output_stop: NativeGameplayResult<()>,
+    input_close: NativeGameplayResult<()>,
+    competition: Option<&mut LiveCompetition>,
+    capture: Option<LiveReplayCapture>,
+    profile: &crate::gauge::GaugeProfile,
+    path: Option<&Path>,
+    save: impl FnOnce(Option<LiveReplayCapture>, Option<&Path>, bool) -> NativeGameplayResult<()>,
+    save_archive: impl FnOnce(
+        &crate::result_archive::ResultArchive,
+        Option<&Path>,
+    ) -> NativeGameplayResult<()>,
+) -> NativeGameplayResult<()> {
+    let has_completion = match &outcome {
+        Ok(result) => result.is_some(),
+        Err(error) => error
+            .downcast_ref::<crate::play_result::CompletedSoloPublicationError>()
+            .is_some(),
+    };
+    let archive = if path.is_none() {
+        Ok(None)
+    } else if has_completion && capture.is_none() {
+        Err("completed recording missing capture".into())
+    } else {
+        crate::native_completed_save::solo_archive(&outcome, capture.as_ref(), profile)
+    };
+    let failed_session = outcome.is_err() || output_stop.is_err() || input_close.is_err();
+    if let Some(competition) = competition {
+        competition.finish();
+    }
+    crate::native_completed_save::finalize_completed_save(
+        outcome,
+        output_stop.and(input_close),
+        archive,
+        || save(capture, path, failed_session),
+        |archive| save_archive(archive, path),
+    )
+}
+
 /// Original exclusive-create capture behavior shared by solo and cohort callers.
 pub fn save_capture(
     capture: Option<LiveReplayCapture>,

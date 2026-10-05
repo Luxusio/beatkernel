@@ -136,3 +136,31 @@ impl ResultArchiveStoragePort for NativeResultArchiveStore {
         Ok(bytes)
     }
 }
+
+/// Append to the entire native filename without UTF-8 conversion.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn sidecar_path(
+    base: &std::path::Path,
+) -> crate::native_gameplay::NativeGameplayResult<std::path::PathBuf> {
+    let name = base.file_name().ok_or("replay base path has no filename")?;
+    let mut name = name.to_os_string();
+    name.push(".bkresult");
+    Ok(base.with_file_name(name))
+}
+/// Outer exclusive-create adapter. A refused write/flush may leave a partial new file.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn save_sidecar(
+    archive: &crate::result_archive::ResultArchive,
+    base: &std::path::Path,
+) -> crate::native_gameplay::NativeGameplayResult<()> {
+    use std::io::Write;
+    let bytes = crate::result_archive::encode_archive(archive)?;
+    let path = sidecar_path(base)?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(&bytes)?;
+    file.flush()?;
+    Ok(())
+}

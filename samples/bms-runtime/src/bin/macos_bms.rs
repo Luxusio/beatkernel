@@ -466,7 +466,7 @@ impl Drop for DeliverySession {
 }
 
 #[cfg(target_os = "macos")]
-use beatkernel_bms_runtime::native_finish::{finish_solo, save_capture};
+use beatkernel_bms_runtime::native_finish::{finish_solo_with_result, save_capture};
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -559,7 +559,7 @@ mod native {
         ChannelPolicy,
         native_chart::{NativeChartConfig, prepare_chart},
         native_end::NativeEnd,
-        native_judge::{NativeJudgeConfig, capture_limits, prepare_capture_for_source},
+        native_judge::{NativeJudgeConfig, capture_limits, prepare_section_capture_for_source},
         playback_pause::NativePause,
         player::{self},
     };
@@ -701,7 +701,7 @@ mod native {
     }
     use beatkernel_bms_runtime::native_gameplay::{
         InputBatch, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
-        NativeGameplaySession, retain_input, run_gameplay,
+        NativeGameplaySession, retain_input, run_gameplay_with_result,
     };
     struct GameplayDevice<'a> {
         audio: &'a mut CoreAudioStream,
@@ -1058,173 +1058,178 @@ mod native {
         let mut pre_origin = 0u64;
         let mut capture = None;
         let mut startup_inputs = VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
-        let outcome = (|| -> Result<()> {
-            capture = prepare_capture_for_source(
-                &prepared.source,
-                &judge,
-                HOST,
-                Timestamp::from_nanos(options.start_ns),
-                options.chart_seed,
-                capture_limits(
-                    options.record_replay.is_some(),
-                    options.replay_max_bytes,
-                    options.replay_max_records,
-                )?,
-            )?;
-            check_hid(&input, selected_id, options.keyboard_registry)?;
-            let (mut discipline, pair, origin, discipline_origin) = if network_start {
-                let competition = competition
-                    .as_mut()
-                    .ok_or("network startup owner missing")?;
-                let started = {
-                    let check_selection =
-                        |input: &HidInput| check_hid(input, selected_id, options.keyboard_registry);
-                    let mut device = StartupDevice {
+        let mut gauge = beatkernel_bms_runtime::gauge::BmsGauge::default();
+        let outcome =
+            (|| -> Result<Option<beatkernel_bms_runtime::play_result::CompletedPlayResult>> {
+                capture = prepare_section_capture_for_source(
+                    &prepared.source,
+                    &judge,
+                    HOST,
+                    Timestamp::from_nanos(options.start_ns),
+                    options.chart_seed,
+                    options.end_ns.map(Timestamp::from_nanos),
+                    capture_limits(
+                        options.record_replay.is_some(),
+                        options.replay_max_bytes,
+                        options.replay_max_records,
+                    )?,
+                )?;
+                check_hid(&input, selected_id, options.keyboard_registry)?;
+                let (mut discipline, pair, origin, discipline_origin) = if network_start {
+                    let competition = competition
+                        .as_mut()
+                        .ok_or("network startup owner missing")?;
+                    let started = {
+                        let check_selection = |input: &HidInput| {
+                            check_hid(input, selected_id, options.keyboard_registry)
+                        };
+                        let mut device = StartupDevice {
+                            audio: &mut audio,
+                            input: &mut input,
+                            clock: &clock,
+                            selected: std::slice::from_ref(&selected_id),
+                            check_selection: &check_selection,
+                            pre_origin: &mut pre_origin,
+                            other_devices: &mut other_devices,
+                            retained: &mut startup_inputs,
+                        };
+                        start_committed(
+                            &mut device,
+                            competition,
+                            &mut producer,
+                            &mut pause,
+                            &mut native_end,
+                            NativeStartConfig {
+                                output_origin: output_origin(),
+                                sample_rate: options.format.sample_rate(),
+                                playback_end_frame: playback_end,
+                                setup_timeout: competition_options.setup_timeout,
+                                max_clock_age_ns: competition_options.start_policy.max_age_ns,
+                                max_rate_error_ppm: DisciplineConfig::default().max_rate_error_ppm,
+                            },
+                            |report, producer| {
+                                feed_rendered(&mut bgm, report, |command| {
+                                    producer.try_push(command)
+                                })
+                            },
+                        )?
+                    };
+                    let Some(started) = started else {
+                        return Ok(None);
+                    };
+                    let plan = started.plan;
+                    let pair = started.observation.timing.point()?;
+                    let origin = started.host_origin;
+                    let mut discipline = PresentationDiscipline::new_with_playback_origin(
+                        DisciplineConfig::default(),
+                        output_origin(),
+                        plan.selected_output(),
+                        HOST,
+                        song_origin,
+                    )?;
+                    discipline.observe_clock_pair(pair)?;
+                    println!(
+                        "native applied start={plan:?}; host={origin:?}; physical accuracy unmeasured"
+                    );
+                    (discipline, pair, origin, plan.selected_output())
+                } else {
+                    audio.start()?;
+                    let mut discipline = PresentationDiscipline::new(
+                        DisciplineConfig::default(),
+                        output_origin(),
+                        HOST,
+                        song_origin,
+                    )?;
+                    let pair = seed(
+                        &audio,
+                        &mut input,
+                        &clock,
+                        selected_id,
+                        options.keyboard_registry,
+                        &mut discipline,
+                        &mut bgm,
+                        &mut producer,
+                    )?;
+                    let origin = ClockPoint {
+                        domain: HOST,
+                        timestamp: estimated_origin(pair, output_origin())?,
+                    };
+                    (discipline, pair, origin, output_origin())
+                };
+                let transport = Transport::new(origin.timestamp, song_origin, Rate::NORMAL);
+                println!(
+                    "estimated playback-zero host={origin:?}; actual seed={pair:?}; config={:?}; quality={:?}; future presentation retained, physical latency unmeasured",
+                    discipline.config(),
+                    discipline.quality()
+                );
+                if options.preroll == 0 {
+                    println!("zero preroll permits startup consumption of initial BGM/notes");
+                }
+                let mut runtime = Runtime::new(
+                    HOST,
+                    OUTPUT,
+                    transport,
+                    bindings,
+                    judge,
+                    producer,
+                    prepared.sounds,
+                    4096,
+                )?;
+                if let Some(timeline) = input_sounds {
+                    runtime.configure_input_sounds(timeline)?;
+                }
+                if let Some(timeline) = hazard_sounds {
+                    runtime.configure_hazard_sounds(timeline)?;
+                }
+                if let Some(end) = options.end_ns {
+                    runtime.set_song_end(Timestamp::from_nanos(end))?;
+                }
+                let pump = {
+                    let mut device = GameplayDevice {
                         audio: &mut audio,
                         input: &mut input,
                         clock: &clock,
-                        selected: std::slice::from_ref(&selected_id),
-                        check_selection: &check_selection,
-                        pre_origin: &mut pre_origin,
+                        selected: selected_id,
+                        registry: options.keyboard_registry,
                         other_devices: &mut other_devices,
                         retained: &mut startup_inputs,
                     };
-                    start_committed(
+                    run_gameplay_with_result(
                         &mut device,
-                        competition,
-                        &mut producer,
-                        &mut pause,
-                        &mut native_end,
-                        NativeStartConfig {
-                            output_origin: output_origin(),
+                        NativeGameplaySession {
+                            runtime: &mut runtime,
+                            gauge: &mut gauge,
+                            bgm: &mut bgm,
+                            discipline: &mut discipline,
+                            pause: &mut pause,
+                            end: &mut native_end,
+                            completion: &mut completion,
+                            capture: &mut capture,
+                            competition: &mut competition,
+                            delivery: &mut delivery,
+                            pre_origin_inputs: &mut pre_origin,
+                        },
+                        NativeGameplayConfig {
+                            origin,
+                            stream_origin: output_origin(),
+                            playback_origin: discipline_origin,
+                            song_origin,
                             sample_rate: options.format.sample_rate(),
-                            playback_end_frame: playback_end,
-                            setup_timeout: competition_options.setup_timeout,
-                            max_clock_age_ns: competition_options.start_policy.max_age_ns,
-                            max_rate_error_ppm: DisciplineConfig::default().max_rate_error_ppm,
+                            end_song: options.end_ns.map(Timestamp::from_nanos),
+                            advance_lag: Duration::from_nanos(options.advance_lag),
+                            seconds: options.seconds,
+                            pause_supported,
+                            logical_schedule: true,
                         },
-                        |report, producer| {
-                            feed_rendered(&mut bgm, report, |command| producer.try_push(command))
-                        },
-                    )?
+                    )
                 };
-                let Some(started) = started else {
-                    return Ok(());
-                };
-                let plan = started.plan;
-                let pair = started.observation.timing.point()?;
-                let origin = started.host_origin;
-                let mut discipline = PresentationDiscipline::new_with_playback_origin(
-                    DisciplineConfig::default(),
-                    output_origin(),
-                    plan.selected_output(),
-                    HOST,
-                    song_origin,
-                )?;
-                discipline.observe_clock_pair(pair)?;
                 println!(
-                    "native applied start={plan:?}; host={origin:?}; physical accuracy unmeasured"
+                    "runtime processing={:?} counters={:?}; other-device ignored={other_devices}; pre-origin ignored={pre_origin}",
+                    runtime.telemetry().processing(),
+                    runtime.telemetry().counters()
                 );
-                (discipline, pair, origin, plan.selected_output())
-            } else {
-                audio.start()?;
-                let mut discipline = PresentationDiscipline::new(
-                    DisciplineConfig::default(),
-                    output_origin(),
-                    HOST,
-                    song_origin,
-                )?;
-                let pair = seed(
-                    &audio,
-                    &mut input,
-                    &clock,
-                    selected_id,
-                    options.keyboard_registry,
-                    &mut discipline,
-                    &mut bgm,
-                    &mut producer,
-                )?;
-                let origin = ClockPoint {
-                    domain: HOST,
-                    timestamp: estimated_origin(pair, output_origin())?,
-                };
-                (discipline, pair, origin, output_origin())
-            };
-            let transport = Transport::new(origin.timestamp, song_origin, Rate::NORMAL);
-            println!(
-                "estimated playback-zero host={origin:?}; actual seed={pair:?}; config={:?}; quality={:?}; future presentation retained, physical latency unmeasured",
-                discipline.config(),
-                discipline.quality()
-            );
-            if options.preroll == 0 {
-                println!("zero preroll permits startup consumption of initial BGM/notes");
-            }
-            let mut runtime = Runtime::new(
-                HOST,
-                OUTPUT,
-                transport,
-                bindings,
-                judge,
-                producer,
-                prepared.sounds,
-                4096,
-            )?;
-            if let Some(timeline) = input_sounds {
-                runtime.configure_input_sounds(timeline)?;
-            }
-            if let Some(timeline) = hazard_sounds {
-                runtime.configure_hazard_sounds(timeline)?;
-            }
-            if let Some(end) = options.end_ns {
-                runtime.set_song_end(Timestamp::from_nanos(end))?;
-            }
-            let mut gauge = beatkernel_bms_runtime::gauge::BmsGauge::default();
-            let pump = {
-                let mut device = GameplayDevice {
-                    audio: &mut audio,
-                    input: &mut input,
-                    clock: &clock,
-                    selected: selected_id,
-                    registry: options.keyboard_registry,
-                    other_devices: &mut other_devices,
-                    retained: &mut startup_inputs,
-                };
-                run_gameplay(
-                    &mut device,
-                    NativeGameplaySession {
-                        runtime: &mut runtime,
-                        gauge: &mut gauge,
-                        bgm: &mut bgm,
-                        discipline: &mut discipline,
-                        pause: &mut pause,
-                        end: &mut native_end,
-                        completion: &mut completion,
-                        capture: &mut capture,
-                        competition: &mut competition,
-                        delivery: &mut delivery,
-                        pre_origin_inputs: &mut pre_origin,
-                    },
-                    NativeGameplayConfig {
-                        origin,
-                        stream_origin: output_origin(),
-                        playback_origin: discipline_origin,
-                        song_origin,
-                        sample_rate: options.format.sample_rate(),
-                        end_song: options.end_ns.map(Timestamp::from_nanos),
-                        advance_lag: Duration::from_nanos(options.advance_lag),
-                        seconds: options.seconds,
-                        pause_supported,
-                        logical_schedule: true,
-                    },
-                )
-            };
-            println!(
-                "runtime processing={:?} counters={:?}; other-device ignored={other_devices}; pre-origin ignored={pre_origin}",
-                runtime.telemetry().processing(),
-                runtime.telemetry().counters()
-            );
-            pump
-        })();
+                pump
+            })();
         let stop = audio.stop();
         let close = input.close();
         println!(
@@ -1246,14 +1251,21 @@ mod native {
         if let Err(error) = &close {
             eprintln!("IOHID close error: {error}");
         }
-        finish_solo(
+        finish_solo_with_result(
             outcome,
             stop.map_err(Into::into),
             close.map_err(Into::into),
             competition.as_mut(),
             capture,
+            gauge.profile(),
             options.record_replay.as_deref(),
             save_capture,
+            |archive, path| {
+                beatkernel_bms_runtime::native_result_archive::save_sidecar(
+                    archive,
+                    path.ok_or("completed archive missing base replay path")?,
+                )
+            },
         )
     }
 }
