@@ -1,5 +1,6 @@
 //! Single-owner forward runtime connecting canonical input to scalar audio.
 
+pub mod hazard_sound;
 pub mod input_sound;
 pub mod playback;
 pub mod restart;
@@ -17,6 +18,7 @@ use crate::{
     transport::{Transport, TransportError},
 };
 use std::{collections::HashMap, fmt, time::Instant};
+use hazard_sound::{HazardSoundError, HazardSoundTimeline};
 use input_sound::InputSoundTimeline;
 
 /// Explicit sound associated with one accepted chart stage.
@@ -194,6 +196,7 @@ pub struct Runtime {
     producer: CommandProducer,
     sounds: Vec<SoundBinding>,
     input_sounds: Option<InputSoundTimeline>,
+    hazard_sounds: Option<HazardSoundTimeline>,
     input_sounds_locked: bool,
     last_host: Option<Timestamp>,
     last_song: Option<Timestamp>,
@@ -229,6 +232,7 @@ impl Runtime {
             producer,
             sounds,
             input_sounds: None,
+            hazard_sounds: None,
             input_sounds_locked: false,
             last_host: None,
             last_song: None,
@@ -250,6 +254,22 @@ impl Runtime {
             return Err(RuntimeError::InputSoundConfigurationLocked);
         }
         self.input_sounds = Some(timeline);
+        Ok(())
+    }
+
+    /// Installs one immutable hazard-sound timeline before committed input or
+    /// advancement. Rejected setup preserves any existing timeline.
+    pub fn configure_hazard_sounds(
+        &mut self,
+        timeline: HazardSoundTimeline,
+    ) -> Result<(), HazardSoundError> {
+        if self.hazard_sounds.is_some() {
+            return Err(HazardSoundError::AlreadyConfigured);
+        }
+        if self.input_sounds_locked {
+            return Err(HazardSoundError::AlreadyStarted);
+        }
+        self.hazard_sounds = Some(timeline);
         Ok(())
     }
 
@@ -572,6 +592,17 @@ impl Runtime {
                 Err(error) => report.audio_failures.push(error),
             }
         }
+        if let Some(timeline) = &self.hazard_sounds {
+            for event in &report.hazard_events {
+                let Some(command) = timeline.command_for(event, report.audio_at.timestamp) else {
+                    continue;
+                };
+                match admit_audio(&mut self.producer, counters, command) {
+                    Ok(()) => report.audio_commands.push(command),
+                    Err(error) => report.audio_failures.push(error),
+                }
+            }
+        }
     }
 
     fn observe(&mut self, started: ProcessingStarted, rejected: bool) {
@@ -621,7 +652,7 @@ impl Runtime {
     }
     /// Replaces both gameplay owners after explicit replay reconstruction.
     /// Resets input chronology, acquisition sequences and song-end setup; leaves telemetry,
-    /// bindings, configured input sounds and already queued audio commands intact. The caller must
+    /// bindings, configured input/hazard sounds and already queued audio commands intact. The caller must
     /// separately synchronize audio output when restoring a timeline. Configured
     /// touch regions remain, but held routes are cleared for a fresh contact start;
     /// restoring active contacts requires `replace_state_with_touch_router` instead.
