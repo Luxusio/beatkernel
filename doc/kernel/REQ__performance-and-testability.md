@@ -54,7 +54,7 @@ notice iterators, borrowed original member data and associated errors. Shared
 policy validates state/gates; native adapters translate transport notices and
 perform publication. Group publication cadence now receives an explicit generic
 clock, with exact portable nanosecond state and post-effect interval commit;
-native clock acquisition lives in a per-owner adapter. Endpoint acquisition
+native clock acquisition lives in a per-owner adapter. Low-level endpoint ownership
 and underlying room/ACK waits still require further separation. See
 [the progress port contract](REQ__competition-progress-port.md) and
 [its cadence contract](REQ__competition-progress-cadence.md).
@@ -78,13 +78,19 @@ their identity. The native reader owns regular-file checks and bounded filesyste
 reads; TLS decoding and sockets remain native. WebTransport destination/Origin
 metadata validation and single-CA preparation use the same generic reader, with
 original option borrowing and unchanged build availability. Full endpoint
-construction still needs boundary work. See
+construction now receives a preflighted request through a generic factory.
+Native room availability is supplied at the outer boundary; policy preserves
+original owned identity/roster vectors and opaque factory errors. Concrete
+connection ownership and waits still need further boundary work. See
 [credential preparation](REQ__multiplayer-credential-loading.md)
 and [WebTransport preparation](REQ__webtransport-preparation.md).
+The [connection factory](REQ__competition-connection-factory.md) defines the
+pre-acquisition validation and ownership boundary.
 
 Solo terminal delivery selection and its one-shot guard are pure; observation
-and start requests cannot revive a finalized owner. Endpoint acquisition and
-whole-owner construction remain follow-up work. See [the terminal contract](REQ__competition-terminal-port.md)
+and start requests cannot revive a finalized owner. Underlying endpoint ownership
+and whole live-owner construction remain follow-up work beyond the injected
+acquisition factory. See [the terminal contract](REQ__competition-terminal-port.md)
 and [solo lifecycle](REQ__solo-competition-terminal.md).
 
 Clock domains and physical input/output provenance cannot be substituted with
