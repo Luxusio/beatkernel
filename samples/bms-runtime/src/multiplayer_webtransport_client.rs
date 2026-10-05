@@ -1,63 +1,23 @@
 //! Native WebTransport client for the same reliable peer session used by QUIC.
+#[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
 use crate::multiplayer_start::StartRole;
-use std::{io, path::PathBuf};
 
-/// Explicit relay destination and trust. Both start roles are network clients.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WebTransportOptions {
-    pub url: String,
-    pub origin: String,
-    pub ca: PathBuf,
-    pub role: StartRole,
-}
-
-impl WebTransportOptions {
-    /// Validate without opening credentials, acquiring a socket or resolving DNS.
-    pub fn validate(&self) -> io::Result<()> {
-        #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
-        {
-            validate_url(&self.url)?;
-            if !crate::multiplayer_webtransport::valid_origin(&self.origin) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "invalid canonical WebTransport Origin",
-                ));
-            }
-            let path = self.ca.as_os_str().as_encoded_bytes();
-            if path.is_empty() || path.len() > 4096 || path.contains(&0) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "invalid WebTransport CA path",
-                ));
-            }
-            Ok(())
-        }
-        #[cfg(not(all(not(target_arch = "wasm32"), feature = "webtransport")))]
-        {
-            Err(unavailable())
-        }
-    }
-}
-
+pub use crate::webtransport_preparation::WebTransportOptions;
 #[cfg(not(all(not(target_arch = "wasm32"), feature = "webtransport")))]
-pub(crate) fn unavailable() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        "native WebTransport requires a native build with the webtransport feature",
-    )
-}
+pub(crate) use crate::webtransport_preparation::unavailable;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
 pub use native::{WebTransportEndpoint, WebTransportStream};
 #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
-pub(crate) use native::validate_url;
+pub(crate) use crate::webtransport_preparation::validate_url;
 #[cfg(all(test, not(target_arch = "wasm32"), feature = "webtransport"))]
 pub(crate) use native::client_config;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
 mod native {
-    use super::{StartRole, WebTransportOptions};
-    use crate::multiplayer_quic::{client_tls, read_credential, wait};
+    use super::{StartRole, WebTransportOptions, validate_url};
+    use crate::multiplayer_quic::{client_tls, NativeCredentialReader, credential_error, wait};
+    use crate::webtransport_preparation::prepare_webtransport;
     use std::{
         fmt,
         io::{self, Read, Write},
@@ -83,33 +43,6 @@ mod native {
             io::ErrorKind::TimedOut,
             "WebTransport operation deadline elapsed",
         )
-    }
-
-    pub(crate) fn validate_url(value: &str) -> io::Result<url::Url> {
-        if value.is_empty() || value.len() > 4096 {
-            return Err(invalid("invalid bounded WebTransport URL"));
-        }
-        let url = url::Url::parse(value).map_err(|_| invalid("invalid WebTransport URL"))?;
-        let key = url.path().strip_prefix("/rooms/").unwrap_or_default();
-        if url.scheme() != "https"
-            || url.host().is_none()
-            || url.port_or_known_default() == Some(0)
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-            || url.as_str() != value
-            || key.is_empty()
-            || key.len() > 1024
-            || !key
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
-            return Err(invalid(
-                "WebTransport requires a canonical HTTPS /rooms/ASCII_KEY URL",
-            ));
-        }
-        Ok(url)
     }
 
     fn configured_client(ca: &[u8], bind: IpBindConfig) -> io::Result<ClientConfig> {
@@ -151,9 +84,10 @@ mod native {
     }
     impl WebTransportEndpoint {
         pub fn prepare(options: &WebTransportOptions) -> io::Result<Self> {
-            options.validate()?;
-            let url = validate_url(&options.url)?;
-            let ca = read_credential(&options.ca)?;
+            let prepared = prepare_webtransport(&mut NativeCredentialReader, options)
+                .map_err(credential_error)?;
+            let url = validate_url(&prepared.options.url)?;
+            let ca = prepared.ca;
             let config = match url.host() {
                 Some(url::Host::Ipv4(_)) => configured_client(&ca, IpBindConfig::InAddrAnyV4)?,
                 Some(url::Host::Ipv6(_)) => configured_client(&ca, IpBindConfig::InAddrAnyV6)?,

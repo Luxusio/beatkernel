@@ -93,7 +93,7 @@ pub enum LoadedCredentials<'a> {
     Join { ca: Vec<u8>, server_name: &'a str },
 }
 
-fn acquire<P: CredentialReadPort>(
+pub(crate) fn acquire<P: CredentialReadPort>(
     port: &mut P,
     path: &Path,
 ) -> Result<Vec<u8>, CredentialLoadError<P::Error>> {

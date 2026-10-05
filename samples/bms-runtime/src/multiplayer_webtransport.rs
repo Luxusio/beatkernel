@@ -257,27 +257,7 @@ impl ServerOptions {
     }
 }
 
-pub(crate) fn valid_origin(origin: &str) -> bool {
-    if origin.is_empty() || origin.len() > 4096 {
-        return false;
-    }
-    let Ok(url) = url::Url::parse(origin) else {
-        return false;
-    };
-    let loopback = match url.host() {
-        Some(url::Host::Domain(name)) => name == "localhost",
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
-    };
-    (url.scheme() == "https" || (url.scheme() == "http" && loopback))
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.path() == "/"
-        && url.query().is_none()
-        && url.fragment().is_none()
-        && url.origin().ascii_serialization() == origin
-}
+pub(crate) use crate::webtransport_preparation::valid_origin;
 
 fn invalid(error: impl fmt::Display) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error.to_string())

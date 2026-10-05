@@ -11,7 +11,7 @@ pub(crate) use native::{client_config, server_config};
 #[cfg(all(not(target_arch = "wasm32"), any(test, feature = "webtransport")))]
 pub(crate) use native::client_tls;
 #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
-pub(crate) use native::{read_credential, wait};
+pub(crate) use native::{NativeCredentialReader, credential_error, wait};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
@@ -88,14 +88,14 @@ mod native {
         bounded_bytes(&bytes)?;
         Ok(bytes)
     }
-    struct NativeCredentialReader;
+    pub(crate) struct NativeCredentialReader;
     impl CredentialReadPort for NativeCredentialReader {
         type Error = io::Error;
         fn read(&mut self, path: &Path) -> io::Result<Vec<u8>> {
             read_credential(path)
         }
     }
-    fn credential_error(error: CredentialLoadError<io::Error>) -> io::Error {
+    pub(crate) fn credential_error(error: CredentialLoadError<io::Error>) -> io::Error {
         match error {
             CredentialLoadError::Validation(error) | CredentialLoadError::Read(error) => error,
             CredentialLoadError::InvalidBytes => {

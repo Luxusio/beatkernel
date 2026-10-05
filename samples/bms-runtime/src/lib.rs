@@ -884,3 +884,5 @@ mod competition_opponent_loader_bridge;
 pub mod competition_opponent_loading;
 
 pub mod multiplayer_credentials;
+
+pub mod webtransport_preparation;
