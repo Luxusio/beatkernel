@@ -886,3 +886,6 @@ pub mod competition_opponent_loading;
 pub mod multiplayer_credentials;
 
 pub mod webtransport_preparation;
+
+pub mod competition_connection;
+pub mod multiplayer_configuration;

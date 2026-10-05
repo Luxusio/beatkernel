@@ -17,28 +17,34 @@ pub struct WebTransportOptions {
 impl WebTransportOptions {
     /// Validate without opening credentials, acquiring a socket or resolving DNS.
     pub fn validate(&self) -> io::Result<()> {
-        #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
-        {
-            validate_url(&self.url)?;
-            if !valid_origin(&self.origin) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "invalid canonical WebTransport Origin",
-                ));
-            }
-            let path = self.ca.as_os_str().as_encoded_bytes();
-            if path.is_empty() || path.len() > 4096 || path.contains(&0) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "invalid WebTransport CA path",
-                ));
-            }
-            Ok(())
+        validate_metadata(&self.url, &self.origin, &self.ca)
+    }
+}
+
+/// Validate borrowed metadata without constructing or copying client options.
+pub(crate) fn validate_metadata(url: &str, origin: &str, ca: &std::path::Path) -> io::Result<()> {
+    #[cfg(all(not(target_arch = "wasm32"), feature = "webtransport"))]
+    {
+        validate_url(url)?;
+        if !valid_origin(origin) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid canonical WebTransport Origin",
+            ));
         }
-        #[cfg(not(all(not(target_arch = "wasm32"), feature = "webtransport")))]
-        {
-            Err(unavailable())
+        let path = ca.as_os_str().as_encoded_bytes();
+        if path.is_empty() || path.len() > 4096 || path.contains(&0) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid WebTransport CA path",
+            ));
         }
+        Ok(())
+    }
+    #[cfg(not(all(not(target_arch = "wasm32"), feature = "webtransport")))]
+    {
+        let _ = (url, origin, ca);
+        Err(unavailable())
     }
 }
 

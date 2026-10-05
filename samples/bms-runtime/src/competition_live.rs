@@ -47,22 +47,7 @@ const START_POLICY_FLAGS: [&str; 5] = [
     "--mp-start-max-lateness-ms",
 ];
 
-/// Explicit bilateral role or multi-host room selection.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NetworkRole {
-    /// Listen on this address without silently selecting public interfaces.
-    Host(SocketAddr),
-    /// Join the supplied address without DNS or service discovery.
-    Join(SocketAddr),
-    /// Both relay participants connect as clients; this role controls the shared start.
-    WebTransport {
-        url: String,
-        role: crate::multiplayer_start::StartRole,
-        origin: String,
-    },
-    /// Room authority comes from actual admission order, not a chosen start role.
-    RoomWebTransport { url: String, origin: String },
-}
+pub use crate::competition_connection::NetworkRole;
 
 /// Competition features are opt-in and retained independently of native options.
 #[derive(Clone, Debug)]

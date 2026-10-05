@@ -548,7 +548,10 @@ fn copy_group_slice<T: Copy>(values: &[T]) -> Result<Vec<T>, MultiplayerError> {
     Ok(copy)
 }
 
-fn encode_group_setup(identity: &[u8], players: &[PlayerId]) -> Result<Vec<u8>, MultiplayerError> {
+pub(crate) fn group_setup_size(
+    identity: &[u8],
+    players: &[PlayerId],
+) -> Result<usize, MultiplayerError> {
     multiplayer_group::validate_roster(players)?;
     let size = identity
         .len()
@@ -558,6 +561,11 @@ fn encode_group_setup(identity: &[u8], players: &[PlayerId]) -> Result<Vec<u8>, 
     if identity.is_empty() {
         return Err(MultiplayerError::InvalidOptions);
     }
+    Ok(size)
+}
+
+fn encode_group_setup(identity: &[u8], players: &[PlayerId]) -> Result<Vec<u8>, MultiplayerError> {
+    let size = group_setup_size(identity, players)?;
     let mut payload = Vec::new();
     payload
         .try_reserve_exact(size)

@@ -1,7 +1,10 @@
 //! Native application routing over existing bilateral and room owners.
 //! Completion is marked only by the common native output/input completion gates.
 use crate::{
-    competition_live::NetworkRole,
+    competition_connection::{
+        self, NetworkRole, CompetitionConnectionRequest, CompetitionConnectionFactory,
+        ConnectionAcquireError,
+    },
     local_players::PlayerId,
     multiplayer::{
         GroupMultiplayer, MultiplayerError, MultiplayerNotice, MultiplayerOptions, MultiplayerEvent,
@@ -36,83 +39,23 @@ impl NativeCompetitionNetwork {
         players: Vec<PlayerId>,
         options: MultiplayerOptions,
     ) -> Result<Self, MultiplayerError> {
-        let policy = options.start_policy;
-        let backend = match role {
-            NetworkRole::Host(address) => Backend::Bilateral(GroupMultiplayer::host(
-                *address, identity, players, options,
-            )?),
-            NetworkRole::Join(address) => Backend::Bilateral(GroupMultiplayer::join(
-                *address, identity, players, options,
-            )?),
-            NetworkRole::WebTransport { url, role, origin } => {
-                Backend::Bilateral(GroupMultiplayer::webtransport(
-                    WebTransportOptions {
-                        url: url.clone(),
-                        origin: origin.clone(),
-                        role: *role,
-                        ca: options
-                            .quic
-                            .ca
-                            .clone()
-                            .ok_or(MultiplayerError::InvalidOptions)?,
-                    },
-                    identity,
-                    players,
-                    options,
-                )?)
-            }
-            NetworkRole::RoomWebTransport { url, origin } => {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    // Interactive admission must exist before any credential or endpoint acquisition.
-                    if !crate::player::attached() {
-                        return Err(MultiplayerError::Protocol(
-                            "native room mode requires the graphical player lobby".into(),
-                        ));
-                    }
-                    if options.quic.cert.is_some()
-                        || options.quic.key.is_some()
-                        || options.quic.server_name.is_some()
-                    {
-                        return Err(MultiplayerError::InvalidOptions);
-                    }
-                    let transport = WebTransportOptions {
-                        url: url.clone(),
-                        origin: origin.clone(),
-                        role: StartRole::Join,
-                        ca: options
-                            .quic
-                            .ca
-                            .clone()
-                            .ok_or(MultiplayerError::InvalidOptions)?,
-                    };
-                    let settings = NativeRoomOptions {
-                        setup_timeout: options.setup_timeout,
-                        drain_timeout: options.io_stall_timeout,
-                        finish_timeout: options.io_stall_timeout,
-                        queue_capacity: options.queue_capacity,
-                        start_policy: policy,
-                        preroll_ns: options.preroll_ns,
-                    };
-                    let port =
-                        NativeRoomNetwork::webtransport(transport, &identity, &players, settings)?;
-                    let owner =
-                        NativeRoomCompetition::new(port, players, options.io_stall_timeout)?;
-                    return Ok(Self::from_room(owner, policy));
-                }
-                #[cfg(target_arch = "wasm32")]
-                {
-                    let _ = (url, origin, identity, players, options);
-                    return Err(MultiplayerError::Io(
-                        "native room mode is unavailable on WASM".into(),
-                    ));
-                }
-            }
-        };
-        Ok(Self {
-            backend,
-            policy,
-            native_completed: false,
+        #[cfg(not(target_arch = "wasm32"))]
+        let room_available =
+            !matches!(role, NetworkRole::RoomWebTransport { .. }) || crate::player::attached();
+        #[cfg(target_arch = "wasm32")]
+        let room_available = false;
+        competition_connection::acquire_connection(
+            &mut NativeFactory,
+            CompetitionConnectionRequest {
+                role,
+                identity,
+                players,
+                options,
+                room_available,
+            },
+        )
+        .map_err(|error| match error {
+            ConnectionAcquireError::Policy(error) | ConnectionAcquireError::Factory(error) => error,
         })
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -343,5 +286,95 @@ impl crate::competition_progress::CompetitionProgressPort for NativeCompetitionN
     }
     fn request_stop(&mut self) {
         NativeCompetitionNetwork::request_stop(self);
+    }
+}
+
+struct NativeFactory;
+impl CompetitionConnectionFactory for NativeFactory {
+    type Connection = NativeCompetitionNetwork;
+    type Error = MultiplayerError;
+    fn create(
+        &mut self,
+        request: CompetitionConnectionRequest<'_>,
+    ) -> Result<Self::Connection, Self::Error> {
+        let CompetitionConnectionRequest {
+            role,
+            identity,
+            players,
+            options,
+            ..
+        } = request;
+        let policy = options.start_policy;
+        let backend = match role {
+            NetworkRole::Host(address) => Backend::Bilateral(GroupMultiplayer::host(
+                *address, identity, players, options,
+            )?),
+            NetworkRole::Join(address) => Backend::Bilateral(GroupMultiplayer::join(
+                *address, identity, players, options,
+            )?),
+            NetworkRole::WebTransport { url, role, origin } => {
+                Backend::Bilateral(GroupMultiplayer::webtransport(
+                    WebTransportOptions {
+                        url: url.clone(),
+                        origin: origin.clone(),
+                        role: *role,
+                        ca: options
+                            .quic
+                            .ca
+                            .clone()
+                            .ok_or(MultiplayerError::InvalidOptions)?,
+                    },
+                    identity,
+                    players,
+                    options,
+                )?)
+            }
+            NetworkRole::RoomWebTransport { url, origin } => {
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    if options.quic.cert.is_some()
+                        || options.quic.key.is_some()
+                        || options.quic.server_name.is_some()
+                    {
+                        return Err(MultiplayerError::InvalidOptions);
+                    }
+                    let transport = WebTransportOptions {
+                        url: url.clone(),
+                        origin: origin.clone(),
+                        role: StartRole::Join,
+                        ca: options
+                            .quic
+                            .ca
+                            .clone()
+                            .ok_or(MultiplayerError::InvalidOptions)?,
+                    };
+                    let settings = NativeRoomOptions {
+                        setup_timeout: options.setup_timeout,
+                        drain_timeout: options.io_stall_timeout,
+                        finish_timeout: options.io_stall_timeout,
+                        queue_capacity: options.queue_capacity,
+                        start_policy: policy,
+                        preroll_ns: options.preroll_ns,
+                    };
+                    let port =
+                        NativeRoomNetwork::webtransport(transport, &identity, &players, settings)?;
+                    let owner =
+                        NativeRoomCompetition::new(port, players, options.io_stall_timeout)?;
+                    return Ok(NativeCompetitionNetwork::from_room(owner, policy));
+                }
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let _ = (url, origin, identity, players, options);
+                    return Err(MultiplayerError::Io(
+                        "native room mode is unavailable on WASM".into(),
+                    ));
+                }
+            }
+        };
+        Ok(NativeCompetitionNetwork {
+            backend,
+            policy,
+            native_completed: false,
+        })
     }
 }
