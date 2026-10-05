@@ -47,7 +47,10 @@ Native adjacent-record lookup and browser loaded-result UI now use the shared
 exact historical association policy; see
 [historical association](REQ__historical-record-association.md) and
 [browser historical presentation](REQ__browser-historical-record.md).
-Native local-member whole-roster sidecar discovery remains subsequent integration.
+Native local publication preserves the whole archive and additionally writes
+one-row sidecars beside original member recordings; see
+[local association](REQ__native-local-record-association.md). Existing local
+files without member sidecars still require explicit association or migration.
 Rich score/timing and
 comparison snapshots may require additional versioned metadata; no data omitted
 by version 1 is claimed to be archived. Independent deferred tests cover golden

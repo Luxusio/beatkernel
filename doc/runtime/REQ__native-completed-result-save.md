@@ -12,7 +12,12 @@ roster result sidecar next to the configured base replay path after native
 output/input cleanup attempts. Solo uses its replay path; local uses the
 configured base path rather than inferring roster position from individual
 destinations. Append `.bkresult` to the entire base filename. All replay saves
-are attempted before the archive effect. Earlier gameplay or cleanup errors
+are attempted before archive publication. Local publication additionally stages
+one-row archives beside each original member recording using the ID in the
+archive, with no filename-derived ID inference; see
+[the local association contract](REQ__native-local-record-association.md).
+Every staged whole/member sidecar write is attempted before returning the first
+exact publication error. Earlier gameplay or cleanup errors
 retain precedence, but cannot erase actual completion or skip the archive
 attempt. Archive validation/save refusal returns an error when no earlier error
 exists. Prefix recordings remain available without a completion sidecar.
@@ -34,8 +39,10 @@ Capture setup must preserve the actual original start and optional end in its
 canonical header. Unlimited captures retain their existing compatibility
 encoding. Browser persistence source now has its
 [own storage contract](REQ__browser-completed-result-storage.md).
-Native/browser catalog and loaded-result UI sidecar loading remain later
-integration. Independent deferred fixtures cover real pristine finite capture,
+Native adjacent record lookup and browser loaded-result presentation now use the
+shared exact association policy. Local recordings saved before adjacent member
+sidecars still require explicit association or migration. Independent deferred
+fixtures cover real pristine finite capture,
 typed completion/error retention, original roster associations, cancelled/prefix
 refusal, cleanup/error precedence and save ordering. Execution assertions,
 actual filesystem/device/browser tests and Windows/macOS target checks remain

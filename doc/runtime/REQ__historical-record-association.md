@@ -32,11 +32,13 @@ may retain compatibility while native composition roots select effect methods.
 No completion claim is inferred from a stored boolean or replay extent.
 
 Automatic adjacent lookup supports directly associated recording sidecars.
-Native local saves currently produce a whole-roster sidecar at the configured
-base path, so member-record lookup still requires explicit archive/player
-selection or durable association metadata in subsequent integration. The pure
-matcher supports explicit IDs now, including equal headers across players, but
-the UI must not guess those IDs from member filenames. Browser loaded-record
+Native local saves preserve a whole-roster sidecar at the configured base path
+and now publish adjacent one-row sidecars beside original member recordings;
+see [the local association contract](REQ__native-local-record-association.md).
+Those files carry explicit original IDs and exact headers. Existing local
+recordings without adjacent member sidecars still require explicit archive/player
+selection or migration. The UI must not guess IDs from member filenames.
+Browser loaded-record
 presentation now uses the same matcher through a separate Worker-owned historical
 binding; see [its contract](REQ__browser-historical-record.md). Rich
 score/timing/comparison archival, actual browser/filesystem/GPU acceptance and
