@@ -43,6 +43,12 @@ validates evidence and decides transitions through explicit ports. A port must
 permit deterministic values, failures and admission limits in tests; moving an
 OS call behind a module name alone does not satisfy this rule.
 
+Archive-set publication follows this boundary through opaque destination values
+and associated errors supplied by a generic port. Whole/member validation,
+staging, duplicate refusal and error precedence are portable policy; original
+native path construction and file writes stay in the adapter. See
+[the publication contract](../runtime/REQ__archive-publication-port.md).
+
 Clock domains and physical input/output provenance cannot be substituted with
 test/control time. Native and browser adapters use common business rules.
 Use static dispatch or direct value inputs where sufficient; do not add heap

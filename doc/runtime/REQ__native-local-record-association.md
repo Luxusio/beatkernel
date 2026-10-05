@@ -16,6 +16,10 @@ Whole and member sidecars use exclusive create, never overwrite existing files,
 and attempt every prepared destination even after an earlier write failure.
 The first exact publication error is returned after attempts. Existing finalizer
 precedence continues to retain the original typed gameplay/cleanup/replay error.
+Portable staging and effect ordering are owned by a shared generic publication
+port with opaque destinations and associated errors; see
+[the port contract](REQ__archive-publication-port.md). Native code supplies paths
+and exclusive-create effects while preserving its existing callback API.
 Only actual complete original-roster evidence authorizes this publication path;
 cancelled/prefix-only play creates no completed sidecar.
 
