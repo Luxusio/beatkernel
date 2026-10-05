@@ -122,7 +122,10 @@ solo/per-member results through injected hosts and retains an atomic registered
 roster table in player snapshots. The native UI now validates the whole completed
 table and caches formatted labels and page geometry. It displays that retained
 view only after cleanup acknowledgement, bypassing timed playfield and BGA
-selection on the completed screen. This is source-level work, not measured
+selection on the completed screen. Final score, timing and comparison prefixes
+are frozen with that first accepted table. Detail and comparison page changes
+reuse prepared packets; original IDs, recording extents and self-reported peer
+status remain explicit. This is source-level work, not measured
 rendering or performance evidence. See [the results screen](../ui/REQ__completed-results-screen.md).
 Browser delivery and archive integration remain unfinished. Test execution, hardware QA and comparative benchmarks remain deferred
 under the user's existing verification instruction; no quality target is
