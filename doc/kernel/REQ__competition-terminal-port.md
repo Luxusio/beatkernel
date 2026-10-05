@@ -49,8 +49,11 @@ each completed with exit zero. See
 
 ## Known ceiling
 
-Solo native finalization, endpoint acquisition and remaining room waits still
-require continued boundary work. Native group final reporting/presentation and
+Solo native finalization now delegates to this same port with pure delivery
+selection and a one-shot lifecycle guard; see
+[its contract](REQ__solo-competition-terminal.md). Endpoint/ghost acquisition
+and remaining room/ACK waits still require continued boundary work.
+Native group final reporting/presentation and
 typed backend failure retention remain outer concerns. These fixtures do not
 exercise the whole group owner, which still constructs concrete endpoints, or
 prove the native repeated-finalization guard through an injected endpoint.
