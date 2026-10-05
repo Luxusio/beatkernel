@@ -37,7 +37,10 @@ per-member network endpoint; their delegated completion remains a no-op there.
 Existing native IO implementations retain setup, sockets, native timing,
 publication cadence and cleanup behavior outside policy. This increment removes
 the common loop's concrete dependency; it does not yet separate all internals of
-those IO/comparison implementations or platform presentation-discipline types.
+those IO/comparison implementations. Presentation-discipline dependencies are
+now injected through [the gameplay presentation port](REQ__gameplay-presentation-port.md).
+Comparison display policy uses [its own injected host](REQ__competition-presentation-port.md);
+network/storage/setup waiting and terminal effects remain native owner concerns.
 
 Independent deferred fixtures connect populated fake solo and group observers,
 virtual clock/waits and an explicit host to actual portable Runtime/Mixer paths.

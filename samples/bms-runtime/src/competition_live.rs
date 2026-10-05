@@ -7,10 +7,13 @@ use crate::{
         MultiplayerEvent, MultiplayerNotice, MultiplayerOptions, Progress,
         competition_identity_for_section,
     },
-    multiplayer_group::{GroupPrefix, MemberProgress, validate_members, validate_roster},
+    multiplayer_group::{GroupPrefix, MemberProgress},
     multiplayer_quic::QuicCredentials,
     native_competition_network::NativeCompetitionNetwork,
-    player::{self, CompetitionSnapshot, GhostSnapshot, NetworkSnapshot, NetworkStatus},
+    competition_presentation::{
+        self, CompetitionPresentationHost, SoloNetworkPresentation, NetworkStatus,
+    },
+    competition_presentation_bridge::NativeCompetitionPresentation,
     replay_capture::LiveReplayCapture,
     replay_playback::read_replay,
 };
@@ -341,7 +344,7 @@ pub struct LiveCompetition {
     last_display: Option<i64>,
     network_failed: bool,
     network_status: Option<NetworkStatus>,
-    last_presentation: Option<Instant>,
+    last_presentation: Option<u64>,
     network_setup_timeout: Duration,
 }
 impl LiveCompetition {
@@ -565,61 +568,44 @@ impl LiveCompetition {
     }
 
     fn publish_presentation(&mut self, force: bool) -> Result<()> {
-        if !player::attached()
-            || (!force
-                && self
-                    .last_presentation
-                    .is_some_and(|last| last.elapsed() < Duration::from_millis(50)))
-        {
-            return Ok(());
-        }
-        let ghosts = self
-            .competition
-            .opponents()
-            .iter()
-            .map(|opponent| {
-                let score = opponent.score();
-                GhostSnapshot {
-                    kind: opponent.kind(),
-                    label: display_basename(opponent.label()),
-                    hits: score.hits,
-                    misses: score.misses,
-                    combo: score.combo,
-                    max_combo: score.max_combo,
-                    recorded_until: opponent.recorded_until(),
-                }
-            })
-            .collect();
-        if self
+        self.publish_presentation_with_host(force, &mut NativeCompetitionPresentation)
+    }
+
+    /// Inject display effects without changing observed competition or network policy.
+    pub fn publish_presentation_with_host<H: CompetitionPresentationHost>(
+        &mut self,
+        force: bool,
+        host: &mut H,
+    ) -> Result<()> {
+        let network = self
             .network
             .as_ref()
-            .is_none_or(NativeCompetitionNetwork::is_room)
-        {
-            player::publish_saved_competition(self.player, ghosts)?;
-        } else {
-            player::publish_competition(
-                self.player,
-                CompetitionSnapshot {
-                    ghosts,
-                    network: self.network_status.map(|status| NetworkSnapshot {
-                        status,
-                        progress: self.network.as_ref().and_then(|network| {
-                            selected_remote_member(
-                                network.remote_roster(),
-                                network.remote_progress(),
-                            )
-                            .map(|member| member.progress)
-                        }),
-                    }),
-                },
-            )?;
-        }
-        self.last_presentation = Some(Instant::now());
-        Ok(())
+            .filter(|network| !network.is_room())
+            .map(|network| SoloNetworkPresentation {
+                status: self.network_status,
+                roster: network.remote_roster(),
+                prefix: network.remote_progress(),
+            });
+        competition_presentation::publish_solo(
+            host,
+            &mut self.last_presentation,
+            force,
+            self.player,
+            &self.competition,
+            network,
+        )
     }
 
     /// Observe actual admitted runtime results; remote data never enters judge.
     pub fn observe(&mut self, report: &RuntimeReport) -> Result<()> {
+        self.observe_with_presentation(report, &mut NativeCompetitionPresentation)
+    }
+
+    pub fn observe_with_presentation<H: CompetitionPresentationHost>(
+        &mut self,
+        report: &RuntimeReport,
+        host: &mut H,
+    ) -> Result<()> {
         self.competition
             .observe(&report.judge_events, report.song_time)?;
         let song = report.song_time.as_nanos();
@@ -720,7 +706,7 @@ impl LiveCompetition {
             self.network_failed = true;
             self.network_status = Some(NetworkStatus::Disconnected);
         }
-        self.publish_presentation(disconnected)?;
+        self.publish_presentation_with_host(disconnected, host)?;
         Ok(())
     }
 
@@ -946,38 +932,16 @@ fn selected_remote_member(
     roster: Option<&[PlayerId]>,
     prefix: Option<&GroupPrefix>,
 ) -> Option<MemberProgress> {
-    let roster = roster?;
-    validate_roster(roster).ok()?;
-    let prefix = prefix?;
-    validate_members(None, &prefix.members).ok()?;
-    if roster.len() != prefix.members.len()
-        || roster
-            .iter()
-            .zip(&prefix.members)
-            .any(|(player, member)| *player != member.player)
-    {
-        return None;
-    }
-    prefix.members.first().copied()
+    competition_presentation::selected_remote_member(roster, prefix)
 }
 
 #[cfg(test)]
 #[path = "competition_live_group_fixtures.rs"]
 mod group_fixtures;
 
+#[cfg(test)]
 fn display_basename(label: &str) -> String {
-    // Accept either platform separator without exposing directories in the UI.
-    let basename = label.rsplit(['/', '\\']).next().unwrap_or("");
-    let clean: String = basename
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(64)
-        .collect();
-    if clean.is_empty() {
-        "RECORD".into()
-    } else {
-        clean
-    }
+    competition_presentation::display_basename(label)
 }
 
 /// Software gate release only; downstream device output latency is separate.

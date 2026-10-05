@@ -102,7 +102,13 @@ bridge. See [the presentation port](REQ__gameplay-presentation-port.md) and
 [the estimator boundary](REQ__pure-presentation-estimator.md).
 Their generic sessions now accept business-owned solo/group competition observers; concrete
 native specializations live in the compatibility bridge. The native competition
-implementations still mix comparison, network, clock and UI effects internally.
+implementations still own network, preparation/storage, setup clocks and
+terminal diagnostics. Competition display payloads, projection and 50ms cadence
+now live in a pure policy using an injected presentation host; native UI and
+display-clock effects live in its bridge. Actual native publication delegates
+to that policy, with explicit host-injected observation/publication entry points.
+This does not make the remaining native network owners pure. See
+[the display boundary](REQ__competition-presentation-port.md).
 Those adapters, file/network boundaries and adapter coverage require continued
 audit and separation. See [the competition ports](REQ__gameplay-competition-ports.md)
 and [the host boundary](REQ__native-gameplay-host.md) for

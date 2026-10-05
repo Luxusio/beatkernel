@@ -39,8 +39,10 @@ This is a boundary increment; the native network owner
 implementation still requires separate work. Test execution and formal QA remain deferred.
 
 The legacy native `LiveCompetition` and `NativeGroupCompetition` implementations
-still include network operations, presentation publication and native timing
-internally. Injecting a host alone cannot make those concrete adapters pure.
+still include network operations, setup timing and terminal diagnostics
+internally. Comparison publication now delegates to a separate
+[display policy/host](REQ__competition-presentation-port.md). Injecting a host
+alone cannot make the remaining concrete network adapters pure.
 The host-boundary fixtures use absent competition owners; the subsequent
 [competition-port boundary](REQ__gameplay-competition-ports.md) also supports
 generic sessions containing populated deterministic observers. The final

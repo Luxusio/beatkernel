@@ -59,6 +59,11 @@ pub mod chart_text;
 pub mod competition;
 /// Application competition options and native runtime observation.
 pub mod competition_live;
+/// Pure competition display projection and publication contracts.
+pub mod competition_presentation;
+mod competition_presentation_bridge;
+#[cfg(test)]
+mod competition_presentation_port_fixtures;
 /// Actual judge completion and native output drain for full-song play.
 pub mod completion;
 #[cfg(test)]

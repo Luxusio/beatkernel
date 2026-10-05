@@ -1,6 +1,6 @@
 //! Latest-state presentation bridge; never called from the audio callback.
 use crate::{
-    competition::{OpponentKind, ScoreSummary},
+    competition::ScoreSummary,
     gauge::{BmsGauge, GaugeFailure, GaugeProfile},
     local_players::PlayerId,
     local_runtime::PlayerReport,
@@ -47,38 +47,12 @@ pub enum PlayerStatus {
 }
 
 pub use crate::native_gameplay_host::PauseState;
+#[cfg(test)]
+use crate::competition::OpponentKind;
 
-/// Actual recorded-operation prefix, with a bounded display basename.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GhostSnapshot {
-    pub kind: OpponentKind,
-    pub label: String,
-    pub hits: u64,
-    pub misses: u64,
-    pub combo: u64,
-    pub max_combo: u64,
-    pub recorded_until: Option<Timestamp>,
-}
-/// Connection lifecycle; peer scores remain explicitly self-reported.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NetworkStatus {
-    Waiting,
-    Connected,
-    Disconnected,
-    Stopped,
-}
-/// Last peer prefix is retained even after disconnect or cleanup.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NetworkSnapshot {
-    pub status: NetworkStatus,
-    pub progress: Option<crate::multiplayer::Progress>,
-}
-/// One local player's bounded comparison state; no judge or clock authority.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompetitionSnapshot {
-    pub ghosts: Vec<GhostSnapshot>,
-    pub network: Option<NetworkSnapshot>,
-}
+pub use crate::competition_presentation::{
+    GhostSnapshot, NetworkStatus, NetworkSnapshot, CompetitionSnapshot,
+};
 
 /// One stable local member's actual reports; never an aggregate cohort score.
 #[derive(Clone)]

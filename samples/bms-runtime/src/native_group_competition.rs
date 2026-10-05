@@ -13,7 +13,8 @@ use crate::{
     multiplayer_group::{GroupPrefix, MemberProgress, validate_members, validate_roster},
     native_competition_network::NativeCompetitionNetwork,
     native_start::{NativeStartAgreement, NativeStartResult, SessionHostBracket},
-    player::{self, NetworkSnapshot, NetworkStatus},
+    competition_presentation::{self, CompetitionPresentationHost, NetworkStatus},
+    competition_presentation_bridge::NativeCompetitionPresentation,
     replay_capture::LiveReplayCapture,
 };
 use beatkernel::time::{ClockDomainId, ClockPoint, Timestamp};
@@ -28,7 +29,7 @@ pub struct NativeGroupCompetition {
     players: Vec<PlayerId>,
     local: Option<Vec<MemberProgress>>,
     last_publish: Option<Instant>,
-    last_presentation: Option<Instant>,
+    last_presentation: Option<u64>,
     status: NetworkStatus,
     failure: Option<MultiplayerError>,
     setup_timeout: Duration,
@@ -95,6 +96,14 @@ impl NativeGroupCompetition {
     /// Retain the whole real prefix before optional network publication. A
     /// networking failure disables comparison without rejecting local progress.
     pub fn observe(&mut self, members: &[MemberProgress]) -> Result<()> {
+        self.observe_with_presentation(members, &mut NativeCompetitionPresentation)
+    }
+
+    pub fn observe_with_presentation<H: CompetitionPresentationHost>(
+        &mut self,
+        members: &[MemberProgress],
+        host: &mut H,
+    ) -> Result<()> {
         if self.finished {
             return Err("group competition already stopped".into());
         }
@@ -123,7 +132,7 @@ impl NativeGroupCompetition {
                 Err(error) => self.disconnect(error),
             }
         }
-        self.publish_presentation(before != self.status)
+        self.publish_presentation_with_host(before != self.status, host)
     }
 
     fn poll_network(&mut self) -> std::result::Result<(), MultiplayerError> {
@@ -165,34 +174,24 @@ impl NativeGroupCompetition {
     }
 
     fn publish_presentation(&mut self, force: bool) -> Result<()> {
-        if self.network.is_room()
-            || !player::attached()
-            || (!force
-                && self
-                    .last_presentation
-                    .is_some_and(|last| last.elapsed() < Duration::from_millis(50)))
-        {
-            return Ok(());
-        }
-        let selected = remote_members(
+        self.publish_presentation_with_host(force, &mut NativeCompetitionPresentation)
+    }
+
+    pub fn publish_presentation_with_host<H: CompetitionPresentationHost>(
+        &mut self,
+        force: bool,
+        host: &mut H,
+    ) -> Result<()> {
+        competition_presentation::publish_group(
+            host,
+            &mut self.last_presentation,
+            force,
+            self.network.is_room(),
             &self.players,
+            self.status,
             self.network.remote_roster(),
             self.network.remote_progress(),
-        )?;
-        let mut rows = Vec::new();
-        rows.try_reserve_exact(selected.len())?;
-        for (player, remote) in selected {
-            rows.push((
-                player,
-                NetworkSnapshot {
-                    status: self.status,
-                    progress: remote.map(|member| member.progress),
-                },
-            ));
-        }
-        player::publish_networks(&rows)?;
-        self.last_presentation = Some(Instant::now());
-        Ok(())
+        )
     }
 
     /// Cleanup only: after an observation, send one actual terminal prefix and
@@ -457,31 +456,7 @@ fn remote_members(
     remote: Option<&[PlayerId]>,
     prefix: Option<&GroupPrefix>,
 ) -> Result<Vec<(PlayerId, Option<MemberProgress>)>> {
-    validate_roster(local)?;
-    if let Some(remote) = remote {
-        validate_roster(remote)?;
-    }
-    if let Some(prefix) = prefix {
-        let remote = remote.ok_or("remote group progress has no accepted roster")?;
-        validate_members(None, &prefix.members)?;
-        if remote.len() != prefix.members.len()
-            || remote
-                .iter()
-                .zip(&prefix.members)
-                .any(|(player, member)| *player != member.player)
-        {
-            return Err("remote group progress changed the accepted roster".into());
-        }
-    }
-    let mut mapped = Vec::new();
-    mapped.try_reserve_exact(local.len())?;
-    for (index, player) in local.iter().enumerate() {
-        mapped.push((
-            *player,
-            prefix.and_then(|prefix| prefix.members.get(index)).copied(),
-        ));
-    }
-    Ok(mapped)
+    competition_presentation::remote_members(local, remote, prefix)
 }
 
 #[cfg(test)]
