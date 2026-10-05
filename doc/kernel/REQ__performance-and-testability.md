@@ -148,7 +148,12 @@ Pure association receives borrowed player/capture/profile data, while sidecar
 filesystem publication remains in the native adapter. Finite capture headers
 retain their original endpoint. See
 [the native save contract](../runtime/REQ__native-completed-result-save.md).
-Browser IndexedDB and catalog/UI archive integration remain unfinished. See
+Browser source now performs cold Rust archive export on the Worker before
+consuming captures and transfers one bounded whole-roster artifact. The Window
+uses a pure finite admission model and retains opaque bytes; IndexedDB stores
+replay/archive associations in the existing transaction, charging both byte
+lengths. See [the browser storage contract](../runtime/REQ__browser-completed-result-storage.md).
+Native/browser catalog and loaded-result UI archive integration remain unfinished. See
 [the archive boundary](../runtime/REQ__completed-result-archive.md).
 Browser execution remains unfinished. Test execution, hardware QA and comparative benchmarks remain deferred
 under the user's existing verification instruction; no quality target is

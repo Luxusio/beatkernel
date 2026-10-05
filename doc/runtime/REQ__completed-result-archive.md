@@ -40,7 +40,10 @@ This stage supplies the common format, storage policy and native adapter.
 Native solo/local recording now connects actual typed completion to a sidecar
 after cleanup and replay save attempts; see
 [the native save contract](REQ__native-completed-result-save.md).
-Browser IndexedDB/catalog/UI association remains subsequent integration.
+Browser source now exports actual stepped completion on the Worker and stores
+the opaque archive alongside recordings in IndexedDB; see
+[the browser storage contract](REQ__browser-completed-result-storage.md).
+Native/browser catalog and loaded-result UI association remains subsequent integration.
 Rich score/timing and
 comparison snapshots may require additional versioned metadata; no data omitted
 by version 1 is claimed to be archived. Independent deferred tests cover golden

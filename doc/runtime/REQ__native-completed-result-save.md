@@ -32,7 +32,9 @@ power-loss/crash atomicity remain explicit limitations.
 
 Capture setup must preserve the actual original start and optional end in its
 canonical header. Unlimited captures retain their existing compatibility
-encoding. Browser persistence and catalog/UI sidecar loading remain later
+encoding. Browser persistence source now has its
+[own storage contract](REQ__browser-completed-result-storage.md).
+Native/browser catalog and loaded-result UI sidecar loading remain later
 integration. Independent deferred fixtures cover real pristine finite capture,
 typed completion/error retention, original roster associations, cancelled/prefix
 refusal, cleanup/error precedence and save ordering. Execution assertions,
