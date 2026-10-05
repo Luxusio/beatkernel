@@ -12,7 +12,8 @@ use crate::{
     },
     native_start::{NativeStartAgreement, NativeStartResult, SessionHostBracket},
     room_opponent_hud::{RoomHudStatus, RoomOpponentHud},
-    player,
+    room_ui_host::RoomUiHost,
+    native_room_ui_bridge::NativeRoomUiHost,
     room_presentation::{
         RoomLobby, RoomPresentation, RoomResults, RoomStatus, RoomUiAction, RoomUiReply,
         ROOM_UI_CAPACITY,
@@ -105,7 +106,11 @@ fn ui_message(message: &str) -> String {
 
 /// Owns one actual local roster, one portable retained HUD and bounded command
 /// correlations. A room snapshot alone never authorizes native audio startup.
-pub struct NativeRoomCompetition<P: NativeRoomPort = NativeRoomNetwork> {
+pub struct NativeRoomCompetition<
+    P: NativeRoomPort = NativeRoomNetwork,
+    H: RoomUiHost = NativeRoomUiHost,
+> {
+    host: H,
     port: P,
     players: Vec<PlayerId>,
     snapshot: NativeRoomSnapshot,
@@ -133,8 +138,13 @@ pub struct NativeRoomCompetition<P: NativeRoomPort = NativeRoomNetwork> {
     ui_error: Option<String>,
 }
 
-impl<P: NativeRoomPort> NativeRoomCompetition<P> {
-    pub fn new(mut port: P, players: Vec<PlayerId>, finish_timeout: Duration) -> io::Result<Self> {
+impl<P: NativeRoomPort, H: RoomUiHost> NativeRoomCompetition<P, H> {
+    pub fn new_with_host(
+        mut port: P,
+        players: Vec<PlayerId>,
+        finish_timeout: Duration,
+        host: H,
+    ) -> io::Result<Self> {
         let validated = (|| {
             validate_roster(&players).map_err(|error| invalid(error.to_string()))?;
             if finish_timeout < Duration::from_millis(1)
@@ -173,6 +183,7 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
             }
         };
         Ok(Self {
+            host,
             port,
             players,
             snapshot: NativeRoomSnapshot::default(),
@@ -212,6 +223,9 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
     }
     pub fn hud(&self) -> Option<&RoomOpponentHud> {
         self.hud.as_ref()
+    }
+    pub fn ui_error(&self) -> Option<&str> {
+        self.ui_error.as_deref()
     }
     pub fn hud_error(&self) -> Option<&str> {
         self.hud_error.as_deref()
@@ -498,7 +512,7 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
     }
 
     fn service_ui_cancellation(&mut self) {
-        if player::cancelled() && !self.cancelled {
+        if self.host.cancelled() && !self.cancelled {
             self.request_stop();
         }
     }
@@ -510,17 +524,17 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
         self.port.request_stop();
         self.hud_status(RoomHudStatus::Disconnected);
         self.ui_dirty = true;
-        player::close_room_controls();
+        self.host.close_controls();
         self.ui_pending.clear();
         self.publish_ui();
     }
     fn service_ui_requests(&mut self) {
-        if !player::attached() {
+        if !self.host.attached() {
             return;
         }
         self.service_ui_cancellation();
         if self.cancelled || self.finishing || self.outcome.is_some() {
-            player::close_room_controls();
+            self.host.close_controls();
             self.ui_pending.clear();
             return;
         }
@@ -542,7 +556,7 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
                     id: self.ui_pending[index].id,
                     result: result.clone(),
                 };
-                match player::reply_room(reply) {
+                match self.host.reply(reply) {
                     Ok(()) => {
                         self.ui_pending.remove(index);
                         continue;
@@ -551,7 +565,7 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
                     Err(error) => {
                         self.ui_error
                             .get_or_insert_with(|| ui_message(&error.to_string()));
-                        player::close_room_controls();
+                        self.host.close_controls();
                         self.ui_pending.clear();
                         self.ui_dirty = true;
                         return;
@@ -561,7 +575,7 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
             index += 1;
         }
         for _ in self.ui_pending.len()..ROOM_UI_CAPACITY {
-            let request = match player::take_room_request() {
+            let request = match self.host.take_request() {
                 Ok(Some(request)) => request,
                 Ok(None) => break,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
@@ -572,7 +586,7 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
                     break;
                 }
             };
-            if player::cancelled() {
+            if self.host.cancelled() {
                 self.service_ui_cancellation();
                 break;
             }
@@ -603,11 +617,13 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
             }
             // Immediate local page/refusal results have no network receipt to await.
             if let Some(result) = pending.result.as_ref() {
-                if player::reply_room(RoomUiReply {
-                    id: pending.id,
-                    result: result.clone(),
-                })
-                .is_ok()
+                if self
+                    .host
+                    .reply(RoomUiReply {
+                        id: pending.id,
+                        result: result.clone(),
+                    })
+                    .is_ok()
                 {
                     continue;
                 }
@@ -616,7 +632,7 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
         }
     }
     fn publish_ui(&mut self) {
-        if !player::attached() {
+        if !self.host.attached() {
             return;
         }
         let status = if self.finishing
@@ -686,7 +702,7 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
                 Ok(page) => {
                     self.ui_presentation = Some(page.clone());
                     self.ui_dirty = false;
-                    if let Err(error) = player::publish_room(page) {
+                    if let Err(error) = self.host.publish(page) {
                         self.ui_error.get_or_insert(error);
                         self.ui_dirty = true;
                     }
@@ -696,7 +712,7 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
                 }
             }
         } else {
-            player::retry_room_publication();
+            self.host.retry_publication();
         }
     }
 
@@ -811,7 +827,7 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
             return outcome.clone();
         }
         self.finishing = true;
-        player::close_room_controls();
+        self.host.close_controls();
         let _ = self.poll();
         let result = if completed && self.local.is_some() {
             self.validated_local(members).and_then(|terminal| {
@@ -864,7 +880,7 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
     }
 
     fn publish_results(&mut self, outcome: &NativeRoomOutcome) {
-        if !player::attached() || self.prepared.is_none() {
+        if !self.host.attached() || self.prepared.is_none() {
             return;
         }
         let built = (|| -> Result<RoomResults, String> {
@@ -909,7 +925,7 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
             };
             RoomResults::new(lobby, hud, outcome.cancelled, error)
         })();
-        let result = built.and_then(|archive| player::publish_room_results(Arc::new(archive)));
+        let result = built.and_then(|archive| self.host.publish_results(Arc::new(archive)));
         if let Err(error) = result {
             // No mutation of failure/outcome: an archive is only presentation.
             self.ui_error.get_or_insert(error);
@@ -919,11 +935,13 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
     }
 }
 
-struct NativeRoomFinalPort<'a, P: NativeRoomPort> {
-    owner: &'a mut NativeRoomCompetition<P>,
+struct NativeRoomFinalPort<'a, P: NativeRoomPort, H: RoomUiHost> {
+    owner: &'a mut NativeRoomCompetition<P, H>,
     members: &'a [MemberProgress],
 }
-impl<P: NativeRoomPort> crate::room_final_wait::RoomFinalPort for NativeRoomFinalPort<'_, P> {
+impl<P: NativeRoomPort, H: RoomUiHost> crate::room_final_wait::RoomFinalPort
+    for NativeRoomFinalPort<'_, P, H>
+{
     type Error = io::Error;
     fn poll(&mut self) -> io::Result<crate::room_final_wait::RoomFinalObservation> {
         use crate::room_final_wait::{RoomFinalObservation, RoomFinalTerminal};
@@ -978,8 +996,12 @@ impl<P: NativeRoomPort> crate::room_final_wait::RoomFinalPort for NativeRoomFina
     }
 }
 
-struct NativeRoomStartPort<'a, P: NativeRoomPort>(&'a mut NativeRoomCompetition<P>);
-impl<P: NativeRoomPort> crate::room_start_wait::RoomStartPort for NativeRoomStartPort<'_, P> {
+struct NativeRoomStartPort<'a, P: NativeRoomPort, H: RoomUiHost>(
+    &'a mut NativeRoomCompetition<P, H>,
+);
+impl<P: NativeRoomPort, H: RoomUiHost> crate::room_start_wait::RoomStartPort
+    for NativeRoomStartPort<'_, P, H>
+{
     type Error = io::Error;
     fn initial(&mut self) -> crate::room_start_wait::RoomStartInitial {
         self.0.service_ui_cancellation();
@@ -1004,7 +1026,7 @@ impl<P: NativeRoomPort> crate::room_start_wait::RoomStartPort for NativeRoomStar
     }
 }
 
-impl<P: NativeRoomPort> NativeStartAgreement for NativeRoomCompetition<P> {
+impl<P: NativeRoomPort, H: RoomUiHost> NativeStartAgreement for NativeRoomCompetition<P, H> {
     fn await_commit(
         &mut self,
         service: &mut dyn FnMut() -> NativeStartResult<bool>,
@@ -1070,7 +1092,7 @@ impl<P: NativeRoomPort> NativeStartAgreement for NativeRoomCompetition<P> {
     }
 }
 
-impl<P: NativeRoomPort> Drop for NativeRoomCompetition<P> {
+impl<P: NativeRoomPort, H: RoomUiHost> Drop for NativeRoomCompetition<P, H> {
     fn drop(&mut self) {
         if self.outcome.is_none() {
             self.port.request_stop();
@@ -1093,3 +1115,10 @@ mod fixtures {
 #[cfg(test)]
 #[path = "native_room_ui_fixtures.rs"]
 mod ui_fixtures;
+
+#[cfg(test)]
+use crate::player;
+
+#[cfg(test)]
+#[path = "room_ui_host_fixtures.rs"]
+mod room_ui_host_fixtures;
