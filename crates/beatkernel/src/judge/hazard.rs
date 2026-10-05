@@ -148,6 +148,14 @@ impl HazardState {
         &self.events
     }
 
+    pub(super) fn count(&self) -> usize {
+        self.timeline.markers.len()
+    }
+
+    pub(super) fn remaining(&self) -> usize {
+        self.timeline.markers.len() - self.cursor
+    }
+
     pub(super) fn clear_events(&mut self) {
         self.events.clear();
     }

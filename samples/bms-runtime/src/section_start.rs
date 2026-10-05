@@ -223,7 +223,15 @@ pub fn prepare_at(
         });
     }
     if retained.is_empty() && commands.is_empty() && prepared.source.invisible.is_empty() {
-        return Err("practice start has no remaining objects or BGM".into());
+        let remaining_mine = !prepared.source.mines.is_empty()
+            && prepared
+                .source
+                .compile_mines()?
+                .iter()
+                .any(|event| event.at >= start);
+        if !remaining_mine {
+            return Err("practice start has no remaining objects or BGM".into());
+        }
     }
     commands.sort_by_key(|command| match command {
         AudioCommand::Play { at, .. } => *at,

@@ -141,6 +141,8 @@ mod mine_admission_fixtures;
 pub mod mine_damage;
 #[cfg(test)]
 mod mine_damage_fixtures;
+#[cfg(test)]
+mod mine_extent_fixtures;
 /// Shared original mine timing and source-aware pristine judge preparation.
 pub mod mine_plan;
 #[cfg(test)]

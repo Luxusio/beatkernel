@@ -209,6 +209,16 @@ impl JudgeEngine {
         self.hazards.as_ref().map_or(&[], HazardState::events)
     }
 
+    /// Number of configured hazard markers, read in constant time.
+    pub fn hazard_count(&self) -> usize {
+        self.hazards.as_ref().map_or(0, HazardState::count)
+    }
+
+    /// Number of markers not yet consumed by an actual judge operation.
+    pub fn remaining_hazards(&self) -> usize {
+        self.hazards.as_ref().map_or(0, HazardState::remaining)
+    }
+
     /// Checks actual button/contact ownership without committing a press.
     /// Only a new Down is fresh; touch also requires enabled contact semantics.
     pub fn is_fresh_press(&self, event: &GameInputEvent) -> bool {

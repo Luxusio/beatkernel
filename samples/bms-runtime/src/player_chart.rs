@@ -38,7 +38,7 @@ pub struct PlayerChart {
     pub lanes: Vec<u8>,
     /// Notes ordered by compiled head timestamp, then identity.
     pub notes: Vec<PlayerNote>,
-    /// Latest gameplay endpoint or invisible selection, in song nanoseconds.
+    /// Latest gameplay endpoint, invisible selection or mine, in song nanoseconds.
     pub duration_ns: i64,
     /// Validated presentation-only POORBGA mode cached during chart preparation.
     pub poor_bga_mode: beatkernel_bms::PoorBgaMode,
@@ -86,6 +86,13 @@ impl PlayerChart {
                 .compile_invisible()
                 .map_err(|error| PlayerChartError(error.to_string()))?
         };
+        let mines = if source.mines.is_empty() {
+            Vec::new()
+        } else {
+            source
+                .compile_mines()
+                .map_err(|error| PlayerChartError(error.to_string()))?
+        };
         let mut by_id = BTreeMap::new();
         for note in &source.notes {
             if by_id.insert(note.object, note.lane.channel()).is_some() {
@@ -104,14 +111,17 @@ impl PlayerChart {
         lanes.sort_by_key(|channel| lane_order(*channel));
         lanes.dedup();
         let mut duration_ns = 0;
-        for event in &invisible {
-            let lane = event.lane.channel();
+        for (lane, at) in invisible
+            .iter()
+            .map(|event| (event.lane.channel(), event.at))
+            .chain(mines.iter().map(|event| (event.lane.channel(), event.at)))
+        {
             if !lanes.contains(&lane) {
                 lanes.push(lane);
             }
-            duration_ns = duration_ns.max(event.at.as_nanos());
+            duration_ns = duration_ns.max(at.as_nanos());
         }
-        if !invisible.is_empty() {
+        if !invisible.is_empty() || !mines.is_empty() {
             lanes.sort_by_key(|channel| lane_order(*channel));
         }
         let lane_indices: BTreeMap<_, _> = lanes

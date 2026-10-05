@@ -26,6 +26,7 @@ impl Error for CompletionError {}
 /// An idle mixer block alone cannot prove native presentation or acoustic output.
 pub struct SongCompletion {
     objects: Vec<ObjectId>,
+    mine_count: usize,
     judge_until: Timestamp,
     calibration_seconds: u64,
     judged: bool,
@@ -68,6 +69,20 @@ impl SongCompletion {
         for event in &invisible {
             judge_until = judge_until.max(i128::from(event.at.as_nanos()) + 1);
         }
+        let mines = if prepared.source.mines.is_empty() {
+            Vec::new()
+        } else {
+            prepared
+                .source
+                .compile_mines()
+                .map_err(|_| CompletionError("invalid mine completion timeline"))?
+        };
+        for event in &mines {
+            // Hazards have no normal-note late window. Their effective judge
+            // boundary must be passed in the original, unoffset song clock.
+            judge_until =
+                judge_until.max(i128::from(event.at.as_nanos()) - i128::from(input_offset_ns) + 1);
+        }
         let starts: BTreeMap<_, _> = prepared
             .compiled
             .chart
@@ -106,6 +121,7 @@ impl SongCompletion {
             .map_err(|_| CompletionError("full-song calibration extent exceeds timestamps"))?;
         Ok(Self {
             objects,
+            mine_count: mines.len(),
             judge_until: Timestamp::from_nanos(
                 i64::try_from(judge_until)
                     .map_err(|_| CompletionError("full-song judge deadline exceeds timestamps"))?,
@@ -143,14 +159,19 @@ impl SongCompletion {
         rendered: Option<RenderReport>,
         presented: Option<ClockPoint>,
     ) -> Result<bool, CompletionError> {
+        if judge.hazard_count() != self.mine_count {
+            return Err(CompletionError("completion judge hazard count differs"));
+        }
+        let hazards_finished = judge.remaining_hazards() == 0;
         if !self.judged && song_time >= self.judge_until {
-            self.judged = self
-                .objects
-                .iter()
-                .all(|&id| judge.state(id) == Some(InteractionState::Completed));
+            self.judged = hazards_finished
+                && self
+                    .objects
+                    .iter()
+                    .all(|&id| judge.state(id) == Some(InteractionState::Completed));
         }
         self.drain.observe(
-            self.judged && bgm.remaining == 0 && bgm.outstanding == 0,
+            self.judged && hazards_finished && bgm.remaining == 0 && bgm.outstanding == 0,
             rendered,
             presented,
         )
