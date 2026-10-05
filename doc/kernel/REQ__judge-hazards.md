@@ -43,10 +43,11 @@ restore/reusable checkpoints/config mismatch and default compatibility.
 
 ## Known ceiling
 
-JudgeEngine processes hazards and RuntimeReport now delivers actual successful
-call outcomes. BMS source-plan/judge construction now shares the actual stepped,
-local-member, source-aware replay and offline composition paths;
-consumer-side live/local/replay/practice/offline gauge/death, WAV00, completion
-and rendering remain required integrations. Keep the shared BMS mine
-admission refusal until those owners actually consume hazards. Compile checks
-and authored fixtures do not prove executed browser/device/performance acceptance.
+JudgeEngine processes hazards and RuntimeReport delivers actual successful call
+outcomes. BMS source-aware construction and installed live/local/replay/practice/
+offline gauge/death, optional WAV00, completion and rendering paths now admit
+mines; see [playable mine admission](REQ__playable-mines.md). The former blanket
+admission refusal has been removed. Compile checks and authored fixtures do not
+prove executed browser/device/performance acceptance or full historical BMS
+compatibility. Immutable configuration sharing and independently owned mutable
+checkpoint state follow [shared storage](REQ__shared-hazard-storage.md).
