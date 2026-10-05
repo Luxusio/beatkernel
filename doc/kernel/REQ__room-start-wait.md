@@ -36,3 +36,26 @@ UI/threads/network/platform execution and formal review/QA remain deferred.
 Six independent fixture groups are authored and compiled only. Four source
 configurations exited zero after both writers stopped. See
 [the evidence scope](../changes/CHANGE__room-start-wait.md).
+
+## Resumable startup wait
+
+RoomStartWaitState owns one initial observation and a sealed terminal result.
+Its finite step returns Pending(1 ms), Ready or Cancelled without waiting,
+looping, timers or resource acquisition. Initial cancellation precedes closing;
+after initial admission, service precedes each poll. Service false cancels;
+observed cancellation precedes port failure, leaving, terminal and commitment,
+in that order. Original service and port errors move out unchanged with no
+Clone/Display/Error bounds. Failed states subsequently refuse with Terminal
+without service/port effects; Ready/Cancelled repeat their value without effects.
+The state has no Clone/Copy/reset APIs that duplicate or renew its authority.
+
+The existing await_room_start uses this state and only its wrapper invokes the
+wait-control port for pending delays. First-result behavior and control refusal
+remain compatible. Service/wait acquisition and all actual host/native effects
+remain adapters. Browser integration of this startup wait state is subsequent
+work; the browser's protocol start agreement is already common Rust logic.
+Pure scripted fixtures are authored for later execution, not startup acceptance.
+
+Six additional finite-state fixture groups are authored, unexecuted. Four
+compile-only configurations exited zero after both writers stopped; see
+[the incremental evidence](../changes/CHANGE__room-start-step.md).
