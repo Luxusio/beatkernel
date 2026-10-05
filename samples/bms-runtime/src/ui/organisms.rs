@@ -1095,6 +1095,7 @@ mod tests {
         let players: Vec<_> = [(3, hit), (u32::MAX, miss)]
             .into_iter()
             .map(|(id, event)| LocalPlayerSnapshot {
+                mine_damage: Default::default(),
                 player: crate::local_players::PlayerId(id),
                 chart: Some(std::sync::Arc::clone(&chart)),
                 song_time: Some(Timestamp::ZERO),
@@ -1195,6 +1196,7 @@ mod tests {
         let players: Vec<_> = [(3, 1 << 5), (u32::MAX, 1 << 9)]
             .into_iter()
             .map(|(id, pressed_lanes)| LocalPlayerSnapshot {
+                mine_damage: Default::default(),
                 player: crate::local_players::PlayerId(id),
                 chart: Some(std::sync::Arc::clone(&chart)),
                 song_time: Some(Timestamp::ZERO),
@@ -1349,6 +1351,7 @@ mod tests {
         let mut players: Vec<_> = [(3, progress.clone()), (u32::MAX, pending)]
             .into_iter()
             .map(|(id, note_progress)| LocalPlayerSnapshot {
+                mine_damage: Default::default(),
                 player: crate::local_players::PlayerId(id),
                 chart: Some(std::sync::Arc::clone(&chart)),
                 song_time: Some(Timestamp::ZERO),
@@ -1453,6 +1456,7 @@ mod tests {
         assert!(image_rectangle.bounds[1] + image_rectangle.bounds[3] <= LINE as f32);
         let players: Vec<_> = (0..64)
             .map(|index| LocalPlayerSnapshot {
+                mine_damage: Default::default(),
                 player: crate::local_players::PlayerId(if index == 63 {
                     u32::MAX
                 } else {
@@ -1630,6 +1634,7 @@ mod tests {
                     max_combo: u64::MAX,
                     ..Default::default()
                 },
+                mine_damage: Default::default(),
                 last_judge: None,
                 recent_results: Vec::new(),
                 competition: None,
@@ -1768,6 +1773,7 @@ mod tests {
                 chart: Some(std::sync::Arc::clone(&chart)),
                 song_time: Some(Timestamp::ZERO),
                 score: ScoreSummary::default(),
+                mine_damage: Default::default(),
                 last_judge: None,
                 recent_results: Vec::new(),
                 competition: Some(comparisons(NetworkStatus::Connected, i64::MIN)),

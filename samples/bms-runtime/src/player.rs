@@ -3,6 +3,7 @@ use crate::{
     competition::{OpponentKind, ScoreSummary},
     local_players::PlayerId,
     local_runtime::PlayerReport,
+    mine_damage::MineDamageSummary,
     note_progress::NoteProgress,
     player_chart::PlayerChart,
     pressed_keys::{PressedKeys, validate_mask},
@@ -11,7 +12,10 @@ use crate::{
     },
 };
 use beatkernel::{
-    chart::CompiledChart, input::GameInputEvent, judge::JudgeEvent, runtime::RuntimeReport,
+    chart::CompiledChart,
+    input::GameInputEvent,
+    judge::{HazardEvent, JudgeEvent},
+    runtime::RuntimeReport,
     time::Timestamp,
 };
 use beatkernel_bms::BmsChart;
@@ -91,6 +95,8 @@ pub struct LocalPlayerSnapshot {
     pub chart: Option<Arc<PlayerChart>>,
     pub song_time: Option<Timestamp>,
     pub score: ScoreSummary,
+    /// Exact committed mine evidence, independent of ordinary-note score.
+    pub mine_damage: MineDamageSummary,
     pub last_judge: Option<JudgeEvent>,
     pub recent_results: Vec<JudgeEvent>,
     /// Actual admitted button ownership, masked during native pause transitions.
@@ -106,6 +112,7 @@ impl LocalPlayerSnapshot {
             chart,
             song_time: None,
             score: ScoreSummary::default(),
+            mine_damage: MineDamageSummary::default(),
             last_judge: None,
             recent_results: Vec::new(),
             pressed_lanes: 0,
@@ -243,6 +250,8 @@ pub struct PlayerSnapshot {
     pub images: Option<Arc<crate::image_assets::ImageAssets>>,
     pub song_time: Option<Timestamp>,
     pub score: ScoreSummary,
+    /// Mirrors the sole member only; multiple members have no aggregate damage.
+    pub mine_damage: MineDamageSummary,
     pub last_judge: Option<JudgeEvent>,
     pub recent_results: Vec<JudgeEvent>,
     /// Actual admitted button ownership, masked during native pause transitions.
@@ -267,6 +276,7 @@ impl Default for PlayerSnapshot {
             images: None,
             song_time: None,
             score: ScoreSummary::default(),
+            mine_damage: MineDamageSummary::default(),
             last_judge: None,
             recent_results: Vec::new(),
             pressed_lanes: 0,
@@ -841,6 +851,8 @@ pub fn publish_report(report: &RuntimeReport) -> Result<(), Box<dyn std::error::
         &report.judge_events,
         &report.bound_inputs,
         None,
+        &report.hazard_events,
+        None,
     )
 }
 
@@ -861,13 +873,50 @@ pub fn publish_replay_prefix_with_pressed(
     mask: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_mask(mask)?;
-    publish_solo(song, events, &[], Some(mask))
+    publish_solo(song, events, &[], Some(mask), &[], None)
 }
+
+/// Publishes incremental replay judgments with the actual cumulative mine
+/// summary. Equal summaries are assigned without adding their damage again.
+pub fn publish_replay_prefix_with_mines(
+    song: Timestamp,
+    events: &[JudgeEvent],
+    mask: u32,
+    summary: MineDamageSummary,
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_mask(mask)?;
+    validate_mine_summary(MineDamageSummary::default(), summary)?;
+    publish_solo(song, events, &[], Some(mask), &[], Some(summary))
+}
+
+fn validate_mine_summary(
+    previous: MineDamageSummary,
+    next: MineDamageSummary,
+) -> Result<(), &'static str> {
+    if next.triggered < previous.triggered
+        || next.avoided < previous.avoided
+        || next.half_percent_damage < previous.half_percent_damage
+        || (previous.instant_death && !next.instant_death)
+    {
+        return Err("replay mine summary regressed");
+    }
+    let nonfatal_bound = next
+        .triggered
+        .checked_sub(u64::from(next.instant_death))
+        .ok_or("replay mine death requires a triggered marker")?;
+    if u128::from(next.half_percent_damage) > u128::from(nonfatal_bound) * 1294 {
+        return Err("replay mine damage exceeds its triggered marker bound");
+    }
+    Ok(())
+}
+
 fn publish_solo(
     song: Timestamp,
     events: &[JudgeEvent],
     inputs: &[GameInputEvent],
     replay_mask: Option<u32>,
+    hazards: &[HazardEvent],
+    replay_mines: Option<MineDamageSummary>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     SESSION.with(|session| {
         let mut session = session.borrow_mut();
@@ -898,6 +947,14 @@ fn publish_solo(
             score.observe(events)?;
             Some(score)
         };
+        let mine_damage = if let Some(summary) = replay_mines {
+            validate_mine_summary(member.mine_damage, summary)?;
+            summary
+        } else {
+            let mut summary = member.mine_damage;
+            summary.observe(hazards)?;
+            summary
+        };
         let prepared = pressed.keys.prepare(inputs)?;
         if let Some(mask) = prepared {
             pressed.keys.commit(mask);
@@ -909,6 +966,7 @@ fn publish_solo(
         if let Some(score) = score {
             member.score = score;
         }
+        member.mine_damage = mine_damage;
         member.update_results(song, events);
         if let Some((member, pressed)) = fresh {
             current.snapshot.players.push(member);
@@ -956,11 +1014,12 @@ pub fn publish_local_reports(reports: &[PlayerReport]) -> Result<(), Box<dyn std
             }
         }
         // Prepare only changed scores: empty 1ms deadline reports do not clone
-        // history/Arc/score maps or allocate scratch. All score errors precede
+        // history/Arc/score maps or allocate scratch. All score/damage errors precede
         // any mutation of any member in this batch.
         let mut changed_scores = Vec::new();
+        let mut changed_mines: [Option<MineDamageSummary>; 64] = [None; 64];
         for report in reports {
-            if report.report.judge_events.is_empty() {
+            if report.report.judge_events.is_empty() && report.report.hazard_events.is_empty() {
                 continue;
             }
             let index = current
@@ -969,9 +1028,16 @@ pub fn publish_local_reports(reports: &[PlayerReport]) -> Result<(), Box<dyn std
                 .iter()
                 .position(|member| member.player == report.player)
                 .expect("validated registered player");
-            let mut score = current.snapshot.players[index].score.clone();
-            score.observe(&report.report.judge_events)?;
-            changed_scores.push((index, score));
+            if !report.report.judge_events.is_empty() {
+                let mut score = current.snapshot.players[index].score.clone();
+                score.observe(&report.report.judge_events)?;
+                changed_scores.push((index, score));
+            }
+            if !report.report.hazard_events.is_empty() {
+                let mut summary = current.snapshot.players[index].mine_damage;
+                summary.observe(&report.report.hazard_events)?;
+                changed_mines[index] = Some(summary);
+            }
         }
         let mut changed_pressed = Vec::new();
         for report in reports {
@@ -996,12 +1062,16 @@ pub fn publish_local_reports(reports: &[PlayerReport]) -> Result<(), Box<dyn std
             current.snapshot.players[index].score = score;
         }
         for report in reports {
-            let member = current
+            let (index, member) = current
                 .snapshot
                 .players
                 .iter_mut()
-                .find(|member| member.player == report.player)
+                .enumerate()
+                .find(|(_, member)| member.player == report.player)
                 .expect("validated registered player");
+            if let Some(summary) = changed_mines[index] {
+                member.mine_damage = summary;
+            }
             member.update_report(&report.report);
         }
         current.observe_cancellation(true);
@@ -1031,6 +1101,7 @@ impl PlayerSnapshot {
             self.pressed_lanes = member.pressed_lanes;
             self.song_time = member.song_time;
             self.score = member.score.clone();
+            self.mine_damage = member.mine_damage;
             self.last_judge = member.last_judge;
             self.recent_results = member.recent_results.clone();
         } else {
@@ -1038,6 +1109,7 @@ impl PlayerSnapshot {
             self.pressed_lanes = 0;
             self.song_time = None;
             self.score = ScoreSummary::default();
+            self.mine_damage = MineDamageSummary::default();
             self.last_judge = None;
             self.recent_results.clear();
         }

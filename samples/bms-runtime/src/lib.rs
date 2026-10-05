@@ -242,6 +242,8 @@ mod native_invisible_identity_fixtures;
 pub mod native_judge;
 #[cfg(test)]
 mod native_mine_fixtures;
+#[cfg(test)]
+mod native_mine_presentation_fixtures;
 /// Game-owned room lobby, comparison, committed start and natural finalization.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_room_competition;

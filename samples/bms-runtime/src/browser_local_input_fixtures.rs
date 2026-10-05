@@ -652,6 +652,7 @@ fn borrowed_local_views_retain_actual_prefix_references_and_match_owned_scene_pa
         let mut progress = NoteProgress::new(chart.clone()).unwrap();
         progress.apply(&events);
         players.push(LocalPlayerSnapshot {
+            mine_damage: Default::default(),
             player: PlayerId(if index == 63 {
                 u32::MAX
             } else {
@@ -953,6 +954,7 @@ fn local_touch_regions_share_actual_three_and_four_field_boundaries_and_preserve
         for count in [3, 4] {
             let players = (0..count)
                 .map(|slot| LocalPlayerSnapshot {
+                    mine_damage: Default::default(),
                     player: PlayerId(PLAYERS[slot]),
                     chart: Some(chart.clone()),
                     song_time: Some(Timestamp::ZERO),
