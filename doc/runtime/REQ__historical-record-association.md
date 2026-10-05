@@ -42,7 +42,8 @@ Browser loaded-record
 presentation now uses the same matcher through a separate Worker-owned historical
 binding; see [its contract](REQ__browser-historical-record.md). Version-2 score
 and timing preservation and common historical presentation are governed by
-[the detail contract](REQ__archived-score-details.md). Native score export and
+[the detail contract](REQ__archived-score-details.md). Native score export uses
+[explicit completed score association](REQ__native-archived-score.md).
 Records preview detail integration, comparison archival, actual browser/filesystem/
 GPU acceptance and race-free directory containment remain unfinished.
 

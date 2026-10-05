@@ -4,7 +4,10 @@ Local completion retains the whole-roster archive at the configured replay base
 path. Each original member replay additionally receives an adjacent `.bkresult`
 archive containing exactly that member's original nonzero u32 ID, canonical
 header, actual gauge profile and historical result. These bounded one-row
-archives use the existing version-1 format. Equal headers across players cannot
+archives retain the same versioned format and member projection. Actual completed
+native publication includes version-2 score/timing details under
+[the native score contract](REQ__native-archived-score.md); scoreless legacy helpers
+retain version 1. Equal headers across players cannot
 cause ambiguity because the member sidecar explicitly preserves the original
 ID. Lookup never infers IDs or parses suffixes from selected filenames.
 

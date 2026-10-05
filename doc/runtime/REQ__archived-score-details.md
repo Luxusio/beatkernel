@@ -52,8 +52,10 @@ Author independent literal version-1/version-2 wire, integer extremes, malformed
 shape, roster association, whole/member projection, truncation and actual Step
 completion/export fixtures. Do not rely solely on encoder/decoder round trips.
 Host and WASM compile checks do not establish runtime behavior. Test execution,
-formal review, QA and platform acceptance remain deferred. Native completed-save
-callers continue producing scoreless archives until a subsequent explicit score
-association integration. Saved opponent comparison snapshots are not archived by
-this increment. Cold serialization/decoded values can allocate; no new per-frame
-work, global allocation-free claim or authenticity guarantee is established.
+formal review, QA and platform acceptance remain deferred. Actual native
+completed-save callers now use explicit score association under
+[the native score contract](REQ__native-archived-score.md). Existing scoreless
+public helpers retain version 1. Saved opponent comparison snapshots are not
+archived by this increment. Cold serialization/decoded values can allocate;
+no new per-frame work, global allocation-free claim or authenticity guarantee
+is established by this serialization increment.

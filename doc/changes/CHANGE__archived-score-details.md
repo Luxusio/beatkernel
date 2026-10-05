@@ -9,9 +9,11 @@ pure presentation rather than Window rendering or repeated per-frame formatting.
 
 ## Known ceiling
 
-Native completed-save composition still emits scoreless version-1 archives until
-its explicit score association is connected. Saved opponent comparisons remain
-unarchived. Structural validation does not authenticate editable local records.
+At this increment native completed-save composition still emitted scoreless
+version-1 archives. [The subsequent native score increment](CHANGE__native-archived-score.md)
+connects actual native finalization while preserving legacy scoreless helpers.
+Saved opponent comparisons remain unarchived. Structural validation does not
+authenticate editable local records.
 Cold serialization, copies and decoding may allocate; byte/grade/roster bounds
 limit accepted data but do not provide allocator-failure or crash-atomic proof.
 Fifteen independent fixture groups are authored for later execution: seven

@@ -6,6 +6,9 @@ completion retained in a typed publication error, can supply archive results.
 Cancellation, setup refusal, bounded-duration cutoff and a valid replay prefix
 cannot manufacture completion. The original actual gauge policy and each
 capture's pristine replay header are associated with the complete roster.
+Actual native solo/local roots now include their independent exact score/timing
+summaries in version 2 under [the native score contract](REQ__native-archived-score.md).
+Legacy scoreless helper APIs continue emitting version 1.
 
 When replay recording is enabled and actual completion exists, save one whole
 roster result sidecar next to the configured base replay path after native
