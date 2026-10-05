@@ -291,6 +291,10 @@ pub mod offline;
 mod offline_gauge_sound_stop_fixtures;
 /// Typed UI panel ownership and cancellation permits for off-thread work.
 pub mod panel_scope;
+/// Read-only outcomes retained after actual live gameplay and output completion.
+pub mod play_result;
+#[cfg(test)]
+mod play_result_fixtures;
 /// Native presentation-derived pause and bounded keyboard reconciliation.
 pub mod playback_pause;
 /// Actual game-to-UI presentation and cancellation outside audio callbacks.
@@ -373,6 +377,8 @@ mod step_local_failed_terminal_fixtures;
 #[cfg(test)]
 mod step_local_gameplay_fixtures;
 #[cfg(test)]
+mod step_local_play_result_fixtures;
+#[cfg(test)]
 mod step_local_stop_ack_fixtures;
 /// Nonblocking recorded-operation presentation and bounded remote audio batches.
 pub mod step_replay;
@@ -382,6 +388,8 @@ mod step_replay_fixtures;
 mod step_replay_stop_ack_fixtures;
 #[cfg(test)]
 mod step_solo_failed_terminal_fixtures;
+#[cfg(test)]
+mod step_solo_play_result_fixtures;
 #[cfg(test)]
 mod step_solo_stop_ack_fixtures;
 /// Validated portable raw texture resources.

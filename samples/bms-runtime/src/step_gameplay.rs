@@ -19,6 +19,7 @@ use crate::{
     mine_sounds::MineSoundPlan,
     native_judge::NativeJudgeConfig,
     offline::OwnedStopEvidence,
+    play_result::CompletedPlayResult,
     replay_audio::{
         ReplayAudioError, before_endpoint, completed_render_cursor_with_stops, section_end_frame,
     },
@@ -359,6 +360,7 @@ pub struct StepGameplay {
     score: ScoreSummary,
     mine_damage: MineDamageSummary,
     gauge: BmsGauge,
+    completed_result: Option<CompletedPlayResult>,
     song: Timestamp,
     host_domain: ClockDomainId,
     start: Timestamp,
@@ -383,6 +385,7 @@ impl fmt::Debug for StepGameplay {
             .field("score", &self.score)
             .field("mine_damage", &self.mine_damage)
             .field("gauge", &self.gauge)
+            .field("completed_result", &self.completed_result)
             .field(
                 "pending_sequence",
                 &self.pending.as_ref().map(|batch| batch.sequence),
@@ -839,6 +842,7 @@ impl StepGameplay {
             score: ScoreSummary::default(),
             mine_damage: MineDamageSummary::default(),
             gauge: BmsGauge::default(),
+            completed_result: None,
             song,
             host_domain: config.host_origin.domain,
             start,
@@ -1301,7 +1305,16 @@ impl StepGameplay {
         self.ensure_solo()?;
         let numeric_terminal =
             self.gauge.snapshot().failure.is_some() && self.gameplay_fence().is_some();
-        self.observe_completion_ready(rendered, presented, true, numeric_terminal)
+        let completed =
+            self.observe_completion_ready(rendered, presented, true, numeric_terminal)?;
+        if completed && self.completed_result.is_none() {
+            self.completed_result = Some(CompletedPlayResult::from_completed(
+                self.start,
+                self.end,
+                &self.gauge,
+            ));
+        }
+        Ok(completed)
     }
 
     fn observe_completion_ready(
@@ -1568,6 +1581,10 @@ impl StepGameplay {
     pub fn gauge(&self) -> &BmsGauge {
         &self.gauge
     }
+    /// First proven live completion, retained as history after later errors.
+    pub fn completed_result(&self) -> Option<&CompletedPlayResult> {
+        self.completed_result.as_ref()
+    }
     /// Actual committed failure frontier; later acquisition does not move it.
     pub fn gameplay_fence(&self) -> Option<Timestamp> {
         match &self.runtime {
@@ -1645,6 +1662,7 @@ struct LocalMemberState {
     score: ScoreSummary,
     mine_damage: MineDamageSummary,
     gauge: BmsGauge,
+    completed_result: Option<CompletedPlayResult>,
     capture: Option<LiveReplayCapture>,
     song: Timestamp,
 }
@@ -1720,6 +1738,7 @@ impl StepLocalGameplay {
             score: ScoreSummary::default(),
             mine_damage: MineDamageSummary::default(),
             gauge: BmsGauge::default(),
+            completed_result: None,
             capture: None,
             song: control.song,
         }));
@@ -1778,6 +1797,16 @@ impl StepLocalGameplay {
             .iter()
             .find(|member| member.player == player)
             .map(|member| &member.gauge)
+    }
+    /// This member's first shared-output completion, also readable after errors.
+    /// Unknown identities are distinct from prepared members still awaiting completion.
+    pub fn completed_result(
+        &self,
+        player: PlayerId,
+    ) -> Result<Option<&CompletedPlayResult>, StepLocalGameplayError> {
+        Ok(self.members[self.member_index(player)?]
+            .completed_result
+            .as_ref())
     }
     /// Independent committed failure frontier, absent for an unfenced or unknown member.
     pub fn gameplay_fence(&self, player: PlayerId) -> Option<Timestamp> {
@@ -2238,9 +2267,24 @@ impl StepLocalGameplay {
         // Admission of real output remains mandatory even while another member
         // is not ready. The shared implementation adopts valid evidence and
         // resets drain readiness without fabricating progress for that member.
-        self.control
-            .observe_completion_ready(rendered, presented, ready, numeric_failed && ready)
-            .map_err(Into::into)
+        let completed = self.control.observe_completion_ready(
+            rendered,
+            presented,
+            ready,
+            numeric_failed && ready,
+        )?;
+        if completed {
+            for member in &mut self.members {
+                if member.completed_result.is_none() {
+                    member.completed_result = Some(CompletedPlayResult::from_completed(
+                        self.control.start,
+                        self.control.end,
+                        &member.gauge,
+                    ));
+                }
+            }
+        }
+        Ok(completed)
     }
 
     /// Validate genuine output evidence before a browser adapter publishes BGM

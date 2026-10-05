@@ -191,11 +191,13 @@ rewrite captures or clear shared audio as part of this presentation policy.
 Whole-batch publication validation still precedes mutation; invalid reports leave
 all members unchanged. Add no Window rendering or gameplay work.
 
-Completion clear/fail decisions and
-actual per-player audio stopping/output cleanup still need integration.
+The [completed live result contract](REQ__bms-completed-play-result.md) separates
+actual output completion from scoped clear/fail classification. Native/UI/archive
+result publication and recorded-prefix result identity still require integration.
 The [scheduled gameplay voice stop](REQ__gameplay-sound-stop.md) defines the
-shared audio component and stepped/native owner connections; replay audio
-and actual output completion remain separate unfinished integration work.
+shared audio component and stepped/native owner connections. Explicit stepped ACK
+and native producer evidence connect scheduled Stops to their output completion
+paths; source/compile evidence does not establish physical audio acceptance.
 The [portable gameplay fence](REQ__gameplay-fence.md) is an explicit control
 component for that integration. Its stepped and native connections above preserve
 new capture prefixes; broader replay policy and per-player audio cleanup remain
