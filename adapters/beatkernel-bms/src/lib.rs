@@ -4,11 +4,15 @@
 //! Long-note tail tokens are metadata only and never automatic sounds.
 //! BMP image selections compile separately without changing the gameplay grid.
 //! Invisible keysound selections have a separate unjudged timing API.
+//! Mine damage selections have a separate timing API without gameplay effects.
 //! Asset paths are opaque references; loading/decoding belongs to the application.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 mod conditional;
 mod invisible;
+#[cfg(test)]
+mod mine_fixtures;
+mod mines;
 mod parser;
 mod rational;
 use beatkernel::{
@@ -21,6 +25,7 @@ use beatkernel::{
 };
 pub use parser::{parse, parse_seeded};
 pub use invisible::{InvisibleEvent, ScheduledInvisible};
+pub use mines::{MineDamage, MineEvent, ScheduledMine};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Explicit input semantics for the BMS adapter's builtin judge rules.
@@ -53,7 +58,7 @@ pub struct ParseOptions {
     pub max_lines: usize,
     /// Maximum bytes in one physical line.
     pub max_line_bytes: usize,
-    /// Maximum nonzero tokens and final gameplay/timing/BGM/BGA/invisible items combined.
+    /// Maximum nonzero tokens and final gameplay/timing/BGM/BGA/invisible/mine items combined.
     pub max_objects: usize,
     /// Maximum exact quarter-beat tick resolution (LCM); never silently rounded.
     pub max_resolution: u32,
@@ -284,6 +289,10 @@ pub struct BmsChart {
     pub invisible: Vec<InvisibleEvent>,
     /// Independent invisible tick grid encompassing the gameplay resolution.
     pub invisible_ticks_per_beat: u32,
+    /// Original unjudged mine damage selections, independent of WAV resources.
+    pub mines: Vec<MineEvent>,
+    /// Independent mine tick grid encompassing the gameplay resolution.
+    pub mine_ticks_per_beat: u32,
     /// Lane/keysound mapping by chart-local object identity.
     pub notes: Vec<BmsNote>,
     /// Layered source BGM events in beat/ordinal order.
@@ -363,6 +372,7 @@ impl BmsChart {
     }
     /// Compiles gameplay, BGM and visual selections with checked core timing.
     /// Invisible keysound selections require the separate `compile_invisible` API.
+    /// Mine damage selections require the separate `compile_mines` API.
     pub fn compile(&self) -> Result<CompiledBms, BmsError> {
         let chart = self
             .source

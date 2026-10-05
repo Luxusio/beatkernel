@@ -135,6 +135,8 @@ pub mod local_runtime;
 pub mod local_setup;
 #[cfg(test)]
 mod local_source_plan_fixtures;
+#[cfg(test)]
+mod mine_admission_fixtures;
 /// Complete MPEG Layer III assets and declared encoder timing during preparation.
 pub mod mp3_decode;
 #[cfg(test)]
@@ -559,6 +561,8 @@ fn prepare_seeded(
 }
 
 /// Prepares the same chart and assets from bounded bytes and a scoped resource source.
+/// Unsupported mine gameplay is refused immediately after parsing, before gain,
+/// replay validation or resource acquisition.
 /// WAV gain and invisible timing are validated before replay setup; replay setup
 /// is then validated before acquiring the unique visible/BGM/invisible resources.
 /// Equal resolved keys reuse decoding within this call; source bytes and the
@@ -581,6 +585,9 @@ pub fn prepare_from_source(
         options.max_bytes,
     )?;
     let source = parse_seeded(&text, options, seed)?;
+    if !source.mines.is_empty() {
+        return Err("mine gameplay is not supported during preparation".into());
+    }
     let wav_gain = source.wav_gain()?;
     let invisible = if source.invisible.is_empty() {
         Vec::new()

@@ -150,6 +150,9 @@ fn long(channel: u8) -> bool {
 fn invisible(channel: u8) -> bool {
     matches!(channel, 0x31..=0x39 | 0x41..=0x49)
 }
+fn mine(channel: u8) -> bool {
+    matches!(channel, 0xd1..=0xd9 | 0xe1..=0xe9)
+}
 fn lane(channel: u8) -> BmsLane {
     BmsLane(if long(channel) {
         channel - 0x40
@@ -270,6 +273,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
     let mut rows = Vec::new();
     let mut visual_rows = Vec::new();
     let mut invisible_rows = Vec::new();
+    let mut mine_rows = Vec::new();
     let mut raw_count = 0usize;
     let mut max_measure = 0usize;
     for (line, command_line) in selected {
@@ -310,6 +314,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 && !visible(channel)
                 && !long(channel)
                 && !invisible(channel)
+                && !mine(channel)
             {
                 return Err(fail(
                     line,
@@ -324,6 +329,8 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
             }
             let radix = if channel == 3 || matches!(channel, 0x0b..=0x0e) {
                 16
+            } else if mine(channel) {
+                36
             } else {
                 resource_radix
             };
@@ -349,6 +356,8 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
                 visual_rows.push(row);
             } else if invisible(channel) {
                 invisible_rows.push(row);
+            } else if mine(channel) {
+                mine_rows.push(row);
             } else {
                 rows.push(row);
             }
@@ -756,6 +765,69 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
     }
     let mut invisible: Vec<_> = invisible_merged.into_values().collect();
     invisible.sort_by_key(|event| (event.beat, event.ordinal));
+    // Mine subdivisions have their own grid and never enlarge the gameplay,
+    // image or invisible resolutions. Damage tokens are not sample references.
+    let mut mine_resolution = resolution;
+    let mut mine_events = Vec::new();
+    let mut mine_ordinal = 0u64;
+    for row in mine_rows {
+        for (index, value) in row
+            .tokens
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, value)| *value != 0)
+        {
+            let offset = arithmetic(
+                row.line,
+                durations[row.measure].mul(Ratio {
+                    n: index as i128,
+                    d: row.tokens.len() as i128,
+                }),
+            )?;
+            let beat = arithmetic(row.line, origins[row.measure].add(offset))?;
+            update_resolution(
+                &mut mine_resolution,
+                beat.d,
+                options.max_resolution,
+                row.line,
+            )?;
+            let damage = arithmetic(row.line, MineDamage::from_raw(value))?;
+            mine_events
+                .try_reserve(1)
+                .map_err(|_| fail(row.line, BmsErrorKind::Limit("mine event allocation")))?;
+            mine_events.push((
+                beat,
+                BmsLane(row.channel - 0xc0),
+                damage,
+                mine_ordinal,
+                row.line,
+            ));
+            mine_ordinal += 1;
+        }
+    }
+    let mine_resolution =
+        u32::try_from(mine_resolution).map_err(|_| fail(0, BmsErrorKind::Resolution))?;
+    let mut mine_merged = BTreeMap::new();
+    for (beat, lane, damage, ordinal, line) in mine_events {
+        let tick = arithmetic(line, beat.ticks(mine_resolution))?;
+        define(
+            &mut mine_merged,
+            (tick, lane),
+            MineEvent {
+                beat: Beat::new(tick).map_err(|error| fail(line, BmsErrorKind::Compile(error)))?,
+                lane,
+                damage,
+                ordinal,
+                line,
+            },
+            line,
+            "mine lane position",
+            options.duplicates,
+        )?;
+    }
+    let mut mines: Vec<_> = mine_merged.into_values().collect();
+    mines.sort_by_key(|event| (event.beat, event.ordinal));
     let resolution = u32::try_from(resolution).map_err(|_| fail(0, BmsErrorKind::Resolution))?;
     let mut measures = Vec::with_capacity(max_measure + 1);
     for measure in 0..=max_measure {
@@ -1002,6 +1074,7 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
         .and_then(|count| count.checked_add(bga.len()))
         .and_then(|count| count.checked_add(bga_opacity.len()))
         .and_then(|count| count.checked_add(invisible.len()))
+        .and_then(|count| count.checked_add(mines.len()))
         .filter(|count| *count <= options.max_objects && *count <= MAX_SOURCE_ITEMS)
         .ok_or_else(|| fail(0, BmsErrorKind::Limit("source items")))?;
     let mut source = SourceChart::new(resolution, base)
@@ -1088,6 +1161,8 @@ pub fn parse_seeded(text: &str, options: ParseOptions, seed: u64) -> Result<BmsC
         bga_ticks_per_beat: visual_resolution,
         invisible,
         invisible_ticks_per_beat: invisible_resolution,
+        mines,
+        mine_ticks_per_beat: mine_resolution,
         notes: mapped,
         bgm,
         metadata,
