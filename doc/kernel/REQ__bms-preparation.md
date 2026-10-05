@@ -1,5 +1,14 @@
 # Shared BMS asset preparation
 
+## Mine source admission during integration
+
+The adapter preserves mine channels through its explicit separate source and
+timing API. Shared playable preparation follows the temporary early refusal
+in [BMS mines](REQ__bms-mines.md#integration-boundary): nonempty hazards reject
+after parsing, before gain validation, replay setup or resource acquisition.
+Rest-only and inactive mine rows preserve ordinary loading. Runtime hazard,
+gauge, sound, render and replay integration remain required future work.
+
 ## Missing static image filename variants
 
 Static `ImageAssets` preparation uses `AssetPathPolicy::ImageVariants` on both
