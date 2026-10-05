@@ -106,11 +106,43 @@ specific across pages of up to four visible players and a roster of up to 64.
 Browser HUD drawing stays on OffscreenCanvas in Worker; no Window DOM gauge or
 new polling/render loop is permitted.
 
-Completion clear/fail decisions and
-actual per-player failure fencing/output cleanup still need integration.
+## Stepped failure fence and capture prefix
+
+StepGameplay must fence its solo runtime after the first valid numeric gauge
+failure, after independently consuming the actual committed report for gauge,
+mine damage, score and replay capture. StepLocalGameplay fences only the failed
+member. Numeric failure is game state, not a technical owner error; retain all
+original report evidence and independent technical errors when both occur.
+Expose gameplay_fence() for solo and gameplay_fence(player) for local observation.
+Never discard the failure-causing operation, roll back judged stages, fabricate
+release inputs, flush queued audio or mark a surviving cohort failed.
+
+Subsequent acquisition still uses the portable fence's clock/sequence checks but
+produces no new judgments or gameplay sound. Preserve the failed member's gauge,
+score, song frontier and judge hash. Do not append post-fence acquisition or empty
+advances to that member's capture. When capture accepts the failure operation,
+the recording remains its exact committed failure prefix; a simultaneous capture
+error retains the shorter accepted recording and its original error, without
+claiming that it contains the missing operation. Other members continue normally,
+including their own captures.
+Shared local control progress must not regress when a frozen member reports its
+earlier frontier. Do not confuse a member's frozen frontier with shared playback
+or a surviving member's progress.
+
+Reconstruct these new failure-prefix captures through the existing validated
+replay pipeline and verify that hash, score, gauge and hazard observations match
+the actual retained prefix. No new wire policy or retrospective rewriting of
+older recordings is introduced here: legacy recordings continue to reconstruct
+their own recorded operations. Configurable gauge/failure capture identity is
+still separate work. This fixed default's only numeric failure is instant death;
+custom pure profiles do not become unrecorded live options.
+
+Completion clear/fail decisions, native owner failure fencing and
+actual per-player audio stopping/output cleanup still need integration.
 The [portable gameplay fence](REQ__gameplay-fence.md) is an explicit control
-component for that integration; introducing it does not automatically connect
-gauge policy, replay reconstruction or per-player audio cleanup.
+component for that integration. Its stepped connection above preserves new
+capture prefixes; native gauge ownership, broader replay policy and per-player
+audio cleanup remain separate integration work.
 InstantDeath state alone does not establish playback termination. Keep the
 high-level mine file admission guard until those owners are connected. Author
 independent deferred fixed-point/configuration/atomicity and real solo/local/

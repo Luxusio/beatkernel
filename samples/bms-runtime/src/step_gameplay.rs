@@ -1172,6 +1172,7 @@ impl StepGameplay {
         &mut self,
         result: Result<RuntimeReport, GroupError>,
     ) -> Result<RuntimeReport, StepGameplayError> {
+        let was_fenced = self.gameplay_fence().is_some();
         let report = match result {
             Ok(report) => report,
             Err(error) => {
@@ -1191,10 +1192,16 @@ impl StepGameplay {
             .observe(&report.judge_events, &report.hazard_events)
             .err();
         let score_error = self.score.observe(&report.judge_events).err();
-        let capture_error = self
-            .capture
-            .as_mut()
-            .and_then(|capture| capture.record_report(&report).err());
+        let capture_error = if was_fenced {
+            None
+        } else {
+            self.capture
+                .as_mut()
+                .and_then(|capture| capture.record_report(&report).err())
+        };
+        if self.gauge.snapshot().failure.is_some() {
+            self.runtime.solo_mut()?.fence_gameplay();
+        }
         if let Some(error) = gauge_error {
             self.failed = true;
             return Err(StepGameplayError::Gauge {
@@ -1545,6 +1552,13 @@ impl StepGameplay {
     pub fn gauge(&self) -> &BmsGauge {
         &self.gauge
     }
+    /// Actual committed failure frontier; later acquisition does not move it.
+    pub fn gameplay_fence(&self) -> Option<Timestamp> {
+        match &self.runtime {
+            RuntimeOwner::Solo(runtime) => runtime.gameplay_fence(),
+            RuntimeOwner::Local { group, primary } => group.player_gameplay_fence(*primary),
+        }
+    }
     pub fn bgm_report(&self) -> BgmFeedReport {
         self.bgm.report()
     }
@@ -1744,6 +1758,10 @@ impl StepLocalGameplay {
             .iter()
             .find(|member| member.player == player)
             .map(|member| &member.gauge)
+    }
+    /// Independent committed failure frontier, absent for an unfenced or unknown member.
+    pub fn gameplay_fence(&self, player: PlayerId) -> Option<Timestamp> {
+        self.group().player_gameplay_fence(player)
     }
     pub fn judge(&self, player: PlayerId) -> Option<&JudgeEngine> {
         self.group().member_judge(player)
@@ -2027,8 +2045,12 @@ impl StepLocalGameplay {
             Err(error) => (error.completed_reports.clone(), Some(error)),
         };
         let mut reported_failure = false;
-        for PlayerReport { player, report } in &reports {
-            self.control.song = report.song_time;
+        let mut fences = [None; 64];
+        for (index, PlayerReport { player, report }) in reports.iter().enumerate() {
+            let was_fenced = self.gameplay_fence(*player).is_some();
+            if !was_fenced {
+                self.control.song = report.song_time;
+            }
             if !report.audio_commands.is_empty() {
                 self.control.reset_drain();
             }
@@ -2044,10 +2066,17 @@ impl StepLocalGameplay {
                 .observe(&report.judge_events, &report.hazard_events)
                 .err();
             let score_error = member.score.observe(&report.judge_events).err();
-            let capture_error = member
-                .capture
-                .as_mut()
-                .and_then(|capture| capture.record_report(report).err());
+            let capture_error = if was_fenced {
+                None
+            } else {
+                member
+                    .capture
+                    .as_mut()
+                    .and_then(|capture| capture.record_report(report).err())
+            };
+            if !was_fenced && member.gauge.snapshot().failure.is_some() {
+                fences[index] = Some(*player);
+            }
             reported_failure |= report.judge_error.is_some() || !report.audio_failures.is_empty();
             if score_error.is_some()
                 || capture_error.is_some()
@@ -2062,6 +2091,11 @@ impl StepLocalGameplay {
                     gauge_error,
                 });
             }
+        }
+        for player in fences.into_iter().flatten() {
+            self.group_mut()
+                .fence_player(player)
+                .expect("group reports only prepared members");
         }
         if group_error.is_some() || reported_failure || !member_errors.is_empty() {
             self.control.fail();

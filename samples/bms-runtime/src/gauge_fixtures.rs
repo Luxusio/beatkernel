@@ -443,7 +443,7 @@ impl ClockMapper for NoMapping {
 }
 
 #[test]
-fn actual_solo_reports_preserve_gauge_on_queue_failure_and_numeric_fatal_does_not_stop_playback() {
+fn actual_solo_reports_preserve_gauge_on_queue_failure_and_numeric_fatal_fences_gameplay() {
     let source = parse(
         "#BPM 60\n#WAV01 head\n#00011:01010100\n#000D1:01010100",
         Default::default(),
@@ -556,6 +556,8 @@ fn actual_solo_reports_preserve_gauge_on_queue_failure_and_numeric_fatal_does_no
         &snapshot(0, Some(GaugeFailure::InstantDeath))
     );
     assert!(!fatal.failed());
+    assert_eq!(fatal.gameplay_fence(), Some(ts(0)));
+    let fatal_hash = fatal.judge().stable_hash().unwrap();
     fatal
         .process_input(
             button(3, 1_000_000_000, 1, ButtonState::Up),
@@ -572,9 +574,12 @@ fn actual_solo_reports_preserve_gauge_on_queue_failure_and_numeric_fatal_does_no
         .unwrap();
     assert_eq!(
         (later.judge_events.len(), later.audio_commands.len()),
-        (1, 1)
+        (0, 0)
     );
-    assert_eq!(fatal.score().hits, 1);
+    assert!(later.bound_inputs.is_empty() && later.hazard_events.is_empty());
+    assert_eq!(later.song_time, ts(0));
+    assert_eq!(fatal.judge().stable_hash().unwrap(), fatal_hash);
+    assert_eq!(fatal.score().hits, 0);
     assert!(!fatal.failed());
     assert_eq!(
         fatal.gauge().snapshot(),

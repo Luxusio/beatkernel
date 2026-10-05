@@ -93,6 +93,8 @@ pub mod font_text;
 /// Shared fixed-point gauge observations from committed normal and mine outcomes.
 pub mod gauge;
 #[cfg(test)]
+mod gauge_fence_fixtures;
+#[cfg(test)]
 mod gauge_fixtures;
 #[cfg(test)]
 mod gauge_hud_fixtures;
