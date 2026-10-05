@@ -87,6 +87,8 @@ fn game(
             status,
             ..Default::default()
         }),
+        completed_results: None,
+        completed_results_error: None,
         cancelling: false,
         joined: false,
         local_page: 0,

@@ -7,6 +7,9 @@ mod catalog_fixtures;
 #[path = "desktop_clipboard_fixtures.rs"]
 mod clipboard_fixtures;
 #[cfg(test)]
+#[path = "desktop_completed_results_fixtures.rs"]
+mod completed_results_fixtures;
+#[cfg(test)]
 #[path = "font_fixture.rs"]
 mod font_fixture;
 #[cfg(test)]
@@ -43,6 +46,7 @@ use beatkernel_bms_runtime::ui::{
     players::{PlayersFrame, PlayersView},
     practice::{PracticeFrame, PracticeView},
     records::{RecordsFrame, RecordsView},
+    results::ResultsView,
     selection::{ROW_HEIGHT, SelectionFrame, SelectionItem, SelectionView, VISIBLE_ROWS},
     settings::{BUTTONS as SETTINGS_BUTTONS, SettingsFrame, SettingsView},
     text_input::LineEditor,
@@ -411,6 +415,8 @@ struct Game {
     viewer: player::PlayerViewer,
     worker: Option<JoinHandle<Result<(), String>>>,
     snapshot: Option<player::PlayerSnapshot>,
+    completed_results: Option<ResultsView>,
+    completed_results_error: Option<String>,
     cancelling: bool,
     joined: bool,
     local_page: usize,
@@ -488,6 +494,27 @@ impl Game {
         }
     }
     fn accept_snapshot(&mut self, mut snapshot: player::PlayerSnapshot) {
+        if !self.replay {
+            if self.completed_results.is_some() {
+                if let Some(current) = &self.snapshot {
+                    snapshot.completed_results = current.completed_results.clone();
+                    snapshot.players = current.players.clone();
+                }
+            } else if let Some(results) = &snapshot.completed_results {
+                let roster: Vec<_> = snapshot
+                    .players
+                    .iter()
+                    .map(|member| member.player)
+                    .collect();
+                match ResultsView::new(results, &roster) {
+                    Ok(view) => {
+                        self.completed_results = Some(view);
+                        self.completed_results_error = None;
+                    }
+                    Err(error) => self.completed_results_error = Some(error),
+                }
+            }
+        }
         // The archive belongs to this joined Game. A trailing final snapshot
         // cannot reset local Results selection or install another owner.
         if self.joined {
@@ -648,6 +675,8 @@ fn spawn_game(
         viewer,
         worker: Some(worker),
         snapshot: None,
+        completed_results: None,
+        completed_results_error: None,
         cancelling: false,
         joined: false,
         local_page,
@@ -5132,6 +5161,9 @@ impl Desktop {
         let Some(game) = &self.game else {
             return self.bga_cache.sync(None, &[], renderer);
         };
+        if game.joined && !game.replay {
+            return self.bga_cache.sync(None, &[], renderer);
+        }
         let Some(snapshot) = &game.snapshot else {
             return self.bga_cache.sync(None, &[], renderer);
         };
@@ -5764,6 +5796,31 @@ fn draw_game_with_background(
         }
     };
     text(pixels, 24, 65, status, 2, 0x9bb1cf);
+    if game.joined && !game.replay {
+        if let Some(results) = &game.completed_results {
+            results.compose(pixels, game.local_page)?;
+        } else if let Some(error) = &game.completed_results_error {
+            text(
+                pixels,
+                24,
+                140,
+                "COMPLETED RESULTS UNAVAILABLE",
+                2,
+                0xff8e8e,
+            );
+            text(pixels, 24, 175, error, 1, 0xff8e8e);
+        } else {
+            text(pixels, 24, 140, "NO COMPLETED PLAY", 2, 0x9bb1cf);
+        }
+        if let player::PlayerStatus::Failed(error) = &snapshot.status {
+            text(pixels, 24, 620, "TECHNICAL ERROR", 1, 0xff8e8e);
+            text(pixels, 150, 620, error, 1, 0xff8e8e);
+        }
+        if let Some(room) = &snapshot.room {
+            organisms::room_presentation_footer(pixels, room)?;
+        }
+        return Ok(());
+    }
     if backgrounds.iter().any(|frame| frame.unavailable != 0) {
         text(pixels, 750, 96, "BACKGROUND UNAVAILABLE", 1, 0xd8b36b);
     }
@@ -7592,6 +7649,8 @@ mod tests {
             viewer,
             worker: None,
             snapshot: None,
+            completed_results: None,
+            completed_results_error: None,
             cancelling: false,
             joined: false,
             local_page: 3,

@@ -15,6 +15,7 @@ pub mod organisms;
 pub mod players;
 pub mod practice;
 pub mod records;
+pub mod results;
 mod retained;
 pub mod selection;
 pub mod settings;
