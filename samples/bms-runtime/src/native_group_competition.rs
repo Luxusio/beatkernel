@@ -15,6 +15,8 @@ use crate::{
     native_start::{NativeStartAgreement, NativeStartResult, SessionHostBracket},
     competition_presentation::{self, CompetitionPresentationHost, NetworkStatus},
     competition_presentation_bridge::NativeCompetitionPresentation,
+    competition_start_gate::{self, CompetitionSetupControl, CompetitionStartPort},
+    native_pump_system::SystemControl,
     replay_capture::LiveReplayCapture,
 };
 use beatkernel::time::{ClockDomainId, ClockPoint, Timestamp};
@@ -292,37 +294,47 @@ impl NativeGroupCompetition {
     }
 }
 
-impl NativeStartAgreement for NativeGroupCompetition {
-    fn await_commit(
+/// Preserves the cohort's local guards and notice handling at the setup boundary.
+struct GroupStartPort<'a>(&'a mut NativeGroupCompetition);
+impl CompetitionStartPort for GroupStartPort<'_> {
+    fn try_ready(&mut self) -> Result<()> {
+        if self.0.finished {
+            return Err("group competition already stopped".into());
+        }
+        if let Some(error) = &self.0.failure {
+            return Err(error.clone().into());
+        }
+        Ok(self.0.network.try_ready()?)
+    }
+    fn poll(&mut self) -> Result<()> {
+        Ok(self.0.poll_network()?)
+    }
+    fn start_schedule(&self) -> Option<crate::multiplayer_start::StartSchedule> {
+        self.0.network.start_schedule()
+    }
+    fn release_clock_now_ns(&self) -> Result<i64> {
+        Ok(self.0.network.clock_now_ns()?)
+    }
+    fn max_release_lateness_ns(&self) -> u64 {
+        self.0.network.start_policy().max_release_lateness_ns
+    }
+}
+
+impl NativeGroupCompetition {
+    pub fn await_commit_with_ports<C: CompetitionSetupControl, H: CompetitionPresentationHost>(
         &mut self,
-        service: &mut dyn FnMut() -> NativeStartResult<bool>,
+        service: impl FnMut() -> NativeStartResult<bool>,
+        control: &mut C,
+        presentation: &mut H,
     ) -> NativeStartResult<bool> {
-        let deadline = Instant::now() + self.setup_timeout;
-        let outcome = (|| -> Result<bool> {
-            if self.finished {
-                return Err("group competition already stopped".into());
-            }
-            if let Some(error) = &self.failure {
-                return Err(error.clone().into());
-            }
-            self.network.try_ready()?;
-            loop {
-                if !service()? {
-                    return Ok(false);
-                }
-                self.poll_network()?;
-                if Instant::now() >= deadline {
-                    return Err(MultiplayerError::SetupTimeout.into());
-                }
-                if self.network.start_schedule().is_some() {
-                    return Ok(true);
-                }
-                std::thread::sleep(
-                    Duration::from_millis(5)
-                        .min(deadline.saturating_duration_since(Instant::now())),
-                );
-            }
-        })();
+        let timeout = self.setup_timeout;
+        let outcome = competition_start_gate::await_start(
+            &mut GroupStartPort(self),
+            control,
+            timeout,
+            false,
+            service,
+        );
         match &outcome {
             Ok(true) => self.status = NetworkStatus::Connected,
             Ok(false) => {
@@ -335,11 +347,24 @@ impl NativeStartAgreement for NativeGroupCompetition {
             }
         }
         if outcome.is_err() {
-            let _ = self.publish_presentation(true);
+            let _ = self.publish_presentation_with_host(true, presentation);
         } else {
-            self.publish_presentation(true)?;
+            self.publish_presentation_with_host(true, presentation)?;
         }
         outcome
+    }
+}
+
+impl NativeStartAgreement for NativeGroupCompetition {
+    fn await_commit(
+        &mut self,
+        service: &mut dyn FnMut() -> NativeStartResult<bool>,
+    ) -> NativeStartResult<bool> {
+        self.await_commit_with_ports(
+            service,
+            &mut SystemControl,
+            &mut NativeCompetitionPresentation,
+        )
     }
     fn committed_schedule(&self) -> NativeStartResult<crate::multiplayer_start::StartSchedule> {
         self.network

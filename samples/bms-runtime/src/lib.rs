@@ -64,6 +64,11 @@ pub mod competition_presentation;
 mod competition_presentation_bridge;
 #[cfg(test)]
 mod competition_presentation_port_fixtures;
+mod competition_start_bridge;
+/// Shared competition setup policy with explicit network and control ports.
+pub mod competition_start_gate;
+#[cfg(test)]
+mod competition_start_gate_fixtures;
 /// Actual judge completion and native output drain for full-song play.
 pub mod completion;
 #[cfg(test)]

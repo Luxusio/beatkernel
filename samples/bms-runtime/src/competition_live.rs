@@ -14,6 +14,8 @@ use crate::{
         self, CompetitionPresentationHost, SoloNetworkPresentation, NetworkStatus,
     },
     competition_presentation_bridge::NativeCompetitionPresentation,
+    competition_start_gate::{self, CompetitionSetupControl},
+    native_pump_system::SystemControl,
     replay_capture::LiveReplayCapture,
     replay_playback::read_replay,
 };
@@ -29,7 +31,7 @@ use std::{
     fs::File,
     net::SocketAddr,
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -748,47 +750,37 @@ impl LiveCompetition {
     }
     fn await_network_start(
         &mut self,
-        mut service: impl FnMut() -> Result<bool>,
+        service: impl FnMut() -> Result<bool>,
         await_release: bool,
+    ) -> Result<bool> {
+        self.await_network_start_with_ports(
+            service,
+            await_release,
+            &mut SystemControl,
+            &mut NativeCompetitionPresentation,
+        )
+    }
+
+    pub fn await_network_start_with_ports<
+        C: CompetitionSetupControl,
+        H: CompetitionPresentationHost,
+    >(
+        &mut self,
+        service: impl FnMut() -> Result<bool>,
+        await_release: bool,
+        control: &mut C,
+        presentation: &mut H,
     ) -> Result<bool> {
         let Some(network) = self.network.as_mut() else {
             return Ok(true);
         };
-        let deadline = Instant::now() + self.network_setup_timeout;
-        let outcome = (|| -> Result<bool> {
-            network.try_ready()?;
-            loop {
-                if !service()? {
-                    return Ok(false);
-                }
-                for event in network.poll() {
-                    if let MultiplayerNotice::Session(MultiplayerEvent::Disconnected(error)) = event
-                    {
-                        return Err(error.into());
-                    }
-                }
-                if Instant::now() >= deadline {
-                    return Err(crate::multiplayer::MultiplayerError::SetupTimeout.into());
-                }
-                if let Some(schedule) = network.start_schedule() {
-                    if !await_release {
-                        return Ok(true);
-                    }
-                    let now = network.clock_now_ns()?;
-                    if start_release_due(
-                        schedule,
-                        now,
-                        network.start_policy().max_release_lateness_ns,
-                    )? {
-                        return Ok(true);
-                    }
-                }
-                std::thread::sleep(
-                    Duration::from_millis(5)
-                        .min(deadline.saturating_duration_since(Instant::now())),
-                );
-            }
-        })();
+        let outcome = competition_start_gate::await_start(
+            network,
+            control,
+            self.network_setup_timeout,
+            await_release,
+            service,
+        );
         match &outcome {
             Ok(true) => self.network_status = Some(NetworkStatus::Connected),
             Ok(false) => {
@@ -801,11 +793,11 @@ impl LiveCompetition {
                 self.network_status = Some(NetworkStatus::Disconnected);
             }
         }
-        // Preserve the original acquisition/protocol error if presentation also fails.
+        // Preserve acquisition/protocol errors even if forced display also fails.
         if outcome.is_err() {
-            let _ = self.publish_presentation(true);
+            let _ = self.publish_presentation_with_host(true, presentation);
         } else {
-            self.publish_presentation(true)?;
+            self.publish_presentation_with_host(true, presentation)?;
         }
         outcome
     }
@@ -945,27 +937,13 @@ fn display_basename(label: &str) -> String {
 }
 
 /// Software gate release only; downstream device output latency is separate.
+#[cfg(test)]
 fn start_release_due(
     schedule: crate::multiplayer_start::StartSchedule,
     now: i64,
     max_lateness_ns: u64,
 ) -> Result<bool> {
-    if now < 0 || schedule.target_ns < 0 {
-        return Err(crate::multiplayer::MultiplayerError::Protocol(
-            "negative committed start timestamp".into(),
-        )
-        .into());
-    }
-    if now < schedule.target_ns {
-        return Ok(false);
-    }
-    if (now - schedule.target_ns) as u64 > max_lateness_ns {
-        return Err(crate::multiplayer::MultiplayerError::Protocol(
-            "committed software start release exceeded lateness policy".into(),
-        )
-        .into());
-    }
-    Ok(true)
+    competition_start_gate::start_release_due(schedule, now, max_lateness_ns)
 }
 
 #[cfg(test)]

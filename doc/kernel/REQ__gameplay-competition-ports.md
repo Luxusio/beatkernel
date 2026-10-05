@@ -40,7 +40,9 @@ the common loop's concrete dependency; it does not yet separate all internals of
 those IO/comparison implementations. Presentation-discipline dependencies are
 now injected through [the gameplay presentation port](REQ__gameplay-presentation-port.md).
 Comparison display policy uses [its own injected host](REQ__competition-presentation-port.md);
-network/storage/setup waiting and terminal effects remain native owner concerns.
+the outer setup wait now uses [a shared injected gate](REQ__competition-start-gate.md).
+Network/storage, room-adapter waiting, group publication cadence and terminal
+effects remain native owner concerns.
 
 Independent deferred fixtures connect populated fake solo and group observers,
 virtual clock/waits and an explicit host to actual portable Runtime/Mixer paths.

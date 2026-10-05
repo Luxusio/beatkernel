@@ -102,8 +102,13 @@ bridge. See [the presentation port](REQ__gameplay-presentation-port.md) and
 [the estimator boundary](REQ__pure-presentation-estimator.md).
 Their generic sessions now accept business-owned solo/group competition observers; concrete
 native specializations live in the compatibility bridge. The native competition
-implementations still own network, preparation/storage, setup clocks and
-terminal diagnostics. Competition display payloads, projection and 50ms cadence
+implementations still own network, preparation/storage and terminal
+diagnostics. Their outer solo/cohort setup waiting now delegates to a shared
+business start gate with explicit readiness/polling and opaque control-clock
+ports; network release time stays separate. Group network publication cadence
+and underlying room-adapter waiting still use native time. See
+[the start gate](REQ__competition-start-gate.md). Competition display payloads,
+projection and 50ms cadence
 now live in a pure policy using an injected presentation host; native UI and
 display-clock effects live in its bridge. Actual native publication delegates
 to that policy, with explicit host-injected observation/publication entry points.

@@ -38,6 +38,8 @@ are needed to test policy. Existing native compatibility tests remain unchanged.
 No extra crate/dependency or per-note dispatch is required.
 
 This increment separates competition display policy and effects. Native network
-ownership, preparation/storage, diagnostic terminal output and setup waiting still
-need further separation; injecting display alone does not make native competition
+ownership, preparation/storage, diagnostic terminal output, group network
+publication cadence and underlying room-adapter waiting still need further
+separation. Outer solo/cohort setup waiting now uses
+[an injected shared gate](REQ__competition-start-gate.md); injecting display alone does not make native competition
 owners pure. Assertions, formal review/QA, drivers and benchmarks remain deferred.
