@@ -2,7 +2,7 @@
 
 use crate::{
     live_pause::LivePauseBoundary, local_players::PlayerId, local_runtime::PlayerReport,
-    native_gameplay::NativeGameplayResult,
+    native_gameplay::NativeGameplayResult, play_result::CompletedPlayResult,
 };
 use beatkernel::{
     runtime::RuntimeReport,
@@ -54,6 +54,15 @@ pub trait NativeGameplayHost {
     fn publish_report(&mut self, report: &RuntimeReport) -> NativeGameplayResult<()>;
     fn publish_local_reports(&mut self, reports: &[PlayerReport]) -> NativeGameplayResult<()>;
     fn diagnostic(&mut self, diagnostic: NativeGameplayDiagnostic<'_>);
+    fn publish_completed_solo(&mut self, _: CompletedPlayResult) -> NativeGameplayResult<()> {
+        Ok(())
+    }
+    fn publish_completed_local(
+        &mut self,
+        _: &[(PlayerId, CompletedPlayResult)],
+    ) -> NativeGameplayResult<()> {
+        Ok(())
+    }
 }
 
 /// Explicit headless operation without cancellation, publication or diagnostics.

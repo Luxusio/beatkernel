@@ -7,6 +7,7 @@ use crate::{
     mine_damage::MineDamageSummary,
     note_progress::NoteProgress,
     player_chart::PlayerChart,
+    play_result::CompletedPlayResult,
     pressed_keys::{PressedKeys, validate_mask},
     room_presentation::{
         RoomPresentation, RoomResults, RoomUiAction, RoomUiReply, RoomUiRequest, ROOM_UI_CAPACITY,
@@ -110,6 +111,45 @@ impl LocalPlayerSnapshot {
             self.recent_results.push(*event);
         }
     }
+}
+
+/// Native solo completion uses the actual sole registered player identity.
+pub fn publish_completed_solo(
+    result: CompletedPlayResult,
+) -> Result<(), Box<dyn std::error::Error>> {
+    SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        let Some(current) = session.as_mut() else {
+            return Ok(());
+        };
+        if current.snapshot.players.len() != 1 {
+            return Err("solo completion requires one registered player".into());
+        }
+        let player = current.snapshot.players[0].player;
+        if current
+            .snapshot
+            .apply_completed_results(&[(player, result)])?
+        {
+            current.publish_latest(true);
+        }
+        Ok(())
+    })
+}
+
+/// Atomic cohort result publication; unattached execution still returns typed proof.
+pub fn publish_completed_local(
+    rows: &[(PlayerId, CompletedPlayResult)],
+) -> Result<(), Box<dyn std::error::Error>> {
+    SESSION.with(|session| {
+        let mut session = session.borrow_mut();
+        let Some(current) = session.as_mut() else {
+            return Ok(());
+        };
+        if current.snapshot.apply_completed_results(rows)? {
+            current.publish_latest(true);
+        }
+        Ok(())
+    })
 }
 
 /// Replace one known member's comparisons on the game owner, never a callback.
@@ -234,6 +274,8 @@ pub struct PlayerSnapshot {
     pub pause: PauseState,
     /// Native finite endpoint presented and input drained; cleanup status is separate.
     pub completed_end: Option<Timestamp>,
+    /// First proven completion table, retained independently of cleanup status.
+    pub completed_results: Option<Vec<(PlayerId, CompletedPlayResult)>>,
     /// Shared admission metadata and only the selected room score page.
     pub room: Option<Arc<RoomPresentation>>,
     /// Immutable room history attached only after the actual network owner joins.
@@ -257,6 +299,7 @@ impl Default for PlayerSnapshot {
             cancelled: false,
             pause: PauseState::Unavailable,
             completed_end: None,
+            completed_results: None,
             room: None,
             room_results: None,
         }
@@ -1164,6 +1207,66 @@ fn validate_players(players: &[PlayerId]) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 impl PlayerSnapshot {
+    /// Validate the complete registered roster before committing any result.
+    /// Input order is normalized to registered player order; exact repeats are idempotent.
+    pub fn apply_completed_results(
+        &mut self,
+        rows: &[(PlayerId, CompletedPlayResult)],
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.players.is_empty() || self.players.len() > 64 || rows.len() != self.players.len() {
+            return Err("completed results require the whole registered roster".into());
+        }
+        let scope = rows[0].1.scope();
+        for (index, (player, result)) in rows.iter().enumerate() {
+            if player.0 == 0 || rows[..index].iter().any(|(previous, _)| previous == player) {
+                return Err("completed results duplicate a player".into());
+            }
+            let member = self
+                .players
+                .iter()
+                .find(|member| member.player == *player)
+                .ok_or("completed results require registered players")?;
+            if result.scope() != scope || result.gauge() != *member.gauge.snapshot() {
+                return Err("completed results disagree with scope or registered gauge".into());
+            }
+        }
+        for (index, member) in self.players.iter().enumerate() {
+            if member.player.0 == 0
+                || self.players[..index]
+                    .iter()
+                    .any(|previous| previous.player == member.player)
+                || !rows.iter().any(|(player, _)| *player == member.player)
+            {
+                return Err("completed results require a unique complete registered roster".into());
+            }
+        }
+        if let Some(previous) = &self.completed_results {
+            if previous.len() == self.players.len()
+                && previous
+                    .iter()
+                    .zip(&self.players)
+                    .all(|((player, result), member)| {
+                        *player == member.player
+                            && rows.iter().any(|row| row == &(*player, *result))
+                    })
+            {
+                return Ok(false);
+            }
+            return Err("completed results cannot replace the first completion table".into());
+        }
+        let mut staged = Vec::new();
+        staged.try_reserve_exact(self.players.len())?;
+        for member in &self.players {
+            let row = rows
+                .iter()
+                .find(|(player, _)| *player == member.player)
+                .ok_or("completed results omitted a registered player")?;
+            staged.push(*row);
+        }
+        self.completed_results = Some(staged);
+        Ok(true)
+    }
+
     // Populate legacy fields only for actual handoff, avoiding report-frequency
     // cloning of bounded history/grade maps while retaining solo UI call shapes.
     fn sync_legacy(&mut self) {
@@ -1923,3 +2026,7 @@ mod fixtures {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "player_completed_result_fixtures.rs"]
+mod completed_result_fixtures;

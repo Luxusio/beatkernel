@@ -15,6 +15,7 @@ use crate::{
     native_pump_control::{NativePumpControl, NativePumpDeadline},
     offline::OwnedStopEvidence,
     playback_pause::{NativePause, PauseKeyboard, PausePhase},
+    play_result::{CompletedPlayResult, CompletedSoloPublicationError},
     replay_capture::{CaptureError, LiveReplayCapture},
 };
 use beatkernel::{
@@ -22,17 +23,18 @@ use beatkernel::{
     input::PhysicalInputEvent,
     runtime::RuntimeReport,
     telemetry::InputDeliveryTelemetry,
-    time::{
-        ClockDomainId, ClockMapper, ClockMappingQuality, ClockPair, ClockPoint, Duration, Timestamp,
-    },
+    time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
 };
 use beatkernel::time::presentation::{DisciplineConfig, DisciplineUpdate};
+#[cfg(test)]
+use beatkernel::time::ClockPair;
 #[cfg(test)]
 use beatkernel_platform::audio::presentation::discipline::PresentationDiscipline;
 use std::{collections::VecDeque, error::Error, fmt, time::Duration as WallDuration};
 
 pub use crate::native_gameplay_bridge::{
     NativeGameplayDevice, NativeGameplaySession, run_gameplay, run_gameplay_with_control,
+    run_gameplay_with_result,
 };
 
 pub type NativeGameplayResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -338,9 +340,46 @@ fn finite_done_with_terminal(
         && finite_terminal_output_ready(bgm, rendered, admitted_commands)
 }
 
+pub fn run_gameplay_with_ports<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+>(
+    device: &mut D,
+    session: GameplaySession<'_, S, D::Presentation>,
+    config: NativeGameplayConfig,
+    control: &mut C,
+    host_port: &mut H,
+) -> NativeGameplayResult<()> {
+    run_gameplay_with_result_and_ports(device, session, config, control, host_port).map(|_| ())
+}
+
+fn complete_gameplay<S: SoloCompetitionPort, P, H: NativeGameplayHost>(
+    session: &mut GameplaySession<'_, S, P>,
+    config: NativeGameplayConfig,
+    host: &mut H,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    if host.cancelled() {
+        return Ok(None);
+    }
+    let result =
+        CompletedPlayResult::from_completed(config.song_origin, config.end_song, session.gauge);
+    if let Some(competition) = session.competition.as_mut() {
+        competition.mark_native_completed();
+    }
+    if let Some(end) = config.end_song {
+        host.publish_section_end(end);
+    }
+    if let Err(cause) = host.publish_completed_solo(result) {
+        return Err(Box::new(CompletedSoloPublicationError { result, cause }));
+    }
+    Ok(Some(result))
+}
+
 /// Runs the actual pump with explicit device, clock/wait and host effects.
 /// Neither the control deadline nor cancellation is successful song completion.
-pub fn run_gameplay_with_ports<
+pub fn run_gameplay_with_result_and_ports<
     D: crate::gameplay_presentation::GameplayDevice,
     C: NativePumpControl,
     H: NativeGameplayHost,
@@ -351,7 +390,7 @@ pub fn run_gameplay_with_ports<
     config: NativeGameplayConfig,
     control: &mut C,
     host_port: &mut H,
-) -> NativeGameplayResult<()> {
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
     if session.gauge.profile() != &GaugeProfile::default() {
         return Err("native gameplay requires the default recorded gauge policy".into());
     }
@@ -477,7 +516,7 @@ pub fn run_gameplay_with_ports<
         let old_len = pending.len();
         let batch = device.acquire(&mut pending)?;
         if batch.closed {
-            return Ok(());
+            return Ok(None);
         }
         if pending.len() < old_len || pending.len() > MAX_PENDING_INPUT_EVENTS {
             return Err("native adapter violated pending input bounds".into());
@@ -661,11 +700,7 @@ pub fn run_gameplay_with_ports<
                 session.runtime.admitted_audio_commands(),
             )
         {
-            if let Some(competition) = session.competition.as_mut() {
-                competition.mark_native_completed();
-            }
-            host_port.publish_section_end(config.end_song.expect("finite endpoint admitted"));
-            return Ok(());
+            return complete_gameplay(&mut session, config, host_port);
         }
         if config.end_song.is_none()
             && !batch.backlog
@@ -692,16 +727,13 @@ pub fn run_gameplay_with_ports<
                     )?
                 };
                 if finished {
-                    if let Some(competition) = session.competition.as_mut() {
-                        competition.mark_native_completed();
-                    }
-                    return Ok(());
+                    return complete_gameplay(&mut session, config, host_port);
                 }
             }
         }
         control.wait(WallDuration::from_millis(1))?;
     }
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(test)]

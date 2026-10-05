@@ -21,6 +21,7 @@ use crate::{
     multiplayer::Progress,
     native_gameplay::{MAX_PENDING_INPUT_EVENTS, NativeGameplayConfig, NativeGameplayResult},
     playback_pause::{NativePause, PauseKeyboard, PausePhase},
+    play_result::{CompletedPlayResult, CompletedLocalPublicationError},
     replay_capture::LiveReplayCapture,
 };
 use beatkernel::{
@@ -42,7 +43,7 @@ use std::{
 };
 pub use crate::native_gameplay_bridge::{
     NativeCohortSession, PlayerState, finite_cohort_done, member_progress, run_cohort,
-    run_cohort_with_control,
+    run_cohort_with_control, run_cohort_with_results,
 };
 #[cfg(test)]
 use crate::native_group_competition::NativeGroupCompetition;
@@ -538,9 +539,61 @@ pub fn lag_reaches(now: ClockPoint, boundary: ClockPoint, lag: i64) -> NativeGam
     Ok(frontier >= i128::from(boundary.timestamp.as_nanos()))
 }
 
+pub fn run_cohort_with_ports<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+>(
+    device: &mut D,
+    session: CohortSession<'_, S, G, D::Presentation>,
+    config: NativeGameplayConfig,
+    control: &mut C,
+    host_port: &mut H,
+) -> NativeGameplayResult<()> {
+    run_cohort_with_results_and_ports(device, session, config, control, host_port).map(|_| ())
+}
+
+fn complete_cohort<S: SoloCompetitionPort, G: GroupCompetitionPort, P, H: NativeGameplayHost>(
+    session: &mut CohortSession<'_, S, G, P>,
+    config: NativeGameplayConfig,
+    host: &mut H,
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    if host.cancelled() {
+        return Ok(None);
+    }
+    let mut results = Vec::new();
+    results.try_reserve_exact(session.states.len())?;
+    for state in session.states.iter() {
+        results.push((
+            state.player,
+            CompletedPlayResult::from_completed(config.song_origin, config.end_song, &state.gauge),
+        ));
+    }
+    if host.cancelled() {
+        return Ok(None);
+    }
+    for state in session.states.iter_mut() {
+        if let Some(competition) = state.competition.as_mut() {
+            competition.mark_native_completed();
+        }
+    }
+    if let Some(network) = session.network.as_deref_mut() {
+        network.mark_native_completed();
+    }
+    if let Some(end) = config.end_song {
+        host.publish_section_end(end);
+    }
+    if let Err(cause) = host.publish_completed_local(&results) {
+        return Err(Box::new(CompletedLocalPublicationError { results, cause }));
+    }
+    Ok(Some(results))
+}
+
 /// Runs the actual cohort policy with explicit device, clock/wait and host effects.
 /// Acquired input and native presentation keep their original clock domains.
-pub fn run_cohort_with_ports<
+pub fn run_cohort_with_results_and_ports<
     D: crate::gameplay_presentation::GameplayDevice,
     C: NativePumpControl,
     H: NativeGameplayHost,
@@ -552,7 +605,7 @@ pub fn run_cohort_with_ports<
     config: NativeGameplayConfig,
     control: &mut C,
     host_port: &mut H,
-) -> NativeGameplayResult<()> {
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
     if session
         .states
         .iter()
@@ -705,7 +758,7 @@ pub fn run_cohort_with_ports<
         // loss and cross-device ordering would be hidden behind a pause request.
         let batch = device.acquire(&mut acquired)?;
         if batch.closed {
-            return Ok(());
+            return Ok(None);
         }
         if acquired.len() > MAX_PENDING_INPUT_EVENTS {
             return Err("cohort native batch exceeds bound".into());
@@ -901,17 +954,7 @@ pub fn run_cohort_with_ports<
                 rendered,
             )
         {
-            for state in session.states.iter_mut() {
-                if let Some(competition) = state.competition.as_mut() {
-                    competition.mark_native_completed();
-                }
-            }
-            if let Some(network) = session.network.as_deref_mut() {
-                network.mark_native_completed();
-            }
-            host_port
-                .publish_section_end(config.end_song.expect("finite cohort endpoint admitted"));
-            return Ok(());
+            return complete_cohort(&mut session, config, host_port);
         }
         if config.end_song.is_none()
             && session.pause.phase() == PausePhase::Running
@@ -949,20 +992,12 @@ pub fn run_cohort_with_ports<
                 };
             }
             if finished {
-                for state in session.states.iter_mut() {
-                    if let Some(competition) = state.competition.as_mut() {
-                        competition.mark_native_completed();
-                    }
-                }
-                if let Some(network) = session.network.as_deref_mut() {
-                    network.mark_native_completed();
-                }
-                return Ok(());
+                return complete_cohort(&mut session, config, host_port);
             }
         }
         control.wait(WallDuration::from_millis(1))?;
     }
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(test)]

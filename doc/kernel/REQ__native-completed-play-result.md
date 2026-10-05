@@ -14,8 +14,14 @@ None. Errors remain errors. This makes headless completion evidence available
 without depending on a UI publisher. No session-field or device-trait changes,
 platform-specific policy or OS-launcher duplication is needed.
 
-Publish completed results through an internal player bridge in the actual
-completion paths. The retained PlayerSnapshot stores one bounded result table
+Publish completed results through explicit business host callbacks in the
+actual completion paths. Default callbacks are no-ops for existing injected
+hosts. Only the native compatibility host calls the player adapter; common
+gameplay policy cannot reach a player global/thread-local. Add result-returning
+fully injected entry points alongside the old unit-returning wrappers.
+Publication refusal after proven completion is a technical error carrying the
+exact immutable result/table and original cause, not a rollback of completion.
+Check cancellation again before final classification/marking/publication. The retained PlayerSnapshot stores one bounded result table
 for its exact registered roster; LocalPlayerSnapshot's existing shape stays
 unchanged. Solo uses the sole registered identity, local uses original member IDs.
 Validate all rows, unique identities, roster coverage, gauge snapshot agreement,
@@ -24,6 +30,10 @@ Unknown/missing/duplicate/later-invalid rows must not publish a partial prefix.
 New sessions start without results. Repeating the exact table is idempotent;
 changed results cannot replace an attached first completion table.
 
+On first commitment, force one nonblocking handoff attempt through the existing
+retained snapshot channel so report cadence does not defer results until cleanup.
+An occupied channel may still defer visibility; final cleanup handoff retains
+the snapshot. An exact repeat does not trigger another completion handoff.
 Publish once using the existing retained snapshot channel, with no new render
 loop, native/device access, business-policy copy or per-frame result calculation.
 Keep original score/history/pressed state, room results and lifecycle status.

@@ -75,3 +75,37 @@ impl CompletedPlayResult {
         )
     }
 }
+
+/// Publication failure after actual completion retains the immutable proof.
+#[derive(Debug)]
+pub struct CompletedSoloPublicationError {
+    pub result: CompletedPlayResult,
+    pub cause: Box<dyn std::error::Error>,
+}
+impl std::fmt::Display for CompletedSoloPublicationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "completed solo result publication: {}", self.cause)
+    }
+}
+impl std::error::Error for CompletedSoloPublicationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}
+
+/// A complete cohort proof survives refusal of its atomic display publication.
+#[derive(Debug)]
+pub struct CompletedLocalPublicationError {
+    pub results: Vec<(crate::local_players::PlayerId, CompletedPlayResult)>,
+    pub cause: Box<dyn std::error::Error>,
+}
+impl std::fmt::Display for CompletedLocalPublicationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "completed local result publication: {}", self.cause)
+    }
+}
+impl std::error::Error for CompletedLocalPublicationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.cause.as_ref())
+    }
+}

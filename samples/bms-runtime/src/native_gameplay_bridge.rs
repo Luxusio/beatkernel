@@ -10,17 +10,19 @@ use crate::{
     multiplayer_group::MemberProgress,
     native_cohort::{
         CohortSession, GameplayPlayerState, finite_cohort_done_for_states,
-        member_progress_for_states, run_cohort_with_ports,
+        member_progress_for_states, run_cohort_with_ports, run_cohort_with_results_and_ports,
     },
     native_gameplay::{
         GameplaySession, InputBatch, NativeGameplayConfig, NativeGameplayResult,
-        run_gameplay_with_ports,
+        run_gameplay_with_ports, run_gameplay_with_result_and_ports,
     },
     native_gameplay_host::{NativeGameplayDiagnostic, NativeGameplayHost, PauseState},
     native_group_competition::NativeGroupCompetition,
     native_pump_control::NativePumpControl,
     native_pump_system::SystemControl,
     player,
+    local_players::PlayerId,
+    play_result::CompletedPlayResult,
 };
 use beatkernel::{
     audio::RenderReport,
@@ -210,6 +212,15 @@ impl NativeGameplayHost for PlayerGameplayHost {
     fn publish_local_reports(&mut self, reports: &[PlayerReport]) -> NativeGameplayResult<()> {
         player::publish_local_reports(reports)
     }
+    fn publish_completed_solo(&mut self, result: CompletedPlayResult) -> NativeGameplayResult<()> {
+        player::publish_completed_solo(result)
+    }
+    fn publish_completed_local(
+        &mut self,
+        results: &[(PlayerId, CompletedPlayResult)],
+    ) -> NativeGameplayResult<()> {
+        player::publish_completed_local(results)
+    }
     fn diagnostic(&mut self, diagnostic: NativeGameplayDiagnostic<'_>) {
         match diagnostic {
             NativeGameplayDiagnostic::SoloReport(report) => {
@@ -297,4 +308,33 @@ pub fn run_cohort_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
     control: &mut C,
 ) -> NativeGameplayResult<()> {
     run_cohort_with_ports(device, session, config, control, &mut PlayerGameplayHost)
+}
+
+/// Returns actual completion evidence independently of native cleanup status.
+pub fn run_gameplay_with_result<D: NativeGameplayDevice>(
+    device: &mut D,
+    session: NativeGameplaySession<'_>,
+    config: NativeGameplayConfig,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    run_gameplay_with_result_and_ports(
+        device,
+        session,
+        config,
+        &mut SystemControl,
+        &mut PlayerGameplayHost,
+    )
+}
+
+pub fn run_cohort_with_results<D: NativeGameplayDevice>(
+    device: &mut D,
+    session: NativeCohortSession<'_>,
+    config: NativeGameplayConfig,
+) -> NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>> {
+    run_cohort_with_results_and_ports(
+        device,
+        session,
+        config,
+        &mut SystemControl,
+        &mut PlayerGameplayHost,
+    )
 }

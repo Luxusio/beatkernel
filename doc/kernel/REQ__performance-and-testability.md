@@ -117,7 +117,9 @@ This does not make the remaining native network owners pure. See
 Those adapters, file/network boundaries and adapter coverage require continued
 audit and separation. See [the competition ports](REQ__gameplay-competition-ports.md)
 and [the host boundary](REQ__native-gameplay-host.md) for
-its exact scope and remaining effects. Completed-play result integration remains
-planned. Test execution, hardware QA and comparative benchmarks remain deferred
+its exact scope and remaining effects. Native completion now returns typed
+solo/per-member results through injected hosts and retains an atomic registered
+roster table in player snapshots. Result rendering, browser delivery and archive
+integration remain unfinished. Test execution, hardware QA and comparative benchmarks remain deferred
 under the user's existing verification instruction; no quality target is
 considered achieved by authoring fixtures or passing compile-only checks.

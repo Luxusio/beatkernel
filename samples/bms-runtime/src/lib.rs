@@ -291,6 +291,8 @@ pub mod native_judge;
 #[cfg(test)]
 mod native_local_presentation_port_fixtures;
 #[cfg(test)]
+mod native_local_result_fixtures;
+#[cfg(test)]
 mod native_mine_audio_fixtures;
 #[cfg(test)]
 mod native_mine_fixtures;
@@ -307,6 +309,8 @@ pub mod native_room_competition;
 pub mod native_room_network;
 #[cfg(test)]
 mod native_solo_presentation_port_fixtures;
+#[cfg(test)]
+mod native_solo_result_fixtures;
 /// Checked nominal session/host/output projection for future native frame startup.
 pub mod native_start;
 /// Full-prefix prepared-object presentation state.
