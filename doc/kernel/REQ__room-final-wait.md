@@ -41,3 +41,26 @@ Compilation does not establish end-to-end completion or physical audio sync.
 Eight independent fixture groups are authored and compiled only. Four source
 configurations exited zero after both writers stopped. See
 [the evidence scope](../changes/CHANGE__room-final-wait.md).
+
+## Resumable final waiting
+
+`RoomFinalWaitState` keeps the same fixed deadlines, previous clock observations
+and own command admissions across finite `step` calls. A step performs one
+policy iteration and returns `RoomFinalStep::Wait(ns)` or `Completed`; it never
+parks, loops, acquires a resource or creates a timer. The caller schedules the
+next step. The existing blocking wait delegates to this state and alone parks
+for the returned delay. Observations, clock checks, command effects and their
+error precedence remain in their original order.
+
+Success is sticky and subsequent steps return Completed without port effects.
+Any error seals the state: its original associated error is returned once and
+subsequent steps refuse with InvalidTerminal without effects. Accepted commands
+are never rolled back or repeated after a terminal error. A scheduling/park
+failure is the caller's responsibility and must stop that wait attempt.
+This component prepares asynchronous orchestration; actual browser integration
+and runtime acceptance remain unfinished and deferred.
+
+Seven additional independent step fixture groups are authored and compiled only.
+All four source configurations exited zero after both writers stopped; see
+[the incremental evidence](../changes/CHANGE__room-final-step.md). This preserves
+the deferred execution and unfinished full-player acceptance boundary above.
