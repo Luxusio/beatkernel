@@ -185,10 +185,13 @@ impl GhostOpponent {
     pub const fn recorded_until(&self) -> Option<Timestamp> {
         self.recorded_until
     }
-    fn prefix(&self, time: Timestamp) -> Result<(usize, ScoreSummary), CompetitionError> {
+    fn prefix(&self, time: Timestamp) -> Result<(usize, Option<ScoreSummary>), CompetitionError> {
         let cursor = self
             .batches
             .partition_point(|batch| batch.song_time <= time);
+        if cursor == self.cursor {
+            return Ok((cursor, None));
+        }
         let forward = cursor >= self.cursor;
         let mut score = if forward {
             self.score.clone()
@@ -199,7 +202,7 @@ impl GhostOpponent {
         for batch in &self.batches[start..cursor] {
             score.observe(&batch.events)?;
         }
-        Ok((cursor, score))
+        Ok((cursor, Some(score)))
     }
 }
 
@@ -212,6 +215,7 @@ pub struct Competition {
     expected_header: ReplayHeader,
     max_opponents: usize,
     opponents: Vec<GhostOpponent>,
+    prepared_updates: Vec<(usize, Option<ScoreSummary>)>,
     score: ScoreSummary,
     song_time: Option<Timestamp>,
 }
@@ -230,6 +234,7 @@ impl Competition {
             expected_header,
             max_opponents,
             opponents: Vec::new(),
+            prepared_updates: Vec::new(),
             score: ScoreSummary::default(),
             song_time: None,
         })
@@ -297,10 +302,15 @@ impl Competition {
         if let Some(time) = self.song_time {
             let (cursor, score) = opponent.prefix(time)?;
             opponent.cursor = cursor;
-            opponent.score = score;
+            if let Some(score) = score {
+                opponent.score = score;
+            }
         }
         self.opponents
             .try_reserve(1)
+            .map_err(|_| CompetitionError::AllocationFailed)?;
+        self.prepared_updates
+            .try_reserve(self.opponents.len() + 1)
             .map_err(|_| CompetitionError::AllocationFailed)?;
         let index = self.opponents.len();
         self.opponents.push(opponent);
@@ -322,9 +332,12 @@ impl Competition {
             self.song_time = Some(song_time);
             return Ok(());
         }
+        if events.is_empty() {
+            return self.update(None, song_time);
+        }
         let mut score = self.score.clone();
         score.observe(events)?;
-        self.update(score, song_time)
+        self.update(Some(score), song_time)
     }
     /// Replaces the local summary with an actual reconstructed result prefix and
     /// seeks saved opponents through recorded operations only, in either direction.
@@ -335,28 +348,44 @@ impl Competition {
     ) -> Result<(), CompetitionError> {
         let mut score = ScoreSummary::default();
         score.observe(local_prefix)?;
-        self.update(score, song_time)
+        self.update(Some(score), song_time)
     }
-    fn update(&mut self, score: ScoreSummary, time: Timestamp) -> Result<(), CompetitionError> {
+    fn update(
+        &mut self,
+        score: Option<ScoreSummary>,
+        time: Timestamp,
+    ) -> Result<(), CompetitionError> {
         // Prepare all updates before committing either local or remote display state.
-        let mut updates = Vec::new();
-        updates
-            .try_reserve_exact(self.opponents.len())
-            .map_err(|_| CompetitionError::AllocationFailed)?;
+        self.prepared_updates.clear();
         for opponent in &self.opponents {
-            updates.push(opponent.prefix(time)?);
+            match opponent.prefix(time) {
+                Ok(update) => self.prepared_updates.push(update),
+                Err(error) => {
+                    self.prepared_updates.clear();
+                    return Err(error);
+                }
+            }
         }
-        for (opponent, (cursor, score)) in self.opponents.iter_mut().zip(updates) {
+        for (opponent, (cursor, score)) in self
+            .opponents
+            .iter_mut()
+            .zip(self.prepared_updates.drain(..))
+        {
             opponent.cursor = cursor;
-            opponent.score = score;
+            if let Some(score) = score {
+                opponent.score = score;
+            }
             opponent.song_time = Some(time);
         }
-        self.score = score;
+        if let Some(score) = score {
+            self.score = score;
+        }
         self.song_time = Some(time);
         Ok(())
     }
     /// Clears displayed scores/progress, retaining loaded validated recordings.
     pub fn reset(&mut self) {
+        self.prepared_updates.clear();
         self.score = ScoreSummary::default();
         self.song_time = None;
         for opponent in &mut self.opponents {
@@ -710,3 +739,7 @@ mod tests {
 #[cfg(test)]
 #[path = "score_observation_fixtures.rs"]
 mod score_observation_fixtures;
+
+#[cfg(test)]
+#[path = "competition_updates_fixtures.rs"]
+mod competition_updates_fixtures;
