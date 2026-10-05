@@ -13,7 +13,7 @@ use crate::{
     },
     replay_visual::ReplayVisual,
     step_gameplay::{
-        StepAudioBatch, StepGameplayError, acknowledge_batch,
+        StepAudioBatch, StepGameplayError, acknowledge_batch_with_stop_evidence,
         validate_section_output_evidence_with_stops,
     },
 };
@@ -295,27 +295,17 @@ impl StepReplay {
         success: bool,
     ) -> Result<(), StepReplayError> {
         self.ensure_usable()?;
-        let mut candidate = self.acknowledged_stops;
-        let counted = self.pending.as_ref().map_or(Ok(()), |batch| {
-            candidate.record_admitted(&batch.commands[..admitted.min(batch.commands.len())])
-        });
-        match acknowledge_batch(self.pending.take(), sequence, admitted, success) {
-            Ok(()) => {
-                if let Err(error) = counted {
-                    self.failed = true;
-                    return Err(StepReplayError::InvalidConfiguration(error));
-                }
-                self.acknowledged_stops = candidate;
-                Ok(())
-            }
-            Err(error) => {
-                if matches!(&error, StepGameplayError::AudioRejected { .. }) && counted.is_ok() {
-                    self.acknowledged_stops = candidate;
-                }
-                self.failed = true;
-                Err(StepReplayError::Acknowledgement(error))
-            }
-        }
+        acknowledge_batch_with_stop_evidence(
+            self.pending.take(),
+            sequence,
+            admitted,
+            success,
+            &mut self.acknowledged_stops,
+        )
+        .map_err(|error| {
+            self.failed = true;
+            StepReplayError::Acknowledgement(error)
+        })
     }
 
     /// Only genuine presentation advances recorded operations. Render reports

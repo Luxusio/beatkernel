@@ -35,6 +35,8 @@ The [replay gauge-failure audio plan](REQ__replay-gauge-sound-stop.md) uses this
 component for its mapped Stops. The
 [offline owner](REQ__offline-gauge-sound-stop.md) tracks actual local admission;
 the [stepped replay ACK owner](REQ__step-replay-stop-ack.md) distinguishes actual
-remote Stop prefixes from prepared feeder callbacks. Other native/live/local
-ownership and failed-output completion must be connected before whole-player
-completion claims. Mine admission stays guarded.
+remote Stop prefixes from prepared feeder callbacks. The
+[stepped live/local owner](REQ__step-live-stop-ack.md) uses that same ACK component
+for its shared remote output. Native output ownership and numeric-failure terminal
+readiness still require integration before whole-player completion claims.
+Mine admission stays guarded.

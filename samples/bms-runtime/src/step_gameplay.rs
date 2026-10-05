@@ -19,7 +19,9 @@ use crate::{
     mine_sounds::MineSoundPlan,
     native_judge::NativeJudgeConfig,
     offline::OwnedStopEvidence,
-    replay_audio::{ReplayAudioError, before_endpoint, completed_render_cursor, section_end_frame},
+    replay_audio::{
+        ReplayAudioError, before_endpoint, completed_render_cursor_with_stops, section_end_frame,
+    },
     replay_capture::{CaptureError, LiveReplayCapture, setup_input_sound_header},
 };
 use beatkernel::{
@@ -370,6 +372,7 @@ pub struct StepGameplay {
     pending: Option<StepAudioBatch>,
     sequence: u64,
     acknowledged_commands: u64,
+    acknowledged_stops: OwnedStopEvidence,
     failed: bool,
 }
 
@@ -849,6 +852,7 @@ impl StepGameplay {
             pending: None,
             sequence: 0,
             acknowledged_commands: 0,
+            acknowledged_stops: OwnedStopEvidence::default(),
             failed: false,
         };
         owner.feed_audio(0, config.bgm_pending)?;
@@ -1384,32 +1388,26 @@ impl StepGameplay {
         presented: Option<ClockPoint>,
     ) -> Result<Option<ClockPoint>, StepGameplayError> {
         self.ensure_usable()?;
-        let validated = if self.playback_end_frame.is_some() {
-            validate_section_output_evidence(
-                self.output_origin,
-                self.sample_rate,
-                self.last_render,
-                self.last_presented,
-                rendered,
-                presented,
-                self.playback_end_frame,
-            )
-        } else {
-            validate_output_evidence(
-                self.output_origin,
-                self.sample_rate,
-                self.last_render,
-                self.last_presented,
-                rendered,
-                presented,
-            )
-        }
+        let validated = validate_section_output_evidence_with_stops(
+            self.output_origin,
+            self.sample_rate,
+            self.last_render,
+            self.last_presented,
+            rendered,
+            presented,
+            self.playback_end_frame,
+            &self.acknowledged_stops,
+        )
         .and_then(|normalized| {
             if self.playback_end_frame.is_some() {
                 if let Some(report) = rendered {
-                    completed_render_cursor(&report).map_err(|_| {
-                        CompletionError("finite output reports a late or rejected audio command")
-                    })?;
+                    completed_render_cursor_with_stops(&report, &self.acknowledged_stops).map_err(
+                        |_| {
+                            CompletionError(
+                                "finite output reports a late or rejected audio command",
+                            )
+                        },
+                    )?;
                 }
             }
             Ok(normalized)
@@ -1520,7 +1518,14 @@ impl StepGameplay {
     ) -> Result<(), StepGameplayError> {
         self.ensure_usable()?;
         let batch = self.pending.take();
-        acknowledge_batch(batch, sequence, admitted, success).map_err(|error| {
+        acknowledge_batch_with_stop_evidence(
+            batch,
+            sequence,
+            admitted,
+            success,
+            &mut self.acknowledged_stops,
+        )
+        .map_err(|error| {
             self.failed = true;
             error
         })?;
@@ -1570,6 +1575,10 @@ impl StepGameplay {
     }
     pub fn bgm_report(&self) -> BgmFeedReport {
         self.bgm.report()
+    }
+    /// Actual Stop prefix accepted by valid remote ACKs, retained after failure.
+    pub fn acknowledged_stop_commands(&self) -> u64 {
+        self.acknowledged_stops.admitted_stops()
     }
     pub fn judge(&self) -> &JudgeEngine {
         self.runtime.judge()
@@ -1822,6 +1831,11 @@ impl StepLocalGameplay {
     }
     pub fn bgm_report(&self) -> BgmFeedReport {
         self.control.bgm_report()
+    }
+    /// Actual remote Stop ACK count for the shared queue, not a per-player count.
+    /// Remains readable after a technical owner failure.
+    pub fn acknowledged_stop_commands(&self) -> u64 {
+        self.control.acknowledged_stop_commands()
     }
 
     pub fn configure_touch_router(
@@ -2253,6 +2267,36 @@ pub(crate) fn acknowledge_batch(
         });
     }
     Ok(())
+}
+
+/// Record only the original prefix accepted by the authoritative ACK validator.
+/// Invalid ACKs earn nothing; valid partial rejection retains its original error.
+pub(crate) fn acknowledge_batch_with_stop_evidence(
+    batch: Option<StepAudioBatch>,
+    sequence: u64,
+    admitted: usize,
+    success: bool,
+    evidence: &mut OwnedStopEvidence,
+) -> Result<(), StepGameplayError> {
+    let mut candidate = *evidence;
+    let counted = batch.as_ref().map_or(Ok(()), |batch| {
+        candidate.record_admitted(&batch.commands[..admitted.min(batch.commands.len())])
+    });
+    match acknowledge_batch(batch, sequence, admitted, success) {
+        Ok(()) => {
+            if counted.is_err() {
+                return Err(StepGameplayError::AudioCountOverflow { sequence, admitted });
+            }
+            *evidence = candidate;
+            Ok(())
+        }
+        Err(error) => {
+            if matches!(&error, StepGameplayError::AudioRejected { .. }) && counted.is_ok() {
+                *evidence = candidate;
+            }
+            Err(error)
+        }
+    }
 }
 
 /// Shared validation for normal unlimited live/replay output; no state is adopted.
