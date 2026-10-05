@@ -5,7 +5,7 @@ use crate::{
     multiplayer_group::encode_words,
     multiplayer_group_rooms::GroupRoomPhase,
     multiplayer_protocol::WriteStep,
-    multiplayer_room_play::RoomPlayClient,
+    multiplayer_room_play::{RoomPlayClient, RoomPlayError},
     multiplayer_rooms::ParticipantId,
     multiplayer_start::StartPolicy,
     room_client_driver::{RoomClientDriver, RoomDrainError, RoomClientSetupError},
@@ -141,6 +141,37 @@ impl BrowserRoomClient {
         }
     }
 
+    fn frame_error(&mut self, value: RoomPlayError) -> JsValue {
+        if !matches!(
+            value,
+            RoomPlayError::FrameWait(crate::room_frame_wait::RoomFrameWaitError::Deadline(
+                crate::room_setup_wait::RoomDeadlineError::Expired
+            ))
+        ) {
+            return error(value);
+        }
+        let result = error(value);
+        let assigned = (|| -> Result<(), JsValue> {
+            field(
+                &js_sys::Object::from(result.clone()),
+                "code",
+                JsValue::from_str("timeout"),
+            )?;
+            field(
+                &js_sys::Object::from(result.clone()),
+                "operation",
+                JsValue::from_str("frame"),
+            )
+        })();
+        match assigned {
+            Ok(()) => result,
+            Err(failure) => {
+                self.close();
+                failure
+            }
+        }
+    }
+
     fn local_result(&mut self, result: Result<(), JsValue>) -> Result<(), JsValue> {
         if let Err(value) = &result {
             if !self.driver.failed() {
@@ -234,7 +265,7 @@ impl BrowserRoomClient {
         self.driver
             .receive_bytes(&bytes, captured_ns, now_ns)
             .map(|size| size as u32)
-            .map_err(error)
+            .map_err(|error| self.frame_error(error))
     }
     pub fn next_write(&mut self, now_ns: i64) -> Result<BrowserMultiplayerWrite, JsValue> {
         self.driver
@@ -291,6 +322,20 @@ impl BrowserRoomClient {
         result
     }
 
+    pub fn configure_frame_wait(&mut self, timeout_ns: u64) -> Result<(), JsValue> {
+        self.driver
+            .configure_frame_wait(timeout_ns)
+            .map_err(|error| self.frame_error(error))
+    }
+    pub fn frame_wait_step(&mut self, now_ns: i64) -> Result<i64, JsValue> {
+        self.driver
+            .frame_wait_step(now_ns)
+            .map(|step| match step {
+                crate::room_frame_wait::RoomFrameWaitStep::Idle => -1,
+                crate::room_frame_wait::RoomFrameWaitStep::Wait(ns) => ns as i64,
+            })
+            .map_err(|error| self.frame_error(error))
+    }
     pub fn begin_setup(&mut self, now_ns: i64, timeout_ns: u64) -> Result<(), JsValue> {
         self.driver
             .begin_setup(now_ns, timeout_ns)

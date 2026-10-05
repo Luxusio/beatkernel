@@ -102,6 +102,7 @@ fn options() -> RoomNetworkOptions {
         setup_timeout: Duration::from_secs(1),
         drain_timeout: Duration::from_millis(1),
         finish_timeout: Duration::from_millis(10),
+        frame_timeout: Duration::from_secs(10),
         queue_capacity: 2,
         start_policy: StartPolicy::default(),
         preroll_ns: 0,
@@ -185,7 +186,7 @@ fn admitted() -> (
 
 #[test]
 fn constructor_validation_precedes_every_stream_operation() {
-    for field in 0..5 {
+    for field in 0..7 {
         let state = Rc::new(RefCell::new(Script::default()));
         let mut config = options();
         match field {
@@ -193,7 +194,9 @@ fn constructor_validation_precedes_every_stream_operation() {
             1 => config.drain_timeout = Duration::from_secs(121),
             2 => config.finish_timeout = Duration::ZERO,
             3 => config.queue_capacity = 0,
-            _ => config.preroll_ns = -1,
+            4 => config.preroll_ns = -1,
+            5 => config.frame_timeout = Duration::ZERO,
+            _ => config.frame_timeout = Duration::from_secs(121),
         }
         let result = RoomNetworkActor::new(owner_io(state.clone()), config);
         assert!(matches!(result, Err(ref error) if error.kind() == io::ErrorKind::InvalidInput));

@@ -19,6 +19,7 @@ pub struct RoomNetworkOptions {
     pub setup_timeout: Duration,
     pub drain_timeout: Duration,
     pub finish_timeout: Duration,
+    pub frame_timeout: Duration,
     pub queue_capacity: usize,
     pub start_policy: StartPolicy,
     pub preroll_ns: i64,
@@ -29,6 +30,7 @@ impl Default for RoomNetworkOptions {
             setup_timeout: Duration::from_secs(60),
             drain_timeout: Duration::from_secs(10),
             finish_timeout: Duration::from_secs(2),
+            frame_timeout: Duration::from_secs(10),
             queue_capacity: 32,
             start_policy: StartPolicy::default(),
             preroll_ns: 0,
@@ -38,9 +40,14 @@ impl Default for RoomNetworkOptions {
 impl RoomNetworkOptions {
     pub fn validate(self) -> io::Result<()> {
         if !(1..=1024).contains(&self.queue_capacity)
-            || [self.setup_timeout, self.drain_timeout, self.finish_timeout]
-                .iter()
-                .any(|limit| *limit < Duration::from_millis(1) || *limit > MAX_TIMEOUT)
+            || [
+                self.setup_timeout,
+                self.drain_timeout,
+                self.finish_timeout,
+                self.frame_timeout,
+            ]
+            .iter()
+            .any(|limit| *limit < Duration::from_millis(1) || *limit > MAX_TIMEOUT)
             || self.preroll_ns < 0
         {
             return Err(invalid("invalid bounded native room options"));

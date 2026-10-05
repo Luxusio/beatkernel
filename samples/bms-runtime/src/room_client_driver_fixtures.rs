@@ -2,6 +2,7 @@
 use super::{RoomClientDriver, RoomDrainError, RoomClientSetupError};
 use crate::{
     room_final_wait::RoomFinalStep,
+    room_frame_wait::{RoomFrameWaitError, RoomFrameWaitStep},
     room_setup_wait::{RoomSetupStep, RoomSetupError, RoomSetupPhase, RoomDeadlineError},
     local_players::PlayerId,
     multiplayer_group::{MemberProgress, encode_words},
@@ -892,4 +893,108 @@ fn setup_late_real_admission_and_lifetime_refusals_never_promote_completion() {
         assert!(client.begin_setup(11_200, 1_000_000).is_err());
         no_final_receipts(client);
     }
+}
+
+#[test]
+fn frame_wait_uses_real_header_body_prefix_and_refuses_late_admission_before_mutation() {
+    for late in [false, true] {
+        let mut client = driver();
+        assert!(client.configure_frame_wait(1_000_000).is_ok());
+        let join = client.next_write(0).unwrap().unwrap();
+        let RoomMessage::Join { identity, players } = decode_message(&join.bytes).unwrap() else {
+            panic!("Join")
+        };
+        client.written(join.id, 0, 0).unwrap();
+        let mut registry = GroupRoomRegistry::new(GroupRoomPolicy::new(1, 2, 16, 1_000).unwrap());
+        let id = registry.join("driver", &identity, &players, 0).unwrap().id;
+        let bytes = encode_message(&RoomMessage::Admitted { participant: id }).unwrap();
+        let header = client.needed_bytes().unwrap();
+        assert_eq!(
+            client.receive_bytes(&bytes[..header], 10, 10).unwrap(),
+            header
+        );
+        assert!(client.frame_pending());
+        assert!(matches!(
+            client.frame_wait_step(10),
+            Ok(RoomFrameWaitStep::Wait(1_000_000))
+        ));
+        assert_eq!(client.revision(), 0);
+        assert_eq!(client.participant_id(), 0);
+        let now = if late { 1_000_010 } else { 1_000_009 };
+        let result = client.receive_bytes(&bytes[header..], now, now);
+        if late {
+            let first = result.unwrap_err();
+            assert_eq!(
+                first,
+                RoomPlayError::FrameWait(RoomFrameWaitError::Deadline(RoomDeadlineError::Expired))
+            );
+            assert!(client.failed());
+            assert_eq!(client.revision(), 0);
+            assert_eq!(client.participant_id(), 0);
+            assert_eq!(client.receive_bytes(&[], now, now).unwrap_err(), first);
+            assert_eq!(client.frame_wait_step(now).unwrap_err(), first);
+        } else {
+            assert_eq!(result.unwrap(), bytes.len() - header);
+            assert_eq!(client.revision(), 1);
+            assert_eq!(client.participant_id(), id.0);
+            assert!(matches!(
+                client.frame_wait_step(now),
+                Ok(RoomFrameWaitStep::Idle)
+            ));
+            let next = encode_message(&snapshot(&registry)).unwrap();
+            let header = client.needed_bytes().unwrap();
+            let at = 604_800_000_000_000;
+            client.receive_bytes(&next[..header], at, at).unwrap();
+            assert!(matches!(
+                client.frame_wait_step(at),
+                Ok(RoomFrameWaitStep::Wait(1_000_000))
+            ));
+            client
+                .receive_bytes(&next[header..], at + 999_999, at + 999_999)
+                .unwrap();
+            assert_eq!(client.revision(), 2);
+            assert!(client.has_snapshot());
+        }
+        no_final_receipts(&client);
+    }
+}
+
+#[test]
+fn frame_wait_configuration_is_once_empty_live_and_cannot_replace_a_partial_deadline() {
+    let mut client = driver();
+    assert!(client.configure_frame_wait(0).is_err());
+    assert!(!client.failed());
+    assert!(client.configure_frame_wait(1_000_000).is_ok());
+    assert_eq!(
+        client.configure_frame_wait(120_000_000_000).unwrap_err(),
+        RoomPlayError::InvalidState
+    );
+    assert!(matches!(
+        client.frame_wait_step(0),
+        Ok(RoomFrameWaitStep::Idle)
+    ));
+    client.receive_bytes(&[b'B'], 1, 1).unwrap();
+    assert!(matches!(
+        client.frame_wait_step(2),
+        Ok(RoomFrameWaitStep::Wait(999_999))
+    ));
+    assert_eq!(
+        client.configure_frame_wait(120_000_000_000).unwrap_err(),
+        RoomPlayError::InvalidState
+    );
+    let first = client.frame_wait_step(1_000_001).unwrap_err();
+    assert_eq!(
+        first,
+        RoomPlayError::FrameWait(RoomFrameWaitError::Deadline(RoomDeadlineError::Expired))
+    );
+    assert_eq!(client.configure_frame_wait(1_000_000).unwrap_err(), first);
+    client.close();
+    assert_eq!(client.configure_frame_wait(1_000_000).unwrap_err(), first);
+    let mut unconfigured = driver();
+    unconfigured.receive_bytes(&[b'B'], 0, 0).unwrap();
+    assert_eq!(
+        unconfigured.configure_frame_wait(1_000_000).unwrap_err(),
+        RoomPlayError::InvalidState
+    );
+    assert!(!unconfigured.failed());
 }

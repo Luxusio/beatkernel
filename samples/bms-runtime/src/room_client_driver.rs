@@ -24,6 +24,7 @@ pub struct RoomClientDriver {
     start_wait: Option<crate::room_start_wait::RoomStartWaitState>,
     pending_start: Option<StartSchedule>,
     setup_wait: Option<crate::room_setup_wait::RoomSetupWaitState>,
+    frame_wait: Option<crate::room_frame_wait::RoomFrameWaitState>,
 }
 
 impl RoomClientDriver {
@@ -88,6 +89,7 @@ impl RoomClientDriver {
             start_wait: Some(crate::room_start_wait::RoomStartWaitState::new()),
             pending_start: None,
             setup_wait: None,
+            frame_wait: None,
         })
     }
     pub fn request_seal(&mut self) -> Result<(), RoomPlayError> {
@@ -150,8 +152,12 @@ impl RoomClientDriver {
             if bytes.len() > 65_808 || bytes.len() > owner.decoder()?.needed()? {
                 return Err(RoomWireError::InvalidFrame.into());
             }
+            let pending = owner.frame_pending();
+            owner.observe_frame(now_ns, pending)?;
             let consumed = owner.decoder()?.push(bytes)?;
-            if let Some(message) = owner.decoder()?.take()? {
+            let message = owner.decoder()?.take()?;
+            owner.observe_frame(now_ns, owner.frame_pending())?;
+            if let Some(message) = message {
                 let peer = match &message {
                     RoomMessage::PeerProgress { participant, .. } => Some(*participant),
                     _ => None,
@@ -304,6 +310,7 @@ impl RoomClientDriver {
         self.drain_wait = None;
         self.start_wait = None;
         self.setup_wait = None;
+        self.frame_wait = None;
         self.pending_start = None;
         if self.failure.is_none() {
             self.failure = Some(RoomPlayError::Stopped);
@@ -359,6 +366,42 @@ impl RoomClientDriver {
             .ok_or(RoomClientSetupError::InvalidState)?
             .step(now, admitted, prepared, committed)
             .map_err(RoomClientSetupError::Policy)
+    }
+}
+
+impl RoomClientDriver {
+    pub fn configure_frame_wait(&mut self, timeout_ns: u64) -> Result<(), RoomPlayError> {
+        self.ensure_live()?;
+        if self.frame_wait.is_some() || self.frame_pending() {
+            return Err(RoomPlayError::InvalidState);
+        }
+        let state = crate::room_frame_wait::RoomFrameWaitState::new(timeout_ns)
+            .map_err(RoomPlayError::FrameWait)?;
+        self.frame_wait = Some(state);
+        Ok(())
+    }
+    fn observe_frame(
+        &mut self,
+        now_ns: i64,
+        pending: bool,
+    ) -> Result<crate::room_frame_wait::RoomFrameWaitStep, RoomPlayError> {
+        match &mut self.frame_wait {
+            Some(state) => state
+                .observe(now_ns, pending)
+                .map_err(RoomPlayError::FrameWait),
+            None => Ok(crate::room_frame_wait::RoomFrameWaitStep::Idle),
+        }
+    }
+    pub fn frame_wait_step(
+        &mut self,
+        now_ns: i64,
+    ) -> Result<crate::room_frame_wait::RoomFrameWaitStep, RoomPlayError> {
+        self.operate(true, |owner| {
+            if owner.frame_wait.is_none() {
+                return Err(RoomPlayError::InvalidState);
+            }
+            owner.observe_frame(now_ns, owner.frame_pending())
+        })
     }
 }
 

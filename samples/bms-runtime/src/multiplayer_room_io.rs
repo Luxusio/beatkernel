@@ -28,6 +28,7 @@ pub struct RoomPlayIo<S: Read + Write> {
     scratch: [u8; 4096],
     last_observed: Option<i64>,
     failure: Option<(io::ErrorKind, String)>,
+    frame_wait: Option<crate::room_frame_wait::RoomFrameWaitState>,
 }
 
 impl<S: Read + Write> RoomPlayIo<S> {
@@ -44,11 +45,44 @@ impl<S: Read + Write> RoomPlayIo<S> {
             scratch: [0; 4096],
             last_observed: None,
             failure: None,
+            frame_wait: None,
         };
         if owner.session.leave_written() {
             owner.stop();
         }
         owner
+    }
+
+    pub fn configure_frame_wait(&mut self, timeout_ns: u64) -> io::Result<()> {
+        self.ensure_live()?;
+        if self.frame_wait.is_some() || self.decoder.buffered_bytes() != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "room frame wait configuration is unavailable",
+            ));
+        }
+        let state = crate::room_frame_wait::RoomFrameWaitState::new(timeout_ns)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        self.frame_wait = Some(state);
+        Ok(())
+    }
+    fn observe_frame(&mut self, now_ns: i64, pending: bool) -> io::Result<()> {
+        if let Some(state) = &mut self.frame_wait {
+            state.observe(now_ns, pending).map_err(|error| {
+                let kind = if matches!(
+                    error,
+                    crate::room_frame_wait::RoomFrameWaitError::Deadline(
+                        crate::room_setup_wait::RoomDeadlineError::Expired
+                    )
+                ) {
+                    io::ErrorKind::TimedOut
+                } else {
+                    io::ErrorKind::InvalidData
+                };
+                io::Error::new(kind, error)
+            })?;
+        }
+        Ok(())
     }
 
     pub fn session(&self) -> &RoomPlayClient {
@@ -191,6 +225,7 @@ impl<S: Read + Write> RoomPlayIo<S> {
 
     fn step_live<F: FnMut() -> io::Result<i64>>(&mut self, now: &mut F) -> io::Result<bool> {
         let polled_ns = self.observe(now)?;
+        self.observe_frame(polled_ns, self.decoder.buffered_bytes() != 0)?;
         let mut progressed = false;
         if self.pending.is_none() {
             self.pending = self.session.poll_write(polled_ns).map_err(protocol_error)?;
@@ -258,6 +293,7 @@ impl<S: Read + Write> RoomPlayIo<S> {
                 if count > limit {
                     return Err(protocol_error("room reader exceeded its supplied slice"));
                 }
+                self.observe_frame(captured_ns, self.decoder.buffered_bytes() != 0)?;
                 let admitted = self
                     .decoder
                     .push(&self.scratch[..count])
@@ -270,9 +306,12 @@ impl<S: Read + Write> RoomPlayIo<S> {
                 progressed = true;
                 if let Some(message) = self.decoder.take().map_err(protocol_error)? {
                     let processing_ns = self.observe(now)?;
+                    self.observe_frame(processing_ns, false)?;
                     self.session
                         .receive_at(message, captured_ns, processing_ns)
                         .map_err(protocol_error)?;
+                } else {
+                    self.observe_frame(captured_ns, true)?;
                 }
             }
             Err(error)

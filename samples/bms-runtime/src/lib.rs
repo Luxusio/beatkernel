@@ -916,3 +916,5 @@ pub mod room_network_actor;
 pub mod room_client_driver;
 
 pub mod room_setup_wait;
+
+pub mod room_frame_wait;

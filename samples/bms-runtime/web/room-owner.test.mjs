@@ -99,6 +99,26 @@ async function harness(faults = {}) {
     receiveTimes: [], writeTimes: [], pollTimes: [], schedules: [], startCalls: 0,
     publications: [], peerUpdates: [], finalWritten: false, finalAcknowledged: false,
     progressComplete: false, drainComplete: false, peerAcks: new Set(), peerAckQueries: [],
+    frameConfigurations: [], frameSteps: [], frameOutputs: [], frameExpires: null,
+    configure_frame_wait(timeout) {
+      this.alive(); this.frameConfigurations.push(timeout);
+      if (faults.configureFrameError) throw faults.configureFrameError;
+      this.frameTimeout = timeout;
+    },
+    frame_wait_step(elapsed) {
+      this.alive(); this.frameSteps.push(elapsed);
+      if (this.frameOutputs.length) {
+        const output = this.frameOutputs.shift();
+        if (output instanceof Error) throw output;
+        return output;
+      }
+      if (this.frameExpires !== null && elapsed >= this.frameExpires) {
+        throw Object.assign(new Error("scripted common frame expiry"), { code: "timeout", operation: "frame" });
+      }
+      if (!this.partial) { this.frameExpires = null; return -1n; }
+      this.frameExpires ??= elapsed + this.frameTimeout;
+      return this.frameExpires - elapsed;
+    },
     setupBegins: [], setupSteps: [], setupOutputs: [], setupPhase: "admission",
     begin_setup(elapsed, timeout) {
       this.alive(); this.setupBegins.push({ elapsed, timeout });
@@ -167,7 +187,12 @@ async function harness(faults = {}) {
       this.alive(); this.receives.push([...bytes]); trace.push(["receive", bytes.length]);
       this.receiveTimes.push({ captured, processing });
       if (faults.receiveError) throw faults.receiveError;
+      if (this.frameExpires !== null && processing >= this.frameExpires) {
+        throw Object.assign(new Error("original common late fragment refusal"), { code: "timeout", operation: "frame" });
+      }
       this.onReceive?.(bytes);
+      if (this.partial) this.frameExpires ??= processing + this.frameTimeout;
+      else this.frameExpires = null;
       return faults.consumed ?? bytes.length;
     },
     next_write(processing) {
@@ -333,7 +358,7 @@ test("configuration retains caller ownership; actual frames preserve u64 IDs and
     assert.equal(h.opens.length, 0);
     assert.equal(h.session.closes, 0); assert.equal(h.session.frees, 0);
   }
-  for (const method of ["needed_bytes", "frame_pending", "receive_bytes", "next_write", "written", "revision", "snapshot", "take_start", "publish_progress", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written", "progress_complete", "request_drain", "drain_complete", "begin_drain", "drain_wait_step", "drain_requested", "begin_setup", "setup_wait_step", "free"]) {
+  for (const method of ["needed_bytes", "frame_pending", "receive_bytes", "next_write", "written", "revision", "snapshot", "take_start", "publish_progress", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written", "progress_complete", "request_drain", "drain_complete", "begin_drain", "drain_wait_step", "drain_requested", "begin_setup", "setup_wait_step", "configure_frame_wait", "frame_wait_step", "free"]) {
     const h = await harness(); delete h.session[method];
     await failure(h.opening(), "validation");
     assert.equal(h.opens.length, 0); assert.equal(h.session.frees, 0);
@@ -1283,6 +1308,91 @@ test("close abort and Leave clear pending setup scheduling without a later polic
     assert.equal(h.session.setupBegins.length, 1);
     assert.equal(h.timers.size, 0);
     assert.deepEqual(h.starts, []);
+    await cleaned(h, owner, io);
+  }
+});
+
+test("frame timers consult Rust outputs and fragments do not refresh the original wake", async () => {
+  const h = await harness(); const { owner, io } = await h.opened();
+  io.writes[0].gate.resolve(); await flush(); await h.observe(io);
+  assert.deepEqual(h.session.frameConfigurations, [10000000n]);
+  h.session.frameOutputs.push(10000000n, 5000000n, -1n);
+  await h.receive(io, () => { h.session.partial = true; h.session.need = 5; });
+  const steps = h.session.frameSteps.length;
+  const deadline = [...h.timers.values()][0].at;
+  await h.elapse(8);
+  await h.receive(io, () => { h.session.partial = true; h.session.need = 4; });
+  assert.equal(h.session.frameSteps.length, steps);
+  assert.equal([...h.timers.values()][0].at, deadline);
+  await h.elapse(2);
+  assert.equal(owner.closed, false, "timer must not invent expiration over Rust Wait");
+  assert.equal(h.session.frameSteps.length, steps + 1);
+  await h.elapse(5);
+  assert.equal(owner.closed, false, "Rust Idle clears the scheduled wake");
+  assert.equal(h.session.frameSteps.length, steps + 2);
+  assert.equal(h.timers.size, 0);
+  await cleaned(h, owner, io);
+});
+
+test("Rust receive refuses expired final fragment before timer runs or callbacks can observe metadata", async () => {
+  const h = await harness(); const { owner, io } = await h.opened();
+  io.writes[0].gate.resolve(); await flush(); await h.observe(io);
+  await h.receive(io, () => { h.session.partial = true; h.session.need = 5; });
+  const revision = h.session.revisionValue, callbacks = h.callbacks.length;
+  const steps = h.session.frameSteps.length;
+  h.setClock(CLOCK_ORIGIN + 10000000n);
+  await h.receive(io, () => {
+    assert.fail("late fragment must be refused before admission changes");
+  });
+  assert.equal(owner.closed, true);
+  assert.equal(h.closures[0].code, "timeout");
+  assert.equal(h.closures[0].operation, "frame");
+  assert.equal(h.session.revisionValue, revision);
+  assert.equal(h.callbacks.length, callbacks);
+  assert.deepEqual(h.starts, []);
+  assert.equal(h.session.frameSteps.length, steps, "late entry guard precedes timer callback");
+  await cleaned(h, owner, io);
+});
+
+test("frame configuration precedes IO and invalid scheduling output cannot create a timer", async () => {
+  const original = new Error("original frame configuration refusal");
+  const refused = await harness({ configureFrameError: original });
+  const error = await failure(refused.opening(), "transport");
+  assert.equal(error.cause, original);
+  assert.equal(refused.opens.length, 0);
+  assert.deepEqual(refused.session.frameConfigurations, [10000000n]);
+  for (const output of [0n, -2n, 120000000001n, 1, null]) {
+    const h = await harness(); const { owner, io } = await h.opened();
+    io.writes[0].gate.resolve(); await flush(); await h.observe(io);
+    h.session.frameOutputs.push(output);
+    await h.receive(io, () => { h.session.partial = true; h.session.need = 5; });
+    assert.equal(owner.closed, true);
+    assert.equal(h.closures[0].code, "protocol");
+    assert.equal(h.closures[0].operation, "frame");
+    assert.equal(h.timers.size, 0);
+    assert.equal(h.session.frameSteps.length, 1);
+    await cleaned(h, owner, io);
+  }
+});
+
+test("close abort and Leave clear incomplete frame wakes without another Rust observation", async () => {
+  for (const mode of ["close", "abort", "leave"]) {
+    const h = await harness(); const controller = new AbortController();
+    const { owner, io } = await h.opened({ signal: controller.signal });
+    io.writes[0].gate.resolve(); await flush(); await h.observe(io);
+    await h.receive(io, () => { h.session.partial = true; h.session.need = 5; });
+    const steps = h.session.frameSteps.length;
+    if (mode === "leave") {
+      h.session.onRequest = kind => { assert.equal(kind, "leave"); h.session.controls.push(frame(813n)); };
+      h.session.onWritten = id => { if (id === 813n) h.session.leaveDone = true; };
+      const leaving = attempt(() => owner.leave()); await flush();
+      io.writes.at(-1).gate.resolve(); await success(leaving);
+    } else if (mode === "abort") controller.abort();
+    else await owner.close();
+    await flush(); await h.elapse(100);
+    assert.equal(h.session.frameSteps.length, steps);
+    assert.deepEqual(h.session.frameConfigurations, [10000000n]);
+    assert.equal(h.timers.size, 0);
     await cleaned(h, owner, io);
   }
 });

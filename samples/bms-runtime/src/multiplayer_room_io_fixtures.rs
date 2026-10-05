@@ -1103,3 +1103,106 @@ fn completed_client_handoff_is_idle_immediately_while_stop_and_leave_cancel_part
         fenced(client, error);
     }
 }
+
+#[test]
+fn partial_frame_fixed_timeout_refuses_before_more_io_without_acquiring_extra_clocks() {
+    let mut endpoint = endpoint(PLAYERS, 0);
+    assert!(endpoint.io.configure_frame_wait(0).is_err());
+    assert!(endpoint.io.configure_frame_wait(1_000_000).is_ok());
+    assert!(endpoint.io.configure_frame_wait(120_000_000_000).is_err());
+    let mut clocks = 0;
+    assert!(
+        endpoint
+            .io
+            .step(|| {
+                clocks += 1;
+                Ok(0)
+            })
+            .unwrap()
+    );
+    assert_eq!(
+        clocks, 3,
+        "original Join poll/completion/processing observations only"
+    );
+    let RoomMessage::Join { identity, players } = emitted(&endpoint) else {
+        panic!("Join")
+    };
+    let mut registry = GroupRoomRegistry::new(GroupRoomPolicy::new(1, 2, 8, 1_000).unwrap());
+    let id = registry.join("room", &identity, &players, 0).unwrap().id;
+    let bytes = encode_message(&RoomMessage::Admitted { participant: id }).unwrap();
+    endpoint.script.borrow_mut().input.extend(&bytes[..11]);
+    clocks = 0;
+    assert!(
+        endpoint
+            .io
+            .step(|| {
+                clocks += 1;
+                Ok(10)
+            })
+            .unwrap()
+    );
+    assert_eq!(
+        clocks, 2,
+        "partial read retains original poll/capture observations"
+    );
+    let calls = (
+        endpoint.script.borrow().read_calls,
+        endpoint.script.borrow().write_calls,
+    );
+    endpoint.script.borrow_mut().input.extend(&bytes[11..]);
+    clocks = 0;
+    let first = endpoint
+        .io
+        .step(|| {
+            clocks += 1;
+            Ok(1_000_010)
+        })
+        .unwrap_err();
+    assert_eq!(first.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(clocks, 1);
+    assert_eq!(
+        (
+            endpoint.script.borrow().read_calls,
+            endpoint.script.borrow().write_calls
+        ),
+        calls
+    );
+    assert_eq!(endpoint.io.session().participant(), None);
+    assert!(endpoint.io.session().room().is_none());
+    assert!(
+        endpoint
+            .io
+            .step(|| panic!("failed IO must not acquire another clock"))
+            .is_err()
+    );
+}
+
+#[test]
+fn complete_frame_captured_before_expiry_but_processed_at_expiry_cannot_admit_participant() {
+    let mut endpoint = endpoint(PLAYERS, 0);
+    endpoint.io.configure_frame_wait(1_000_000).unwrap();
+    step(&mut endpoint, 0);
+    let RoomMessage::Join { identity, players } = emitted(&endpoint) else {
+        panic!("Join")
+    };
+    let mut registry = GroupRoomRegistry::new(GroupRoomPolicy::new(1, 2, 8, 1_000).unwrap());
+    let id = registry.join("room", &identity, &players, 0).unwrap().id;
+    let bytes = encode_message(&RoomMessage::Admitted { participant: id }).unwrap();
+    endpoint.script.borrow_mut().input.extend(&bytes[..11]);
+    step(&mut endpoint, 10);
+    endpoint.script.borrow_mut().input.extend(&bytes[11..]);
+    let mut times = [1_000_009, 1_000_009, 1_000_010].into_iter();
+    let error = endpoint
+        .io
+        .step(|| Ok(times.next().expect("no extra frame clock")))
+        .unwrap_err();
+    assert_eq!(times.next(), None);
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(endpoint.io.session().participant(), None);
+    assert!(endpoint.io.session().room().is_none());
+    assert!(
+        endpoint.script.borrow().input.is_empty(),
+        "actual late bytes remain read history"
+    );
+    assert!(endpoint.io.take_schedule().is_err());
+}

@@ -9,7 +9,7 @@ const METHODS = ["request_seal", "request_ready", "request_leave", "needed_bytes
   "frame_pending", "receive_bytes", "next_write", "written", "participant_id",
   "revision", "has_snapshot", "leave_written", "snapshot", "take_start", "publish_progress",
   "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written",
-  "progress_complete", "request_drain", "drain_complete", "begin_drain", "drain_wait_step", "drain_requested", "begin_setup", "setup_wait_step", "close", "free"];
+  "progress_complete", "request_drain", "drain_complete", "begin_drain", "drain_wait_step", "drain_requested", "begin_setup", "setup_wait_step", "configure_frame_wait", "frame_wait_step", "close", "free"];
 
 export class BrowserRoomOwnerError extends Error {
   constructor(code, operation, message, cause) {
@@ -167,6 +167,7 @@ export class BrowserRoomOwner {
         || owner.#core("initial", session => session.drain_requested()) !== false) {
         throw new BrowserRoomOwnerError("protocol", "open", "Room session is already in use.");
       }
+      owner.#session.configure_frame_wait(BigInt(config.ioTimeoutMs) * 1000000n);
       owner.#session.begin_setup(0n, BigInt(config.setupTimeoutMs) * 1000000n);
       owner.#advanceSetup();
       const opening = owner.#track(() => config.channelFactory(url, { signal: owner.#controller.signal,
@@ -241,7 +242,12 @@ export class BrowserRoomOwner {
   }
   #core(operation, action) {
     this.#ensure();
-    try { return action(this.#session); } catch (cause) { throw this.#fatal(cause, "core", operation); }
+    try { return action(this.#session); } catch (cause) {
+      if (cause?.code === "timeout" && cause?.operation === "frame") {
+        throw this.#fatal(new BrowserRoomOwnerError("timeout", "frame", "Incomplete room frame timed out.", cause), "timeout", "frame");
+      }
+      throw this.#fatal(cause, "core", operation);
+    }
   }
   #closeChannel(channel) {
     if (channel === null || channel === undefined) return;
@@ -378,6 +384,7 @@ export class BrowserRoomOwner {
     if (this.#receipts.drainComplete) return Promise.reject(new BrowserRoomOwnerError("state", "leave", "Room drain already completed."));
     try { this.#request("request_leave"); } catch (cause) { return Promise.reject(cause); }
     clearTimeout(this.#setupTimer); this.#setupTimer = null;
+    clearTimeout(this.#frameTimer); this.#frameTimer = null;
     this.#leaveGate = gate();
     clearTimeout(this.#drainTimer); this.#drainTimer = null;
     this.#drainGate?.reject(new BrowserRoomOwnerError("closed", "leave", "Room drain cancelled by Leave."));
@@ -392,6 +399,18 @@ export class BrowserRoomOwner {
       if (this.#cleanupError !== null) throw this.#cleanupError;
     });
     return this.#closing;
+  }
+
+  #advanceFrame() {
+    if (this.closed || this.#leaveGate !== null || this.#receipts.drainComplete) return;
+    clearTimeout(this.#frameTimer); this.#frameTimer = null;
+    try {
+      const delay = this.#core("frame_wait_step", session => session.frame_wait_step(this.#elapsed()));
+      if (typeof delay !== "bigint" || delay < -1n || delay === 0n || delay > 120000000000n) {
+        throw new BrowserRoomOwnerError("protocol", "frame", "Invalid room frame wait result.");
+      }
+      if (delay > 0n) this.#frameTimer = setTimeout(() => this.#advanceFrame(), Number((delay + 999999n) / 1000000n));
+    } catch (cause) { this.#fatal(cause, "core", "frame"); }
   }
 
   #advanceSetup() {
@@ -537,7 +556,7 @@ export class BrowserRoomOwner {
       if (typeof remains !== "boolean") throw new BrowserRoomOwnerError("protocol", "read", "Invalid room frame state.");
       this.#advanceSetup();
       if (remains && this.#frameTimer === null) {
-        this.#frameTimer = setTimeout(() => this.#fail(new BrowserRoomOwnerError("timeout", "frame", "Incomplete room frame timed out.")), this.#config.ioTimeoutMs);
+        this.#advanceFrame();
       } else if (!remains) { clearTimeout(this.#frameTimer); this.#frameTimer = null; }
       this.#observe();
       this.#observeProgress();

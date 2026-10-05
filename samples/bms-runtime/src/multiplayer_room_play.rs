@@ -30,6 +30,7 @@ pub enum RoomPlayError {
     Progress(RoomProgressClientError),
     Start(StartError),
     Wire(RoomWireError),
+    FrameWait(crate::room_frame_wait::RoomFrameWaitError),
 }
 
 impl fmt::Display for RoomPlayError {
@@ -49,6 +50,7 @@ impl fmt::Display for RoomPlayError {
             Self::Progress(error) => write!(f, "{error}"),
             Self::Start(error) => write!(f, "{error}"),
             Self::Wire(error) => write!(f, "{error}"),
+            Self::FrameWait(error) => write!(f, "{error}"),
         }
     }
 }
@@ -61,6 +63,7 @@ impl std::error::Error for RoomPlayError {
             Self::Progress(error) => Some(error),
             Self::Start(error) => Some(error),
             Self::Wire(error) => Some(error),
+            Self::FrameWait(error) => Some(error),
             _ => None,
         }
     }

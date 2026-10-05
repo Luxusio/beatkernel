@@ -106,6 +106,7 @@ fn option_defaults_and_all_inclusive_time_queue_preroll_bounds_are_portable() {
     let default = RoomNetworkOptions::default();
     assert_eq!(default.setup_timeout, Duration::from_secs(60));
     assert_eq!(default.drain_timeout, Duration::from_secs(10));
+    assert_eq!(default.frame_timeout, Duration::from_secs(10));
     assert_eq!(default.finish_timeout, Duration::from_secs(2));
     assert_eq!(default.queue_capacity, 32);
     assert_eq!(default.start_policy, StartPolicy::default());
@@ -131,6 +132,7 @@ fn option_defaults_and_all_inclusive_time_queue_preroll_bounds_are_portable() {
                             setup_timeout: Duration::from_millis(setup),
                             drain_timeout: Duration::from_millis(drain),
                             finish_timeout: Duration::from_millis(finish),
+                            frame_timeout: Duration::from_secs(10),
                             queue_capacity: queue,
                             preroll_ns: preroll,
                             start_policy: StartPolicy {
@@ -147,11 +149,21 @@ fn option_defaults_and_all_inclusive_time_queue_preroll_bounds_are_portable() {
             }
         }
     }
+    for frame in [Duration::from_millis(1), Duration::from_secs(120)] {
+        assert!(
+            RoomNetworkOptions {
+                frame_timeout: frame,
+                ..default
+            }
+            .validate()
+            .is_ok()
+        );
+    }
 }
 
 #[test]
 fn every_invalid_option_field_and_policy_bound_refuses_without_acquisition() {
-    for case in 0..17 {
+    for case in 0..19 {
         let mut options = RoomNetworkOptions::default();
         match case {
             0 => options.setup_timeout = Duration::ZERO,
@@ -170,7 +182,9 @@ fn every_invalid_option_field_and_policy_bound_refuses_without_acquisition() {
             13 => options.start_policy.min_remaining_ns = u64::MAX,
             14 => options.start_policy.max_age_ns = u64::MAX,
             15 => options.start_policy.max_uncertainty_ns = u64::MAX,
-            _ => options.start_policy.max_release_lateness_ns = u64::MAX,
+            16 => options.start_policy.max_release_lateness_ns = u64::MAX,
+            17 => options.frame_timeout = Duration::ZERO,
+            _ => options.frame_timeout = Duration::from_millis(120_001),
         }
         assert_eq!(
             options.validate().unwrap_err().kind(),

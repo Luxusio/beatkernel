@@ -53,9 +53,10 @@ pub struct RoomNetworkActor<S: RoomNetworkStream> {
     changed: bool,
 }
 impl<S: RoomNetworkStream> RoomNetworkActor<S> {
-    pub fn new(io: RoomPlayIo<S>, options: RoomNetworkOptions) -> io::Result<Self> {
+    pub fn new(mut io: RoomPlayIo<S>, options: RoomNetworkOptions) -> io::Result<Self> {
         // The public owner validates options before acquiring a stream.
         options.validate()?;
+        io.configure_frame_wait(options.frame_timeout.as_nanos() as u64)?;
         let setup_deadline =
             crate::room_setup_wait::RoomDeadline::new(0, options.setup_timeout.as_nanos() as u64)
                 .map_err(|_| invalid("native room setup deadline overflow"))?;

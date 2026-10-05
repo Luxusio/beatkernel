@@ -352,6 +352,7 @@ impl CompetitionConnectionFactory for NativeFactory {
                         setup_timeout: options.setup_timeout,
                         drain_timeout: options.io_stall_timeout,
                         finish_timeout: options.io_stall_timeout,
+                        frame_timeout: options.io_stall_timeout,
                         queue_capacity: options.queue_capacity,
                         start_policy: policy,
                         preroll_ns: options.preroll_ns,

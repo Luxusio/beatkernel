@@ -126,6 +126,7 @@ fn options(preroll_ns: i64) -> NativeRoomOptions {
         setup_timeout: Duration::from_secs(1),
         drain_timeout: Duration::from_millis(1),
         finish_timeout: Duration::from_millis(10),
+        frame_timeout: Duration::from_secs(10),
         queue_capacity: 2,
         start_policy: policy(),
         preroll_ns,
@@ -488,6 +489,12 @@ fn invalid_native_setup_is_refused_before_connector_or_stream_ownership() {
     let mut bad_options = Vec::new();
     let mut value = options(0);
     value.setup_timeout = Duration::ZERO;
+    bad_options.push(value);
+    let mut value = options(0);
+    value.frame_timeout = Duration::ZERO;
+    bad_options.push(value);
+    let mut value = options(0);
+    value.frame_timeout = Duration::from_secs(121);
     bad_options.push(value);
     let mut value = options(0);
     value.drain_timeout = Duration::ZERO;
