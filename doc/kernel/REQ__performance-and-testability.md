@@ -252,3 +252,10 @@ associated controls are statically selected; native fixed deadline construction
 and diagnostic output belong to the adapter. This does not establish physical
 timing or peer completion. Native start compatibility and defaults belong to
 the separate compatibility module rather than the portable controller.
+
+The [shared room network actor](REQ__room-network-actor.md) owns caller-driven
+protocol state and retained snapshots over an injected stream port. Its native
+worker delegates commands and observations to that same actor; acquisition,
+queue/reply credits, locking, actual time and thread join stay in the adapter.
+This is a code boundary, not evidence that a real adapter never blocks or that
+browser integration and physical timing are complete.
