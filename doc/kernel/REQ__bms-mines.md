@@ -1,5 +1,11 @@
 # BMS mine source and runtime integration
 
+Current source admission follows [playable mines](REQ__playable-mines.md): the
+shared loader now accepts valid timelines through installed portable owners.
+Earlier component-stage guard notes below describe historical integration steps;
+they do not reintroduce blanket refusal. Execution and platform acceptance remain
+unproven, and source admission is not full historical BMS compatibility.
+
 ## Original source and timing
 
 Accept selected mine channels D1..D9/E1..E9 in a separate typed namespace,
@@ -36,7 +42,9 @@ source and long-duration fixtures for deferred execution.
 
 The [common gauge contract](REQ__bms-gauge.md) defines fixed-point recovery,
 mine damage and latched failure state from committed reports. Actual terminal
-playback control, native/HUD publication and final file admission remain required;
+playback control and native/HUD publication use installed portable owners; final
+file admission follows [the current contract](REQ__playable-mines.md).
+Execution acceptance remains required;
 a readable InstantDeath snapshot alone does not complete mine support.
 
 ### BMS WAV00 plan and stepped live installation
@@ -147,7 +155,7 @@ block-partition consistency and unchanged WAV00 across section BGM slicing.
 Internal asset preparation is specified below. File mine admission and complete
 gauge/fatal-stop remain pending.
 
-### Common WAV00 asset preparation under guarded admission
+### Common WAV00 asset preparation
 
 The shared audio asset selection/loader is reused by prepare_from_source for
 ordinary visible, BGM and invisible resources. Extend its referenced sample
@@ -166,16 +174,16 @@ key with a normal/BGM/invisible resource decodes once and retains independent
 original IDs. No hidden gain baking, suffix slicing, resampling, path bypass or
 special explosion decoder is introduced.
 
-High-level prepare_from_source still refuses actual mines immediately after
-parsing and before gain/replay/asset work until complete gauge/fatal-stop and
-admission integration. The internal reusable selector/loader can prepare typed
-mine PCM for composition fixtures and future admission; this is not a new
-playable-file bypass. Preserve no-mine visible/BGM/invisible preparation and
+High-level prepare_from_source now uses installed mine owners under
+[the playable-source admission contract](REQ__playable-mines.md). The reusable
+selector/loader prepares typed mine PCM through the same resource path.
+Preserve no-mine visible/BGM/invisible preparation and
 replay validation order through the shared loader. Author independent deferred
 fixtures for optional selection and capacity, exact/compatible MemoryAssetSource
 resolution and shared decode keys, zero PCM used by actual sound preparation,
-missing/oversized/malformed assets and channel/bank limits, and high-level guard
-ordering before any resource/decode work. Execution and acceptance remain deferred.
+missing/oversized/malformed assets and channel/bank limits, and high-level parser,
+replay/timeline/capacity refusal before resource/decode work. Execution and
+acceptance remain deferred.
 
 ### Common optional sound primitive
 
@@ -340,23 +348,23 @@ existing cleanup boundary. Platform code does not interpret damage or rebuild
 hazard ordering. Recording and competition use the actual configured judge's
 initial hash. Disabled capture still ignores unused capture settings.
 
-Consumer-side BMS integration remains pending;
-the shared playable-source admission guard stays in force. Author independent
+Consumer-side BMS source composition is installed; shared loader admission is
+enabled under [the current contract](REQ__playable-mines.md). Author independent
 plan/type/budget/timing/contact/snapshot/replay identity and actual-owner fixtures
 for later execution, with no performance or platform acceptance claim.
 
 The [shared judge hazard contract](REQ__judge-hazards.md) defines one-shot
 occupancy processing, simultaneous operation order and complete checkpoints.
-Its engine component is the next integration layer; it does not by itself
+Its engine component is a reusable integration layer; it does not by itself
 enable BMS gameplay admission or apply BMS gauge and sound policy.
 
-During source integration, shared `prepare_from_source` rejects any nonempty
+Earlier in source integration, shared `prepare_from_source` rejected any nonempty
 mine timeline immediately after actual parsing and before gain/replay/asset
 lookup, reads, decode or PCM allocation. Empty/rest-only/inactive mine rows
 retain the ordinary loading path. This prevents loading a playable chart which
 silently omits its hazards. Adapter parsing and explicit timing are available;
-the temporary admission refusal is removed only when actual portable hazard
-processing is installed in live, local, replay, practice and offline owners.
+the temporary admission refusal is now removed after actual portable hazard
+processing was installed in live, local, replay, practice and offline owners.
 
 Full mine support still requires contact/held-button occupancy at original-song
 mine times, deterministic simultaneous release/press ordering and per-mine

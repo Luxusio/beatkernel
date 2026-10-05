@@ -231,4 +231,6 @@ boundaries, aliases/radix/caps/channel policies, real stepped/native preparation
 source-aware capture/replay planning and actual offline software Mixer. Include
 failure before resource IO and no automatic invisible sound. Source admission
 is an implementation connection, not physical-device/browser/audio verification
-or a full BMS support claim; mines remain unsupported.
+or a full BMS support claim. Mine source admission now follows
+[its installed portable contract](REQ__playable-mines.md); mine execution and
+platform acceptance remain unproven.
