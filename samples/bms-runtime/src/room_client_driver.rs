@@ -21,6 +21,8 @@ pub struct RoomClientDriver {
     drain_admitted: bool,
     leave_requested: bool,
     drain_wait: Option<crate::room_final_wait::RoomFinalWaitState>,
+    start_wait: Option<crate::room_start_wait::RoomStartWaitState>,
+    pending_start: Option<StartSchedule>,
 }
 
 impl RoomClientDriver {
@@ -82,6 +84,8 @@ impl RoomClientDriver {
             drain_admitted: false,
             leave_requested: false,
             drain_wait: None,
+            start_wait: Some(crate::room_start_wait::RoomStartWaitState::new()),
+            pending_start: None,
         })
     }
     pub fn request_seal(&mut self) -> Result<(), RoomPlayError> {
@@ -94,6 +98,7 @@ impl RoomClientDriver {
         self.operate(false, |owner| {
             owner.session()?.request_leave()?;
             owner.leave_requested = true;
+            owner.pending_start = None;
             Ok(())
         })
     }
@@ -243,7 +248,25 @@ impl RoomClientDriver {
     }
 
     pub fn take_start(&mut self) -> Result<Option<StartSchedule>, RoomPlayError> {
-        self.operate(true, |owner| Ok(owner.session()?.take_schedule()))
+        self.operate(true, |owner| {
+            let mut state = owner.start_wait.take().ok_or(RoomPlayError::InvalidState)?;
+            let result = state.step(&mut DriverStartPort(owner), &mut || {
+                Ok::<bool, std::convert::Infallible>(true)
+            });
+            owner.start_wait = Some(state);
+            match result {
+                Ok(crate::room_start_wait::RoomStartStep::Ready) => Ok(owner.pending_start.take()),
+                Ok(crate::room_start_wait::RoomStartStep::Pending(_))
+                | Ok(crate::room_start_wait::RoomStartStep::Cancelled) => Ok(None),
+                Err(crate::room_start_wait::RoomStartStepError::Port(error)) => Err(error),
+                Err(crate::room_start_wait::RoomStartStepError::Service(error)) => match error {},
+                Err(crate::room_start_wait::RoomStartStepError::Closing)
+                | Err(crate::room_start_wait::RoomStartStepError::LeavePending)
+                | Err(crate::room_start_wait::RoomStartStepError::Terminal) => {
+                    Err(RoomPlayError::InvalidState)
+                }
+            }
+        })
     }
     pub fn participant_id(&self) -> u64 {
         self.session
@@ -277,8 +300,43 @@ impl RoomClientDriver {
         self.decoder = None;
         self.pending_peer = None;
         self.drain_wait = None;
+        self.start_wait = None;
+        self.pending_start = None;
         if self.failure.is_none() {
             self.failure = Some(RoomPlayError::Stopped);
+        }
+    }
+}
+
+struct DriverStartPort<'a>(&'a mut RoomClientDriver);
+impl crate::room_start_wait::RoomStartPort for DriverStartPort<'_> {
+    type Error = RoomPlayError;
+    fn initial(&mut self) -> crate::room_start_wait::RoomStartInitial {
+        crate::room_start_wait::RoomStartInitial {
+            cancelled: self.0.leave_requested,
+            closing: false,
+        }
+    }
+    fn poll(&mut self) -> crate::room_start_wait::RoomStartObservation<Self::Error> {
+        let cancelled = self.0.leave_requested;
+        let failure = if cancelled {
+            None
+        } else {
+            (|| -> Result<(), RoomPlayError> {
+                self.0.ensure_live()?;
+                if let Some(schedule) = self.0.session()?.take_schedule() {
+                    self.0.pending_start = Some(schedule);
+                }
+                Ok(())
+            })()
+            .err()
+        };
+        crate::room_start_wait::RoomStartObservation {
+            cancelled,
+            failure,
+            leaving: false,
+            terminal: false,
+            committed: self.0.pending_start.is_some(),
         }
     }
 }

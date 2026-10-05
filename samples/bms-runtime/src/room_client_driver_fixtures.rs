@@ -303,6 +303,15 @@ fn committed_pair() -> (Vec<RoomClientDriver>, GroupRoomRegistry, Vec<Participan
         }
     }
     let room = registry.room("driver").unwrap();
+    // Prepared admission alone must not create a playback schedule or mutate
+    // transport evidence, even under repeated finite startup observations.
+    for client in &mut clients {
+        let original = client.session_ref().unwrap().clone();
+        for _ in 0..3 {
+            assert!(client.take_start().unwrap().is_none());
+        }
+        assert_eq!(client.session_ref().unwrap(), &original);
+    }
     let mut coordinator = RoomStartCoordinator::new(room, measured_policy()).unwrap();
     for index in 0..2 {
         let mut server = RoomClockExchange::new(room, ids[index]).unwrap();
@@ -658,5 +667,104 @@ fn genuine_final_upload_ack_and_drain_complete_are_the_only_success_evidence() {
             clients[index].drain_step(i64::MAX),
             Ok(RoomFinalStep::Completed)
         ));
+    }
+}
+
+#[test]
+fn pending_start_observations_preserve_fresh_and_admitted_protocol_write_evidence() {
+    let fresh = driver();
+    let (admitted, _, _) = admitted(0);
+    for mut client in [fresh, admitted] {
+        let original = client.session_ref().unwrap().clone();
+        let revision = client.revision();
+        for _ in 0..4 {
+            assert!(client.take_start().unwrap().is_none());
+            assert_eq!(client.session_ref().unwrap(), &original);
+            assert_eq!(client.revision(), revision);
+            no_final_receipts(&client);
+        }
+    }
+}
+
+#[test]
+fn startup_steps_return_exact_original_common_commit_schedule_only_once() {
+    let (mut clients, _, _) = committed_pair();
+    for client in &mut clients {
+        let mut common = client.session_ref().unwrap().clone();
+        let expected = common
+            .take_schedule()
+            .expect("actual common Commit schedule");
+        let revision = client.revision();
+        let actual = client
+            .take_start()
+            .unwrap()
+            .expect("genuine driver schedule");
+        assert_eq!(actual, expected);
+        assert_eq!(actual.uncertainty_ns, 17);
+        assert_eq!(actual.target_ns, actual.song_target_ns);
+        assert_eq!(client.revision(), revision);
+        for _ in 0..4 {
+            assert!(client.take_start().unwrap().is_none());
+        }
+        no_final_receipts(client);
+        assert!(!client.failed());
+    }
+}
+
+#[test]
+fn leave_cancels_unconsumed_commit_and_health_guards_precede_ready_or_pending_start_state() {
+    let (mut clients, _, _) = committed_pair();
+    let client = &mut clients[0];
+    assert!(
+        client
+            .session_ref()
+            .unwrap()
+            .clone()
+            .take_schedule()
+            .is_some()
+    );
+    client.request_leave().unwrap();
+    for _ in 0..3 {
+        assert!(client.take_start().unwrap().is_none());
+    }
+    let frame = client.next_write(12_000).unwrap().unwrap();
+    assert_eq!(decode_message(&frame.bytes).unwrap(), RoomMessage::Leave);
+    assert!(!client.leave_written());
+    client.written(frame.id, 12_001, 12_001).unwrap();
+    assert!(client.leave_written());
+    assert!(client.take_start().unwrap().is_none());
+    no_final_receipts(client);
+
+    for consume_first in [false, true] {
+        for close in [false, true] {
+            let (mut clients, _, _) = committed_pair();
+            let client = &mut clients[0];
+            assert!(
+                client
+                    .session_ref()
+                    .unwrap()
+                    .clone()
+                    .take_schedule()
+                    .is_some()
+            );
+            if consume_first {
+                assert!(client.take_start().unwrap().is_some());
+            }
+            let first = if close {
+                client.close();
+                RoomPlayError::Stopped
+            } else {
+                let oversized = vec![0; client.needed_bytes().unwrap() + 1];
+                client
+                    .receive_bytes(&oversized, 12_000, 12_000)
+                    .unwrap_err()
+            };
+            for _ in 0..3 {
+                assert_eq!(client.take_start().unwrap_err(), first);
+                assert_eq!(client.session_ref().unwrap_err(), first);
+            }
+            assert!(client.failed());
+            no_final_receipts(client);
+        }
     }
 }
