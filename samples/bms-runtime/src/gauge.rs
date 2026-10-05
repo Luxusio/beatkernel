@@ -94,6 +94,25 @@ impl GaugeProfile {
         })
     }
 
+    pub const fn initial_units(&self) -> u64 {
+        self.initial_units
+    }
+    pub const fn clear_units(&self) -> u64 {
+        self.clear_units
+    }
+    pub const fn default_hit_delta(&self) -> i64 {
+        self.hit_delta
+    }
+    pub const fn miss_delta(&self) -> i64 {
+        self.miss_delta
+    }
+    pub const fn fail_on_empty(&self) -> bool {
+        self.fail_on_empty
+    }
+    pub fn grades(&self) -> &[GradeDelta] {
+        &self.grades
+    }
+
     fn hit_delta(&self, grade: JudgeGrade) -> i64 {
         self.grades
             .binary_search_by_key(&grade, |entry| entry.grade)

@@ -832,3 +832,13 @@ mod worklet_audio_fixtures;
 
 /// Prepared original-song per-role BGA opacity queries.
 pub mod bga_opacity;
+
+/// Explicit caller-directory native archive storage.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native_result_archive;
+/// Portable bounded historical completed-result format.
+pub mod result_archive;
+/// Injected exclusive-create and bounded-read archive policy.
+pub mod result_archive_store;
+#[cfg(test)]
+mod result_archive_store_fixtures;
