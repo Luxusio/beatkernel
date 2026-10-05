@@ -6,7 +6,7 @@ use beatkernel::interaction::InputOwner;
 
 const FAILURE_AT: i64 = 20_000_000;
 
-fn fatal_fixture(queue_capacity: usize, capture_records: usize) -> Fixture {
+pub(super) fn fatal_fixture(queue_capacity: usize, capture_records: usize) -> Fixture {
     let mut fixture = Fixture::new(false, false);
     let source = beatkernel_bms::parse(
         "#BPM 3000\n#LNTYPE 1\n#WAV01 head.wav\n#00051:00010001\n#00012:00010001\n#000D1:00ZZ0001\n",
@@ -146,9 +146,11 @@ fn successful_failure_prefix(viewer: Option<&player::PlayerViewer>) {
     );
     assert_eq!(fixture.gauge.snapshot().level_units, 0);
     assert_eq!(fixture.runtime.judge().remaining_hazards(), 1);
-    // Both genuine bound head hits remain audible after the same operation's
-    // fatal hazard. The ordinary hold tail and later mine stay unconsumed.
-    assert_eq!(&fixture.device.pcm[20..23], &[0.5, 1.0, 0.0]);
+    // The genuine Play prefix is followed by equal-frame Stops. The hold tail
+    // and later mine remain unconsumed; zero PCM does not prove completion.
+    assert_eq!(&fixture.device.pcm[20..23], &[0.0, 0.0, 0.0]);
+    assert_eq!(fixture.device.mixer.counters().commands_applied, 4);
+    assert_eq!(fixture.device.mixer.counters().unknown_stops, 0);
     let held = InputOwner {
         source: DeviceId(1),
         physical: PhysicalControlId::keyboard(4u16),
@@ -288,7 +290,44 @@ fn native_solo_observation_errors_keep_committed_failure_and_reject_custom_entry
         assert_eq!(error.report.judge_events.len(), 2);
         assert_eq!(error.report.hazard_events.len(), 1);
         assert_eq!(error.report.audio_commands.len(), 1);
-        assert_eq!(error.report.audio_failures.len(), 1);
+        assert_eq!(error.report.audio_failures.len(), 3);
+        assert!(matches!(
+            error.report.audio_commands.as_slice(),
+            [AudioCommand::Play {
+                voice: VoiceId(17),
+                ..
+            }]
+        ));
+        assert!(matches!(
+            error.report.audio_failures[0].command,
+            AudioCommand::Play {
+                voice: VoiceId(18),
+                ..
+            }
+        ));
+        assert_eq!(
+            error.report.audio_failures[1..]
+                .iter()
+                .map(|error| error.command)
+                .collect::<Vec<_>>(),
+            [
+                AudioCommand::Stop {
+                    voice: VoiceId(17),
+                    at: Timestamp::from_nanos(FAILURE_AT)
+                },
+                AudioCommand::Stop {
+                    voice: VoiceId(18),
+                    at: Timestamp::from_nanos(FAILURE_AT)
+                },
+            ]
+        );
+        assert!(
+            error
+                .report
+                .audio_failures
+                .iter()
+                .all(|error| error.reason == QueuePushError::Full)
+        );
         assert_eq!(
             fixture.gauge.snapshot().failure,
             Some(GaugeFailure::InstantDeath)

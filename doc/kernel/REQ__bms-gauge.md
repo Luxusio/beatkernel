@@ -194,8 +194,8 @@ all members unchanged. Add no Window rendering or gameplay work.
 Completion clear/fail decisions and
 actual per-player audio stopping/output cleanup still need integration.
 The [scheduled gameplay voice stop](REQ__gameplay-sound-stop.md) defines the
-shared audio component and stepped connection; native/replay output integration
-remains separate unfinished work until their actual owners consume stop evidence.
+shared audio component and stepped/native owner connections; replay audio
+and actual output completion remain separate unfinished integration work.
 The [portable gameplay fence](REQ__gameplay-fence.md) is an explicit control
 component for that integration. Its stepped and native connections above preserve
 new capture prefixes; broader replay policy and per-player audio cleanup remain

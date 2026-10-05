@@ -6,7 +6,7 @@ use crate::gauge::GaugeFailure;
 const PLAYERS: [PlayerId; 3] = [PlayerId(7), PlayerId(101), PlayerId(u32::MAX)];
 const SOURCES: [u64; 3] = [u64::MAX - 2, u64::MAX - 1, u64::MAX];
 
-fn cohort_fixture(
+pub(super) fn cohort_fixture(
     text: &str,
     lanes: &[u32],
     queue_capacity: usize,
@@ -142,7 +142,7 @@ fn input_reports(
     reports
 }
 
-fn observe_actual(fixture: &mut Fixture, reports: &[PlayerReport]) -> NativeGameplayResult<()> {
+fn observe_actual(fixture: &mut Fixture, reports: &mut [PlayerReport]) -> NativeGameplayResult<()> {
     observe_reports(reports, &mut fixture.states, &mut fixture.group, None)
 }
 
@@ -168,14 +168,14 @@ fn survivor_case(viewer: Option<&player::PlayerViewer>) {
         .unwrap();
     }
     for member in 0..3 {
-        let reports = input_reports(&mut fixture, member, 0, 1, ButtonState::Down);
-        observe_actual(&mut fixture, &reports).unwrap();
+        let mut reports = input_reports(&mut fixture, member, 0, 1, ButtonState::Down);
+        observe_actual(&mut fixture, &mut reports).unwrap();
     }
     for member in 1..3 {
-        let reports = input_reports(&mut fixture, member, 10_000_000, 2, ButtonState::Up);
-        observe_actual(&mut fixture, &reports).unwrap();
+        let mut reports = input_reports(&mut fixture, member, 10_000_000, 2, ButtonState::Up);
+        observe_actual(&mut fixture, &mut reports).unwrap();
     }
-    let reports = fixture
+    let mut reports = fixture
         .group
         .advance_to(host(20_000_000), &ExplicitDomains, output(20_000_000))
         .unwrap();
@@ -201,7 +201,24 @@ fn survivor_case(viewer: Option<&player::PlayerViewer>) {
             .all(|report| report.report.hazard_events[0].outcome
                 == beatkernel::judge::HazardOutcome::Avoided)
     );
-    observe_actual(&mut fixture, &reports).unwrap();
+    observe_actual(&mut fixture, &mut reports).unwrap();
+    assert_eq!(
+        reports[0].report.audio_commands,
+        [AudioCommand::Stop {
+            voice: VoiceId(1),
+            at: Timestamp::from_nanos(20_000_000),
+        }]
+    );
+    assert!(
+        reports
+            .iter()
+            .all(|report| report.report.audio_failures.is_empty())
+    );
+    assert!(
+        reports[1..]
+            .iter()
+            .all(|report| report.report.audio_commands.is_empty())
+    );
     assert!(!fixture.group.poisoned());
     assert_eq!(
         fixture.group.player_gameplay_fence(PLAYERS[0]),
@@ -230,12 +247,12 @@ fn survivor_case(viewer: Option<&player::PlayerViewer>) {
         .to_vec();
     assert_eq!(failed_capture.len(), 2); // genuine Down(0), Advance(20ms).
     for member in 1..3 {
-        let reports = input_reports(&mut fixture, member, 40_000_000, 3, ButtonState::Down);
+        let mut reports = input_reports(&mut fixture, member, 40_000_000, 3, ButtonState::Down);
         assert_eq!(reports[0].report.judge_events.len(), 1);
-        observe_actual(&mut fixture, &reports).unwrap();
+        observe_actual(&mut fixture, &mut reports).unwrap();
     }
     let progress_before = viewer.map(latest);
-    let frozen = input_reports(&mut fixture, 0, 40_000_000, 2, ButtonState::Up);
+    let mut frozen = input_reports(&mut fixture, 0, 40_000_000, 2, ButtonState::Up);
     assert_eq!(
         frozen[0].report.song_time,
         Timestamp::from_nanos(20_000_000)
@@ -244,7 +261,7 @@ fn survivor_case(viewer: Option<&player::PlayerViewer>) {
     assert!(frozen[0].report.judge_events.is_empty());
     assert!(frozen[0].report.hazard_events.is_empty());
     assert!(frozen[0].report.audio_commands.is_empty());
-    observe_actual(&mut fixture, &frozen).unwrap();
+    observe_actual(&mut fixture, &mut frozen).unwrap();
     if let (Some(viewer), Some(before)) = (viewer, progress_before) {
         let after = latest(viewer);
         assert_eq!(after.song_time, before.song_time);
@@ -254,11 +271,11 @@ fn survivor_case(viewer: Option<&player::PlayerViewer>) {
             assert_eq!(new.song_time, Some(Timestamp::from_nanos(40_000_000)));
         }
     }
-    let reports = fixture
+    let mut reports = fixture
         .group
         .advance_to(host(80_000_000), &ExplicitDomains, output(80_000_000))
         .unwrap();
-    observe_actual(&mut fixture, &reports).unwrap();
+    observe_actual(&mut fixture, &mut reports).unwrap();
     assert_eq!(
         fixture.states[0].capture.as_ref().unwrap().records(),
         failed_capture
@@ -291,11 +308,13 @@ fn survivor_case(viewer: Option<&player::PlayerViewer>) {
         assert_eq!(state.gauge.snapshot().failure, None);
         assert_eq!(state.last_song, Timestamp::from_nanos(80_000_000));
     }
-    // Nothing in the numeric fence flushes the shared real command queue.
+    // Scheduled per-member Stops preserve the admitted shared queue and survivor PCM.
     let mut pcm = [0.0; 48];
-    fixture.device.mixer.render(&mut pcm).unwrap();
+    let rendered = fixture.device.mixer.render(&mut pcm).unwrap();
     assert_eq!(&pcm[..3], &[0.75, 1.0, 0.0]); // Real mixer clamps the three-voice sum.
     assert_eq!(&pcm[40..43], &[0.5, 1.0, 0.0]);
+    assert_eq!(rendered.counters.commands_applied, 6);
+    assert_eq!(rendered.counters.unknown_stops, 1); // The stopped two-frame sample already ended.
     if let Some(viewer) = viewer {
         let snapshot = latest(viewer);
         assert_eq!(snapshot.gauge, BmsGauge::default()); // Multi-player has no combined gauge.
@@ -341,11 +360,11 @@ fn native_cohort_processing_error_keeps_poisoned_prefix_and_independent_observat
         1,
         1,
     );
-    let initial = fixture
+    let mut initial = fixture
         .group
         .advance_to(host(0), &ExplicitDomains, output(0))
         .unwrap();
-    observe_actual(&mut fixture, &initial).unwrap();
+    observe_actual(&mut fixture, &mut initial).unwrap();
     let (publisher, viewer) = player::channel();
     player::with_publisher(publisher, || {
         player::publish_local_chart(
@@ -393,7 +412,37 @@ fn native_cohort_processing_error_keeps_poisoned_prefix_and_independent_observat
         assert_eq!(original[0].report.judge_events.len(), 2);
         assert_eq!(original[0].report.hazard_events.len(), 1);
         assert_eq!(original[0].report.audio_commands.len(), 1);
-        assert_eq!(original[0].report.audio_failures.len(), 1);
+        assert_eq!(original[0].report.audio_failures.len(), 3);
+        assert!(matches!(
+            original[0].report.audio_failures[0].command,
+            AudioCommand::Play {
+                voice: VoiceId(2),
+                ..
+            }
+        ));
+        assert_eq!(
+            original[0].report.audio_failures[1..]
+                .iter()
+                .map(|error| error.command)
+                .collect::<Vec<_>>(),
+            [
+                AudioCommand::Stop {
+                    voice: VoiceId(1),
+                    at: Timestamp::ZERO
+                },
+                AudioCommand::Stop {
+                    voice: VoiceId(2),
+                    at: Timestamp::ZERO
+                },
+            ]
+        );
+        assert!(
+            original[0]
+                .report
+                .audio_failures
+                .iter()
+                .all(|error| error.reason == QueuePushError::Full)
+        );
         let observation = error
             .observation_error
             .as_ref()
@@ -401,6 +450,14 @@ fn native_cohort_processing_error_keeps_poisoned_prefix_and_independent_observat
             .downcast_ref::<NativeCohortObservationError>()
             .unwrap();
         assert_eq!(observation.reports.len(), 1);
+        assert_eq!(
+            observation.reports[0].report.audio_commands,
+            original[0].report.audio_commands
+        );
+        assert_eq!(
+            observation.reports[0].report.audio_failures,
+            original[0].report.audio_failures
+        );
         assert_eq!(
             observation.reports[0].report.bound_inputs,
             original[0].report.bound_inputs

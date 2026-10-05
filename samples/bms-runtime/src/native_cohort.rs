@@ -85,8 +85,8 @@ fn process<D: NativeGameplayDevice>(
 ) -> NativeGameplayResult<()> {
     let at = schedule(device, session, config)?;
     match session.group.process_input(event, &ExplicitDomains, at) {
-        Ok(InputResult::Processed(reports)) => observe_reports(
-            &reports,
+        Ok(InputResult::Processed(mut reports)) => observe_reports(
+            &mut reports,
             session.states,
             session.group,
             session.network.as_deref_mut(),
@@ -94,9 +94,9 @@ fn process<D: NativeGameplayDevice>(
         Ok(InputResult::Ignored { device }) => {
             Err(format!("merged source {device:?} has no cohort owner").into())
         }
-        Err(error) => {
+        Err(mut error) => {
             let observation_error = observe_reports(
-                &error.completed_reports,
+                &mut error.completed_reports,
                 session.states,
                 session.group,
                 session.network.as_deref_mut(),
@@ -117,15 +117,15 @@ fn advance<D: NativeGameplayDevice>(
 ) -> NativeGameplayResult<()> {
     let audio_at = schedule(device, session, config)?;
     match session.group.advance_to(at, &ExplicitDomains, audio_at) {
-        Ok(reports) => observe_reports(
-            &reports,
+        Ok(mut reports) => observe_reports(
+            &mut reports,
             session.states,
             session.group,
             session.network.as_deref_mut(),
         ),
-        Err(error) => {
+        Err(mut error) => {
             let observation_error = observe_reports(
-                &error.completed_reports,
+                &mut error.completed_reports,
                 session.states,
                 session.group,
                 session.network.as_deref_mut(),
@@ -259,7 +259,7 @@ pub fn replay_path(base: &Path, player: PlayerId) -> NativeGameplayResult<PathBu
 }
 
 fn observe_reports(
-    reports: &[PlayerReport],
+    reports: &mut [PlayerReport],
     states: &mut [PlayerState],
     group: &mut RuntimeGroup,
     network: Option<&mut NativeGroupCompetition>,
@@ -321,9 +321,30 @@ fn observe_reports(
     if let Err(error) = player::publish_local_reports(reports) {
         failures.push(format!("local presentation: {error}"));
     }
-    for player in fences.into_iter().flatten() {
+    for (index, player) in fences.into_iter().enumerate() {
+        let Some(player) = player else {
+            continue;
+        };
         if let Err(error) = group.fence_player(player) {
             failures.push(format!("player{} gameplay fence: {error}", player.0));
+            continue;
+        }
+        let report = &mut reports[index].report;
+        match group.fence_player_sounds(player, report.audio_at.timestamp) {
+            Ok(Some(stops)) => {
+                if !stops.failures.is_empty() {
+                    failures.push(format!(
+                        "player{} gameplay sound stops: {:?}",
+                        player.0, stops.failures
+                    ));
+                }
+                report.audio_commands.extend(stops.commands);
+                report.audio_failures.extend(stops.failures);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                failures.push(format!("player{} gameplay sound stops: {error}", player.0));
+            }
         }
     }
     if failures.is_empty() {
@@ -690,6 +711,9 @@ pub fn run_cohort<D: NativeGameplayDevice>(
 
 #[cfg(test)]
 mod fixtures {
+    mod sound_stop {
+        include!("native_local_sound_stop_fixtures.rs");
+    }
     mod gauge_fence {
         include!("native_local_gauge_fence_fixtures.rs");
     }

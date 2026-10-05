@@ -50,8 +50,34 @@ repeat behavior, restoration, exact local voice ownership and actual stepped
 gauge failure/error prefixes. Authoring or compile-only checks do not establish
 assertion, hardware, Worklet, native driver or performance acceptance.
 
-Native pump and replay/offline audio policy connections, result clear/fail and
-output cleanup remain unfinished after this component/stepped integration.
+## Native owner connection
+
+The shared native solo and cohort pumps use the same scheduled voice-stop API.
+After independently consuming gauge, capture, score/competition and presentation
+observations, fence the failed member and attempt its prepared voice stops using
+the actual report.audio_at.timestamp. Preserve the original input, judge/hazard,
+Play prefix and all independent errors; append accepted Stop commands and exact
+admission errors to that same actual report. Local observation consumes the whole
+committed prefix before stopping newly failed members, even after group poison.
+The normal input and deadline paths and original GroupError completed-prefix
+paths all use this connection. Do not reset poison or abort survivors solely for
+a numeric gauge failure with successfully admitted stops.
+
+Native typed observation/processing errors retain the augmented committed
+reports alongside the original core failure identity and independent observer
+errors. Any stop admission refusal is a technical owner error with readable
+numeric failure/fence and accepted audio prefix. No automatic retries, global
+Stop/Seek/pause, BGM interruption or OS-specific gameplay policy. UI attachment
+must not determine whether stop commands are admitted. Do not invent physical
+silence, drain/presentation evidence or successful terminal outcomes.
+
+Independent native deferred fixtures cover actual common report/pump paths,
+headless/publisher cases, real queue/Mixer future scheduling and survivor/BGM
+preservation, simultaneous capture/presentation/audio errors, group poison and
+prefix retention, and no duplicate post-fence stops.
+
+Replay/offline audio policy connections, result clear/fail and output cleanup
+remain unfinished after the common native owner connection.
 Stopping a configured inactive or never-played voice preserves the Mixer's
 existing unknown_stops diagnostic. The current strict normal-completion evidence
 validator rejects that counter; failed-session output completion needs an

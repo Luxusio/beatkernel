@@ -217,7 +217,7 @@ fn schedule<D: NativeGameplayDevice>(
 }
 fn publish(
     session: &mut NativeGameplaySession<'_>,
-    report: RuntimeReport,
+    mut report: RuntimeReport,
 ) -> NativeGameplayResult<()> {
     let was_fenced = session.runtime.gameplay_fence().is_some();
     let gauge_error = session
@@ -239,6 +239,13 @@ fn publish(
     let presentation_error = player::publish_report(&report).err();
     if session.gauge.snapshot().failure.is_some() {
         session.runtime.fence_gameplay();
+        if let Some(stops) = session
+            .runtime
+            .fence_gameplay_sounds(report.audio_at.timestamp)
+        {
+            report.audio_commands.extend(stops.commands);
+            report.audio_failures.extend(stops.failures);
+        }
     }
     for result in &report.judge_events {
         println!("judge={result:?}");
@@ -608,6 +615,9 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
 
 #[cfg(test)]
 mod fixtures {
+    mod sound_stop {
+        include!("native_solo_sound_stop_fixtures.rs");
+    }
     mod gauge_fence {
         include!("native_solo_gauge_fence_fixtures.rs");
     }
