@@ -81,6 +81,34 @@ fn failure(message: impl ToString, last_render: Option<RenderReport>) -> Offline
     }
 }
 
+/// Actual Stop admissions from one closed queue owner, not execution evidence.
+#[derive(Default)]
+pub(crate) struct OwnedStopEvidence {
+    admitted_stops: u64,
+}
+
+impl OwnedStopEvidence {
+    /// Record each successfully admitted command prefix exactly once.
+    /// Planned, requested and rejected commands must never be supplied here.
+    /// Overflow preserves all previously recorded evidence.
+    pub(crate) fn record_admitted(
+        &mut self,
+        commands: &[AudioCommand],
+    ) -> Result<(), &'static str> {
+        let count = commands
+            .iter()
+            .filter(|command| matches!(command, AudioCommand::Stop { .. }))
+            .count();
+        let count = u64::try_from(count).map_err(|_| "accepted Stop count overflow")?;
+        let next = self
+            .admitted_stops
+            .checked_add(count)
+            .ok_or("accepted Stop count overflow")?;
+        self.admitted_stops = next;
+        Ok(())
+    }
+}
+
 const DOMAIN: ClockDomainId = ClockDomainId(0x424d53);
 fn point(timestamp: Timestamp) -> ClockPoint {
     ClockPoint {
@@ -130,7 +158,7 @@ fn accept(
     summary: &mut OfflineReport,
     gauge: &mut BmsGauge,
     runtime: &mut Runtime,
-    admitted_stops: &mut u64,
+    admitted_stops: &mut OwnedStopEvidence,
     bgm_collision: bool,
 ) -> Result<(), OfflineError> {
     let hits = report
@@ -158,12 +186,8 @@ fn accept(
         if bgm_collision {
             errors.push("gameplay failure Stop voice collides with BGM".to_owned());
         } else if let Some(stops) = runtime.fence_gameplay_sounds(report.audio_at.timestamp) {
-            match u64::try_from(stops.commands.len())
-                .ok()
-                .and_then(|count| admitted_stops.checked_add(count))
-            {
-                Some(count) => *admitted_stops = count,
-                None => errors.push("offline accepted Stop count overflow".to_owned()),
+            if let Err(error) = admitted_stops.record_admitted(&stops.commands) {
+                errors.push(format!("offline {error}"));
             }
             report.audio_commands.extend(stops.commands);
             report.audio_failures.extend(stops.failures);
@@ -192,19 +216,27 @@ pub(crate) fn render_block(
     output: &mut dyn Write,
     summary: &mut OfflineReport,
 ) -> Result<(), OfflineError> {
-    render_owned_block(mixer, pcm, bytes, format, output, summary, 0)
+    render_block_with_stops(
+        mixer,
+        pcm,
+        bytes,
+        format,
+        output,
+        summary,
+        &OwnedStopEvidence::default(),
+    )
 }
 
-// Only render_offline owns the fresh queue and its actual accepted Stop ledger.
-// Other callers retain strict zero allowance through render_block above.
-fn render_owned_block(
+// Callers own fresh closed queues and record actual accepted commands once.
+// Generic callers retain strict zero allowance through render_block above.
+pub(crate) fn render_block_with_stops(
     mixer: &mut Mixer,
     pcm: &mut [f32],
     bytes: &mut [u8],
     format: DeviceFormat,
     output: &mut dyn Write,
     summary: &mut OfflineReport,
-    admitted_stops: u64,
+    admitted_stops: &OwnedStopEvidence,
 ) -> Result<(), OfflineError> {
     let report = mixer
         .render(pcm)
@@ -215,7 +247,7 @@ fn render_owned_block(
         || c.pending_full != 0
         || c.voice_full != 0
         || c.unknown_samples != 0
-        || c.unknown_stops > admitted_stops
+        || c.unknown_stops > admitted_stops.admitted_stops
         || c.invalid_gains != 0
         || c.invalid_rates != 0
         || c.invalid_times != 0
@@ -472,7 +504,7 @@ pub fn render_offline(
     let mut index = 0;
     let mut sequence = 0u64;
     let mut gauge = BmsGauge::default();
-    let mut admitted_stops = 0u64;
+    let mut admitted_stops = OwnedStopEvidence::default();
     while summary.frames < options.frames {
         let next_frame = records
             .get(index)
@@ -480,14 +512,14 @@ pub fn render_offline(
         if next_frame > summary.frames {
             let frames =
                 usize::try_from((next_frame - summary.frames).min(options.block_frames as u64))?;
-            render_owned_block(
+            render_block_with_stops(
                 &mut mixer,
                 &mut pcm[..frames * channels],
                 &mut bytes[..frames * channels * 4],
                 encoded,
                 output,
                 &mut summary,
-                admitted_stops,
+                &admitted_stops,
             )?;
         } else {
             while let Some(record) = records

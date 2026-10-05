@@ -325,6 +325,8 @@ pub mod replay_pause;
 pub mod replay_playback;
 /// Bounded PCM rendering of captured BMS play through the actual core Mixer.
 pub mod replay_render;
+#[cfg(test)]
+mod replay_render_owned_stop_fixtures;
 /// Incremental presentation of validated recorded judging operations.
 pub mod replay_visual;
 /// Retained participant-scoped room scores and bounded borrowed pages.

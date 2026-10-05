@@ -1,7 +1,9 @@
 //! Offline recorded-sound rendering through the shared planner and actual Mixer.
 use crate::{
     PreparedBms,
-    offline::{OfflineError, OfflineOptions, OfflineReport, render_block},
+    offline::{
+        OfflineError, OfflineOptions, OfflineReport, OwnedStopEvidence, render_block_with_stops,
+    },
     replay_audio::plan_audio,
 };
 use beatkernel::{
@@ -55,6 +57,8 @@ fn target_frame(at: Timestamp, origin: Timestamp, rate: u32) -> Result<u64, Box<
 /// Commands at/beyond the output extent are excluded; judge counts/hash still
 /// describe the full recording. Only one target-frame group is admitted at a time.
 /// Actual core execution and writer errors retain shared OfflineError evidence.
+/// Inactive Stop diagnostics are bounded by this owner's actual Stop admissions;
+/// raw counters remain visible and do not establish physical silence or completion.
 /// Zero frames validates without admission/output; the sink is never flushed.
 /// This cannot reproduce original native scheduling or dropped audio admissions.
 /// Supply freshly loaded original assets; recorded section metadata selects PCM
@@ -145,6 +149,7 @@ pub fn render_replay(
         consumer,
     )?;
     let mut index = 0;
+    let mut admitted_stops = OwnedStopEvidence::default();
     while summary.frames < options.frames {
         let next_frame = match plan.commands.get(index) {
             Some(command) => {
@@ -155,13 +160,14 @@ pub fn render_replay(
         if next_frame > summary.frames {
             let frames =
                 usize::try_from((next_frame - summary.frames).min(options.block_frames as u64))?;
-            render_block(
+            render_block_with_stops(
                 &mut mixer,
                 &mut pcm[..frames * channels],
                 &mut bytes[..frames * channels * 4],
                 encoded,
                 output,
                 &mut summary,
+                &admitted_stops,
             )?;
         } else {
             while let Some(command) = plan.commands.get(index).copied() {
@@ -173,6 +179,13 @@ pub fn render_replay(
                     last_render: summary.last_render,
                     audio_failures: vec![error],
                 })?;
+                admitted_stops
+                    .record_admitted(std::slice::from_ref(&command))
+                    .map_err(|error| OfflineError {
+                        message: format!("replay {error}"),
+                        last_render: summary.last_render,
+                        audio_failures: Vec::new(),
+                    })?;
                 index += 1;
             }
         }

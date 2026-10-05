@@ -24,7 +24,9 @@ may allow cumulative unknown_stops up to that count, because inactive or expired
 owned voices are legitimate idempotent Stop targets. Planned/requested/rejected
 Stops provide no allowance. Preserve the raw RenderReport/counters without
 normalization; all other render diagnostics remain strict errors. The generic
-render_block used by replay rendering retains zero unknown-stop allowance.
+render_block retains zero unknown-stop allowance. The separate
+[replay PCM owner](REQ__replay-render-owned-stops.md) reuses the same internal
+evidence component, recording its own actual queue admissions.
 This owner count is admission evidence, not per-command acoustic execution proof.
 
 Judge/gauge errors and original Play admission failures remain technical errors;
