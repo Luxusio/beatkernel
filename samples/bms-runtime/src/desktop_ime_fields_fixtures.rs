@@ -402,6 +402,9 @@ fn record_directory_commit_invalidates_old_catalog_and_preview_only_when_the_com
             records: 7,
             recorded_until: Some(beatkernel::time::Timestamp::from_nanos(123)),
             start: beatkernel::time::Timestamp::ZERO,
+            end: None,
+            historical: None,
+            archive_error: None,
             score: Default::default(),
         });
     }

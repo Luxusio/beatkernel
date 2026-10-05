@@ -2268,8 +2268,11 @@ impl Desktop {
                     }
                     Ok(ProfileResult::Record(preview)) => {
                         if records.selected_path() == Some(&preview.path) {
+                            records.error = preview
+                                .archive_error
+                                .as_ref()
+                                .map(|error| format!("Historical archive unavailable: {error}"));
                             records.preview = Some(preview);
-                            records.error = None;
                         }
                     }
                     Err(error) => {
@@ -8101,6 +8104,9 @@ mod tests {
             records: 7,
             recorded_until: Some(beatkernel::time::Timestamp::from_nanos(1_000_000_000)),
             start: beatkernel::time::Timestamp::ZERO,
+            end: None,
+            historical: None,
+            archive_error: None,
             score: Default::default(),
         }
     }

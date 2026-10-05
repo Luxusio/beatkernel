@@ -852,3 +852,11 @@ mod native_section_capture_fixtures;
 
 #[cfg(test)]
 mod step_result_archive_fixtures;
+
+/// Exact historical recording-to-archive identity matching.
+pub mod record_association;
+#[cfg(test)]
+mod record_association_fixtures;
+
+/// Pure catalog and recording preview values shared by presentation.
+pub mod record_model;

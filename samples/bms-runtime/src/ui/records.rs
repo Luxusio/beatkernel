@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     font_text::FontText,
-    record_catalog::{RecordCatalog, RecordPreview},
+    record_model::{RecordCatalog, RecordPreview},
     scene::Scene,
     screen_lifecycle::ScreenInstanceId,
 };
@@ -235,6 +235,9 @@ struct Row {
 struct Preview {
     records: usize,
     start: Timestamp,
+    end: Option<Timestamp>,
+    historical: Option<crate::record_model::HistoricalRecordValue>,
+    archive_failed: bool,
     until: Option<Timestamp>,
     hits: u64,
     misses: u64,
@@ -247,6 +250,9 @@ impl From<&RecordPreview> for Preview {
         Self {
             records: value.records,
             start: value.start,
+            end: value.end,
+            historical: value.historical,
+            archive_failed: value.archive_error.is_some(),
             until: value.recorded_until,
             hits: value.score.hits,
             misses: value.score.misses,
@@ -461,6 +467,83 @@ impl RecordsView {
                     let (bias, absolute) = crate::timing_display::summary(&preview.timing);
                     text(scene, 24, 582, &bias, 1, 0x9bb1cf);
                     text(scene, 24, 598, &absolute, 1, 0x9bb1cf);
+                    let end = preview.end.map_or_else(
+                        || "END UNLIMITED".into(),
+                        |end| format!("END {} NS", end.as_nanos()),
+                    );
+                    text(scene, 560, 518, &end, 1, 0xb6cce6);
+                    if let Some((player, result)) = preview.historical {
+                        use crate::play_result::{PlayResultScope, PlayResultOutcome};
+                        use crate::gauge::GaugeFailure;
+                        text(
+                            scene,
+                            560,
+                            534,
+                            &format!("HISTORICAL PLAYER {}", player.0),
+                            1,
+                            0xd8b36b,
+                        );
+                        text(
+                            scene,
+                            560,
+                            550,
+                            match result.scope {
+                                PlayResultScope::FullSong => "STORED SCOPE FULL SONG",
+                                PlayResultScope::PracticeSection { .. } => {
+                                    "STORED SCOPE PRACTICE SECTION"
+                                }
+                            },
+                            1,
+                            0xd8b36b,
+                        );
+                        text(
+                            scene,
+                            560,
+                            566,
+                            match result.outcome {
+                                PlayResultOutcome::Cleared => "STORED OUTCOME CLEARED",
+                                PlayResultOutcome::BelowClearThreshold => {
+                                    "STORED OUTCOME BELOW CLEAR"
+                                }
+                                PlayResultOutcome::Failed(GaugeFailure::InstantDeath) => {
+                                    "STORED OUTCOME FAILED INSTANT DEATH"
+                                }
+                                PlayResultOutcome::Failed(GaugeFailure::Depleted) => {
+                                    "STORED OUTCOME FAILED DEPLETED"
+                                }
+                            },
+                            1,
+                            0xd8b36b,
+                        );
+                        text(
+                            scene,
+                            560,
+                            582,
+                            &format!("STORED GAUGE {} UNITS", result.gauge.level_units),
+                            1,
+                            0xd8b36b,
+                        );
+                        if preview.archive_failed {
+                            text(scene, 560, 598, "ARCHIVE DIAGNOSTIC", 1, 0xf07878);
+                        }
+                    } else {
+                        text(
+                            scene,
+                            560,
+                            534,
+                            if preview.archive_failed {
+                                "HISTORICAL ARCHIVE UNAVAILABLE"
+                            } else {
+                                "NO HISTORICAL ARCHIVE"
+                            },
+                            1,
+                            if preview.archive_failed {
+                                0xf07878
+                            } else {
+                                0x9bb1cf
+                            },
+                        );
+                    }
                 } else {
                     text(
                         scene,
@@ -788,6 +871,9 @@ mod fixtures {
             records: 3,
             recorded_until: Some(Timestamp::from_nanos(200_000_000)),
             start: Timestamp::ZERO,
+            end: None,
+            historical: None,
+            archive_error: None,
             score: ScoreSummary {
                 hits: 2,
                 misses: 1,
@@ -848,6 +934,9 @@ mod fixtures {
             records: 1,
             recorded_until: Some(Timestamp::ZERO),
             start: Timestamp::ZERO,
+            end: None,
+            historical: None,
+            archive_error: None,
             score: ScoreSummary::default(),
         };
         let mut update = frame(&directory, &catalog);
@@ -922,6 +1011,9 @@ mod fixtures {
             records: 0,
             recorded_until: None,
             start: Timestamp::ZERO,
+            end: None,
+            historical: None,
+            archive_error: None,
             score: ScoreSummary::default(),
         };
         let mut invalid = frame(&directory, &catalog);
@@ -971,3 +1063,7 @@ mod fixtures {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "records_archive_fixtures.rs"]
+mod archive_fixtures;

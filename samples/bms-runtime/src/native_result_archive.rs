@@ -83,57 +83,7 @@ impl ResultArchiveStoragePort for NativeResultArchiveStore {
     }
     fn read_bounded(&mut self, key: &str, max_bytes: usize) -> io::Result<Vec<u8>> {
         let path = self.path(key)?;
-        if max_bytes
-            .checked_add(1)
-            .is_none_or(|n| n > isize::MAX as usize)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "archive read bound",
-            ));
-        }
-        if !std::fs::symlink_metadata(&path)?.file_type().is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "archive is not a regular file",
-            ));
-        }
-        let mut file = File::open(path)?;
-        let metadata = file.metadata()?;
-        if !metadata.is_file() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "archive is not a regular file",
-            ));
-        }
-        if metadata.len() > max_bytes as u64 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "archive exceeds byte bound",
-            ));
-        }
-        let mut bytes = Vec::new();
-        let mut block = [0u8; 8192];
-        loop {
-            let limit = (max_bytes + 1 - bytes.len()).min(block.len());
-            let count = match file.read(&mut block[..limit]) {
-                Ok(0) => break,
-                Ok(count) => count,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            };
-            if bytes.len() + count > max_bytes {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "archive exceeds byte bound",
-                ));
-            }
-            bytes
-                .try_reserve(count)
-                .map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory, "archive allocation"))?;
-            bytes.extend_from_slice(&block[..count]);
-        }
-        Ok(bytes)
+        read_regular_file(&path, max_bytes)
     }
 }
 
@@ -163,4 +113,68 @@ pub fn save_sidecar(
     file.write_all(&bytes)?;
     file.flush()?;
     Ok(())
+}
+
+fn read_regular_file(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
+    if max_bytes
+        .checked_add(1)
+        .is_none_or(|n| n > isize::MAX as usize)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "archive read bound",
+        ));
+    }
+    if !std::fs::symlink_metadata(&path)?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "archive is not a regular file",
+        ));
+    }
+    let mut file = File::open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "archive is not a regular file",
+        ));
+    }
+    if metadata.len() > max_bytes as u64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "archive exceeds byte bound",
+        ));
+    }
+    let mut bytes = Vec::new();
+    let mut block = [0u8; 8192];
+    loop {
+        let limit = (max_bytes + 1 - bytes.len()).min(block.len());
+        let count = match file.read(&mut block[..limit]) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if bytes.len() + count > max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "archive exceeds byte bound",
+            ));
+        }
+        bytes
+            .try_reserve(count)
+            .map_err(|_| io::Error::new(io::ErrorKind::OutOfMemory, "archive allocation"))?;
+        bytes.extend_from_slice(&block[..count]);
+    }
+    Ok(bytes)
+}
+/// Adjacent sidecar admission supports the original native filename without conversion.
+pub fn read_sidecar(base: &Path) -> io::Result<Option<Vec<u8>>> {
+    let path = sidecar_path(base)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error.to_string()))?;
+    match read_regular_file(&path, crate::result_archive::MAX_ARCHIVE_BYTES) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }

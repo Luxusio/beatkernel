@@ -2,7 +2,7 @@
 use crate::{
     competition::ScoreSummary,
     competition_live::{load_chart_with_seed, replay_limits},
-    replay_playback::{decode_chart_setup, read_replay, reconstruct},
+    replay_playback::{decode_section_setup, read_replay, reconstruct_section, RecordedSetup},
     settings::{MAX_VALUE_BYTES, NativeSettings},
 };
 use beatkernel::{
@@ -18,13 +18,7 @@ use std::{
 const MAX_INSPECTED: usize = 4096;
 const MAX_RETAINED: usize = 256;
 
-/// Direct regular .bkr files (ASCII case-insensitive extension), sorted within the bounded inspected subset.
-/// Directory iteration order is OS-owned; truncation never promises completeness.
-#[derive(Clone, Debug)]
-pub struct RecordCatalog {
-    pub entries: Vec<PathBuf>,
-    pub truncated: bool,
-}
+pub use crate::record_model::{RecordCatalog, RecordPreview};
 impl RecordCatalog {
     pub fn scan(directory: &Path) -> Result<Self, String> {
         settings_path(directory)?;
@@ -74,15 +68,6 @@ impl RecordCatalog {
     }
 }
 
-/// Actual recorded prefix results, with no synthetic end-of-song advance.
-#[derive(Clone, Debug)]
-pub struct RecordPreview {
-    pub path: PathBuf,
-    pub records: usize,
-    pub recorded_until: Option<Timestamp>,
-    pub start: Timestamp,
-    pub score: ScoreSummary,
-}
 impl RecordPreview {
     pub fn inspect(path: &Path, chart: &Path, settings: &NativeSettings) -> Result<Self, String> {
         settings_path(path)?;
@@ -100,10 +85,28 @@ impl RecordPreview {
             return Err("saved record must be a regular file".into());
         }
         let file = read_replay(&mut reader, limits).map_err(|error| error.to_string())?;
-        let (_, _, seed) =
-            decode_chart_setup(&file.header.options).map_err(|error| error.to_string())?;
-        let source = load_chart_with_seed(chart, seed).map_err(|error| error.to_string())?;
-        Self::from_file(path, &source, settings, file)
+        let setup =
+            decode_section_setup(&file.header.options).map_err(|error| error.to_string())?;
+        let source =
+            load_chart_with_seed(chart, setup.chart_seed).map_err(|error| error.to_string())?;
+        let header = file.header.clone();
+        let preview = Self::from_file(path, &source, settings, file)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        let preview = {
+            let mut preview = preview;
+            match crate::native_result_archive::read_sidecar(path) {
+                Ok(None) => {}
+                Ok(Some(bytes)) => match crate::result_archive::decode_archive(&bytes) {
+                    Ok(archive) => preview.attach_archive(&header, &archive, None),
+                    Err(error) => preview.archive_error = Some(error.to_string()),
+                },
+                Err(error) => preview.archive_error = Some(error.to_string()),
+            }
+            preview
+        };
+        #[cfg(target_arch = "wasm32")]
+        let _ = header;
+        Ok(preview)
     }
     fn from_file(
         path: &Path,
@@ -111,16 +114,20 @@ impl RecordPreview {
         settings: &NativeSettings,
         file: ReplayFile,
     ) -> Result<Self, String> {
-        let (profile, start, seed) =
-            decode_chart_setup(&file.header.options).map_err(|error| error.to_string())?;
-        let (expected, expected_start) = draft_setup(settings)?;
-        if seed != settings.chart_seed()? {
+        let setup =
+            decode_section_setup(&file.header.options).map_err(|error| error.to_string())?;
+        let expected = draft_section(settings)?;
+        if setup.chart_seed != expected.chart_seed {
             return Err("saved record chart seed differs from the current draft".into());
         }
-        if profile != expected || start != expected_start {
+        if setup.profile != expected.profile
+            || setup.start != expected.start
+            || setup.end != expected.end
+            || setup.input_mode != expected.input_mode
+        {
             return Err("saved record profile or section differs from the current draft".into());
         }
-        let replay = reconstruct(
+        let replay = reconstruct_section(
             source,
             file,
             replay_limits().map_err(|error| error.to_string())?,
@@ -134,9 +141,52 @@ impl RecordPreview {
             path: path.into(),
             records: replay.records().len(),
             recorded_until: replay.records().last().map(|record| record.song_time),
-            start,
+            start: setup.start,
+            end: setup.end,
+            historical: None,
+            archive_error: None,
             score,
         })
+    }
+    /// Explicit decoded archive association; failed association keeps a valid prefix.
+    pub fn from_file_with_archive(
+        path: &Path,
+        source: &beatkernel_bms::BmsChart,
+        settings: &NativeSettings,
+        file: ReplayFile,
+        archive: Option<&crate::result_archive::ResultArchive>,
+        player: Option<crate::local_players::PlayerId>,
+    ) -> Result<Self, String> {
+        let association = archive
+            .map(|archive| crate::record_association::associate(archive, &file.header, player));
+        let mut preview = Self::from_file(path, source, settings, file)?;
+        match association {
+            Some(Ok(entry)) => preview.historical = Some((entry.player, entry.result)),
+            Some(Err(error)) => preview.archive_error = Some(error.to_string()),
+            None if player.is_some() => {
+                preview.archive_error = Some("historical player requires an archive".into())
+            }
+            None => {}
+        }
+        Ok(preview)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    fn attach_archive(
+        &mut self,
+        header: &beatkernel::replay::ReplayHeader,
+        archive: &crate::result_archive::ResultArchive,
+        player: Option<crate::local_players::PlayerId>,
+    ) {
+        match crate::record_association::associate(archive, header, player) {
+            Ok(entry) => {
+                self.historical = Some((entry.player, entry.result));
+                self.archive_error = None;
+            }
+            Err(error) => {
+                self.historical = None;
+                self.archive_error = Some(error.to_string());
+            }
+        }
     }
 }
 fn is_record_path(path: &Path) -> bool {
@@ -202,6 +252,42 @@ fn draft_setup(settings: &NativeSettings) -> Result<(JudgeProfile, Timestamp), S
         Timestamp::from_nanos(nonnegative("--start-ns", 0)?),
     ))
 }
+
+/// Full current native draft identity; finite endpoints are strictly after the start.
+fn draft_section(settings: &NativeSettings) -> Result<RecordedSetup, String> {
+    let (profile, start) = draft_setup(settings)?;
+    let text = settings
+        .fields()
+        .iter()
+        .find(|row| row.flag == "--end-ns")
+        .map(|row| row.value.as_str())
+        .unwrap_or("");
+    let end = if text.is_empty() {
+        None
+    } else {
+        if !text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("--end-ns requires nonnegative decimal nanoseconds".into());
+        }
+        let end = Timestamp::from_nanos(
+            text.parse::<i64>()
+                .map_err(|_| "--end-ns requires i64 nanoseconds")?,
+        );
+        if end <= start {
+            return Err("--end-ns must be after the section start".into());
+        }
+        Some(end)
+    };
+    Ok(RecordedSetup {
+        profile,
+        start,
+        end,
+        chart_seed: settings.chart_seed()?,
+        input_mode: beatkernel_bms::BmsInputMode::ButtonOnly,
+    })
+}
+#[cfg(test)]
+#[path = "record_catalog_section_fixtures.rs"]
+pub(crate) mod section_fixtures;
 
 #[cfg(test)]
 mod fixtures {
