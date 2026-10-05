@@ -34,6 +34,11 @@ source and long-duration fixtures for deferred execution.
 
 ## Integration boundary
 
+The [shared judge hazard contract](REQ__judge-hazards.md) defines one-shot
+occupancy processing, simultaneous operation order and complete checkpoints.
+Its engine component is the next integration layer; it does not by itself
+enable BMS gameplay admission or apply BMS gauge and sound policy.
+
 During source integration, shared `prepare_from_source` rejects any nonempty
 mine timeline immediately after actual parsing and before gain/replay/asset
 lookup, reads, decode or PCM allocation. Empty/rest-only/inactive mine rows
