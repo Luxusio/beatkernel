@@ -11,6 +11,8 @@ use crate::{
     local_runtime::SoloRuntime,
     native_end::{EndBoundary, NativeEnd},
     native_audio::{NativeStopBarrier, finite_terminal_output_ready, validate_stop_evidence},
+    native_pump_control::{NativePumpControl, NativePumpDeadline},
+    native_pump_system::SystemControl,
     offline::OwnedStopEvidence,
     playback_pause::{NativePause, PauseKeyboard, PausePhase},
     player::{self, PauseState},
@@ -28,12 +30,7 @@ use beatkernel::{
 use beatkernel_platform::audio::presentation::discipline::{
     DisciplineConfig, DisciplineUpdate, PresentationDiscipline,
 };
-use std::{
-    collections::VecDeque,
-    error::Error,
-    fmt,
-    time::{Duration as WallDuration, Instant},
-};
+use std::{collections::VecDeque, error::Error, fmt, time::Duration as WallDuration};
 
 pub type NativeGameplayResult<T> = Result<T, Box<dyn std::error::Error>>;
 pub const MAX_PENDING_INPUT_EVENTS: usize = 65_536;
@@ -357,8 +354,19 @@ fn finite_done_with_terminal(
 /// No native operation, wall-time inference or platform branch enters judge/audio callbacks.
 pub fn run_gameplay<D: NativeGameplayDevice>(
     device: &mut D,
+    session: NativeGameplaySession<'_>,
+    config: NativeGameplayConfig,
+) -> NativeGameplayResult<()> {
+    run_gameplay_with_control(device, session, config, &mut SystemControl)
+}
+
+/// Runs the same pump with explicit diagnostic-clock and wait effects.
+/// Neither the control deadline nor cancellation is successful song completion.
+pub fn run_gameplay_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
+    device: &mut D,
     mut session: NativeGameplaySession<'_>,
     config: NativeGameplayConfig,
+    control: &mut C,
 ) -> NativeGameplayResult<()> {
     if session.gauge.profile() != &GaugeProfile::default() {
         return Err("native gameplay requires the default recorded gauge policy".into());
@@ -372,14 +380,8 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
     {
         return Err("invalid native gameplay clocks/rate/lag".into());
     }
-    let deadline = config
-        .seconds
-        .map(|seconds| {
-            Instant::now()
-                .checked_add(WallDuration::from_secs(seconds))
-                .ok_or("native gameplay deadline overflow")
-        })
-        .transpose()?;
+    let mut deadline =
+        NativePumpDeadline::new(control, config.seconds, "native gameplay deadline overflow")?;
     let mut pending = VecDeque::new();
     pending.try_reserve_exact(4096)?;
     let mut last_acquired = config.origin;
@@ -396,7 +398,7 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
     let mut pause_announced = false;
     let mut stop_evidence = OwnedStopEvidence::default();
     let mut stop_barrier = NativeStopBarrier::default();
-    while !player::cancelled() && deadline.is_none_or(|deadline| Instant::now() < deadline) {
+    while !player::cancelled() && deadline.active(control)? {
         player::retry_pause_publication();
         device.observe(session.discipline)?;
         let reference = session
@@ -528,7 +530,7 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
                     PausePhase::Pausing | PausePhase::Resuming
                 ))
         {
-            std::thread::sleep(WallDuration::from_millis(1));
+            control.wait(WallDuration::from_millis(1))?;
             continue;
         }
         if let Some(at) = resume_boundary {
@@ -539,7 +541,7 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
                 keyboard.observe_paused(pending.pop_front().unwrap())?;
             }
             if batch.backlog || received.timestamp < at.timestamp {
-                std::thread::sleep(WallDuration::from_millis(1));
+                control.wait(WallDuration::from_millis(1))?;
                 continue;
             }
             // Reconciliation precedes every post-resume input, including equal time.
@@ -588,7 +590,7 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
         if (session.pause.phase() == PausePhase::Paused && !end_rendered)
             || resume_boundary.is_some()
         {
-            std::thread::sleep(WallDuration::from_millis(1));
+            control.wait(WallDuration::from_millis(1))?;
             continue;
         }
         let now = device.host_now()?;
@@ -596,7 +598,7 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
         last_host = Some(now);
         session.discipline.validate_host(now)?;
         if now.timestamp < config.origin.timestamp {
-            std::thread::sleep(WallDuration::from_millis(1));
+            control.wait(WallDuration::from_millis(1))?;
             continue;
         }
         if let DisciplineUpdate::Applied {
@@ -695,13 +697,16 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
                 }
             }
         }
-        std::thread::sleep(WallDuration::from_millis(1));
+        control.wait(WallDuration::from_millis(1))?;
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod fixtures {
+    mod control {
+        include!("native_solo_control_fixtures.rs");
+    }
     mod failed_terminal {
         include!("native_solo_failed_terminal_fixtures.rs");
     }

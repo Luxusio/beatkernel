@@ -275,6 +275,9 @@ mod native_mine_audio_fixtures;
 mod native_mine_fixtures;
 #[cfg(test)]
 mod native_mine_presentation_fixtures;
+/// Injectable diagnostic deadlines and waiting for shared native pumps.
+pub mod native_pump_control;
+mod native_pump_system;
 /// Game-owned room lobby, comparison, committed start and natural finalization.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_room_competition;

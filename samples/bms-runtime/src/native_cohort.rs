@@ -13,6 +13,8 @@ use crate::{
     local_runtime::{GroupError, InputResult, PlayerReport, RuntimeGroup},
     native_end::NativeEnd,
     native_audio::{NativeStopBarrier, finite_terminal_output_ready, validate_stop_evidence},
+    native_pump_control::{NativePumpControl, NativePumpDeadline},
+    native_pump_system::SystemControl,
     offline::OwnedStopEvidence,
     native_group_competition::NativeGroupCompetition,
     multiplayer_group::{MemberProgress, validate_members},
@@ -35,7 +37,7 @@ use std::{
     collections::VecDeque,
     fmt,
     path::{Path, PathBuf},
-    time::{Duration as WallDuration, Instant},
+    time::Duration as WallDuration,
 };
 pub struct NativeCohortSession<'a> {
     pub group: &'a mut RuntimeGroup,
@@ -452,8 +454,19 @@ pub fn lag_reaches(now: ClockPoint, boundary: ClockPoint, lag: i64) -> NativeGam
 /// Owns the complete cohort pump; native cleanup and durable saves remain caller-owned.
 pub fn run_cohort<D: NativeGameplayDevice>(
     device: &mut D,
+    session: NativeCohortSession<'_>,
+    config: NativeGameplayConfig,
+) -> NativeGameplayResult<()> {
+    run_cohort_with_control(device, session, config, &mut SystemControl)
+}
+
+/// Runs the actual cohort policy with injectable diagnostic time and waiting.
+/// Acquired input and native presentation keep their original clock domains.
+pub fn run_cohort_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
+    device: &mut D,
     mut session: NativeCohortSession<'_>,
     config: NativeGameplayConfig,
+    control: &mut C,
 ) -> NativeGameplayResult<()> {
     if session
         .states
@@ -482,14 +495,8 @@ pub fn run_cohort<D: NativeGameplayDevice>(
             return Err("invalid cohort roster".into());
         }
     }
-    let deadline = config
-        .seconds
-        .map(|seconds| {
-            Instant::now()
-                .checked_add(WallDuration::from_secs(seconds))
-                .ok_or("cohort deadline overflow")
-        })
-        .transpose()?;
+    let mut deadline =
+        NativePumpDeadline::new(control, config.seconds, "cohort deadline overflow")?;
     let lag = config.advance_lag.as_nanos();
     let mut acquired = VecDeque::new();
     acquired.try_reserve_exact(64 * 256)?;
@@ -514,7 +521,7 @@ pub fn run_cohort<D: NativeGameplayDevice>(
     let mut pause_committed = false;
     let mut pause_lag_reached = false;
     let mut pause_announced = false;
-    while !player::cancelled() && deadline.is_none_or(|deadline| Instant::now() < deadline) {
+    while !player::cancelled() && deadline.active(control)? {
         player::retry_pause_publication();
         device.observe(session.discipline)?;
         let reference = session
@@ -649,11 +656,11 @@ pub fn run_cohort<D: NativeGameplayDevice>(
                     PausePhase::Pausing | PausePhase::Resuming
                 ))
         {
-            std::thread::sleep(WallDuration::from_millis(1));
+            control.wait(WallDuration::from_millis(1))?;
             continue;
         }
         if now.timestamp < config.origin.timestamp || batch.backlog {
-            std::thread::sleep(WallDuration::from_millis(1));
+            control.wait(WallDuration::from_millis(1))?;
             continue;
         }
         if session.pause.phase() == PausePhase::Paused && !end_rendered {
@@ -696,12 +703,12 @@ pub fn run_cohort<D: NativeGameplayDevice>(
                     }
                 }
             }
-            std::thread::sleep(WallDuration::from_millis(1));
+            control.wait(WallDuration::from_millis(1))?;
             continue;
         }
         if let Some(at) = resume_boundary {
             if !lag_reaches(now, at, lag)? {
-                std::thread::sleep(WallDuration::from_millis(1));
+                control.wait(WallDuration::from_millis(1))?;
                 continue;
             }
         }
@@ -709,7 +716,7 @@ pub fn run_cohort<D: NativeGameplayDevice>(
         if resume_boundary
             .is_some_and(|at| frontier.is_none_or(|frontier| frontier.timestamp < at.timestamp))
         {
-            std::thread::sleep(WallDuration::from_millis(1));
+            control.wait(WallDuration::from_millis(1))?;
             continue;
         }
         let was_resuming = resume_boundary.is_some();
@@ -833,13 +840,16 @@ pub fn run_cohort<D: NativeGameplayDevice>(
                 return Ok(());
             }
         }
-        std::thread::sleep(WallDuration::from_millis(1));
+        control.wait(WallDuration::from_millis(1))?;
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod fixtures {
+    mod control {
+        include!("native_local_control_fixtures.rs");
+    }
     mod failed_terminal {
         include!("native_local_failed_terminal_fixtures.rs");
     }
