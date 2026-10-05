@@ -989,9 +989,10 @@ impl StepGameplay {
                 "completed capture already consumed",
             ))?;
         let identity = completed_archive_identity(PlayerId(1), capture, self.gauge.profile())?;
-        let archive = crate::result_archive::ResultArchive::from_completed(
+        let archive = crate::result_archive::ResultArchive::from_completed_with_scores(
             &[(PlayerId(1), result)],
             &[identity],
+            &[(PlayerId(1), &self.score)],
         )?;
         Ok(Some(crate::result_archive::encode_archive(&archive)?))
     }
@@ -2047,13 +2048,18 @@ impl StepLocalGameplay {
         }
         let mut results = Vec::new();
         let mut identities = Vec::new();
+        let mut scores = Vec::new();
         results
             .try_reserve_exact(self.members.len())
             .map_err(|_| ArchiveError::AllocationFailed)?;
         identities
             .try_reserve_exact(self.members.len())
             .map_err(|_| ArchiveError::AllocationFailed)?;
+        scores
+            .try_reserve_exact(self.members.len())
+            .map_err(|_| ArchiveError::AllocationFailed)?;
         for member in &self.members {
+            scores.push((member.player, &member.score));
             let capture = member
                 .capture
                 .as_ref()
@@ -2070,7 +2076,7 @@ impl StepLocalGameplay {
                     .ok_or(ArchiveError::Invalid("completed member missing result"))?,
             ));
         }
-        let archive = ResultArchive::from_completed(&results, &identities)?;
+        let archive = ResultArchive::from_completed_with_scores(&results, &identities, &scores)?;
         Ok(Some(encode_archive(&archive)?))
     }
 
@@ -2729,3 +2735,7 @@ fn completed_archive_identity(
         profile,
     ))
 }
+
+#[cfg(test)]
+#[path = "step_archived_score_fixtures.rs"]
+mod step_archived_score_fixtures;

@@ -13,6 +13,135 @@ impl std::fmt::Display for TimingError {
 }
 impl std::error::Error for TimingError {}
 
+/// Exact decoded historical timing scalars, without live judgment authority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TimingRecord {
+    pub count: u64,
+    pub early: u64,
+    pub late: u64,
+    pub exact: u64,
+    pub sum: i128,
+    pub absolute_sum: u128,
+    pub last: Option<i64>,
+    pub min: Option<i64>,
+    pub max: Option<i64>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimingRecordError {
+    Invalid,
+}
+impl std::fmt::Display for TimingRecordError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid historical timing record")
+    }
+}
+impl std::error::Error for TimingRecordError {}
+impl TimingRecord {
+    pub fn validate(&self) -> Result<(), TimingRecordError> {
+        use TimingRecordError::Invalid;
+        if self
+            .early
+            .checked_add(self.late)
+            .and_then(|n| n.checked_add(self.exact))
+            != Some(self.count)
+        {
+            return Err(Invalid);
+        }
+        if self.count == 0 {
+            return if self.sum == 0
+                && self.absolute_sum == 0
+                && self.last.is_none()
+                && self.min.is_none()
+                && self.max.is_none()
+            {
+                Ok(())
+            } else {
+                Err(Invalid)
+            };
+        }
+        let (Some(min), Some(max), Some(last)) = (self.min, self.max, self.last) else {
+            return Err(Invalid);
+        };
+        if min > max
+            || last < min
+            || last > max
+            || (min < 0) != (self.early > 0)
+            || (max > 0) != (self.late > 0)
+            || (self.exact > 0 && (min > 0 || max < 0))
+        {
+            return Err(Invalid);
+        }
+        let magnitude = self.sum.unsigned_abs();
+        if magnitude > self.absolute_sum || (self.absolute_sum - magnitude) % 2 != 0 {
+            return Err(Invalid);
+        }
+        let smaller = (self.absolute_sum - magnitude) / 2;
+        let (negative, positive) = if self.sum >= 0 {
+            (smaller, self.absolute_sum - smaller)
+        } else {
+            (self.absolute_sum - smaller, smaller)
+        };
+        // Extrema and last are genuine observed values; reserve one sample for
+        // each distinct required value before bounding remaining magnitudes.
+        let required = [min, max, last];
+        let mut neg_count = 0u64;
+        let mut pos_count = 0u64;
+        let mut zero_count = 0u64;
+        let mut neg_sum = 0u128;
+        let mut pos_sum = 0u128;
+        for (index, value) in required.iter().copied().enumerate() {
+            if required[..index].contains(&value) {
+                continue;
+            }
+            if value < 0 {
+                neg_count += 1;
+                neg_sum += u128::from(value.unsigned_abs());
+            } else if value > 0 {
+                pos_count += 1;
+                pos_sum += value as u128;
+            } else {
+                zero_count += 1;
+            }
+        }
+        if neg_count > self.early || pos_count > self.late || zero_count > self.exact {
+            return Err(Invalid);
+        }
+        let bounded = |total: u128,
+                       required_sum: u128,
+                       count: u64,
+                       required_count: u64,
+                       low: u128,
+                       high: u128| {
+            let remaining = u128::from(count - required_count);
+            let lower = remaining
+                .checked_mul(low)
+                .and_then(|n| n.checked_add(required_sum));
+            let upper = remaining
+                .checked_mul(high)
+                .and_then(|n| n.checked_add(required_sum));
+            lower.is_some_and(|n| total >= n) && upper.is_some_and(|n| total <= n)
+        };
+        let neg_low = if max < 0 {
+            u128::from(max.unsigned_abs())
+        } else {
+            1
+        };
+        let neg_high = if min < 0 {
+            u128::from(min.unsigned_abs())
+        } else {
+            0
+        };
+        let pos_low = if min > 0 { min as u128 } else { 1 };
+        let pos_high = if max > 0 { max as u128 } else { 0 };
+        if !bounded(negative, neg_sum, self.early, neg_count, neg_low, neg_high)
+            || !bounded(positive, pos_sum, self.late, pos_count, pos_low, pos_high)
+        {
+            return Err(Invalid);
+        }
+        Ok(())
+    }
+}
+
 /// All accepted known-stage samples, independent of bounded recent HUD history.
 /// Grades are opaque and each hold head/tail contributes separately.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -28,6 +157,20 @@ pub struct TimingSummary {
     max: Option<i64>,
 }
 impl TimingSummary {
+    pub const fn record(&self) -> TimingRecord {
+        TimingRecord {
+            count: self.count,
+            early: self.early,
+            late: self.late,
+            exact: self.exact,
+            sum: self.sum,
+            absolute_sum: self.absolute_sum,
+            last: self.last,
+            min: self.min,
+            max: self.max,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn exhausted_for_fixture() -> Self {
         Self {
@@ -243,3 +386,7 @@ mod fixtures {
         assert_eq!(near, original);
     }
 }
+
+#[cfg(test)]
+#[path = "timing_record_fixtures.rs"]
+mod timing_record_fixtures;

@@ -16,6 +16,7 @@ pub struct HistoricalRecordPresentation {
     value: HistoricalRecordValue,
     start: Timestamp,
     end: Option<Timestamp>,
+    score: Option<crate::result_archive::ArchivedScore>,
     geometry: GeometrySnapshot,
 }
 impl HistoricalRecordPresentation {
@@ -108,10 +109,57 @@ impl HistoricalRecordPresentation {
             0xd8b36b,
         );
         text(&mut scene, 24, 286, "STORED HISTORICAL DATA", 1, 0x9bb1cf);
+        if let Some(score) = &entry.score {
+            for (y, label) in [
+                (
+                    322,
+                    format!("STORED HITS {} MISSES {}", score.hits, score.misses),
+                ),
+                (
+                    346,
+                    format!("STORED COMBO {} MAX COMBO {}", score.combo, score.max_combo),
+                ),
+                (
+                    370,
+                    format!(
+                        "TIMING COUNT {} EARLY {} LATE {} EXACT {}",
+                        score.timing.count,
+                        score.timing.early,
+                        score.timing.late,
+                        score.timing.exact
+                    ),
+                ),
+                (394, format!("TIMING SUM {} NS", score.timing.sum)),
+                (
+                    418,
+                    format!("TIMING ABSOLUTE SUM {} NS", score.timing.absolute_sum),
+                ),
+            ] {
+                text(&mut scene, 24, y, &label, 1, 0xb6cce6);
+            }
+            for (y, name, value) in [
+                (442, "LAST", score.timing.last),
+                (466, "MIN", score.timing.min),
+                (490, "MAX", score.timing.max),
+            ] {
+                let label = value.map_or_else(
+                    || format!("TIMING {name} UNAVAILABLE"),
+                    |value| format!("TIMING {name} {value} NS"),
+                );
+                text(&mut scene, 24, y, &label, 1, 0xb6cce6);
+            }
+        }
+        let score = entry
+            .score
+            .as_ref()
+            .map(crate::result_archive::ArchivedScore::try_copy)
+            .transpose()
+            .map_err(|error| error.to_string())?;
         Ok(Some(Self {
             value,
             start,
             end,
+            score,
             geometry: scene.geometry_snapshot()?,
         }))
     }
@@ -123,6 +171,9 @@ impl HistoricalRecordPresentation {
     }
     pub const fn end(&self) -> Option<Timestamp> {
         self.end
+    }
+    pub fn score(&self) -> Option<&crate::result_archive::ArchivedScore> {
+        self.score.as_ref()
     }
     pub fn compose(&self, scene: &mut Scene) -> Result<(), String> {
         scene.append_geometry(&self.geometry)
