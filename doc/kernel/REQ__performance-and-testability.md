@@ -75,9 +75,12 @@ QUIC credential metadata validation and ordered byte acquisition use portable
 policy with an injected reader. Original Path keys and owned byte buffers cross
 the boundary without policy formatting or copies, and opaque read errors retain
 their identity. The native reader owns regular-file checks and bounded filesystem
-reads; TLS decoding and sockets remain native. WebTransport CA acquisition and
-full endpoint construction still need boundary work. See
-[credential preparation](REQ__multiplayer-credential-loading.md).
+reads; TLS decoding and sockets remain native. WebTransport destination/Origin
+metadata validation and single-CA preparation use the same generic reader, with
+original option borrowing and unchanged build availability. Full endpoint
+construction still needs boundary work. See
+[credential preparation](REQ__multiplayer-credential-loading.md)
+and [WebTransport preparation](REQ__webtransport-preparation.md).
 
 Solo terminal delivery selection and its one-shot guard are pure; observation
 and start requests cannot revive a finalized owner. Endpoint acquisition and

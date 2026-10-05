@@ -16,7 +16,9 @@ Native QUIC endpoints retain address validation before credential reads and use
 the injected preparation path. Filesystem regular-file checks, bounded native
 reads, certificate/key decoding, trust validation and socket binding remain in
 the native adapter. Pure validation does not prove TLS correctness or file safety.
-WebTransport's existing CA reader is outside this increment.
+WebTransport preparation now reuses this reader contract through its
+[separate policy](REQ__webtransport-preparation.md); its TLS and socket ownership
+remain native.
 
 Deferred fake-reader fixtures cover zero effects on invalid metadata, ordered
 original keys, errors, byte bounds and original server-name borrowing. Assertions,

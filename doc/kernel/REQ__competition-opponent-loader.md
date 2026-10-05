@@ -46,7 +46,10 @@ zero. See [the evidence scope](../changes/CHANGE__competition-opponent-loader.md
 
 ## Known ceiling
 
-Endpoint acquisition and credential loading, actual file reader/OS behavior,
-remaining room/ACK waits and whole networked-owner construction still require
-continued boundary work and acceptance. Allocator fault injection, full pipeline
+Credential metadata and trust-byte preparation have a
+[separate injected reader boundary](REQ__multiplayer-credential-loading.md),
+including [WebTransport preparation](REQ__webtransport-preparation.md).
+Endpoint acquisition, actual file reader/OS behavior, remaining room/ACK waits
+and whole networked-owner construction still require continued boundary work
+and acceptance. Allocator fault injection, full pipeline
 runtime evidence and complete IO separation are not established by these fixtures.
