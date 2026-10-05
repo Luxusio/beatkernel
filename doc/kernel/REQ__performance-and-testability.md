@@ -259,3 +259,9 @@ worker delegates commands and observations to that same actor; acquisition,
 queue/reply credits, locking, actual time and thread join stay in the adapter.
 This is a code boundary, not evidence that a real adapter never blocks or that
 browser integration and physical timing are complete.
+
+The [split-operation room client driver](REQ__room-client-driver.md) separates
+the existing WASM room client's protocol lifetime and decoder/revision state
+from JS materialization. The actual binding delegates to it, retaining real
+async write-completion authority in the Worker transport. This is a separate
+integration step from a browser stream adapter or the shared room controller.
