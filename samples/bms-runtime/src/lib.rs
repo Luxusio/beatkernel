@@ -149,6 +149,10 @@ pub mod mine_plan;
 mod mine_plan_fixtures;
 #[cfg(test)]
 mod mine_render_fixtures;
+#[cfg(test)]
+mod mine_sound_fixtures;
+/// Optional original WAV00 bindings and source sound identity.
+pub mod mine_sounds;
 /// Complete MPEG Layer III assets and declared encoder timing during preparation.
 pub mod mp3_decode;
 #[cfg(test)]

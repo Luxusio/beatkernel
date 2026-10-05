@@ -91,6 +91,15 @@ impl SongCompletion {
             .map(|object| (object.id, object.time.start.as_nanos()))
             .collect();
         let mut song_extent = judge_until;
+        if prepared.source.samples.contains_key(&0)
+            && mines.iter().any(|mine| !mine.damage.is_fatal())
+        {
+            let duration = sample_duration(prepared, beatkernel::audio::SampleId(0))?;
+            for mine in mines.iter().filter(|mine| !mine.damage.is_fatal()) {
+                let at = i128::from(mine.at.as_nanos()) - i128::from(input_offset_ns);
+                song_extent = song_extent.max(at + duration);
+            }
+        }
         for sound in &prepared.sounds {
             let start = starts
                 .get(&sound.object)

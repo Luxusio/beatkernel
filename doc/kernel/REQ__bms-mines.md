@@ -34,6 +34,50 @@ source and long-duration fixtures for deferred execution.
 
 ## Integration boundary
 
+### BMS WAV00 plan and stepped live installation
+
+MineSoundPlan prepares validated original mine IDs with optional SampleId(0)
+only when WAV00 is defined and at least one nonfatal mine exists. Fatal ZZ has
+no explosion binding; this sound policy follows the documented
+[Angolmois instant-death behavior](https://github.com/lifthrasiir/angolmois/blob/master/INTERNALS.md#data-commands).
+Absent WAV00, fatal-only and empty sources create no implicit sample/voice.
+Validate mine capacity/timing even when sound is absent. Audible bindings use
+the source WAV gain and one reusable voice per logical mine lane, ordered by
+control and allocated above supplied gameplay, BGM and invisible press voices.
+Checked exhaustion refuses the whole plan; no PCM load or command is fabricated.
+
+RuntimeGroup installs exact roster-ordered hazard timelines atomically before
+start, refusing cross-member aliases and collisions with gameplay/reserved BGM
+or already installed press voices. Both press and hazard installations reserve
+their admitted voices so the opposite installation order also rejects collision.
+VoiceAllocator remaps hazard bindings with within-lane aliases retained and
+atomic exhaustion. Local preparation validates optional WAV00 bank membership,
+then reserves distinct member voices after every existing actual voice.
+
+StepGameplay's actual solo and local setup installs the plan after press sounds,
+including StepLocalGameplay's delegated setup. Missing audible WAV00 PCM fails
+before activation. SongCompletion includes optional explosion PCM tails in its
+prepared calibration extent, without replacing real mixer/output drain evidence.
+Extend the existing source sound identity with a versioned mine-sound fingerprint
+only for audible WAV00 plans; hash semantic IDs/control/time/gain/sample selection,
+not resource paths or remapped output voices. No audible mine extension preserves
+the previous identity exactly. Mine fingerprint wire order is the domain
+`beatkernel-bms/mine-sounds/v1`, little-endian u64 binding count, f32 gain bits,
+SampleId(0), then ascending-ordinal rows of u64 ordinal, u32 control and i64 song
+nanoseconds. Nonfatal damage magnitude is excluded here because pristine judge
+identity already includes it. Compose the existing optional invisible fingerprint
+and mine fingerprint with `beatkernel-bms/input-sounds/v2`, a one-byte invisible
+presence flag, its u64 fingerprint when present, and the u64 mine fingerprint.
+Both domains use the existing semantic FNV-1a64 convention, not a cryptographic
+asset digest. Existing source-aware capture/replay validation
+consume that common identity; this does not yet schedule native/replay/offline
+mine audio or load WAV00 through guarded file preparation.
+
+Author independent deferred plan/voice/identity, atomic group-order collision,
+real solo/local report-to-command and completion-tail fixtures. Gauge/fatal-stop
+policy, native/replay/offline installation and guarded asset admission remain
+unfinished. Execution and acceptance remain deferred.
+
 ### Common optional sound primitive
 
 The [core hazard-sound contract](REQ__hazard-sounds.md) publishes sounds from

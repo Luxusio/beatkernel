@@ -8,10 +8,14 @@ use crate::{
     completion::{CompletionError, SongCompletion},
     input_sounds::{InputSoundIdentity, InputSoundPlan},
     local_players::{PlayerId, ResolvedInputPlan},
-    local_preparation::{PreparedLocalMembers, prepare_local_members, prepare_local_input_sounds},
+    local_preparation::{
+        PreparedLocalMembers, prepare_local_members, prepare_local_input_sounds,
+        prepare_local_mine_sounds,
+    },
     local_runtime::{GroupError, InputResult, PlayerReport, RuntimeGroup, SoloRuntime},
     mine_damage::{MineDamageError, MineDamageSummary},
     mine_plan::prepare_judge,
+    mine_sounds::MineSoundPlan,
     native_judge::NativeJudgeConfig,
     replay_audio::{ReplayAudioError, before_endpoint, completed_render_cursor, section_end_frame},
     replay_capture::{CaptureError, LiveReplayCapture, setup_input_sound_header},
@@ -26,7 +30,10 @@ use beatkernel::{
     interaction::InteractionState,
     judge::JudgeEngine,
     replay::{ReplayHeader, codec::ReplayCodecLimits},
-    runtime::{RuntimeProcessingClock, RuntimeReport, input_sound::InputSoundTimeline},
+    runtime::{
+        RuntimeProcessingClock, RuntimeReport, input_sound::InputSoundTimeline,
+        hazard_sound::HazardSoundTimeline,
+    },
     time::{ClockDomainId, ClockMapper, ClockPair, ClockPoint, Duration, Timestamp},
     transport::{Rate, Transport},
 };
@@ -237,11 +244,13 @@ enum RuntimeSetup {
         bindings: BindingMap,
         judge: JudgeEngine,
         input_sounds: Option<InputSoundTimeline>,
+        hazard_sounds: Option<HazardSoundTimeline>,
     },
     Local {
         members: PreparedLocalMembers,
         primary: PlayerId,
         input_sounds: Vec<(PlayerId, InputSoundTimeline)>,
+        hazard_sounds: Vec<(PlayerId, HazardSoundTimeline)>,
     },
 }
 
@@ -557,6 +566,26 @@ impl StepGameplay {
                     }
                     Some(plan.timeline())
                 };
+                let hazard_sounds = if prepared.source.mines.is_empty() {
+                    None
+                } else {
+                    let mine_sounds = MineSoundPlan::prepare(
+                        &prepared.source,
+                        &prepared.sounds,
+                        &prepared.bgm_commands,
+                        input_sounds.as_ref(),
+                        beatkernel_bms::ParseOptions::default().max_objects,
+                    )
+                    .map_err(StepGameplayError::Setup)?;
+                    for &sample in mine_sounds.samples() {
+                        if prepared.bank.get(sample).is_none() {
+                            return Err(StepGameplayError::InvalidConfiguration(
+                                "mine sound PCM sample is missing",
+                            ));
+                        }
+                    }
+                    mine_sounds.timeline()
+                };
                 let judge = prepare_judge(
                     &prepared.source,
                     prepared.compiled.chart,
@@ -569,6 +598,7 @@ impl StepGameplay {
                     bindings,
                     judge,
                     input_sounds,
+                    hazard_sounds,
                 }
             }
             InputSetup::Local(plan, bindings) => {
@@ -579,10 +609,18 @@ impl StepGameplay {
                 let input_sounds =
                     prepare_local_input_sounds(&prepared, &members.configs, &members.reserved)
                         .map_err(StepGameplayError::Setup)?;
+                let hazard_sounds = prepare_local_mine_sounds(
+                    &prepared,
+                    &members.configs,
+                    &members.reserved,
+                    &input_sounds,
+                )
+                .map_err(StepGameplayError::Setup)?;
                 RuntimeSetup::Local {
                     members,
                     primary,
                     input_sounds,
+                    hazard_sounds,
                 }
             }
         };
@@ -695,6 +733,7 @@ impl StepGameplay {
                 bindings,
                 judge,
                 input_sounds,
+                hazard_sounds,
             } => {
                 let mut solo = SoloRuntime::new(
                     config.host_origin.domain,
@@ -711,12 +750,17 @@ impl StepGameplay {
                     solo.configure_input_sounds(timeline)
                         .map_err(StepGameplayError::Setup)?;
                 }
+                if let Some(timeline) = hazard_sounds {
+                    solo.configure_hazard_sounds(timeline)
+                        .map_err(StepGameplayError::Setup)?;
+                }
                 RuntimeOwner::Solo(solo)
             }
             RuntimeSetup::Local {
                 members,
                 primary,
                 input_sounds,
+                hazard_sounds,
             } => {
                 let mut group = RuntimeGroup::new(
                     config.host_origin.domain,
@@ -731,6 +775,11 @@ impl StepGameplay {
                 if !input_sounds.is_empty() {
                     group
                         .configure_input_sounds(input_sounds)
+                        .map_err(StepGameplayError::Setup)?;
+                }
+                if !hazard_sounds.is_empty() {
+                    group
+                        .configure_hazard_sounds(hazard_sounds)
                         .map_err(StepGameplayError::Setup)?;
                 }
                 RuntimeOwner::Local { group, primary }

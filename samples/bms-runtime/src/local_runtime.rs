@@ -10,6 +10,7 @@ use beatkernel::{
     runtime::{
         Runtime, RuntimeError, RuntimeProcessingClock, RuntimeReport, SoundBinding,
         input_sound::InputSoundTimeline,
+        hazard_sound::{HazardSoundBinding, HazardSoundTimeline},
     },
     telemetry::RuntimeTelemetry,
     time::{ClockDomainId, ClockMapper, ClockPoint, Timestamp},
@@ -81,6 +82,7 @@ pub struct RuntimeGroup {
     song_end: Option<Timestamp>,
     occupied_voices: HashSet<VoiceId>,
     input_sounds_configured: bool,
+    hazard_sounds_configured: bool,
 }
 
 /// Parks the member's disconnected placeholders while it uses shared owners.
@@ -197,6 +199,7 @@ impl RuntimeGroup {
             song_end: None,
             occupied_voices,
             input_sounds_configured: false,
+            hazard_sounds_configured: false,
         })
     }
 
@@ -219,7 +222,7 @@ impl RuntimeGroup {
             }
             for marker in timeline.markers() {
                 if self.occupied_voices.contains(&marker.voice) {
-                    return Err("input sound voice collides with gameplay or reserved BGM".into());
+                    return Err("input sound voice collides with an occupied voice".into());
                 }
                 if voices
                     .insert(marker.voice, *player)
@@ -229,13 +232,60 @@ impl RuntimeGroup {
                 }
             }
         }
+        self.occupied_voices
+            .try_reserve(voices.len())
+            .map_err(|_| "input sound voice reservation failed")?;
         for (member, (_, timeline)) in self.members.iter_mut().zip(timelines) {
             member
                 .runtime
                 .configure_input_sounds(timeline)
                 .expect("validated fresh private member input sound setup cannot reject");
         }
+        self.occupied_voices.extend(voices.into_keys());
         self.input_sounds_configured = true;
+        Ok(())
+    }
+
+    /// Installs exact roster-ordered hazard sounds after complete voice preflight.
+    /// Within-member aliases are retained; other occupied voices cannot collide.
+    pub fn configure_hazard_sounds(
+        &mut self,
+        timelines: Vec<(PlayerId, HazardSoundTimeline)>,
+    ) -> Result<(), String> {
+        if self.poisoned || self.started || self.hazard_sounds_configured {
+            return Err("shared hazard sound configuration is locked".into());
+        }
+        if timelines.len() != self.members.len() {
+            return Err("hazard sound timeline count differs from cohort".into());
+        }
+        let mut voices = HashMap::new();
+        for (member, (player, timeline)) in self.members.iter().zip(&timelines) {
+            if member.player != *player {
+                return Err("hazard sound players differ from source-plan order".into());
+            }
+            for binding in timeline.bindings() {
+                if self.occupied_voices.contains(&binding.voice) {
+                    return Err("hazard sound voice collides with an occupied voice".into());
+                }
+                if voices
+                    .insert(binding.voice, *player)
+                    .is_some_and(|owner| owner != *player)
+                {
+                    return Err("hazard sound voice collides across local players".into());
+                }
+            }
+        }
+        self.occupied_voices
+            .try_reserve(voices.len())
+            .map_err(|_| "hazard sound voice reservation failed")?;
+        for (member, (_, timeline)) in self.members.iter_mut().zip(timelines) {
+            member
+                .runtime
+                .configure_hazard_sounds(timeline)
+                .expect("validated fresh private member hazard sound setup cannot reject");
+        }
+        self.occupied_voices.extend(voices.into_keys());
+        self.hazard_sounds_configured = true;
         Ok(())
     }
 
@@ -489,6 +539,12 @@ impl RuntimeGroup {
 /// Production solo adapter uses exactly the same cohort execution path.
 pub struct SoloRuntime(RuntimeGroup);
 impl SoloRuntime {
+    /// Uses the same atomic one-member hazard-sound installation as local play.
+    pub fn configure_hazard_sounds(&mut self, timeline: HazardSoundTimeline) -> Result<(), String> {
+        self.0
+            .configure_hazard_sounds(vec![(PlayerId(1), timeline)])
+    }
+
     /// Uses the same atomic one-member input-sound installation as local play.
     pub fn configure_input_sounds(&mut self, timeline: InputSoundTimeline) -> Result<(), String> {
         self.0.configure_input_sounds(vec![(PlayerId(1), timeline)])
@@ -653,6 +709,29 @@ impl VoiceAllocator {
         }
         for marker in markers {
             marker.voice = mapping[&marker.voice.0];
+        }
+        self.next = next;
+        Ok(())
+    }
+
+    /// Remaps distinct hazard voices atomically, retaining intentional aliases.
+    pub fn remap_hazard_sounds(
+        &mut self,
+        bindings: &mut [HazardSoundBinding],
+    ) -> Result<(), String> {
+        let mut mapping = BTreeMap::new();
+        let mut next = self.next;
+        for binding in bindings.iter() {
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                mapping.entry(binding.voice.0)
+            {
+                let id = next.ok_or("voice identity namespace exhausted")?;
+                entry.insert(VoiceId(id));
+                next = id.checked_add(1);
+            }
+        }
+        for binding in bindings {
+            binding.voice = mapping[&binding.voice.0];
         }
         self.next = next;
         Ok(())

@@ -5,12 +5,13 @@ use crate::{
     local_players::{ResolvedInputPlan, PlayerId, validate_source_routes},
     local_runtime::{MemberConfig, VoiceAllocator},
     mine_plan::prepare_judge,
+    mine_sounds::MineSoundPlan,
 };
 use beatkernel::{
     audio::{AudioCommand, VoiceId},
     input::{BindingMap, DeviceSelector},
     judge::JudgeProfile,
-    runtime::input_sound::InputSoundTimeline,
+    runtime::{input_sound::InputSoundTimeline, hazard_sound::HazardSoundTimeline},
 };
 use beatkernel_bms::BmsInputMode;
 use std::collections::BTreeSet;
@@ -175,6 +176,94 @@ pub fn prepare_local_input_sounds(
         allocator.remap_input_sounds(&mut markers)?;
         let timeline =
             InputSoundTimeline::new(markers, capacity).map_err(|error| error.to_string())?;
+        timelines.push((member.player, timeline));
+    }
+    Ok(timelines)
+}
+
+/// Prepares optional WAV00 voices after every actual gameplay, reserved and
+/// press-sound voice. Source and member order remain unchanged.
+pub fn prepare_local_mine_sounds(
+    prepared: &PreparedBms,
+    members: &[MemberConfig],
+    reserved: &[VoiceId],
+    input_sounds: &[(PlayerId, InputSoundTimeline)],
+) -> Result<Vec<(PlayerId, HazardSoundTimeline)>, String> {
+    if prepared.source.mines.is_empty() {
+        return Ok(Vec::new());
+    }
+    let capacity = beatkernel_bms::ParseOptions::default().max_objects;
+    let plan = MineSoundPlan::prepare(
+        &prepared.source,
+        &[],
+        &prepared.bgm_commands,
+        None,
+        capacity,
+    )?;
+    if plan.bindings().is_empty() {
+        return Ok(Vec::new());
+    }
+    validate_source_routes(members.iter().map(|member| (member.player, member.device)))?;
+    if (!input_sounds.is_empty() || !prepared.source.invisible.is_empty())
+        && (input_sounds.len() != members.len()
+            || members
+                .iter()
+                .zip(input_sounds)
+                .any(|(member, (player, _))| member.player != *player))
+    {
+        return Err("local mine sound press timelines differ from source-plan order".into());
+    }
+    for &sample in plan.samples() {
+        if prepared.bank.get(sample).is_none() {
+            return Err("local mine sound sample is missing from shared PCM bank".into());
+        }
+    }
+    if members
+        .iter()
+        .flat_map(|member| &member.sounds)
+        .any(|sound| !sound.gain.is_finite())
+    {
+        return Err("local mine sound preparation found nonfinite gameplay gain".into());
+    }
+    let occupied = members
+        .iter()
+        .flat_map(|member| &member.sounds)
+        .map(|sound| sound.voice.0)
+        .chain(reserved.iter().map(|voice| voice.0))
+        .chain(
+            input_sounds
+                .iter()
+                .flat_map(|(_, timeline)| timeline.markers())
+                .map(|marker| marker.voice.0),
+        )
+        .chain(
+            prepared
+                .bgm_commands
+                .iter()
+                .filter_map(|command| match command {
+                    AudioCommand::Play { voice, .. } => Some(voice.0),
+                    _ => None,
+                }),
+        )
+        .max()
+        .unwrap_or(0);
+    let first = occupied
+        .checked_add(1)
+        .ok_or("local mine sound voice namespace exhausted")?;
+    let mut allocator = VoiceAllocator::new(first);
+    let mut timelines = Vec::new();
+    timelines
+        .try_reserve_exact(members.len())
+        .map_err(|_| "local mine sound allocation failed")?;
+    for member in members {
+        let mut bindings = Vec::new();
+        bindings
+            .try_reserve_exact(plan.bindings().len())
+            .map_err(|_| "local mine sound allocation failed")?;
+        bindings.extend_from_slice(plan.bindings());
+        allocator.remap_hazard_sounds(&mut bindings)?;
+        let timeline =
+            HazardSoundTimeline::new(bindings, capacity).map_err(|error| error.to_string())?;
         timelines.push((member.player, timeline));
     }
     Ok(timelines)

@@ -10,15 +10,37 @@ use beatkernel::{
 use beatkernel_bms::BmsChart;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Noncryptographic compatibility identity of validated invisible selections.
+/// Noncryptographic compatibility identity of validated invisible selections
+/// and optional audible mine sounds.
 /// Source lines, resource paths, output clocks and voice assignments are excluded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InputSoundIdentity(u64);
 
 impl InputSoundIdentity {
-    /// Hashes actual compiled selections in semantic control/time order. Empty
-    /// sources have no extension and retain their exact legacy setup identity.
+    /// Retains the original invisible fingerprint when no mine sound is audible;
+    /// otherwise combines it with the versioned original mine-sound identity.
     pub fn from_source(source: &BmsChart) -> Result<Option<Self>, String> {
+        let invisible = Self::from_invisible_source(source)?;
+        let Some(mines) = crate::mine_sounds::MineSoundIdentity::from_source(source)? else {
+            return Ok(invisible);
+        };
+        let mut hash = 14_695_981_039_346_656_037u64;
+        let mut feed = |bytes: &[u8]| {
+            for &byte in bytes {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(1_099_511_628_211);
+            }
+        };
+        feed(b"beatkernel-bms/input-sounds/v2");
+        feed(&[u8::from(invisible.is_some())]);
+        if let Some(invisible) = invisible {
+            feed(&invisible.fingerprint().to_le_bytes());
+        }
+        feed(&mines.fingerprint().to_le_bytes());
+        Ok(Some(Self(hash)))
+    }
+
+    fn from_invisible_source(source: &BmsChart) -> Result<Option<Self>, String> {
         if source.invisible.is_empty() {
             return Ok(None);
         }
