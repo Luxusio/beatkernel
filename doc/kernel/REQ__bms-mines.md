@@ -34,6 +34,35 @@ source and long-duration fixtures for deferred execution.
 
 ## Integration boundary
 
+### Mine lanes, practice eligibility and full-song completion
+
+PlayerChart prepares the sorted union of visible, invisible and mine lanes,
+including mine-only channels, and includes the latest compiled mine time in
+its presentation duration. Do not manufacture normal PlayerNote objects or
+score totals for mines. Preserve existing ordering, ordinary note identities
+and empty-source behavior. Validate actual mine timing before publishing a
+presentation; default touch geometry and coverage use the resulting lane union.
+
+Practice preparation may retain a mine-only suffix when at least one original
+compiled marker is at or after the selected start. Earlier markers retain their
+original timing/identity for fresh reconstruction; they do not by themselves
+make an otherwise empty suffix playable. Existing non-mine eligibility remains.
+
+SongCompletion includes each mine's effective judge boundary, translated back
+to song time using the actual input offset, with checked arithmetic and a
+strictly later one-nanosecond deadline. Mine boundaries have no normal-note late
+window. Calibration extent includes that deadline. Completion also requires
+actual consumption of every configured hazard, rather than inferring completion
+from presentation time or an empty ordinary chart. Constant-time read-only
+JudgeEngine hazard-count and remaining-count accessors expose the existing
+cursor without changing canonical bytes or consumption. A mismatching supplied
+judge refuses before adopting completion/output evidence. Existing mixer and
+native presentation drain evidence remains required. Check actual remaining
+hazards on every observation, including after judge snapshot restoration; newly
+pending hazards revoke the earlier output-drain barrier before completion.
+This does not choose
+fatal stop/gauge policy, add WAV00 or enable source admission.
+
 ### Shared committed damage summary
 
 Native presentation stores `mine_damage: MineDamageSummary` per actual
