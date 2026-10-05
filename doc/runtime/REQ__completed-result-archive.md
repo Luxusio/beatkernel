@@ -54,8 +54,13 @@ files without member sidecars still require explicit association or migration.
 Version 2 adds exact historical score/timing details from common Step completion
 exports under [the detailed score contract](REQ__archived-score-details.md).
 Version-1 archives and legacy scoreless publication retain their original bytes;
-missing details remain unavailable. Saved comparison snapshots remain future
-versioned metadata; no omitted data is claimed to be archived.
+missing details remain unavailable. Version 3 optionally retains bounded
+original-ID comparison snapshots through
+[the comparison archive contract](REQ__archived-comparisons.md). Comparison-aware
+Step and browser completion exports retain Rust-owned HUD prefixes; legacy
+exports have no comparison table. Native comparison attachment and historical
+comparison UI remain pending. Stored comparisons are display metadata, not
+trusted final rankings or additional completion proof.
 Actual native completion now also uses score-bearing version 2 under
 [the native score association contract](REQ__native-archived-score.md).
 Independent deferred tests cover golden
