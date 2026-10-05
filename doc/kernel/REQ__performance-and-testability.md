@@ -87,6 +87,13 @@ and [WebTransport preparation](REQ__webtransport-preparation.md).
 The [connection factory](REQ__competition-connection-factory.md) defines the
 pre-acquisition validation and ownership boundary.
 
+Bilateral final acknowledgement waiting uses generic notice/admission and
+clock/park ports. The fixed exact deadline is never renewed, and cancellation,
+disconnect and ACK evidence retain their precedence. Scalar/group native methods
+adapt their real notices and queues to this policy; native clock acquisition and
+thread parking live in a private bridge. Room final/drain waits and underlying
+worker waits remain further work. See [final ACK waiting](REQ__final-ack-wait.md).
+
 Solo terminal delivery selection and its one-shot guard are pure; observation
 and start requests cannot revive a finalized owner. Underlying endpoint ownership
 and whole live-owner construction remain follow-up work beyond the injected
