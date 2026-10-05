@@ -1206,3 +1206,138 @@ fn complete_frame_captured_before_expiry_but_processed_at_expiry_cannot_admit_pa
     );
     assert!(endpoint.io.take_schedule().is_err());
 }
+
+#[test]
+fn admitted_leave_drains_partial_output_after_frame_expiry_without_any_inbound_read() {
+    let mut empty = collecting(2);
+    let empty = &mut empty.clients[0];
+    empty.io.configure_frame_wait(1_000_000).unwrap();
+    empty.io.request_leave().unwrap();
+    assert!(
+        empty.io.configure_frame_wait(1_000_000).is_err(),
+        "cancellation cannot reconfigure even an empty decoder"
+    );
+    assert!(!empty.io.session().leave_written());
+    for output_failure in [false, true] {
+        let mut cohort = collecting(2);
+        let bytes = encode_message(&registry_snapshot(&cohort.registry)).unwrap();
+        let endpoint = &mut cohort.clients[0];
+        endpoint.io.configure_frame_wait(1_000_000).unwrap();
+        endpoint.script.borrow_mut().input.extend(&bytes[..11]);
+        step(endpoint, 10);
+        let reads = endpoint.script.borrow().read_calls;
+        endpoint.io.request_leave().unwrap();
+        assert!(endpoint.io.session().leave_requested());
+        assert!(!endpoint.io.session().leave_written());
+        assert!(endpoint.io.configure_frame_wait(1_000_000).is_err());
+        {
+            let mut script = endpoint.script.borrow_mut();
+            script.input.extend([255, 0, 17]);
+            script.reads.push_back(Action::Limit(0));
+            script.writes.push_back(if output_failure {
+                Action::Error(io::ErrorKind::BrokenPipe)
+            } else {
+                Action::Limit(2)
+            });
+        }
+        let mut clocks = 0;
+        let first = endpoint.io.step(|| {
+            clocks += 1;
+            Ok(1_000_010)
+        });
+        if output_failure {
+            assert_eq!(first.unwrap_err().to_string(), "scripted write");
+            assert_eq!(
+                clocks, 1,
+                "write failure preserves original polled observation"
+            );
+            assert!(!endpoint.io.session().leave_written());
+            assert!(
+                endpoint
+                    .io
+                    .step(|| panic!("failed write must not observe time"))
+                    .is_err()
+            );
+        } else {
+            assert!(first.unwrap());
+            assert_eq!(
+                clocks, 2,
+                "partial output keeps poll/completion clocks only"
+            );
+            assert_eq!(endpoint.script.borrow().output.len(), 2);
+            assert!(!endpoint.io.session().leave_written());
+            clocks = 0;
+            assert!(
+                endpoint
+                    .io
+                    .step(|| {
+                        clocks += 1;
+                        Ok(i64::MAX)
+                    })
+                    .unwrap()
+            );
+            assert_eq!(
+                clocks, 3,
+                "full output requires original processing receipt"
+            );
+            assert_eq!(emitted(endpoint), RoomMessage::Leave);
+            assert!(endpoint.io.session().leave_written());
+        }
+        assert_eq!(endpoint.script.borrow().read_calls, reads);
+        assert_eq!(
+            endpoint.script.borrow().reads.len(),
+            1,
+            "incoming EOF is never serviced after Leave"
+        );
+        assert_eq!(endpoint.script.borrow().input.len(), 3);
+        assert!(endpoint.io.session().room().is_some());
+    }
+}
+
+#[test]
+fn failed_local_leave_keeps_native_partial_frame_bound_and_original_output_offset() {
+    let mut endpoint = endpoint(PLAYERS, 0);
+    endpoint.io.configure_frame_wait(1_000_000).unwrap();
+    let mut registry = GroupRoomRegistry::new(GroupRoomPolicy::new(1, 2, 8, 1_000).unwrap());
+    let id = registry.join("room", IDENTITY, PLAYERS, 0).unwrap().id;
+    let bytes = encode_message(&RoomMessage::Admitted { participant: id }).unwrap();
+    endpoint.script.borrow_mut().input.extend(&bytes[..11]);
+    endpoint
+        .script
+        .borrow_mut()
+        .writes
+        .push_back(Action::Limit(2));
+    let mut clocks = 0;
+    assert!(
+        endpoint
+            .io
+            .step(|| {
+                clocks += 1;
+                Ok(10)
+            })
+            .unwrap()
+    );
+    assert_eq!(clocks, 3);
+    assert_eq!(endpoint.script.borrow().output.len(), 2);
+    assert!(endpoint.io.request_leave().is_err());
+    assert!(!endpoint.io.session().leave_requested());
+    let calls = (
+        endpoint.script.borrow().read_calls,
+        endpoint.script.borrow().write_calls,
+    );
+    let error = endpoint.io.step(|| Ok(1_000_010)).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(
+        (
+            endpoint.script.borrow().read_calls,
+            endpoint.script.borrow().write_calls
+        ),
+        calls
+    );
+    assert_eq!(endpoint.script.borrow().output.len(), 2);
+    assert_eq!(
+        endpoint.io.request_leave().unwrap_err().to_string(),
+        error.to_string()
+    );
+    assert!(!endpoint.io.session().leave_written());
+}

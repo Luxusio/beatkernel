@@ -1396,3 +1396,57 @@ test("close abort and Leave clear incomplete frame wakes without another Rust ob
     await cleaned(h, owner, io);
   }
 });
+
+test("admitted Leave discards an already-owned malformed read without a clock or callback and still requires its write", async () => {
+  const h = await harness(); const { owner, io } = await h.opened();
+  io.writes[0].gate.resolve(); await flush(); await h.observe(io);
+  await h.receive(io, () => { h.session.partial = true; h.session.need = 5; });
+  h.session.onRequest = kind => { assert.equal(kind, "leave"); h.session.controls.push(frame(814n)); };
+  h.session.onWritten = id => { if (id === 814n) h.session.leaveDone = true; };
+  const leaving = attempt(() => owner.leave()); await flush();
+  const clocks = h.clockCalls, receives = h.session.receives.length;
+  const callbacks = h.callbacks.length, starts = h.starts.length, progress = h.progress.length;
+  const credits = [...h.session.credits], reads = io.reads.length;
+  h.session.onReceive = () => assert.fail("cancelled inbound data reached WASM");
+  h.setClock(CLOCK_ORIGIN - 1n);
+  io.reads.at(-1).gate.resolve([1]); await flush();
+  assert.equal(h.clockCalls, clocks, "settled cancelled read must not capture another clock");
+  assert.equal(h.session.receives.length, receives);
+  assert.equal(h.callbacks.length, callbacks); assert.equal(h.starts.length, starts);
+  assert.equal(h.progress.length, progress);
+  assert.deepEqual(h.session.credits, credits);
+  assert.equal(io.reads.length, reads);
+  assert.equal(leaving.state, "pending"); assert.equal(h.session.leaveDone, false);
+  assert.equal(io.activeWrites, 1);
+  h.setClock(CLOCK_ORIGIN);
+  io.writes.at(-1).gate.resolve(); await success(leaving);
+  assert.deepEqual(h.session.credits, [...credits, 814n]);
+  assert.equal(h.session.leaveDone, true);
+  assert.equal(h.timers.size, 0);
+  await cleaned(h, owner, io);
+});
+
+test("refused local Leave retains inbound servicing and the original incomplete frame expiry", async () => {
+  const h = await harness(); const { owner, io } = await h.opened();
+  io.writes[0].gate.resolve(); await flush(); await h.observe(io);
+  await h.receive(io, () => { h.session.partial = true; h.session.need = 5; });
+  const deadline = [...h.timers.values()][0].at;
+  const original = new Error("original in-flight control refusal");
+  h.session.requestError = original;
+  const error = await failure(attempt(() => owner.leave()), "state");
+  assert.equal(error.cause, original);
+  assert.equal(owner.closed, false);
+  assert.equal([...h.timers.values()][0].at, deadline);
+  const receives = h.session.receives.length, clocks = h.clockCalls;
+  await h.receive(io, () => {});
+  assert.equal(h.session.receives.length, receives + 1);
+  assert.ok(h.clockCalls > clocks, "failed Leave must preserve actual read observations");
+  assert.equal([...h.timers.values()][0].at, deadline);
+  await h.elapse(10);
+  assert.equal(owner.closed, true);
+  assert.equal(h.closures[0].code, "timeout");
+  assert.equal(h.closures[0].operation, "frame");
+  assert.equal(h.session.leaveDone, false);
+  assert.deepEqual(h.starts, []);
+  await cleaned(h, owner, io);
+});

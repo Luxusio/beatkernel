@@ -528,7 +528,7 @@ export class BrowserRoomOwner {
   }
 
   async #readLoop() {
-    while (!this.closed && !this.#receipts.drainComplete) {
+    while (!this.closed && this.#leaveGate === null && !this.#receipts.drainComplete) {
       const needed = this.#core("needed_bytes", session => session.needed_bytes());
       const pending = this.#core("frame_pending", session => session.frame_pending());
       if (!integer(needed, 1, MAX_FRAME) || typeof pending !== "boolean") {
@@ -538,9 +538,9 @@ export class BrowserRoomOwner {
       try {
         received = await this.#await(this.#track(
           () => this.#channel.readPrefix(needed, !pending),
-          bytes => ({ bytes, capturedNs: this.#receipts.drainComplete ? null : this.#elapsed() })));
-      } catch (cause) { if (this.#receipts.drainComplete) return; throw cause; }
-      if (this.#receipts.drainComplete) return;
+          bytes => ({ bytes, capturedNs: (this.closed || this.#leaveGate !== null || this.#receipts.drainComplete) ? null : this.#elapsed() })));
+      } catch (cause) { if (this.closed || this.#leaveGate !== null || this.#receipts.drainComplete) return; throw cause; }
+      if (this.closed || this.#leaveGate !== null || this.#receipts.drainComplete) return;
       const { bytes, capturedNs } = received;
       this.#ensure();
       if (!(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer) || bytes.buffer.resizable === true

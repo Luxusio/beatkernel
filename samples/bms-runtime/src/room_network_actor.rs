@@ -50,6 +50,7 @@ pub struct RoomNetworkActor<S: RoomNetworkStream> {
     last_now: Option<i64>,
     drain: Option<Drain>,
     leaving: bool,
+    leave_deadline_ns: Option<i64>,
     changed: bool,
 }
 impl<S: RoomNetworkStream> RoomNetworkActor<S> {
@@ -68,6 +69,7 @@ impl<S: RoomNetworkStream> RoomNetworkActor<S> {
             last_now: None,
             drain: None,
             leaving: false,
+            leave_deadline_ns: None,
             changed: false,
         })
     }
@@ -107,8 +109,13 @@ impl<S: RoomNetworkStream> RoomNetworkActor<S> {
             RoomCommand::Seal => self.io.request_seal()?,
             RoomCommand::Ready => self.io.request_ready()?,
             RoomCommand::Leave => {
+                let deadline_ns = now
+                    .checked_add(nanos(self.options.drain_timeout)?)
+                    .ok_or_else(|| invalid("native room Leave deadline overflow"))?;
                 self.io.request_leave()?;
                 self.leaving = true;
+                self.drain = None;
+                self.leave_deadline_ns = Some(deadline_ns);
             }
             RoomCommand::Publish {
                 members,
@@ -240,10 +247,22 @@ impl<S: RoomNetworkStream> RoomNetworkActor<S> {
         self.check_now(observed)?;
         self.last_now = Some(observed);
         self.refresh()?;
-        if self.snapshot.schedule.is_none() && self.setup_deadline.remaining_ns(observed).is_err() {
+        if !self.leaving
+            && self.snapshot.schedule.is_none()
+            && self.setup_deadline.remaining_ns(observed).is_err()
+        {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "native room setup deadline expired",
+            ));
+        }
+        if self
+            .leave_deadline_ns
+            .is_some_and(|deadline| observed >= deadline)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "native room Leave deadline expired",
             ));
         }
         if let Some(drain) = &mut self.drain {
@@ -258,7 +277,7 @@ impl<S: RoomNetworkStream> RoomNetworkActor<S> {
                 drain.requested = true;
             }
         }
-        let setup_pending = self.snapshot.schedule.is_none();
+        let setup_pending = !self.leaving && self.snapshot.schedule.is_none();
         let last = &mut self.last_now;
         let result = self.io.step(|| {
             let value = now()?;
@@ -281,6 +300,15 @@ impl<S: RoomNetworkStream> RoomNetworkActor<S> {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "native room setup deadline expired during I/O",
+                    ));
+                }
+                if self
+                    .leave_deadline_ns
+                    .is_some_and(|deadline| completed >= deadline)
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "native room Leave deadline expired during I/O",
                     ));
                 }
                 if self

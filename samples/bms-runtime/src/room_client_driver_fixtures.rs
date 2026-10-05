@@ -998,3 +998,112 @@ fn frame_wait_configuration_is_once_empty_live_and_cannot_replace_a_partial_dead
     );
     assert!(!unconfigured.failed());
 }
+
+#[test]
+fn admitted_leave_cancels_partial_frame_without_decoder_mutation_or_synthetic_write_receipt() {
+    for wrong_receipt in [false, true] {
+        let (mut client, registry, _) = admitted(0);
+        client.configure_frame_wait(1_000_000).unwrap();
+        let bytes = encode_message(&snapshot(&registry)).unwrap();
+        let header = client.needed_bytes().unwrap();
+        client.receive_bytes(&bytes[..header], 10, 10).unwrap();
+        let revision = client.revision();
+        let participant = client.participant_id();
+        let remaining = client.needed_bytes().unwrap();
+        assert!(client.frame_pending());
+        client.request_leave().unwrap();
+        assert!(client.session_ref().unwrap().leave_requested());
+        assert!(!client.leave_written());
+        for now in [-1, 1_000_010, i64::MAX] {
+            assert!(matches!(
+                client.frame_wait_step(now),
+                Ok(RoomFrameWaitStep::Idle)
+            ));
+            assert_eq!(
+                client
+                    .receive_bytes(&bytes[header..], now, now)
+                    .unwrap_err(),
+                RoomPlayError::InvalidState
+            );
+            assert!(!client.failed());
+            assert_eq!(client.revision(), revision);
+            assert_eq!(client.participant_id(), participant);
+            assert!(client.frame_pending());
+            assert_eq!(client.needed_bytes().unwrap(), remaining);
+            assert!(client.pending_peer().unwrap().is_none());
+        }
+        assert_eq!(
+            client.configure_frame_wait(1_000_000).unwrap_err(),
+            RoomPlayError::InvalidState
+        );
+        let leave = client
+            .next_write(1_000_010)
+            .unwrap()
+            .expect("actual outgoing Leave");
+        assert_eq!(decode_message(&leave.bytes).unwrap(), RoomMessage::Leave);
+        assert!(client.next_write(1_000_010).unwrap().is_none());
+        assert!(!client.leave_written());
+        if wrong_receipt {
+            let first = client
+                .written(leave.id + 1, 1_000_010, 1_000_010)
+                .unwrap_err();
+            assert_eq!(first, RoomPlayError::UnknownWrite);
+            assert!(client.failed());
+            assert_eq!(client.frame_wait_step(-1).unwrap_err(), first);
+            assert_eq!(
+                client.written(leave.id, 1_000_010, 1_000_010).unwrap_err(),
+                first
+            );
+            assert!(!client.leave_written());
+        } else {
+            client.written(leave.id, 1_000_010, 1_000_010).unwrap();
+            assert!(client.leave_written());
+            assert!(matches!(
+                client.frame_wait_step(-1),
+                Ok(RoomFrameWaitStep::Idle)
+            ));
+        }
+        no_final_receipts(&client);
+    }
+}
+
+#[test]
+fn refused_leave_retains_original_partial_deadline_and_failed_owner_cannot_revive() {
+    let mut client = driver();
+    client.configure_frame_wait(1_000_000).unwrap();
+    let join = client.next_write(0).unwrap().unwrap();
+    let RoomMessage::Join { identity, players } = decode_message(&join.bytes).unwrap() else {
+        panic!("Join")
+    };
+    let mut registry = GroupRoomRegistry::new(GroupRoomPolicy::new(1, 2, 16, 1_000).unwrap());
+    let id = registry.join("driver", &identity, &players, 0).unwrap().id;
+    let bytes = encode_message(&RoomMessage::Admitted { participant: id }).unwrap();
+    let header = client.needed_bytes().unwrap();
+    client.receive_bytes(&bytes[..header], 10, 10).unwrap();
+    assert!(
+        client.request_leave().is_err(),
+        "in-flight Join has no completed write authority"
+    );
+    assert!(!client.failed());
+    assert!(!client.session_ref().unwrap().leave_requested());
+    assert!(matches!(
+        client.frame_wait_step(11),
+        Ok(RoomFrameWaitStep::Wait(999_999))
+    ));
+    let first = client.frame_wait_step(1_000_010).unwrap_err();
+    assert_eq!(
+        first,
+        RoomPlayError::FrameWait(RoomFrameWaitError::Deadline(RoomDeadlineError::Expired))
+    );
+    assert_eq!(client.request_leave().unwrap_err(), first);
+    assert_eq!(client.frame_wait_step(-1).unwrap_err(), first);
+    assert_eq!(
+        client
+            .receive_bytes(&bytes[header..], 1_000_010, 1_000_010)
+            .unwrap_err(),
+        first
+    );
+    assert_eq!(client.participant_id(), 0);
+    assert_eq!(client.revision(), 0);
+    assert!(!client.leave_written());
+}

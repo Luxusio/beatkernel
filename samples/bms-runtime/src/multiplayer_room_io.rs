@@ -55,7 +55,10 @@ impl<S: Read + Write> RoomPlayIo<S> {
 
     pub fn configure_frame_wait(&mut self, timeout_ns: u64) -> io::Result<()> {
         self.ensure_live()?;
-        if self.frame_wait.is_some() || self.decoder.buffered_bytes() != 0 {
+        if self.session.leave_requested()
+            || self.frame_wait.is_some()
+            || self.decoder.buffered_bytes() != 0
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "room frame wait configuration is unavailable",
@@ -127,7 +130,9 @@ impl<S: Read + Write> RoomPlayIo<S> {
         self.ensure_live()?;
         self.session
             .request_leave()
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        self.frame_wait = None;
+        Ok(())
     }
 
     /// Opt in to coordinated drain without closing the caller-owned stream.
@@ -225,7 +230,9 @@ impl<S: Read + Write> RoomPlayIo<S> {
 
     fn step_live<F: FnMut() -> io::Result<i64>>(&mut self, now: &mut F) -> io::Result<bool> {
         let polled_ns = self.observe(now)?;
-        self.observe_frame(polled_ns, self.decoder.buffered_bytes() != 0)?;
+        if !self.session.leave_requested() {
+            self.observe_frame(polled_ns, self.decoder.buffered_bytes() != 0)?;
+        }
         let mut progressed = false;
         if self.pending.is_none() {
             self.pending = self.session.poll_write(polled_ns).map_err(protocol_error)?;
@@ -278,6 +285,9 @@ impl<S: Read + Write> RoomPlayIo<S> {
                     ) => {}
                 Err(error) => return Err(error),
             }
+        }
+        if self.session.leave_requested() {
+            return Ok(progressed);
         }
         let needed = self.decoder.needed().map_err(protocol_error)?;
         let limit = needed.min(self.scratch.len());

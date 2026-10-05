@@ -102,6 +102,7 @@ impl RoomClientDriver {
         self.operate(false, |owner| {
             owner.session()?.request_leave()?;
             owner.leave_requested = true;
+            owner.frame_wait = None;
             owner.pending_start = None;
             Ok(())
         })
@@ -145,6 +146,10 @@ impl RoomClientDriver {
         captured_ns: i64,
         now_ns: i64,
     ) -> Result<usize, RoomPlayError> {
+        self.ensure_live()?;
+        if self.leave_requested {
+            return Err(RoomPlayError::InvalidState);
+        }
         self.operate(true, |owner| {
             if captured_ns < 0 || captured_ns > now_ns {
                 return Err(RoomPlayError::InvalidObservation);
@@ -372,7 +377,7 @@ impl RoomClientDriver {
 impl RoomClientDriver {
     pub fn configure_frame_wait(&mut self, timeout_ns: u64) -> Result<(), RoomPlayError> {
         self.ensure_live()?;
-        if self.frame_wait.is_some() || self.frame_pending() {
+        if self.leave_requested || self.frame_wait.is_some() || self.frame_pending() {
             return Err(RoomPlayError::InvalidState);
         }
         let state = crate::room_frame_wait::RoomFrameWaitState::new(timeout_ns)
@@ -397,6 +402,9 @@ impl RoomClientDriver {
         now_ns: i64,
     ) -> Result<crate::room_frame_wait::RoomFrameWaitStep, RoomPlayError> {
         self.operate(true, |owner| {
+            if owner.leave_requested {
+                return Ok(crate::room_frame_wait::RoomFrameWaitStep::Idle);
+            }
             if owner.frame_wait.is_none() {
                 return Err(RoomPlayError::InvalidState);
             }

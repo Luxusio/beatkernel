@@ -30,6 +30,9 @@ struct Script {
     finish: Vec<Duration>,
     drops: usize,
     read_error: bool,
+    write_error: bool,
+    write_block: bool,
+    write_limit: Option<usize>,
     idle_error: bool,
     cleanup_error: bool,
 }
@@ -64,8 +67,22 @@ impl Write for Stream {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         let mut state = self.0.borrow_mut();
         state.writes += 1;
-        state.output.extend_from_slice(bytes);
-        Ok(bytes.len())
+        if state.write_error {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "original actor write refusal",
+            ));
+        }
+        if state.write_block {
+            return Err(io::ErrorKind::WouldBlock.into());
+        }
+        let count = state
+            .write_limit
+            .take()
+            .unwrap_or(bytes.len())
+            .min(bytes.len());
+        state.output.extend_from_slice(&bytes[..count]);
+        Ok(count)
     }
     fn flush(&mut self) -> io::Result<()> {
         panic!("actor must not flush");
@@ -357,4 +374,154 @@ fn actual_leave_write_stops_driving_without_fabricating_final_receipts() {
     assert_eq!(outcome.receipts, RoomReceipts::default());
     assert_eq!(state.borrow().finish.len(), 1);
     assert_eq!(state.borrow().drops, 1);
+}
+
+#[test]
+fn admitted_leave_uses_new_fixed_bound_and_drains_after_original_setup_expiry() {
+    let (mut actor, state, registry) = admitted();
+    let bytes = encode_message(&room_message(&registry)).unwrap();
+    state.borrow_mut().input.extend(&bytes[..11]);
+    assert!(actor.drive(|| Ok(999_999_800)).unwrap());
+    let reads = state.borrow().reads;
+    actor.command(RoomCommand::Leave, 999_999_900).unwrap();
+    state.borrow_mut().write_limit = Some(2);
+    state.borrow_mut().input.extend([255, 0, 17]);
+    let mut clocks = 0;
+    assert!(
+        actor
+            .drive(|| {
+                clocks += 1;
+                Ok(1_000_000_000)
+            })
+            .unwrap()
+    );
+    assert_eq!(
+        clocks, 3,
+        "partial Leave keeps actor/poll/completion observations"
+    );
+    assert_eq!(state.borrow().output.len(), 2);
+    assert!(!actor.leave_written());
+    clocks = 0;
+    assert!(
+        actor
+            .drive(|| {
+                clocks += 1;
+                Ok(1_000_000_001)
+            })
+            .unwrap()
+    );
+    assert_eq!(
+        clocks, 4,
+        "only the real full-write receipt adds processing observation"
+    );
+    assert_eq!(emitted(&state), RoomMessage::Leave);
+    assert!(actor.finished() && actor.leave_written());
+    assert_eq!(state.borrow().reads, reads);
+    assert_eq!(state.borrow().input.len(), 3);
+    assert_eq!(actor.snapshot().receipts, RoomReceipts::default());
+}
+
+#[test]
+fn leave_deadline_is_inclusive_before_and_after_io_and_original_io_error_wins() {
+    let (mut pre, state, _) = admitted();
+    pre.command(RoomCommand::Leave, 10).unwrap();
+    let original_reads = state.borrow().reads;
+    let original_writes = state.borrow().writes;
+    state.borrow_mut().write_block = true;
+    let mut clocks = 0;
+    assert!(
+        !pre.drive(|| {
+            clocks += 1;
+            Ok(11)
+        })
+        .unwrap()
+    );
+    assert_eq!(
+        clocks, 2,
+        "WouldBlock cannot add a completion clock or renew Leave"
+    );
+    assert!(!pre.leave_written());
+    assert_eq!(state.borrow().reads, original_reads);
+    clocks = 0;
+    assert!(
+        !pre.drive(|| {
+            clocks += 1;
+            Ok(900_000)
+        })
+        .unwrap()
+    );
+    assert_eq!(clocks, 2);
+    assert_eq!(state.borrow().writes, original_writes + 2);
+    assert_eq!(state.borrow().reads, original_reads);
+    assert!(!pre.leave_written());
+    assert!(state.borrow().output.is_empty());
+    assert!(pre.command(RoomCommand::Leave, 900_001).is_err());
+    let calls = (state.borrow().reads, state.borrow().writes);
+    let error = pre.drive(|| Ok(1_000_010)).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    assert_eq!(error.to_string(), "native room Leave deadline expired");
+    assert_eq!((state.borrow().reads, state.borrow().writes), calls);
+    assert!(!pre.leave_written());
+
+    for io_failure in [false, true] {
+        let (mut post, state, _) = admitted();
+        post.command(RoomCommand::Leave, 10).unwrap();
+        state.borrow_mut().write_error = io_failure;
+        let observations = if io_failure {
+            vec![1_000_009, 1_000_010]
+        } else {
+            vec![1_000_009, 1_000_009, 1_000_010, 1_000_010]
+        };
+        let mut observations = observations.into_iter();
+        let error = post
+            .drive(|| Ok(observations.next().expect("no extra Leave clock")))
+            .unwrap_err();
+        assert_eq!(observations.next(), None);
+        if io_failure {
+            assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+            assert_eq!(error.to_string(), "original actor write refusal");
+            assert!(!post.leave_written());
+        } else {
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+            assert_eq!(
+                error.to_string(),
+                "native room Leave deadline expired during I/O"
+            );
+            assert_eq!(emitted(&state), RoomMessage::Leave);
+            assert!(
+                post.leave_written(),
+                "late full write remains history, not timely success"
+            );
+        }
+        let kind = error.kind();
+        let outcome = post.finish(Some(error.into()), true);
+        assert_eq!(outcome.error.unwrap().kind, kind);
+        assert_eq!(outcome.leave_written, !io_failure);
+        assert_eq!(outcome.receipts, RoomReceipts::default());
+    }
+}
+
+#[test]
+fn overflow_refusal_and_repeated_leave_cannot_install_or_renew_an_unearned_bound() {
+    let (mut owner, state, _) = admitted();
+    let error = owner.command(RoomCommand::Leave, i64::MAX).unwrap_err();
+    assert_eq!(error.to_string(), "native room Leave deadline overflow");
+    assert!(!owner.leave_written());
+    owner.command(RoomCommand::Leave, 10).unwrap();
+    assert!(owner.command(RoomCommand::Leave, 900_000).is_err());
+    assert_eq!(
+        owner.drive(|| Ok(1_000_010)).unwrap_err().kind(),
+        io::ErrorKind::TimedOut
+    );
+    assert!(state.borrow().output.is_empty());
+    let (mut unadmitted, state) = actor();
+    assert!(unadmitted.command(RoomCommand::Leave, 0).is_err());
+    assert_eq!(
+        unadmitted
+            .drive(|| Ok(1_000_000_000))
+            .unwrap_err()
+            .to_string(),
+        "native room setup deadline expired"
+    );
+    assert_eq!((state.borrow().reads, state.borrow().writes), (0, 0));
 }

@@ -603,6 +603,11 @@ impl RoomPlayClient {
         }
     }
 
+    /// Actual successful Leave admission, independent of full write receipt.
+    pub fn leave_requested(&self) -> bool {
+        self.leaving
+    }
+
     pub fn leave_written(&self) -> bool {
         self.admission.leave_written()
     }
