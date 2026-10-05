@@ -55,7 +55,7 @@ policy validates state/gates; native adapters translate transport notices and
 perform publication. Group publication cadence now receives an explicit generic
 clock, with exact portable nanosecond state and post-effect interval commit;
 native clock acquisition lives in a per-owner adapter. Endpoint acquisition,
-ghost acquisition and underlying room/ACK waits still require further separation. See
+credential loading and underlying room/ACK waits still require further separation. See
 [the progress port contract](REQ__competition-progress-port.md) and
 [its cadence contract](REQ__competition-progress-cadence.md).
 
@@ -64,9 +64,16 @@ post-cleanup notice draining through a generic port. The outer native adapter
 performs the ownership copy/join and preserves room controller completion
 authority. Shared policy retains every outcome and the first original opaque
 error; it cannot create a successful delivery or gameplay proof from cleanup.
+Saved-opponent preparation now consumes opaque resource keys and loader errors
+through a generic port. Whole-count capacity preflight precedes acquisition;
+each supplied decoded recording still passes actual competition reconstruction.
+Native file reads and path formatting live in the adapter. Loader failure keeps
+the explicit previously accepted prefix, not an atomic batch claim. See
+[the opponent loader](REQ__competition-opponent-loader.md).
+
 Solo terminal delivery selection and its one-shot guard are pure; observation
-and start requests cannot revive a finalized owner. Endpoint/ghost acquisition
-remain follow-up work. See [the terminal contract](REQ__competition-terminal-port.md)
+and start requests cannot revive a finalized owner. Endpoint acquisition and
+whole-owner construction remain follow-up work. See [the terminal contract](REQ__competition-terminal-port.md)
 and [solo lifecycle](REQ__solo-competition-terminal.md).
 
 Clock domains and physical input/output provenance cannot be substituted with
