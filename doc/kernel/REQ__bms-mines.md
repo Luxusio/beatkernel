@@ -34,6 +34,43 @@ source and long-duration fixtures for deferred execution.
 
 ## Integration boundary
 
+### Shared committed damage summary
+
+`MineDamageSummary` consumes actual one-shot HazardEvents and retains checked
+full-width triggered/avoided counters, exact accumulated nonfatal half-percent
+damage units and a latched instant_death flag. Validate every opaque value as
+1..1295 before committing a batch. Avoided markers add no damage; triggered ZZ
+latches instant death but is not converted into numeric percent damage. Values
+above 100% remain exact, as the source policy already requires. Invalid values
+or counter overflow leave the entire prior summary unchanged. Consumption adds
+no per-frame scan, collection allocation, asset access or ordinary JudgeEvent.
+Callers must pass each committed result once; this summary does not deduplicate
+or re-judge arbitrary injected events.
+
+Stepped solo consumes each actual RuntimeReport, including committed prefixes
+on later judge/audio failures. Local members have independent summaries and
+consume their actual reports in member order. Expose read-only summary accessors;
+rejected pre-report acquisition and unknown members cannot change summaries.
+Summary failure fences the owner while retaining the actual report and other
+score/capture errors. The public local-member failure record adds a mine_error
+field; external literal constructors must initialize it.
+
+ReplayVisual consumes each actual recorded judge operation's hazard report
+immediately after success. A display target may apply several operations whose
+later empty reports must not erase earlier damage. Equal presentation targets
+and targets before the next recorded operation add nothing; never synthesize an
+extra advance from display time. Regressions reject before summary mutation.
+StepReplay borrows this same accumulated summary, rather than applying a second
+replay-specific damage rule. Fresh playback/practice owners start at empty state;
+restored judge hazards do not imply restored application counters by themselves.
+
+This layer records exact damage and fatal evidence, preparing actual gauge/death
+integration without choosing a normal-note gauge curve, initial gauge or fail
+threshold. It does not stop playback, enqueue WAV00, render mines or grant source
+admission. Native presentation/report consumers and complete gauge/death/audio/
+completion behavior remain required work. Author independent deferred atomicity,
+raw-range, live/local/replay equality and failure-prefix fixtures.
+
 ### Shared plan and judge construction
 
 `MinePlan::prepare(source, max_markers)` validates the source mine count before
