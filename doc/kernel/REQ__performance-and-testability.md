@@ -236,3 +236,9 @@ score/timing/comparison values and runtime acceptance remain unfinished. See
 Browser execution remains unfinished. Test execution, hardware QA and comparative benchmarks remain deferred
 under the user's existing verification instruction; no quality target is
 considered achieved by authoring fixtures or passing compile-only checks.
+
+Room network values and the command/poll/clock/stop port belong to the portable
+[room network contract](REQ__room-network-model.md). Native aliases retain API
+compatibility and Arc sharing; the worker owns its actual thread and stream.
+The controller uses these portable values while native defaults, waiting,
+result construction and diagnostics still require further separation.
