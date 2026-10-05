@@ -132,7 +132,7 @@ pub(super) fn rejected_output(
         error => panic!("original output evidence lost: {error:?}"),
     }
 }
-fn owner(text: &str, end: Option<i64>) -> (StepGameplay, SampleBank) {
+pub(super) fn owner(text: &str, end: Option<i64>) -> (StepGameplay, SampleBank) {
     let (mut game, bank) = StepGameplay::new_section(
         data(text, false),
         config(),
@@ -333,12 +333,11 @@ fn solo_output_requires_ack_keeps_raw_diagnostics_and_preserves_finite_ordinary_
         if acknowledge {
             assert!(
                 !result.unwrap(),
-                "fenced unplayed notes have not become completed notes"
+                "terminal gameplay still requires a subsequent idle render"
             );
             let idle = output_mixer.render(&mut [0.0]).unwrap();
             assert!(
-                !game
-                    .observe_completion(Some(idle), Some(output(2_300_000_000)))
+                game.observe_completion(Some(idle), Some(output(2_300_000_000)))
                     .unwrap()
             );
             assert_eq!(game.acknowledged_stop_commands(), 3);
@@ -378,8 +377,7 @@ fn solo_output_requires_ack_keeps_raw_diagnostics_and_preserves_finite_ordinary_
             }
             5 => {
                 assert!(
-                    !game
-                        .observe_completion(Some(next), Some(presented))
+                    game.observe_completion(Some(next), Some(presented))
                         .unwrap()
                 );
                 bad = output_mixer.render(&mut [0.0]).unwrap();

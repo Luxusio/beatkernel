@@ -147,6 +147,11 @@ impl SongCompletion {
         self.calibration_seconds
     }
 
+    /// Immutable unoffset deadline prepared from all retained gameplay timelines.
+    pub(crate) const fn judge_until(&self) -> Timestamp {
+        self.judge_until
+    }
+
     /// Producer work invalidates an earlier idle barrier without undoing judging.
     /// Hosts with a separately acknowledged output queue must call this whenever
     /// new commands can still reach the mixer after the observed idle block.
@@ -179,8 +184,20 @@ impl SongCompletion {
                     .iter()
                     .all(|&id| judge.state(id) == Some(InteractionState::Completed));
         }
+        self.observe_terminal_ready(self.judged && hazards_finished, bgm, rendered, presented)
+    }
+
+    /// Uses caller-proven terminal gameplay without altering retained judge state.
+    /// BGM retirement and the original later-render/presentation barrier still apply.
+    pub(crate) fn observe_terminal_ready(
+        &mut self,
+        ready: bool,
+        bgm: BgmFeedReport,
+        rendered: Option<RenderReport>,
+        presented: Option<ClockPoint>,
+    ) -> Result<bool, CompletionError> {
         self.drain.observe(
-            self.judged && hazards_finished && bgm.remaining == 0 && bgm.outstanding == 0,
+            ready && bgm.remaining == 0 && bgm.outstanding == 0,
             rendered,
             presented,
         )

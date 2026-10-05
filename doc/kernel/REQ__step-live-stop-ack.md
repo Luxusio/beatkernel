@@ -30,10 +30,11 @@ and BGM continue. The numeric member fence and original committed prefix remain.
 
 Preserve existing finite/unlimited completion criteria and drain resets in this
 slice. Stop evidence is not a completed gameplay/clear/fail decision, physical
-silence or native presentation. A numeric-fenced member still needs explicit
-terminal-readiness integration; do not finish from ACK alone or fabricate judge
-results for its unplayed notes. Native output ownership and the high-level mine
-admission guard remain separate unfinished work.
+silence or native presentation. The separate
+[numeric-fenced readiness contract](REQ__step-failed-terminal-readiness.md)
+connects actual terminal gameplay to the existing drain machinery; do not finish
+from ACK alone or fabricate judge results for unplayed notes. Native output
+ownership and the high-level mine admission guard remain separate unfinished work.
 
 Independent deferred fixtures cover actual solo/local fatal runtime operations,
 queued Stop prefixes and remote queues/Mixer; full/partial/invalid/repeated ACK,

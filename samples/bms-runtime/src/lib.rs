@@ -367,6 +367,8 @@ pub mod step_gameplay;
 #[cfg(test)]
 mod step_gameplay_fixtures;
 #[cfg(test)]
+mod step_local_failed_terminal_fixtures;
+#[cfg(test)]
 mod step_local_gameplay_fixtures;
 #[cfg(test)]
 mod step_local_stop_ack_fixtures;
@@ -376,6 +378,8 @@ pub mod step_replay;
 mod step_replay_fixtures;
 #[cfg(test)]
 mod step_replay_stop_ack_fixtures;
+#[cfg(test)]
+mod step_solo_failed_terminal_fixtures;
 #[cfg(test)]
 mod step_solo_stop_ack_fixtures;
 /// Validated portable raw texture resources.

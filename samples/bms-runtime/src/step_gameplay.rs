@@ -1299,7 +1299,9 @@ impl StepGameplay {
         presented: Option<ClockPoint>,
     ) -> Result<bool, StepGameplayError> {
         self.ensure_solo()?;
-        self.observe_completion_ready(rendered, presented, true)
+        let numeric_terminal =
+            self.gauge.snapshot().failure.is_some() && self.gameplay_fence().is_some();
+        self.observe_completion_ready(rendered, presented, true, numeric_terminal)
     }
 
     fn observe_completion_ready(
@@ -1307,6 +1309,7 @@ impl StepGameplay {
         rendered: Option<RenderReport>,
         presented: Option<ClockPoint>,
         members_ready: bool,
+        numeric_terminal: bool,
     ) -> Result<bool, StepGameplayError> {
         let normalized = self.validate_completion_evidence(rendered, presented)?;
         let actual = rendered
@@ -1348,7 +1351,7 @@ impl StepGameplay {
             return Ok(members_ready
                 && commands_resolved
                 && actual.is_some_and(|report| report.playback_end_physical_frame == Some(frame))
-                && self.song == end
+                && (self.song == end || numeric_terminal)
                 && self
                     .last_presented
                     .is_some_and(|at| i128::from(at.as_nanos()) >= nanos));
@@ -1357,17 +1360,16 @@ impl StepGameplay {
             self.reset_drain();
             return Ok(false);
         }
-        match self
+        let completion = self
             .completion
             .as_mut()
-            .expect("unlimited completion prepared at setup")
-            .observe(
-                self.runtime.judge(),
-                self.song,
-                self.bgm.report(),
-                rendered,
-                normalized,
-            ) {
+            .expect("unlimited completion prepared at setup");
+        let observed = if numeric_terminal {
+            completion.observe_terminal_ready(members_ready, bgm, rendered, normalized)
+        } else {
+            completion.observe(self.runtime.judge(), self.song, bgm, rendered, normalized)
+        };
+        match observed {
             Ok(complete) => Ok(complete),
             Err(error) => {
                 self.failed = true;
@@ -2205,20 +2207,39 @@ impl StepLocalGameplay {
         presented: Option<ClockPoint>,
     ) -> Result<bool, StepLocalGameplayError> {
         self.control.ensure_usable()?;
-        let ready = match self.control.end {
-            Some(end) => self.members.iter().all(|member| member.song == end),
-            None => self.players.iter().all(|&player| {
-                let judge = self.judge(player).expect("prepared member");
-                self.objects
-                    .iter()
-                    .all(|&id| judge.state(id) == Some(InteractionState::Completed))
-            }),
-        };
+        let judge_until = self
+            .control
+            .completion
+            .as_ref()
+            .map(SongCompletion::judge_until);
+        let mut ready = true;
+        let mut numeric_failed = false;
+        for member in &self.members {
+            let failed = member.gauge.snapshot().failure.is_some()
+                && self.group().player_gameplay_fence(member.player).is_some();
+            numeric_failed |= failed;
+            if failed {
+                continue;
+            }
+            let healthy = match self.control.end {
+                Some(end) => member.song == end,
+                None => {
+                    let judge = self.judge(member.player).expect("prepared member");
+                    member.song >= judge_until.expect("unlimited completion prepared at setup")
+                        && judge.remaining_hazards() == 0
+                        && self
+                            .objects
+                            .iter()
+                            .all(|&id| judge.state(id) == Some(InteractionState::Completed))
+                }
+            };
+            ready &= healthy;
+        }
         // Admission of real output remains mandatory even while another member
         // is not ready. The shared implementation adopts valid evidence and
         // resets drain readiness without fabricating progress for that member.
         self.control
-            .observe_completion_ready(rendered, presented, ready)
+            .observe_completion_ready(rendered, presented, ready, numeric_failed && ready)
             .map_err(Into::into)
     }
 

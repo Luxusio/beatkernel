@@ -20,9 +20,9 @@ use beatkernel::{
 };
 use beatkernel_bms::BmsInputMode;
 
-const FAILED: PlayerId = PlayerId(7);
-const HEALTHY: PlayerId = PlayerId(u32::MAX);
-const SOURCES: [u64; 2] = [u64::MAX, u64::MAX - 11];
+pub(super) const FAILED: PlayerId = PlayerId(7);
+pub(super) const HEALTHY: PlayerId = PlayerId(u32::MAX);
+pub(super) const SOURCES: [u64; 2] = [u64::MAX, u64::MAX - 11];
 const TEXT: &str =
     "#BPM 60\n#VOLWAV 50\n#WAV01 note\n#WAV02 music\n#00011:01000100\n#000D1:00ZZ0000\n#00001:02";
 
