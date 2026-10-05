@@ -43,9 +43,11 @@ their existing selection path and byte-identical command ordering.
 Expose the same ReplayAudioPlan shape, documenting output Play/Stop commands.
 The mapped feeder already supports these Stops; actual owned Stop diagnostic/
 Worklet acknowledgement tracking remains a separate integration. Do not weaken
-generic strict render validators or hide unknown_stops. Offline runtime gauge
-connection, failed-session output completion, clear/fail and high-level mine
-admission remain unfinished. Compilation and authored fixtures do not establish
+generic strict render validators or hide unknown_stops. The separate
+[offline runtime owner](REQ__offline-gauge-sound-stop.md) observes actual reports
+and tracks admitted Stops in its fresh queue. Failed-session native/replay output
+completion, clear/fail and high-level mine admission remain unfinished.
+Compilation and authored fixtures do not establish
 assertion, browser/device output or performance acceptance.
 
 Independent deferred fixtures cover the actual shared component with partial

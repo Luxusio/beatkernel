@@ -287,6 +287,8 @@ pub mod native_start;
 pub mod note_progress;
 /// Synthetic offline composition using the same runtime and mixer as native apps.
 pub mod offline;
+#[cfg(test)]
+mod offline_gauge_sound_stop_fixtures;
 /// Typed UI panel ownership and cancellation permits for off-thread work.
 pub mod panel_scope;
 /// Native presentation-derived pause and bounded keyboard reconciliation.

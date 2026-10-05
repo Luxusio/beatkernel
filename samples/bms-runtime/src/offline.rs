@@ -1,6 +1,7 @@
 //! Bounded chronological synthetic BMS rendering through the shared runtime.
 use crate::{
-    PreparedBms, input_sounds::InputSoundPlan, mine_plan::prepare_judge, mine_sounds::MineSoundPlan,
+    PreparedBms, gauge::BmsGauge, input_sounds::InputSoundPlan, mine_plan::prepare_judge,
+    mine_sounds::MineSoundPlan,
 };
 use beatkernel::{
     audio::{
@@ -17,7 +18,12 @@ use beatkernel::{
     transport::{Rate, Transport},
 };
 use beatkernel_platform::audio::{encode_pcm, DeviceFormat, SampleEncoding};
-use std::{collections::BTreeMap, error::Error, fmt, io::Write};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+    io::Write,
+};
 
 /// Independent output extent and bounded outstanding audio work.
 #[derive(Clone, Copy, Debug)]
@@ -119,19 +125,59 @@ fn target_frame(at: Timestamp, rate: u32) -> Result<u64, Box<dyn Error>> {
     let scaled = i128::from(at.as_nanos()) * i128::from(rate);
     Ok(u64::try_from((scaled + 999_999_999) / 1_000_000_000)?)
 }
-fn accept(report: RuntimeReport, summary: &mut OfflineReport) -> Result<(), OfflineError> {
-    summary.judge_results += report.judge_events.len();
-    summary.hits += report
+fn accept(
+    mut report: RuntimeReport,
+    summary: &mut OfflineReport,
+    gauge: &mut BmsGauge,
+    runtime: &mut Runtime,
+    admitted_stops: &mut u64,
+    bgm_collision: bool,
+) -> Result<(), OfflineError> {
+    let hits = report
         .judge_events
         .iter()
         .filter(|event| matches!(event.outcome, JudgeOutcome::Hit { .. }))
         .count();
+    let mut errors = Vec::new();
+    match (
+        summary.judge_results.checked_add(report.judge_events.len()),
+        summary.hits.checked_add(hits),
+    ) {
+        (Some(results), Some(hits)) => {
+            summary.judge_results = results;
+            summary.hits = hits;
+        }
+        _ => errors.push("offline judge count overflow".to_owned()),
+    }
+    let was_failed = gauge.snapshot().failure.is_some();
+    if let Err(error) = gauge.observe(&report.judge_events, &report.hazard_events) {
+        errors.push(error.to_string());
+    }
+    if !was_failed && gauge.snapshot().failure.is_some() {
+        runtime.fence_gameplay();
+        if bgm_collision {
+            errors.push("gameplay failure Stop voice collides with BGM".to_owned());
+        } else if let Some(stops) = runtime.fence_gameplay_sounds(report.audio_at.timestamp) {
+            match u64::try_from(stops.commands.len())
+                .ok()
+                .and_then(|count| admitted_stops.checked_add(count))
+            {
+                Some(count) => *admitted_stops = count,
+                None => errors.push("offline accepted Stop count overflow".to_owned()),
+            }
+            report.audio_commands.extend(stops.commands);
+            report.audio_failures.extend(stops.failures);
+        }
+    }
     if let Some(error) = report.judge_error {
-        return Err(failure(error, summary.last_render));
+        errors.push(error.to_string());
     }
     if !report.audio_failures.is_empty() {
+        errors.push("audio command admission failed".to_owned());
+    }
+    if !errors.is_empty() {
         return Err(OfflineError {
-            message: "audio command admission failed".into(),
+            message: errors.join("; "),
             last_render: summary.last_render,
             audio_failures: report.audio_failures,
         });
@@ -146,6 +192,20 @@ pub(crate) fn render_block(
     output: &mut dyn Write,
     summary: &mut OfflineReport,
 ) -> Result<(), OfflineError> {
+    render_owned_block(mixer, pcm, bytes, format, output, summary, 0)
+}
+
+// Only render_offline owns the fresh queue and its actual accepted Stop ledger.
+// Other callers retain strict zero allowance through render_block above.
+fn render_owned_block(
+    mixer: &mut Mixer,
+    pcm: &mut [f32],
+    bytes: &mut [u8],
+    format: DeviceFormat,
+    output: &mut dyn Write,
+    summary: &mut OfflineReport,
+    admitted_stops: u64,
+) -> Result<(), OfflineError> {
     let report = mixer
         .render(pcm)
         .map_err(|error| failure(error, summary.last_render))?;
@@ -155,7 +215,7 @@ pub(crate) fn render_block(
         || c.pending_full != 0
         || c.voice_full != 0
         || c.unknown_samples != 0
-        || c.unknown_stops != 0
+        || c.unknown_stops > admitted_stops
         || c.invalid_gains != 0
         || c.invalid_rates != 0
         || c.invalid_times != 0
@@ -165,11 +225,15 @@ pub(crate) fn render_block(
             Some(report),
         ));
     }
+    let frames = u64::try_from(report.frames)
+        .ok()
+        .and_then(|frames| summary.frames.checked_add(frames))
+        .ok_or_else(|| failure("offline rendered frame count overflow", Some(report)))?;
     encode_pcm(format, pcm, bytes).map_err(|error| failure(error, Some(report)))?;
     output
         .write_all(bytes)
         .map_err(|error| failure(error, Some(report)))?;
-    summary.frames += report.frames as u64;
+    summary.frames = frames;
     Ok(())
 }
 
@@ -178,6 +242,8 @@ pub(crate) fn render_block(
 /// Synthetic input preserves exact compiled times; overlapping lane/hold patterns
 /// retain real judge outcomes. Same-frame capacity overflow is explicit. The sink
 /// is not flushed; any failure may leave a prefix. No native playback occurs.
+/// Numeric gauge failure fences gameplay and schedules its owned voice Stops;
+/// independent BGM and the requested output extent continue without a clear claim.
 pub fn render_offline(
     prepared: PreparedBms,
     options: OfflineOptions,
@@ -239,6 +305,29 @@ pub fn render_offline(
         Vec::new()
     } else {
         prepared.source.compile_mines()?
+    };
+    let bgm_collision = if mines.is_empty() {
+        false
+    } else {
+        let voices: BTreeSet<_> = prepared
+            .sounds
+            .iter()
+            .map(|sound| sound.voice)
+            .chain(
+                input_sounds
+                    .iter()
+                    .flat_map(|timeline| timeline.markers().iter().map(|marker| marker.voice)),
+            )
+            .chain(
+                hazard_sounds
+                    .iter()
+                    .flat_map(|timeline| timeline.bindings().iter().map(|binding| binding.voice)),
+            )
+            .collect();
+        prepared.bgm_commands.iter().any(|command| match command {
+            AudioCommand::Play { voice, .. } => voices.contains(voice),
+            _ => false,
+        })
     };
     let count = options
         .block_frames
@@ -382,6 +471,8 @@ pub fn render_offline(
     };
     let mut index = 0;
     let mut sequence = 0u64;
+    let mut gauge = BmsGauge::default();
+    let mut admitted_stops = 0u64;
     while summary.frames < options.frames {
         let next_frame = records
             .get(index)
@@ -389,13 +480,14 @@ pub fn render_offline(
         if next_frame > summary.frames {
             let frames =
                 usize::try_from((next_frame - summary.frames).min(options.block_frames as u64))?;
-            render_block(
+            render_owned_block(
                 &mut mixer,
                 &mut pcm[..frames * channels],
                 &mut bytes[..frames * channels * 4],
                 encoded,
                 output,
                 &mut summary,
+                admitted_stops,
             )?;
         } else {
             while let Some(record) = records
@@ -424,13 +516,27 @@ pub fn render_offline(
                         let report = runtime
                             .process_input(event, &Identity, point(record.at))
                             .map_err(|error| failure(error, summary.last_render))?;
-                        accept(report, &mut summary)?;
+                        accept(
+                            report,
+                            &mut summary,
+                            &mut gauge,
+                            &mut runtime,
+                            &mut admitted_stops,
+                            bgm_collision,
+                        )?;
                     }
                     Item::Advance => {
                         let report = runtime
                             .advance_to(point(record.at), &Identity, point(record.at))
                             .map_err(|error| failure(error, summary.last_render))?;
-                        accept(report, &mut summary)?;
+                        accept(
+                            report,
+                            &mut summary,
+                            &mut gauge,
+                            &mut runtime,
+                            &mut admitted_stops,
+                            bgm_collision,
+                        )?;
                     }
                 }
                 index += 1;
@@ -445,7 +551,14 @@ pub fn render_offline(
         let report = runtime
             .advance_to(at, &Identity, at)
             .map_err(|error| failure(error, summary.last_render))?;
-        accept(report, &mut summary)?;
+        accept(
+            report,
+            &mut summary,
+            &mut gauge,
+            &mut runtime,
+            &mut admitted_stops,
+            bgm_collision,
+        )?;
     }
     Ok(summary)
 }
