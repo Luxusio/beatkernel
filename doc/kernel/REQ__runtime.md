@@ -216,3 +216,34 @@ continues to refuse playback until app voice allocation, sample loading, replay
 identity and live/local/replay wiring all consume the same timeline. Core source
 and compile-only checks do not prove browser/device/audio execution or complete
 invisible-note playback. Runtime test execution and formal QA remain deferred.
+
+## Hazard outcome delivery
+
+RuntimeReport exposes a separate `hazard_events: Vec<HazardEvent>` from the
+actual configured JudgeEngine. Configure hazards on the pristine engine before
+handing it to Runtime. Every successful judge call copies its current operation
+report immediately: mapped input fanout appends each successful call's hazards
+in binding order; explicit advances and finite-song endpoint advances append
+their outcomes as well. Copy only after success, so a rejected judge call cannot
+re-publish the engine's retained previous report. Preserve earlier committed
+fanout results when a later destination fails. Unbound/ignored input makes no
+judge call and reports no hazards; it must not invent advancement or publish a
+stale report. A later genuine advance remains responsible for pending markers.
+
+Preserve each marker's full identity, original time/value/outcome and original
+input metadata. Mapping normalization retains original clock provenance through
+the existing input path. Hazards neither become JudgeEvent scores nor trigger
+ordinary note/input-sound commands automatically. Queue rejection does not erase
+hazard results. Existing judge-result telemetry counts ordinary JudgeEvents only.
+RuntimeGroup/SoloRuntime wrappers carry these actual reports unchanged. Default
+unconfigured engines report an empty hazard vector. Synthetic fixture reports
+must explicitly initialize it. This new public struct field requires external
+RuntimeReport literal constructors to add an empty vector where appropriate.
+
+Author independent deferred fixtures over actual Runtime fanout, prefix failure,
+advancement/end cap, mapping/touch ownership, unbound input, audio failure and
+snapshot/replay consistency. Compile-only checks are not execution evidence.
+
+Known ceiling: This delivery layer does not install BMS hazard plans, apply
+gauge/death, play WAV00, render mines or enable source preparation. Keep mine
+admission refused until actual live/local/replay/practice/offline integration.
