@@ -37,8 +37,11 @@ are separate operations and do not guarantee containment if another actor
 concurrently replaces directory entries or the root.
 
 This stage supplies the common format, storage policy and native adapter.
-High-level native replay-save and browser IndexedDB/catalog/UI association are
-subsequent integration, not achieved by this component. Rich score/timing and
+Native solo/local recording now connects actual typed completion to a sidecar
+after cleanup and replay save attempts; see
+[the native save contract](REQ__native-completed-result-save.md).
+Browser IndexedDB/catalog/UI association remains subsequent integration.
+Rich score/timing and
 comparison snapshots may require additional versioned metadata; no data omitted
 by version 1 is claimed to be archived. Independent deferred tests cover golden
 bytes, policy/identity round trips, malformed and later-row cases, integer bounds,

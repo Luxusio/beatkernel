@@ -47,6 +47,14 @@ Clock domains and physical input/output provenance cannot be substituted with
 test/control time. Native and browser adapters use common business rules.
 Use static dispatch or direct value inputs where sufficient; do not add heap
 allocation, per-note virtual dispatch or new crates solely to enforce layering.
+The user's explicit implementation preference is zero-cost abstraction wherever
+practical. Prefer generic ports, monomorphized adapters and direct typed values
+on judgment, input, audio and rendering hot paths. Introducing a trait boundary
+must not itself require allocation, locking or per-note dynamic dispatch.
+Dynamic dispatch or ownership allocation on setup, UI construction and storage
+paths needs a concrete purpose and should remain outside real-time callbacks.
+This is an implementation rule, not proof of zero overhead everywhere: evaluate
+code size, compile time and runtime costs with evidence before claiming gains.
 Real-time audio callbacks must not gain allocation, blocking I/O or locks.
 Bound queues and work, and make overflow, refusal and cancellation explicit.
 
@@ -134,8 +142,14 @@ See [the browser results requirement](../ui/REQ__browser-completed-results.md).
 The common completed-result archive now separates historical storage values from
 live completion evidence. Its codec and one-effect save/load policy accept an
 injected storage port; the native file adapter remains outside business policy.
-High-level native save, browser IndexedDB and catalog/UI archive integration
-remain unfinished. See [the archive boundary](../runtime/REQ__completed-result-archive.md).
+Native solo/local application save paths now retain the typed pump result and
+use shared finalization with generic callbacks after device cleanup attempts.
+Pure association receives borrowed player/capture/profile data, while sidecar
+filesystem publication remains in the native adapter. Finite capture headers
+retain their original endpoint. See
+[the native save contract](../runtime/REQ__native-completed-result-save.md).
+Browser IndexedDB and catalog/UI archive integration remain unfinished. See
+[the archive boundary](../runtime/REQ__completed-result-archive.md).
 Browser execution remains unfinished. Test execution, hardware QA and comparative benchmarks remain deferred
 under the user's existing verification instruction; no quality target is
 considered achieved by authoring fixtures or passing compile-only checks.
