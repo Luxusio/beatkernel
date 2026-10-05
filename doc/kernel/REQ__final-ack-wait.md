@@ -28,8 +28,10 @@ pressure, failure and timeout do not claim rollback of already admitted data.
 Independent scripted fixtures cover precedence, admission retries, immutable
 deadlines, exact large integer times, regression and errors before/after effects.
 Assertions, native clock/channel/thread/socket execution and formal review/QA
-remain deferred. Room final/drain waits and broader native owner separation
-remain follow-up work; this policy covers bilateral final ACK waiting.
+remain deferred. Room final/drain waiting has its
+[separate policy](REQ__room-final-wait.md). Startup/worker waits and broader
+native owner separation remain follow-up work; this policy covers bilateral
+final ACK waiting.
 
 Eight independent fixture groups are authored and compiled only. Four source
 configurations exited zero after both writers stopped. See

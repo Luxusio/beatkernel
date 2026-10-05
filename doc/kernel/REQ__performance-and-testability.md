@@ -91,8 +91,12 @@ Bilateral final acknowledgement waiting uses generic notice/admission and
 clock/park ports. The fixed exact deadline is never renewed, and cancellation,
 disconnect and ACK evidence retain their precedence. Scalar/group native methods
 adapt their real notices and queues to this policy; native clock acquisition and
-thread parking live in a private bridge. Room final/drain waits and underlying
-worker waits remain further work. See [final ACK waiting](REQ__final-ack-wait.md).
+thread parking live in a private bridge. Room final/drain waiting now similarly
+uses generic observation/command and wait-control ports, with separate original
+room/control deadlines and actual admission, acceptance and receipt gates.
+Actual joins/cleanup errors, startup and underlying worker waits remain native.
+See [final ACK waiting](REQ__final-ack-wait.md) and
+[room final/drain waiting](REQ__room-final-wait.md).
 
 Solo terminal delivery selection and its one-shot guard are pure; observation
 and start requests cannot revive a finalized owner. Underlying endpoint ownership
