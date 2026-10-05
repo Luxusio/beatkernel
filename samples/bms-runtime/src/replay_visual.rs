@@ -1,6 +1,10 @@
 //! Incremental actual recorded operations for presentation, without synthetic judging.
-use crate::replay_playback::{
-    decode_section_setup, reconstruct, reconstruct_section, validate_section_setup, validate_setup,
+use crate::{
+    mine_damage::MineDamageSummary,
+    replay_playback::{
+        decode_section_setup, reconstruct, reconstruct_section, validate_section_setup,
+        validate_setup,
+    },
 };
 use beatkernel::{
     judge::{JudgeEngine, JudgeEvent},
@@ -24,6 +28,8 @@ pub struct ReplayVisual {
     end: Option<Timestamp>,
     observed: Option<Timestamp>,
     pressed: crate::pressed_keys::PressedKeys,
+    mine_damage: MineDamageSummary,
+    failed: bool,
 }
 impl ReplayVisual {
     /// Validates codec bounds and setup before cloning, and every operation before use.
@@ -77,6 +83,8 @@ impl ReplayVisual {
             end: setup.end,
             observed: None,
             pressed,
+            mine_damage: MineDamageSummary::default(),
+            failed: false,
         })
     }
     pub const fn start(&self) -> Timestamp {
@@ -88,13 +96,22 @@ impl ReplayVisual {
     pub fn pressed_lanes(&self) -> u32 {
         self.pressed.mask()
     }
+    /// Damage from actual recorded operations already applied by this owner.
+    pub fn mine_damage(&self) -> &MineDamageSummary {
+        &self.mine_damage
+    }
     pub fn recorded_until(&self) -> Option<Timestamp> {
         self.records.last().map(|record| record.song_time)
     }
     /// Applies every actual operation at or before this presentation target.
     /// Equal-time operations retain their validated ordinal order. Regressions
     /// reject before mutation, including after the actual prefix has finished.
+    /// Damage aggregation failure fences further operations after the committed
+    /// judge call; previously accumulated damage remains readable.
     pub fn advance_to(&mut self, song: Timestamp) -> Result<Vec<JudgeEvent>, BoxError> {
+        if self.failed {
+            return Err("replay presentation is fenced after mine damage failure".into());
+        }
         if self.observed.is_some_and(|prior| song < prior) {
             return Err("replay presentation target regressed".into());
         }
@@ -105,13 +122,16 @@ impl ReplayVisual {
             .filter(|record| record.song_time <= song)
         {
             let events = match &record.operation {
-                ReplayOperation::Input(input) => {
-                    let events = self.engine.push_input(input, record.song_time)?;
-                    self.pressed.apply(std::slice::from_ref(input))?;
-                    events
-                }
+                ReplayOperation::Input(input) => self.engine.push_input(input, record.song_time)?,
                 ReplayOperation::Advance => self.engine.advance_to(record.song_time)?,
             };
+            if let Err(error) = self.mine_damage.observe(self.engine.hazard_events()) {
+                self.failed = true;
+                return Err(error.into());
+            }
+            if let ReplayOperation::Input(input) = &record.operation {
+                self.pressed.apply(std::slice::from_ref(input))?;
+            }
             results.extend(events);
             self.cursor += 1;
         }

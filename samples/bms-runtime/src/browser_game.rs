@@ -881,6 +881,7 @@ impl BrowserGame {
             Err(failure) => {
                 match &failure {
                     StepGameplayError::Report { report, .. }
+                    | StepGameplayError::MineDamage { report, .. }
                     | StepGameplayError::Capture {
                         report: Some(report),
                         ..

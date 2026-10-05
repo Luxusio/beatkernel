@@ -10,6 +10,7 @@ use crate::{
     local_players::{PlayerId, ResolvedInputPlan},
     local_preparation::{PreparedLocalMembers, prepare_local_members, prepare_local_input_sounds},
     local_runtime::{GroupError, InputResult, PlayerReport, RuntimeGroup, SoloRuntime},
+    mine_damage::{MineDamageError, MineDamageSummary},
     mine_plan::prepare_judge,
     native_judge::NativeJudgeConfig,
     replay_audio::{ReplayAudioError, before_endpoint, completed_render_cursor, section_end_frame},
@@ -85,6 +86,14 @@ pub enum StepGameplayError {
         score_error: Option<CompetitionError>,
         capture_error: Option<CaptureError>,
     },
+    /// Mine aggregation refused an already committed report. Other processing
+    /// errors remain attached, and the previous damage summary is unchanged.
+    MineDamage {
+        error: MineDamageError,
+        report: RuntimeReport,
+        score_error: Option<CompetitionError>,
+        capture_error: Option<CaptureError>,
+    },
     /// Capture rejected a committed operation, or setup/export failed without
     /// an operation. Earlier recorded operations remain the accepted prefix.
     Capture {
@@ -154,6 +163,19 @@ impl fmt::Display for StepGameplayError {
             } => write!(
                 f,
                 "step gameplay report failed: judge {:?}, {} audio failures, score {:?}, capture {:?}",
+                report.judge_error,
+                report.audio_failures.len(),
+                score_error,
+                capture_error
+            ),
+            Self::MineDamage {
+                error,
+                report,
+                score_error,
+                capture_error,
+            } => write!(
+                f,
+                "step gameplay mine damage: {error}; judge {:?}, {} audio failures, score {:?}, capture {:?}",
                 report.judge_error,
                 report.audio_failures.len(),
                 score_error,
@@ -298,6 +320,7 @@ pub struct StepGameplay {
     correction_watermark: Option<ClockPoint>,
     capture: Option<LiveReplayCapture>,
     score: ScoreSummary,
+    mine_damage: MineDamageSummary,
     song: Timestamp,
     host_domain: ClockDomainId,
     start: Timestamp,
@@ -319,6 +342,7 @@ impl fmt::Debug for StepGameplay {
         f.debug_struct("StepGameplay")
             .field("song", &self.song)
             .field("score", &self.score)
+            .field("mine_damage", &self.mine_damage)
             .field(
                 "pending_sequence",
                 &self.pending.as_ref().map(|batch| batch.sequence),
@@ -733,6 +757,7 @@ impl StepGameplay {
             correction_watermark: None,
             capture: None,
             score: ScoreSummary::default(),
+            mine_damage: MineDamageSummary::default(),
             song,
             host_domain: config.host_origin.domain,
             start,
@@ -1083,11 +1108,21 @@ impl StepGameplay {
         if !report.audio_commands.is_empty() {
             self.reset_drain();
         }
+        let mine_error = self.mine_damage.observe(&report.hazard_events).err();
         let score_error = self.score.observe(&report.judge_events).err();
         let capture_error = self
             .capture
             .as_mut()
             .and_then(|capture| capture.record_report(&report).err());
+        if let Some(error) = mine_error {
+            self.failed = true;
+            return Err(StepGameplayError::MineDamage {
+                error,
+                report,
+                score_error,
+                capture_error,
+            });
+        }
         if score_error.is_some()
             || report.judge_error.is_some()
             || !report.audio_failures.is_empty()
@@ -1411,6 +1446,10 @@ impl StepGameplay {
     pub fn score(&self) -> &ScoreSummary {
         &self.score
     }
+    /// Actual committed hazard evidence, also retained after failure.
+    pub fn mine_damage(&self) -> &MineDamageSummary {
+        &self.mine_damage
+    }
     pub fn bgm_report(&self) -> BgmFeedReport {
         self.bgm.report()
     }
@@ -1429,6 +1468,7 @@ pub struct StepLocalMemberFailure {
     pub player: PlayerId,
     pub score_error: Option<CompetitionError>,
     pub capture_error: Option<CaptureError>,
+    pub mine_error: Option<MineDamageError>,
 }
 
 /// Local failure retains the complete committed group prefix and every member's
@@ -1473,6 +1513,7 @@ impl Error for StepLocalGameplayError {}
 struct LocalMemberState {
     player: PlayerId,
     score: ScoreSummary,
+    mine_damage: MineDamageSummary,
     capture: Option<LiveReplayCapture>,
     song: Timestamp,
 }
@@ -1546,6 +1587,7 @@ impl StepLocalGameplay {
         members.extend(players.iter().map(|&player| LocalMemberState {
             player,
             score: ScoreSummary::default(),
+            mine_damage: MineDamageSummary::default(),
             capture: None,
             song: control.song,
         }));
@@ -1590,6 +1632,13 @@ impl StepLocalGameplay {
             .iter()
             .find(|member| member.player == player)
             .map(|member| &member.score)
+    }
+    /// Independent committed hazard evidence for one actual prepared member.
+    pub fn mine_damage(&self, player: PlayerId) -> Option<&MineDamageSummary> {
+        self.members
+            .iter()
+            .find(|member| member.player == player)
+            .map(|member| &member.mine_damage)
     }
     pub fn judge(&self, player: PlayerId) -> Option<&JudgeEngine> {
         self.group().member_judge(player)
@@ -1884,17 +1933,19 @@ impl StepLocalGameplay {
                 .find(|member| member.player == *player)
                 .expect("group reports only prepared members");
             member.song = report.song_time;
+            let mine_error = member.mine_damage.observe(&report.hazard_events).err();
             let score_error = member.score.observe(&report.judge_events).err();
             let capture_error = member
                 .capture
                 .as_mut()
                 .and_then(|capture| capture.record_report(report).err());
             reported_failure |= report.judge_error.is_some() || !report.audio_failures.is_empty();
-            if score_error.is_some() || capture_error.is_some() {
+            if score_error.is_some() || capture_error.is_some() || mine_error.is_some() {
                 member_errors.push(StepLocalMemberFailure {
                     player: *player,
                     score_error,
                     capture_error,
+                    mine_error,
                 });
             }
         }

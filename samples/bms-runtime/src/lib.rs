@@ -137,6 +137,10 @@ pub mod local_setup;
 mod local_source_plan_fixtures;
 #[cfg(test)]
 mod mine_admission_fixtures;
+/// Checked committed mine damage evidence, independent of gauge and audio policy.
+pub mod mine_damage;
+#[cfg(test)]
+mod mine_damage_fixtures;
 /// Shared original mine timing and source-aware pristine judge preparation.
 pub mod mine_plan;
 #[cfg(test)]

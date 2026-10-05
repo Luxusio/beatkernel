@@ -5,6 +5,7 @@ use crate::{
     bgm::{BgmConfig, BgmFeedError, BgmFeedReport, BgmFeeder},
     competition::{CompetitionError, ScoreSummary},
     completion::{CompletionError, ReplayCompletion},
+    mine_damage::MineDamageSummary,
     replay_audio::{
         ReplayAudioError, completed_render_cursor, plan_section_audio, section_end_frame,
     },
@@ -457,6 +458,10 @@ impl StepReplay {
     }
     pub fn score(&self) -> &ScoreSummary {
         &self.score
+    }
+    /// Borrows the visual owner's actual recorded hazard accumulation.
+    pub fn mine_damage(&self) -> &MineDamageSummary {
+        self.visual.mine_damage()
     }
     pub fn pressed_lanes(&self) -> u32 {
         self.visual.pressed_lanes()
