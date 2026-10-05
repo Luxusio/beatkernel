@@ -17,8 +17,8 @@ use crate::{
 };
 
 use super::{
-    Candidate, CandidateResolver, ClosestCandidate, JudgeError, JudgeEvent, JudgePolicy,
-    JudgeProfile, Rule, WindowJudgePolicy,
+    hazard::HazardState, Candidate, CandidateResolver, ClosestCandidate, HazardError, HazardEvent,
+    HazardTimeline, JudgeError, JudgeEvent, JudgePolicy, JudgeProfile, Rule, WindowJudgePolicy,
 };
 
 /// Single-owner forward judge with indexed starts and ordered deadlines.
@@ -43,6 +43,7 @@ pub struct JudgeEngine {
     held: HashSet<InputOwner>,
     held_contacts: HashSet<(InputOwner, ContactId)>,
     contact_enabled: bool,
+    hazards: Option<HazardState>,
     effective_time: Option<Timestamp>,
     initial_configuration: Result<Vec<u8>, SnapshotError>,
 }
@@ -173,6 +174,7 @@ impl JudgeEngine {
             held: HashSet::new(),
             held_contacts: HashSet::new(),
             contact_enabled,
+            hazards: None,
             effective_time: None,
             initial_configuration: Err(SnapshotError::ConfigurationMismatch),
         };
@@ -181,6 +183,30 @@ impl JudgeEngine {
         }
         engine.initial_configuration = engine.canonical_state_bytes();
         Ok(engine)
+    }
+
+    /// Installs one immutable hazard timeline before any accepted operation.
+    /// Snapshot support is checked before committing the new configuration.
+    pub fn configure_hazards(&mut self, timeline: HazardTimeline) -> Result<(), HazardError> {
+        if self.hazards.is_some() {
+            return Err(HazardError::AlreadyConfigured);
+        }
+        if self.effective_time.is_some() {
+            return Err(HazardError::AlreadyStarted);
+        }
+        let hazards = HazardState::new(timeline)?;
+        let configuration = self
+            .canonical_state_bytes_with_hazards(Some(&hazards))
+            .map_err(HazardError::Snapshot)?;
+        self.hazards = Some(hazards);
+        self.initial_configuration = Ok(configuration);
+        Ok(())
+    }
+
+    /// Borrows the last successful input/advance's hazard report. Rejected
+    /// operations preserve it; unconfigured engines always report an empty slice.
+    pub fn hazard_events(&self) -> &[HazardEvent] {
+        self.hazards.as_ref().map_or(&[], HazardState::events)
     }
 
     /// Checks actual button/contact ownership without committing a press.
@@ -269,15 +295,27 @@ impl JudgeEngine {
         };
 
         // No library-owned fallible work remains after this point.
+        if let Some(hazards) = &mut self.hazards {
+            hazards.clear_events();
+            hazards.consume(time, false, None);
+        }
         let mut output = Vec::new();
         self.expire(time, &mut output);
         if let Some((owner, state)) = button {
             match state {
                 ButtonState::Down => {
-                    self.held.insert(owner);
+                    if self.held.insert(owner) {
+                        if let Some(hazards) = &mut self.hazards {
+                            hazards.acquired(owner.game_control);
+                        }
+                    }
                 }
                 ButtonState::Up => {
-                    self.held.remove(&owner);
+                    if self.held.remove(&owner) {
+                        if let Some(hazards) = &mut self.hazards {
+                            hazards.released(owner.game_control);
+                        }
+                    }
                 }
                 ButtonState::Repeat => {}
             }
@@ -285,13 +323,24 @@ impl JudgeEngine {
         if let Some((owner, phase)) = contact {
             match phase {
                 TouchPhase::Down => {
-                    self.held_contacts.insert(owner);
+                    if self.held_contacts.insert(owner) {
+                        if let Some(hazards) = &mut self.hazards {
+                            hazards.acquired(owner.0.game_control);
+                        }
+                    }
                 }
                 TouchPhase::Up | TouchPhase::Cancel => {
-                    self.held_contacts.remove(&owner);
+                    if self.held_contacts.remove(&owner) {
+                        if let Some(hazards) = &mut self.hazards {
+                            hazards.released(owner.0.game_control);
+                        }
+                    }
                 }
                 TouchPhase::Move => {}
             }
+        }
+        if let Some(hazards) = &mut self.hazards {
+            hazards.consume(time, true, Some(*event.physical.meta()));
         }
         let mut dispatch: BTreeSet<(ObjectId, usize)> = self
             .active_controls
@@ -333,6 +382,10 @@ impl JudgeEngine {
         mapped_song_time: Timestamp,
     ) -> Result<Vec<JudgeEvent>, JudgeError> {
         let time = self.checked_time(mapped_song_time)?;
+        if let Some(hazards) = &mut self.hazards {
+            hazards.clear_events();
+            hazards.consume(time, true, None);
+        }
         let mut output = Vec::new();
         let advanced = self.expire(time, &mut output);
         let active: Vec<_> = self.active.iter().copied().collect();
@@ -638,6 +691,13 @@ impl JudgeEngine {
     }
 
     pub(crate) fn canonical_state_bytes(&self) -> Result<Vec<u8>, SnapshotError> {
+        self.canonical_state_bytes_with_hazards(self.hazards.as_ref())
+    }
+
+    fn canonical_state_bytes_with_hazards(
+        &self,
+        hazards: Option<&HazardState>,
+    ) -> Result<Vec<u8>, SnapshotError> {
         use super::snapshot::Encoder;
         let mut bytes = Encoder::new(b"beatkernel-judge-state/v1");
         bytes.chart(&self.chart);
@@ -709,6 +769,9 @@ impl JudgeEngine {
             }
             bytes.bytes(&extension.finish());
         }
+        if let Some(hazards) = hazards {
+            hazards.encode(&mut bytes);
+        }
         Ok(bytes.finish())
     }
 
@@ -756,6 +819,7 @@ impl JudgeEngine {
             held: self.held.clone(),
             held_contacts: self.held_contacts.clone(),
             contact_enabled: self.contact_enabled,
+            hazards: self.hazards.clone(),
             effective_time: self.effective_time,
             initial_configuration: self.initial_configuration.clone(),
         };

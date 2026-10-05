@@ -1,11 +1,13 @@
 //! Configurable deterministic judging with explicit song time and provenance.
 
 mod engine;
+mod hazard;
 mod policy;
 mod profile;
 pub(crate) mod snapshot;
 
 pub use engine::{JudgeEngine, JudgeSnapshot, SnapshotError};
+pub use hazard::{HazardError, HazardEvent, HazardId, HazardMarker, HazardOutcome, HazardTimeline};
 pub use policy::{
     Candidate, CandidateResolver, ClosestCandidate, EarliestCandidate, JudgePolicy,
     WindowJudgePolicy,
