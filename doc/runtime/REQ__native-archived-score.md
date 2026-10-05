@@ -46,5 +46,6 @@ and macOS adapter call-site edits require later target and hardware acceptance.
 Runtime assertions, formal reviews, required QA, verify and close remain deferred.
 Cold archive construction may allocate; first new grade uses existing score-map
 insertion. No benchmark or globally allocation-free claim is established.
-Native Records preview integration of stored final score details and saved
-comparison archival remain separate unfinished work.
+Native Records now retains associated stored final score details in a cached
+subview under [the detail contract](REQ__native-record-details.md). Full
+grade-table UI and saved comparison archival remain unfinished.

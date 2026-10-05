@@ -14,6 +14,10 @@ nanosecond extent, stored outcome and exact gauge units, with explicit stored
 historical provenance. Version-2 stored score counts and timing use
 [the exact detail contract](REQ__archived-score-details.md). Version-1 omission
 remains unavailable; the display cannot invent these statistics.
+The shared from_record presentation builder marks associated version-1 score
+metadata as STORED SCORE UNAVAILABLE. Native Records reuses this builder under
+[its detail contract](REQ__native-record-details.md); browser decoding and
+association remain Worker-owned.
 Repeated drawing uses cached geometry rather than
 reformatting strings. This path owns no gameplay, network, clock or audio state.
 

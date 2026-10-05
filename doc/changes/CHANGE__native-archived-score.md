@@ -15,8 +15,10 @@ preserving original gameplay, cleanup and publication errors.
 
 ## Known ceiling
 
-Native Records preview of stored final score details and archived saved-opponent
-comparisons remain unfinished. First observation of a new grade may allocate
+At this increment native Records preview of stored final score details remained
+unfinished. [The following retained detail increment](CHANGE__native-record-details.md)
+connects that preview. Grade-table UI and archived saved-opponent comparisons
+remain unfinished. First observation of a new grade may allocate
 the existing score-map node; cold archive staging/encoding can allocate. No
 benchmark or global allocation-free claim is established. Fifteen independent
 fixture groups are authored: six genuine Runtime/static host delegation and

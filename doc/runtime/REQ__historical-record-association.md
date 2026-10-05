@@ -44,8 +44,12 @@ binding; see [its contract](REQ__browser-historical-record.md). Version-2 score
 and timing preservation and common historical presentation are governed by
 [the detail contract](REQ__archived-score-details.md). Native score export uses
 [explicit completed score association](REQ__native-archived-score.md).
-Records preview detail integration, comparison archival, actual browser/filesystem/
+Comparison archival, actual browser/filesystem/
 GPU acceptance and race-free directory containment remain unfinished.
+Native Records now retains associated final score metadata separately from its
+prefix and exposes a cached detail subview under
+[the stored detail contract](REQ__native-record-details.md). Full grade-table
+presentation and saved comparison archival remain pending.
 
 Independent deferred fixtures cover exact header fields and original IDs,
 ambiguous/missing rows, finite draft equality, long extents, recorded-prefix-only
