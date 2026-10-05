@@ -13,8 +13,8 @@ use crate::{
     local_runtime::{GroupError, InputResult, PlayerReport, RuntimeGroup},
     native_end::NativeEnd,
     native_audio::{NativeStopBarrier, finite_terminal_output_ready, validate_stop_evidence},
+    native_gameplay_host::{NativeGameplayDiagnostic, NativeGameplayHost, PauseState},
     native_pump_control::{NativePumpControl, NativePumpDeadline},
-    native_pump_system::SystemControl,
     offline::OwnedStopEvidence,
     native_group_competition::NativeGroupCompetition,
     multiplayer_group::{MemberProgress, validate_members},
@@ -23,7 +23,6 @@ use crate::{
         MAX_PENDING_INPUT_EVENTS, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
     },
     playback_pause::{NativePause, PauseKeyboard, PausePhase},
-    player::{self, PauseState},
     replay_capture::LiveReplayCapture,
 };
 use beatkernel::{
@@ -39,6 +38,7 @@ use std::{
     path::{Path, PathBuf},
     time::Duration as WallDuration,
 };
+pub use crate::native_gameplay_bridge::{run_cohort, run_cohort_with_control};
 pub struct NativeCohortSession<'a> {
     pub group: &'a mut RuntimeGroup,
     pub network: Option<&'a mut NativeGroupCompetition>,
@@ -97,6 +97,7 @@ fn process<D: NativeGameplayDevice>(
         &mut OwnedStopEvidence::default(),
     )
 }
+#[cfg(test)]
 fn process_with_stops<D: NativeGameplayDevice>(
     device: &mut D,
     session: &mut NativeCohortSession<'_>,
@@ -104,25 +105,44 @@ fn process_with_stops<D: NativeGameplayDevice>(
     event: PhysicalInputEvent,
     evidence: &mut OwnedStopEvidence,
 ) -> NativeGameplayResult<()> {
+    process_with_host(
+        device,
+        session,
+        config,
+        event,
+        evidence,
+        &mut crate::native_gameplay_bridge::PlayerGameplayHost,
+    )
+}
+fn process_with_host<D: NativeGameplayDevice, H: NativeGameplayHost>(
+    device: &mut D,
+    session: &mut NativeCohortSession<'_>,
+    config: NativeGameplayConfig,
+    event: PhysicalInputEvent,
+    evidence: &mut OwnedStopEvidence,
+    host_port: &mut H,
+) -> NativeGameplayResult<()> {
     let at = schedule(device, session, config)?;
     match session.group.process_input(event, &ExplicitDomains, at) {
-        Ok(InputResult::Processed(mut reports)) => observe_reports_with_stops(
+        Ok(InputResult::Processed(mut reports)) => observe_reports_with_host(
             &mut reports,
             session.states,
             session.group,
             session.network.as_deref_mut(),
             evidence,
+            host_port,
         ),
         Ok(InputResult::Ignored { device }) => {
             Err(format!("merged source {device:?} has no cohort owner").into())
         }
         Err(mut error) => {
-            let observation_error = observe_reports_with_stops(
+            let observation_error = observe_reports_with_host(
                 &mut error.completed_reports,
                 session.states,
                 session.group,
                 session.network.as_deref_mut(),
                 evidence,
+                host_port,
             )
             .err();
             Err(Box::new(NativeCohortProcessingError {
@@ -132,29 +152,32 @@ fn process_with_stops<D: NativeGameplayDevice>(
         }
     }
 }
-fn advance<D: NativeGameplayDevice>(
+fn advance<D: NativeGameplayDevice, H: NativeGameplayHost>(
     device: &mut D,
     session: &mut NativeCohortSession<'_>,
     config: NativeGameplayConfig,
     at: ClockPoint,
     evidence: &mut OwnedStopEvidence,
+    host_port: &mut H,
 ) -> NativeGameplayResult<()> {
     let audio_at = schedule(device, session, config)?;
     match session.group.advance_to(at, &ExplicitDomains, audio_at) {
-        Ok(mut reports) => observe_reports_with_stops(
+        Ok(mut reports) => observe_reports_with_host(
             &mut reports,
             session.states,
             session.group,
             session.network.as_deref_mut(),
             evidence,
+            host_port,
         ),
         Err(mut error) => {
-            let observation_error = observe_reports_with_stops(
+            let observation_error = observe_reports_with_host(
                 &mut error.completed_reports,
                 session.states,
                 session.group,
                 session.network.as_deref_mut(),
                 evidence,
+                host_port,
             )
             .err();
             Err(Box::new(NativeCohortProcessingError {
@@ -164,16 +187,17 @@ fn advance<D: NativeGameplayDevice>(
         }
     }
 }
-fn reconcile<D: NativeGameplayDevice>(
+fn reconcile<D: NativeGameplayDevice, H: NativeGameplayHost>(
     device: &mut D,
     session: &mut NativeCohortSession<'_>,
     config: NativeGameplayConfig,
     keyboard: &mut PauseKeyboard,
     at: ClockPoint,
     evidence: &mut OwnedStopEvidence,
+    host_port: &mut H,
 ) -> NativeGameplayResult<()> {
     for event in keyboard.resume(at)? {
-        process_with_stops(device, session, config, event, evidence)?;
+        process_with_host(device, session, config, event, evidence, host_port)?;
     }
     Ok(())
 }
@@ -330,12 +354,30 @@ fn observe_reports(
         &mut OwnedStopEvidence::default(),
     )
 }
+#[cfg(test)]
 fn observe_reports_with_stops(
     reports: &mut [PlayerReport],
     states: &mut [PlayerState],
     group: &mut RuntimeGroup,
     network: Option<&mut NativeGroupCompetition>,
     evidence: &mut OwnedStopEvidence,
+) -> NativeGameplayResult<()> {
+    observe_reports_with_host(
+        reports,
+        states,
+        group,
+        network,
+        evidence,
+        &mut crate::native_gameplay_bridge::PlayerGameplayHost,
+    )
+}
+fn observe_reports_with_host<H: NativeGameplayHost>(
+    reports: &mut [PlayerReport],
+    states: &mut [PlayerState],
+    group: &mut RuntimeGroup,
+    network: Option<&mut NativeGroupCompetition>,
+    evidence: &mut OwnedStopEvidence,
+    host_port: &mut H,
 ) -> NativeGameplayResult<()> {
     let mut failures = Vec::new();
     let mut fences = [None; 64];
@@ -375,9 +417,6 @@ fn observe_reports_with_stops(
                 failures.push(format!("player{} competition: {error}", state.player.0));
             }
         }
-        for event in &tagged.report.judge_events {
-            println!("player{} judge={event:?}", tagged.player.0);
-        }
         if tagged.report.judge_error.is_some() || !tagged.report.audio_failures.is_empty() {
             failures.push(format!(
                 "player{} committed partial report judge={:?}, audio={:?}",
@@ -391,7 +430,7 @@ fn observe_reports_with_stops(
             Err(error) => failures.push(format!("shared competition: {error}")),
         }
     }
-    if let Err(error) = player::publish_local_reports(reports) {
+    if let Err(error) = host_port.publish_local_reports(reports) {
         failures.push(format!("local presentation: {error}"));
     }
     for (index, player) in fences.into_iter().enumerate() {
@@ -431,6 +470,12 @@ fn observe_reports_with_stops(
             }
         }
     }
+    for tagged in reports.iter() {
+        host_port.diagnostic(NativeGameplayDiagnostic::LocalReport {
+            player: tagged.player,
+            report: &tagged.report,
+        });
+    }
     if failures.is_empty() {
         Ok(())
     } else {
@@ -451,22 +496,18 @@ pub fn lag_reaches(now: ClockPoint, boundary: ClockPoint, lag: i64) -> NativeGam
     Ok(frontier >= i128::from(boundary.timestamp.as_nanos()))
 }
 
-/// Owns the complete cohort pump; native cleanup and durable saves remain caller-owned.
-pub fn run_cohort<D: NativeGameplayDevice>(
-    device: &mut D,
-    session: NativeCohortSession<'_>,
-    config: NativeGameplayConfig,
-) -> NativeGameplayResult<()> {
-    run_cohort_with_control(device, session, config, &mut SystemControl)
-}
-
-/// Runs the actual cohort policy with injectable diagnostic time and waiting.
+/// Runs the actual cohort policy with explicit device, clock/wait and host effects.
 /// Acquired input and native presentation keep their original clock domains.
-pub fn run_cohort_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
+pub fn run_cohort_with_ports<
+    D: NativeGameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+>(
     device: &mut D,
     mut session: NativeCohortSession<'_>,
     config: NativeGameplayConfig,
     control: &mut C,
+    host_port: &mut H,
 ) -> NativeGameplayResult<()> {
     if session
         .states
@@ -521,8 +562,8 @@ pub fn run_cohort_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
     let mut pause_committed = false;
     let mut pause_lag_reached = false;
     let mut pause_announced = false;
-    while !player::cancelled() && deadline.active(control)? {
-        player::retry_pause_publication();
+    while !host_port.cancelled() && deadline.active(control)? {
+        host_port.retry_pause_publication();
         device.observe(session.discipline)?;
         let reference = session
             .discipline
@@ -542,7 +583,7 @@ pub fn run_cohort_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
                 && !end_rendered
                 && (session.pause.phase() == PausePhase::Running || pause_committed)
                 && resume_boundary.is_none())
-            .then(player::pause_requested);
+            .then(|| host_port.pause_requested());
             let update = update_live_pause(
                 session.pause,
                 device.pause_observation(reference)?,
@@ -553,21 +594,21 @@ pub fn run_cohort_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
             )?;
             if update.observed && config.pause_supported && !pause_announced {
                 pause_announced = true;
-                player::publish_pause(PauseState::Running);
+                host_port.publish_pause(PauseState::Running);
             }
             if let Some(desired) = update.requested {
                 session.group.request_audio_pause(desired);
-                player::publish_pause(if desired {
+                host_port.publish_pause(if desired {
                     PauseState::Pausing
                 } else {
                     PauseState::Resuming
                 });
             }
             if let Some(boundary) = update.boundary {
-                println!(
-                    "local pause={} host window={:?}, software cutoff={:?}, exact song={:?}; acoustic accuracy unmeasured",
-                    boundary.paused, boundary.window, boundary.at, boundary.song
-                );
+                host_port.diagnostic(NativeGameplayDiagnostic::Pause {
+                    local: true,
+                    boundary,
+                });
                 let last_song = session
                     .states
                     .iter()
@@ -676,20 +717,28 @@ pub fn run_cohort_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
                             boundary,
                             point(&event),
                         )?;
-                        process_with_stops(
+                        process_with_host(
                             device,
                             &mut session,
                             config,
                             event,
                             &mut stop_evidence,
+                            host_port,
                         )?;
                     }
                 }
-                advance(device, &mut session, config, at, &mut stop_evidence)?;
+                advance(
+                    device,
+                    &mut session,
+                    config,
+                    at,
+                    &mut stop_evidence,
+                    host_port,
+                )?;
                 session.merger.commit(at)?;
                 committed = Some(at);
                 pause_committed = true;
-                player::publish_pause(PauseState::Paused);
+                host_port.publish_pause(PauseState::Paused);
             }
             if pause_committed {
                 if !pause_lag_reached {
@@ -741,15 +790,23 @@ pub fn run_cohort_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
                         &mut keyboard,
                         at,
                         &mut stop_evidence,
+                        host_port,
                     )?;
                     resume_boundary = None;
-                    player::publish_pause(PauseState::Running);
+                    host_port.publish_pause(PauseState::Running);
                 }
                 if end_boundary.is_some_and(|boundary| host.timestamp >= boundary.host.timestamp) {
                     continue;
                 }
                 if !config.pause_supported || keyboard.accept(&event)? {
-                    process_with_stops(device, &mut session, config, event, &mut stop_evidence)?;
+                    process_with_host(
+                        device,
+                        &mut session,
+                        config,
+                        event,
+                        &mut stop_evidence,
+                        host_port,
+                    )?;
                 }
             }
             if let Some(at) = resume_boundary.take() {
@@ -760,15 +817,23 @@ pub fn run_cohort_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
                     &mut keyboard,
                     at,
                     &mut stop_evidence,
+                    host_port,
                 )?;
-                player::publish_pause(PauseState::Running);
+                host_port.publish_pause(PauseState::Running);
             }
             if was_resuming {
                 session
                     .discipline
                     .update(now, session.group.transport_mut())?;
             }
-            advance(device, &mut session, config, frontier, &mut stop_evidence)?;
+            advance(
+                device,
+                &mut session,
+                config,
+                frontier,
+                &mut stop_evidence,
+                host_port,
+            )?;
             session.merger.commit(frontier)?;
             committed = Some(frontier);
         }
@@ -795,7 +860,8 @@ pub fn run_cohort_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
             if let Some(network) = session.network.as_deref_mut() {
                 network.mark_native_completed();
             }
-            player::publish_section_end(config.end_song.expect("finite cohort endpoint admitted"));
+            host_port
+                .publish_section_end(config.end_song.expect("finite cohort endpoint admitted"));
             return Ok(());
         }
         if config.end_song.is_none()
@@ -847,6 +913,10 @@ pub fn run_cohort_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
 
 #[cfg(test)]
 mod fixtures {
+    use crate::player;
+    mod host {
+        include!("native_local_host_fixtures.rs");
+    }
     mod control {
         include!("native_local_control_fixtures.rs");
     }

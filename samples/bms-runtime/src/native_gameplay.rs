@@ -11,11 +11,10 @@ use crate::{
     local_runtime::SoloRuntime,
     native_end::{EndBoundary, NativeEnd},
     native_audio::{NativeStopBarrier, finite_terminal_output_ready, validate_stop_evidence},
+    native_gameplay_host::{NativeGameplayDiagnostic, NativeGameplayHost, PauseState},
     native_pump_control::{NativePumpControl, NativePumpDeadline},
-    native_pump_system::SystemControl,
     offline::OwnedStopEvidence,
     playback_pause::{NativePause, PauseKeyboard, PausePhase},
-    player::{self, PauseState},
     replay_capture::{CaptureError, LiveReplayCapture},
 };
 use beatkernel::{
@@ -31,6 +30,8 @@ use beatkernel_platform::audio::presentation::discipline::{
     DisciplineConfig, DisciplineUpdate, PresentationDiscipline,
 };
 use std::{collections::VecDeque, error::Error, fmt, time::Duration as WallDuration};
+
+pub use crate::native_gameplay_bridge::{run_gameplay, run_gameplay_with_control};
 
 pub type NativeGameplayResult<T> = Result<T, Box<dyn std::error::Error>>;
 pub const MAX_PENDING_INPUT_EVENTS: usize = 65_536;
@@ -223,10 +224,24 @@ fn publish(
 ) -> NativeGameplayResult<()> {
     publish_with_stops(session, report, &mut OwnedStopEvidence::default())
 }
+#[cfg(test)]
 fn publish_with_stops(
+    session: &mut NativeGameplaySession<'_>,
+    report: RuntimeReport,
+    evidence: &mut OwnedStopEvidence,
+) -> NativeGameplayResult<()> {
+    publish_with_host(
+        session,
+        report,
+        evidence,
+        &mut crate::native_gameplay_bridge::PlayerGameplayHost,
+    )
+}
+fn publish_with_host<H: NativeGameplayHost>(
     session: &mut NativeGameplaySession<'_>,
     mut report: RuntimeReport,
     evidence: &mut OwnedStopEvidence,
+    host_port: &mut H,
 ) -> NativeGameplayResult<()> {
     let was_fenced = session.runtime.gameplay_fence().is_some();
     let gauge_error = session
@@ -245,7 +260,7 @@ fn publish_with_stops(
         .competition
         .as_mut()
         .and_then(|competition| competition.observe(&report).err());
-    let presentation_error = player::publish_report(&report).err();
+    let presentation_error = host_port.publish_report(&report).err();
     let mut stop_evidence_error = None;
     if session.gauge.snapshot().failure.is_some() {
         session.runtime.fence_gameplay();
@@ -263,12 +278,7 @@ fn publish_with_stops(
             report.audio_failures.extend(stops.failures);
         }
     }
-    for result in &report.judge_events {
-        println!("judge={result:?}");
-    }
-    if !report.audio_failures.is_empty() {
-        eprintln!("exact failed audio commands={:?}", report.audio_failures);
-    }
+    host_port.diagnostic(NativeGameplayDiagnostic::SoloReport(&report));
     if report.judge_error.is_some()
         || !report.audio_failures.is_empty()
         || gauge_error.is_some()
@@ -288,17 +298,18 @@ fn publish_with_stops(
     }
     Ok(())
 }
-fn process<D: NativeGameplayDevice>(
+fn process<D: NativeGameplayDevice, H: NativeGameplayHost>(
     device: &mut D,
     session: &mut NativeGameplaySession<'_>,
     config: NativeGameplayConfig,
     event: PhysicalInputEvent,
     evidence: &mut OwnedStopEvidence,
+    host_port: &mut H,
 ) -> NativeGameplayResult<Timestamp> {
     let at = schedule(device, session, config)?;
     let report = session.runtime.process_input(event, &ExplicitDomains, at)?;
     let song = report.song_time;
-    publish_with_stops(session, report, evidence)?;
+    publish_with_host(session, report, evidence, host_port)?;
     Ok(song)
 }
 fn finite_done(
@@ -350,23 +361,18 @@ fn finite_done_with_terminal(
         && finite_terminal_output_ready(bgm, rendered, admitted_commands)
 }
 
-/// Complete solo pump. Device cancellation and all errors leave native cleanup to caller.
-/// No native operation, wall-time inference or platform branch enters judge/audio callbacks.
-pub fn run_gameplay<D: NativeGameplayDevice>(
-    device: &mut D,
-    session: NativeGameplaySession<'_>,
-    config: NativeGameplayConfig,
-) -> NativeGameplayResult<()> {
-    run_gameplay_with_control(device, session, config, &mut SystemControl)
-}
-
-/// Runs the same pump with explicit diagnostic-clock and wait effects.
+/// Runs the actual pump with explicit device, clock/wait and host effects.
 /// Neither the control deadline nor cancellation is successful song completion.
-pub fn run_gameplay_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
+pub fn run_gameplay_with_ports<
+    D: NativeGameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+>(
     device: &mut D,
     mut session: NativeGameplaySession<'_>,
     config: NativeGameplayConfig,
     control: &mut C,
+    host_port: &mut H,
 ) -> NativeGameplayResult<()> {
     if session.gauge.profile() != &GaugeProfile::default() {
         return Err("native gameplay requires the default recorded gauge policy".into());
@@ -398,8 +404,8 @@ pub fn run_gameplay_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
     let mut pause_announced = false;
     let mut stop_evidence = OwnedStopEvidence::default();
     let mut stop_barrier = NativeStopBarrier::default();
-    while !player::cancelled() && deadline.active(control)? {
-        player::retry_pause_publication();
+    while !host_port.cancelled() && deadline.active(control)? {
+        host_port.retry_pause_publication();
         device.observe(session.discipline)?;
         let reference = session
             .discipline
@@ -419,7 +425,7 @@ pub fn run_gameplay_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
                 && !end_rendered
                 && (session.pause.phase() == PausePhase::Running || pause_committed)
                 && resume_boundary.is_none())
-            .then(player::pause_requested);
+            .then(|| host_port.pause_requested());
             let update = update_live_pause(
                 session.pause,
                 device.pause_observation(reference)?,
@@ -430,21 +436,21 @@ pub fn run_gameplay_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
             )?;
             if update.observed && config.pause_supported && !pause_announced {
                 pause_announced = true;
-                player::publish_pause(PauseState::Running);
+                host_port.publish_pause(PauseState::Running);
             }
             if let Some(desired) = update.requested {
                 session.runtime.request_audio_pause(desired);
-                player::publish_pause(if desired {
+                host_port.publish_pause(if desired {
                     PauseState::Pausing
                 } else {
                     PauseState::Resuming
                 });
             }
             if let Some(boundary) = update.boundary {
-                println!(
-                    "live pause={} host window={:?}, software cutoff={:?}, exact song={:?}; acoustic accuracy unmeasured",
-                    boundary.paused, boundary.window, boundary.at, boundary.song
-                );
+                host_port.diagnostic(NativeGameplayDiagnostic::Pause {
+                    local: false,
+                    boundary,
+                });
                 if boundary.paused {
                     if !end_rendered {
                         let transport = prepare_live_transport(
@@ -547,11 +553,18 @@ pub fn run_gameplay_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
             // Reconciliation precedes every post-resume input, including equal time.
             chronology(at, last_operation)?;
             for event in keyboard.resume(at)? {
-                last_song = process(device, &mut session, config, event, &mut stop_evidence)?;
+                last_song = process(
+                    device,
+                    &mut session,
+                    config,
+                    event,
+                    &mut stop_evidence,
+                    host_port,
+                )?;
             }
             last_operation = at;
             resume_boundary = None;
-            player::publish_pause(PauseState::Running);
+            host_port.publish_pause(PauseState::Running);
         }
         while let Some(event) = pending.pop_front() {
             let host = point(&event);
@@ -569,7 +582,14 @@ pub fn run_gameplay_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
             if config.pause_supported && !keyboard.accept(&event)? {
                 continue;
             }
-            last_song = process(device, &mut session, config, event, &mut stop_evidence)?;
+            last_song = process(
+                device,
+                &mut session,
+                config,
+                event,
+                &mut stop_evidence,
+                host_port,
+            )?;
             last_operation = host;
         }
         if !batch.backlog {
@@ -580,10 +600,10 @@ pub fn run_gameplay_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
                     let audio_at = schedule(device, &session, config)?;
                     let report = session.runtime.advance_to(at, &ExplicitDomains, audio_at)?;
                     last_song = report.song_time;
-                    publish_with_stops(&mut session, report, &mut stop_evidence)?;
+                    publish_with_host(&mut session, report, &mut stop_evidence, host_port)?;
                     last_operation = at;
                     pause_committed = true;
-                    player::publish_pause(PauseState::Paused);
+                    host_port.publish_pause(PauseState::Paused);
                 }
             }
         }
@@ -611,10 +631,14 @@ pub fn run_gameplay_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
             .discipline
             .update(now, session.runtime.transport_mut())?
         {
-            println!(
-                "discipline measured={base_rate_ppm:+}ppm correction={correction_ppm:+}ppm applied={applied_rate_ppm:+}ppm phase={phase_error_ns}ns limited={limited} quality={:?}",
-                session.discipline.quality()
-            );
+            host_port.diagnostic(NativeGameplayDiagnostic::Discipline {
+                base_rate_ppm,
+                correction_ppm,
+                applied_rate_ppm,
+                phase_error_ns,
+                limited,
+                quality: session.discipline.quality(),
+            });
         }
         if let Some(at) = watermark(
             config.origin,
@@ -629,10 +653,10 @@ pub fn run_gameplay_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
             last_operation = at;
             let second = last_song.as_nanos().div_euclid(1_000_000_000);
             if last_progress != Some(second) {
-                println!("logical song={}ns", last_song.as_nanos());
+                host_port.diagnostic(NativeGameplayDiagnostic::SongProgress(last_song));
                 last_progress = Some(second);
             }
-            publish_with_stops(&mut session, report, &mut stop_evidence)?;
+            publish_with_host(&mut session, report, &mut stop_evidence, host_port)?;
         }
         // Read after this iteration's admissions. A pre-admission idle block
         // cannot establish that newly queued Stops reached the mixer.
@@ -662,7 +686,7 @@ pub fn run_gameplay_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
             if let Some(competition) = session.competition.as_mut() {
                 competition.mark_native_completed();
             }
-            player::publish_section_end(config.end_song.expect("finite endpoint admitted"));
+            host_port.publish_section_end(config.end_song.expect("finite endpoint admitted"));
             return Ok(());
         }
         if config.end_song.is_none()
@@ -704,6 +728,10 @@ pub fn run_gameplay_with_control<D: NativeGameplayDevice, C: NativePumpControl>(
 
 #[cfg(test)]
 mod fixtures {
+    use crate::player;
+    mod host {
+        include!("native_solo_host_fixtures.rs");
+    }
     mod control {
         include!("native_solo_control_fixtures.rs");
     }

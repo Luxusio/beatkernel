@@ -46,16 +46,7 @@ pub enum PlayerStatus {
     Failed(String),
 }
 
-/// Native-owner pause capability and acknowledgement, independent of UI focus.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum PauseState {
-    #[default]
-    Unavailable,
-    Running,
-    Pausing,
-    Paused,
-    Resuming,
-}
+pub use crate::native_gameplay_host::PauseState;
 
 /// Actual recorded-operation prefix, with a bounded display basename.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1,4 +1,4 @@
-//! Native system effects for the shared pump's explicit control port.
+//! Native system effects selected only by the outer gameplay composition bridge.
 
 use crate::{native_gameplay::NativeGameplayResult, native_pump_control::NativePumpControl};
 use std::time::{Duration, Instant};

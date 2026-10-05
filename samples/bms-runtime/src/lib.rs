@@ -259,6 +259,9 @@ pub mod native_end;
 pub mod native_finish;
 /// Shared native solo gameplay sequencing behind device operations.
 pub mod native_gameplay;
+mod native_gameplay_bridge;
+/// Explicit command, publication and diagnostic port for native gameplay policy.
+pub mod native_gameplay_host;
 #[cfg(test)]
 mod native_gauge_fixtures;
 /// One shared network/start owner over actual native local-member prefixes.

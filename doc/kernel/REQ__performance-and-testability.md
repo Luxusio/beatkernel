@@ -85,14 +85,15 @@ requirements; arbitrary numbers or average FPS do not establish superiority.
 Separation is unfinished. Core runtime processing telemetry currently defaults
 to a native `Instant` clock; deterministic tests must select its existing
 `RuntimeProcessingClock::Disabled` or scripted `External` mode. Telemetry timing
-is distinct from judgment timing. Shared native pumps still depend on platform
-presentation-discipline types, player publication/control state and diagnostic
-terminal output. The compatibility wrappers also still select their system
-control adapter in the native pump modules; move concrete selection to the
-composition boundary when finishing the separation. File and
-network effects and adapter coverage require continued audit and separation.
-The next bounded increment extracts native pump wall-clock deadlines and waits
-behind an injectable control port. Completed-play result integration remains
+is distinct from judgment timing. Native pump wall-clock deadlines and waits use
+an explicit control port. The fully injected solo/cohort entry points also
+receive a business-owned host for commands, publication and typed diagnostics;
+the outer compatibility bridge selects legacy player/system adapters. Shared
+pumps still depend on platform presentation-discipline types and optional
+competition owners that internally perform network, clock and UI effects.
+Those owners, file/network boundaries and adapter coverage require continued
+audit and separation. See [the host boundary](REQ__native-gameplay-host.md) for
+its exact scope and remaining effects. Completed-play result integration remains
 planned. Test execution, hardware QA and comparative benchmarks remain deferred
 under the user's existing verification instruction; no quality target is
 considered achieved by authoring fixtures or passing compile-only checks.
