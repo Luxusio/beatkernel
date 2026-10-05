@@ -187,6 +187,8 @@ pub mod mine_plan;
 #[cfg(test)]
 mod mine_plan_fixtures;
 #[cfg(test)]
+mod mine_playable_pipeline_fixtures;
+#[cfg(test)]
 mod mine_render_fixtures;
 #[cfg(test)]
 mod mine_sound_fixtures;
@@ -660,10 +662,10 @@ fn prepare_seeded(
 }
 
 /// Prepares the same chart and assets from bounded bytes and a scoped resource source.
-/// Unsupported mine gameplay is refused immediately after parsing, before gain,
-/// replay validation or resource acquisition.
-/// WAV gain and invisible timing are validated before replay setup; replay setup
-/// is then validated before acquiring the unique visible/BGM/invisible resources.
+/// WAV gain and invisible timing are validated before optional replay setup,
+/// which uses the source-aware pristine hazard judge. Referenced-sample selection
+/// validates mine timing/capacity before acquiring visible/BGM/invisible resources
+/// and optional WAV00. Gameplay owners install the same original mine timeline.
 /// Equal resolved keys reuse decoding within this call; source bytes and the
 /// decoder must remain stable during preparation. Each sample ID owns its PCM.
 pub fn prepare_from_source(
@@ -684,9 +686,6 @@ pub fn prepare_from_source(
         options.max_bytes,
     )?;
     let source = parse_seeded(&text, options, seed)?;
-    if !source.mines.is_empty() {
-        return Err("mine gameplay is not supported during preparation".into());
-    }
     let wav_gain = source.wav_gain()?;
     let invisible = if source.invisible.is_empty() {
         Vec::new()

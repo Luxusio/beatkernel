@@ -1,5 +1,4 @@
-//! Deferred actual source admission. A mine timeline is not playable until the
-//! shared hazard, gauge, sound, rendering and replay owners are integrated.
+//! Deferred actual source admission and original pre-acquisition error ordering.
 use crate::{
     AssetDecoder, ChannelPolicy, PreparedBms, asset_paths::AssetPathPolicy,
     asset_source::AssetSource, prepare_from_source, replay_playback::PlaybackError,
@@ -31,12 +30,12 @@ impl AssetSource for Assets {
     fn resolve(&self, name: &str, policy: AssetPathPolicy) -> io::Result<PathBuf> {
         self.resolved.borrow_mut().push(name.into());
         assert_eq!(policy, AssetPathPolicy::Exact);
-        assert_eq!(name, "sample.pcm");
+        assert!(matches!(name, "sample.pcm" | "absent-explosion.pcm"));
         Ok(name.into())
     }
     fn read<'a>(&'a self, path: &Path, bound: usize) -> io::Result<Cow<'a, [u8]>> {
         self.reads.set(self.reads.get() + 1);
-        assert_eq!(path, Path::new("sample.pcm"));
+        assert!(path == Path::new("sample.pcm") || path == Path::new("absent-explosion.pcm"));
         assert_eq!(bound, 64 * 1024 * 1024);
         Ok(Cow::Borrowed(&[1, 2, 3]))
     }
@@ -53,7 +52,7 @@ impl AssetDecoder for Decoder {
         limits: PcmLimits,
     ) -> Result<PcmSample, Box<dyn Error>> {
         self.calls.set(self.calls.get() + 1);
-        assert_eq!(path, Path::new("sample.pcm"));
+        assert!(path == Path::new("sample.pcm") || path == Path::new("absent-explosion.pcm"));
         assert_eq!(bytes, [1, 2, 3]);
         Ok(PcmSample::new(
             AudioFormat::new(10, 1)?,
@@ -101,7 +100,8 @@ fn no_assets(assets: &Assets, decoder: &Decoder) {
 }
 
 #[test]
-fn parsed_nonempty_mines_refuse_before_replay_or_assets_without_masking_original_parser_errors() {
+fn parsed_nonempty_mines_admit_and_replay_refuses_before_assets_without_masking_original_parser_errors()
+ {
     let replay = invalid_replay();
     for mine in [
         "#000D1:01",
@@ -111,17 +111,25 @@ fn parsed_nonempty_mines_refuse_before_replay_or_assets_without_masking_original
         "#WAV00 absent-explosion.pcm\n#000D6:01",
     ] {
         let text = format!("#BPM 60\n#WAV01 sample.pcm\n#00011:01\n#00001:0001\n{mine}");
-        for recording in [None, Some(&replay)] {
-            let assets = Assets::default();
-            let decoder = Decoder::default();
-            let error = prepare(&text, &assets, &decoder, recording).unwrap_err();
-            assert!(error.to_string().contains("mine"));
-            assert!(
-                error.downcast_ref::<BmsError>().is_none()
-                    && error.downcast_ref::<PlaybackError>().is_none()
-            );
-            no_assets(&assets, &decoder);
-        }
+        let assets = Assets::default();
+        let decoder = Decoder::default();
+        let prepared = prepare(&text, &assets, &decoder, None).unwrap();
+        assert!(!prepared.source.mines.is_empty());
+        assert!(!prepared.source.compile_mines().unwrap().is_empty());
+        assert_eq!((prepared.sounds.len(), prepared.bgm_commands.len()), (1, 1));
+        let expected = if mine.contains("#WAV00") { 2 } else { 1 };
+        assert_eq!(prepared.bank.len(), expected);
+        assert_eq!(assets.reads.get(), expected);
+        assert_eq!(decoder.calls.get(), expected);
+        assert_eq!(
+            prepared.bank.get(SampleId(1)).unwrap().samples(),
+            [0.25, -0.5]
+        );
+        let assets = Assets::default();
+        let decoder = Decoder::default();
+        let error = prepare(&text, &assets, &decoder, Some(&replay)).unwrap_err();
+        assert!(error.downcast_ref::<PlaybackError>().is_some());
+        no_assets(&assets, &decoder);
     }
     let assets = Assets::default();
     let decoder = Decoder::default();

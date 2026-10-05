@@ -1,5 +1,5 @@
-//! Deferred guarded asset preparation with real scoped files and WAV decoding.
-//! These tests neither authorize mine-file playback nor open native resources.
+//! Deferred asset preparation with real in-memory scoped files and WAV decoding.
+//! These tests do not open native resources.
 use crate::{
     AssetDecoder, ChannelPolicy, PreparedBms, WavDecoder,
     asset_paths::AssetPathPolicy,
@@ -609,7 +609,8 @@ fn high_level(
     )
 }
 #[test]
-fn high_level_mine_guard_stays_before_replay_and_assets_while_ordinary_union_uses_shared_loader() {
+fn high_level_playable_mines_admit_and_replay_refuses_before_assets_while_ordinary_union_uses_shared_loader()
+ {
     let bad_replay = invalid_replay();
     for suffix in [
         "#000D1:1E",
@@ -618,20 +619,29 @@ fn high_level_mine_guard_stays_before_replay_and_assets_while_ordinary_union_use
         "#WAV00 absent.wav\n#000D1:ZZ",
     ] {
         let text = format!("#BPM 60\n#VOLWAV 50\n#WAV01 same.wav\n#00011:01\n{suffix}");
-        for replay in [None, Some(&bad_replay)] {
-            let assets = Assets::new(&text, &[]);
-            let decoder = Decoder::default();
-            let error = high_level(&text, &assets, &decoder, bounds(), replay).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "mine gameplay is not supported during preparation"
-            );
-            assert!(
-                error.downcast_ref::<BmsError>().is_none()
-                    && error.downcast_ref::<PlaybackError>().is_none()
-            );
-            no_io(&assets, &decoder);
-        }
+        let assets = Assets::new(
+            &text,
+            &[
+                ("same.wav", wav(10, 1, &[0.5, -0.25])),
+                ("absent.wav", wav(10, 1, &[0.25, -0.5])),
+            ],
+        );
+        let decoder = Decoder::default();
+        let prepared = high_level(&text, &assets, &decoder, bounds(), None).unwrap();
+        assert!(!prepared.source.compile_mines().unwrap().is_empty());
+        assert_eq!(
+            prepared.bank.get(SampleId(1)).unwrap().samples(),
+            [0.5, -0.25]
+        );
+        let zero = suffix.contains("#WAV00") && !suffix.contains(":ZZ");
+        assert_eq!(prepared.bank.get(SampleId(0)).is_some(), zero);
+        assert_eq!(decoder.calls.borrow().len(), if zero { 2 } else { 1 });
+        assert_eq!(assets.reads.borrow().len(), if zero { 2 } else { 1 });
+        let assets = Assets::new(&text, &[]);
+        let decoder = Decoder::default();
+        let error = high_level(&text, &assets, &decoder, bounds(), Some(&bad_replay)).unwrap_err();
+        assert!(error.downcast_ref::<PlaybackError>().is_some());
+        no_io(&assets, &decoder);
     }
     let invalid = "#000D1:01\n#VOLWAV bad";
     let assets = Assets::new(invalid, &[]);
