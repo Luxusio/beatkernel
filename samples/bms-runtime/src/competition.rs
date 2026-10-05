@@ -34,58 +34,89 @@ pub struct ScoreSummary {
     /// Exact accepted known-stage delta statistics across the entire prefix.
     pub timing: TimingSummary,
 }
+#[derive(Clone, Copy)]
+struct ScorePlan {
+    hits: u64,
+    misses: u64,
+    combo: u64,
+    max_combo: u64,
+    timing: TimingSummary,
+}
 impl ScoreSummary {
     /// Applies a batch atomically, rejecting counter overflow.
     pub fn observe(&mut self, events: &[JudgeEvent]) -> Result<(), CompetitionError> {
         if events.is_empty() {
             return Ok(());
         }
-        let mut timing = self.timing;
-        timing.observe(events)?;
-        let mut hits = self.hits;
-        let mut misses = self.misses;
-        let mut combo = self.combo;
-        let mut max_combo = self.max_combo;
-        for event in events {
-            match event.outcome {
-                JudgeOutcome::Hit { .. } => {
-                    hits = increment(hits)?;
-                    combo = increment(combo)?;
-                    max_combo = max_combo.max(combo);
-                }
-                JudgeOutcome::Miss { .. } => {
-                    misses = increment(misses)?;
-                    combo = 0;
+        let batches = std::iter::once(events);
+        let plan = self.prepare_batches(batches.clone())?;
+        self.commit_batches(plan, batches);
+        Ok(())
+    }
+    fn prepare_batches<'a, I>(&self, batches: I) -> Result<ScorePlan, CompetitionError>
+    where
+        I: Clone + Iterator<Item = &'a [JudgeEvent]>,
+    {
+        let mut plan = ScorePlan {
+            hits: self.hits,
+            misses: self.misses,
+            combo: self.combo,
+            max_combo: self.max_combo,
+            timing: self.timing,
+        };
+        for (index, events) in batches.clone().enumerate() {
+            // Preserve timing-before-score precedence within each original batch.
+            plan.timing.observe(events)?;
+            for event in events {
+                match event.outcome {
+                    JudgeOutcome::Hit { .. } => {
+                        plan.hits = increment(plan.hits)?;
+                        plan.combo = increment(plan.combo)?;
+                        plan.max_combo = plan.max_combo.max(plan.combo);
+                    }
+                    JudgeOutcome::Miss { .. } => {
+                        plan.misses = increment(plan.misses)?;
+                        plan.combo = 0;
+                    }
                 }
             }
-        }
-        let batch_hits = hits - self.hits;
-        for (&grade, &count) in &self.grades {
-            if count.checked_add(batch_hits).is_none() {
-                // Only near-overflow entries need an exact borrowed batch scan.
-                // An unrelated exhausted grade must not reject this observation.
-                let mut next_count = count;
-                for event in events {
-                    if matches!(event.outcome, JudgeOutcome::Hit { grade: hit, .. } if hit.0 == grade)
-                    {
-                        next_count = increment(next_count)?;
+            let cumulative_hits = plan.hits - self.hits;
+            for (&grade, &count) in &self.grades {
+                if count.checked_add(cumulative_hits).is_none() {
+                    // Rare near-overflow grades require exact cumulative counts;
+                    // unrelated exhausted grades do not reject the transaction.
+                    let mut next_count = count;
+                    for earlier in batches.clone().take(index + 1) {
+                        for event in earlier {
+                            if matches!(event.outcome, JudgeOutcome::Hit { grade: hit, .. } if hit.0 == grade)
+                            {
+                                next_count = increment(next_count)?;
+                            }
+                        }
                     }
                 }
             }
         }
-        self.hits = hits;
-        self.misses = misses;
-        self.combo = combo;
-        self.max_combo = max_combo;
-        self.timing = timing;
-        for event in events {
-            if let JudgeOutcome::Hit { grade, .. } = event.outcome {
-                // Preflight proved every existing count fits; a new grade's
-                // count is bounded by the already checked batch hit count.
-                *self.grades.entry(grade.0).or_default() += 1;
+        Ok(plan)
+    }
+    fn commit_batches<'a, I>(&mut self, plan: ScorePlan, batches: I)
+    where
+        I: Iterator<Item = &'a [JudgeEvent]>,
+    {
+        for events in batches {
+            for event in events {
+                if let JudgeOutcome::Hit { grade, .. } = event.outcome {
+                    // Preflight established capacity for every existing count.
+                    // New grade counts cannot exceed checked cumulative hits.
+                    *self.grades.entry(grade.0).or_default() += 1;
+                }
             }
         }
-        Ok(())
+        self.hits = plan.hits;
+        self.misses = plan.misses;
+        self.combo = plan.combo;
+        self.max_combo = plan.max_combo;
+        self.timing = plan.timing;
     }
 }
 fn increment(value: u64) -> Result<u64, CompetitionError> {
@@ -185,25 +216,55 @@ impl GhostOpponent {
     pub const fn recorded_until(&self) -> Option<Timestamp> {
         self.recorded_until
     }
-    fn prefix(&self, time: Timestamp) -> Result<(usize, Option<ScoreSummary>), CompetitionError> {
+    fn prefix(&self, time: Timestamp) -> Result<GhostUpdatePlan, CompetitionError> {
         let cursor = self
             .batches
             .partition_point(|batch| batch.song_time <= time);
         if cursor == self.cursor {
-            return Ok((cursor, None));
+            return Ok(GhostUpdatePlan {
+                cursor,
+                score: None,
+                restart: false,
+            });
         }
-        let forward = cursor >= self.cursor;
-        let mut score = if forward {
-            self.score.clone()
+        let restart = cursor < self.cursor;
+        let start = if restart { 0 } else { self.cursor };
+        let batches = self.batches[start..cursor]
+            .iter()
+            .map(|batch| batch.events.as_slice());
+        let score = if restart {
+            ScoreSummary::default().prepare_batches(batches)?
         } else {
-            ScoreSummary::default()
+            self.score.prepare_batches(batches)?
         };
-        let start = if forward { self.cursor } else { 0 };
-        for batch in &self.batches[start..cursor] {
-            score.observe(&batch.events)?;
-        }
-        Ok((cursor, Some(score)))
+        Ok(GhostUpdatePlan {
+            cursor,
+            score: Some(score),
+            restart,
+        })
     }
+    fn apply(&mut self, plan: GhostUpdatePlan, time: Timestamp) {
+        if let Some(score) = plan.score {
+            let start = if plan.restart { 0 } else { self.cursor };
+            if plan.restart {
+                self.score = ScoreSummary::default();
+            }
+            self.score.commit_batches(
+                score,
+                self.batches[start..plan.cursor]
+                    .iter()
+                    .map(|batch| batch.events.as_slice()),
+            );
+        }
+        self.cursor = plan.cursor;
+        self.song_time = Some(time);
+    }
+}
+
+struct GhostUpdatePlan {
+    cursor: usize,
+    score: Option<ScorePlan>,
+    restart: bool,
 }
 
 /// Local real judgments and finite saved opponents for one compiled play setup.
@@ -215,7 +276,7 @@ pub struct Competition {
     expected_header: ReplayHeader,
     max_opponents: usize,
     opponents: Vec<GhostOpponent>,
-    prepared_updates: Vec<(usize, Option<ScoreSummary>)>,
+    prepared_updates: Vec<GhostUpdatePlan>,
     score: ScoreSummary,
     song_time: Option<Timestamp>,
 }
@@ -300,11 +361,8 @@ impl Competition {
             recorded_until,
         };
         if let Some(time) = self.song_time {
-            let (cursor, score) = opponent.prefix(time)?;
-            opponent.cursor = cursor;
-            if let Some(score) = score {
-                opponent.score = score;
-            }
+            let plan = opponent.prefix(time)?;
+            opponent.apply(plan, time);
         }
         self.opponents
             .try_reserve(1)
@@ -335,9 +393,8 @@ impl Competition {
         if events.is_empty() {
             return self.update(None, song_time);
         }
-        let mut score = self.score.clone();
-        score.observe(events)?;
-        self.update(Some(score), song_time)
+        let plan = self.score.prepare_batches(std::iter::once(events))?;
+        self.update(Some((events, plan, false)), song_time)
     }
     /// Replaces the local summary with an actual reconstructed result prefix and
     /// seeks saved opponents through recorded operations only, in either direction.
@@ -346,13 +403,12 @@ impl Competition {
         local_prefix: &[JudgeEvent],
         song_time: Timestamp,
     ) -> Result<(), CompetitionError> {
-        let mut score = ScoreSummary::default();
-        score.observe(local_prefix)?;
-        self.update(Some(score), song_time)
+        let plan = ScoreSummary::default().prepare_batches(std::iter::once(local_prefix))?;
+        self.update(Some((local_prefix, plan, true)), song_time)
     }
     fn update(
         &mut self,
-        score: Option<ScoreSummary>,
+        score: Option<(&[JudgeEvent], ScorePlan, bool)>,
         time: Timestamp,
     ) -> Result<(), CompetitionError> {
         // Prepare all updates before committing either local or remote display state.
@@ -366,19 +422,18 @@ impl Competition {
                 }
             }
         }
-        for (opponent, (cursor, score)) in self
+        for (opponent, plan) in self
             .opponents
             .iter_mut()
             .zip(self.prepared_updates.drain(..))
         {
-            opponent.cursor = cursor;
-            if let Some(score) = score {
-                opponent.score = score;
-            }
-            opponent.song_time = Some(time);
+            opponent.apply(plan, time);
         }
-        if let Some(score) = score {
-            self.score = score;
+        if let Some((events, plan, restart)) = score {
+            if restart {
+                self.score = ScoreSummary::default();
+            }
+            self.score.commit_batches(plan, std::iter::once(events));
         }
         self.song_time = Some(time);
         Ok(())
@@ -743,3 +798,7 @@ mod score_observation_fixtures;
 #[cfg(test)]
 #[path = "competition_updates_fixtures.rs"]
 mod competition_updates_fixtures;
+
+#[cfg(test)]
+#[path = "score_transaction_fixtures.rs"]
+mod score_transaction_fixtures;

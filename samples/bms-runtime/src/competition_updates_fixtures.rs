@@ -215,10 +215,10 @@ impl OldTransaction {
         Ok(())
     }
 }
-fn scratch(owner: &Competition) -> (*const (usize, Option<ScoreSummary>), usize) {
+fn scratch(owner: &Competition) -> (*const (), usize) {
     assert!(owner.prepared_updates.is_empty());
     (
-        owner.prepared_updates.as_ptr(),
+        owner.prepared_updates.as_ptr().cast::<()>(),
         owner.prepared_updates.capacity(),
     )
 }
