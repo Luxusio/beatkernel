@@ -40,7 +40,7 @@ pub struct BgmFeedReport {
 pub enum BgmFeedError {
     /// Zero/invalid capacities, rate, lookahead, preroll or admission budget.
     InvalidConfiguration(&'static str),
-    /// Non-Play, nonfinite gain or a mapped target before output frame zero.
+    /// Unsupported command kind, nonfinite gain or a target before frame zero.
     InvalidCommand(AudioCommand),
     /// Checked timestamp/frame/horizon arithmetic was unrepresentable.
     Overflow,
@@ -91,6 +91,7 @@ pub struct BgmFeeder {
     retired: usize,
     cursor: u64,
     deferred: bool,
+    admitted_stops: usize,
 }
 impl BgmFeeder {
     /// Maps song-time Play commands once and preserves original equal-time order.
@@ -98,7 +99,7 @@ impl BgmFeeder {
         Self::prepare(commands, config, false)
     }
 
-    /// Retains already mapped output times without adding origin or preroll again.
+    /// Retains output-time Play/Stop commands without adding origin or preroll again.
     ///
     /// Additional preroll must be zero. Relative frame selection uses wide
     /// subtraction, including negative origins and the complete i64 time span.
@@ -134,21 +135,18 @@ impl BgmFeeder {
         cues.try_reserve_exact(commands.len())
             .map_err(|_| BgmFeedError::AllocationFailed)?;
         for (ordinal, original) in commands.into_iter().enumerate() {
-            let AudioCommand::Play {
-                voice,
-                sample,
-                at,
-                gain,
-            } = original
-            else {
-                return Err(BgmFeedError::InvalidCommand(original));
+            let mut command = original;
+            let at = match &mut command {
+                AudioCommand::Play { at, gain, .. } if gain.is_finite() => at,
+                AudioCommand::Stop { at, .. } if output_commands => at,
+                _ => return Err(BgmFeedError::InvalidCommand(original)),
             };
             let elapsed = if output_commands {
                 i128::from(at.as_nanos()) - i128::from(config.output_origin.timestamp.as_nanos())
             } else {
                 i128::from(at.as_nanos()) + i128::from(config.preroll.as_nanos())
             };
-            if !gain.is_finite() || elapsed < 0 {
+            if elapsed < 0 {
                 return Err(BgmFeedError::InvalidCommand(original));
             }
             let mapped = if output_commands {
@@ -157,13 +155,9 @@ impl BgmFeeder {
                 i128::from(config.output_origin.timestamp.as_nanos()) + elapsed
             };
             let mapped = i64::try_from(mapped).map_err(|_| BgmFeedError::Overflow)?;
+            *at = beatkernel::time::Timestamp::from_nanos(mapped);
             cues.push(Cue {
-                command: AudioCommand::Play {
-                    voice,
-                    sample,
-                    at: beatkernel::time::Timestamp::from_nanos(mapped),
-                    gain,
-                },
+                command,
                 frame: ceil_frames(elapsed, config.sample_rate)?,
                 ordinal,
             });
@@ -178,12 +172,20 @@ impl BgmFeeder {
             retired: 0,
             cursor: 0,
             deferred: false,
+            admitted_stops: 0,
         })
     }
 
     /// Declared frame grid and admission policy, without native inspection.
     pub const fn config(&self) -> BgmConfig {
         self.config
+    }
+
+    /// Stop commands whose admission callbacks returned success, retained after retirement.
+    ///
+    /// Callback success does not prove Worklet acknowledgement, mixer execution or silence.
+    pub const fn admitted_stops(&self) -> usize {
+        self.admitted_stops
     }
 
     /// State snapshot; the per-call admitted count is zero.
@@ -247,6 +249,9 @@ impl BgmFeeder {
                 self.deferred = true;
                 return Err(BgmFeedError::Admission(error));
             }
+            if matches!(cue.command, AudioCommand::Stop { .. }) {
+                self.admitted_stops += 1;
+            }
             self.next += 1;
             admitted += 1;
         }
@@ -269,3 +274,7 @@ fn ceil_frames(nanos: i128, sample_rate: u32) -> Result<u64, BgmFeedError> {
         scaled.div_euclid(1_000_000_000) + i128::from(scaled.rem_euclid(1_000_000_000) != 0);
     u64::try_from(frames).map_err(|_| BgmFeedError::Overflow)
 }
+
+#[cfg(test)]
+#[path = "output_stop_feed_fixtures.rs"]
+mod output_stop_feed_fixtures;
