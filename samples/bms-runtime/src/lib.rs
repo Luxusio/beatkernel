@@ -8,6 +8,7 @@ pub mod asset_paths;
 pub mod asset_source;
 #[cfg(test)]
 mod asset_source_fixtures;
+mod audio_assets;
 /// Prepared original-song image selections shared by live and replay presentation.
 pub mod bga;
 /// Rolling BGM admission on an explicitly configured output frame grid.
@@ -137,6 +138,8 @@ pub mod local_setup;
 mod local_source_plan_fixtures;
 #[cfg(test)]
 mod mine_admission_fixtures;
+#[cfg(test)]
+mod mine_asset_fixtures;
 #[cfg(test)]
 mod mine_audio_consumers_fixtures;
 /// Checked committed mine damage evidence, independent of gauge and audio policy.
@@ -368,16 +371,12 @@ mod vorbis_fixture;
 
 use beatkernel::replay::codec::{ReplayCodecLimits, ReplayFile, encode_replay};
 use beatkernel::{
-    audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId},
+    audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, VoiceId},
     judge::JudgeStage,
     runtime::SoundBinding,
 };
 use beatkernel_bms::{BmsChart, CompiledBms, ParseOptions, parse_seeded};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    error::Error,
-    path::{Path, PathBuf},
-};
+use std::{collections::BTreeMap, error::Error, path::Path};
 
 /// Default original PCM sample capacity for the complete two-digit base62 namespace.
 pub const DEFAULT_BMS_PCM_SAMPLES: usize = 62 * 62;
@@ -622,41 +621,18 @@ pub fn prepare_from_source(
         replay_playback::validate_setup(&source, file, limits)?;
     }
     let compiled = source.compile()?;
-    let referenced: BTreeSet<_> = source
-        .notes
-        .iter()
-        .map(|note| note.sample)
-        .chain(compiled.bgm.iter().map(|event| event.sample))
-        .chain(invisible.iter().map(|event| event.sample))
-        .collect();
-    if referenced.len() > pcm_limits.max_samples() {
-        return Err("referenced asset count exceeds PCM limits".into());
-    }
-    let mut bank = SampleBank::new(format, pcm_limits)?;
-    let mut decoded: BTreeMap<PathBuf, SampleId> = BTreeMap::new();
-    for sample in referenced {
-        let name = source
-            .samples
-            .get(&u16::try_from(sample.0)?)
-            .ok_or("referenced sample has no WAV definition")?;
-        let asset_path = assets.resolve(name, paths)?;
-        if let Some(&first) = decoded.get(&asset_path) {
-            let pcm = bank
-                .get(first)
-                .expect("cached PCM was inserted into this bank")
-                .try_clone(pcm_limits)?;
-            bank.insert(sample, pcm)?;
-            continue;
-        }
-        let encoded = assets.read(&asset_path, 64 * 1024 * 1024)?;
-        if encoded.len() > 64 * 1024 * 1024 {
-            return Err("encoded file exceeds preparation limit".into());
-        }
-        let pcm = decoder.decode(&asset_path, &encoded, pcm_limits)?;
-        let pcm = prepare_channels(pcm, format, pcm_limits, channels)?;
-        bank.insert(sample, pcm)?;
-        decoded.insert(asset_path, sample);
-    }
+    let referenced =
+        audio_assets::referenced_samples(&source, &compiled, &invisible, pcm_limits.max_samples())?;
+    let bank = audio_assets::load_bank(
+        &source,
+        &referenced,
+        assets,
+        format,
+        pcm_limits,
+        channels,
+        decoder,
+        paths,
+    )?;
 
     let objects: BTreeMap<_, _> = compiled
         .chart

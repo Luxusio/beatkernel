@@ -70,8 +70,8 @@ and mine fingerprint with `beatkernel-bms/input-sounds/v2`, a one-byte invisible
 presence flag, its u64 fingerprint when present, and the u64 mine fingerprint.
 Both domains use the existing semantic FNV-1a64 convention, not a cryptographic
 asset digest. Existing source-aware capture/replay validation
-consume that common identity. Native, replay and offline installation are
-specified below; guarded WAV00 file loading remains separate work.
+consume that common identity. Native, replay, offline installation and internal
+WAV00 asset preparation are specified below; high-level admission remains gated.
 
 Author independent deferred plan/voice/identity, atomic group-order collision,
 real solo/local report-to-command and completion-tail fixtures. Gauge/fatal-stop
@@ -101,8 +101,8 @@ for routing, held triggering versus avoidance/fatal silence, simultaneous normal
 and press sounds, disjoint member voices, finite-end fences, atomic refusal and
 missing PCM. Native source changes and portable composition compilation do not
 prove Windows/macOS device behavior. Replay/offline scheduling is specified
-below. File mine admission, WAV00 asset loading and complete gauge/fatal-stop
-policy remain unfinished.
+below. Internal WAV00 asset preparation is shared under guarded admission.
+File mine admission and complete gauge/fatal-stop policy remain unfinished.
 
 ### Replay and offline WAV00 consumers
 
@@ -139,7 +139,38 @@ actual capture/reconstruction, Runtime, offline rendering and Mixer paths for
 equal-time order, held contacts, Advance-triggered hazards, replay prefixes,
 section/offset/preroll/finite mapping, missing PCM and silent/fatal sources,
 block-partition consistency and unchanged WAV00 across section BGM slicing.
-File mine admission, asset loading and complete gauge/fatal-stop remain pending.
+Internal asset preparation is specified below. File mine admission and complete
+gauge/fatal-stop remain pending.
+
+### Common WAV00 asset preparation under guarded admission
+
+The shared audio asset selection/loader is reused by prepare_from_source for
+ordinary visible, BGM and invisible resources. Extend its referenced sample
+union with SampleId(0) only for a defined WAV00 and at least one compiled
+nonfatal mine. Validate original mine timing/capacity even for silent sources;
+fatal-only, absent-WAV00, empty/rest and inactive mine sources invent no asset.
+Apply the existing unique-ID PCM sample limit to the full union before resource
+acquisition, retaining ascending sample-ID preparation order.
+
+The reusable bank loader accepts the bounded selected union and existing
+AssetSource/AssetDecoder contracts. Retain the 64 MiB encoded read limit and
+returned-byte length check, scoped path resolution policies, equal-resolved-key
+decode reuse, separately owned PCM per original sample ID, actual bank aggregate
+limits, channel conversion and sample-rate validation. WAV00 sharing a resolved
+key with a normal/BGM/invisible resource decodes once and retains independent
+original IDs. No hidden gain baking, suffix slicing, resampling, path bypass or
+special explosion decoder is introduced.
+
+High-level prepare_from_source still refuses actual mines immediately after
+parsing and before gain/replay/asset work until complete gauge/fatal-stop and
+admission integration. The internal reusable selector/loader can prepare typed
+mine PCM for composition fixtures and future admission; this is not a new
+playable-file bypass. Preserve no-mine visible/BGM/invisible preparation and
+replay validation order through the shared loader. Author independent deferred
+fixtures for optional selection and capacity, exact/compatible MemoryAssetSource
+resolution and shared decode keys, zero PCM used by actual sound preparation,
+missing/oversized/malformed assets and channel/bank limits, and high-level guard
+ordering before any resource/decode work. Execution and acceptance remain deferred.
 
 ### Common optional sound primitive
 
