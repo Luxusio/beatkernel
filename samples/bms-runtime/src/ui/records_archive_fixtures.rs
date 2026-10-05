@@ -20,6 +20,7 @@ fn frame<'a>(
         preview: Some(preview),
         pending: false,
         details: false,
+        grade_page: 0,
         opponents: 0,
         selected_opponents: [0; 2],
         message: None,

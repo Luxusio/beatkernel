@@ -1020,6 +1020,7 @@ impl PracticeDraft {
 
 struct RecordsDraft {
     details: bool,
+    grade_page: usize,
     chart: PathBuf,
     directory: LineEditor,
     directory_focused: bool,
@@ -1042,6 +1043,7 @@ impl RecordsDraft {
         )?;
         Ok(Self {
             details: false,
+            grade_page: 0,
             chart,
             directory,
             directory_focused: true,
@@ -1072,6 +1074,7 @@ impl RecordsDraft {
         {
             if self.selected != Some(index) {
                 self.details = false;
+                self.grade_page = 0;
                 self.preview = None;
                 self.message = None;
             }
@@ -1106,6 +1109,7 @@ impl RecordsDraft {
         self.error = edit_line(&mut self.directory, key, value).err();
         if self.directory.value() != before {
             self.details = false;
+            self.grade_page = 0;
             self.catalog = None;
             self.preview = None;
             self.selected = None;
@@ -1755,7 +1759,9 @@ impl Desktop {
             if !self.ui_ready() {
                 return;
             }
-            self.records.as_mut().expect("records route").details = false;
+            let records = self.records.as_mut().expect("records route");
+            records.details = false;
+            records.grade_page = 0;
             self.gesture.cancel();
             self.sync_ime();
             self.invalidate_hits();
@@ -2280,6 +2286,7 @@ impl Desktop {
         if self.navigator.route() == ScreenRoute::Records {
             if let Some(records) = &mut self.records {
                 records.details = false;
+                records.grade_page = 0;
                 match result {
                     Ok(ProfileResult::Records(catalog)) => {
                         records.selected = (!catalog.entries.is_empty()).then_some(0);
@@ -2473,11 +2480,52 @@ impl Desktop {
                 return;
             }
             records.details = true;
+            records.grade_page = 0;
             records.directory_focused = false;
         }
         self.gesture.cancel();
         self.sync_ime();
         self.invalidate_hits();
+    }
+    fn set_record_grade_page(&mut self, requested: usize) {
+        if !self.ui_ready() || self.navigator.route() != ScreenRoute::Records {
+            return;
+        }
+        let Some(records) = &mut self.records else {
+            return;
+        };
+        if !records.details {
+            return;
+        }
+        let Some(preview) = records.valid_preview() else {
+            return;
+        };
+        let pages = preview.historical_score.as_ref().map_or(1, |score| {
+            score
+                .grades
+                .len()
+                .div_ceil(
+                    beatkernel_bms_runtime::historical_record_presentation::GRADE_ROWS_PER_PAGE,
+                )
+                .max(1)
+        });
+        let page = requested.min(pages - 1);
+        if records.grade_page != page {
+            records.grade_page = page;
+            self.gesture.cancel();
+            self.invalidate_hits();
+        }
+    }
+    fn change_record_grade_page(&mut self, forward: bool) {
+        let page = self
+            .records
+            .as_ref()
+            .map_or(0, |records| records.grade_page);
+        self.set_record_grade_page(if forward {
+            page.saturating_add(1)
+        } else {
+            page.saturating_sub(1)
+        });
     }
     fn records_request(&mut self, preview: bool) {
         if !self.records_admitted() {
@@ -2529,6 +2577,7 @@ impl Desktop {
                 self.profile_io = Some(operation);
                 if let Some(records) = &mut self.records {
                     records.details = false;
+                    records.grade_page = 0;
                     records.preview = None;
                     records.error = None;
                     records.message = None;
@@ -2671,8 +2720,17 @@ impl Desktop {
     }
     fn records_key(&mut self, key: KeyCode, repeat: bool) {
         if self.records.as_ref().is_some_and(|records| records.details) {
-            if key == KeyCode::Escape && !repeat {
-                self.back();
+            match key {
+                KeyCode::Escape if !repeat => self.back(),
+                KeyCode::ArrowLeft | KeyCode::ArrowUp | KeyCode::PageUp => {
+                    self.change_record_grade_page(false)
+                }
+                KeyCode::ArrowRight | KeyCode::ArrowDown | KeyCode::PageDown => {
+                    self.change_record_grade_page(true)
+                }
+                KeyCode::Home => self.set_record_grade_page(0),
+                KeyCode::End => self.set_record_grade_page(usize::MAX),
+                _ => {}
             }
             return;
         }
@@ -3003,6 +3061,10 @@ impl Desktop {
         if self.navigator.route() == ScreenRoute::Records {
             if id.0 == 66 {
                 self.toggle_record_details();
+                return;
+            }
+            if matches!(id.0, 67 | 68) {
+                self.change_record_grade_page(id.0 == 68);
                 return;
             }
             if !self.records_admitted() {
@@ -4731,7 +4793,7 @@ impl Desktop {
         frame.error = self.input_font_error.as_deref().or(frame.error);
         frame.hovered = beatkernel_bms_runtime::ui::records::hit(&frame, self.point());
         frame.armed = (50..=61)
-            .chain(std::iter::once(66))
+            .chain(66..=68)
             .map(ControlId)
             .find(|&id| self.gesture.is_armed(id));
         let view = self
@@ -5683,6 +5745,7 @@ fn records_frame<'a>(
     RecordsFrame {
         directory: &records.directory,
         details: records.details,
+        grade_page: records.grade_page,
         directory_focused: records.directory_focused,
         catalog: records.catalog.as_ref(),
         selected: records.selected,
@@ -5720,7 +5783,7 @@ fn draw_records(
     let mut frame = records_frame(records, pending, opponents, None);
     frame.hovered = beatkernel_bms_runtime::ui::records::hit(&frame, point);
     frame.armed = (50..=61)
-        .chain(std::iter::once(66))
+        .chain(66..=68)
         .map(ControlId)
         .find(|&id| gesture.is_armed(id));
     view.update(frame).unwrap();
@@ -8718,3 +8781,7 @@ mod tests {
 #[cfg(test)]
 #[path = "desktop_record_details_fixtures.rs"]
 mod desktop_record_details_fixtures;
+
+#[cfg(test)]
+#[path = "desktop_grade_page_fixtures.rs"]
+mod desktop_grade_page_fixtures;

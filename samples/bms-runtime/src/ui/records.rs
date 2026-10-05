@@ -148,6 +148,58 @@ pub const BUTTONS: [(ControlId, Bounds, &'static str); 12] = [
         "DETAILS (D)",
     ),
 ];
+pub const DETAIL_BUTTONS: [(ControlId, Bounds, &str); 3] = [
+    (
+        ControlId(66),
+        Bounds {
+            x: 754,
+            y: 620,
+            width: 176,
+            height: 34,
+        },
+        "BACK",
+    ),
+    (
+        ControlId(67),
+        Bounds {
+            x: 430,
+            y: 575,
+            width: 140,
+            height: 34,
+        },
+        "PREVIOUS",
+    ),
+    (
+        ControlId(68),
+        Bounds {
+            x: 580,
+            y: 575,
+            width: 164,
+            height: 34,
+        },
+        "NEXT",
+    ),
+];
+fn grade_pages(frame: &RecordsFrame<'_>) -> usize {
+    frame
+        .preview
+        .and_then(|preview| preview.historical_score.as_ref())
+        .map_or(1, |score| {
+            score
+                .grades
+                .len()
+                .div_ceil(crate::historical_record_presentation::GRADE_ROWS_PER_PAGE)
+                .max(1)
+        })
+}
+fn detail_available(id: ControlId, page: usize, pages: usize) -> bool {
+    match id.0 {
+        66 => true,
+        67 => page > 0,
+        68 => page.saturating_add(1) < pages,
+        _ => false,
+    }
+}
 pub struct RecordsFrame<'a> {
     pub directory: &'a LineEditor,
     pub directory_focused: bool,
@@ -158,6 +210,7 @@ pub struct RecordsFrame<'a> {
     pub preview: Option<&'a RecordPreview>,
     pub pending: bool,
     pub details: bool,
+    pub grade_page: usize,
     pub opponents: usize,
     /// Exact selected path occurrences, ordered own/other, in the parent draft.
     pub selected_opponents: [usize; 2],
@@ -179,7 +232,7 @@ fn available(frame: &RecordsFrame<'_>, id: ControlId) -> bool {
         return false;
     }
     if frame.details {
-        return id.0 == 66;
+        return detail_available(id, frame.grade_page, grade_pages(frame));
     }
     let count = frame.catalog.map_or(0, |catalog| catalog.entries.len());
     match id.0 {
@@ -204,13 +257,15 @@ pub fn hit(frame: &RecordsFrame<'_>, point: Option<(f64, f64)>) -> Option<Contro
     if frame.pending || validate_frame(frame).is_err() {
         return None;
     }
+    if frame.details {
+        return DETAIL_BUTTONS.iter().rev().find_map(|(id, bounds, _)| {
+            (available(frame, *id) && bounds.contains(point)).then_some(*id)
+        });
+    }
     for (id, bounds, _) in BUTTONS.iter().rev() {
         if available(frame, *id) && bounds.contains(point) {
             return Some(*id);
         }
-    }
-    if frame.details {
-        return None;
     }
     let count = frame.catalog.map_or(0, |catalog| catalog.entries.len());
     for slot in (0..10).rev() {
@@ -222,6 +277,11 @@ pub fn hit(frame: &RecordsFrame<'_>, point: Option<(f64, f64)>) -> Option<Contro
     DIRECTORY.contains(point).then_some(ControlId(58))
 }
 fn validate_frame(frame: &RecordsFrame<'_>) -> Result<(), String> {
+    if (!frame.details && frame.grade_page != 0)
+        || (frame.details && frame.grade_page >= grade_pages(frame))
+    {
+        return Err("Records stored grade page is out of range".into());
+    }
     if frame.details
         && (frame.pending
             || frame
@@ -300,23 +360,31 @@ struct DetailCache {
     score: Option<Arc<crate::result_archive::ArchivedScore>>,
     presentation: crate::historical_record_presentation::HistoricalRecordPresentation,
     geometry: crate::scene::GeometrySnapshot,
+    grade_page: usize,
+    grade_geometry: crate::scene::GeometrySnapshot,
 }
 fn detail_geometry(
     presentation: &crate::historical_record_presentation::HistoricalRecordPresentation,
+    grade_geometry: &crate::scene::GeometrySnapshot,
+    page: usize,
     hovered: Option<ControlId>,
     armed: Option<ControlId>,
 ) -> Result<crate::scene::GeometrySnapshot, String> {
     let mut scene = Scene::with_capacity(960, 720, 1024);
     rect(&mut scene, 0, 0, 960, 720, 0x10151e);
-    presentation.compose(&mut scene)?;
-    let (id, bounds, _) = BUTTONS[11];
-    button(
-        &mut scene,
-        bounds,
-        "BACK",
-        hovered == Some(id),
-        armed == Some(id),
-    );
+    presentation.compose_body(&mut scene)?;
+    scene.append_geometry(grade_geometry)?;
+    for (id, bounds, label) in DETAIL_BUTTONS {
+        if detail_available(id, page, presentation.grade_page_count()) {
+            button(
+                &mut scene,
+                bounds,
+                label,
+                hovered == Some(id),
+                armed == Some(id),
+            );
+        }
+    }
     scene.geometry_snapshot()
 }
 pub struct RecordsView {
@@ -699,36 +767,58 @@ impl RecordsView {
             });
             if !same {
                 let presentation = crate::historical_record_presentation::HistoricalRecordPresentation::from_record(value, preview.historical_score.as_deref())?;
-                let geometry = detail_geometry(&presentation, frame.hovered, frame.armed)?;
+                let grade_geometry = presentation.prepare_grade_page(frame.grade_page)?;
+                let geometry = detail_geometry(
+                    &presentation,
+                    &grade_geometry,
+                    frame.grade_page,
+                    frame.hovered,
+                    frame.armed,
+                )?;
                 staged = Some(DetailCache {
                     value,
                     score: preview.historical_score.clone(),
                     presentation,
                     geometry,
+                    grade_page: frame.grade_page,
+                    grade_geometry,
                 });
             } else if !self.details.get()
+                || self
+                    .detail_cache
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|cache| cache.grade_page != frame.grade_page)
                 || self.detail_hovered.get() != frame.hovered
                 || self.detail_armed.get() != frame.armed
             {
                 let cache = self.detail_cache.borrow();
                 let cache = cache.as_ref().expect("matching detail cache");
-                staged_geometry = Some(detail_geometry(
+                let grade_geometry = if cache.grade_page == frame.grade_page {
+                    cache.grade_geometry.clone()
+                } else {
+                    cache.presentation.prepare_grade_page(frame.grade_page)?
+                };
+                let geometry = detail_geometry(
                     &cache.presentation,
+                    &grade_geometry,
+                    frame.grade_page,
                     frame.hovered,
                     frame.armed,
-                )?);
+                )?;
+                staged_geometry = Some((frame.grade_page, grade_geometry, geometry));
             }
         }
         if let Some(cache) = staged {
             *self.detail_cache.borrow_mut() = Some(cache);
             self.detail_dirty.set(true);
         }
-        if let Some(geometry) = staged_geometry {
-            self.detail_cache
-                .borrow_mut()
-                .as_mut()
-                .expect("prepared detail cache")
-                .geometry = geometry;
+        if let Some((page, grade_geometry, geometry)) = staged_geometry {
+            let mut cache = self.detail_cache.borrow_mut();
+            let cache = cache.as_mut().expect("prepared detail cache");
+            cache.grade_page = page;
+            cache.grade_geometry = grade_geometry;
+            cache.geometry = geometry;
             self.detail_dirty.set(true);
         }
         if self.details.replace(frame.details) != frame.details {
@@ -840,8 +930,11 @@ impl RecordsView {
             scene.clear();
             hits.clear();
             scene.append_geometry(&cache.geometry)?;
-            let (id, bounds, _) = BUTTONS[11];
-            hits.push((id, bounds));
+            for (id, bounds, _) in DETAIL_BUTTONS {
+                if detail_available(id, cache.grade_page, cache.presentation.grade_page_count()) {
+                    hits.push((id, bounds));
+                }
+            }
         } else {
             self.nodes.compose(scene, hits)?;
         }
@@ -903,6 +996,7 @@ mod fixtures {
             preview: None,
             pending: false,
             details: false,
+            grade_page: 0,
             opponents: 0,
             selected_opponents: [0; 2],
             message: None,
@@ -1216,3 +1310,7 @@ mod archive_fixtures;
 #[cfg(test)]
 #[path = "records_stored_score_fixtures.rs"]
 mod records_stored_score_fixtures;
+
+#[cfg(test)]
+#[path = "records_grade_page_fixtures.rs"]
+mod records_grade_page_fixtures;

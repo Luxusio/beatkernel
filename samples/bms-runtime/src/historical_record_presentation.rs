@@ -12,12 +12,16 @@ use beatkernel::{
     input::CodecLimits,
 };
 
+pub const GRADE_ROWS_PER_PAGE: usize = 4;
+
 pub struct HistoricalRecordPresentation {
     value: HistoricalRecordValue,
     start: Timestamp,
     end: Option<Timestamp>,
     score: Option<crate::result_archive::ArchivedScore>,
     geometry: GeometrySnapshot,
+    grade_page: usize,
+    grade_geometry: GeometrySnapshot,
 }
 impl HistoricalRecordPresentation {
     pub fn new(
@@ -174,7 +178,10 @@ impl HistoricalRecordPresentation {
             .map(crate::result_archive::ArchivedScore::try_copy)
             .transpose()
             .map_err(|error| error.to_string())?;
+        let grade_geometry = build_grade_geometry(score.as_ref(), 0)?;
         Ok(Self {
+            grade_page: 0,
+            grade_geometry,
             value,
             start,
             end,
@@ -194,10 +201,94 @@ impl HistoricalRecordPresentation {
     pub fn score(&self) -> Option<&crate::result_archive::ArchivedScore> {
         self.score.as_ref()
     }
-    pub fn compose(&self, scene: &mut Scene) -> Result<(), String> {
+    pub const fn grade_page(&self) -> usize {
+        self.grade_page
+    }
+    pub fn grade_page_count(&self) -> usize {
+        self.score.as_ref().map_or(1, |score| {
+            score.grades.len().div_ceil(GRADE_ROWS_PER_PAGE).max(1)
+        })
+    }
+    pub(crate) fn prepare_grade_page(&self, page: usize) -> Result<GeometrySnapshot, String> {
+        if page >= self.grade_page_count() {
+            return Err("stored grade page is out of range".into());
+        }
+        if page == self.grade_page {
+            return Ok(self.grade_geometry.clone());
+        }
+        build_grade_geometry(self.score.as_ref(), page)
+    }
+    pub fn set_grade_page(&mut self, page: usize) -> Result<bool, String> {
+        if page >= self.grade_page_count() {
+            return Err("stored grade page is out of range".into());
+        }
+        if page == self.grade_page {
+            return Ok(false);
+        }
+        let geometry = self.prepare_grade_page(page)?;
+        self.grade_geometry = geometry;
+        self.grade_page = page;
+        Ok(true)
+    }
+    pub(crate) fn compose_body(&self, scene: &mut Scene) -> Result<(), String> {
         scene.append_geometry(&self.geometry)
     }
+    pub fn compose(&self, scene: &mut Scene) -> Result<(), String> {
+        self.compose_body(scene)?;
+        scene.append_geometry(&self.grade_geometry)
+    }
+}
+fn build_grade_geometry(
+    score: Option<&crate::result_archive::ArchivedScore>,
+    page: usize,
+) -> Result<GeometrySnapshot, String> {
+    use crate::ui::atoms::text;
+    let mut scene = Scene::with_capacity(960, 720, 512);
+    match score {
+        None => text(
+            &mut scene,
+            24,
+            514,
+            "STORED GRADES UNAVAILABLE",
+            1,
+            0x9bb1cf,
+        ),
+        Some(score) if score.grades.is_empty() => {
+            text(&mut scene, 24, 514, "STORED GRADES EMPTY", 1, 0x9bb1cf)
+        }
+        Some(score) => {
+            let pages = score.grades.len().div_ceil(GRADE_ROWS_PER_PAGE);
+            text(
+                &mut scene,
+                24,
+                514,
+                &format!("STORED GRADES PAGE {} / {}", page + 1, pages),
+                1,
+                0x9bb1cf,
+            );
+            let start = page * GRADE_ROWS_PER_PAGE;
+            for (index, (grade, count)) in score.grades
+                [start..score.grades.len().min(start + GRADE_ROWS_PER_PAGE)]
+                .iter()
+                .enumerate()
+            {
+                text(
+                    &mut scene,
+                    24,
+                    538 + index * 16,
+                    &format!("STORED GRADE {grade} COUNT {count}"),
+                    1,
+                    0xb6cce6,
+                );
+            }
+        }
+    }
+    scene.geometry_snapshot()
 }
 #[cfg(test)]
 #[path = "historical_record_presentation_fixtures.rs"]
 mod fixtures;
+
+#[cfg(test)]
+#[path = "historical_grade_page_fixtures.rs"]
+mod historical_grade_page_fixtures;

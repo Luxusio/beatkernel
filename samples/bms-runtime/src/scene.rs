@@ -47,6 +47,7 @@ pub(crate) struct Rectangle {
 
 /// Immutable ordered UI geometry for one retained component. Timed playfields
 /// remain separate; these packets never own transport or native resources.
+#[derive(Clone)]
 pub struct GeometrySnapshot {
     width: u32,
     height: u32,

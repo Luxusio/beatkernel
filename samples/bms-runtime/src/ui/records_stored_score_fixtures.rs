@@ -51,6 +51,7 @@ fn frame<'a>(
         preview,
         pending: false,
         details,
+        grade_page: 0,
         opponents: 0,
         selected_opponents: [0; 2],
         message: None,
@@ -94,7 +95,7 @@ fn details_uses_common_stored_geometry_and_exposes_only_back_instead_of_catalog_
     assert_eq!(
         hit(
             &frame(&directory, &catalog, Some(&preview), true),
-            Some((305., 576.))
+            Some((755., 621.))
         ),
         Some(ControlId(66))
     );
