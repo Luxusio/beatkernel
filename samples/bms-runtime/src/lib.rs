@@ -147,6 +147,8 @@ mod mine_extent_fixtures;
 pub mod mine_plan;
 #[cfg(test)]
 mod mine_plan_fixtures;
+#[cfg(test)]
+mod mine_render_fixtures;
 /// Complete MPEG Layer III assets and declared encoder timing during preparation.
 pub mod mp3_decode;
 #[cfg(test)]

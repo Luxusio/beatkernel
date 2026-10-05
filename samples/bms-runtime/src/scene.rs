@@ -65,6 +65,7 @@ pub struct Scene {
     playfield_caches: Vec<PlayfieldCache>,
     // Lazy backing storage: static retained nodes never run a note query.
     visible_note_indices: Vec<usize>,
+    visible_mine_indices: Vec<usize>,
     geometry_identity: Arc<()>,
     geometry_epoch: u64,
 }
@@ -93,6 +94,7 @@ impl Scene {
                 .map(|_| PlayfieldCache::default())
                 .collect(),
             visible_note_indices: Vec::new(),
+            visible_mine_indices: Vec::new(),
             geometry_identity: Arc::new(()),
             geometry_epoch: 0,
         }
@@ -106,6 +108,7 @@ impl Scene {
         self.error = None;
         self.playfields.clear();
         self.visible_note_indices.clear();
+        self.visible_mine_indices.clear();
     }
 
     fn geometry_changed(&mut self) {
@@ -207,6 +210,12 @@ impl Scene {
             progress,
             &mut self.visible_note_indices,
         )?;
+        chart.visible_mine_indices_checked(
+            now,
+            lookahead,
+            150_000_000,
+            &mut self.visible_mine_indices,
+        )?;
         if self
             .visible_note_indices
             .iter()
@@ -214,9 +223,18 @@ impl Scene {
         {
             return Err("playfield note references an unavailable lane".into());
         }
-        let frame = self.playfield_caches[slot].frame_indexed_with_progress(
+        if self
+            .visible_mine_indices
+            .iter()
+            .any(|&index| chart.mines()[index].lane_index >= chart.lanes.len())
+        {
+            return Err("playfield mine references an unavailable lane".into());
+        }
+        let frame = self.playfield_caches[slot].frame_indexed_with_mines_and_progress(
             &chart.notes,
             &self.visible_note_indices,
+            chart.mines(),
+            &self.visible_mine_indices,
             chart.lanes.len(),
             bounds,
             now,

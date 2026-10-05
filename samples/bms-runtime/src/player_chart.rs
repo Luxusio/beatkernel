@@ -14,6 +14,9 @@ use std::{
 /// Maximum number of notes returned for one desktop frame.
 pub const MAX_VISIBLE_NOTES: usize = 2048;
 
+/// Maximum number of original mine markers returned for one frame.
+pub const MAX_VISIBLE_MINES: usize = 2048;
+
 /// A note from the actual compiled gameplay chart.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlayerNote {
@@ -25,6 +28,15 @@ pub struct PlayerNote {
     pub start: Timestamp,
     /// Exact compiled hold endpoint, if present.
     pub end: Option<Timestamp>,
+}
+
+/// An original mine marker, independent of normal object and score identity.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlayerMine {
+    pub ordinal: u64,
+    pub lane_index: usize,
+    pub at: Timestamp,
+    pub damage: beatkernel_bms::MineDamage,
 }
 
 /// Presentation data prepared once, outside gameplay/audio callbacks.
@@ -42,6 +54,7 @@ pub struct PlayerChart {
     pub duration_ns: i64,
     /// Validated presentation-only POORBGA mode cached during chart preparation.
     pub poor_bga_mode: beatkernel_bms::PoorBgaMode,
+    mines: Vec<PlayerMine>,
     // A range-maximum tree prunes ended holds without scanning the old prefix.
     endpoint_tree: Vec<i64>,
     tree_leaves: usize,
@@ -129,6 +142,17 @@ impl PlayerChart {
             .enumerate()
             .map(|(index, lane)| (*lane, index))
             .collect();
+        let mut retained_mines = Vec::new();
+        retained_mines
+            .try_reserve_exact(mines.len())
+            .map_err(|_| PlayerChartError("mine presentation allocation failed".into()))?;
+        retained_mines.extend(mines.into_iter().map(|mine| PlayerMine {
+            ordinal: mine.ordinal,
+            lane_index: lane_indices[&mine.lane.channel()],
+            at: mine.at,
+            damage: mine.damage,
+        }));
+        retained_mines.sort_by_key(|mine| (mine.at, mine.ordinal));
         let mut notes = Vec::with_capacity(chart.objects().len());
         for object in chart.objects() {
             let lane = by_id.remove(&object.id).ok_or_else(|| {
@@ -165,6 +189,7 @@ impl PlayerChart {
             notes,
             duration_ns,
             poor_bga_mode,
+            mines: retained_mines,
             endpoint_tree,
             tree_leaves,
             object_index,
@@ -182,6 +207,52 @@ impl PlayerChart {
     /// Per-channel opacity at the exact original song time, independent of images.
     pub fn bga_opacity(&self, now: Timestamp) -> crate::bga_opacity::BgaOpacity {
         self.opacity.state_at(now)
+    }
+
+    /// Borrows original mine metadata in timestamp/ordinal order.
+    pub fn mines(&self) -> &[PlayerMine] {
+        &self.mines
+    }
+
+    /// Queries an inclusive mine window using binary searches and reusable
+    /// bounded scratch. Empty or negative windows allocate no backing storage;
+    /// every call clears output, including failures.
+    pub fn visible_mine_indices_checked(
+        &self,
+        now: Timestamp,
+        lookahead_ns: i64,
+        behind_ns: i64,
+        output: &mut Vec<usize>,
+    ) -> Result<(), String> {
+        output.clear();
+        if lookahead_ns < 0 || behind_ns < 0 || self.mines.is_empty() {
+            return Ok(());
+        }
+        let lower = i128::from(now.as_nanos()) - i128::from(behind_ns);
+        let upper = i128::from(now.as_nanos()) + i128::from(lookahead_ns);
+        let begin = self
+            .mines
+            .partition_point(|mine| i128::from(mine.at.as_nanos()) < lower);
+        let end = self
+            .mines
+            .partition_point(|mine| i128::from(mine.at.as_nanos()) <= upper);
+        let count = (end - begin).min(MAX_VISIBLE_MINES + 1);
+        if count == 0 {
+            return Ok(());
+        }
+        if output.capacity() < MAX_VISIBLE_MINES + 1 {
+            output
+                .try_reserve_exact(MAX_VISIBLE_MINES + 1)
+                .map_err(|_| "mine visibility allocation failed".to_string())?;
+        }
+        output.extend(begin..begin + count);
+        if output.len() > MAX_VISIBLE_MINES {
+            output.clear();
+            return Err(format!(
+                "playfield exceeds {MAX_VISIBLE_MINES} visible mines"
+            ));
+        }
+        Ok(())
     }
 
     /// Looks up a prepared object identity without scanning notes. A changed
@@ -651,6 +722,7 @@ mod tests {
             lanes: vec![0x11],
             duration_ns: 0,
             poor_bga_mode: beatkernel_bms::PoorBgaMode::default(),
+            mines: Vec::new(),
             notes,
             endpoint_tree,
             tree_leaves,

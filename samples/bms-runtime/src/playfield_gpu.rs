@@ -3,10 +3,14 @@ use std::sync::Arc;
 
 use beatkernel::time::Timestamp;
 
-use crate::{player_chart::PlayerNote, ui::interaction::Bounds};
+use crate::{
+    player_chart::{PlayerMine, PlayerNote},
+    ui::interaction::Bounds,
+};
 
 pub(crate) const MAX_PLAYFIELDS: usize = 4;
-pub(crate) const MAX_NOTE_INSTANCES: usize = crate::player_chart::MAX_VISIBLE_NOTES * 3;
+pub(crate) const MAX_NOTE_INSTANCES: usize =
+    crate::player_chart::MAX_VISIBLE_NOTES * 3 + crate::player_chart::MAX_VISIBLE_MINES;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -31,6 +35,7 @@ pub(crate) struct PlayfieldCache {
 
 struct Cached {
     notes: Vec<(PlayerNote, bool)>,
+    mines: Vec<PlayerMine>,
     lanes: usize,
     bounds: Bounds,
     lookahead: i64,
@@ -51,6 +56,7 @@ impl PlayfieldCache {
     ) -> PlayfieldFrame {
         self.frame_inner(
             notes.iter().map(|&note| (note, false)),
+            std::iter::empty(),
             lanes,
             bounds,
             now,
@@ -81,6 +87,31 @@ impl PlayfieldCache {
         lookahead: i64,
         progress: Option<&crate::note_progress::NoteProgress>,
     ) -> PlayfieldFrame {
+        self.frame_indexed_with_mines_and_progress(
+            notes,
+            indices,
+            &[],
+            &[],
+            lanes,
+            bounds,
+            now,
+            lookahead,
+            progress,
+        )
+    }
+
+    pub(crate) fn frame_indexed_with_mines_and_progress(
+        &mut self,
+        notes: &[PlayerNote],
+        indices: &[usize],
+        mines: &[PlayerMine],
+        mine_indices: &[usize],
+        lanes: usize,
+        bounds: Bounds,
+        now: Timestamp,
+        lookahead: i64,
+        progress: Option<&crate::note_progress::NoteProgress>,
+    ) -> PlayfieldFrame {
         self.frame_inner(
             indices.iter().map(|&index| {
                 (
@@ -90,6 +121,7 @@ impl PlayfieldCache {
                     }),
                 )
             }),
+            mine_indices.iter().map(|&index| &mines[index]),
             lanes,
             bounds,
             now,
@@ -100,6 +132,7 @@ impl PlayfieldCache {
     fn frame_inner<'a>(
         &mut self,
         notes: impl ExactSizeIterator<Item = (&'a PlayerNote, bool)> + Clone,
+        mines: impl ExactSizeIterator<Item = &'a PlayerMine> + Clone,
         lanes: usize,
         bounds: Bounds,
         now: Timestamp,
@@ -123,9 +156,15 @@ impl PlayfieldCache {
                     .iter()
                     .zip(notes.clone())
                     .all(|(old, (new, consumed))| old.0 == *new && old.1 == consumed)
+                && cached.mines.len() == mines.len()
+                && cached
+                    .mines
+                    .iter()
+                    .zip(mines.clone())
+                    .all(|(old, new)| old == new)
         });
         if !reuse {
-            let mut instances = Vec::with_capacity(notes.len() * 3);
+            let mut instances = Vec::with_capacity(notes.len() * 3 + mines.len());
             // Outside this margin no endpoint can enter the clip region before
             // rebasing. Saturating a week-long hold thus avoids huge GPU floats
             // while preserving its visible body and eventual endpoint.
@@ -162,10 +201,38 @@ impl PlayfieldCache {
                     push(left + 3, right - left - 6, 2.0, 0x74e5c5);
                 }
             }
+            for mine in mines.clone() {
+                let left = bounds.x
+                    + (mine.lane_index as i128 * i128::from(bounds.width) / lanes as i128) as i64;
+                let right = bounds.x
+                    + ((mine.lane_index + 1) as i128 * i128::from(bounds.width) / lanes as i128)
+                        as i64;
+                let head = position(mine.at);
+                let color: u32 = if mine.damage.is_fatal() {
+                    0xd86bff
+                } else {
+                    0xef6372
+                };
+                instances.push(NoteInstance {
+                    geometry: [
+                        (left + 3) as f32,
+                        (right - left - 6).max(1) as f32,
+                        head,
+                        head,
+                    ],
+                    appearance: [
+                        2.0,
+                        ((color >> 16) & 255) as f32 / 255.0,
+                        ((color >> 8) & 255) as f32 / 255.0,
+                        (color & 255) as f32 / 255.0,
+                    ],
+                });
+            }
             self.state = Some(Cached {
                 notes: notes
                     .map(|(note, consumed)| (note.clone(), consumed))
                     .collect(),
+                mines: mines.cloned().collect(),
                 lanes,
                 bounds,
                 lookahead,
