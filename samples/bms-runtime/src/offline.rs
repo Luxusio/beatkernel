@@ -1,5 +1,7 @@
 //! Bounded chronological synthetic BMS rendering through the shared runtime.
-use crate::{PreparedBms, input_sounds::InputSoundPlan, mine_plan::prepare_judge};
+use crate::{
+    PreparedBms, input_sounds::InputSoundPlan, mine_plan::prepare_judge, mine_sounds::MineSoundPlan,
+};
 use beatkernel::{
     audio::{
         command_queue, AudioCommand, AudioFormat, AudioLimits, CommandPushError, Mixer,
@@ -102,6 +104,7 @@ enum Item {
         control: PhysicalControlId,
         state: ButtonState,
     },
+    Advance,
 }
 struct Record {
     at: Timestamp,
@@ -215,6 +218,28 @@ pub fn render_offline(
         }
         Some(plan.timeline())
     };
+    let hazard_sounds = if prepared.source.mines.is_empty() {
+        None
+    } else {
+        let plan = MineSoundPlan::prepare(
+            &prepared.source,
+            &prepared.sounds,
+            &prepared.bgm_commands,
+            input_sounds.as_ref(),
+            beatkernel_bms::ParseOptions::default().max_objects,
+        )?;
+        for &sample in plan.samples() {
+            if prepared.bank.get(sample).is_none() {
+                return Err("offline mine sound sample is missing from PCM bank".into());
+            }
+        }
+        plan.timeline()
+    };
+    let mines = if prepared.source.mines.is_empty() {
+        Vec::new()
+    } else {
+        prepared.source.compile_mines()?
+    };
     let count = options
         .block_frames
         .checked_mul(channels)
@@ -241,12 +266,25 @@ pub fn render_offline(
         .len()
         .checked_mul(2)
         .and_then(|n| n.checked_add(prepared.bgm_commands.len()))
+        .and_then(|n| n.checked_add(mines.len()))
         .ok_or("offline schedule extent overflow")?;
     let mut records = Vec::new();
     records.try_reserve_exact(schedule_len)?;
     let mut lanes = BTreeMap::new();
     for event in &prepared.source.invisible {
         lanes.insert(event.lane.channel(), event.lane.control());
+    }
+    for (ordinal, mine) in mines.iter().enumerate() {
+        lanes.insert(mine.lane.channel(), mine.lane.control());
+        if ordinal != 0 && mines[ordinal - 1].at == mine.at {
+            continue;
+        }
+        records.push(Record {
+            at: mine.at,
+            frame: target_frame(mine.at, rate)?,
+            ordinal,
+            item: Item::Advance,
+        });
     }
     for (ordinal, note) in prepared.source.notes.iter().enumerate() {
         let time = objects
@@ -285,7 +323,11 @@ pub fn render_offline(
     records.sort_by_key(|record| {
         (
             record.at,
-            matches!(record.item, Item::Input { .. }),
+            match record.item {
+                Item::Bgm(_) => 0u8,
+                Item::Input { .. } => 1,
+                Item::Advance => 2,
+            },
             record.ordinal,
         )
     });
@@ -322,6 +364,9 @@ pub fn render_offline(
     )?;
     if let Some(timeline) = input_sounds {
         runtime.configure_input_sounds(timeline)?;
+    }
+    if let Some(timeline) = hazard_sounds {
+        runtime.configure_hazard_sounds(timeline)?;
     }
     let mut mixer = Mixer::new(
         MixerConfig::new(format, DOMAIN, Timestamp::ZERO, limits),
@@ -378,6 +423,12 @@ pub fn render_offline(
                         });
                         let report = runtime
                             .process_input(event, &Identity, point(record.at))
+                            .map_err(|error| failure(error, summary.last_render))?;
+                        accept(report, &mut summary)?;
+                    }
+                    Item::Advance => {
+                        let report = runtime
+                            .advance_to(point(record.at), &Identity, point(record.at))
                             .map_err(|error| failure(error, summary.last_render))?;
                         accept(report, &mut summary)?;
                     }

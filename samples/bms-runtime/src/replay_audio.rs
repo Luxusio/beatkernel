@@ -3,6 +3,7 @@
 use crate::{
     PreparedBms,
     input_sounds::InputSoundPlan,
+    mine_sounds::MineSoundPlan,
     practice::PracticeStart,
     practice_loop::PracticeLoop,
     replay_playback::{
@@ -166,16 +167,17 @@ fn plan_with_section(
     if preroll.as_nanos() < 0 {
         return Err(ReplayAudioError::InvalidConfiguration("negative preroll").into());
     }
-    // Keep a pristine actual judge only when fallback selection needs its held
-    // ownership. The reconstructed session below still owns full results/hash.
+    // Keep one pristine actual judge when sound selection needs its ownership
+    // or hazard reports. Reconstruction still owns complete results and hash.
+    let mut selection_judge = None;
     let input_sounds = if prepared.source.invisible.is_empty() {
         None
     } else {
-        let judge = if allow_finite {
+        selection_judge = Some(if allow_finite {
             validate_section_setup(&prepared.source, &file, limits)?
         } else {
             validate_setup(&prepared.source, &file, limits)?
-        };
+        });
         let plan = InputSoundPlan::prepare(
             &prepared.source,
             &prepared.sounds,
@@ -187,7 +189,31 @@ fn plan_with_section(
                 return Err(ReplayAudioError::MissingSample(sample).into());
             }
         }
-        Some((judge, plan.timeline()))
+        Some(plan.timeline())
+    };
+    let hazard_sounds = if prepared.source.mines.is_empty() {
+        None
+    } else {
+        let plan = MineSoundPlan::prepare(
+            &prepared.source,
+            &prepared.sounds,
+            &prepared.bgm_commands,
+            input_sounds.as_ref(),
+            beatkernel_bms::ParseOptions::default().max_objects,
+        )?;
+        if !plan.bindings().is_empty() && selection_judge.is_none() {
+            selection_judge = Some(if allow_finite {
+                validate_section_setup(&prepared.source, &file, limits)?
+            } else {
+                validate_setup(&prepared.source, &file, limits)?
+            });
+        }
+        for &sample in plan.samples() {
+            if prepared.bank.get(sample).is_none() {
+                return Err(ReplayAudioError::MissingSample(sample).into());
+            }
+        }
+        plan.timeline()
     };
     let session = if allow_finite {
         reconstruct_section(&prepared.source, file, limits)?
@@ -264,79 +290,173 @@ fn plan_with_section(
             },
         ));
     }
-    for event in session.results() {
-        if !matches!(event.outcome, JudgeOutcome::Hit { .. }) {
-            continue;
-        }
-        let Some(group) = bindings.get(&(event.object, event.stage)) else {
-            continue;
-        };
-        let song = i128::from(event.at.as_nanos()) - i128::from(offset);
-        let at = output_time(song, start, output_origin, preroll)?;
-        if !before_endpoint(at, output_origin, sample_rate, end)? {
-            continue;
-        }
-        for sound in group {
-            let command = sound
-                .command_for(event, at)
-                .expect("indexed sound binding matches this hit");
-            scheduled
-                .try_reserve(1)
-                .map_err(|_| ReplayAudioError::AllocationFailed)?;
-            scheduled.push((at, true, scheduled.len(), command));
-        }
-    }
-    if let Some((mut judge, timeline)) = input_sounds {
-        // One forward pass preserves contact/button freshness and equal-time
-        // operation order without rebuilding through repeated replay seeks.
+    if let Some(hazards) = hazard_sounds {
+        let mut judge = selection_judge.expect("audible hazards prepared a pristine judge");
         for record in session.records() {
-            let input = match &record.operation {
-                ReplayOperation::Advance => {
-                    judge.advance_to(record.song_time)?;
+            let (results, press_command) = match &record.operation {
+                ReplayOperation::Advance => (judge.advance_to(record.song_time)?, None),
+                ReplayOperation::Input(input) => {
+                    let fresh = input_sounds.is_some() && judge.is_fresh_press(input);
+                    let results = judge.push_input(input, record.song_time)?;
+                    let command = input_sounds.as_ref().and_then(|timeline| {
+                        timeline.command_for_press(
+                            input,
+                            fresh,
+                            record.song_time,
+                            record.song_time,
+                            &results,
+                        )
+                    });
+                    (results, command)
+                }
+            };
+            for event in &results {
+                if !matches!(event.outcome, JudgeOutcome::Hit { .. }) {
                     continue;
                 }
-                ReplayOperation::Input(input) => input,
-            };
-            let fresh = judge.is_fresh_press(input);
-            let results = judge.push_input(input, record.song_time)?;
-            let Some(AudioCommand::Play {
-                voice,
-                sample,
-                gain,
-                ..
-            }) = timeline.command_for_press(
-                input,
-                fresh,
-                record.song_time,
-                record.song_time,
-                &results,
+                let Some(group) = bindings.get(&(event.object, event.stage)) else {
+                    continue;
+                };
+                let song = i128::from(event.at.as_nanos()) - i128::from(offset);
+                let at = output_time(song, start, output_origin, preroll)?;
+                if !before_endpoint(at, output_origin, sample_rate, end)? {
+                    continue;
+                }
+                for sound in group {
+                    let command = sound
+                        .command_for(event, at)
+                        .expect("indexed sound binding matches this hit");
+                    scheduled
+                        .try_reserve(1)
+                        .map_err(|_| ReplayAudioError::AllocationFailed)?;
+                    scheduled.push((at, true, scheduled.len(), command));
+                }
+            }
+            // Only selected commands require output mapping. Marker timestamps
+            // stay in the judge report; delayed operations schedule at their own
+            // recorded song time, after that operation's normal and press sounds.
+            for command in press_command.into_iter().chain(
+                judge
+                    .hazard_events()
+                    .iter()
+                    .filter_map(|event| hazards.command_for(event, record.song_time)),
+            ) {
+                let AudioCommand::Play {
+                    voice,
+                    sample,
+                    gain,
+                    ..
+                } = command
+                else {
+                    unreachable!("sound selectors return Play commands");
+                };
+                let at = output_time(
+                    i128::from(record.song_time.as_nanos()),
+                    start,
+                    output_origin,
+                    preroll,
+                )?;
+                if !before_endpoint(at, output_origin, sample_rate, end)? {
+                    continue;
+                }
+                scheduled
+                    .try_reserve(1)
+                    .map_err(|_| ReplayAudioError::AllocationFailed)?;
+                scheduled.push((
+                    at,
+                    true,
+                    scheduled.len(),
+                    AudioCommand::Play {
+                        voice,
+                        sample,
+                        at,
+                        gain,
+                    },
+                ));
+            }
+        }
+        if judge.stable_hash()? != final_judge_hash {
+            return Err(ReplayAudioError::InvalidConfiguration(
+                "sound selection judge differs from reconstructed state",
             )
-            else {
+            .into());
+        }
+    } else {
+        for event in session.results() {
+            if !matches!(event.outcome, JudgeOutcome::Hit { .. }) {
+                continue;
+            }
+            let Some(group) = bindings.get(&(event.object, event.stage)) else {
                 continue;
             };
-            let at = output_time(
-                i128::from(record.song_time.as_nanos()),
-                start,
-                output_origin,
-                preroll,
-            )?;
+            let song = i128::from(event.at.as_nanos()) - i128::from(offset);
+            let at = output_time(song, start, output_origin, preroll)?;
             if !before_endpoint(at, output_origin, sample_rate, end)? {
                 continue;
             }
-            scheduled
-                .try_reserve(1)
-                .map_err(|_| ReplayAudioError::AllocationFailed)?;
-            scheduled.push((
-                at,
-                true,
-                scheduled.len(),
-                AudioCommand::Play {
+            for sound in group {
+                let command = sound
+                    .command_for(event, at)
+                    .expect("indexed sound binding matches this hit");
+                scheduled
+                    .try_reserve(1)
+                    .map_err(|_| ReplayAudioError::AllocationFailed)?;
+                scheduled.push((at, true, scheduled.len(), command));
+            }
+        }
+        if let Some(timeline) = input_sounds {
+            let mut judge = selection_judge.expect("press sounds prepared a pristine judge");
+            // One forward pass preserves contact/button freshness and equal-time
+            // operation order without rebuilding through repeated replay seeks.
+            for record in session.records() {
+                let input = match &record.operation {
+                    ReplayOperation::Advance => {
+                        judge.advance_to(record.song_time)?;
+                        continue;
+                    }
+                    ReplayOperation::Input(input) => input,
+                };
+                let fresh = judge.is_fresh_press(input);
+                let results = judge.push_input(input, record.song_time)?;
+                let Some(AudioCommand::Play {
                     voice,
                     sample,
-                    at,
                     gain,
-                },
-            ));
+                    ..
+                }) = timeline.command_for_press(
+                    input,
+                    fresh,
+                    record.song_time,
+                    record.song_time,
+                    &results,
+                )
+                else {
+                    continue;
+                };
+                let at = output_time(
+                    i128::from(record.song_time.as_nanos()),
+                    start,
+                    output_origin,
+                    preroll,
+                )?;
+                if !before_endpoint(at, output_origin, sample_rate, end)? {
+                    continue;
+                }
+                scheduled
+                    .try_reserve(1)
+                    .map_err(|_| ReplayAudioError::AllocationFailed)?;
+                scheduled.push((
+                    at,
+                    true,
+                    scheduled.len(),
+                    AudioCommand::Play {
+                        voice,
+                        sample,
+                        at,
+                        gain,
+                    },
+                ));
+            }
         }
     }
     scheduled.sort_unstable_by_key(|&(at, is_hit, ordinal, _)| (at, is_hit, ordinal));

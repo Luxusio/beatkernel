@@ -70,12 +70,12 @@ and mine fingerprint with `beatkernel-bms/input-sounds/v2`, a one-byte invisible
 presence flag, its u64 fingerprint when present, and the u64 mine fingerprint.
 Both domains use the existing semantic FNV-1a64 convention, not a cryptographic
 asset digest. Existing source-aware capture/replay validation
-consume that common identity. Native installation is specified below; replay
-and offline mine audio and guarded WAV00 file loading remain separate work.
+consume that common identity. Native, replay and offline installation are
+specified below; guarded WAV00 file loading remains separate work.
 
 Author independent deferred plan/voice/identity, atomic group-order collision,
 real solo/local report-to-command and completion-tail fixtures. Gauge/fatal-stop
-policy, replay/offline installation and guarded asset admission remain
+policy and guarded asset admission remain
 unfinished. Execution and acceptance remain deferred.
 
 ### Native WAV00 preparation and activation
@@ -100,8 +100,46 @@ Author independent deferred actual native-plan/Runtime/Mixer and cohort fixtures
 for routing, held triggering versus avoidance/fatal silence, simultaneous normal
 and press sounds, disjoint member voices, finite-end fences, atomic refusal and
 missing PCM. Native source changes and portable composition compilation do not
-prove Windows/macOS device behavior. File mine admission, WAV00 asset loading,
-replay/offline scheduling and complete gauge/fatal-stop policy remain unfinished.
+prove Windows/macOS device behavior. Replay/offline scheduling is specified
+below. File mine admission, WAV00 asset loading and complete gauge/fatal-stop
+policy remain unfinished.
+
+### Replay and offline WAV00 consumers
+
+Replay audio validates the same source sound identity and prepares the common
+MineSoundPlan against actual PCM and already reserved press voices. Missing
+audible WAV00 PCM fails planning. When mine sounds are audible, replay the
+original recorded operations through a pristine source-aware judge once. Consume
+each operation's normal hits, fresh press selection and hazard report immediately
+in that order, including hazards emitted by Advance. Map hazard commands from
+the recorded operation's song time to the output origin, removing section start
+once and adding preroll once. Do not substitute the original mine timestamp for
+a delayed recorded operation, reinterpret fatal damage, seek the engine from
+scratch, advance past the recorded prefix or reuse an old operation's report.
+Preserve original operation order for equal output times. BGM retains its
+existing background-before-gameplay ordering. Finite output rejects commands
+whose rounded execution frame reaches the endpoint. No audible mine extension
+retains the existing replay sound scheduling path and final reconstructed hash.
+
+Offline rendering installs common hazard sounds after press sounds, against
+actual PCM. Its chronological schedule includes explicit judge advances at
+compiled mine boundaries, after BGM and synthetic normal-note inputs at the
+same song time. This resolves held mine triggers before rendering their output
+frames instead of delaying them to the next ordinary input or final report.
+Mine-only lanes may appear in the binding map but generate no artificial presses;
+only actual normal notes supply synthetic input. Fatal and absent-WAV00 mines
+still follow actual judge outcomes without explosion commands. Keep the existing
+frame extent, output clipping, queue failure evidence and no-mine schedule.
+
+Practice section preparation already retains the original PCM bank, including
+SampleId(0), and allocates BGM suffix IDs strictly above zero. Preserve the WAV00
+PCM unchanged through practice/replay preparation; do not crop it like a crossing
+BGM tail or relabel it as a suffix. Add independent deferred fixtures using
+actual capture/reconstruction, Runtime, offline rendering and Mixer paths for
+equal-time order, held contacts, Advance-triggered hazards, replay prefixes,
+section/offset/preroll/finite mapping, missing PCM and silent/fatal sources,
+block-partition consistency and unchanged WAV00 across section BGM slicing.
+File mine admission, asset loading and complete gauge/fatal-stop remain pending.
 
 ### Common optional sound primitive
 
