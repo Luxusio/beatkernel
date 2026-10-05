@@ -40,24 +40,51 @@ impl ScoreSummary {
         if events.is_empty() {
             return Ok(());
         }
-        let mut next = self.clone();
-        next.timing.observe(events)?;
+        let mut timing = self.timing;
+        timing.observe(events)?;
+        let mut hits = self.hits;
+        let mut misses = self.misses;
+        let mut combo = self.combo;
+        let mut max_combo = self.max_combo;
         for event in events {
             match event.outcome {
-                JudgeOutcome::Hit { grade, .. } => {
-                    next.hits = increment(next.hits)?;
-                    next.combo = increment(next.combo)?;
-                    next.max_combo = next.max_combo.max(next.combo);
-                    let count = next.grades.entry(grade.0).or_default();
-                    *count = increment(*count)?;
+                JudgeOutcome::Hit { .. } => {
+                    hits = increment(hits)?;
+                    combo = increment(combo)?;
+                    max_combo = max_combo.max(combo);
                 }
                 JudgeOutcome::Miss { .. } => {
-                    next.misses = increment(next.misses)?;
-                    next.combo = 0;
+                    misses = increment(misses)?;
+                    combo = 0;
                 }
             }
         }
-        *self = next;
+        let batch_hits = hits - self.hits;
+        for (&grade, &count) in &self.grades {
+            if count.checked_add(batch_hits).is_none() {
+                // Only near-overflow entries need an exact borrowed batch scan.
+                // An unrelated exhausted grade must not reject this observation.
+                let mut next_count = count;
+                for event in events {
+                    if matches!(event.outcome, JudgeOutcome::Hit { grade: hit, .. } if hit.0 == grade)
+                    {
+                        next_count = increment(next_count)?;
+                    }
+                }
+            }
+        }
+        self.hits = hits;
+        self.misses = misses;
+        self.combo = combo;
+        self.max_combo = max_combo;
+        self.timing = timing;
+        for event in events {
+            if let JudgeOutcome::Hit { grade, .. } = event.outcome {
+                // Preflight proved every existing count fits; a new grade's
+                // count is bounded by the already checked batch hit count.
+                *self.grades.entry(grade.0).or_default() += 1;
+            }
+        }
         Ok(())
     }
 }
@@ -289,6 +316,11 @@ impl Competition {
     ) -> Result<(), CompetitionError> {
         if self.song_time.is_some_and(|previous| song_time < previous) {
             return Err(CompetitionError::TimeRegression);
+        }
+        if self.opponents.is_empty() {
+            self.score.observe(events)?;
+            self.song_time = Some(song_time);
+            return Ok(());
         }
         let mut score = self.score.clone();
         score.observe(events)?;
@@ -674,3 +706,7 @@ mod tests {
         assert_eq!(exhausted.timing, before.timing);
     }
 }
+
+#[cfg(test)]
+#[path = "score_observation_fixtures.rs"]
+mod score_observation_fixtures;
