@@ -194,6 +194,7 @@ async function workerHarness(options = {}) {
     free() { this.live(); assert.equal(++this.frees, 1); }
   }
   class BrowserGame {
+    completed_archive() { return null; }
     completed_results() { return null; }
     static new_physical_contact(prepared, ...args) {
       contactConstructions.push({ prepared, args });

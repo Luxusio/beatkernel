@@ -1,11 +1,31 @@
 // Deferred pure finite metadata admission. No result/gauge is manufactured here.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateCompletedResults, resultRequest } from "./completed-results-model.mjs";
+import { validateCompletedResults, resultRequest, validateCompletedArchive } from "./completed-results-model.mjs";
 const metadata = (extra = {}) => ({ proof: true, players: [4294967295, 7], page: 0,
   pages: 1, detailPages: 1, comparisonPages: 3, comparisons: false, hasComparisons: true, failed: false, ...extra });
 const owner = (extra = {}) => ({ ...metadata(), id: 9007199254740991, lastRpc: 3,
   ready: false, shown: false, ...extra });
+test("archive admission preserves exact roster and opaque bytes without trusting replay completion",()=>{
+  const context={playId:7,players:[4294967295,7],recording:true,mode:"live"};
+  const bytes=Uint8Array.from([1,2,3]);const message={playId:7,completedArchive:bytes,archivePlayers:[4294967295,7],archiveError:null,replayComplete:false};
+  assert.equal(validateCompletedArchive(message,context).bytes,bytes);
+  assert.deepEqual(validateCompletedArchive({playId:7},context),{bytes:null,error:null});
+  assert.deepEqual(validateCompletedArchive({...message,completedArchive:null,archivePlayers:null,archiveError:"encode refused"},context),{bytes:null,error:"encode refused"});
+  for(const bad of [{playId:8},{archivePlayers:[7,4294967295]},{archivePlayers:[4294967295]},
+    {archivePlayers:[7,7]},{archiveError:"not null"},{completedArchive:new Uint8Array(0)},
+    {completedArchive:new Uint8Array(5*1024*1024+1)},{completedArchive:new Uint8Array(4).subarray(1)},
+    {replay:bytes},{replays:[{player:4294967295,replay:bytes}]}]){
+    assert.throws(()=>validateCompletedArchive({...message,...bad},context));
+  }
+  for(const bad of [{players:[0,7]},{players:[4294967296,7]},{players:[7,7]},{recording:false},{mode:"replay"}]){
+    assert.throws(()=>validateCompletedArchive(message,{...context,...bad}));
+  }
+  if(typeof ArrayBuffer.prototype.resize==="function"){
+    const resizable=new Uint8Array(new ArrayBuffer(3,{maxByteLength:8}));
+    assert.throws(()=>validateCompletedArchive({...message,completedArchive:resizable},context));
+  }
+});
 test("admission copies exact original IDs and freezes finite metadata", () => {
   const input = metadata(); const first = validateCompletedResults(input);
   input.players[0] = 1;

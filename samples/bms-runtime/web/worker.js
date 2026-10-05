@@ -1233,8 +1233,24 @@ function disposeGame(state) {
   const game = state.game;
   state.game = null;
   const result = { cleanupError: captureError, replay: null, replayError: null,
+    completedArchive: null, archivePlayers: null, archiveError: null,
     ...(state.localPlan ? { replays: state.localPlan.members.map(({ player }) => ({ player, replay: null, replayError: null, replayComplete: false })) } : {}) };
   if (!game) return result;
+  // Rust alone admits genuine whole-roster completion; export before consuming captures.
+  if (state.mode === "live" && state.recordReplay) {
+    try {
+      const bytes = game.completed_archive();
+      if (bytes != null) {
+        if (!(bytes instanceof Uint8Array) || !(bytes.buffer instanceof ArrayBuffer)
+          || bytes.buffer.resizable === true || bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength
+          || bytes.byteLength === 0 || bytes.byteLength > 5 * 1024 * 1024) {
+          throw new Error("Completed archive has an invalid bounded transferable layout.");
+        }
+        result.completedArchive = bytes;
+        result.archivePlayers = state.localPlan ? state.localPlan.members.map(({ player }) => player) : [1];
+      }
+    } catch (cause) { result.archiveError = message(cause); }
+  }
   let stopped = false;
   try { game.stop(); stopped = true; } catch (cause) { result.cleanupError ??= cause; }
   if (state.localPlan && state.recordReplay && stopped) {
@@ -1264,13 +1280,21 @@ function disposeGame(state) {
       result.replay = bytes;
     } catch (cause) { result.replayError = message(cause); }
   }
+  if (result.completedArchive && (result.replay?.buffer === result.completedArchive.buffer
+    || result.replays?.some(row => row.replay?.buffer === result.completedArchive.buffer))) {
+    result.completedArchive = null;
+    result.archivePlayers = null;
+    result.archiveError = "Completed archive must own a separate transferable buffer.";
+  }
   try { game.free(); } catch (cause) { result.cleanupError ??= cause; }
   return result;
 }
 
-function replayTransfers(replay, replays) {
-  return replays ? replays.filter(row => row.replay !== null).map(row => row.replay.buffer)
+function replayTransfers(replay, replays, completedArchive) {
+  const buffers = replays ? replays.filter(row => row.replay !== null).map(row => row.replay.buffer)
     : replay ? [replay.buffer] : [];
+  if (completedArchive) buffers.push(completedArchive.buffer);
+  return buffers;
 }
 
 function failPlay(state, error, request = null) {
@@ -1283,7 +1307,7 @@ function failPlay(state, error, request = null) {
   stopRedraw();
   closeNetwork(state.network);
   const roomClosing = state.room ? finishRoom(state, false) : null;
-  const { cleanupError, replay, replayError, replays } = disposeGame(state);
+  const { cleanupError, replay, replayError, replays, completedArchive, archivePlayers, archiveError } = disposeGame(state);
   const text = message(cleanupError ? `${message(error)}; cleanup: ${message(cleanupError)}` : error);
   const pending = new Set([request?.rpcId, state.startRpcId, state.sampleRpcId, state.audioRpcId, state.network?.rpcId, state.room?.rpcId]);
   state.startRpcId = null;
@@ -1298,10 +1322,10 @@ function failPlay(state, error, request = null) {
     completedResults: completedResultsMetadata(state.completedResults), completedResultsError: state.completedResults?.displayError ?? null,
     message: roomError ? message(`${text}; room cleanup: ${message(roomError)}`) : text,
     released: cleanupError === null && roomError === null,
-    replay, replayComplete: false, replayError, ...score, ...(replays ? { replays } : {}),
+    completedArchive, archivePlayers, archiveError, replay, replayComplete: false, replayError, ...score, ...(replays ? { replays } : {}),
     ...(state.network ? { multiplayer: multiplayerOutcome(state.network) } : {}),
     ...(state.room ? { room: roomOutcome(state.room), roomResults: roomResultsMetadata(state.roomResults) } : {}),
-    ...(savedOpponents ? { savedOpponents } : {}) }, replayTransfers(replay, replays));
+    ...(savedOpponents ? { savedOpponents } : {}) }, replayTransfers(replay, replays, completedArchive));
   };
   if (roomClosing) void roomClosing.then(finished).catch(fatal);
   else finished(null);
@@ -1324,7 +1348,7 @@ function stopPlay(state, request) {
     clearRemoteProgress(state.network);
   }
   const roomClosing = state.room ? finishRoom(state, completed) : null;
-  const { cleanupError, replay, replayError, replays } = disposeGame(state);
+  const { cleanupError, replay, replayError, replays, completedArchive, archivePlayers, archiveError } = disposeGame(state);
   const pending = new Set([state.startRpcId, state.sampleRpcId, state.audioRpcId, state.network?.rpcId, state.room?.rpcId]);
   state.startRpcId = null;
   state.sampleRpcId = null;
@@ -1338,13 +1362,13 @@ function stopPlay(state, request) {
     const cleanupFailure = cleanupError ?? roomError;
     retainCompletedResults(state, cleanupFailure);
     if (replays) for (const row of replays) row.replayComplete = !cleanupFailure && completed && row.replay !== null && row.replayError === null;
-    const result = { replay, replayError, ...score, completedResults: completedResultsMetadata(state.completedResults), completedResultsError: state.completedResults?.displayError ?? null, ...(multiplayer ? { multiplayer } : {}),
+    const result = { completedArchive, archivePlayers, archiveError, replay, replayError, ...score, completedResults: completedResultsMetadata(state.completedResults), completedResultsError: state.completedResults?.displayError ?? null, ...(multiplayer ? { multiplayer } : {}),
       ...(state.room ? { room: roomOutcome(state.room), roomResults: roomResultsMetadata(state.roomResults) } : {}),
       ...(savedOpponents ? { savedOpponents } : {}), ...(replays ? { replays } : {}) };
     if (cleanupFailure) report("play-error", { playId: state.id, message: message(cleanupFailure), released: false,
-      ...result, replayComplete: false }, replayTransfers(replay, replays));
+      ...result, replayComplete: false }, replayTransfers(replay, replays, completedArchive));
     else report("play-stopped", { playId: state.id, ...result,
-      replayComplete: completed && replay !== null }, replayTransfers(replay, replays));
+      replayComplete: completed && replay !== null }, replayTransfers(replay, replays, completedArchive));
   };
   scheduleDraw();
   // The game and samples are already released. Network disposal cannot delay

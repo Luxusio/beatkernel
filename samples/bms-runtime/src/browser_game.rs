@@ -134,6 +134,13 @@ pub struct BrowserGame {
 #[wasm_bindgen]
 impl BrowserGame {
     /// Extract only actual StepGameplay completion, never a JavaScript choice.
+    /// Whole original completion archive; never promotes an exported replay prefix.
+    pub fn completed_archive(&self) -> Result<Option<Vec<u8>>, JsValue> {
+        self.game
+            .completed_archive()
+            .map_err(|error| JsValue::from_str(&error.to_string()))
+    }
+
     pub fn completed_results(
         &self,
     ) -> Result<Option<crate::browser_completed_results::BrowserCompletedResults>, JsValue> {

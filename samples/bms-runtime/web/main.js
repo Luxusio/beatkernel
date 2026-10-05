@@ -1,4 +1,4 @@
-import { validateCompletedResults } from "./completed-results-model.mjs";
+import { validateCompletedResults, validateCompletedArchive } from "./completed-results-model.mjs";
 import { snapshotFiles, nanoseconds, seconds } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
 import { RecordsStore } from "./record-store.mjs";
@@ -1454,7 +1454,8 @@ async function play(mode = "live") {
     origin: null, lastHost: 0n, stopping: null, renderId: 0, renderPending: null,
     workerStarted: false, workerReleased: false, workerStop: null, finalScore: null,
     completionReady: false, completionTick: null, cleanupError: null, peerDisplayFailed: false, peerDisplayFailures: new Set(),
-    recordReplay: mode === "live" && ui.record.checked === true, replay: null, replayError: null, naturalFinishRequested: false,
+    recordReplay: mode === "live" && ui.record.checked === true, replay: null, replayError: null,
+    completedArchive: null, archiveError: null, naturalFinishRequested: false,
     replayFile: mode === "replay" ? selectedReplay : null,
     opponentSelection: mode === "live" && opponents.size ? opponents.snapshot() : null,
     opponentCount: mode === "live" ? opponents.size : 0, opponentsFailed: false, opponentError: null,
@@ -2541,6 +2542,9 @@ function stopPlay(reason, failed = false, completed = false) {
           failed = true;
           reason += ` Replay export failed: ${session.replayError}`;
         }
+        if (session.archiveError != null) {
+          reason += ` Completed archive export failed: ${session.archiveError}`;
+        }
         if (session.localPlan && session.owner === owner) {
           showLocalResults(session, failed);
           localRoster.clearSources();
@@ -2550,7 +2554,8 @@ function stopPlay(reason, failed = false, completed = false) {
         } else if (session.replay !== null) {
           revokeReplayURL();
           lastReplay = { bytes: session.replay.bytes, complete: session.replay.complete && !failed, id: session.id,
-            chartPath: session.chartPath, hits: score?.hits ?? null, misses: score?.misses ?? null, combo: score?.combo ?? null };
+            chartPath: session.chartPath, hits: score?.hits ?? null, misses: score?.misses ?? null, combo: score?.combo ?? null,
+            ...(session.completedArchive ? { completedArchive: session.completedArchive, archivePlayer: 1 } : {}) };
           ui.export.textContent = `Download last replay (${lastReplay.complete ? "complete" : "prefix"})`;
           capturedReplays = [lastReplay];
           showCapturedReplays(true);
@@ -2572,7 +2577,21 @@ function stopPlay(reason, failed = false, completed = false) {
   return session.stopping;
 }
 
+function archiveReceipt(session, data) {
+  try {
+    if (session.owner !== owner) throw new Error("Completed archive belongs to a previous library owner.");
+    const archive = validateCompletedArchive(data, { playId: session.id,
+      players: session.localPlan?.players ?? [1], recording: session.recordReplay, mode: session.mode });
+    session.completedArchive = archive.bytes;
+    if (archive.error !== null) session.archiveError = archive.error;
+  } catch (error) {
+    session.completedArchive = null;
+    session.archiveError = String(error.message).slice(0, 4096);
+  }
+}
+
 function replayReceipt(session, data) {
+  archiveReceipt(session, data);
   if (session.localPlan) {
     session.localReplays = localReplayReceipt(session.localPlan, data, { recording: session.recordReplay,
       natural: session.naturalFinishRequested, bytesPerMember: Math.floor(64 * 1024 * 1024 / session.localPlan.players.length) });
@@ -2645,7 +2664,8 @@ function showLocalResults(session, failed) {
         : replay?.replay ? ` · ${replay.replayComplete && !failed ? "Complete recording" : "Recorded prefix"}` : " · No recording");
     rows.append(item);
     if (replay?.replay) recordings.push({ player, bytes: replay.replay, complete: replay.replayComplete && !failed,
-      id: session.id, chartPath: session.chartPath, hits: score.hits, misses: score.misses, combo: score.combo });
+      id: session.id, chartPath: session.chartPath, hits: score.hits, misses: score.misses, combo: score.combo,
+      ...(session.completedArchive ? { completedArchive: session.completedArchive, archivePlayer: player } : {}) });
   }
   ui["local-results"].replaceChildren(rows);
   if (session.recordReplay) {
@@ -2868,7 +2888,8 @@ async function recordAction(action) {
       if (action === "save") {
         await store.save({ bytes: captured.bytes, name: replayFilename(captured),
           chartPath: captured.chartPath, complete: captured.complete,
-          hits: captured.hits, misses: captured.misses, combo: captured.combo });
+          hits: captured.hits, misses: captured.misses, combo: captured.combo,
+          ...(captured.completedArchive ? { completedArchive: captured.completedArchive, archivePlayer: captured.archivePlayer } : {}) });
         if (!recordCurrent(operation)) return;
         committed = "Recording saved. ";
       } else if (action === "delete") {

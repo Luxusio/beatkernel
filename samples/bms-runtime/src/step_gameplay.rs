@@ -357,6 +357,7 @@ pub struct StepGameplay {
     output_clock: Option<PresentationDiscipline>,
     correction_watermark: Option<ClockPoint>,
     capture: Option<LiveReplayCapture>,
+    capture_configured: bool,
     score: ScoreSummary,
     mine_damage: MineDamageSummary,
     gauge: BmsGauge,
@@ -839,6 +840,7 @@ impl StepGameplay {
             output_clock: None,
             correction_watermark: None,
             capture: None,
+            capture_configured: false,
             score: ScoreSummary::default(),
             mine_damage: MineDamageSummary::default(),
             gauge: BmsGauge::default(),
@@ -946,7 +948,7 @@ impl StepGameplay {
     ) -> Result<(), StepGameplayError> {
         self.ensure_solo()?;
         self.ensure_usable()?;
-        if self.started || self.capture.is_some() {
+        if self.started || self.capture_configured {
             return Err(StepGameplayError::InvalidConfiguration(
                 "capture configuration requires an unprocessed, unconfigured runtime",
             ));
@@ -966,7 +968,32 @@ impl StepGameplay {
             report: None,
         })?;
         self.capture = Some(capture);
+        self.capture_configured = true;
         Ok(())
+    }
+
+    /// Cold, read-only archive export from actual latched completion before capture consumption.
+    pub fn completed_archive(
+        &self,
+    ) -> Result<Option<Vec<u8>>, crate::result_archive::ArchiveError> {
+        if !self.capture_configured {
+            return Ok(None);
+        }
+        let Some(result) = self.completed_result else {
+            return Ok(None);
+        };
+        let capture = self
+            .capture
+            .as_ref()
+            .ok_or(crate::result_archive::ArchiveError::Invalid(
+                "completed capture already consumed",
+            ))?;
+        let identity = completed_archive_identity(PlayerId(1), capture, self.gauge.profile())?;
+        let archive = crate::result_archive::ResultArchive::from_completed(
+            &[(PlayerId(1), result)],
+            &[identity],
+        )?;
+        Ok(Some(crate::result_archive::encode_archive(&archive)?))
     }
 
     /// Take the canonical accepted prefix once, only after stop/failure fenced
@@ -1664,6 +1691,7 @@ struct LocalMemberState {
     gauge: BmsGauge,
     completed_result: Option<CompletedPlayResult>,
     capture: Option<LiveReplayCapture>,
+    capture_configured: bool,
     song: Timestamp,
 }
 
@@ -1740,6 +1768,7 @@ impl StepLocalGameplay {
             gauge: BmsGauge::default(),
             completed_result: None,
             capture: None,
+            capture_configured: false,
             song: control.song,
         }));
         Ok((
@@ -1973,7 +2002,7 @@ impl StepLocalGameplay {
     ) -> Result<(), StepLocalGameplayError> {
         self.control.ensure_usable()?;
         let index = self.member_index(player)?;
-        if self.control.started || self.members[index].capture.is_some() {
+        if self.control.started || self.members[index].capture_configured {
             return Err(StepGameplayError::InvalidConfiguration(
                 "capture configuration requires an unprocessed, unconfigured runtime",
             )
@@ -1994,7 +2023,55 @@ impl StepLocalGameplay {
             report: None,
         })?;
         self.members[index].capture = Some(capture);
+        self.members[index].capture_configured = true;
         Ok(())
+    }
+
+    /// Export only the whole genuinely completed original roster, without consuming captures.
+    pub fn completed_archive(
+        &self,
+    ) -> Result<Option<Vec<u8>>, crate::result_archive::ArchiveError> {
+        use crate::result_archive::{ArchiveError, ResultArchive, MAX_PLAYERS, encode_archive};
+        if !self.members.iter().any(|member| member.capture_configured) {
+            return Ok(None);
+        }
+        if self
+            .members
+            .iter()
+            .any(|member| member.completed_result.is_none())
+        {
+            return Ok(None);
+        }
+        if self.members.is_empty() || self.members.len() > MAX_PLAYERS {
+            return Err(ArchiveError::Invalid("completed roster size"));
+        }
+        let mut results = Vec::new();
+        let mut identities = Vec::new();
+        results
+            .try_reserve_exact(self.members.len())
+            .map_err(|_| ArchiveError::AllocationFailed)?;
+        identities
+            .try_reserve_exact(self.members.len())
+            .map_err(|_| ArchiveError::AllocationFailed)?;
+        for member in &self.members {
+            let capture = member
+                .capture
+                .as_ref()
+                .ok_or(ArchiveError::Invalid("completed member missing capture"))?;
+            identities.push(completed_archive_identity(
+                member.player,
+                capture,
+                member.gauge.profile(),
+            )?);
+            results.push((
+                member.player,
+                member
+                    .completed_result
+                    .ok_or(ArchiveError::Invalid("completed member missing result"))?,
+            ));
+        }
+        let archive = ResultArchive::from_completed(&results, &identities)?;
+        Ok(Some(encode_archive(&archive)?))
     }
 
     /// Export each accepted member prefix once after the entire owner is fenced.
@@ -2592,4 +2669,63 @@ fn counter_values(counters: AudioCounters) -> [u64; 11] {
         counters.invalid_rates,
         counters.invalid_times,
     ]
+}
+
+/// Bounded fallible copies are cold archive work, never part of input/report processing.
+fn completed_archive_identity(
+    player: PlayerId,
+    capture: &LiveReplayCapture,
+    profile: &crate::gauge::GaugeProfile,
+) -> Result<
+    (
+        PlayerId,
+        beatkernel::replay::ReplayHeader,
+        crate::gauge::GaugeProfile,
+    ),
+    crate::result_archive::ArchiveError,
+> {
+    use crate::result_archive::{ArchiveError, MAX_HEADER_BYTES};
+    let header = capture.header();
+    let length = header
+        .chart_identity
+        .len()
+        .checked_add(header.rules_identity.len())
+        .and_then(|n| n.checked_add(header.options.len()))
+        .ok_or(ArchiveError::TooLarge)?;
+    if length > MAX_HEADER_BYTES {
+        return Err(ArchiveError::TooLarge);
+    }
+    let copy = |bytes: &[u8]| -> Result<Vec<u8>, ArchiveError> {
+        let mut v = Vec::new();
+        v.try_reserve_exact(bytes.len())
+            .map_err(|_| ArchiveError::AllocationFailed)?;
+        v.extend_from_slice(bytes);
+        Ok(v)
+    };
+    let mut grades = Vec::new();
+    grades
+        .try_reserve_exact(profile.grades().len())
+        .map_err(|_| ArchiveError::AllocationFailed)?;
+    grades.extend_from_slice(profile.grades());
+    let profile = crate::gauge::GaugeProfile::new(
+        profile.initial_units(),
+        profile.clear_units(),
+        profile.default_hit_delta(),
+        profile.miss_delta(),
+        profile.fail_on_empty(),
+        grades,
+    )
+    .map_err(|_| ArchiveError::Invalid("gauge profile"))?;
+    Ok((
+        player,
+        beatkernel::replay::ReplayHeader {
+            version: header.version,
+            chart_identity: copy(&header.chart_identity)?,
+            rules_identity: copy(&header.rules_identity)?,
+            options: copy(&header.options)?,
+            seed: header.seed,
+            normalized_clock: header.normalized_clock,
+        },
+        profile,
+    ))
 }

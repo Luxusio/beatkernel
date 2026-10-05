@@ -114,6 +114,7 @@ async function workerHarness(options = {}) {
     needs_redraw() { return options.needsRedraw ?? false; }
   }
   class BrowserGame {
+    completed_archive() { return null; }
     completed_results() { return null; }
     constructor(prepared, ...constructorArgs) {
       if (!options.gameplay) throw new Error("Preview fixtures must not create gameplay owners");

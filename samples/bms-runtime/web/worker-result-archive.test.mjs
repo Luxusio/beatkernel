@@ -1,4 +1,4 @@
-// Deferred actual Worker completed Results ownership and cleanup barriers.
+// Deferred actual Worker archive export before replay consumption.
 // Actual Worker and numeric helpers; only generated WASM owners and browser APIs are mocked.
 import assert from "node:assert/strict";
 import { File as NodeFile } from "node:buffer";
@@ -121,96 +121,56 @@ async function showResults(h) {
   await h.tick();
   return reply;
 }
-test("actual Worker captures before game disposal and waits for explicit Window cleanup acknowledgement", async () => {
-  const h = await active({ observeOutput: () => true });
-  await completeOutput(h);
-  assert.equal(h.completedOwners.length, 1);
-  assert.equal(h.games[0].frees, 0);
-  assert.equal(h.views[0].resultDraws.length, 0);
-  await h.send({ kind: "play-stop", playId: 7, completed: true });
-  assert.equal(h.games[0].frees, 1);
-  assert.equal(h.of("play-stopped").at(-1).completedResults.proof, true);
-  assert.ok(h.trace.indexOf("capture-results") < h.trace.indexOf("stop-game"));
-  assert.ok(h.trace.indexOf("capture-results") < h.trace.indexOf("free-game"));
-  assert.equal(h.views[0].resultDraws.length, 0);
-  await h.tick();
-  assert.equal(h.views[0].resultDraws.length, 0, "Worker stop receipt alone cannot bypass Window audio/input cleanup");
-  await showResults(h);
-  assert.equal(h.views[0].resultDraws.at(-1).results, h.completedOwners[0]);
-  assert.equal(h.completedOwners[0].frees, 0);
+async function observeDone(h) {
+  await h.send({kind:"play-render",playId:7,renderId:1,presentedNs:100000000n,presentedHostNs:ORIGIN,report:renderReport()});
+  assert.equal(h.of("play-render-done").at(-1).completed,true);
+}
+test("actual disposal exports one standalone archive before replay consumption and transfers exactly once",async()=>{
+  const h=await active({recordReplay:true,observeOutput:()=>true});await observeDone(h);
+  await h.send({kind:"play-stop",playId:7,completed:true});const final=h.of("play-stopped").at(-1);
+  assert.deepEqual(Array.from(final.completedArchive),[66,75,82,69,83,85,76,84]);
+  assert.deepEqual(Array.from(final.archivePlayers),[1]);assert.equal(final.archiveError,null);
+  assert.ok(h.trace.indexOf("archive-export")<h.trace.indexOf("stop-game"));
+  assert.ok(h.trace.indexOf("archive-export")<h.trace.indexOf("take-replay"));
+  const transfers=h.transfers.at(-1);assert.equal(transfers.length,2);assert.equal(new Set(transfers).size,2);
+  assert.equal(h.games[0].frees,1);assert.equal(h.trace.filter(value=>value==="archive-export").length,1);
+  await h.send({kind:"play-stop",playId:7,completed:true});assert.equal(h.games[0].frees,1);
 });
-test("Results page/mode refusal is atomic and consumes RPC without rendering stale requests", async () => {
-  const h = await active({ observeOutput: () => true });
-  await completeOutput(h); await h.send({ kind: "play-stop", playId: 7, completed: true });
-  await showResults(h);
-  const binding = h.completedOwners[0];
-  assert.equal((await h.rpc("play-results-page", { page: 2, comparisons: true })).result.completedResults.page, 2);
-  assert.equal(binding.page, 2); assert.equal(binding.comparisons, true);
-  const refused = await h.rpc("play-results-page", { page: 1, comparisons: false });
-  assert.ok(refused.error); assert.equal(binding.page, 2); assert.equal(binding.comparisons, true);
-  const count = h.trace.filter(value => value === "page-results").length;
-  await h.send({ kind: "play-results-page", playId: 7, rpcId: h.rpcId, page: 0, comparisons: false });
-  await h.send({ kind: "play-results-page", playId: 6, rpcId: h.rpcId + 1, page: 0, comparisons: false });
-  assert.equal(h.trace.filter(value => value === "page-results").length, count);
-  assert.equal((await h.rpc("play-results-page", { page: 0, comparisons: false })).result.completedResults.page, 0);
+test("whole local roster transfers one archive beside exact original per-member replays",async()=>{
+  const request=startRequest({inputMode:"physical",recordReplay:true,localPlanWords:new Uint32Array([4294967295,1,1,0,7,1,2,0])});
+  const h=await active({startRequest:request,observeOutput:()=>true});await observeDone(h);
+  await h.send({kind:"play-stop",playId:7,completed:true});const final=h.of("play-stopped").at(-1);
+  assert.deepEqual(Array.from(final.archivePlayers),[4294967295,7]);
+  assert.deepEqual(Array.from(final.replays,row=>row.player),[4294967295,7]);
+  assert.equal(h.transfers.at(-1).length,3);assert.equal(new Set(h.transfers.at(-1)).size,3);
+  assert.equal(h.trace.filter(value=>value==="archive-export").length,1);
+  assert.ok(h.trace.indexOf("archive-export")<h.trace.indexOf("take-replay:4294967295"));
+  assert.equal(h.locals[0].frees,1);
 });
-test("cleanup failure preserves genuine result while selection, preview reset or new play disposes it exactly once", async () => {
-  for (const action of ["select", "seek", "play-start"]) {
-    const h = await active({ observeOutput: () => true, stopError: "cleanup refused" });
-    await completeOutput(h); await h.send({ kind: "play-stop", playId: 7, completed: true });
-    const failed = h.of("play-error").at(-1);
-    assert.equal(failed.completedResults.proof, true); assert.equal(failed.released, false);
-    await showResults(h);
-    const binding = h.completedOwners[0];
-    await h.send(action === "select" ? { kind: "select", id: 3, libraryId: 1, path: "song/chart.bms", rate: 48000, seed: "0" }
-      : action === "seek" ? { kind: "seek", id: 3, selectedId: 2, ns: 0n } : startRequest({ playId: 8 }));
-    assert.equal(binding.frees, 1);
-    const draws = h.trace.filter(value => value === "draw-results").length;
-    await h.send({ kind: "play-results-present", playId: 7, rpcId: 100 });
-    assert.equal(binding.frees, 1);
-    assert.equal(h.trace.filter(value => value === "draw-results").length, draws);
+test("archive refusal stays diagnostic while genuine proof, replay export and cleanup survive",async()=>{
+  const h=await active({recordReplay:true,observeOutput:()=>true,archiveError:"late archive refused"});await observeDone(h);
+  await h.send({kind:"play-stop",playId:7,completed:true});const final=h.of("play-stopped").at(-1);
+  assert.equal(final.completedArchive,null);assert.equal(final.archivePlayers,null);assert.match(final.archiveError,/late archive refused/);
+  assert.equal(final.completedResults.proof,true);assert.ok(final.replay instanceof Uint8Array);
+  assert.equal(h.games[0].stops,1);assert.equal(h.games[0].frees,1);
+  const next=await active({recordReplay:true,observeOutput:()=>true,freeError:"cleanup refused"});await observeDone(next);
+  await next.send({kind:"play-stop",playId:7,completed:true});const failed=next.of("play-error").at(-1);
+  assert.ok(failed.completedArchive instanceof Uint8Array);assert.equal(failed.completedResults.proof,true);
+  assert.equal(failed.released,false);assert.equal(failed.replayComplete,false);
+});
+test("prefix and disabled recordings cannot manufacture archives and stale owner stop cannot export again",async()=>{
+  for(const recordReplay of [false,true]){
+    const h=await active({recordReplay});await h.send({kind:"play-stop",playId:7,completed:false});
+    assert.equal(h.of("play-stopped").at(-1).completedArchive,null);
+    assert.equal(h.of("play-stopped").at(-1).archivePlayers,null);
+    await h.send(startRequest({playId:8,recordReplay:true}));const before=h.messages.length;
+    await h.send({kind:"play-stop",playId:7,completed:true});assert.equal(h.messages.length,before);
+    assert.equal(h.games[1].stops,0);
   }
-});
-test("cancelled live and recorded replay prefixes never acquire a completed Results owner", async () => {
-  const cancelled = await active();
-  await cancelled.send({ kind: "play-stop", playId: 7, completed: false });
-  assert.equal(cancelled.of("play-stopped").at(-1).completedResults, null);
-  assert.equal(cancelled.completedOwners.length, 0);
-  const bytes = new Uint8Array([66, 75, 82, 0, 255, 1]);
-  const replay = await active({ observeOutput: () => true,
-    startRequest: startRequest({ mode: "replay", replayFile: new FileType([bytes], "prefix.bkr") }) });
-  await completeOutput(replay);
-  await replay.send({ kind: "play-stop", playId: 7, completed: true });
-  assert.equal(replay.of("play-stopped").at(-1).completedResults, null);
-  assert.equal(replay.completedOwners.length, 0);
-});
-test("premature Window presentation cannot bypass an active game or manufacture completion", async () => {
-  const h = await active();
-  const early = await h.rpc("play-results-present");
-  assert.ok(early.error);
-  assert.equal(h.completedOwners.length, 0);
-  assert.equal(h.views[0].resultDraws.length, 0);
-  assert.equal(h.of("play-error").at(-1).completedResults, null);
-});
-test("async multiplayer write and peer acknowledgement precede result release and Window presentation", async () => {
-  const h = await activeNetwork({ observeOutput: () => true });
-  await completeOutput(h, { presentedHostNs: h.networkOrigin, report: renderReport({ start: 123456n, cursor: 124456n }) });
-  await h.send({ kind: "play-stop", playId: 7, completed: true });
-  const network = h.networks[0];
-  assert.equal(h.games[0].frees, 1); assert.equal(h.completedOwners.length, 1);
-  assert.equal(h.of("play-stopped").length, 0); assert.equal(h.views[0].resultDraws.length, 0);
-  await h.send({ kind: "play-results-present", playId: 7, rpcId: ++h.rpcId });
-  assert.equal(h.views[0].resultDraws.length, 0);
-  for (const submission of network.submissions) submission.gate.resolve();
-  await flushJobs();
-  for (const submission of network.submissions) submission.gate.resolve();
-  await flushJobs();
-  assert.equal(h.of("play-stopped").length, 0);
-  network.emit({ kind: "final-acknowledged" }); network.ack.resolve(); await flushJobs();
-  assert.equal(h.of("play-stopped").at(-1).completedResults.proof, true);
-  assert.equal(h.views[0].resultDraws.length, 0);
-  await showResults(h);
-  assert.equal(h.views[0].resultDraws.at(-1).results, h.completedOwners[0]);
+  const replay=await active({observeOutput:()=>true,startRequest:replayRequest(replayFile().file)});
+  await observeDone(replay);await replay.send({kind:"play-stop",playId:7,completed:true});
+  assert.equal(replay.of("play-stopped").at(-1).completedArchive,null);
+  assert.equal(replay.trace.filter(value=>value==="archive-export").length,0);
 });
 
 function deferred() {
@@ -414,7 +374,13 @@ async function workerHarness(options = {}) {
     free() { this.live(); assert.equal(++this.frees, 1); trace.push("free-results"); }
   }
   class BrowserGame {
-    completed_archive() { return null; }
+    completed_archive() {
+      this.live(); assert.equal(this.stops, 0); assert.equal(this.replayTakes, 0);
+      assert.equal(this.memberReplayTakes?.size ?? 0,0);
+      trace.push("archive-export");
+      if (options.archiveError) throw new Error(options.archiveError);
+      return this.completedEvidence ? new Uint8Array(options.archiveBytes ?? [66,75,82,69,83,85,76,84]) : null;
+    }
     static new_physical_contact(prepared, ...args) {
       contactConstructions.push({ prepared, args });
       if (options.contactConstructError) { prepared.moved = true; throw new Error(options.contactConstructError); }
@@ -551,6 +517,7 @@ async function workerHarness(options = {}) {
       this.live();
       assert.equal(this.stops, 1, "capture export requires a stopped owner");
       assert.equal(++this.replayTakes, 1);
+      trace.push("take-replay");
       this.disposals.push("take");
       if (options.replayError) throw new Error(options.replayError);
       // Opaque binding output: actual codec/parity is covered by the Rust fixtures.
@@ -592,7 +559,7 @@ async function workerHarness(options = {}) {
       options.inputHidBlob?.(this, bytes, audioNs);
     }
     advance(...args) { this.live(); this.calls.push(["advance", ...args]); options.advance?.(this, args); }
-    completed_results() { this.live(); trace.push('capture-results'); assert.equal(this.stops, 0); return this.completedEvidence ? new BrowserCompletedResults() : null; }
+    completed_results() { this.live(); trace.push('capture-results'); assert.equal(this.stops, 0); return this.completedEvidence ? new BrowserCompletedResults(this.memberIds ?? [1]) : null; }
     observe_output(words, presentedNs) {
       this.live();
       this.calls.push(["output", words.slice(), presentedNs]);
@@ -768,6 +735,7 @@ async function workerHarness(options = {}) {
     }
     take_replay(player) {
       this.live(); assert.equal(this.stops, 1);
+      trace.push(`take-replay:${player}`);
       assert.equal(this.memberReplayTakes.has(player), false); this.memberReplayTakes.set(player, 1);
       this.disposals.push(`take:${player}`);
       if (!this.memberCaptures.has(player)) return null;

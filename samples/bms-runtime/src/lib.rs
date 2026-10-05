@@ -849,3 +849,6 @@ pub mod native_completed_save;
 mod native_completed_save_fixtures;
 #[cfg(test)]
 mod native_section_capture_fixtures;
+
+#[cfg(test)]
+mod step_result_archive_fixtures;

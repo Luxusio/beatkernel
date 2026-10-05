@@ -5,6 +5,7 @@ const STORES = ["metadata", "recordings"];
 const MAX_RECORDS = 128;
 const MAX_FILE = 64 * 1024 * 1024;
 const MAX_TOTAL = 256 * 1024 * 1024;
+const MAX_ARCHIVE = 5 * 1024 * 1024;
 const MAX_SCORE = 18446744073709551615n;
 const OWNER = Symbol("RecordsStore");
 
@@ -35,6 +36,16 @@ function validBytes(value) {
   return value instanceof Uint8Array && value.buffer instanceof ArrayBuffer &&
     value.byteOffset === 0 && value.byteLength === value.buffer.byteLength &&
     value.byteLength > 0 && value.byteLength <= MAX_FILE;
+}
+
+function validArchiveBytes(value) {
+  return value instanceof Uint8Array && value.buffer instanceof ArrayBuffer &&
+    value.buffer.resizable !== true && value.byteOffset === 0 && value.byteLength === value.buffer.byteLength &&
+    value.byteLength > 0 && value.byteLength <= MAX_ARCHIVE;
+}
+
+function validPlayer(value) {
+  return Number.isInteger(value) && value >= 1 && value <= 0xffffffff;
 }
 
 function validName(value) {
@@ -74,7 +85,12 @@ function publicMetadata(value, operation) {
   "corrupt", operation, "Stored recording metadata is invalid.");
   const path = chartPath(value.chartPath, "corrupt", operation);
   requireValue(path === value.chartPath, "corrupt", operation, "Stored recording path is not canonical.");
+  const archived = value.archiveByteLength != null || value.archivePlayer != null;
+  requireValue(!archived || (Number.isInteger(value.archiveByteLength) && value.archiveByteLength >= 1
+    && value.archiveByteLength <= MAX_ARCHIVE && validPlayer(value.archivePlayer)),
+  "corrupt", operation, "Stored archive association is invalid.");
   return {
+    ...(archived ? { archiveByteLength: value.archiveByteLength, archivePlayer: value.archivePlayer } : {}),
     id: value.id, name: value.name, chartPath: path, complete: value.complete,
     hits: publicScore(value.hits, operation), misses: publicScore(value.misses, operation),
     combo: publicScore(value.combo, operation), createdAt: value.createdAt, byteLength: value.byteLength,
@@ -84,10 +100,14 @@ function publicMetadata(value, operation) {
 function saveSnapshot(value) {
   const operation = "save";
   requireValue(value !== null && typeof value === "object", "validation", operation, "Recording is required.");
-  const { bytes, name, complete, hits, misses, combo } = value;
+  const { bytes, name, complete, hits, misses, combo, completedArchive, archivePlayer } = value;
+  const archived = completedArchive != null;
+  requireValue(archived ? validArchiveBytes(completedArchive) && validPlayer(archivePlayer) : archivePlayer == null,
+    "validation", operation, "Completed archive requires standalone bytes of at most 5 MiB and an original u32 player ID.");
   requireValue(validBytes(bytes), "validation", operation, "Recording bytes must be a nonempty standalone Uint8Array of at most 64 MiB.");
   requireValue(validName(name) && typeof complete === "boolean", "validation", operation, "Recording name or completion label is invalid.");
   const metadata = {
+    ...(archived ? { archiveByteLength: completedArchive.byteLength, archivePlayer } : {}),
     name, chartPath: chartPath(value.chartPath, "validation", operation), complete,
     hits: storedScore(hits, operation), misses: storedScore(misses, operation),
     combo: storedScore(combo, operation), createdAt: Date.now(), byteLength: bytes.byteLength,
@@ -97,7 +117,10 @@ function saveSnapshot(value) {
   // Validate all metadata before allocating the bounded private snapshot.
   const snapshot = new Uint8Array(bytes.byteLength);
   snapshot.set(bytes);
-  return { metadata, bytes: snapshot };
+  if (!archived) return { metadata, bytes: snapshot };
+  const archiveSnapshot = new Uint8Array(completedArchive.byteLength);
+  archiveSnapshot.set(completedArchive);
+  return { metadata, bytes: snapshot, completedArchive: archiveSnapshot, archivePlayer };
 }
 
 function validateSchema(db, transaction) {
@@ -120,7 +143,7 @@ function scanMetadata(store, operation, watch, done) {
     const row = publicMetadata(cursor.value, operation);
     requireValue(cursor.primaryKey === row.id && (!rows.length || rows[rows.length - 1].id < row.id),
       "corrupt", operation, "Stored recording key is inconsistent.");
-    bytes += row.byteLength;
+    bytes += row.byteLength + (row.archiveByteLength ?? 0);
     requireValue(bytes <= MAX_TOTAL, "corrupt", operation, "Stored recording bytes exceed their limit.");
     rows.push(row);
     cursor.continue();
@@ -291,12 +314,14 @@ export class RecordsStore {
     return this.#transaction("save", STORES, "readwrite", (transaction, watch, done) => {
       const metadata = transaction.objectStore("metadata");
       scanMetadata(metadata, "save", watch, (rows, bytes) => {
-        requireValue(rows.length < MAX_RECORDS && bytes + snapshot.metadata.byteLength <= MAX_TOTAL,
+        requireValue(rows.length < MAX_RECORDS && bytes + snapshot.metadata.byteLength + (snapshot.metadata.archiveByteLength ?? 0) <= MAX_TOTAL,
           "validation", "save", "Recording library capacity exceeded; delete a record explicitly before saving.");
         watch(metadata.add(snapshot.metadata), id => {
           requireValue(validId(id), "corrupt", "save", "Generated recording id is invalid.");
           const record = publicMetadata({ ...snapshot.metadata, id }, "save");
-          watch(transaction.objectStore("recordings").add({ id, bytes: snapshot.bytes }), () => done(record));
+          const payload = { id, bytes: snapshot.bytes,
+            ...(snapshot.completedArchive ? { completedArchive: snapshot.completedArchive, archivePlayer: snapshot.archivePlayer } : {}) };
+          watch(transaction.objectStore("recordings").add(payload), () => done(record));
         });
       });
     });
@@ -314,7 +339,16 @@ export class RecordsStore {
           requireValue(payload !== null && typeof payload === "object" && payload.id === id &&
             validBytes(payload.bytes) && payload.bytes.byteLength === metadata.byteLength,
           "corrupt", "load", "Stored recording payload is missing or invalid.");
-          done({ metadata, bytes: payload.bytes });
+          if (metadata.archiveByteLength !== undefined) {
+            requireValue(validArchiveBytes(payload.completedArchive) && payload.completedArchive.byteLength === metadata.archiveByteLength
+              && payload.archivePlayer === metadata.archivePlayer,
+            "corrupt", "load", "Stored archive payload association is invalid.");
+            done({ metadata, bytes: payload.bytes, completedArchive: payload.completedArchive, archivePlayer: payload.archivePlayer });
+          } else {
+            requireValue(payload.completedArchive == null && payload.archivePlayer == null,
+              "corrupt", "load", "Stored archive payload has no matching metadata.");
+            done({ metadata, bytes: payload.bytes });
+          }
         });
       });
     });

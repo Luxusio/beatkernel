@@ -157,6 +157,57 @@ function bothStores(transaction, mode) {
   assert.deepEqual([...transaction.names].sort(), ["metadata", "recordings"]);
 }
 
+test("archive save validates IDs and whole standalone buffers before snapshots or transaction effects", async () => {
+  const h=await harness();const {store,db}=await h.opened();const before=db.transactions.length;
+  for(const fields of [{completedArchive:new Uint8Array(0),archivePlayer:1},
+    {completedArchive:new Uint8Array(5*1024*1024+1),archivePlayer:1},
+    {completedArchive:new Uint8Array(4).subarray(1),archivePlayer:1},
+    {completedArchive:new Uint8Array([1]),archivePlayer:0},
+    {completedArchive:new Uint8Array([1]),archivePlayer:4294967296},
+    {completedArchive:new Uint8Array([1]),archivePlayer:1.5}, {archivePlayer:7}]) {
+    await failure(attempt(()=>store.save(input(fields))),"validation");
+    assert.equal(db.transactions.length,before);
+  }
+  const source=input({completedArchive:Uint8Array.from([8,7,6]),archivePlayer:4294967295});
+  const saved=attempt(()=>store.save(source));source.completedArchive[0]=0;source.bytes[0]=0;
+  const tx=db.transactions.at(-1);scan(tx.request("metadata","cursor"),[]);
+  const metadata=tx.request("metadata","add").args[0];assert.equal(metadata.archiveByteLength,3);assert.equal(metadata.archivePlayer,4294967295);
+  tx.request("metadata","add").succeed(7);const payload=tx.request("recordings","add");
+  assert.deepEqual(Array.from(payload.args[0].completedArchive),[8,7,6]);
+  assert.notEqual(payload.args[0].completedArchive.buffer,source.completedArchive.buffer);
+  assert.notEqual(payload.args[0].completedArchive.buffer,payload.args[0].bytes.buffer);
+  payload.succeed(7);await flush();assert.equal(saved.state,"pending");tx.complete();
+  assert.equal((await success(saved)).archivePlayer,4294967295);store.close();
+});
+test("archive association reads reject later corruption atomically while legacy payload stays compatible",async()=>{
+  const h=await harness();const {store,db}=await h.opened();const bytes=Uint8Array.from([66,75,82,255]);
+  const archive=Uint8Array.from([8,7,6]);const metadata=stored(7,{archiveByteLength:3,archivePlayer:4294967295});
+  for(const payload of [{id:7,bytes},{id:7,bytes,completedArchive:archive,archivePlayer:7},
+    {id:7,bytes,completedArchive:new Uint8Array(2),archivePlayer:4294967295},
+    {id:7,bytes,completedArchive:new Uint8Array(4).subarray(1),archivePlayer:4294967295}]){
+    const loaded=attempt(()=>store.load(7));const tx=db.transactions.at(-1);
+    tx.request("metadata","get").succeed(metadata);tx.request("recordings","get").succeed(payload);
+    if(tx.aborts===0)tx.complete();await failure(loaded,"corrupt");
+  }
+  const loaded=attempt(()=>store.load(7));const tx=db.transactions.at(-1);
+  tx.request("metadata","get").succeed(metadata);tx.request("recordings","get").succeed({id:7,bytes,completedArchive:archive,archivePlayer:4294967295});
+  await flush();assert.equal(loaded.state,"pending");tx.complete();const result=await success(loaded);
+  assert.equal(result.archivePlayer,4294967295);assert.deepEqual(Array.from(result.completedArchive),[8,7,6]);
+  const legacy=attempt(()=>store.load(7));const old=db.transactions.at(-1);
+  old.request("metadata","get").succeed(stored(7));old.request("recordings","get").succeed({id:7,bytes});old.complete();
+  assert.equal((await success(legacy)).completedArchive,undefined);store.close();
+});
+test("archive capacity charges every private copy and transaction abort is authoritative",async()=>{
+  const h=await harness();const {store,db}=await h.opened();const recording=input({completedArchive:new Uint8Array(3),archivePlayer:7});
+  const full=attempt(()=>store.save(recording));const tx=db.transactions.at(-1);
+  scan(tx.request("metadata","cursor"),Array.from({length:4},(_,index)=>stored(index+1,{byteLength:64*1024*1024-(index===3?6:0)})));
+  await failure(full,"validation");assert.equal(tx.requests.some(row=>row.kind==="add"),false);
+  const failed=attempt(()=>store.save(recording));const aborted=db.transactions.at(-1);scan(aborted.request("metadata","cursor"),[]);
+  aborted.request("metadata","add").succeed(9);aborted.request("recordings","add").succeed(9);
+  await flush();assert.equal(failed.state,"pending");aborted.fail(new DOMException("archive quota at commit","QuotaExceededError"));
+  await failure(failed,"quota");store.close();
+});
+
 test("invalid save fields reject before a transaction and valid aliases retain exact Unicode and integer scores", async () => {
   const h = await harness();
   const { store, db } = await h.opened();
