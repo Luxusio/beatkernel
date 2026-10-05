@@ -2,6 +2,8 @@
 use crate::{
     competition::{Competition, OpponentKind},
     competition_progress,
+    competition_opponent_loading::{self, OpponentLoadError, OpponentRequest},
+    competition_opponent_loader_bridge::NativeOpponentReplayPort,
     competition_terminal::{self, DeliveryStatus, TerminalGuard},
     competition_terminal_bridge::NativeTerminalPort,
     input_sounds::InputSoundIdentity,
@@ -20,7 +22,6 @@ use crate::{
     competition_start_gate::{self, CompetitionSetupControl},
     native_pump_system::SystemControl,
     replay_capture::LiveReplayCapture,
-    replay_playback::read_replay,
 };
 use beatkernel::{
     input::CodecLimits,
@@ -308,11 +309,26 @@ impl CompetitionOptions {
         competition: &mut Competition,
         limits: ReplayCodecLimits,
     ) -> Result<()> {
-        for (kind, path) in &self.ghosts {
-            let file = read_replay(&mut File::open(path)?, limits)?;
-            competition.add_replay(source, file, limits, *kind, path.display().to_string())?;
+        if self.ghosts.len() > competition.remaining_opponent_capacity() {
+            return Err(crate::competition::CompetitionError::TooManyOpponents.into());
         }
-        Ok(())
+        let mut requests = Vec::new();
+        requests.try_reserve_exact(self.ghosts.len())?;
+        requests.extend(self.ghosts.iter().map(|(kind, path)| OpponentRequest {
+            kind: *kind,
+            key: path.as_path(),
+        }));
+        match competition_opponent_loading::load_opponents(
+            &mut NativeOpponentReplayPort,
+            source,
+            competition,
+            &requests,
+            limits,
+        ) {
+            Ok(()) => Ok(()),
+            Err(OpponentLoadError::Load(error)) => Err(error),
+            Err(OpponentLoadError::Competition(error)) => Err(error.into()),
+        }
     }
 }
 

@@ -341,6 +341,11 @@ impl Competition {
     pub const fn score(&self) -> &ScoreSummary {
         &self.score
     }
+    /// Unused capacity under this comparison's configured opponent bound.
+    pub fn remaining_opponent_capacity(&self) -> usize {
+        self.max_opponents - self.opponents.len()
+    }
+
     /// Loaded saved opponents and their current recorded prefixes.
     pub fn opponents(&self) -> &[GhostOpponent] {
         &self.opponents

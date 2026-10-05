@@ -879,3 +879,6 @@ mod competition_progress_clock_bridge;
 
 pub mod competition_terminal;
 mod competition_terminal_bridge;
+
+mod competition_opponent_loader_bridge;
+pub mod competition_opponent_loading;
