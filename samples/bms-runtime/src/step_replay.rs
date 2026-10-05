@@ -7,12 +7,14 @@ use crate::{
     completion::{CompletionError, ReplayCompletion},
     gauge::BmsGauge,
     mine_damage::MineDamageSummary,
+    offline::OwnedStopEvidence,
     replay_audio::{
-        ReplayAudioError, completed_render_cursor, plan_section_audio, section_end_frame,
+        ReplayAudioError, completed_render_cursor_with_stops, plan_section_audio, section_end_frame,
     },
     replay_visual::ReplayVisual,
     step_gameplay::{
-        StepAudioBatch, StepGameplayError, acknowledge_batch, validate_section_output_evidence,
+        StepAudioBatch, StepGameplayError, acknowledge_batch,
+        validate_section_output_evidence_with_stops,
     },
 };
 use beatkernel::{
@@ -118,6 +120,7 @@ pub struct StepReplay {
     last_render: Option<RenderReport>,
     last_presented: Option<Timestamp>,
     pending: Option<StepAudioBatch>,
+    acknowledged_stops: OwnedStopEvidence,
     sequence: u64,
     failed: bool,
 }
@@ -162,7 +165,8 @@ impl StepReplay {
             .map(|end| section_end_frame(visual.start(), end, config.preroll, sample_rate))
             .transpose()
             .map_err(|error| StepReplayError::Setup(error.into()))?;
-        validate_section_output_evidence(
+        let acknowledged_stops = OwnedStopEvidence::default();
+        validate_section_output_evidence_with_stops(
             config.output_origin,
             sample_rate,
             None,
@@ -170,6 +174,7 @@ impl StepReplay {
             None,
             None,
             playback_end_frame,
+            &acknowledged_stops,
         )
         .map_err(|error| StepReplayError::InvalidConfiguration(error.0))?;
         let plan = plan_section_audio(
@@ -215,6 +220,7 @@ impl StepReplay {
                 last_render: None,
                 last_presented: None,
                 pending: None,
+                acknowledged_stops,
                 sequence: 0,
                 failed: false,
             },
@@ -289,10 +295,27 @@ impl StepReplay {
         success: bool,
     ) -> Result<(), StepReplayError> {
         self.ensure_usable()?;
-        acknowledge_batch(self.pending.take(), sequence, admitted, success).map_err(|error| {
-            self.failed = true;
-            StepReplayError::Acknowledgement(error)
-        })
+        let mut candidate = self.acknowledged_stops;
+        let counted = self.pending.as_ref().map_or(Ok(()), |batch| {
+            candidate.record_admitted(&batch.commands[..admitted.min(batch.commands.len())])
+        });
+        match acknowledge_batch(self.pending.take(), sequence, admitted, success) {
+            Ok(()) => {
+                if let Err(error) = counted {
+                    self.failed = true;
+                    return Err(StepReplayError::InvalidConfiguration(error));
+                }
+                self.acknowledged_stops = candidate;
+                Ok(())
+            }
+            Err(error) => {
+                if matches!(&error, StepGameplayError::AudioRejected { .. }) && counted.is_ok() {
+                    self.acknowledged_stops = candidate;
+                }
+                self.failed = true;
+                Err(StepReplayError::Acknowledgement(error))
+            }
+        }
     }
 
     /// Only genuine presentation advances recorded operations. Render reports
@@ -304,7 +327,7 @@ impl StepReplay {
         presented: Option<ClockPoint>,
     ) -> Result<bool, StepReplayError> {
         self.ensure_usable()?;
-        let normalized = validate_section_output_evidence(
+        let normalized = validate_section_output_evidence_with_stops(
             self.config.output_origin,
             self.sample_rate,
             self.last_render,
@@ -312,18 +335,21 @@ impl StepReplay {
             rendered,
             presented,
             self.playback_end_frame,
+            &self.acknowledged_stops,
         )
         .map_err(|error| self.output_failure(error, rendered, presented))?;
         let cursor = rendered
             .map(|report| {
-                completed_render_cursor(&report).map_err(|error| {
-                    self.failed = true;
-                    StepReplayError::Audio {
-                        error,
-                        rendered: report,
-                        presented,
-                    }
-                })
+                completed_render_cursor_with_stops(&report, &self.acknowledged_stops).map_err(
+                    |error| {
+                        self.failed = true;
+                        StepReplayError::Audio {
+                            error,
+                            rendered: report,
+                            presented,
+                        }
+                    },
+                )
             })
             .transpose()?;
         let song = normalized
@@ -476,6 +502,11 @@ impl StepReplay {
     }
     pub fn bgm_report(&self) -> BgmFeedReport {
         self.feeder.report()
+    }
+    /// Actual Stop prefix accepted by valid remote ACKs, retained after failure.
+    /// Feeder callbacks and immutable planned commands do not establish this count.
+    pub fn acknowledged_stop_commands(&self) -> u64 {
+        self.acknowledged_stops.admitted_stops()
     }
     pub fn fail(&mut self) {
         self.failed = true;

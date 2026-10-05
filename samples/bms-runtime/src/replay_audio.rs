@@ -5,6 +5,7 @@ use crate::{
     gauge::BmsGauge,
     input_sounds::InputSoundPlan,
     mine_sounds::MineSoundPlan,
+    offline::OwnedStopEvidence,
     practice::PracticeStart,
     practice_loop::PracticeLoop,
     replay_playback::{
@@ -50,12 +51,21 @@ impl Error for ReplayAudioError {}
 /// Admission, submitted native frames and physical presentation are different
 /// observations and cannot substitute for this successful RenderReport.
 pub fn completed_render_cursor(report: &RenderReport) -> Result<u64, ReplayAudioError> {
+    completed_render_cursor_with_stops(report, &OwnedStopEvidence::default())
+}
+
+/// Shared strict cursor checks with this owner's actual accepted Stop evidence.
+pub(crate) fn completed_render_cursor_with_stops(
+    report: &RenderReport,
+    stops: &OwnedStopEvidence,
+) -> Result<u64, ReplayAudioError> {
     let counters = report.counters;
     if counters.late_commands != 0
         || counters.pending_full != 0
         || counters.voice_full != 0
         || counters.unknown_samples != 0
-        || counters.unknown_stops != 0
+        || !stops.permits_unknown_stops(counters.unknown_stops)
+        || counters.unknown_stops > counters.commands_applied
         || counters.invalid_gains != 0
         || counters.invalid_rates != 0
         || counters.invalid_times != 0

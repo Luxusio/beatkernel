@@ -32,6 +32,9 @@ subframe ceiling and config/chronology/command-kind rejection. Default BGM stays
 Play-only, and the strict generic render validators remain unchanged.
 
 The [replay gauge-failure audio plan](REQ__replay-gauge-sound-stop.md) uses this
-component for its mapped Stops. Offline gauge/audio connection, per-session ownership,
-actual Worklet acknowledged Stop counts and failed-output diagnostic acceptance
-must be connected before completion claims. Mine admission stays guarded.
+component for its mapped Stops. The
+[offline owner](REQ__offline-gauge-sound-stop.md) tracks actual local admission;
+the [stepped replay ACK owner](REQ__step-replay-stop-ack.md) distinguishes actual
+remote Stop prefixes from prepared feeder callbacks. Other native/live/local
+ownership and failed-output completion must be connected before whole-player
+completion claims. Mine admission stays guarded.

@@ -82,12 +82,20 @@ fn failure(message: impl ToString, last_render: Option<RenderReport>) -> Offline
 }
 
 /// Actual Stop admissions from one closed queue owner, not execution evidence.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub(crate) struct OwnedStopEvidence {
     admitted_stops: u64,
 }
 
 impl OwnedStopEvidence {
+    pub(crate) const fn admitted_stops(&self) -> u64 {
+        self.admitted_stops
+    }
+
+    pub(crate) const fn permits_unknown_stops(&self, count: u64) -> bool {
+        count <= self.admitted_stops
+    }
+
     /// Record each successfully admitted command prefix exactly once.
     /// Planned, requested and rejected commands must never be supplied here.
     /// Overflow preserves all previously recorded evidence.
@@ -247,7 +255,7 @@ pub(crate) fn render_block_with_stops(
         || c.pending_full != 0
         || c.voice_full != 0
         || c.unknown_samples != 0
-        || c.unknown_stops > admitted_stops.admitted_stops
+        || !admitted_stops.permits_unknown_stops(c.unknown_stops)
         || c.invalid_gains != 0
         || c.invalid_rates != 0
         || c.invalid_times != 0

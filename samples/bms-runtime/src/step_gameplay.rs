@@ -18,6 +18,7 @@ use crate::{
     mine_plan::prepare_judge,
     mine_sounds::MineSoundPlan,
     native_judge::NativeJudgeConfig,
+    offline::OwnedStopEvidence,
     replay_audio::{ReplayAudioError, before_endpoint, completed_render_cursor, section_end_frame},
     replay_capture::{CaptureError, LiveReplayCapture, setup_input_sound_header},
 };
@@ -2286,6 +2287,29 @@ pub fn validate_section_output_evidence(
     presented: Option<ClockPoint>,
     expected_end: Option<u64>,
 ) -> Result<Option<ClockPoint>, CompletionError> {
+    validate_section_output_evidence_with_stops(
+        output_origin,
+        sample_rate,
+        last_render,
+        last_presented,
+        rendered,
+        presented,
+        expected_end,
+        &OwnedStopEvidence::default(),
+    )
+}
+
+/// Shared evidence validation with an actual owner-acknowledged Stop allowance.
+pub(crate) fn validate_section_output_evidence_with_stops(
+    output_origin: ClockPoint,
+    sample_rate: u32,
+    last_render: Option<RenderReport>,
+    last_presented: Option<Timestamp>,
+    rendered: Option<RenderReport>,
+    presented: Option<ClockPoint>,
+    expected_end: Option<u64>,
+    stops: &OwnedStopEvidence,
+) -> Result<Option<ClockPoint>, CompletionError> {
     if sample_rate == 0 {
         return Err(CompletionError("completion output sample rate is zero"));
     }
@@ -2393,9 +2417,18 @@ pub fn validate_section_output_evidence(
     if counters.rendered_frames != end
         || counters.commands_applied > counters.commands_consumed
         || counters.late_commands > counters.commands_consumed
-        || counter_values(counters)[4..]
-            .iter()
-            .any(|&value| value != 0)
+        || !stops.permits_unknown_stops(counters.unknown_stops)
+        || counters.unknown_stops > counters.commands_applied
+        || [
+            counters.pending_full,
+            counters.voice_full,
+            counters.unknown_samples,
+            counters.invalid_gains,
+            counters.invalid_rates,
+            counters.invalid_times,
+        ]
+        .into_iter()
+        .any(|value| value != 0)
     {
         return Err(CompletionError(
             "completion mixer counters contain failure or invalid evidence",
