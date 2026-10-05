@@ -39,13 +39,16 @@ exact four compile-only checks provide compilation evidence only.
 
 Implementation now supplies a graphics-gated pure HistoricalRecordPresentation,
 a separate BrowserHistoricalRecord binding and Worker-owned cached drawing.
-Window validates only archive byte layout/size and original u32 member ID,
+Window validates archive byte layout/size and original u32 member ID,
 transfers that opaque buffer, and waits at most ten seconds for its matching
 operation response. Cancellation and timeout send a newer clear request. Legacy
 records without archives select the replay and clear historical display normally.
 Showing a stored result needs no prepared chart. Active gameplay and retained
 joined live Results refuse historical replacement with a diagnostic. Preparing
 another chart or beginning another accepted play releases prior history.
+Window page controls validate bounded metadata and correlate one pending request
+through [the browser grade-page contract](REQ__browser-grade-pages.md), without
+decoding statistics or owning canvas rendering.
 
 Both paired writers returned terminal `Writes STOPPED` before formatting and
 compilation. Seven deferred groups were authored: three pure Rust byte/geometry

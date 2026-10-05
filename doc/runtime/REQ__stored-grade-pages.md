@@ -40,8 +40,9 @@ on every page action. Reuse pure helpers to compose base and prepared grade pack
 
 BrowserHistoricalRecord exposes grade_page, grade_pages and set_grade_page(u32)
 through the same common logic. Its rendering remains Worker-owned. Interactive
-Worker message routing and Window paging controls remain a following integration;
-do not claim browser users can navigate pages until that route is connected.
+Worker message routing and Window controls now follow
+[the browser paging contract](REQ__browser-grade-pages.md); generated binding
+and real browser acceptance remain unproven.
 
 ## Evidence and known ceiling
 
@@ -54,5 +55,5 @@ from the desktop binary crate. No tests, JS parsing, apps or hardware execution;
 four compile-only checks follow both paired writers stopping. Assertions, formal
 review, required QA, runtime acceptance, verify and close remain deferred.
 Cold first presentation and page leaf builds may allocate; existing initial
-grade copy remains. Browser interactive paging, saved comparison archival and
+grade copy remains. Browser paging acceptance, saved comparison archival and
 platform acceptance remain unfinished, and the full player Goal stays active.

@@ -11,13 +11,15 @@ stored detail subview; Home/End select endpoints. Back preserves the catalog
 selection/page, and later entry starts at grade page zero. Grade controls are
 isolated from catalog controls. Geometry packets clone their immutable Arc-backed
 storage without copying rectangle vectors. Browser bindings expose the same page
-model; interactive Worker/Window paging remains a following integration.
+model; interactive Worker/Window paging was following work at this increment.
+[The subsequent browser routing increment](CHANGE__browser-grade-pages.md)
+connects those controls while leaving actual browser acceptance unproven.
 
 ## Known ceiling
 
 Initial historical construction retains its extra cold grade copy. First
 construction and page leaf builds may allocate; no benchmark or globally
-allocation-free claim is established. Browser interactive paging, saved comparison
+allocation-free claim is established. Browser paging acceptance, saved comparison
 archival and actual platform acceptance remain unfinished. Thirteen independent
 fixture groups are authored: five common page/order/boundary/retention groups,
 four native geometry/hit/staging groups, and four desktop controller groups.
