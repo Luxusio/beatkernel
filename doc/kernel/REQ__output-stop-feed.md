@@ -37,6 +37,10 @@ component for its mapped Stops. The
 the [stepped replay ACK owner](REQ__step-replay-stop-ack.md) distinguishes actual
 remote Stop prefixes from prepared feeder callbacks. The
 [stepped live/local owner](REQ__step-live-stop-ack.md) uses that same ACK component
-for its shared remote output. Native output ownership and numeric-failure terminal
-readiness still require integration before whole-player completion claims.
+for its shared remote output. The
+[native recorded player](REQ__native-replay-stop-evidence.md) uses actual producer
+callback admission with explicit owned cursor validation; the
+[native live/local terminal path](REQ__native-failed-terminal-readiness.md)
+uses its own actual producer evidence and numeric-fenced readiness. Final clear/fail
+and actual full-player acceptance still require integration and verification.
 Mine admission stays guarded.

@@ -13,11 +13,13 @@ use beatkernel_bms_runtime::{
     native_start::HostStartWindow,
     playback_pause::{PauseIntervalObservation, PausePhase},
     player,
-    replay_audio::{completed_render_cursor, plan_audio},
+    replay_audio::{completed_render_cursor_for_feeder, plan_audio},
     replay_pause::ReplayPause,
     replay_playback::read_replay,
     replay_visual::ReplayVisual,
 };
+#[cfg(test)]
+use beatkernel_bms_runtime::replay_audio::completed_render_cursor;
 use beatkernel_platform::audio::{DeviceFormat, SampleEncoding, SharedPeriodPolicy};
 use std::{
     collections::HashSet,
@@ -591,8 +593,18 @@ fn presentation_song(point: ClockPoint, start: Timestamp, preroll: Duration) -> 
     )?))
 }
 
+#[cfg(test)]
 fn playback_render_cursor(report: &RenderReport) -> Result<u64> {
     let physical = completed_render_cursor(report)?;
+    playback_render_cursor_on_grid(report, physical)
+}
+
+fn playback_render_cursor_for_feeder(report: &RenderReport, feeder: &BgmFeeder) -> Result<u64> {
+    let physical = completed_render_cursor_for_feeder(report, feeder)?;
+    playback_render_cursor_on_grid(report, physical)
+}
+
+fn playback_render_cursor_on_grid(report: &RenderReport, physical: u64) -> Result<u64> {
     let end = report
         .playback_start_frame
         .checked_add(u64::try_from(report.playback_frames)?)
@@ -1064,7 +1076,10 @@ fn run(options: Options) -> Result<()> {
                 break;
             }
             let rendered = stream.poll()?;
-            let cursor = rendered.as_ref().map(playback_render_cursor).transpose()?;
+            let cursor = rendered
+                .as_ref()
+                .map(|report| playback_render_cursor_for_feeder(report, &feeder))
+                .transpose()?;
             player::retry_pause_publication();
             let presentation = stream.presentation()?;
             let presented = presentation.presented;
@@ -1149,7 +1164,10 @@ fn run(options: Options) -> Result<()> {
     let stop = stream.stop();
     let final_native = stream.final_check();
     let report = stream.last_render();
-    let final_core = report.as_ref().map(completed_render_cursor).transpose();
+    let final_core = report
+        .as_ref()
+        .map(|report| completed_render_cursor_for_feeder(report, &feeder))
+        .transpose();
     println!(
         "final command admission config={:?}; summary={:?}; admission is separate from core execution/native delivery/acoustic output",
         feeder.config(),
@@ -1220,6 +1238,9 @@ pub(crate) fn default_asio_format(args: &[String]) -> Result<AudioFormat> {
 
 #[cfg(test)]
 mod fixtures {
+    mod stop_evidence {
+        include!("play_replay_bms/stop_evidence_fixtures.rs");
+    }
     use super::*;
     #[test]
     fn feeder_credit_uses_playback_frames_and_still_rejects_core_execution_failures() {

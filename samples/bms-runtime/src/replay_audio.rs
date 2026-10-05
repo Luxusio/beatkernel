@@ -2,6 +2,7 @@
 
 use crate::{
     PreparedBms,
+    bgm::BgmFeeder,
     gauge::BmsGauge,
     input_sounds::InputSoundPlan,
     mine_sounds::MineSoundPlan,
@@ -51,7 +52,20 @@ impl Error for ReplayAudioError {}
 /// Admission, submitted native frames and physical presentation are different
 /// observations and cannot substitute for this successful RenderReport.
 pub fn completed_render_cursor(report: &RenderReport) -> Result<u64, ReplayAudioError> {
-    completed_render_cursor_with_stops(report, &OwnedStopEvidence::default())
+    completed_render_cursor_with_admitted_stops(report, 0)
+}
+
+/// Checks a cursor using only Stops whose actual feeder callbacks succeeded.
+/// Native callers must use the same retained feeder backed by their producer.
+/// Admission is not execution or presentation evidence; remote owners still
+/// require their acknowledged Stop ledger instead of this callback contract.
+pub fn completed_render_cursor_for_feeder(
+    report: &RenderReport,
+    feeder: &BgmFeeder,
+) -> Result<u64, ReplayAudioError> {
+    let admitted =
+        u64::try_from(feeder.admitted_stops()).map_err(|_| ReplayAudioError::Overflow)?;
+    completed_render_cursor_with_admitted_stops(report, admitted)
 }
 
 /// Shared strict cursor checks with this owner's actual accepted Stop evidence.
@@ -59,12 +73,19 @@ pub(crate) fn completed_render_cursor_with_stops(
     report: &RenderReport,
     stops: &OwnedStopEvidence,
 ) -> Result<u64, ReplayAudioError> {
+    completed_render_cursor_with_admitted_stops(report, stops.admitted_stops())
+}
+
+fn completed_render_cursor_with_admitted_stops(
+    report: &RenderReport,
+    admitted_stops: u64,
+) -> Result<u64, ReplayAudioError> {
     let counters = report.counters;
     if counters.late_commands != 0
         || counters.pending_full != 0
         || counters.voice_full != 0
         || counters.unknown_samples != 0
-        || !stops.permits_unknown_stops(counters.unknown_stops)
+        || counters.unknown_stops > admitted_stops
         || counters.unknown_stops > counters.commands_applied
         || counters.invalid_gains != 0
         || counters.invalid_rates != 0
