@@ -28,8 +28,10 @@ the atomic local score method directly and retain its grade storage. A backward
 song-time request still refuses before score observation. Success publishes the
 same exact song time even for an empty report, and rejection retains the prior
 score/time. When saved opponents exist, keep the original cross-opponent atomic
-transaction and prefix behavior; removing its outer clones/scratch is separate
-work. Rebuild and loading retain their existing preparation behavior.
+transaction and prefix behavior. Retained scratch and unchanged-prefix storage
+are governed by [the saved-opponent update policy](REQ__competition-updates.md);
+nonempty local staging and changed-prefix score clones remain separate work.
+Rebuild and loading retain their existing preparation behavior.
 
 ## Evidence and known ceiling
 

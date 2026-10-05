@@ -25,9 +25,11 @@ scoring allocations. Large batches with many existing near-overflow grade counts
 can require repeated matching-event scans. Setup/public-state extremes remain
 supported without assuming internal counter consistency. No benchmark, allocator
 profile or world-leading performance claim is established by source changes.
-Saved-opponent Competition updates and GhostOpponent prefix transactions still
-clone summaries and use a temporary update vector; rebuild/loading behavior is
-unchanged. Their complete atomic transaction needs separate optimization.
+At this increment, saved-opponent Competition updates and GhostOpponent prefix
+transactions still cloned summaries and used a temporary update vector.
+[The following retained-update increment](CHANGE__competition-updates.md)
+addresses that vector and unchanged prefixes. Nonempty local staging and changed
+prefix clones remain; rebuild/loading behavior is unchanged.
 
 Nine independent reference, boundary, atomicity and storage-retention fixture
 groups are authored for later execution. Deterministic ordered batches and split
