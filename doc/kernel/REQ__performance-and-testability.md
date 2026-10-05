@@ -127,6 +127,10 @@ are frozen with that first accepted table. Detail and comparison page changes
 reuse prepared packets; original IDs, recording extents and self-reported peer
 status remain explicit. This is source-level work, not measured
 rendering or performance evidence. See [the results screen](../ui/REQ__completed-results-screen.md).
-Browser delivery and archive integration remain unfinished. Test execution, hardware QA and comparative benchmarks remain deferred
+Browser source now captures actual stepped completion into a separate retained
+presentation before freeing gameplay. The Worker owns rendering and requests;
+the Window acknowledges presentation only after its existing cleanup path settles.
+See [the browser results requirement](../ui/REQ__browser-completed-results.md).
+Browser execution and archive integration remain unfinished. Test execution, hardware QA and comparative benchmarks remain deferred
 under the user's existing verification instruction; no quality target is
 considered achieved by authoring fixtures or passing compile-only checks.
