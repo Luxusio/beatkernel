@@ -106,6 +106,7 @@ fn run_solo_interval(f: &mut Fixture, finite: bool, conflicting: bool) -> Native
         },
         NativeGameplaySession {
             runtime: &mut f.runtime,
+            gauge: &mut f.gauge,
             bgm: &mut f.bgm,
             discipline: &mut f.discipline,
             pause: &mut f.pause,

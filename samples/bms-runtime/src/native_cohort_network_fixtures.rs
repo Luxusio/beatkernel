@@ -26,6 +26,7 @@ fn states(count: usize) -> Vec<PlayerState> {
             competition: None,
             completion: None,
             score: ScoreSummary::default(),
+            gauge: crate::gauge::BmsGauge::default(),
             last_song: Timestamp::from_nanos(-100_000_000),
         })
         .collect()

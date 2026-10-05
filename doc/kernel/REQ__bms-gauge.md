@@ -137,12 +137,46 @@ their own recorded operations. Configurable gauge/failure capture identity is
 still separate work. This fixed default's only numeric failure is instant death;
 custom pure profiles do not become unrecorded live options.
 
-Completion clear/fail decisions, native owner failure fencing and
+## Native game owner failure contract
+
+NativeGameplaySession retains a borrowed default BmsGauge on the actual game
+thread, independently of whether a UI publisher is attached. All three native
+solo launchers supply a persistent gauge; each native local PlayerState owns its
+own default gauge, including common preparation and all roster constructors.
+Use the same common report policy and committed-frontier fence as stepped play.
+Do not create OS-specific gauge or multiplayer rules.
+Native pump admission rejects a nondefault profile before processing, even when
+a typed caller supplies one through public state fields. Do not reset an existing
+valid retained gauge when entering the pump. Configurable live profiles require
+their own recorded policy identity before they can be admitted.
+
+On each actual native report, independently consume gauge, capture, competition
+and presentation observations even when one fails. Retain the original committed
+report and independent failures on the technical error path. Fence numeric gauge
+failure after consuming the failure-causing operation, before returning technical
+errors. Numeric failure itself does not abort healthy cohort members. In local
+play consume the whole actual report prefix, then fence only failed members;
+an existing runtime poison stays poisoned.
+
+Exclude post-fence operations from that player's capture while other members
+continue. Keep a failed member's retained song/score/gauge frontier and the
+shared queue intact. Successful failure-prefix captures must reconstruct the
+same retained judge state through the existing replay pipeline. Capture rejection
+retains its shorter accepted prefix and the original error. UI publication is
+an observer; it does not own failure policy or supply invented clock evidence.
+
+Compile-only Linux/workspace evidence does not establish Windows/macOS target
+acceptance or real native audio/input/GPU behavior. Independent deferred native
+owner fixtures use actual common report/pump paths and fake acquisition/output
+evidence, covering headless and attached cases, prefix/error preservation,
+replay reconstruction, and surviving independent local members.
+
+Completion clear/fail decisions and
 actual per-player audio stopping/output cleanup still need integration.
 The [portable gameplay fence](REQ__gameplay-fence.md) is an explicit control
-component for that integration. Its stepped connection above preserves new
-capture prefixes; native gauge ownership, broader replay policy and per-player
-audio cleanup remain separate integration work.
+component for that integration. Its stepped and native connections above preserve
+new capture prefixes; broader replay policy and per-player audio cleanup remain
+separate integration work.
 InstantDeath state alone does not establish playback termination. Keep the
 high-level mine file admission guard until those owners are connected. Author
 independent deferred fixed-point/configuration/atomicity and real solo/local/

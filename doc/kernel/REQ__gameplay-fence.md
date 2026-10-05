@@ -41,8 +41,9 @@ Independent deferred fixtures must cover actual hold/hazard/button/touch state,
 queued audio preservation, post-fence input and advancement, chronology errors,
 idempotence, explicit restoration, and independent local source/member behavior.
 
-Known ceiling: this component is explicit owner control. Automatic BMS gauge
-failure calls, replay reconstruction policy, completion outcomes and actual
-per-player audio-stop/output-drain integration still need implementation. It
+Known ceiling: this component is explicit owner control. The automatic stepped
+and native default-gauge calls are described in [BMS gauge ownership](REQ__bms-gauge.md).
+Broader replay failure policy, completion outcomes and actual per-player
+audio-stop/output-drain integration still need implementation. It
 does not itself make mine-containing files playable. Keep the high-level mine
 admission guard. Hardware/browser/performance acceptance requires later execution.

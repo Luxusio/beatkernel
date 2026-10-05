@@ -4,12 +4,13 @@ use crate::{
     competition::ScoreSummary,
     competition_live::LiveCompetition,
     completion::SongCompletion,
+    gauge::{BmsGauge, GaugeProfile},
     live_pause::{
         LivePauseBoundary, prepare_live_transport, update_live_pause, validate_pre_pause_input,
     },
     local_input::InputMerger,
     local_players::PlayerId,
-    local_runtime::{InputResult, PlayerReport, RuntimeGroup},
+    local_runtime::{GroupError, InputResult, PlayerReport, RuntimeGroup},
     native_end::NativeEnd,
     native_group_competition::NativeGroupCompetition,
     multiplayer_group::{MemberProgress, validate_members},
@@ -29,6 +30,7 @@ use beatkernel::{
 use beatkernel_platform::audio::presentation::discipline::{DisciplineConfig, PresentationDiscipline};
 use std::{
     collections::VecDeque,
+    fmt,
     path::{Path, PathBuf},
     time::{Duration as WallDuration, Instant},
 };
@@ -83,21 +85,27 @@ fn process<D: NativeGameplayDevice>(
 ) -> NativeGameplayResult<()> {
     let at = schedule(device, session, config)?;
     match session.group.process_input(event, &ExplicitDomains, at) {
-        Ok(InputResult::Processed(reports)) => {
-            observe_reports(&reports, session.states, session.network.as_deref_mut())
-        }
+        Ok(InputResult::Processed(reports)) => observe_reports(
+            &reports,
+            session.states,
+            session.group,
+            session.network.as_deref_mut(),
+        ),
         Ok(InputResult::Ignored { device }) => {
             Err(format!("merged source {device:?} has no cohort owner").into())
         }
         Err(error) => {
-            if let Err(observation) = observe_reports(
+            let observation_error = observe_reports(
                 &error.completed_reports,
                 session.states,
+                session.group,
                 session.network.as_deref_mut(),
-            ) {
-                eprintln!("partial cohort observation: {observation}");
-            }
-            Err(error.into())
+            )
+            .err();
+            Err(Box::new(NativeCohortProcessingError {
+                group_error: error,
+                observation_error,
+            }))
         }
     }
 }
@@ -109,16 +117,24 @@ fn advance<D: NativeGameplayDevice>(
 ) -> NativeGameplayResult<()> {
     let audio_at = schedule(device, session, config)?;
     match session.group.advance_to(at, &ExplicitDomains, audio_at) {
-        Ok(reports) => observe_reports(&reports, session.states, session.network.as_deref_mut()),
+        Ok(reports) => observe_reports(
+            &reports,
+            session.states,
+            session.group,
+            session.network.as_deref_mut(),
+        ),
         Err(error) => {
-            if let Err(observation) = observe_reports(
+            let observation_error = observe_reports(
                 &error.completed_reports,
                 session.states,
+                session.group,
                 session.network.as_deref_mut(),
-            ) {
-                eprintln!("partial cohort deadline observation: {observation}");
-            }
-            Err(error.into())
+            )
+            .err();
+            Err(Box::new(NativeCohortProcessingError {
+                group_error: error,
+                observation_error,
+            }))
         }
     }
 }
@@ -140,7 +156,49 @@ pub struct PlayerState {
     pub competition: Option<LiveCompetition>,
     pub completion: Option<SongCompletion>,
     pub score: ScoreSummary,
+    pub gauge: BmsGauge,
     pub last_song: Timestamp,
+}
+
+/// The original committed prefix and all independent observation diagnostics.
+#[derive(Debug)]
+pub struct NativeCohortObservationError {
+    pub reports: Vec<PlayerReport>,
+    pub failures: Vec<String>,
+}
+impl fmt::Display for NativeCohortObservationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("native cohort observation: ")?;
+        for (index, failure) in self.failures.iter().enumerate() {
+            if index > 0 {
+                f.write_str("; ")?;
+            }
+            f.write_str(failure)?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for NativeCohortObservationError {}
+
+/// Preserves a group failure and any subsequent observation failure together.
+#[derive(Debug)]
+pub struct NativeCohortProcessingError {
+    pub group_error: GroupError,
+    pub observation_error: Option<Box<dyn std::error::Error>>,
+}
+impl fmt::Display for NativeCohortProcessingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.group_error)?;
+        if let Some(error) = &self.observation_error {
+            write!(f, "; {error}")?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for NativeCohortProcessingError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.group_error)
+    }
 }
 
 /// Snapshot every member's retained committed prefix without advancing gameplay.
@@ -203,10 +261,12 @@ pub fn replay_path(base: &Path, player: PlayerId) -> NativeGameplayResult<PathBu
 fn observe_reports(
     reports: &[PlayerReport],
     states: &mut [PlayerState],
+    group: &mut RuntimeGroup,
     network: Option<&mut NativeGroupCompetition>,
 ) -> NativeGameplayResult<()> {
     let mut failures = Vec::new();
-    for tagged in reports {
+    let mut fences = [None; 64];
+    for (index, tagged) in reports.iter().enumerate() {
         let Some(state) = states
             .iter_mut()
             .find(|state| state.player == tagged.player)
@@ -214,10 +274,22 @@ fn observe_reports(
             failures.push(format!("report for unknown player {:?}", tagged.player));
             continue;
         };
+        let was_fenced = group.player_gameplay_fence(tagged.player).is_some();
         state.last_song = tagged.report.song_time;
-        if let Some(capture) = state.capture.as_mut() {
-            if let Err(error) = capture.record_report(&tagged.report) {
-                failures.push(format!("player{} capture: {error}", state.player.0));
+        if let Err(error) = state
+            .gauge
+            .observe(&tagged.report.judge_events, &tagged.report.hazard_events)
+        {
+            failures.push(format!("player{} gauge: {error}", state.player.0));
+        }
+        if !was_fenced {
+            if let Some(capture) = state.capture.as_mut() {
+                if let Err(error) = capture.record_report(&tagged.report) {
+                    failures.push(format!("player{} capture: {error}", state.player.0));
+                }
+            }
+            if state.gauge.snapshot().failure.is_some() {
+                fences[index] = Some(state.player);
             }
         }
         if !tagged.report.judge_events.is_empty() {
@@ -234,10 +306,10 @@ fn observe_reports(
             println!("player{} judge={event:?}", tagged.player.0);
         }
         if tagged.report.judge_error.is_some() || !tagged.report.audio_failures.is_empty() {
-            eprintln!(
+            failures.push(format!(
                 "player{} committed partial report judge={:?}, audio={:?}",
                 tagged.player.0, tagged.report.judge_error, tagged.report.audio_failures
-            );
+            ));
         }
     }
     if let Some(network) = network {
@@ -249,10 +321,18 @@ fn observe_reports(
     if let Err(error) = player::publish_local_reports(reports) {
         failures.push(format!("local presentation: {error}"));
     }
+    for player in fences.into_iter().flatten() {
+        if let Err(error) = group.fence_player(player) {
+            failures.push(format!("player{} gameplay fence: {error}", player.0));
+        }
+    }
     if failures.is_empty() {
         Ok(())
     } else {
-        Err(failures.join("; ").into())
+        Err(Box::new(NativeCohortObservationError {
+            reports: reports.to_vec(),
+            failures,
+        }))
     }
 }
 
@@ -272,6 +352,13 @@ pub fn run_cohort<D: NativeGameplayDevice>(
     mut session: NativeCohortSession<'_>,
     config: NativeGameplayConfig,
 ) -> NativeGameplayResult<()> {
+    if session
+        .states
+        .iter()
+        .any(|state| state.gauge.profile() != &GaugeProfile::default())
+    {
+        return Err("native cohort requires the default recorded gauge policy".into());
+    }
     if !(2..=64).contains(&session.states.len())
         || config.origin.domain == config.stream_origin.domain
         || config.stream_origin.domain != config.playback_origin.domain
@@ -603,6 +690,9 @@ pub fn run_cohort<D: NativeGameplayDevice>(
 
 #[cfg(test)]
 mod fixtures {
+    mod gauge_fence {
+        include!("native_local_gauge_fence_fixtures.rs");
+    }
     include!("native_cohort_interval_fixtures.rs");
     use super::*;
     use crate::local_runtime::MemberConfig;
@@ -775,6 +865,7 @@ mod fixtures {
                     competition: None,
                     completion: None,
                     score: ScoreSummary::default(),
+                    gauge: BmsGauge::default(),
                     last_song: Timestamp::ZERO,
                 });
                 configs.push(MemberConfig {

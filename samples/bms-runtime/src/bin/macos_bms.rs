@@ -1178,6 +1178,7 @@ mod native {
             if let Some(end) = options.end_ns {
                 runtime.set_song_end(Timestamp::from_nanos(end))?;
             }
+            let mut gauge = beatkernel_bms_runtime::gauge::BmsGauge::default();
             let pump = {
                 let mut device = GameplayDevice {
                     audio: &mut audio,
@@ -1192,6 +1193,7 @@ mod native {
                     &mut device,
                     NativeGameplaySession {
                         runtime: &mut runtime,
+                        gauge: &mut gauge,
                         bgm: &mut bgm,
                         discipline: &mut discipline,
                         pause: &mut pause,

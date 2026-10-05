@@ -135,6 +135,7 @@ fn run_until(
         },
         NativeGameplaySession {
             runtime: &mut fixture.runtime,
+            gauge: &mut fixture.gauge,
             bgm: &mut fixture.bgm,
             discipline: &mut fixture.discipline,
             pause: &mut fixture.pause,

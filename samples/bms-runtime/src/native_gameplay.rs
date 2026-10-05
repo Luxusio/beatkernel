@@ -3,6 +3,7 @@ use crate::{
     bgm::BgmFeeder,
     competition_live::LiveCompetition,
     completion::SongCompletion,
+    gauge::{BmsGauge, GaugeError, GaugeProfile},
     live_pause::{
         LivePauseBoundary, LivePauseObservation, prepare_live_transport, update_live_pause,
         validate_pre_pause_input,
@@ -11,7 +12,7 @@ use crate::{
     native_end::{EndBoundary, NativeEnd},
     playback_pause::{NativePause, PauseKeyboard, PausePhase},
     player::{self, PauseState},
-    replay_capture::LiveReplayCapture,
+    replay_capture::{CaptureError, LiveReplayCapture},
 };
 use beatkernel::{
     audio::RenderReport,
@@ -27,6 +28,8 @@ use beatkernel_platform::audio::presentation::discipline::{
 };
 use std::{
     collections::VecDeque,
+    error::Error,
+    fmt,
     time::{Duration as WallDuration, Instant},
 };
 
@@ -96,6 +99,7 @@ pub struct NativeGameplayConfig {
 }
 pub struct NativeGameplaySession<'a> {
     pub runtime: &'a mut SoloRuntime,
+    pub gauge: &'a mut BmsGauge,
     pub bgm: &'a mut BgmFeeder,
     pub discipline: &'a mut PresentationDiscipline,
     pub pause: &'a mut NativePause,
@@ -105,6 +109,50 @@ pub struct NativeGameplaySession<'a> {
     pub competition: &'a mut Option<LiveCompetition>,
     pub delivery: &'a mut InputDeliveryTelemetry,
     pub pre_origin_inputs: &'a mut u64,
+}
+
+/// Independent observation failures retain the complete committed operation.
+#[derive(Debug)]
+pub struct NativeReportObservationError {
+    pub report: RuntimeReport,
+    pub gauge_error: Option<GaugeError>,
+    pub capture_error: Option<CaptureError>,
+    pub competition_error: Option<Box<dyn Error>>,
+    pub presentation_error: Option<Box<dyn Error>>,
+}
+impl fmt::Display for NativeReportObservationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "native report observation: judge {:?}, {} audio failures, gauge {:?}, capture {:?}, competition {:?}, presentation {:?}",
+            self.report.judge_error,
+            self.report.audio_failures.len(),
+            self.gauge_error,
+            self.capture_error,
+            self.competition_error,
+            self.presentation_error,
+        )
+    }
+}
+impl Error for NativeReportObservationError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        if let Some(error) = &self.gauge_error {
+            return Some(error);
+        }
+        if let Some(error) = &self.capture_error {
+            return Some(error);
+        }
+        if let Some(error) = self.competition_error.as_deref() {
+            return Some(error);
+        }
+        if let Some(error) = self.presentation_error.as_deref() {
+            return Some(error);
+        }
+        self.report
+            .judge_error
+            .as_ref()
+            .map(|error| error as &dyn Error)
+    }
 }
 struct ExplicitDomains;
 impl ClockMapper for ExplicitDomains {
@@ -171,12 +219,26 @@ fn publish(
     session: &mut NativeGameplaySession<'_>,
     report: RuntimeReport,
 ) -> NativeGameplayResult<()> {
-    if let Some(capture) = session.capture.as_mut() {
-        capture.record_report(&report)?;
-    }
-    player::publish_report(&report)?;
-    if let Some(competition) = session.competition.as_mut() {
-        competition.observe(&report)?;
+    let was_fenced = session.runtime.gameplay_fence().is_some();
+    let gauge_error = session
+        .gauge
+        .observe(&report.judge_events, &report.hazard_events)
+        .err();
+    let capture_error = if was_fenced {
+        None
+    } else {
+        session
+            .capture
+            .as_mut()
+            .and_then(|capture| capture.record_report(&report).err())
+    };
+    let competition_error = session
+        .competition
+        .as_mut()
+        .and_then(|competition| competition.observe(&report).err());
+    let presentation_error = player::publish_report(&report).err();
+    if session.gauge.snapshot().failure.is_some() {
+        session.runtime.fence_gameplay();
     }
     for result in &report.judge_events {
         println!("judge={result:?}");
@@ -184,8 +246,20 @@ fn publish(
     if !report.audio_failures.is_empty() {
         eprintln!("exact failed audio commands={:?}", report.audio_failures);
     }
-    if let Some(error) = report.judge_error {
-        return Err(error.into());
+    if report.judge_error.is_some()
+        || !report.audio_failures.is_empty()
+        || gauge_error.is_some()
+        || capture_error.is_some()
+        || competition_error.is_some()
+        || presentation_error.is_some()
+    {
+        return Err(Box::new(NativeReportObservationError {
+            report,
+            gauge_error,
+            capture_error,
+            competition_error,
+            presentation_error,
+        }));
     }
     Ok(())
 }
@@ -224,6 +298,9 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
     mut session: NativeGameplaySession<'_>,
     config: NativeGameplayConfig,
 ) -> NativeGameplayResult<()> {
+    if session.gauge.profile() != &GaugeProfile::default() {
+        return Err("native gameplay requires the default recorded gauge policy".into());
+    }
     if config.origin.domain == config.stream_origin.domain
         || config.stream_origin.domain != config.playback_origin.domain
         || config.playback_origin.timestamp < config.stream_origin.timestamp
@@ -531,6 +608,9 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
 
 #[cfg(test)]
 mod fixtures {
+    mod gauge_fence {
+        include!("native_solo_gauge_fence_fixtures.rs");
+    }
     mod room_completion {
         include!("native_room_completion_fixtures.rs");
     }
@@ -655,6 +735,7 @@ mod fixtures {
         source: beatkernel_bms::BmsChart,
         device: Device,
         runtime: SoloRuntime,
+        gauge: BmsGauge,
         bgm: BgmFeeder,
         discipline: PresentationDiscipline,
         pause: NativePause,
@@ -792,6 +873,7 @@ mod fixtures {
                     invalid: false,
                 },
                 runtime,
+                gauge: BmsGauge::default(),
                 bgm,
                 discipline,
                 pause,
@@ -809,6 +891,7 @@ mod fixtures {
                 &mut self.device,
                 NativeGameplaySession {
                     runtime: &mut self.runtime,
+                    gauge: &mut self.gauge,
                     bgm: &mut self.bgm,
                     discipline: &mut self.discipline,
                     pause: &mut self.pause,

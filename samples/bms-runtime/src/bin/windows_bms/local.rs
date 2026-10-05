@@ -459,6 +459,7 @@ mod fixtures {
                 competition: None,
                 completion: None,
                 score: ScoreSummary::default(),
+                gauge: beatkernel_bms_runtime::gauge::BmsGauge::default(),
                 last_song: Timestamp::from_nanos(song),
             })
             .collect()

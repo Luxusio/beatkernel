@@ -168,6 +168,7 @@ pub fn prepare_cohort(
             competition: None,
             completion,
             score: ScoreSummary::default(),
+            gauge: crate::gauge::BmsGauge::default(),
             last_song: song_origin,
         });
         save_paths.push((player, path));
@@ -728,6 +729,7 @@ mod fixtures {
                 competition: None,
                 completion: None,
                 score: ScoreSummary::default(),
+                gauge: crate::gauge::BmsGauge::default(),
                 last_song: Timestamp::ZERO,
             })
             .collect()
