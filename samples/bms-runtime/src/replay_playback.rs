@@ -2,6 +2,7 @@
 
 use crate::{
     input_sounds::InputSoundIdentity,
+    mine_plan::prepare_judge,
     replay_capture::{CaptureError, setup_input_sound_header},
 };
 #[cfg(test)]
@@ -36,6 +37,8 @@ pub enum PlaybackError {
     Bms(BmsError),
     /// Invisible sound selections could not form a canonical setup identity.
     InputSounds(String),
+    /// Mine timing or the source-aware hazard judge could not be prepared.
+    Hazards(String),
     /// An operation or snapshot could not be reconstructed.
     Replay(ReplayError),
     /// Reading the supplied stream failed.
@@ -413,17 +416,14 @@ fn validate_recorded_setup(
     let input_sounds =
         InputSoundIdentity::from_source(&selected).map_err(PlaybackError::InputSounds)?;
     let compiled = selected.compile()?;
-    let constructor =
-        if input_mode == BmsInputMode::ButtonOrContact && !selected.invisible.is_empty() {
-            JudgeEngine::new_with_contacts
-        } else {
-            JudgeEngine::new
-        };
-    let judge = constructor(
+    let judge = prepare_judge(
+        &selected,
         compiled.chart,
-        selected.rules_with_input_mode(input_mode),
         profile,
-    )?;
+        input_mode,
+        beatkernel_bms::ParseOptions::default().max_objects,
+    )
+    .map_err(PlaybackError::Hazards)?;
     let expected = setup_input_sound_header(
         &judge,
         file.header.normalized_clock,

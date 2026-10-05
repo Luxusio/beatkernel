@@ -137,6 +137,10 @@ pub mod local_setup;
 mod local_source_plan_fixtures;
 #[cfg(test)]
 mod mine_admission_fixtures;
+/// Shared original mine timing and source-aware pristine judge preparation.
+pub mod mine_plan;
+#[cfg(test)]
+mod mine_plan_fixtures;
 /// Complete MPEG Layer III assets and declared encoder timing during preparation.
 pub mod mp3_decode;
 #[cfg(test)]

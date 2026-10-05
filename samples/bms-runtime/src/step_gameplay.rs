@@ -10,6 +10,7 @@ use crate::{
     local_players::{PlayerId, ResolvedInputPlan},
     local_preparation::{PreparedLocalMembers, prepare_local_members, prepare_local_input_sounds},
     local_runtime::{GroupError, InputResult, PlayerReport, RuntimeGroup, SoloRuntime},
+    mine_plan::prepare_judge,
     native_judge::NativeJudgeConfig,
     replay_audio::{ReplayAudioError, before_endpoint, completed_render_cursor, section_end_frame},
     replay_capture::{CaptureError, LiveReplayCapture, setup_input_sound_header},
@@ -532,16 +533,14 @@ impl StepGameplay {
                     }
                     Some(plan.timeline())
                 };
-                let rules = prepared.source.rules_with_input_mode(input_mode);
-                let constructor = if input_mode == BmsInputMode::ButtonOrContact
-                    && !prepared.source.invisible.is_empty()
-                {
-                    JudgeEngine::new_with_contacts
-                } else {
-                    JudgeEngine::new
-                };
-                let judge = constructor(prepared.compiled.chart, rules, profile)
-                    .map_err(|error| StepGameplayError::Setup(error.to_string()))?;
+                let judge = prepare_judge(
+                    &prepared.source,
+                    prepared.compiled.chart,
+                    profile,
+                    input_mode,
+                    beatkernel_bms::ParseOptions::default().max_objects,
+                )
+                .map_err(StepGameplayError::Setup)?;
                 RuntimeSetup::Solo {
                     bindings,
                     judge,

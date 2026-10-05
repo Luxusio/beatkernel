@@ -1,5 +1,5 @@
 //! Bounded chronological synthetic BMS rendering through the shared runtime.
-use crate::{PreparedBms, input_sounds::InputSoundPlan};
+use crate::{PreparedBms, input_sounds::InputSoundPlan, mine_plan::prepare_judge};
 use beatkernel::{
     audio::{
         command_queue, AudioCommand, AudioFormat, AudioLimits, CommandPushError, Mixer,
@@ -9,7 +9,7 @@ use beatkernel::{
         Binding, BindingMap, ButtonEvent, ButtonState, DeviceId, DeviceSelector, EventMeta,
         PhysicalControlId, PhysicalInputEvent, VendorNamespaceId,
     },
-    judge::{JudgeEngine, JudgeGrade, JudgeOutcome, JudgeProfile, JudgeWindow},
+    judge::{JudgeGrade, JudgeOutcome, JudgeProfile, JudgeWindow},
     runtime::{Runtime, RuntimeReport},
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Duration, Timestamp},
     transport::{Rate, Transport},
@@ -295,9 +295,9 @@ pub fn render_offline(
             physical: physical(channel),
             game_control,
         }))?;
-    let judge = JudgeEngine::new(
+    let judge = prepare_judge(
+        &prepared.source,
         prepared.compiled.chart,
-        prepared.source.rules(),
         JudgeProfile::new(
             vec![JudgeWindow {
                 grade: JudgeGrade(1),
@@ -306,6 +306,8 @@ pub fn render_offline(
             }],
             Duration::ZERO,
         )?,
+        beatkernel_bms::BmsInputMode::ButtonOnly,
+        beatkernel_bms::ParseOptions::default().max_objects,
     )?;
     let (producer, consumer) = command_queue(options.command_capacity)?;
     let mut runtime = Runtime::new(

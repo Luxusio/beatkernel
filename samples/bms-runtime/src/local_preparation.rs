@@ -4,11 +4,12 @@ use crate::{
     input_sounds::InputSoundPlan,
     local_players::{ResolvedInputPlan, PlayerId, validate_source_routes},
     local_runtime::{MemberConfig, VoiceAllocator},
+    mine_plan::prepare_judge,
 };
 use beatkernel::{
     audio::{AudioCommand, VoiceId},
     input::{BindingMap, DeviceSelector},
-    judge::{JudgeEngine, JudgeProfile},
+    judge::JudgeProfile,
     runtime::input_sound::InputSoundTimeline,
 };
 use beatkernel_bms::BmsInputMode;
@@ -38,6 +39,7 @@ pub fn prepare_local_members(
         .iter()
         .map(|note| note.lane)
         .chain(prepared.source.invisible.iter().map(|event| event.lane))
+        .chain(prepared.source.mines.iter().map(|event| event.lane))
         .collect();
     for (&(player, source), bindings) in plan.members().iter().zip(&bindings) {
         if let Some(source) = source {
@@ -89,19 +91,13 @@ pub fn prepare_local_members(
         .try_reserve_exact(plan.members().len())
         .map_err(|_| "local member allocation failed")?;
     for (&(player, device), bindings) in plan.members().iter().zip(bindings) {
-        let constructor = if input_mode == BmsInputMode::ButtonOrContact
-            && !prepared.source.invisible.is_empty()
-        {
-            JudgeEngine::new_with_contacts
-        } else {
-            JudgeEngine::new
-        };
-        let judge = constructor(
+        let judge = prepare_judge(
+            &prepared.source,
             prepared.compiled.chart.clone(),
-            prepared.source.rules_with_input_mode(input_mode),
             profile.clone(),
-        )
-        .map_err(|error| error.to_string())?;
+            input_mode,
+            beatkernel_bms::ParseOptions::default().max_objects,
+        )?;
         let mut sounds = Vec::new();
         sounds
             .try_reserve_exact(prepared.sounds.len())
