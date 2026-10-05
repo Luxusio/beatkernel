@@ -429,7 +429,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         options.record_replay.as_deref(),
         save_capture,
         |archive, path| {
-            beatkernel_bms_runtime::native_result_archive::save_sidecar(
+            beatkernel_bms_runtime::native_result_archive::save_cohort_sidecars(
                 archive,
                 path.ok_or("completed archive missing base replay path")?,
             )

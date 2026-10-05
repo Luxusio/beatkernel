@@ -172,6 +172,27 @@ impl ResultArchive {
         validate(&archive)?;
         Ok(archive)
     }
+    /// Project one original historical member only after validating the whole archive.
+    pub fn for_player(&self, player: PlayerId) -> Result<Self, ArchiveError> {
+        validate(self)?;
+        if player.0 == 0 {
+            return Err(ArchiveError::Invalid("player identity"));
+        }
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.player == player)
+            .ok_or(ArchiveError::Invalid("unknown player identity"))?;
+        let mut entries = Vec::new();
+        reserve(&mut entries, 1)?;
+        entries.push(ArchiveEntry {
+            player: entry.player,
+            header: copy_header(&entry.header)?,
+            profile: copy_profile(&entry.profile)?,
+            result: entry.result,
+        });
+        Ok(Self { entries })
+    }
     pub fn entries(&self) -> &[ArchiveEntry] {
         &self.entries
     }
@@ -452,3 +473,7 @@ pub fn decode_archive(bytes: &[u8]) -> Result<ResultArchive, ArchiveError> {
 #[cfg(test)]
 #[path = "result_archive_fixtures.rs"]
 pub(crate) mod fixtures;
+
+#[cfg(test)]
+#[path = "result_archive_member_fixtures.rs"]
+pub(crate) mod member_fixtures;

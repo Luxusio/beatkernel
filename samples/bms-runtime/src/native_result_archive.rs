@@ -103,16 +103,61 @@ pub fn save_sidecar(
     archive: &crate::result_archive::ResultArchive,
     base: &std::path::Path,
 ) -> crate::native_gameplay::NativeGameplayResult<()> {
-    use std::io::Write;
     let bytes = crate::result_archive::encode_archive(archive)?;
     let path = sidecar_path(base)?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
-    file.write_all(&bytes)?;
+    write_sidecar_bytes(&path, &bytes)
+}
+fn write_sidecar_bytes(
+    path: &Path,
+    bytes: &[u8],
+) -> crate::native_gameplay::NativeGameplayResult<()> {
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    file.write_all(bytes)?;
     file.flush()?;
     Ok(())
+}
+
+/// Stage the whole base archive and all one-member associations before any publication.
+/// Every prepared destination is attempted; the first original callback error survives.
+pub fn publish_cohort_sidecars(
+    archive: &crate::result_archive::ResultArchive,
+    base: &Path,
+    mut write: impl FnMut(&Path, &[u8]) -> crate::native_gameplay::NativeGameplayResult<()>,
+) -> crate::native_gameplay::NativeGameplayResult<()> {
+    let whole = crate::result_archive::encode_archive(archive)?;
+    let base_destination = sidecar_path(base)?;
+    let mut publications = Vec::new();
+    publications.try_reserve_exact(archive.entries().len() + 1)?;
+    publications.push((base_destination, whole));
+    for entry in archive.entries() {
+        let replay = crate::native_cohort::replay_path(base, entry.player)?;
+        let destination = sidecar_path(&replay)?;
+        if publications.iter().any(|(path, _)| path == &destination) {
+            return Err("duplicate completed sidecar destination".into());
+        }
+        let member = archive.for_player(entry.player)?;
+        let bytes = crate::result_archive::encode_archive(&member)?;
+        publications.push((destination, bytes));
+    }
+    let mut first_error = None;
+    for (path, bytes) in publications {
+        if let Err(error) = write(&path, &bytes) {
+            if first_error.is_none() {
+                first_error = Some(error);
+            }
+        }
+    }
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+/// Outer filesystem adapter; files are exclusive but the group is not transactional.
+pub fn save_cohort_sidecars(
+    archive: &crate::result_archive::ResultArchive,
+    base: &Path,
+) -> crate::native_gameplay::NativeGameplayResult<()> {
+    publish_cohort_sidecars(archive, base, write_sidecar_bytes)
 }
 
 fn read_regular_file(path: &Path, max_bytes: usize) -> io::Result<Vec<u8>> {
@@ -178,3 +223,7 @@ pub fn read_sidecar(base: &Path) -> io::Result<Option<Vec<u8>>> {
         Err(error) => Err(error),
     }
 }
+
+#[cfg(test)]
+#[path = "native_member_sidecar_fixtures.rs"]
+mod member_fixtures;
