@@ -35,7 +35,10 @@ operations and output drain, healthy survivors and all-failed cohorts, early/idl
 presentation/ACK barriers, invalid output/partial ACK before completion and
 duplicate observation preserving gauge/hash/capture/frontier/result identity.
 
-The full result feature additionally requires native live/cohort publication,
+The planned [native result contract](REQ__native-completed-play-result.md) specifies
+connecting actual live/cohort completion to retained result publication; its
+implementation is queued behind the native pump control boundary. The full
+feature requires
 retained result UI/browser export and durable archive integration. Recorded-prefix
 replay completion is a distinct scope and must never infer whole-chart clearance
 from the end of a captured prefix. Configurable gauge profile identity, legacy
