@@ -19,6 +19,7 @@ fn frame<'a>(
         first: 0,
         preview: Some(preview),
         pending: false,
+        details: false,
         opponents: 0,
         selected_opponents: [0; 2],
         message: None,
@@ -47,6 +48,7 @@ fn preview(practice: bool) -> RecordPreview {
                 gauge: result.gauge(),
             },
         )),
+        historical_score: None,
         archive_error: None,
     }
 }

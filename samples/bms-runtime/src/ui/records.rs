@@ -13,6 +13,10 @@ use crate::{
     screen_lifecycle::ScreenInstanceId,
 };
 use beatkernel::time::Timestamp;
+use std::{
+    cell::{Cell, RefCell},
+    sync::Arc,
+};
 use floem_reactive::{RwSignal, Scope, SignalGet, SignalUpdate, SignalWith};
 
 const DIRECTORY: Bounds = Bounds {
@@ -22,7 +26,7 @@ const DIRECTORY: Bounds = Bounds {
     height: 34,
 };
 /// Shared button geometry in painter order, including conditionally visible pages.
-pub const BUTTONS: [(ControlId, Bounds, &'static str); 11] = [
+pub const BUTTONS: [(ControlId, Bounds, &'static str); 12] = [
     (
         ControlId(56),
         Bounds {
@@ -133,6 +137,16 @@ pub const BUTTONS: [(ControlId, Bounds, &'static str); 11] = [
         },
         "REMOVE OTHER",
     ),
+    (
+        ControlId(66),
+        Bounds {
+            x: 304,
+            y: 575,
+            width: 110,
+            height: 34,
+        },
+        "DETAILS (D)",
+    ),
 ];
 pub struct RecordsFrame<'a> {
     pub directory: &'a LineEditor,
@@ -143,6 +157,7 @@ pub struct RecordsFrame<'a> {
     /// The coordinator supplies only the current compatible selected preview.
     pub preview: Option<&'a RecordPreview>,
     pub pending: bool,
+    pub details: bool,
     pub opponents: usize,
     /// Exact selected path occurrences, ordered own/other, in the parent draft.
     pub selected_opponents: [usize; 2],
@@ -163,6 +178,9 @@ fn available(frame: &RecordsFrame<'_>, id: ControlId) -> bool {
     if frame.pending {
         return false;
     }
+    if frame.details {
+        return id.0 == 66;
+    }
     let count = frame.catalog.map_or(0, |catalog| catalog.entries.len());
     match id.0 {
         56 => frame.catalog.is_some() && frame.first > 0,
@@ -170,6 +188,9 @@ fn available(frame: &RecordsFrame<'_>, id: ControlId) -> bool {
         51 => frame.selected.is_some_and(|index| index < count),
         52 | 53 => frame.preview.is_some() && frame.opponents < 8,
         59 => frame.preview.is_some(),
+        66 => frame
+            .preview
+            .is_some_and(|preview| preview.historical.is_some()),
         60 => frame.selected_opponents[0] > 0,
         61 => frame.selected_opponents[1] > 0,
         50 | 54 | 55 => true,
@@ -188,6 +209,9 @@ pub fn hit(frame: &RecordsFrame<'_>, point: Option<(f64, f64)>) -> Option<Contro
             return Some(*id);
         }
     }
+    if frame.details {
+        return None;
+    }
     let count = frame.catalog.map_or(0, |catalog| catalog.entries.len());
     for slot in (0..10).rev() {
         let index = frame.first + slot;
@@ -198,6 +222,14 @@ pub fn hit(frame: &RecordsFrame<'_>, point: Option<(f64, f64)>) -> Option<Contro
     DIRECTORY.contains(point).then_some(ControlId(58))
 }
 fn validate_frame(frame: &RecordsFrame<'_>) -> Result<(), String> {
+    if frame.details
+        && (frame.pending
+            || frame
+                .preview
+                .is_none_or(|preview| preview.historical.is_none()))
+    {
+        return Err("Records details require idle associated historical metadata".into());
+    }
     let count = frame.catalog.map_or(0, |catalog| catalog.entries.len());
     if count > 256
         || frame.opponents > crate::settings::MAX_FIELDS
@@ -263,7 +295,36 @@ impl From<&RecordPreview> for Preview {
     }
 }
 /// Fixed node tree per Records instance, with only visible row labels retained.
+struct DetailCache {
+    value: crate::record_model::HistoricalRecordValue,
+    score: Option<Arc<crate::result_archive::ArchivedScore>>,
+    presentation: crate::historical_record_presentation::HistoricalRecordPresentation,
+    geometry: crate::scene::GeometrySnapshot,
+}
+fn detail_geometry(
+    presentation: &crate::historical_record_presentation::HistoricalRecordPresentation,
+    hovered: Option<ControlId>,
+    armed: Option<ControlId>,
+) -> Result<crate::scene::GeometrySnapshot, String> {
+    let mut scene = Scene::with_capacity(960, 720, 1024);
+    rect(&mut scene, 0, 0, 960, 720, 0x10151e);
+    presentation.compose(&mut scene)?;
+    let (id, bounds, _) = BUTTONS[11];
+    button(
+        &mut scene,
+        bounds,
+        "BACK",
+        hovered == Some(id),
+        armed == Some(id),
+    );
+    scene.geometry_snapshot()
+}
 pub struct RecordsView {
+    details: Cell<bool>,
+    detail_dirty: Cell<bool>,
+    detail_hovered: Cell<Option<ControlId>>,
+    detail_armed: Cell<Option<ControlId>>,
+    detail_cache: RefCell<Option<DetailCache>>,
     id: ScreenInstanceId,
     scope: Scope,
     directory: RwSignal<LineEditor>,
@@ -277,7 +338,7 @@ pub struct RecordsView {
     message: RwSignal<Option<String>>,
     error: RwSignal<Option<String>>,
     pending: RwSignal<bool>,
-    gates: [RwSignal<bool>; 11],
+    gates: [RwSignal<bool>; 12],
     hovered: RwSignal<Option<ControlId>>,
     armed: RwSignal<Option<ControlId>>,
     nodes: RetainedNodes,
@@ -288,6 +349,11 @@ impl RecordsView {
         let directory = LineEditor::new("", 4096)?;
         let scope = Scope::new();
         let mut view = Self {
+            details: Cell::new(false),
+            detail_dirty: Cell::new(false),
+            detail_hovered: Cell::new(None),
+            detail_armed: Cell::new(None),
+            detail_cache: RefCell::new(None),
             id,
             scope,
             directory: scope.create_rw_signal(directory),
@@ -425,7 +491,7 @@ impl RecordsView {
                     text(
                         scene,
                         24,
-                        518,
+                        514,
                         &format!(
                             "OPERATIONS {}   START {:.3} S",
                             preview.records,
@@ -437,7 +503,7 @@ impl RecordsView {
                     text(
                         scene,
                         24,
-                        534,
+                        524,
                         &format!(
                             "UNTIL {}",
                             preview.until.map_or("UNKNOWN".into(), |at| format!(
@@ -451,7 +517,7 @@ impl RecordsView {
                     text(
                         scene,
                         24,
-                        550,
+                        534,
                         &format!("HITS {} MISSES {}", preview.hits, preview.misses),
                         1,
                         0x9bb1cf,
@@ -459,26 +525,26 @@ impl RecordsView {
                     text(
                         scene,
                         24,
-                        566,
+                        544,
                         &format!("COMBO {} MAX {}", preview.combo, preview.max_combo),
                         1,
                         0x9bb1cf,
                     );
                     let (bias, absolute) = crate::timing_display::summary(&preview.timing);
-                    text(scene, 24, 582, &bias, 1, 0x9bb1cf);
-                    text(scene, 24, 598, &absolute, 1, 0x9bb1cf);
+                    text(scene, 24, 554, &bias, 1, 0x9bb1cf);
+                    text(scene, 24, 564, &absolute, 1, 0x9bb1cf);
                     let end = preview.end.map_or_else(
                         || "END UNLIMITED".into(),
                         |end| format!("END {} NS", end.as_nanos()),
                     );
-                    text(scene, 560, 518, &end, 1, 0xb6cce6);
+                    text(scene, 560, 514, &end, 1, 0xb6cce6);
                     if let Some((player, result)) = preview.historical {
                         use crate::play_result::{PlayResultScope, PlayResultOutcome};
                         use crate::gauge::GaugeFailure;
                         text(
                             scene,
                             560,
-                            534,
+                            524,
                             &format!("HISTORICAL PLAYER {}", player.0),
                             1,
                             0xd8b36b,
@@ -486,7 +552,7 @@ impl RecordsView {
                         text(
                             scene,
                             560,
-                            550,
+                            534,
                             match result.scope {
                                 PlayResultScope::FullSong => "STORED SCOPE FULL SONG",
                                 PlayResultScope::PracticeSection { .. } => {
@@ -499,7 +565,7 @@ impl RecordsView {
                         text(
                             scene,
                             560,
-                            566,
+                            544,
                             match result.outcome {
                                 PlayResultOutcome::Cleared => "STORED OUTCOME CLEARED",
                                 PlayResultOutcome::BelowClearThreshold => {
@@ -518,19 +584,19 @@ impl RecordsView {
                         text(
                             scene,
                             560,
-                            582,
+                            554,
                             &format!("STORED GAUGE {} UNITS", result.gauge.level_units),
                             1,
                             0xd8b36b,
                         );
                         if preview.archive_failed {
-                            text(scene, 560, 598, "ARCHIVE DIAGNOSTIC", 1, 0xf07878);
+                            text(scene, 560, 564, "ARCHIVE DIAGNOSTIC", 1, 0xf07878);
                         }
                     } else {
                         text(
                             scene,
                             560,
-                            534,
+                            524,
                             if preview.archive_failed {
                                 "HISTORICAL ARCHIVE UNAVAILABLE"
                             } else {
@@ -618,6 +684,69 @@ impl RecordsView {
     }
     pub fn update(&self, frame: RecordsFrame<'_>) -> Result<(), String> {
         validate_frame(&frame)?;
+        let mut staged = None;
+        let mut staged_geometry = None;
+        if frame.details {
+            let preview = frame.preview.expect("validated detail preview");
+            let value = preview.historical.expect("validated historical value");
+            let same = self.detail_cache.borrow().as_ref().is_some_and(|cache| {
+                cache.value == value
+                    && match (&cache.score, &preview.historical_score) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                        _ => false,
+                    }
+            });
+            if !same {
+                let presentation = crate::historical_record_presentation::HistoricalRecordPresentation::from_record(value, preview.historical_score.as_deref())?;
+                let geometry = detail_geometry(&presentation, frame.hovered, frame.armed)?;
+                staged = Some(DetailCache {
+                    value,
+                    score: preview.historical_score.clone(),
+                    presentation,
+                    geometry,
+                });
+            } else if !self.details.get()
+                || self.detail_hovered.get() != frame.hovered
+                || self.detail_armed.get() != frame.armed
+            {
+                let cache = self.detail_cache.borrow();
+                let cache = cache.as_ref().expect("matching detail cache");
+                staged_geometry = Some(detail_geometry(
+                    &cache.presentation,
+                    frame.hovered,
+                    frame.armed,
+                )?);
+            }
+        }
+        if let Some(cache) = staged {
+            *self.detail_cache.borrow_mut() = Some(cache);
+            self.detail_dirty.set(true);
+        }
+        if let Some(geometry) = staged_geometry {
+            self.detail_cache
+                .borrow_mut()
+                .as_mut()
+                .expect("prepared detail cache")
+                .geometry = geometry;
+            self.detail_dirty.set(true);
+        }
+        if self.details.replace(frame.details) != frame.details {
+            self.detail_dirty.set(true);
+        }
+        if frame.details {
+            if self.detail_hovered.get() != frame.hovered || self.detail_armed.get() != frame.armed
+            {
+                self.detail_dirty.set(true);
+            }
+            if self.detail_hovered.get() != frame.hovered {
+                self.detail_hovered.set(frame.hovered);
+            }
+            if self.detail_armed.get() != frame.armed {
+                self.detail_armed.set(frame.armed);
+            }
+            return Ok(());
+        }
         if !self.directory.with_untracked(|old| old == frame.directory) {
             self.directory.set(frame.directory.clone());
         }
@@ -698,14 +827,26 @@ impl RecordsView {
         Ok(())
     }
     pub fn dirty(&self) -> bool {
-        self.nodes.dirty()
+        self.detail_dirty.get() || (!self.details.get() && self.nodes.dirty())
     }
     pub fn compose(
         &self,
         scene: &mut Scene,
         hits: &mut Vec<(ControlId, Bounds)>,
     ) -> Result<(), String> {
-        self.nodes.compose(scene, hits)
+        if self.details.get() {
+            let cache = self.detail_cache.borrow();
+            let cache = cache.as_ref().ok_or("Records details cache unavailable")?;
+            scene.clear();
+            hits.clear();
+            scene.append_geometry(&cache.geometry)?;
+            let (id, bounds, _) = BUTTONS[11];
+            hits.push((id, bounds));
+        } else {
+            self.nodes.compose(scene, hits)?;
+        }
+        self.detail_dirty.set(false);
+        Ok(())
     }
     fn button_node(&mut self, index: usize) {
         let (id, bounds, label) = BUTTONS[index];
@@ -761,6 +902,7 @@ mod fixtures {
             first: 0,
             preview: None,
             pending: false,
+            details: false,
             opponents: 0,
             selected_opponents: [0; 2],
             message: None,
@@ -873,6 +1015,7 @@ mod fixtures {
             start: Timestamp::ZERO,
             end: None,
             historical: None,
+            historical_score: None,
             archive_error: None,
             score: ScoreSummary {
                 hits: 2,
@@ -936,6 +1079,7 @@ mod fixtures {
             start: Timestamp::ZERO,
             end: None,
             historical: None,
+            historical_score: None,
             archive_error: None,
             score: ScoreSummary::default(),
         };
@@ -978,8 +1122,8 @@ mod fixtures {
         view.compose(&mut scene, &mut hits).unwrap();
         assert!(scene.rectangles().iter().any(|rect| rect.bounds[0] >= 24.0
             && rect.bounds[0] < 400.0
-            && rect.bounds[1] >= 582.0
-            && rect.bounds[1] < 589.0));
+            && rect.bounds[1] >= 554.0
+            && rect.bounds[1] < 561.0));
         let mut same = frame(&directory, &catalog);
         same.selected = Some(0);
         same.preview = Some(&preview);
@@ -1013,6 +1157,7 @@ mod fixtures {
             start: Timestamp::ZERO,
             end: None,
             historical: None,
+            historical_score: None,
             archive_error: None,
             score: ScoreSummary::default(),
         };
@@ -1067,3 +1212,7 @@ mod fixtures {
 #[cfg(test)]
 #[path = "records_archive_fixtures.rs"]
 mod archive_fixtures;
+
+#[cfg(test)]
+#[path = "records_stored_score_fixtures.rs"]
+mod records_stored_score_fixtures;

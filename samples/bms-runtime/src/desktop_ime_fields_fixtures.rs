@@ -404,6 +404,7 @@ fn record_directory_commit_invalidates_old_catalog_and_preview_only_when_the_com
             start: beatkernel::time::Timestamp::ZERO,
             end: None,
             historical: None,
+            historical_score: None,
             archive_error: None,
             score: Default::default(),
         });

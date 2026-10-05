@@ -1019,6 +1019,7 @@ impl PracticeDraft {
 }
 
 struct RecordsDraft {
+    details: bool,
     chart: PathBuf,
     directory: LineEditor,
     directory_focused: bool,
@@ -1040,6 +1041,7 @@ impl RecordsDraft {
             4096,
         )?;
         Ok(Self {
+            details: false,
             chart,
             directory,
             directory_focused: true,
@@ -1060,12 +1062,16 @@ impl RecordsDraft {
             .filter(|preview| self.selected_path() == Some(&preview.path))
     }
     fn select(&mut self, index: usize) {
+        if self.details {
+            return;
+        }
         if self
             .catalog
             .as_ref()
             .is_some_and(|catalog| index < catalog.entries.len())
         {
             if self.selected != Some(index) {
+                self.details = false;
                 self.preview = None;
                 self.message = None;
             }
@@ -1075,6 +1081,9 @@ impl RecordsDraft {
         }
     }
     fn page(&mut self, forward: bool) {
+        if self.details {
+            return;
+        }
         let count = self
             .catalog
             .as_ref()
@@ -1090,12 +1099,13 @@ impl RecordsDraft {
         self.select(first);
     }
     fn edit(&mut self, key: Option<KeyCode>, value: Option<&str>) {
-        if !self.directory_focused {
+        if self.details || !self.directory_focused {
             return;
         }
         let before = self.directory.value().to_owned();
         self.error = edit_line(&mut self.directory, key, value).err();
         if self.directory.value() != before {
+            self.details = false;
             self.catalog = None;
             self.preview = None;
             self.selected = None;
@@ -1739,6 +1749,18 @@ impl Desktop {
         Ok(())
     }
     fn back(&mut self) {
+        if self.navigator.route() == ScreenRoute::Records
+            && self.records.as_ref().is_some_and(|records| records.details)
+        {
+            if !self.ui_ready() {
+                return;
+            }
+            self.records.as_mut().expect("records route").details = false;
+            self.gesture.cancel();
+            self.sync_ime();
+            self.invalidate_hits();
+            return;
+        }
         if let Some(to) = self.navigator.back_target() {
             if let Err(error) = self.navigate(to) {
                 self.failure = Some(error);
@@ -2257,6 +2279,7 @@ impl Desktop {
         }
         if self.navigator.route() == ScreenRoute::Records {
             if let Some(records) = &mut self.records {
+                records.details = false;
                 match result {
                     Ok(ProfileResult::Records(catalog)) => {
                         records.selected = (!catalog.entries.is_empty()).then_some(0);
@@ -2394,7 +2417,8 @@ impl Desktop {
         self.invalidate_hits();
     }
     fn records_admitted(&self) -> bool {
-        self.ui_ready()
+        !self.records.as_ref().is_some_and(|records| records.details)
+            && self.ui_ready()
             && matches!(
                 self.navigator.route(),
                 ScreenRoute::Settings | ScreenRoute::Records
@@ -2428,6 +2452,31 @@ impl Desktop {
             }
         }
         self.gesture.cancel();
+        self.invalidate_hits();
+    }
+    fn toggle_record_details(&mut self) {
+        if self.navigator.route() != ScreenRoute::Records {
+            return;
+        }
+        if self.records.as_ref().is_some_and(|records| records.details) {
+            self.back();
+            return;
+        }
+        if !self.records_admitted() {
+            return;
+        }
+        if let Some(records) = &mut self.records {
+            if records
+                .valid_preview()
+                .is_none_or(|preview| preview.historical.is_none())
+            {
+                return;
+            }
+            records.details = true;
+            records.directory_focused = false;
+        }
+        self.gesture.cancel();
+        self.sync_ime();
         self.invalidate_hits();
     }
     fn records_request(&mut self, preview: bool) {
@@ -2479,6 +2528,7 @@ impl Desktop {
             Ok(operation) => {
                 self.profile_io = Some(operation);
                 if let Some(records) = &mut self.records {
+                    records.details = false;
                     records.preview = None;
                     records.error = None;
                     records.message = None;
@@ -2620,7 +2670,18 @@ impl Desktop {
         self.invalidate_hits();
     }
     fn records_key(&mut self, key: KeyCode, repeat: bool) {
+        if self.records.as_ref().is_some_and(|records| records.details) {
+            if key == KeyCode::Escape && !repeat {
+                self.back();
+            }
+            return;
+        }
         match key {
+            KeyCode::KeyD
+                if !repeat && self.records.as_ref().is_some_and(|r| !r.directory_focused) =>
+            {
+                self.toggle_record_details()
+            }
             KeyCode::KeyW
                 if !repeat && self.records.as_ref().is_some_and(|r| !r.directory_focused) =>
             {
@@ -2940,6 +3001,10 @@ impl Desktop {
             return;
         }
         if self.navigator.route() == ScreenRoute::Records {
+            if id.0 == 66 {
+                self.toggle_record_details();
+                return;
+            }
             if !self.records_admitted() {
                 return;
             }
@@ -4666,6 +4731,7 @@ impl Desktop {
         frame.error = self.input_font_error.as_deref().or(frame.error);
         frame.hovered = beatkernel_bms_runtime::ui::records::hit(&frame, self.point());
         frame.armed = (50..=61)
+            .chain(std::iter::once(66))
             .map(ControlId)
             .find(|&id| self.gesture.is_armed(id));
         let view = self
@@ -5616,6 +5682,7 @@ fn records_frame<'a>(
 ) -> RecordsFrame<'a> {
     RecordsFrame {
         directory: &records.directory,
+        details: records.details,
         directory_focused: records.directory_focused,
         catalog: records.catalog.as_ref(),
         selected: records.selected,
@@ -5652,7 +5719,10 @@ fn draw_records(
     let view = RecordsView::new(id, WIDTH as u32, HEIGHT as u32).unwrap();
     let mut frame = records_frame(records, pending, opponents, None);
     frame.hovered = beatkernel_bms_runtime::ui::records::hit(&frame, point);
-    frame.armed = (50..=61).map(ControlId).find(|&id| gesture.is_armed(id));
+    frame.armed = (50..=61)
+        .chain(std::iter::once(66))
+        .map(ControlId)
+        .find(|&id| gesture.is_armed(id));
     view.update(frame).unwrap();
     view.compose(scene, hits).unwrap();
 }
@@ -8106,6 +8176,7 @@ mod tests {
             start: beatkernel::time::Timestamp::ZERO,
             end: None,
             historical: None,
+            historical_score: None,
             archive_error: None,
             score: Default::default(),
         }
@@ -8643,3 +8714,7 @@ mod tests {
         assert_eq!(window_title(&"A".repeat(1024), "").chars().count(), 256);
     }
 }
+
+#[cfg(test)]
+#[path = "desktop_record_details_fixtures.rs"]
+mod desktop_record_details_fixtures;

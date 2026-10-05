@@ -43,10 +43,29 @@ impl HistoricalRecordPresentation {
             crate::result_archive::decode_archive(archive).map_err(|error| error.to_string())?;
         let entry = crate::record_association::associate(&archive, &replay.header, player)
             .map_err(|error| error.to_string())?;
-        let value = (entry.player, entry.result);
-        let (start, end) = match entry.result.scope {
+        Self::from_record((entry.player, entry.result), entry.score.as_ref()).map(Some)
+    }
+    pub fn from_record(
+        value: HistoricalRecordValue,
+        stored_score: Option<&crate::result_archive::ArchivedScore>,
+    ) -> Result<Self, String> {
+        if value.0.0 == 0 {
+            return Err("historical player ID must be nonzero".into());
+        }
+        if let Some(score) = stored_score {
+            score.validate().map_err(|error| error.to_string())?;
+        }
+        let (start, end) = match value.1.scope {
             PlayResultScope::FullSong => (Timestamp::ZERO, None),
-            PlayResultScope::PracticeSection { start, end } => (start, end),
+            PlayResultScope::PracticeSection { start, end } => {
+                if start < Timestamp::ZERO
+                    || end.is_some_and(|end| end <= start)
+                    || (start == Timestamp::ZERO && end.is_none())
+                {
+                    return Err("invalid historical extent".into());
+                }
+                (start, end)
+            }
         };
         let mut scene = Scene::with_capacity(960, 720, 1024);
         use crate::ui::atoms::text;
@@ -55,7 +74,7 @@ impl HistoricalRecordPresentation {
             &mut scene,
             24,
             130,
-            &format!("HISTORICAL PLAYER {}", entry.player.0),
+            &format!("HISTORICAL PLAYER {}", value.0.0),
             1,
             0xd8b36b,
         );
@@ -63,7 +82,7 @@ impl HistoricalRecordPresentation {
             &mut scene,
             24,
             154,
-            match entry.result.scope {
+            match value.1.scope {
                 PlayResultScope::FullSong => "STORED SCOPE FULL SONG",
                 PlayResultScope::PracticeSection { .. } => "STORED SCOPE PRACTICE SECTION",
             },
@@ -87,7 +106,7 @@ impl HistoricalRecordPresentation {
             &mut scene,
             24,
             226,
-            match entry.result.outcome {
+            match value.1.outcome {
                 PlayResultOutcome::Cleared => "STORED OUTCOME CLEARED",
                 PlayResultOutcome::BelowClearThreshold => "STORED OUTCOME BELOW CLEAR",
                 PlayResultOutcome::Failed(GaugeFailure::InstantDeath) => {
@@ -104,12 +123,12 @@ impl HistoricalRecordPresentation {
             &mut scene,
             24,
             250,
-            &format!("STORED GAUGE {} UNITS", entry.result.gauge.level_units),
+            &format!("STORED GAUGE {} UNITS", value.1.gauge.level_units),
             1,
             0xd8b36b,
         );
         text(&mut scene, 24, 286, "STORED HISTORICAL DATA", 1, 0x9bb1cf);
-        if let Some(score) = &entry.score {
+        if let Some(score) = stored_score {
             for (y, label) in [
                 (
                     322,
@@ -148,20 +167,20 @@ impl HistoricalRecordPresentation {
                 );
                 text(&mut scene, 24, y, &label, 1, 0xb6cce6);
             }
+        } else {
+            text(&mut scene, 24, 322, "STORED SCORE UNAVAILABLE", 1, 0x9bb1cf);
         }
-        let score = entry
-            .score
-            .as_ref()
+        let score = stored_score
             .map(crate::result_archive::ArchivedScore::try_copy)
             .transpose()
             .map_err(|error| error.to_string())?;
-        Ok(Some(Self {
+        Ok(Self {
             value,
             start,
             end,
             score,
             geometry: scene.geometry_snapshot()?,
-        }))
+        })
     }
     pub const fn value(&self) -> HistoricalRecordValue {
         self.value

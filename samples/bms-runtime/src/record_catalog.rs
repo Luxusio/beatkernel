@@ -144,6 +144,7 @@ impl RecordPreview {
             start: setup.start,
             end: setup.end,
             historical: None,
+            historical_score: None,
             archive_error: None,
             score,
         })
@@ -157,11 +158,13 @@ impl RecordPreview {
         archive: Option<&crate::result_archive::ResultArchive>,
         player: Option<crate::local_players::PlayerId>,
     ) -> Result<Self, String> {
-        let association = archive
-            .map(|archive| crate::record_association::associate(archive, &file.header, player));
+        let association = archive.map(|archive| prepare_association(archive, &file.header, player));
         let mut preview = Self::from_file(path, source, settings, file)?;
         match association {
-            Some(Ok(entry)) => preview.historical = Some((entry.player, entry.result)),
+            Some(Ok((historical, score))) => {
+                preview.historical = Some(historical);
+                preview.historical_score = score;
+            }
             Some(Err(error)) => preview.archive_error = Some(error.to_string()),
             None if player.is_some() => {
                 preview.archive_error = Some("historical player requires an archive".into())
@@ -177,17 +180,41 @@ impl RecordPreview {
         archive: &crate::result_archive::ResultArchive,
         player: Option<crate::local_players::PlayerId>,
     ) {
-        match crate::record_association::associate(archive, header, player) {
-            Ok(entry) => {
-                self.historical = Some((entry.player, entry.result));
+        match prepare_association(archive, header, player) {
+            Ok((historical, score)) => {
+                self.historical = Some(historical);
+                self.historical_score = score;
                 self.archive_error = None;
             }
             Err(error) => {
                 self.historical = None;
+                self.historical_score = None;
                 self.archive_error = Some(error.to_string());
             }
         }
     }
+}
+fn prepare_association(
+    archive: &crate::result_archive::ResultArchive,
+    header: &beatkernel::replay::ReplayHeader,
+    player: Option<crate::local_players::PlayerId>,
+) -> Result<
+    (
+        crate::record_model::HistoricalRecordValue,
+        Option<std::sync::Arc<crate::result_archive::ArchivedScore>>,
+    ),
+    String,
+> {
+    let entry = crate::record_association::associate(archive, header, player)
+        .map_err(|error| error.to_string())?;
+    let score = entry
+        .score
+        .as_ref()
+        .map(crate::result_archive::ArchivedScore::try_copy)
+        .transpose()
+        .map_err(|error| error.to_string())?
+        .map(std::sync::Arc::new);
+    Ok(((entry.player, entry.result), score))
 }
 fn is_record_path(path: &Path) -> bool {
     path.extension()
@@ -516,3 +543,7 @@ mod fixtures {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "record_stored_score_fixtures.rs"]
+mod record_stored_score_fixtures;
