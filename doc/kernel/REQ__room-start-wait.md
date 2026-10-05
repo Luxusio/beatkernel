@@ -52,8 +52,10 @@ The state has no Clone/Copy/reset APIs that duplicate or renew its authority.
 The existing await_room_start uses this state and only its wrapper invokes the
 wait-control port for pending delays. First-result behavior and control refusal
 remain compatible. Service/wait acquisition and all actual host/native effects
-remain adapters. Browser integration of this startup wait state is subsequent
-work; the browser's protocol start agreement is already common Rust logic.
+remain adapters. The split-operation driver now advances this startup state through its existing
+BrowserRoomClient take_start path; see [the driver contract](REQ__room-driver-start.md).
+Browser admission/prepared timers and full asynchronous orchestration remain
+adapter work. The protocol start agreement is common Rust logic.
 Pure scripted fixtures are authored for later execution, not startup acceptance.
 
 Six additional finite-state fixture groups are authored, unexecuted. Four
