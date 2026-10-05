@@ -1,78 +1,8 @@
 //! Native reliable QUIC byte stream, owned by the existing multiplayer worker.
 //! TLS authenticates the server, not the joining player or reported scores.
 use crate::multiplayer_start::StartRole;
-use std::{io, path::PathBuf};
 
-/// Explicit trust material. Private key contents never enter this metadata.
-#[derive(Clone, Debug, Default)]
-pub struct QuicCredentials {
-    pub cert: Option<PathBuf>,
-    pub key: Option<PathBuf>,
-    pub ca: Option<PathBuf>,
-    pub server_name: Option<String>,
-}
-
-impl QuicCredentials {
-    /// Validate a complete role before reading credentials or binding a socket.
-    /// Paths retain native spelling and are bounded to 4096 encoded bytes.
-    pub fn validate_for_role(&self, host: bool) -> io::Result<()> {
-        for path in [&self.cert, &self.key, &self.ca].into_iter().flatten() {
-            let bytes = path.as_os_str().as_encoded_bytes();
-            if bytes.is_empty() || bytes.len() > 4096 || bytes.contains(&0) {
-                return Err(invalid("invalid QUIC credential path"));
-            }
-        }
-        if host {
-            if self.cert.is_none()
-                || self.key.is_none()
-                || self.ca.is_some()
-                || self.server_name.is_some()
-            {
-                return Err(invalid("QUIC host requires only certificate and key paths"));
-            }
-        } else {
-            if self.cert.is_some() || self.key.is_some() || self.ca.is_none() {
-                return Err(invalid("QUIC join requires only CA path and server name"));
-            }
-            validate_name(self.server_name.as_deref().unwrap_or_default())?;
-        }
-        Ok(())
-    }
-}
-
-fn invalid(message: &'static str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidInput, message)
-}
-
-fn validate_name(name: &str) -> io::Result<()> {
-    if name.is_empty() || name.len() > 253 || !name.is_ascii() {
-        return Err(invalid(
-            "QUIC server name must be a bounded ASCII DNS name or IP",
-        ));
-    }
-    if name.parse::<std::net::IpAddr>().is_ok() {
-        return Ok(());
-    }
-    let dns = name.strip_suffix('.').unwrap_or(name);
-    if dns.is_empty()
-        || dns.split('.').any(|label| {
-            label.is_empty()
-                || label.len() > 63
-                || label.starts_with('-')
-                || label.ends_with('-')
-                || !label
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-        })
-        || dns
-            .rsplit('.')
-            .next()
-            .is_some_and(|label| label.bytes().all(|byte| byte.is_ascii_digit()))
-    {
-        return Err(invalid("invalid QUIC server name"));
-    }
-    Ok(())
-}
+pub use crate::multiplayer_credentials::QuicCredentials;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::{QuicEndpoint, QuicStream};
@@ -85,7 +15,11 @@ pub(crate) use native::{read_credential, wait};
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
-    use super::{QuicCredentials, StartRole, invalid, validate_name};
+    use super::{QuicCredentials, StartRole};
+    use crate::multiplayer_credentials::{
+        self, CredentialReadPort, CredentialLoadError, LoadedCredentials, CREDENTIAL_BYTE_LIMIT,
+        invalid, validate_name,
+    };
     use quinn::{
         ClientConfig, Connection, Endpoint, EndpointConfig, RecvStream, SendStream, ServerConfig,
         TransportConfig, VarInt,
@@ -111,7 +45,7 @@ mod native {
     use tokio::runtime::{Builder, Runtime};
 
     const TICK: Duration = Duration::from_millis(5);
-    const FILE_LIMIT: usize = 1024 * 1024;
+    const FILE_LIMIT: usize = CREDENTIAL_BYTE_LIMIT;
     const WINDOW: u32 = 256 * 1024;
     const ALPN: &[u8] = b"beatkernel-multiplayer/6";
 
@@ -153,6 +87,21 @@ mod native {
         file.take(FILE_LIMIT as u64 + 1).read_to_end(&mut bytes)?;
         bounded_bytes(&bytes)?;
         Ok(bytes)
+    }
+    struct NativeCredentialReader;
+    impl CredentialReadPort for NativeCredentialReader {
+        type Error = io::Error;
+        fn read(&mut self, path: &Path) -> io::Result<Vec<u8>> {
+            read_credential(path)
+        }
+    }
+    fn credential_error(error: CredentialLoadError<io::Error>) -> io::Error {
+        match error {
+            CredentialLoadError::Validation(error) | CredentialLoadError::Read(error) => error,
+            CredentialLoadError::InvalidBytes => {
+                data_error("QUIC credential must contain 1..=1048576 bytes")
+            }
+        }
     }
     fn is_pem(bytes: &[u8]) -> bool {
         bytes.windows(11).any(|window| window == b"-----BEGIN ")
@@ -300,10 +249,16 @@ mod native {
             if address.port() == 0 {
                 return Err(invalid("QUIC host requires a nonzero port"));
             }
-            let config = server_config(
-                &read_credential(credentials.cert.as_deref().unwrap())?,
-                &read_credential(credentials.key.as_deref().unwrap())?,
-            )?;
+            let loaded = multiplayer_credentials::load_credentials(
+                &mut NativeCredentialReader,
+                credentials,
+                true,
+            )
+            .map_err(credential_error)?;
+            let LoadedCredentials::Host { cert, key } = loaded else {
+                unreachable!()
+            };
+            let config = server_config(&cert, &key)?;
             let socket = UdpSocket::bind(address)?;
             socket.set_nonblocking(true)?;
             Ok(Self {
@@ -316,9 +271,20 @@ mod native {
             if address.port() == 0 || address.ip().is_unspecified() {
                 return Err(invalid("invalid QUIC join address"));
             }
-            let name = credentials.server_name.as_deref().unwrap();
-            let config =
-                client_config(&read_credential(credentials.ca.as_deref().unwrap())?, name)?;
+            let loaded = multiplayer_credentials::load_credentials(
+                &mut NativeCredentialReader,
+                credentials,
+                false,
+            )
+            .map_err(credential_error)?;
+            let LoadedCredentials::Join {
+                ca,
+                server_name: name,
+            } = loaded
+            else {
+                unreachable!()
+            };
+            let config = client_config(&ca, name)?;
             let local = match address.ip() {
                 IpAddr::V4(_) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
                 IpAddr::V6(_) => IpAddr::V6(Ipv6Addr::UNSPECIFIED),
