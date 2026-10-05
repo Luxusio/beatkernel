@@ -24,10 +24,11 @@ Cleanup errors and historical receipts remain independent fields. Existing Arc
 ownership of retained rosters/prefixes remains unchanged; no policy serialization,
 new queue or per-note allocation is introduced by this extraction.
 
-The native controller still has compatibility defaults and native wait/lifecycle
-adapters; worker stream/time/thread ownership and fully portable controller
-construction remain further work. Extracting the contract is a real dependency
-boundary, not proof of complete IO separation or equivalent adapter behavior.
+The [portable controller](REQ__portable-room-controller.md) receives all hosts
+explicitly. Native defaults and physical start/wait/lifecycle adapters remain
+outside it; worker stream/time/thread ownership and browser adapter integration
+remain further work. Extracting the contract is a real dependency boundary,
+not proof of complete IO separation or equivalent adapter behavior.
 
 Independent deferred fixtures cover option bounds, exact identity/time/value
 ownership and injected port contracts without native owners. Host/WASM compilation

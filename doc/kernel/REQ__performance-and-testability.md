@@ -240,12 +240,15 @@ considered achieved by authoring fixtures or passing compile-only checks.
 Room network values and the command/poll/clock/stop port belong to the portable
 [room network contract](REQ__room-network-model.md). Native aliases retain API
 compatibility and Arc sharing; the worker owns its actual thread and stream.
-The controller uses these portable values while native defaults, start
-compatibility and result construction still require further separation.
+The [portable room controller](REQ__portable-room-controller.md) uses these
+values and all three injected hosts. Native defaults and physical start
+compatibility live outside its unconditional module. Cold retained result
+construction remains controller policy; browser adapter integration and worker
+IO still require continued development.
 
 The [room runtime host](REQ__room-runtime-host.md) separates control-clock and
 sleep construction plus implicit-drop reporting from controller policy. Its
 associated controls are statically selected; native fixed deadline construction
 and diagnostic output belong to the adapter. This does not establish physical
-timing or peer completion, nor make the controller's remaining native start
-compatibility and defaults portable.
+timing or peer completion. Native start compatibility and defaults belong to
+the separate compatibility module rather than the portable controller.

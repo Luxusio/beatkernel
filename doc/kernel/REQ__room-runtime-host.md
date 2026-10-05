@@ -31,9 +31,10 @@ natural finalization, timeout/control refusal and explicit versus implicit clean
 
 ## Known ceiling
 
-The controller remains in its native compatibility module with concrete defaults
-and the native start-agreement implementation. Worker IO, full portable controller
-construction and the remaining result presentation separation are unfinished.
+The [shared controller](REQ__portable-room-controller.md) has no native defaults;
+its native start-agreement and default constructors remain in the compatibility
+module. Worker IO, browser adapter integration and the remaining result
+presentation separation are unfinished.
 Compilation and fixture authorship do not prove actual adapter equivalence,
 physical timing, successful peer receipts, test stability or measured performance.
 Runtime tests, hardware/browser/network acceptance, formal review and QA remain
