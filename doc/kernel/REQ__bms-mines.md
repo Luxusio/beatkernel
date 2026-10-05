@@ -34,6 +34,17 @@ source and long-duration fixtures for deferred execution.
 
 ## Integration boundary
 
+### Common optional sound primitive
+
+The [core hazard-sound contract](REQ__hazard-sounds.md) publishes sounds from
+actual Triggered report prefixes at the normalized output frontier, after
+normal and invisible press sounds. Its immutable exact-ID bindings interpret no
+BMS damage values and choose no fatal-sound policy. BMS still must prepare the
+optional WAV00 bindings/assets and install them in all actual owners with local
+voice isolation, source-aware identity and output/completion handling before
+mine source admission. A core sound primitive alone does not establish WAV00
+playback or complete mine support.
+
 ### Shared retained mine rendering
 
 PlayerChart retains an immutable, separately typed PlayerMine timeline containing
