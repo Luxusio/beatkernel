@@ -1304,6 +1304,7 @@ mod fixtures {
                 input_mapping_quality: ClockMappingQuality::Unknown,
                 audio_mapping_quality: ClockMappingQuality::Unknown,
                 judge_events,
+                hazard_events: Vec::new(),
                 judge_error: None,
                 audio_commands: Vec::new(),
                 audio_failures: Vec::new(),

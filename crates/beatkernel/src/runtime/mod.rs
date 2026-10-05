@@ -11,7 +11,7 @@ use crate::{
         BindingMap, DeviceId, GameInputEvent, PhysicalInputEvent, Position2, TouchRegion,
         TouchRoute, TouchRouter, TouchRoutingError,
     },
-    judge::{JudgeEngine, JudgeError, JudgeEvent, JudgeOutcome, JudgeStage},
+    judge::{HazardEvent, JudgeEngine, JudgeError, JudgeEvent, JudgeOutcome, JudgeStage},
     telemetry::{RuntimeCounters, RuntimeTelemetry},
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Timestamp},
     transport::{Transport, TransportError},
@@ -118,6 +118,10 @@ pub struct RuntimeReport {
     pub audio_mapping_quality: ClockMappingQuality,
     /// Emitted judge results; never undone by queue failures.
     pub judge_events: Vec<JudgeEvent>,
+    /// Hazard outcomes from successful judge calls in binding order, preserving
+    /// provenance and committed prefixes across later judge or queue failures.
+    /// These do not automatically produce scores or audio commands.
+    pub hazard_events: Vec<HazardEvent>,
     /// First judge fanout failure; prior results remain committed.
     pub judge_error: Option<JudgeError>,
     /// Successfully published scalar commands.
@@ -378,7 +382,12 @@ impl Runtime {
             let mut input_commands = Vec::new();
             if report.song_end_reached {
                 match self.judge.advance_to(report.song_time) {
-                    Ok(events) => report.judge_events = events,
+                    Ok(events) => {
+                        report
+                            .hazard_events
+                            .extend_from_slice(self.judge.hazard_events());
+                        report.judge_events = events;
+                    }
                     Err(error) => report.judge_error = Some(error),
                 }
             } else {
@@ -396,6 +405,9 @@ impl Runtime {
                     let fresh = self.input_sounds.is_some() && self.judge.is_fresh_press(&bound);
                     match self.judge.push_input(&bound, report.song_time) {
                         Ok(events) => {
+                            report
+                                .hazard_events
+                                .extend_from_slice(self.judge.hazard_events());
                             if let Some(command) = self.input_sounds.as_ref().and_then(|timeline| {
                                 timeline.command_for_press(
                                     &bound,
@@ -442,6 +454,9 @@ impl Runtime {
             let (mut report, mapped_song) = self.prepare(host, audio_at, mapper, quality)?;
             match self.judge.advance_to(report.song_time) {
                 Ok(events) => {
+                    report
+                        .hazard_events
+                        .extend_from_slice(self.judge.hazard_events());
                     report.judge_events = events;
                     self.commit_time(host.timestamp, mapped_song);
                 }
@@ -490,6 +505,7 @@ impl Runtime {
                 input_mapping_quality,
                 audio_mapping_quality,
                 judge_events: Vec::new(),
+                hazard_events: Vec::new(),
                 judge_error: None,
                 audio_commands: Vec::new(),
                 audio_failures: Vec::new(),
