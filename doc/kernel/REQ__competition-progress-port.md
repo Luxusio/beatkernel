@@ -50,6 +50,9 @@ establish runtime, platform, performance or independent review/QA acceptance.
 Endpoint acquisition, native start/cleanup owners and some retained prefix
 allocations remain in outer owners. Group cadence now uses an injected clock
 through [the cadence contract](REQ__competition-progress-cadence.md), with
-native time acquisition confined to its adapter. This increment separates
+native time acquisition confined to its adapter. Group final delivery, cleanup
+and notice draining now delegate to [the terminal port](REQ__competition-terminal-port.md);
+the actual endpoint/join and diagnostics remain native outer effects.
+This increment separates
 progress policy and does not claim complete IO-layer separation, allocation-free
 networking, real QUIC/WebTransport acceptance or measured latency improvements.

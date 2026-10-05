@@ -55,9 +55,17 @@ policy validates state/gates; native adapters translate transport notices and
 perform publication. Group publication cadence now receives an explicit generic
 clock, with exact portable nanosecond state and post-effect interval commit;
 native clock acquisition lives in a per-owner adapter. Endpoint acquisition,
-start/cleanup and underlying room waits still require further separation. See
+solo finalization and underlying room waits still require further separation. See
 [the progress port contract](REQ__competition-progress-port.md) and
 [its cadence contract](REQ__competition-progress-cadence.md).
+
+Group terminal orchestration separates borrowed final delivery, cleanup and
+post-cleanup notice draining through a generic port. The outer native adapter
+performs the ownership copy/join and preserves room controller completion
+authority. Shared policy retains every outcome and the first original opaque
+error; it cannot create a successful delivery or gameplay proof from cleanup.
+Solo finalization and endpoint acquisition remain separate follow-up work. See
+[the terminal contract](REQ__competition-terminal-port.md).
 
 Clock domains and physical input/output provenance cannot be substituted with
 test/control time. Native and browser adapters use common business rules.
