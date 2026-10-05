@@ -61,7 +61,15 @@ an integration requirement below.
 
 The caller must provide the ordinary chart compiled from the supplied selected
 source. This helper does not verify PCM, apply gauge/death or publish outcomes.
-Direct native solo constructors and consumer-side BMS integration remain pending;
+NativeJudgeConfig exposes source-aware pristine judge construction using this
+same helper, existing asymmetric windows, signed offset and ButtonOnly policy.
+Linux ALSA, Windows WASAPI/optional-ASIO and macOS CoreAudio solo setup call it
+before competition identity, audio start and optional recording, retaining the
+existing cleanup boundary. Platform code does not interpret damage or rebuild
+hazard ordering. Recording and competition use the actual configured judge's
+initial hash. Disabled capture still ignores unused capture settings.
+
+Consumer-side BMS integration remains pending;
 the shared playable-source admission guard stays in force. Author independent
 plan/type/budget/timing/contact/snapshot/replay identity and actual-owner fixtures
 for later execution, with no performance or platform acceptance claim.
