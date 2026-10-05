@@ -892,3 +892,7 @@ pub mod multiplayer_configuration;
 
 pub mod final_ack_wait;
 mod native_final_wait_bridge;
+
+#[cfg(not(target_arch = "wasm32"))]
+mod native_room_final_wait_bridge;
+pub mod room_final_wait;

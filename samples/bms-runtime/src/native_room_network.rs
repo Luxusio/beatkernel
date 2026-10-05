@@ -140,15 +140,7 @@ pub struct NativeRoomReply {
     pub id: u64,
     pub result: Result<(), NativeRoomFailure>,
 }
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-/// Historical proofs observed before shutdown. Inspect the terminal outcome
-/// separately: cancellation or cleanup failure does not erase a real receipt.
-pub struct NativeRoomReceipts {
-    pub local_final_written: bool,
-    pub local_final_acknowledged: bool,
-    pub progress_complete: bool,
-    pub drain_complete: bool,
-}
+pub use crate::room_final_wait::RoomFinalReceipts as NativeRoomReceipts;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeRoomRoster {
     pub members: Vec<GroupRoomMember>,

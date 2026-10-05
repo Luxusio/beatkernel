@@ -773,61 +773,35 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
         let deadline = Instant::now()
             .checked_add(self.finish_timeout)
             .ok_or_else(|| invalid("native room finish deadline overflow"))?;
-        let mut final_queued = false;
-        let mut drain_queued = false;
-        loop {
-            self.poll()?;
-            let now = self.clock()?;
-            if now >= deadline_ns || Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "native room final/drain/cleanup deadline expired",
-                ));
+        let (mut control, control_deadline_ns) =
+            crate::native_room_final_wait_bridge::NativeRoomFinalWaitControl::until(deadline)?;
+        crate::room_final_wait::wait_for_room_final(
+            &mut NativeRoomFinalPort {
+                owner: self,
+                members: &members,
+            },
+            &mut control,
+            deadline_ns,
+            control_deadline_ns,
+        )
+        .map_err(|error| match error {
+            crate::room_final_wait::RoomFinalWaitError::Port(error)
+            | crate::room_final_wait::RoomFinalWaitError::Control(error) => error,
+            crate::room_final_wait::RoomFinalWaitError::TimedOut => io::Error::new(
+                io::ErrorKind::TimedOut,
+                "native room final/drain/cleanup deadline expired",
+            ),
+            crate::room_final_wait::RoomFinalWaitError::InvalidTerminal => io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native room ended without successful coordinated drain",
+            ),
+            crate::room_final_wait::RoomFinalWaitError::InvalidClock => {
+                invalid("native room finish clock is negative")
             }
-            if let Some(terminal) = &self.snapshot.terminal {
-                let receipts = terminal.receipts;
-                if !terminal.cancelled
-                    && terminal.error.is_none()
-                    && final_queued
-                    && self.final_accepted
-                    && drain_queued
-                    && self.drain_accepted
-                    && receipts.local_final_written
-                    && receipts.local_final_acknowledged
-                    && receipts.progress_complete
-                    && receipts.drain_complete
-                {
-                    // Waiting is over, not a success claim: finish returns the
-                    // real terminal cleanup_error separately after joining.
-                    return Ok(());
-                }
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "native room ended without successful coordinated drain",
-                ));
+            crate::room_final_wait::RoomFinalWaitError::ClockRegressed => {
+                invalid("native room finish clock regressed")
             }
-            if !final_queued && !self.pending(CommandKind::Progress) {
-                match self.send(
-                    CommandKind::Final,
-                    NativeRoomCommand::Publish {
-                        members: copy_members(&members)?,
-                        final_prefix: true,
-                    },
-                ) {
-                    Ok(_) => final_queued = true,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            if self.final_accepted && !drain_queued {
-                match self.send(CommandKind::Drain, NativeRoomCommand::Drain) {
-                    Ok(_) => drain_queued = true,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            std::thread::sleep(WAIT.min(deadline.saturating_duration_since(Instant::now())));
-        }
+        })
     }
 
     /// Call after genuine local completion and device teardown. Cancellation or
@@ -942,6 +916,65 @@ impl<P: NativeRoomPort> NativeRoomCompetition<P> {
             self.ui_error.get_or_insert(error);
             self.ui_dirty = true;
             self.publish_ui();
+        }
+    }
+}
+
+struct NativeRoomFinalPort<'a, P: NativeRoomPort> {
+    owner: &'a mut NativeRoomCompetition<P>,
+    members: &'a [MemberProgress],
+}
+impl<P: NativeRoomPort> crate::room_final_wait::RoomFinalPort for NativeRoomFinalPort<'_, P> {
+    type Error = io::Error;
+    fn poll(&mut self) -> io::Result<crate::room_final_wait::RoomFinalObservation> {
+        use crate::room_final_wait::{RoomFinalObservation, RoomFinalTerminal};
+        self.owner.poll()?;
+        Ok(RoomFinalObservation {
+            progress_pending: self.owner.pending(CommandKind::Progress),
+            final_accepted: self.owner.final_accepted,
+            drain_accepted: self.owner.drain_accepted,
+            terminal: self
+                .owner
+                .snapshot
+                .terminal
+                .as_ref()
+                .map(|terminal| RoomFinalTerminal {
+                    cancelled: terminal.cancelled,
+                    failed: terminal.error.is_some(),
+                    receipts: terminal.receipts,
+                }),
+        })
+    }
+    fn clock_now_ns(&mut self) -> io::Result<i64> {
+        self.owner.clock()
+    }
+    fn queue_final(&mut self) -> io::Result<crate::room_final_wait::RoomFinalAdmission> {
+        use crate::room_final_wait::RoomFinalAdmission;
+        match self.owner.send(
+            CommandKind::Final,
+            NativeRoomCommand::Publish {
+                members: copy_members(self.members)?,
+                final_prefix: true,
+            },
+        ) {
+            Ok(_) => Ok(RoomFinalAdmission::Accepted),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Ok(RoomFinalAdmission::QueueFull)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    fn queue_drain(&mut self) -> io::Result<crate::room_final_wait::RoomFinalAdmission> {
+        use crate::room_final_wait::RoomFinalAdmission;
+        match self
+            .owner
+            .send(CommandKind::Drain, NativeRoomCommand::Drain)
+        {
+            Ok(_) => Ok(RoomFinalAdmission::Accepted),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Ok(RoomFinalAdmission::QueueFull)
+            }
+            Err(error) => Err(error),
         }
     }
 }
