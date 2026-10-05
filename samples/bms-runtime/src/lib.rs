@@ -902,3 +902,5 @@ pub mod room_start_wait;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_room_ui_bridge;
 pub mod room_ui_host;
+
+pub mod room_network_model;

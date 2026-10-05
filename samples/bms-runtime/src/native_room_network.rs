@@ -2,12 +2,12 @@
 //! Command admission is not a transport receipt or permission to start audio.
 
 use crate::local_players::PlayerId;
-use crate::multiplayer_group::{validate_members, GroupPrefix, MemberProgress};
-use crate::multiplayer_group_rooms::{GroupRoomMember, GroupRoomPhase};
+use crate::multiplayer_group::{validate_members, GroupPrefix};
+use crate::multiplayer_group_rooms::GroupRoomMember;
 use crate::multiplayer_room_io::RoomPlayIo;
 use crate::multiplayer_room_play::RoomPlayClient;
+#[cfg(test)]
 use crate::multiplayer_rooms::ParticipantId;
-use crate::multiplayer_start::{StartPolicy, StartSchedule};
 use crate::multiplayer_webtransport_client::WebTransportOptions;
 use std::{
     collections::VecDeque,
@@ -23,7 +23,6 @@ use std::{
 };
 
 const IDLE: Duration = Duration::from_millis(1);
-const MAX_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
@@ -62,117 +61,13 @@ impl NativeRoomStream for crate::multiplayer_webtransport_client::WebTransportSt
     }
 }
 
-/// Fixed deadlines include connection through commitment, and explicit drain
-/// admission through genuine Complete respectively. They are never renewed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct NativeRoomOptions {
-    pub setup_timeout: Duration,
-    pub drain_timeout: Duration,
-    pub finish_timeout: Duration,
-    pub queue_capacity: usize,
-    pub start_policy: StartPolicy,
-    pub preroll_ns: i64,
-}
-impl Default for NativeRoomOptions {
-    fn default() -> Self {
-        Self {
-            setup_timeout: Duration::from_secs(60),
-            drain_timeout: Duration::from_secs(10),
-            finish_timeout: Duration::from_secs(2),
-            queue_capacity: 32,
-            start_policy: StartPolicy::default(),
-            preroll_ns: 0,
-        }
-    }
-}
-impl NativeRoomOptions {
-    fn validate(self) -> io::Result<()> {
-        if !(1..=1024).contains(&self.queue_capacity)
-            || [self.setup_timeout, self.drain_timeout, self.finish_timeout]
-                .iter()
-                .any(|limit| *limit < Duration::from_millis(1) || *limit > MAX_TIMEOUT)
-            || self.preroll_ns < 0
-        {
-            return Err(invalid("invalid bounded native room options"));
-        }
-        self.start_policy
-            .validate()
-            .map_err(|error| invalid(error.to_string()))
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum NativeRoomCommand {
-    Seal,
-    Ready,
-    Leave,
-    Publish {
-        members: Vec<MemberProgress>,
-        final_prefix: bool,
-    },
-    /// Admit one fixed deadline; queue common DrainReady only after actual local completion.
-    Drain,
-}
-
-/// Retained errors remain readable after stream and thread ownership have joined.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NativeRoomFailure {
-    pub kind: io::ErrorKind,
-    pub message: String,
-}
-impl From<io::Error> for NativeRoomFailure {
-    fn from(error: io::Error) -> Self {
-        Self {
-            kind: error.kind(),
-            message: error.to_string(),
-        }
-    }
-}
-impl fmt::Display for NativeRoomFailure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-impl std::error::Error for NativeRoomFailure {}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NativeRoomReply {
-    pub id: u64,
-    pub result: Result<(), NativeRoomFailure>,
-}
-pub use crate::room_final_wait::RoomFinalReceipts as NativeRoomReceipts;
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NativeRoomRoster {
-    pub members: Vec<GroupRoomMember>,
-    pub phase: GroupRoomPhase,
-    pub deadline_ns: Option<i64>,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NativeRoomOutcome {
-    pub cancelled: bool,
-    pub error: Option<NativeRoomFailure>,
-    pub cleanup_error: Option<NativeRoomFailure>,
-    pub receipts: NativeRoomReceipts,
-    pub leave_written: bool,
-}
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct NativeRoomSnapshot {
-    /// Changes only when an actual accepted room snapshot changes.
-    pub revision: u64,
-    pub participant: Option<ParticipantId>,
-    pub room: Option<Arc<NativeRoomRoster>>,
-    /// Retained genuine schedule on this owner's elapsed clock, never a readiness guess.
-    pub schedule: Option<StartSchedule>,
-    /// Exact host-qualified prefixes in frozen room order, copied only on sequence changes.
-    pub peers: Vec<(ParticipantId, Arc<GroupPrefix>)>,
-    pub receipts: NativeRoomReceipts,
-    pub terminal: Option<NativeRoomOutcome>,
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NativeRoomPoll {
-    pub snapshot: NativeRoomSnapshot,
-    pub replies: Vec<NativeRoomReply>,
-}
+pub use crate::room_network_model::{
+    RoomNetworkOptions as NativeRoomOptions, RoomCommand as NativeRoomCommand,
+    RoomFailure as NativeRoomFailure, RoomReply as NativeRoomReply,
+    RoomReceipts as NativeRoomReceipts, RoomRoster as NativeRoomRoster,
+    RoomOutcome as NativeRoomOutcome, RoomSnapshot as NativeRoomSnapshot,
+    RoomPoll as NativeRoomPoll,
+};
 
 struct Drain {
     deadline_ns: i64,
@@ -810,3 +705,21 @@ fn run<S: NativeRoomStream>(
 #[cfg(test)]
 #[path = "native_room_network_fixtures.rs"]
 mod fixtures;
+
+impl crate::room_network_model::RoomNetworkPort for NativeRoomNetwork {
+    fn try_command(&mut self, command: NativeRoomCommand) -> io::Result<u64> {
+        NativeRoomNetwork::try_command(self, command)
+    }
+    fn poll(&self) -> io::Result<NativeRoomPoll> {
+        NativeRoomNetwork::poll(self)
+    }
+    fn clock_now_ns(&self) -> io::Result<i64> {
+        NativeRoomNetwork::clock_now_ns(self)
+    }
+    fn request_stop(&self) {
+        NativeRoomNetwork::request_stop(self);
+    }
+    fn stop(&mut self) -> NativeRoomOutcome {
+        NativeRoomNetwork::stop(self)
+    }
+}

@@ -6,9 +6,11 @@ use crate::{
     multiplayer_group::{validate_members, validate_roster, MemberProgress},
     multiplayer_group_rooms::GroupRoomPhase,
     multiplayer_start::StartSchedule,
-    native_room_network::{
-        NativeRoomCommand, NativeRoomFailure, NativeRoomNetwork, NativeRoomOutcome, NativeRoomPoll,
-        NativeRoomReply, NativeRoomRoster, NativeRoomSnapshot,
+    native_room_network::NativeRoomNetwork,
+    room_network_model::{
+        RoomCommand as NativeRoomCommand, RoomFailure as NativeRoomFailure,
+        RoomOutcome as NativeRoomOutcome, RoomPoll as NativeRoomPoll, RoomReply as NativeRoomReply,
+        RoomRoster as NativeRoomRoster, RoomSnapshot as NativeRoomSnapshot,
     },
     native_start::{NativeStartAgreement, NativeStartResult, SessionHostBracket},
     room_opponent_hud::{RoomHudStatus, RoomOpponentHud},
@@ -30,33 +32,7 @@ use std::{
 const PUBLICATION_NS: i64 = 50_000_000;
 const LOBBY_LIMIT: usize = 16;
 
-/// The production implementation delegates only to the existing network owner.
-/// In-memory ports can exercise this same controller without creating a second
-/// admission, clock, progress or drain protocol.
-pub trait NativeRoomPort {
-    fn try_command(&mut self, command: NativeRoomCommand) -> io::Result<u64>;
-    fn poll(&self) -> io::Result<NativeRoomPoll>;
-    fn clock_now_ns(&self) -> io::Result<i64>;
-    fn request_stop(&self);
-    fn stop(&mut self) -> NativeRoomOutcome;
-}
-impl NativeRoomPort for NativeRoomNetwork {
-    fn try_command(&mut self, command: NativeRoomCommand) -> io::Result<u64> {
-        NativeRoomNetwork::try_command(self, command)
-    }
-    fn poll(&self) -> io::Result<NativeRoomPoll> {
-        NativeRoomNetwork::poll(self)
-    }
-    fn clock_now_ns(&self) -> io::Result<i64> {
-        NativeRoomNetwork::clock_now_ns(self)
-    }
-    fn request_stop(&self) {
-        NativeRoomNetwork::request_stop(self);
-    }
-    fn stop(&mut self) -> NativeRoomOutcome {
-        NativeRoomNetwork::stop(self)
-    }
-}
+pub use crate::room_network_model::RoomNetworkPort as NativeRoomPort;
 
 fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message.into())
