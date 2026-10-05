@@ -56,6 +56,46 @@ pub fn finalize_terminal<P: CompetitionTerminalPort>(
     }
 }
 
+/// One-shot lifecycle ownership; this state carries no completed-play proof.
+#[derive(Default)]
+pub struct TerminalGuard {
+    claimed: bool,
+}
+
+impl TerminalGuard {
+    pub const fn new() -> Self {
+        Self { claimed: false }
+    }
+    pub fn claim(&mut self) -> bool {
+        if self.claimed {
+            return false;
+        }
+        self.claimed = true;
+        true
+    }
+    pub const fn is_claimed(&self) -> bool {
+        self.claimed
+    }
+}
+
+pub fn solo_delivery_intent<'a, E>(
+    room: bool,
+    failed: bool,
+    ready: bool,
+    member: Option<&'a MemberProgress>,
+) -> DeliveryIntent<'a, E> {
+    if room {
+        DeliveryIntent::Send(member.map(std::slice::from_ref).unwrap_or(&[]))
+    } else if !failed && ready {
+        match member {
+            Some(member) => DeliveryIntent::Send(std::slice::from_ref(member)),
+            None => DeliveryIntent::Skip,
+        }
+    } else {
+        DeliveryIntent::Skip
+    }
+}
+
 #[cfg(test)]
 #[path = "competition_terminal_port_fixtures.rs"]
 mod fixtures;

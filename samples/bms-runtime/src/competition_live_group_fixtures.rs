@@ -218,6 +218,7 @@ fn offline_terminal_progress_uses_actual_reports_and_remote_selection_cannot_cha
         network_status: None,
         last_presentation: None,
         network_setup_timeout: Duration::from_secs(10),
+        terminal: TerminalGuard::new(),
     };
     assert_eq!(owner.terminal_prefix(), None);
     assert!(

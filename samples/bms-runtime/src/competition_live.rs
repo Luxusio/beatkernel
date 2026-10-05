@@ -2,6 +2,8 @@
 use crate::{
     competition::{Competition, OpponentKind},
     competition_progress,
+    competition_terminal::{self, DeliveryStatus, TerminalGuard},
+    competition_terminal_bridge::NativeTerminalPort,
     input_sounds::InputSoundIdentity,
     local_players::PlayerId,
     multiplayer::{
@@ -349,6 +351,7 @@ pub struct LiveCompetition {
     network_status: Option<NetworkStatus>,
     last_presentation: Option<u64>,
     network_setup_timeout: Duration,
+    terminal: TerminalGuard,
 }
 impl LiveCompetition {
     /// Load ghosts before starting audio; spawn networking only when selected.
@@ -565,6 +568,7 @@ impl LiveCompetition {
             network_status,
             last_presentation: None,
             network_setup_timeout: setup_timeout,
+            terminal: TerminalGuard::new(),
         };
         prepared.publish_presentation(true)?;
         Ok(prepared)
@@ -609,6 +613,9 @@ impl LiveCompetition {
         report: &RuntimeReport,
         host: &mut H,
     ) -> Result<()> {
+        if self.terminal.is_claimed() {
+            return Err("competition already stopped".into());
+        }
         self.competition
             .observe(&report.judge_events, report.song_time)?;
         let song = report.song_time.as_nanos();
@@ -751,6 +758,9 @@ impl LiveCompetition {
         control: &mut C,
         presentation: &mut H,
     ) -> Result<bool> {
+        if self.terminal.is_claimed() {
+            return Err("competition already stopped".into());
+        }
         let Some(network) = self.network.as_mut() else {
             return Ok(true);
         };
@@ -809,7 +819,17 @@ impl LiveCompetition {
     /// Send the exact last observed prefix, wait boundedly for receipt and join.
     /// Call only after native cleanup; a peer receipt is not a ranked final result.
     pub fn finish(&mut self) {
-        let terminal_prefix = self.terminal_prefix();
+        self.finish_with_presentation(&mut NativeCompetitionPresentation);
+    }
+
+    pub fn finish_with_presentation<H: CompetitionPresentationHost>(&mut self, host: &mut H) {
+        if !self.terminal.claim() {
+            return;
+        }
+        let member = self.terminal_prefix().map(|progress| MemberProgress {
+            player: self.player,
+            progress,
+        });
         println!(
             "competition final local prefix at {:?}: {:?}",
             self.competition.song_time(),
@@ -833,37 +853,42 @@ impl LiveCompetition {
                     self.network_failed = true;
                 }
             }
-            if network.is_room() {
-                let members = terminal_prefix
-                    .map(|progress| {
-                        vec![MemberProgress {
-                            player: self.player,
-                            progress,
-                        }]
-                    })
-                    .unwrap_or_default();
-                if let Err(error) = network.finish_delivery(members) {
-                    eprintln!("room finalization failed: {error}");
-                    self.network_failed = true;
+            let room = network.is_room();
+            let intent = competition_terminal::solo_delivery_intent(
+                room,
+                self.network_failed,
+                network.is_ready(),
+                member.as_ref(),
+            );
+            let outcome = competition_terminal::finalize_terminal(
+                &mut NativeTerminalPort::new(network),
+                intent,
+            );
+            if let Err(error) = &outcome.delivery {
+                eprintln!("multiplayer terminal delivery failed: {error}");
+            }
+            if let Err(error) = &outcome.cleanup {
+                eprintln!("multiplayer worker cleanup failed: {error}");
+            }
+            if let Err(error) = &outcome.drain {
+                eprintln!("multiplayer final disconnect: {error}");
+            }
+            self.network_failed |= outcome.has_failed();
+            if !room && matches!(outcome.delivery, Ok(DeliveryStatus::Accepted)) {
+                if let Some(member) = member {
+                    println!(
+                        "multiplayer terminal prefix acknowledged by peer: {:?}",
+                        member.progress
+                    );
                 }
-                #[cfg(not(target_arch = "wasm32"))]
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if room {
                 if let Some(outcome) = network.room_outcome() {
                     println!(
                         "room cleanup cancelled={} receipts={:?} protocol_error={:?} cleanup_error={:?}",
                         outcome.cancelled, outcome.receipts, outcome.error, outcome.cleanup_error
                     );
-                }
-            } else if !self.network_failed && network.is_ready() {
-                if let Some(progress) = terminal_prefix {
-                    if let Err(error) = network.finish_delivery(vec![MemberProgress {
-                        player: self.player,
-                        progress,
-                    }]) {
-                        eprintln!("multiplayer terminal prefix was not acknowledged: {error}");
-                        self.network_failed = true;
-                    } else {
-                        println!("multiplayer terminal prefix acknowledged by peer: {progress:?}");
-                    }
                 }
             }
             if let Some(remote) =
@@ -882,17 +907,13 @@ impl LiveCompetition {
                     remote.player.0, remote.progress
                 );
             }
-            if let Err(error) = network.stop() {
-                eprintln!("multiplayer worker cleanup failed: {error}");
-                self.network_failed = true;
-            }
             self.network_status = Some(if self.network_failed {
                 NetworkStatus::Disconnected
             } else {
                 NetworkStatus::Stopped
             });
         }
-        if let Err(error) = self.publish_presentation(true) {
+        if let Err(error) = self.publish_presentation_with_host(true, host) {
             eprintln!("competition presentation cleanup: {error}");
         }
     }
@@ -1048,6 +1069,7 @@ mod fixtures {
             network_status: None,
             last_presentation: None,
             network_setup_timeout: Duration::from_secs(10),
+            terminal: TerminalGuard::new(),
         };
         assert_eq!(owner.terminal_prefix(), None); // No invented prefix before an actual report.
         assert!(
@@ -1268,3 +1290,7 @@ mod fixtures {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "competition_solo_terminal_fixtures.rs"]
+mod solo_terminal_fixtures;
