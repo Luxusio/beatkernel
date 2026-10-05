@@ -1,0 +1,46 @@
+# Completed result archive
+
+A portable versioned archive preserves actual completed live results for the
+entire original 1..64 player roster, each player's existing replay setup/header
+identity, actual gauge policy, final gauge/outcome and full/practice extent.
+Canonical integer serialization retains original IDs and long signed timestamps;
+the policy must preserve grade overrides and custom clear/failure thresholds
+rather than assuming a default gauge. Decoded records are historical data and
+never construct a live CompletedPlayResult or certify trusted replay/remote results.
+
+Version 1 starts with `BKRESULT`, a little-endian u32 version and u32 roster
+count. Each row stores its u32 player ID, a u32-sized canonical header-only
+replay envelope, u64 initial/clear gauge units, i64 hit/miss deltas, a boolean
+failure flag, and a bounded ascending table of u32 grade/i64 delta overrides.
+The remaining row stores the scope tag and optional signed nanosecond start/end,
+u64 final gauge level, failure tag and outcome tag. Full-song scope has no
+start/end payload. Embedded replay setup must have the same original extent.
+The envelope must contain no records or calibration metadata. Maximum sizes
+are 64 players, 65,536 bytes per envelope and 5 MiB for the entire archive.
+
+The format validates the whole table, unique nonzero player IDs, common extent,
+supported version/tags, policy configuration and result consistency before
+acceptance. Truncation, trailing data, excessive sizes, unsupported versions,
+bad later rows and allocation failure return errors without a partial archive.
+Replay identity uses the existing canonical replay header codec; it is not a
+cryptographic proof of gameplay or authentication of editable local files.
+
+Saving first validates and encodes the entire archive, then invokes an injected
+exclusive-create storage port once. Reading is bounded and validates complete
+bytes before returning historical data. Pure policy code performs no file, OS,
+clock, database or network access. A separate native file adapter maps safe
+single-component keys under an explicit caller-owned directory to bounded reads
+and exclusive creation, preserving existing files. Write/flush errors can leave
+a partial newly created file; flush is not power-loss or crash-atomic durability.
+The directory must remain caller-owned. Standard-library path checks and open
+are separate operations and do not guarantee containment if another actor
+concurrently replaces directory entries or the root.
+
+This stage supplies the common format, storage policy and native adapter.
+High-level native replay-save and browser IndexedDB/catalog/UI association are
+subsequent integration, not achieved by this component. Rich score/timing and
+comparison snapshots may require additional versioned metadata; no data omitted
+by version 1 is claimed to be archived. Independent deferred tests cover golden
+bytes, policy/identity round trips, malformed and later-row cases, integer bounds,
+storage refusal and exact call ordering. Assertions, filesystem/device/browser
+runtime and crash/recovery acceptance remain deferred under the user's instruction.

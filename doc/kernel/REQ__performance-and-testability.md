@@ -131,6 +131,11 @@ Browser source now captures actual stepped completion into a separate retained
 presentation before freeing gameplay. The Worker owns rendering and requests;
 the Window acknowledges presentation only after its existing cleanup path settles.
 See [the browser results requirement](../ui/REQ__browser-completed-results.md).
-Browser execution and archive integration remain unfinished. Test execution, hardware QA and comparative benchmarks remain deferred
+The common completed-result archive now separates historical storage values from
+live completion evidence. Its codec and one-effect save/load policy accept an
+injected storage port; the native file adapter remains outside business policy.
+High-level native save, browser IndexedDB and catalog/UI archive integration
+remain unfinished. See [the archive boundary](../runtime/REQ__completed-result-archive.md).
+Browser execution remains unfinished. Test execution, hardware QA and comparative benchmarks remain deferred
 under the user's existing verification instruction; no quality target is
 considered achieved by authoring fixtures or passing compile-only checks.
