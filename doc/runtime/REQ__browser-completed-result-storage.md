@@ -33,8 +33,11 @@ lengths, missing payload, oversized bytes or invalid IDs refuse the stored entry
 Loaded bytes remain untrusted historical data and are decoded and exactly
 associated by Worker-owned Rust before result presentation; see
 [the loaded historical record contract](REQ__browser-historical-record.md).
-No storage metadata or file authenticates live play. Rich score/timing/comparison
-archival and actual browser acceptance remain unfinished.
+No storage metadata or file authenticates live play. Actual Step completion
+exports now include exact score/timing details under
+[the version-2 contract](REQ__archived-score-details.md); opaque storage needs
+no format parsing. Comparison archival and actual browser acceptance remain
+unfinished.
 
 Independent deferred fixtures cover actual stepped solo/cohort completion and
 refusal, byte/header/gauge identities, malformed late members, Worker transfer

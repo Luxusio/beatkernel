@@ -51,9 +51,12 @@ Native local publication preserves the whole archive and additionally writes
 one-row sidecars beside original member recordings; see
 [local association](REQ__native-local-record-association.md). Existing local
 files without member sidecars still require explicit association or migration.
-Rich score/timing and
-comparison snapshots may require additional versioned metadata; no data omitted
-by version 1 is claimed to be archived. Independent deferred tests cover golden
+Version 2 adds exact historical score/timing details from common Step completion
+exports under [the detailed score contract](REQ__archived-score-details.md).
+Version-1 archives and scoreless native publication retain their original bytes;
+missing details remain unavailable. Saved comparison snapshots remain future
+versioned metadata; no omitted data is claimed to be archived.
+Independent deferred tests cover golden
 bytes, policy/identity round trips, malformed and later-row cases, integer bounds,
 storage refusal and exact call ordering. Assertions, filesystem/device/browser
 runtime and crash/recovery acceptance remain deferred under the user's instruction.

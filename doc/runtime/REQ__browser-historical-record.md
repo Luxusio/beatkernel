@@ -11,8 +11,10 @@ Shared pure Rust policy completely decodes the bounded replay and archive and
 uses exact canonical ReplayHeader/original-player association. Historical
 presentation displays the original player, full/practice scope, exact signed
 nanosecond extent, stored outcome and exact gauge units, with explicit stored
-historical provenance. It cannot invent archived score/timing statistics omitted
-from archive version 1. Repeated drawing uses cached geometry rather than
+historical provenance. Version-2 stored score counts and timing use
+[the exact detail contract](REQ__archived-score-details.md). Version-1 omission
+remains unavailable; the display cannot invent these statistics.
+Repeated drawing uses cached geometry rather than
 reformatting strings. This path owns no gameplay, network, clock or audio state.
 
 Absent legacy archive data leaves replay selection usable. Corrupt, oversized,

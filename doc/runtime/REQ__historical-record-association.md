@@ -40,9 +40,11 @@ recordings without adjacent member sidecars still require explicit archive/playe
 selection or migration. The UI must not guess IDs from member filenames.
 Browser loaded-record
 presentation now uses the same matcher through a separate Worker-owned historical
-binding; see [its contract](REQ__browser-historical-record.md). Rich
-score/timing/comparison archival, actual browser/filesystem/GPU acceptance and
-race-free directory containment remain unfinished.
+binding; see [its contract](REQ__browser-historical-record.md). Version-2 score
+and timing preservation and common historical presentation are governed by
+[the detail contract](REQ__archived-score-details.md). Native score export and
+Records preview detail integration, comparison archival, actual browser/filesystem/
+GPU acceptance and race-free directory containment remain unfinished.
 
 Independent deferred fixtures cover exact header fields and original IDs,
 ambiguous/missing rows, finite draft equality, long extents, recorded-prefix-only
