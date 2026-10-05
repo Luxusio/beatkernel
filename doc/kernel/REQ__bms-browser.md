@@ -2347,7 +2347,7 @@ failure and stale cleanup, live preparation/queue forwarding, exact local source
 assignment, replay exclusion and replacement isolation. Actual browser/device
 execution, OS differences and performance acceptance remain deferred.
 
-## Coalesced mouse and pen movement acquisition
+## Minimal Window ownership for every input family
 
 The user-confirmed minimal Window policy applies to all input families, including
 keyboard, touch, pointer, HID and Gamepad. It is not limited to keyboard input.
@@ -2361,6 +2361,14 @@ Window collects keyboard, touch, mouse/pen, HID and Gamepad input. It preserves
 original timestamps and identities; Worker owns decoding, mapping, judgment,
 replay and rendering. Necessary permissions, gestures, lifecycle and resize
 observations remain on Window. Setup and final-result DOM changes are event-driven.
+
+This boundary covers keyboard, touch, HID and other admitted physical input
+families equally. Keep Window work bounded to acquisition and browser-required
+bridges; do not interpret the policy as a claim of zero main-thread activity.
+Existing input/output observation pumping remains separate from game rendering.
+Actual browser latency and performance acceptance remain deferred.
+
+## Coalesced mouse and pen movement acquisition
 
 For pointermove only, PointerInputOwner reads getCoalescedEvents once and calls
 an available function once with the native event as receiver. A nonempty array
