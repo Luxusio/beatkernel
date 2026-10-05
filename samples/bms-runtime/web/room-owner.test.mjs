@@ -99,6 +99,28 @@ async function harness(faults = {}) {
     receiveTimes: [], writeTimes: [], pollTimes: [], schedules: [], startCalls: 0,
     publications: [], peerUpdates: [], finalWritten: false, finalAcknowledged: false,
     progressComplete: false, drainComplete: false, peerAcks: new Set(), peerAckQueries: [],
+    drainBegins: [], drainSteps: [], drainOutputs: [], drainAdmitted: false,
+    begin_drain(elapsed, timeout) {
+      this.alive(); this.drainBegins.push({ elapsed, timeout });
+      if (this.beginDrainError) throw this.beginDrainError;
+      this.drainExpires = elapsed + timeout;
+    },
+    drain_requested() { this.alive(); return this.drainAdmitted; },
+    drain_wait_step(elapsed) {
+      this.alive(); this.drainSteps.push(elapsed);
+      // Explicit scripts below exercise adapter authority. These default
+      // outputs preserve the older tests' scripted WASM receipt transitions.
+      if (this.drainOutputs.length) {
+        const output = this.drainOutputs.shift();
+        if (output instanceof Error) throw output;
+        return output;
+      }
+      if (elapsed >= this.drainExpires) throw Object.assign(new Error("scripted common drain deadline"), { code: "timeout" });
+      if (this.progressComplete && !this.drainAdmitted) {
+        this.request("drain"); this.drainAdmitted = true;
+      }
+      return this.drainComplete ? -1n : 1000000n;
+    },
     alive() { assert.equal(this.freed, false, "WASM called after free"); },
     request_seal() { this.request("seal"); },
     request_ready() { this.request("ready"); },
@@ -281,7 +303,7 @@ test("configuration retains caller ownership; actual frames preserve u64 IDs and
     assert.equal(h.opens.length, 0);
     assert.equal(h.session.closes, 0); assert.equal(h.session.frees, 0);
   }
-  for (const method of ["needed_bytes", "frame_pending", "receive_bytes", "next_write", "written", "revision", "snapshot", "take_start", "publish_progress", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written", "progress_complete", "request_drain", "drain_complete", "free"]) {
+  for (const method of ["needed_bytes", "frame_pending", "receive_bytes", "next_write", "written", "revision", "snapshot", "take_start", "publish_progress", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written", "progress_complete", "request_drain", "drain_complete", "begin_drain", "drain_wait_step", "drain_requested", "free"]) {
     const h = await harness(); delete h.session[method];
     await failure(h.opening(), "validation");
     assert.equal(h.opens.length, 0); assert.equal(h.session.frees, 0);
@@ -1002,6 +1024,14 @@ test("drain cancellation joins pending operations and local Ready refusal cannot
   await failure(attempt(() => opened.owner.drain()), "state");
   assert.equal(opened.owner.closed, false); assert.equal(opened.owner.receipts.drainComplete, false);
   assert.deepEqual(refused.session.requests, ["drain"]);
+  const refusedSteps = refused.session.drainSteps.length;
+  const refusedPromise = opened.owner.drain();
+  await refused.receive(opened.io, () => {});
+  await refused.elapse(1);
+  assert.equal(opened.owner.drain(), refusedPromise);
+  assert.equal(refused.session.drainSteps.length, refusedSteps);
+  assert.equal(refused.session.drainBegins.length, 1);
+  assert.deepEqual(refused.session.requests, ["drain"]);
   await cleaned(refused, opened.owner, opened.io);
 
   for (const mode of ["close", "abort", "leave"]) {
@@ -1034,4 +1064,92 @@ test("drain cancellation joins pending operations and local Ready refusal cannot
     assert.equal(h.session.receives.length, receives); assert.equal(owner.receipts.drainComplete, false);
     await cleaned(h, owner, io);
   }
+});
+
+test("Rust drain steps own completion despite complete-looking old receipt fields", async () => {
+  const h = await harness(); const { owner, io } = await progressOwner(h);
+  h.session.drainAdmitted = true;
+  h.session.drainOutputs.push(1000000n, 1000000n, 1000000n, -1n);
+  const promise = owner.drain(), waiting = attempt(() => promise);
+  assert.equal(owner.drain(), promise);
+  assert.equal(h.session.drainBegins.length, 1);
+  assert.equal(h.session.drainBegins[0].timeout, 10000000n);
+  await h.receive(io, () => {
+    h.session.finalWritten = true; h.session.finalAcknowledged = true;
+    h.session.progressComplete = true; h.session.drainComplete = true;
+  });
+  assert.equal(waiting.state, "pending", "old complete receipts cannot override pending Rust step");
+  assert.equal(h.session.requests.length, 0, "adapter must not issue request_drain itself");
+  await h.elapse(1);
+  assert.equal(waiting.state, "pending");
+  await h.elapse(1);
+  const receipts = await success(waiting);
+  assert.equal(receipts, owner.receipts);
+  assert.equal(h.session.drainBegins.length, 1);
+  assert.equal(h.session.requests.length, 0);
+  assert.equal(owner.drain(), promise);
+  await cleaned(h, owner, io);
+});
+
+test("invalid Rust drain return shapes and completion without receipts refuse atomically", async () => {
+  for (const output of [-2n, 1000001n, 0, null, "-1", -1n]) {
+    const h = await harness(); const { owner, io } = await progressOwner(h);
+    h.session.drainOutputs.push(output);
+    const waiting = attempt(() => owner.drain());
+    await failure(waiting, "protocol");
+    assert.equal(h.session.drainBegins.length, 1);
+    assert.equal(h.session.drainSteps.length, 1);
+    assert.deepEqual(h.session.requests, []);
+    assert.equal(owner.receipts.drainComplete, false);
+    await cleaned(h, owner, io);
+  }
+});
+
+test("scripted common timeout and cancelled owner stop finite drain timers and never begin twice", async () => {
+  for (const cancel of [false, true]) {
+    const h = await harness(); const { owner, io } = await progressOwner(h);
+    const original = Object.assign(new Error("original common timeout"), { code: "timeout" });
+    h.session.drainOutputs.push(0n, original);
+    const promise = owner.drain(), waiting = attempt(() => promise);
+    assert.equal(owner.drain(), promise);
+    assert.equal(h.session.drainBegins.length, 1);
+    const before = h.session.drainSteps.length;
+    if (cancel) {
+      await owner.close();
+      await failure(waiting, "closed");
+      await h.elapse(5);
+      assert.equal(h.session.drainSteps.length, before);
+    } else {
+      await h.elapse(1);
+      const error = await failure(waiting, "timeout");
+      assert.equal(error.operation, "drain");
+      assert.equal(error.cause, original);
+      assert.equal(h.session.drainSteps.length, before + 1);
+    }
+    assert.equal(h.session.drainBegins.length, 1);
+    assert.deepEqual(h.session.requests, []);
+    await cleaned(h, owner, io);
+  }
+});
+
+test("recoverable common refusal seals the drain promise across later valid receipt updates", async () => {
+  const h = await harness(); const { owner, io } = await progressOwner(h);
+  const original = Object.assign(new Error("original local drain refusal"), { code: "state" });
+  h.session.drainOutputs.push(original);
+  const promise = owner.drain();
+  const error = await failure(attempt(() => promise), "state");
+  assert.equal(error.cause, original);
+  assert.equal(owner.closed, false);
+  assert.equal(h.session.drainSteps.length, 1);
+  await h.receive(io, () => {
+    h.session.finalWritten = true; h.session.finalAcknowledged = true;
+    h.session.progressComplete = true;
+  });
+  await h.elapse(5);
+  assert.equal(owner.drain(), promise);
+  assert.equal(h.session.drainBegins.length, 1);
+  assert.equal(h.session.drainSteps.length, 1);
+  assert.deepEqual(h.session.requests, []);
+  assert.equal(owner.receipts.drainComplete, false);
+  await cleaned(h, owner, io);
 });

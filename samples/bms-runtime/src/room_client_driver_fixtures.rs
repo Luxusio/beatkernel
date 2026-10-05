@@ -1,6 +1,7 @@
 //! Deferred split-operation fixtures using genuine common admission frames.
-use super::RoomClientDriver;
+use super::{RoomClientDriver, RoomDrainError};
 use crate::{
+    room_final_wait::RoomFinalStep,
     local_players::PlayerId,
     multiplayer_group::{MemberProgress, encode_words},
     multiplayer_group_rooms::{GroupRoomPolicy, GroupRoomRegistry},
@@ -468,5 +469,194 @@ fn genuine_start_and_relay_hold_peer_token_until_consumed_and_refuse_collision_a
             }
             no_final_receipts(&clients[1]);
         }
+    }
+}
+
+#[test]
+fn drain_setup_bounds_are_atomic_and_repeated_begin_does_not_renew_fixed_deadline() {
+    for (now, timeout) in [
+        (-1, 1_000_000),
+        (0, 999_999),
+        (0, 120_000_000_001),
+        (0, u64::MAX),
+        (i64::MAX - 500_000, 1_000_000),
+    ] {
+        let mut client = driver();
+        assert!(client.begin_drain(now, timeout).is_err());
+        assert!(!client.drain_requested());
+        assert!(!client.failed());
+        // Invalid setup must not consume or renew a wait owner.
+        assert!(client.begin_drain(0, 1_000_000).is_ok());
+    }
+    let (mut clients, _, _) = committed_pair();
+    let client = &mut clients[0];
+    assert!(client.begin_drain(12_000, 1_000_000).is_ok());
+    assert!(matches!(
+        client.begin_drain(900_000, 120_000_000_000),
+        Err(RoomDrainError::InvalidState)
+    ));
+    assert!(matches!(
+        client.drain_step(12_000),
+        Ok(RoomFinalStep::Wait(1_000_000))
+    ));
+    assert!(!client.drain_requested());
+    assert!(
+        client.next_write(12_000).unwrap().is_none(),
+        "drain wait cannot publish a synthetic final"
+    );
+    assert!(matches!(
+        client.drain_step(1_012_000),
+        Err(RoomDrainError::TimedOut)
+    ));
+    assert!(matches!(
+        client.drain_step(1_012_001),
+        Err(RoomDrainError::InvalidTerminal)
+    ));
+    no_final_receipts(client);
+}
+
+#[test]
+fn drain_clock_refusal_leave_and_close_never_create_terminal_success() {
+    for now in [-1, 11_999] {
+        let (mut clients, _, _) = committed_pair();
+        let client = &mut clients[0];
+        assert!(client.begin_drain(12_000, 1_000_000).is_ok());
+        assert!(matches!(
+            client.drain_step(12_000),
+            Ok(RoomFinalStep::Wait(_))
+        ));
+        let result = client.drain_step(now);
+        if now < 0 {
+            assert!(matches!(result, Err(RoomDrainError::InvalidClock)));
+        } else {
+            assert!(matches!(result, Err(RoomDrainError::ClockRegressed)));
+        }
+        assert!(matches!(
+            client.drain_step(12_001),
+            Err(RoomDrainError::InvalidTerminal)
+        ));
+        assert!(!client.drain_requested());
+        no_final_receipts(client);
+    }
+    let (mut clients, _, _) = committed_pair();
+    let client = &mut clients[0];
+    assert!(client.begin_drain(12_000, 1_000_000).is_ok());
+    client.request_leave().unwrap();
+    assert!(matches!(
+        client.drain_step(12_000),
+        Err(RoomDrainError::InvalidTerminal)
+    ));
+    assert!(!client.drain_requested());
+    client.close();
+    assert!(client.begin_drain(12_001, 1_000_000).is_err());
+    assert!(client.drain_step(12_001).is_err());
+    no_final_receipts(client);
+    // Signed room and unsigned scheduling values retain full precision.
+    let mut client = driver();
+    let now = 9_007_199_254_740_993;
+    assert!(client.begin_drain(now, 1_000_000).is_ok());
+    assert!(matches!(
+        client.drain_step(now),
+        Ok(RoomFinalStep::Wait(1_000_000))
+    ));
+    assert!(matches!(
+        client.drain_step(now + 1_000_000),
+        Err(RoomDrainError::TimedOut)
+    ));
+}
+
+#[test]
+fn genuine_final_upload_ack_and_drain_complete_are_the_only_success_evidence() {
+    let (mut clients, registry, ids) = committed_pair();
+    let room = registry.room("driver").unwrap();
+    let mut relay = RoomProgressRelay::new(room).unwrap();
+    relay.activate().unwrap();
+    for index in 0..2 {
+        let rows = room.members[index]
+            .players
+            .iter()
+            .map(|&player| MemberProgress {
+                player,
+                progress: Progress {
+                    song_ns: 604_800_000_000_000,
+                    hits: u64::MAX,
+                    misses: 0,
+                    combo: u64::MAX,
+                    max_combo: u64::MAX,
+                },
+            })
+            .collect::<Vec<_>>();
+        clients[index]
+            .publish_progress_words(&encode_words(&rows).unwrap(), true)
+            .unwrap();
+        assert!(!clients[index].local_final_written());
+        let frame = clients[index].next_write(12_000).unwrap().unwrap();
+        let actual = decode_message(&frame.bytes).unwrap();
+        assert!(matches!(actual, RoomMessage::Progress(_)));
+        relay.receive(ids[index], &actual).unwrap();
+        clients[index].written(frame.id, 12_001, 12_001).unwrap();
+        assert!(clients[index].local_final_written());
+        assert!(!clients[index].local_final_acknowledged());
+    }
+    for turn in 0..12 {
+        let at = 13_000 + turn * 100;
+        for index in 0..2 {
+            if let Some(frame) = relay.poll_write(ids[index]).unwrap() {
+                let message = decode_message(&frame.bytes).unwrap();
+                receive(&mut clients[index], &message, at + 10).unwrap();
+                clients[index].consume_peer_progress();
+                relay.written(ids[index], frame.id).unwrap();
+            }
+        }
+        for index in 0..2 {
+            if let Some(frame) = clients[index].next_write(at + 20).unwrap() {
+                let message = decode_message(&frame.bytes).unwrap();
+                assert!(matches!(message, RoomMessage::FinalAck { .. }));
+                relay.receive(ids[index], &message).unwrap();
+                clients[index].written(frame.id, at + 21, at + 21).unwrap();
+            }
+        }
+        if relay.complete() && clients.iter().all(RoomClientDriver::progress_complete) {
+            break;
+        }
+    }
+    assert!(relay.complete());
+    assert!(clients.iter().all(RoomClientDriver::progress_complete));
+    for index in 0..2 {
+        assert!(clients[index].begin_drain(19_000, 1_000_000).is_ok());
+        assert!(matches!(
+            clients[index].drain_step(19_000),
+            Ok(RoomFinalStep::Wait(_))
+        ));
+        assert!(clients[index].drain_requested());
+        assert!(!clients[index].drain_complete());
+        let frame = clients[index].next_write(19_001).unwrap().unwrap();
+        let message = decode_message(&frame.bytes).unwrap();
+        assert!(
+            matches!(message, RoomMessage::DrainReady { .. }),
+            "already-admitted final must not be published twice"
+        );
+        relay.receive(ids[index], &message).unwrap();
+        clients[index].written(frame.id, 19_002, 19_002).unwrap();
+    }
+    for index in 0..2 {
+        let frame = relay
+            .poll_write(ids[index])
+            .unwrap()
+            .expect("genuine DrainComplete");
+        let message = decode_message(&frame.bytes).unwrap();
+        assert!(matches!(message, RoomMessage::DrainComplete { .. }));
+        receive(&mut clients[index], &message, 19_010).unwrap();
+        relay.written(ids[index], frame.id).unwrap();
+        assert!(clients[index].local_final_written() && clients[index].local_final_acknowledged());
+        assert!(clients[index].progress_complete() && clients[index].drain_complete());
+        assert!(matches!(
+            clients[index].drain_step(19_010),
+            Ok(RoomFinalStep::Completed)
+        ));
+        assert!(matches!(
+            clients[index].drain_step(i64::MAX),
+            Ok(RoomFinalStep::Completed)
+        ));
     }
 }

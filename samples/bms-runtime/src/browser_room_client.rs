@@ -8,7 +8,7 @@ use crate::{
     multiplayer_room_play::RoomPlayClient,
     multiplayer_rooms::ParticipantId,
     multiplayer_start::StartPolicy,
-    room_client_driver::RoomClientDriver,
+    room_client_driver::{RoomClientDriver, RoomDrainError},
 };
 use wasm_bindgen::prelude::*;
 
@@ -67,6 +67,42 @@ pub struct BrowserRoomClient {
     driver: RoomClientDriver,
 }
 impl BrowserRoomClient {
+    fn drain_error(&mut self, value: RoomDrainError) -> JsValue {
+        let code = match &value {
+            RoomDrainError::TimedOut => "timeout",
+            RoomDrainError::InvalidState => "state",
+            RoomDrainError::Protocol(failure)
+                if !self.driver.failed()
+                    && matches!(failure,
+            crate::multiplayer_room_play::RoomPlayError::InvalidState
+            | crate::multiplayer_room_play::RoomPlayError::Admission(
+                crate::multiplayer_room_client::RoomClientError::InvalidState)
+            | crate::multiplayer_room_play::RoomPlayError::Progress(
+                crate::multiplayer_room_progress_client::RoomProgressClientError::InvalidState)
+        ) =>
+            {
+                "state"
+            }
+            _ => "protocol",
+        };
+        let result = error(value);
+        match js_sys::Reflect::set(
+            &result,
+            &JsValue::from_str("code"),
+            &JsValue::from_str(code),
+        ) {
+            Ok(true) => result,
+            Ok(false) => {
+                self.close();
+                error("room error property assignment refused")
+            }
+            Err(failure) => {
+                self.close();
+                failure
+            }
+        }
+    }
+
     fn local_result(&mut self, result: Result<(), JsValue>) -> Result<(), JsValue> {
         if let Err(value) = &result {
             if !self.driver.failed() {
@@ -217,6 +253,23 @@ impl BrowserRoomClient {
         result
     }
 
+    pub fn begin_drain(&mut self, now_ns: i64, timeout_ns: u64) -> Result<(), JsValue> {
+        self.driver
+            .begin_drain(now_ns, timeout_ns)
+            .map_err(|value| self.drain_error(value))
+    }
+    pub fn drain_wait_step(&mut self, now_ns: i64) -> Result<i64, JsValue> {
+        self.driver
+            .drain_step(now_ns)
+            .map(|step| match step {
+                crate::room_final_wait::RoomFinalStep::Completed => -1,
+                crate::room_final_wait::RoomFinalStep::Wait(delay) => delay as i64,
+            })
+            .map_err(|value| self.drain_error(value))
+    }
+    pub fn drain_requested(&self) -> bool {
+        self.driver.drain_requested()
+    }
     pub fn local_final_written(&self) -> bool {
         self.driver.local_final_written()
     }

@@ -17,6 +17,10 @@ pub struct RoomClientDriver {
     failure: Option<RoomPlayError>,
     revision: u64,
     pending_peer: Option<ParticipantId>,
+    final_admitted: bool,
+    drain_admitted: bool,
+    leave_requested: bool,
+    drain_wait: Option<crate::room_final_wait::RoomFinalWaitState>,
 }
 
 impl RoomClientDriver {
@@ -74,6 +78,10 @@ impl RoomClientDriver {
             failure: None,
             revision: 0,
             pending_peer: None,
+            final_admitted: false,
+            drain_admitted: false,
+            leave_requested: false,
+            drain_wait: None,
         })
     }
     pub fn request_seal(&mut self) -> Result<(), RoomPlayError> {
@@ -83,10 +91,18 @@ impl RoomClientDriver {
         self.operate(false, |owner| owner.session()?.request_ready())
     }
     pub fn request_leave(&mut self) -> Result<(), RoomPlayError> {
-        self.operate(false, |owner| owner.session()?.request_leave())
+        self.operate(false, |owner| {
+            owner.session()?.request_leave()?;
+            owner.leave_requested = true;
+            Ok(())
+        })
     }
     pub fn request_drain(&mut self) -> Result<(), RoomPlayError> {
-        self.operate(false, |owner| owner.session()?.request_drain())
+        self.operate(false, |owner| {
+            owner.session()?.request_drain()?;
+            owner.drain_admitted = true;
+            Ok(())
+        })
     }
     pub fn publish_progress_words(
         &mut self,
@@ -96,7 +112,11 @@ impl RoomClientDriver {
         self.operate(false, |owner| {
             let members = decode_words(words)
                 .map_err(|_| RoomPlayError::Progress(RoomProgressClientError::InvalidProgress))?;
-            owner.session()?.publish_progress(&members, final_prefix)
+            owner.session()?.publish_progress(&members, final_prefix)?;
+            if final_prefix {
+                owner.final_admitted = true;
+            }
+            Ok(())
         })
     }
     pub fn needed_bytes(&mut self) -> Result<usize, RoomPlayError> {
@@ -256,9 +276,157 @@ impl RoomClientDriver {
         self.session = None;
         self.decoder = None;
         self.pending_peer = None;
+        self.drain_wait = None;
         if self.failure.is_none() {
             self.failure = Some(RoomPlayError::Stopped);
         }
+    }
+}
+
+#[derive(Debug)]
+pub enum RoomDrainError {
+    Protocol(RoomPlayError),
+    TimedOut,
+    InvalidTerminal,
+    ClockRegressed,
+    InvalidClock,
+    InvalidState,
+}
+impl std::fmt::Display for RoomDrainError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Protocol(error) => std::fmt::Display::fmt(error, f),
+            Self::TimedOut => f.write_str("room coordinated drain timed out"),
+            Self::InvalidTerminal => f.write_str("room ended without successful coordinated drain"),
+            Self::ClockRegressed => f.write_str("room drain clock regressed"),
+            Self::InvalidClock => f.write_str("invalid room drain clock"),
+            Self::InvalidState => f.write_str("room drain request is unavailable"),
+        }
+    }
+}
+
+impl RoomClientDriver {
+    pub fn begin_drain(&mut self, now_ns: i64, timeout_ns: u64) -> Result<(), RoomDrainError> {
+        if now_ns < 0 {
+            return Err(RoomDrainError::InvalidClock);
+        }
+        if !(1_000_000..=120_000_000_000).contains(&timeout_ns) {
+            return Err(RoomDrainError::InvalidState);
+        }
+        let network_deadline = now_ns
+            .checked_add(timeout_ns as i64)
+            .ok_or(RoomDrainError::InvalidClock)?;
+        let control_deadline = (now_ns as u64)
+            .checked_add(timeout_ns)
+            .ok_or(RoomDrainError::InvalidClock)?;
+        self.ensure_live().map_err(RoomDrainError::Protocol)?;
+        if self.drain_wait.is_some() || self.leave_requested || self.leave_written() {
+            return Err(RoomDrainError::InvalidState);
+        }
+        self.drain_wait = Some(crate::room_final_wait::RoomFinalWaitState::new(
+            network_deadline,
+            control_deadline,
+        ));
+        Ok(())
+    }
+    pub fn drain_requested(&self) -> bool {
+        self.drain_admitted
+    }
+    pub fn drain_step(
+        &mut self,
+        now_ns: i64,
+    ) -> Result<crate::room_final_wait::RoomFinalStep, RoomDrainError> {
+        let mut state = self.drain_wait.take().ok_or(RoomDrainError::InvalidState)?;
+        let result = state.step(
+            &mut DriverDrainPort {
+                driver: self,
+                now_ns,
+            },
+            &mut DriverDrainControl { now_ns },
+        );
+        self.drain_wait = Some(state);
+        result.map_err(|error| match error {
+            crate::room_final_wait::RoomFinalWaitError::Port(error) => {
+                RoomDrainError::Protocol(error)
+            }
+            crate::room_final_wait::RoomFinalWaitError::Control(error) => error,
+            crate::room_final_wait::RoomFinalWaitError::TimedOut => RoomDrainError::TimedOut,
+            crate::room_final_wait::RoomFinalWaitError::InvalidTerminal => {
+                RoomDrainError::InvalidTerminal
+            }
+            crate::room_final_wait::RoomFinalWaitError::ClockRegressed => {
+                RoomDrainError::ClockRegressed
+            }
+            crate::room_final_wait::RoomFinalWaitError::InvalidClock => {
+                RoomDrainError::InvalidClock
+            }
+        })
+    }
+}
+
+struct DriverDrainPort<'a> {
+    driver: &'a mut RoomClientDriver,
+    now_ns: i64,
+}
+impl crate::room_final_wait::RoomFinalPort for DriverDrainPort<'_> {
+    type Error = RoomPlayError;
+    fn poll(&mut self) -> Result<crate::room_final_wait::RoomFinalObservation, Self::Error> {
+        use crate::room_final_wait::{RoomFinalObservation, RoomFinalTerminal, RoomFinalReceipts};
+        self.driver.ensure_live()?;
+        let cancelled = self.driver.leave_requested || self.driver.leave_written();
+        let complete = self.driver.drain_complete();
+        Ok(RoomFinalObservation {
+            progress_pending: !self.driver.final_admitted,
+            final_accepted: self.driver.final_admitted,
+            drain_accepted: self.driver.drain_admitted,
+            terminal: if cancelled || complete {
+                Some(RoomFinalTerminal {
+                    cancelled,
+                    failed: false,
+                    receipts: RoomFinalReceipts {
+                        local_final_written: self.driver.local_final_written(),
+                        local_final_acknowledged: self.driver.local_final_acknowledged(),
+                        progress_complete: self.driver.progress_complete(),
+                        drain_complete: complete,
+                    },
+                })
+            } else {
+                None
+            },
+        })
+    }
+    fn clock_now_ns(&mut self) -> Result<i64, Self::Error> {
+        Ok(self.now_ns)
+    }
+    fn queue_final(&mut self) -> Result<crate::room_final_wait::RoomFinalAdmission, Self::Error> {
+        Ok(if self.driver.final_admitted {
+            crate::room_final_wait::RoomFinalAdmission::Accepted
+        } else {
+            crate::room_final_wait::RoomFinalAdmission::QueueFull
+        })
+    }
+    fn queue_drain(&mut self) -> Result<crate::room_final_wait::RoomFinalAdmission, Self::Error> {
+        use crate::room_final_wait::RoomFinalAdmission;
+        if self.driver.drain_admitted {
+            return Ok(RoomFinalAdmission::Accepted);
+        }
+        if !self.driver.progress_complete() {
+            return Ok(RoomFinalAdmission::QueueFull);
+        }
+        self.driver.request_drain()?;
+        Ok(RoomFinalAdmission::Accepted)
+    }
+}
+struct DriverDrainControl {
+    now_ns: i64,
+}
+impl crate::final_ack_wait::FinalWaitControl for DriverDrainControl {
+    type Error = RoomDrainError;
+    fn now_ns(&mut self) -> Result<u64, Self::Error> {
+        u64::try_from(self.now_ns).map_err(|_| RoomDrainError::InvalidClock)
+    }
+    fn park_ns(&mut self, _duration_ns: u64) -> Result<(), Self::Error> {
+        Err(RoomDrainError::InvalidState)
     }
 }
 

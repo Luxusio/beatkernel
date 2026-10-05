@@ -9,7 +9,7 @@ const METHODS = ["request_seal", "request_ready", "request_leave", "needed_bytes
   "frame_pending", "receive_bytes", "next_write", "written", "participant_id",
   "revision", "has_snapshot", "leave_written", "snapshot", "take_start", "publish_progress",
   "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written",
-  "progress_complete", "request_drain", "drain_complete", "close", "free"];
+  "progress_complete", "request_drain", "drain_complete", "begin_drain", "drain_wait_step", "drain_requested", "close", "free"];
 
 export class BrowserRoomOwnerError extends Error {
   constructor(code, operation, message, cause) {
@@ -110,6 +110,7 @@ export class BrowserRoomOwner {
   #leaveGate = null;
   #completionGate = null;
   #drainGate = null;
+  #drainSettled = false;
   #drainTimer = null;
   #drainRequested = false;
   #setupTimer = null;
@@ -163,7 +164,8 @@ export class BrowserRoomOwner {
         || owner.#core("initial", session => session.local_final_written()) !== false
         || owner.#core("initial", session => session.local_final_acknowledged()) !== false
         || owner.#core("initial", session => session.progress_complete()) !== false
-        || owner.#core("initial", session => session.drain_complete()) !== false) {
+        || owner.#core("initial", session => session.drain_complete()) !== false
+        || owner.#core("initial", session => session.drain_requested()) !== false) {
         throw new BrowserRoomOwnerError("protocol", "open", "Room session is already in use.");
       }
       const opening = owner.#track(() => config.channelFactory(url, { signal: owner.#controller.signal,
@@ -324,33 +326,50 @@ export class BrowserRoomOwner {
     if (this.closed) return Promise.reject(this.#failure);
     if (this.#leaveGate !== null) return Promise.reject(new BrowserRoomOwnerError("state", "drain", "Room is leaving."));
     this.#drainGate = gate();
-    this.#drainTimer = setTimeout(() => this.#fail(new BrowserRoomOwnerError(
-      "timeout", "drain", "Room coordinated drain timed out.")), this.#config.ioTimeoutMs);
-    this.#advanceDrain();
+    try {
+      this.#session.begin_drain(this.#elapsed(), BigInt(this.#config.ioTimeoutMs) * 1000000n);
+      this.#advanceDrain();
+    } catch (cause) { this.#rejectDrain(cause); }
     return this.#drainGate.promise;
   }
 
+  #rejectDrain(cause) {
+    if (this.#drainSettled) return;
+    this.#drainSettled = true;
+    clearTimeout(this.#drainTimer); this.#drainTimer = null;
+    const error = cause?.code === "state"
+      ? new BrowserRoomOwnerError("state", "drain", "Room drain request is unavailable.", cause)
+      : this.#fatal(cause, cause?.code === "timeout" ? "timeout" : "core", "drain");
+    this.#drainGate?.reject(error);
+  }
+
   #advanceDrain() {
-    if (this.#drainGate === null || this.closed || this.#leaveGate !== null) return;
-    if (this.#receipts.complete && !this.#drainRequested) {
-      this.#drainRequested = true; // One attempt, even if a local request refuses.
-      try { this.#session.request_drain(); }
-      catch (cause) {
-        clearTimeout(this.#drainTimer); this.#drainTimer = null;
-        const error = cause?.code === "state"
-          ? new BrowserRoomOwnerError("state", "drain", "Room drain request is unavailable.", cause)
-          : this.#fatal(cause, "core", "drain");
-        this.#drainGate.reject(error);
-        return;
+    if (this.#drainGate === null || this.#drainSettled || this.closed || this.#leaveGate !== null) return;
+    clearTimeout(this.#drainTimer); this.#drainTimer = null;
+    try {
+      const delay = this.#session.drain_wait_step(this.#elapsed());
+      const requested = this.#session.drain_requested();
+      if (typeof requested !== "boolean" || (this.#drainRequested && !requested)) {
+        throw new BrowserRoomOwnerError("protocol", "drain", "Invalid room drain admission.");
       }
-      this.#wake();
-    }
-    if (this.#receipts.drainComplete && !this.closed) {
-      clearTimeout(this.#drainTimer); this.#drainTimer = null;
-      clearTimeout(this.#frameTimer); this.#frameTimer = null;
-      this.#drainGate.resolve(this.#receipts);
-      this.#wake();
-    }
+      if (requested && !this.#drainRequested) { this.#drainRequested = true; this.#wake(); }
+      if (typeof delay !== "bigint" || delay < -1n || delay > 1000000n) {
+        throw new BrowserRoomOwnerError("protocol", "drain", "Invalid room drain wait result.");
+      }
+      if (delay === -1n) {
+        const receipts = this.#receipts;
+        if (!receipts.localFinalWritten || !receipts.localFinalAcknowledged
+          || !receipts.complete || !receipts.drainComplete || !requested) {
+          throw new BrowserRoomOwnerError("protocol", "drain", "Room drain completed without actual receipts.");
+        }
+        clearTimeout(this.#frameTimer); this.#frameTimer = null;
+        this.#drainSettled = true;
+        this.#drainGate.resolve(receipts);
+        this.#wake();
+      } else {
+        this.#drainTimer = setTimeout(() => this.#advanceDrain(), Math.max(1, Number((delay + 999999n) / 1000000n)));
+      }
+    } catch (cause) { this.#rejectDrain(cause); }
   }
 
   leave() {
