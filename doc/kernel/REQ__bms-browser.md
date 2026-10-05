@@ -2349,6 +2349,14 @@ execution, OS differences and performance acceptance remain deferred.
 
 ## Coalesced mouse and pen movement acquisition
 
+The user-confirmed minimal Window policy applies to all input families, including
+keyboard, touch, pointer, HID and Gamepad. It is not limited to keyboard input.
+Window performs browser-required acquisition and permissions/gesture work and
+forwards original event metadata. It must not run a gameplay or HUD rendering
+loop. Worker owns game/UI drawing, input interpretation and judgment; the audio
+Worklet owns audio output. Necessary event-driven setup/final-result DOM updates
+and lifecycle/resize notifications remain permitted on Window.
+
 Window collects keyboard, touch, mouse/pen, HID and Gamepad input. It preserves
 original timestamps and identities; Worker owns decoding, mapping, judgment,
 replay and rendering. Necessary permissions, gestures, lifecycle and resize
