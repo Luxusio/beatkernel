@@ -76,8 +76,10 @@ headless/publisher cases, real queue/Mixer future scheduling and survivor/BGM
 preservation, simultaneous capture/presentation/audio errors, group poison and
 prefix retention, and no duplicate post-fence stops.
 
-Replay/offline audio policy connections, result clear/fail and output cleanup
-remain unfinished after the common native owner connection.
+The [replay failure sound plan](REQ__replay-gauge-sound-stop.md) reuses the shared
+scheduled-stop state and derives fixed-default failure from actual recorded
+operations. Offline gauge/audio connection, per-owner output diagnostics,
+result clear/fail and output cleanup remain unfinished.
 Stopping a configured inactive or never-played voice preserves the Mixer's
 existing unknown_stops diagnostic. The current strict normal-completion evidence
 validator rejects that counter; failed-session output completion needs an

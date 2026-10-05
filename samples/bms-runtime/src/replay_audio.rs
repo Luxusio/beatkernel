@@ -2,6 +2,7 @@
 
 use crate::{
     PreparedBms,
+    gauge::BmsGauge,
     input_sounds::InputSoundPlan,
     mine_sounds::MineSoundPlan,
     practice::PracticeStart,
@@ -18,6 +19,7 @@ use beatkernel::{
         ReplayOperation,
         codec::{ReplayCodecLimits, ReplayFile},
     },
+    runtime::GameplaySoundStop,
     time::{ClockPoint, Duration, Timestamp},
 };
 use std::{collections::BTreeMap, error::Error};
@@ -69,7 +71,7 @@ pub fn completed_render_cursor(report: &RenderReport) -> Result<u64, ReplayAudio
 /// Off-thread planned commands, distinct from queue/native execution.
 #[derive(Debug)]
 pub struct ReplayAudioPlan {
-    /// Stable chronological output-domain Play commands.
+    /// Stable chronological output-domain Play and gameplay-failure Stop commands.
     pub commands: Vec<AudioCommand>,
     /// Actual full-log judge results with original input provenance.
     pub judge_events: Vec<JudgeEvent>,
@@ -201,7 +203,7 @@ fn plan_with_section(
             input_sounds.as_ref(),
             beatkernel_bms::ParseOptions::default().max_objects,
         )?;
-        if !plan.bindings().is_empty() && selection_judge.is_none() {
+        if selection_judge.is_none() {
             selection_judge = Some(if allow_finite {
                 validate_section_setup(&prepared.source, &file, limits)?
             } else {
@@ -290,9 +292,39 @@ fn plan_with_section(
             },
         ));
     }
-    if let Some(hazards) = hazard_sounds {
-        let mut judge = selection_judge.expect("audible hazards prepared a pristine judge");
+    if !prepared.source.mines.is_empty() {
+        let mut judge = selection_judge.expect("mines prepared a pristine judge");
+        let mut voices = Vec::new();
+        let voice_count = prepared
+            .sounds
+            .len()
+            .checked_add(
+                input_sounds
+                    .as_ref()
+                    .map_or(0, |timeline| timeline.markers().len()),
+            )
+            .and_then(|count| {
+                count.checked_add(
+                    hazard_sounds
+                        .as_ref()
+                        .map_or(0, |timeline| timeline.bindings().len()),
+                )
+            })
+            .ok_or(ReplayAudioError::Overflow)?;
+        voices
+            .try_reserve_exact(voice_count)
+            .map_err(|_| ReplayAudioError::AllocationFailed)?;
+        voices.extend(prepared.sounds.iter().map(|sound| sound.voice));
+        if let Some(timeline) = &input_sounds {
+            voices.extend(timeline.markers().iter().map(|marker| marker.voice));
+        }
+        if let Some(timeline) = &hazard_sounds {
+            voices.extend(timeline.bindings().iter().map(|binding| binding.voice));
+        }
+        let mut stops = GameplaySoundStop::new(voices);
+        let mut gauge = BmsGauge::default();
         for record in session.records() {
+            let was_failed = gauge.snapshot().failure.is_some();
             let (results, press_command) = match &record.operation {
                 ReplayOperation::Advance => (judge.advance_to(record.song_time)?, None),
                 ReplayOperation::Input(input) => {
@@ -310,6 +342,12 @@ fn plan_with_section(
                     (results, command)
                 }
             };
+            gauge.observe(&results, judge.hazard_events())?;
+            if was_failed {
+                // Legacy logs may continue after failure. Keep judging every
+                // record for exact results/hash, without selecting more sounds.
+                continue;
+            }
             for event in &results {
                 if !matches!(event.outcome, JudgeOutcome::Hit { .. }) {
                     continue;
@@ -330,17 +368,20 @@ fn plan_with_section(
                         .try_reserve(1)
                         .map_err(|_| ReplayAudioError::AllocationFailed)?;
                     scheduled.push((at, true, scheduled.len(), command));
+                    stops.observe_admitted(at);
                 }
             }
             // Only selected commands require output mapping. Marker timestamps
             // stay in the judge report; delayed operations schedule at their own
             // recorded song time, after that operation's normal and press sounds.
-            for command in press_command.into_iter().chain(
-                judge
-                    .hazard_events()
-                    .iter()
-                    .filter_map(|event| hazards.command_for(event, record.song_time)),
-            ) {
+            for command in press_command
+                .into_iter()
+                .chain(judge.hazard_events().iter().filter_map(|event| {
+                    hazard_sounds
+                        .as_ref()
+                        .and_then(|timeline| timeline.command_for(event, record.song_time))
+                }))
+            {
                 let AudioCommand::Play {
                     voice,
                     sample,
@@ -373,6 +414,36 @@ fn plan_with_section(
                         gain,
                     },
                 ));
+                stops.observe_admitted(at);
+            }
+            if gauge.snapshot().failure.is_some() && !stops.voices().is_empty() {
+                if prepared.bgm_commands.iter().any(|command| match command {
+                    AudioCommand::Play { voice, .. } => stops.voices().binary_search(voice).is_ok(),
+                    _ => false,
+                }) {
+                    return Err(ReplayAudioError::InvalidConfiguration(
+                        "gameplay failure Stop voice collides with BGM",
+                    )
+                    .into());
+                }
+                let at = output_time(
+                    i128::from(record.song_time.as_nanos()),
+                    start,
+                    output_origin,
+                    preroll,
+                )?;
+                // Success here means off-thread planning only. The owner must
+                // still feed these commands and observe actual output evidence.
+                if let Some(report) = stops.attempt(at, |_| Ok(())) {
+                    if before_endpoint(report.at, output_origin, sample_rate, end)? {
+                        scheduled
+                            .try_reserve(report.commands.len())
+                            .map_err(|_| ReplayAudioError::AllocationFailed)?;
+                        for command in report.commands {
+                            scheduled.push((report.at, true, scheduled.len(), command));
+                        }
+                    }
+                }
             }
         }
         if judge.stable_hash()? != final_judge_hash {

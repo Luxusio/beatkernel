@@ -31,7 +31,7 @@ without duplicated accepted commands, sparse full-width voices, negative origin,
 subframe ceiling and config/chronology/command-kind rejection. Default BGM stays
 Play-only, and the strict generic render validators remain unchanged.
 
-This component unblocks the next replay/offline gauge-failure audio integration;
-the current audio planners do not yet emit these Stops. Per-session ownership,
+The [replay gauge-failure audio plan](REQ__replay-gauge-sound-stop.md) uses this
+component for its mapped Stops. Offline gauge/audio connection, per-session ownership,
 actual Worklet acknowledged Stop counts and failed-output diagnostic acceptance
 must be connected before completion claims. Mine admission stays guarded.

@@ -47,7 +47,7 @@ fn point(domain: u32, ns: i64) -> ClockPoint {
 fn pcm_limits() -> PcmLimits {
     PcmLimits::new(256, 2048, 8).unwrap()
 }
-fn replay_limits() -> ReplayCodecLimits {
+pub(super) fn replay_limits() -> ReplayCodecLimits {
     ReplayCodecLimits::new(65536, 128, 4096, CodecLimits::new(4096, 1024).unwrap()).unwrap()
 }
 fn play(sample: u64, voice: u64, at: i64, gain: f32) -> AudioCommand {
@@ -58,7 +58,7 @@ fn play(sample: u64, voice: u64, at: i64, gain: f32) -> AudioCommand {
         gain,
     }
 }
-fn data(text: &str, zero: bool) -> PreparedBms {
+pub(super) fn data(text: &str, zero: bool) -> PreparedBms {
     data_with_music(text, zero, &[0.25, 0.75])
 }
 fn data_with_music(text: &str, zero: bool, music: &[f32]) -> PreparedBms {
@@ -119,17 +119,17 @@ fn data_with_music(text: &str, zero: bool, music: &[f32]) -> PreparedBms {
     }
 }
 #[derive(Clone, Copy)]
-enum Action {
+pub(super) enum Action {
     Press(i64, u16),
     Release(i64, u16),
     Advance(i64),
     Bgm(usize),
 }
-struct Recorded {
-    file: ReplayFile,
-    commands: Vec<AudioCommand>,
-    reports: Vec<RuntimeReport>,
-    hash: u64,
+pub(super) struct Recorded {
+    pub(super) file: ReplayFile,
+    pub(super) commands: Vec<AudioCommand>,
+    pub(super) reports: Vec<RuntimeReport>,
+    pub(super) hash: u64,
 }
 struct NoMapping;
 impl ClockMapper for NoMapping {
@@ -140,7 +140,7 @@ impl ClockMapper for NoMapping {
         ClockMappingQuality::Unknown
     }
 }
-fn recorded(
+pub(super) fn recorded(
     data: &PreparedBms,
     actions: &[Action],
     mode: BmsInputMode,
@@ -506,8 +506,9 @@ fn replay_prefix_and_silent_variants_keep_legacy_order_while_audible_missing_pcm
         [
             play(1, 11, OUTPUT, 0.5),
             play(1, 90, 2_000_000_000, 0.5),
-            play(1, 12, 2_000_000_000, 0.5),
-            play(2, 92, 2_000_000_000, 0.5)
+            // Mine sources preserve operation order even without WAV00.
+            play(2, 92, 2_000_000_000, 0.5),
+            play(1, 12, 2_000_000_000, 0.5)
         ]
     );
     assert_eq!(plan.final_judge_hash, actual.hash);

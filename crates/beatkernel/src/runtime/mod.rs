@@ -1,9 +1,12 @@
 //! Single-owner forward runtime connecting canonical input to scalar audio.
 
+pub mod gameplay_sound_stop;
 pub mod hazard_sound;
 pub mod input_sound;
 pub mod playback;
 pub mod restart;
+
+pub use gameplay_sound_stop::{GameplaySoundStop, RuntimeSoundStopReport};
 
 use crate::{
     audio::{AudioCommand, CommandProducer, CommandPushError, QueuePushError, SampleId, VoiceId},
@@ -132,17 +135,6 @@ pub struct RuntimeReport {
     pub audio_failures: Vec<CommandPushError>,
 }
 
-/// One scheduled gameplay-voice stop attempt, preserving all queue evidence.
-#[derive(Clone, Debug)]
-pub struct RuntimeSoundStopReport {
-    /// Effective output-domain time, no earlier than accepted gameplay audio.
-    pub at: Timestamp,
-    /// Stop commands accepted by the existing producer in prepared voice order.
-    pub commands: Vec<AudioCommand>,
-    /// Original rejected commands and reasons; no automatic retry is permitted.
-    pub failures: Vec<CommandPushError>,
-}
-
 /// Software profiling only; never an input, song or output clock.
 ///
 /// Hosts without a usable `std::time::Instant` must select `External` or
@@ -208,9 +200,7 @@ pub struct Runtime {
     sounds: Vec<SoundBinding>,
     input_sounds: Option<InputSoundTimeline>,
     hazard_sounds: Option<HazardSoundTimeline>,
-    gameplay_voices: Vec<VoiceId>,
-    gameplay_audio_watermark: Option<Timestamp>,
-    gameplay_sound_stop_attempted: bool,
+    gameplay_sound_stop: GameplaySoundStop,
     input_sounds_locked: bool,
     last_host: Option<Timestamp>,
     last_song: Option<Timestamp>,
@@ -237,9 +227,8 @@ impl Runtime {
         if sounds.iter().any(|sound| !sound.gain.is_finite()) {
             return Err(RuntimeError::InvalidGain);
         }
-        let mut gameplay_voices: Vec<_> = sounds.iter().map(|sound| sound.voice).collect();
-        gameplay_voices.sort_unstable();
-        gameplay_voices.dedup();
+        let gameplay_sound_stop =
+            GameplaySoundStop::new(sounds.iter().map(|sound| sound.voice).collect());
         Ok(Self {
             host_domain,
             audio_domain,
@@ -251,9 +240,7 @@ impl Runtime {
             sounds,
             input_sounds: None,
             hazard_sounds: None,
-            gameplay_voices,
-            gameplay_audio_watermark: None,
-            gameplay_sound_stop_attempted: false,
+            gameplay_sound_stop,
             input_sounds_locked: false,
             last_host: None,
             last_song: None,
@@ -275,12 +262,11 @@ impl Runtime {
         if self.input_sounds_locked || self.input_sounds.is_some() {
             return Err(RuntimeError::InputSoundConfigurationLocked);
         }
-        let mut voices = self.gameplay_voices.clone();
+        let mut voices = self.gameplay_sound_stop.voices().to_vec();
         voices.extend(timeline.markers().iter().map(|marker| marker.voice));
-        voices.sort_unstable();
-        voices.dedup();
+        let stops = GameplaySoundStop::new(voices);
         self.input_sounds = Some(timeline);
-        self.gameplay_voices = voices;
+        self.gameplay_sound_stop = stops;
         Ok(())
     }
 
@@ -296,12 +282,11 @@ impl Runtime {
         if self.input_sounds_locked {
             return Err(HazardSoundError::AlreadyStarted);
         }
-        let mut voices = self.gameplay_voices.clone();
+        let mut voices = self.gameplay_sound_stop.voices().to_vec();
         voices.extend(timeline.bindings().iter().map(|binding| binding.voice));
-        voices.sort_unstable();
-        voices.dedup();
+        let stops = GameplaySoundStop::new(voices);
         self.hazard_sounds = Some(timeline);
-        self.gameplay_voices = voices;
+        self.gameplay_sound_stop = stops;
         Ok(())
     }
 
@@ -354,26 +339,14 @@ impl Runtime {
         &mut self,
         requested_at: Timestamp,
     ) -> Option<RuntimeSoundStopReport> {
-        if self.gameplay_fence.is_none() || self.gameplay_sound_stop_attempted {
+        if self.gameplay_fence.is_none() {
             return None;
         }
-        let at = self
-            .gameplay_audio_watermark
-            .map_or(requested_at, |latest| requested_at.max(latest));
-        let mut report = RuntimeSoundStopReport {
-            at,
-            commands: Vec::with_capacity(self.gameplay_voices.len()),
-            failures: Vec::with_capacity(self.gameplay_voices.len()),
-        };
-        self.gameplay_sound_stop_attempted = true;
-        for &voice in &self.gameplay_voices {
-            let command = AudioCommand::Stop { voice, at };
-            match admit_audio(&mut self.producer, self.telemetry.counters_mut(), command) {
-                Ok(()) => report.commands.push(command),
-                Err(error) => report.failures.push(error),
-            }
-        }
-        Some(report)
+        let producer = &mut self.producer;
+        let counters = self.telemetry.counters_mut();
+        self.gameplay_sound_stop.attempt(requested_at, |command| {
+            admit_audio(producer, counters, command)
+        })
     }
 
     /// Installs spatial routing before any committed operation, at most once.
@@ -677,7 +650,7 @@ impl Runtime {
                 match admit_gameplay_audio(
                     &mut self.producer,
                     counters,
-                    &mut self.gameplay_audio_watermark,
+                    &mut self.gameplay_sound_stop,
                     command,
                 ) {
                     Ok(()) => {
@@ -695,7 +668,7 @@ impl Runtime {
             match admit_gameplay_audio(
                 &mut self.producer,
                 counters,
-                &mut self.gameplay_audio_watermark,
+                &mut self.gameplay_sound_stop,
                 command,
             ) {
                 Ok(()) => report.audio_commands.push(command),
@@ -710,7 +683,7 @@ impl Runtime {
                 match admit_gameplay_audio(
                     &mut self.producer,
                     counters,
-                    &mut self.gameplay_audio_watermark,
+                    &mut self.gameplay_sound_stop,
                     command,
                 ) {
                     Ok(()) => report.audio_commands.push(command),
@@ -815,8 +788,7 @@ impl Runtime {
         self.last_song = None;
         self.song_end = None;
         self.gameplay_fence = None;
-        self.gameplay_audio_watermark = None;
-        self.gameplay_sound_stop_attempted = false;
+        self.gameplay_sound_stop.reset();
         self.sequences.clear();
         (previous_judge, previous_transport)
     }
@@ -856,11 +828,11 @@ impl Runtime {
 fn admit_gameplay_audio(
     producer: &mut CommandProducer,
     counters: &mut RuntimeCounters,
-    watermark: &mut Option<Timestamp>,
+    stops: &mut GameplaySoundStop,
     command: AudioCommand,
 ) -> Result<(), CommandPushError> {
     admit_audio(producer, counters, command)?;
-    *watermark = Some(watermark.map_or(command.at(), |previous| previous.max(command.at())));
+    stops.observe_admitted(command.at());
     Ok(())
 }
 

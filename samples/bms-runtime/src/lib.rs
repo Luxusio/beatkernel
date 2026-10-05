@@ -316,6 +316,8 @@ pub mod record_catalog;
 pub mod replay_audio;
 /// Bounded capture of the actual native runtime's accepted judgment operations.
 pub mod replay_capture;
+#[cfg(test)]
+mod replay_gauge_sound_stop_fixtures;
 pub mod replay_pause;
 /// Checked durable replay reconstruction through the same builtin BMS judge.
 pub mod replay_playback;
