@@ -36,6 +36,26 @@ source and long-duration fixtures for deferred execution.
 
 ### Shared committed damage summary
 
+Native presentation stores `mine_damage: MineDamageSummary` per actual
+LocalPlayerSnapshot. The solo compatibility snapshot mirrors its sole member;
+multiple members expose no fabricated aggregate damage. Actual solo/local
+report publication consumes each report's hazard events through the same
+summary. Preflight score, damage and pressed ownership for the entire local
+batch before mutating any member or lifecycle. Invalid damage, overflow,
+unknown/duplicate members or invalid input leave prior publication unchanged.
+Empty reports preserve damage with no additional heap allocation or history
+clone for damage. Cancellation, pause and final cleanup retain admitted damage.
+
+Native replay publication accepts the actual reconstructed cumulative summary
+alongside incremental normal results and pressed mask. Assign that summary;
+do not add it a second time. Repeated prefixes are idempotent. Reject regressing
+counts/damage, unlatching death and impossible numeric summaries before any
+score/history/pressed/lifecycle mutation. Legacy replay publication lacking
+damage metadata preserves existing damage. Both actual replay presentation
+and pause-boundary calls supply ReplayVisual's summary. Snapshot struct literals
+must initialize the new field. This exposes retained evidence for future HUD
+and gauge use without claiming it is drawn or changes play outcome.
+
 `MineDamageSummary` consumes actual one-shot HazardEvents and retains checked
 full-width triggered/avoided counters, exact accumulated nonfatal half-percent
 damage units and a latched instant_death flag. Validate every opaque value as
