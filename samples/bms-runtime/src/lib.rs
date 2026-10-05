@@ -872,3 +872,7 @@ pub mod result_archive_publication;
 
 /// Shared comparison progress notice and publication policy with injected ports.
 pub mod competition_progress;
+
+/// Portable comparison progress publication cadence with an injected clock.
+pub mod competition_progress_cadence;
+mod competition_progress_clock_bridge;

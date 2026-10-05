@@ -4,6 +4,8 @@
 use crate::{
     competition_live::{CompetitionOptions, replay_limits},
     competition_progress,
+    competition_progress_cadence::{self, CompetitionProgressClock, ProgressCadence, CadenceError},
+    competition_progress_clock_bridge::NativeProgressClock,
     input_sounds::InputSoundIdentity,
     local_players::PlayerId,
     local_runtime::MemberConfig,
@@ -19,7 +21,7 @@ use crate::{
 };
 use beatkernel::time::{ClockDomainId, ClockPoint, Timestamp};
 use beatkernel_bms::{BmsChart, BmsInputMode};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -28,7 +30,8 @@ pub struct NativeGroupCompetition {
     network: NativeCompetitionNetwork,
     players: Vec<PlayerId>,
     local: Option<Vec<MemberProgress>>,
-    last_publish: Option<Instant>,
+    progress_cadence: ProgressCadence,
+    progress_clock: NativeProgressClock,
     last_presentation: Option<u64>,
     status: NetworkStatus,
     failure: Option<MultiplayerError>,
@@ -70,7 +73,8 @@ impl NativeGroupCompetition {
             network,
             players,
             local: None,
-            last_publish: None,
+            progress_cadence: ProgressCadence::new(),
+            progress_clock: NativeProgressClock::new(),
             last_presentation: None,
             status: NetworkStatus::Waiting,
             failure: None,
@@ -104,6 +108,19 @@ impl NativeGroupCompetition {
         members: &[MemberProgress],
         host: &mut H,
     ) -> Result<()> {
+        let mut clock = self.progress_clock;
+        self.observe_with_ports(members, &mut clock, host)
+    }
+
+    pub fn observe_with_ports<
+        C: CompetitionProgressClock<Error = MultiplayerError>,
+        H: CompetitionPresentationHost,
+    >(
+        &mut self,
+        members: &[MemberProgress],
+        clock: &mut C,
+        host: &mut H,
+    ) -> Result<()> {
         if self.finished {
             return Err("group competition already stopped".into());
         }
@@ -124,15 +141,21 @@ impl NativeGroupCompetition {
                 self.status,
                 NetworkStatus::Waiting | NetworkStatus::Connected
             );
-        let due = allowed
-            && self
-                .last_publish
-                .is_none_or(|last| last.elapsed() >= Duration::from_millis(50));
-        match competition_progress::publish_progress(&mut self.network, members, allowed, true, due)
-        {
-            Ok(true) => self.last_publish = Some(Instant::now()),
-            Ok(false) => {}
-            Err(error) => self.disconnect(error),
+        match competition_progress_cadence::publish_progress_with_clock(
+            &mut self.network,
+            clock,
+            &mut self.progress_cadence,
+            members,
+            allowed,
+            true,
+        ) {
+            Ok(_) => {}
+            Err(CadenceError::Publication(error) | CadenceError::Clock(error)) => {
+                self.disconnect(error)
+            }
+            Err(CadenceError::ClockRegressed) => self.disconnect(MultiplayerError::Protocol(
+                "competition progress clock regressed".into(),
+            )),
         }
         self.publish_presentation_with_host(before != self.status, host)
     }
