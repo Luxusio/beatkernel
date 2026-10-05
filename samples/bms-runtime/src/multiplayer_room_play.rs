@@ -586,6 +586,11 @@ impl RoomPlayClient {
         Ok(())
     }
 
+    /// Read-only genuine commitment observation; never consumes its schedule.
+    pub(crate) fn start_committed(&self) -> bool {
+        !self.stopped && !self.leaving && self.start.committed()
+    }
+
     /// A matching actual Commit yields one measured local software schedule.
     pub fn take_schedule(&mut self) -> Option<StartSchedule> {
         if self.stopped || self.leaving {

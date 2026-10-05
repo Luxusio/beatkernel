@@ -1,7 +1,8 @@
 //! Deferred split-operation fixtures using genuine common admission frames.
-use super::{RoomClientDriver, RoomDrainError};
+use super::{RoomClientDriver, RoomDrainError, RoomClientSetupError};
 use crate::{
     room_final_wait::RoomFinalStep,
+    room_setup_wait::{RoomSetupStep, RoomSetupError, RoomSetupPhase, RoomDeadlineError},
     local_players::PlayerId,
     multiplayer_group::{MemberProgress, encode_words},
     multiplayer_group_rooms::{GroupRoomPolicy, GroupRoomRegistry},
@@ -266,11 +267,23 @@ fn measured_policy() -> StartPolicy {
 // Every server response below comes from the actual admission, clock or start
 // owner. Only externally observed completed frames receive write receipts.
 fn committed_pair() -> (Vec<RoomClientDriver>, GroupRoomRegistry, Vec<ParticipantId>) {
+    committed_pair_with_setup(false)
+}
+fn committed_pair_with_setup(
+    track_setup: bool,
+) -> (Vec<RoomClientDriver>, GroupRoomRegistry, Vec<ParticipantId>) {
     let mut registry = GroupRoomRegistry::new(GroupRoomPolicy::new(1, 2, 16, 1_000).unwrap());
     let mut clients = Vec::new();
     let mut ids = Vec::new();
     for roster in [PLAYERS, &[PlayerId(91)][..]] {
         let mut client = RoomClientDriver::new(IDENTITY, roster, measured_policy(), 0).unwrap();
+        if track_setup {
+            assert!(client.begin_setup(0, 1_000_000).is_ok());
+            assert!(matches!(
+                client.setup_step(0),
+                Ok(RoomSetupStep::Wait(1_000_000))
+            ));
+        }
         let join = client.next_write(0).unwrap().unwrap();
         let RoomMessage::Join { identity, players } = decode_message(&join.bytes).unwrap() else {
             panic!("actual Join required")
@@ -278,10 +291,19 @@ fn committed_pair() -> (Vec<RoomClientDriver>, GroupRoomRegistry, Vec<Participan
         client.written(join.id, 0, 0).unwrap();
         let id = registry.join("driver", &identity, &players, 0).unwrap().id;
         receive(&mut client, &RoomMessage::Admitted { participant: id }, 0).unwrap();
+        if track_setup {
+            assert!(matches!(
+                client.setup_step(0),
+                Ok(RoomSetupStep::Wait(1_000_000))
+            ));
+        }
         clients.push(client);
         ids.push(id);
         for client in &mut clients {
             receive(client, &snapshot(&registry), 0).unwrap();
+            if track_setup {
+                assert!(matches!(client.setup_step(0), Ok(RoomSetupStep::Idle)));
+            }
         }
     }
     clients[0].request_seal().unwrap();
@@ -303,6 +325,14 @@ fn committed_pair() -> (Vec<RoomClientDriver>, GroupRoomRegistry, Vec<Participan
         }
     }
     let room = registry.room("driver").unwrap();
+    if track_setup {
+        for client in &mut clients {
+            assert!(matches!(
+                client.setup_step(2),
+                Ok(RoomSetupStep::Wait(1_000_000))
+            ));
+        }
+    }
     // Prepared admission alone must not create a playback schedule or mutate
     // transport evidence, even under repeated finite startup observations.
     for client in &mut clients {
@@ -766,5 +796,100 @@ fn leave_cancels_unconsumed_commit_and_health_guards_precede_ready_or_pending_st
             assert!(client.failed());
             no_final_receipts(client);
         }
+    }
+}
+
+#[test]
+fn setup_real_protocol_phases_preserve_unconsumed_schedule_and_fixed_prepared_deadline() {
+    for late in [false, true] {
+        let (mut clients, _, _) = committed_pair_with_setup(true);
+        for client in &mut clients {
+            let expected = client
+                .session_ref()
+                .unwrap()
+                .clone()
+                .take_schedule()
+                .expect("actual Commit");
+            assert!(matches!(
+                client.begin_setup(11_200, 120_000_000_000),
+                Err(RoomClientSetupError::InvalidState)
+            ));
+            if late {
+                assert!(matches!(
+                    client.setup_step(1_000_002),
+                    Err(RoomClientSetupError::Policy(RoomSetupError::Deadline(
+                        RoomSetupPhase::Prepared,
+                        RoomDeadlineError::Expired
+                    )))
+                ));
+                assert!(matches!(
+                    client.setup_step(1_000_003),
+                    Err(RoomClientSetupError::Policy(RoomSetupError::Finished))
+                ));
+            } else {
+                assert!(matches!(
+                    client.setup_step(11_200),
+                    Ok(RoomSetupStep::Complete)
+                ));
+                assert!(matches!(
+                    client.setup_step(i64::MAX),
+                    Ok(RoomSetupStep::Complete)
+                ));
+                // Setup observes commitment without consuming the common one-shot.
+                assert_eq!(client.take_start().unwrap(), Some(expected));
+                assert!(client.take_start().unwrap().is_none());
+            }
+            no_final_receipts(client);
+        }
+    }
+}
+
+#[test]
+fn setup_late_real_admission_and_lifetime_refusals_never_promote_completion() {
+    let mut client = driver();
+    assert!(client.begin_setup(-1, 1_000_000).is_err());
+    assert!(client.begin_setup(0, 1_000_000).is_ok());
+    let join = client.next_write(0).unwrap().unwrap();
+    let RoomMessage::Join { identity, players } = decode_message(&join.bytes).unwrap() else {
+        panic!("Join")
+    };
+    client.written(join.id, 0, 0).unwrap();
+    let mut registry = GroupRoomRegistry::new(GroupRoomPolicy::new(1, 2, 16, 1_000).unwrap());
+    let id = registry.join("driver", &identity, &players, 0).unwrap().id;
+    receive(
+        &mut client,
+        &RoomMessage::Admitted { participant: id },
+        1_000_000,
+    )
+    .unwrap();
+    receive(&mut client, &snapshot(&registry), 1_000_000).unwrap();
+    assert_eq!(
+        client.participant_id(),
+        id.0,
+        "late admission remains history"
+    );
+    assert!(matches!(
+        client.setup_step(1_000_000),
+        Err(RoomClientSetupError::Policy(RoomSetupError::Deadline(
+            RoomSetupPhase::Admission,
+            RoomDeadlineError::Expired
+        )))
+    ));
+    assert!(matches!(
+        client.setup_step(1_000_001),
+        Err(RoomClientSetupError::Policy(RoomSetupError::Finished))
+    ));
+    assert!(client.take_start().unwrap().is_none());
+    for close in [false, true] {
+        let (mut clients, _, _) = committed_pair_with_setup(true);
+        let client = &mut clients[0];
+        if close {
+            client.close();
+        } else {
+            client.request_leave().unwrap();
+        }
+        assert!(client.setup_step(11_200).is_err());
+        assert!(client.begin_setup(11_200, 1_000_000).is_err());
+        no_final_receipts(client);
     }
 }

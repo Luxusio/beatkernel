@@ -914,3 +914,5 @@ pub mod room_competition;
 pub mod room_network_actor;
 
 pub mod room_client_driver;
+
+pub mod room_setup_wait;

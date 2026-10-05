@@ -9,7 +9,7 @@ const METHODS = ["request_seal", "request_ready", "request_leave", "needed_bytes
   "frame_pending", "receive_bytes", "next_write", "written", "participant_id",
   "revision", "has_snapshot", "leave_written", "snapshot", "take_start", "publish_progress",
   "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written",
-  "progress_complete", "request_drain", "drain_complete", "begin_drain", "drain_wait_step", "drain_requested", "close", "free"];
+  "progress_complete", "request_drain", "drain_complete", "begin_drain", "drain_wait_step", "drain_requested", "begin_setup", "setup_wait_step", "close", "free"];
 
 export class BrowserRoomOwnerError extends Error {
   constructor(code, operation, message, cause) {
@@ -114,8 +114,8 @@ export class BrowserRoomOwner {
   #drainTimer = null;
   #drainRequested = false;
   #setupTimer = null;
+  #setupComplete = false;
   #frameTimer = null;
-  #handshakeTimer = null;
   #prepared = false;
   #start = null;
   #origin = null;
@@ -149,7 +149,6 @@ export class BrowserRoomOwner {
     try {
       owner.#origin = owner.#clock();
       owner.#lastNow = owner.#origin;
-      owner.#setupTimer = setTimeout(() => owner.#fail(new BrowserRoomOwnerError("timeout", "setup", "Room admission timed out.")), config.setupTimeoutMs);
       if (config.signal !== undefined) {
         owner.#abort = () => owner.#fail(new BrowserRoomOwnerError("aborted", "abort", "Room was cancelled."));
         config.signal.addEventListener("abort", owner.#abort, { once: true });
@@ -168,6 +167,8 @@ export class BrowserRoomOwner {
         || owner.#core("initial", session => session.drain_requested()) !== false) {
         throw new BrowserRoomOwnerError("protocol", "open", "Room session is already in use.");
       }
+      owner.#session.begin_setup(0n, BigInt(config.setupTimeoutMs) * 1000000n);
+      owner.#advanceSetup();
       const opening = owner.#track(() => config.channelFactory(url, { signal: owner.#controller.signal,
         setupTimeoutMs: config.setupTimeoutMs, ioTimeoutMs: config.ioTimeoutMs, maxPrefixBytes: MAX_FRAME }));
       opening.then(channel => { if (owner.closed) owner.#closeChannel(channel); }, () => {});
@@ -250,8 +251,8 @@ export class BrowserRoomOwner {
   #fail(error) {
     if (this.#failure) return this.#failure;
     this.#failure = error;
-    clearTimeout(this.#setupTimer); clearTimeout(this.#frameTimer); clearTimeout(this.#handshakeTimer); clearTimeout(this.#drainTimer);
-    this.#setupTimer = null; this.#frameTimer = null; this.#handshakeTimer = null;
+    clearTimeout(this.#setupTimer); clearTimeout(this.#frameTimer); clearTimeout(this.#drainTimer);
+    this.#setupTimer = null; this.#frameTimer = null;
     if (this.#abort !== null) {
       try { this.#config.signal.removeEventListener("abort", this.#abort); } catch {}
       this.#abort = null;
@@ -376,6 +377,7 @@ export class BrowserRoomOwner {
     if (this.#leaveGate !== null) return this.#leaveGate.promise;
     if (this.#receipts.drainComplete) return Promise.reject(new BrowserRoomOwnerError("state", "leave", "Room drain already completed."));
     try { this.#request("request_leave"); } catch (cause) { return Promise.reject(cause); }
+    clearTimeout(this.#setupTimer); this.#setupTimer = null;
     this.#leaveGate = gate();
     clearTimeout(this.#drainTimer); this.#drainTimer = null;
     this.#drainGate?.reject(new BrowserRoomOwnerError("closed", "leave", "Room drain cancelled by Leave."));
@@ -390,6 +392,28 @@ export class BrowserRoomOwner {
       if (this.#cleanupError !== null) throw this.#cleanupError;
     });
     return this.#closing;
+  }
+
+  #advanceSetup() {
+    if (this.closed || this.#setupComplete || this.#leaveGate !== null) return;
+    clearTimeout(this.#setupTimer); this.#setupTimer = null;
+    try {
+      const delay = this.#session.setup_wait_step(this.#elapsed());
+      if (typeof delay !== "bigint" || delay < -2n || delay === 0n || delay > 120000000000n) {
+        throw new BrowserRoomOwnerError("protocol", "setup", "Invalid room setup wait result.");
+      }
+      if (delay === -1n) this.#setupComplete = true;
+      if (delay > 0n) {
+        this.#setupTimer = setTimeout(() => {
+          try { this.#advanceSetup(); } catch (cause) { this.#fatal(cause, "core", "setup"); }
+        }, Number((delay + 999999n) / 1000000n));
+      }
+    } catch (cause) {
+      const error = cause instanceof BrowserRoomOwnerError ? cause
+        : new BrowserRoomOwnerError(cause?.code === "timeout" ? "timeout" : "core",
+          cause?.operation === "prepared" ? "prepared" : "setup", "Room setup wait failed.", cause);
+      throw this.#fail(error);
+    }
   }
 
   #observe() {
@@ -414,14 +438,11 @@ export class BrowserRoomOwner {
     this.#revision = revision; this.#participant = participant;
     if (!hasSnapshot) return;
     this.#snapshot = snapshot;
-    clearTimeout(this.#setupTimer); this.#setupTimer = null;
     if (snapshot.phase === 2 && !this.#prepared) {
       // Snapshot DTOs are exposed to consumers; preserve independent roster
       // identities before their callback can mutate those arrays or objects.
       this.#roster = new Map(snapshot.members.map(member => [member.participant, Object.freeze(Array.from(member.players))]));
       this.#prepared = true;
-      this.#handshakeTimer = setTimeout(() => this.#fail(new BrowserRoomOwnerError(
-        "timeout", "prepared", "Room start handshake timed out.")), this.#config.setupTimeoutMs);
     }
     try { Promise.resolve(this.#config.onSnapshot?.(snapshot)).catch(cause => this.#fatal(cause, "callback", "snapshot")); }
     catch (cause) { throw this.#fatal(cause, "callback", "snapshot"); }
@@ -441,7 +462,7 @@ export class BrowserRoomOwner {
       throw new BrowserRoomOwnerError("protocol", "start", "Invalid or repeated room start schedule.");
     }
     this.#start = Object.freeze({ targetNs, songTargetNs, uncertaintyNs });
-    clearTimeout(this.#handshakeTimer); this.#handshakeTimer = null;
+
     try { Promise.resolve(this.#config.onStart?.(this.#start, this.#origin)).catch(cause => this.#fatal(cause, "callback", "start")); }
     catch (cause) { throw this.#fatal(cause, "callback", "start"); }
   }
@@ -514,6 +535,7 @@ export class BrowserRoomOwner {
       if (consumed !== bytes.byteLength) throw new BrowserRoomOwnerError("protocol", "read", "Room prefix was not fully consumed.");
       const remains = this.#core("frame_pending", session => session.frame_pending());
       if (typeof remains !== "boolean") throw new BrowserRoomOwnerError("protocol", "read", "Invalid room frame state.");
+      this.#advanceSetup();
       if (remains && this.#frameTimer === null) {
         this.#frameTimer = setTimeout(() => this.#fail(new BrowserRoomOwnerError("timeout", "frame", "Incomplete room frame timed out.")), this.#config.ioTimeoutMs);
       } else if (!remains) { clearTimeout(this.#frameTimer); this.#frameTimer = null; }
@@ -553,6 +575,7 @@ export class BrowserRoomOwner {
       this.#ensure();
       const writtenNow = this.#elapsed();
       this.#core("written", session => session.written(id, completedNs, writtenNow));
+      this.#advanceSetup();
       const left = this.#core("leave_written", session => session.leave_written());
       if (typeof left !== "boolean") throw new BrowserRoomOwnerError("protocol", "leave", "Invalid room leave receipt.");
       if (left) {

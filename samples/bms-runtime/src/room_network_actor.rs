@@ -45,6 +45,7 @@ struct Drain {
 pub struct RoomNetworkActor<S: RoomNetworkStream> {
     io: RoomPlayIo<S>,
     options: RoomNetworkOptions,
+    setup_deadline: crate::room_setup_wait::RoomDeadline,
     snapshot: RoomSnapshot,
     last_now: Option<i64>,
     drain: Option<Drain>,
@@ -55,7 +56,11 @@ impl<S: RoomNetworkStream> RoomNetworkActor<S> {
     pub fn new(io: RoomPlayIo<S>, options: RoomNetworkOptions) -> io::Result<Self> {
         // The public owner validates options before acquiring a stream.
         options.validate()?;
+        let setup_deadline =
+            crate::room_setup_wait::RoomDeadline::new(0, options.setup_timeout.as_nanos() as u64)
+                .map_err(|_| invalid("native room setup deadline overflow"))?;
         Ok(Self {
+            setup_deadline,
             io,
             options,
             snapshot: RoomSnapshot::default(),
@@ -234,7 +239,7 @@ impl<S: RoomNetworkStream> RoomNetworkActor<S> {
         self.check_now(observed)?;
         self.last_now = Some(observed);
         self.refresh()?;
-        if self.snapshot.schedule.is_none() && observed >= nanos(self.options.setup_timeout)? {
+        if self.snapshot.schedule.is_none() && self.setup_deadline.remaining_ns(observed).is_err() {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "native room setup deadline expired",
@@ -271,7 +276,7 @@ impl<S: RoomNetworkStream> RoomNetworkActor<S> {
                 // A bounded transport operation can complete across its fixed
                 // deadline. Real late receipts remain history, never timely success.
                 let completed = self.last_now.unwrap_or(observed);
-                if setup_pending && completed >= nanos(self.options.setup_timeout)? {
+                if setup_pending && self.setup_deadline.remaining_ns(completed).is_err() {
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
                         "native room setup deadline expired during I/O",

@@ -23,6 +23,7 @@ pub struct RoomClientDriver {
     drain_wait: Option<crate::room_final_wait::RoomFinalWaitState>,
     start_wait: Option<crate::room_start_wait::RoomStartWaitState>,
     pending_start: Option<StartSchedule>,
+    setup_wait: Option<crate::room_setup_wait::RoomSetupWaitState>,
 }
 
 impl RoomClientDriver {
@@ -86,6 +87,7 @@ impl RoomClientDriver {
             drain_wait: None,
             start_wait: Some(crate::room_start_wait::RoomStartWaitState::new()),
             pending_start: None,
+            setup_wait: None,
         })
     }
     pub fn request_seal(&mut self) -> Result<(), RoomPlayError> {
@@ -301,10 +303,62 @@ impl RoomClientDriver {
         self.pending_peer = None;
         self.drain_wait = None;
         self.start_wait = None;
+        self.setup_wait = None;
         self.pending_start = None;
         if self.failure.is_none() {
             self.failure = Some(RoomPlayError::Stopped);
         }
+    }
+}
+
+#[derive(Debug)]
+pub enum RoomClientSetupError {
+    Policy(crate::room_setup_wait::RoomSetupError),
+    Protocol(RoomPlayError),
+    InvalidState,
+}
+impl std::fmt::Display for RoomClientSetupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Policy(error) => write!(f, "room setup: {error:?}"),
+            Self::Protocol(error) => std::fmt::Display::fmt(error, f),
+            Self::InvalidState => f.write_str("room setup wait is unavailable"),
+        }
+    }
+}
+impl RoomClientDriver {
+    pub fn begin_setup(&mut self, now: i64, timeout: u64) -> Result<(), RoomClientSetupError> {
+        self.ensure_live().map_err(RoomClientSetupError::Protocol)?;
+        if self.setup_wait.is_some() || self.leave_requested {
+            return Err(RoomClientSetupError::InvalidState);
+        }
+        let state = crate::room_setup_wait::RoomSetupWaitState::new(now, timeout)
+            .map_err(RoomClientSetupError::Policy)?;
+        self.setup_wait = Some(state);
+        Ok(())
+    }
+    pub fn setup_step(
+        &mut self,
+        now: i64,
+    ) -> Result<crate::room_setup_wait::RoomSetupStep, RoomClientSetupError> {
+        self.ensure_live().map_err(RoomClientSetupError::Protocol)?;
+        if self.leave_requested {
+            return Err(RoomClientSetupError::InvalidState);
+        }
+        let session = self
+            .session
+            .as_ref()
+            .ok_or(RoomClientSetupError::InvalidState)?;
+        let admitted = session.participant().is_some() && session.room().is_some();
+        let prepared = session.room().is_some_and(|room| {
+            room.phase == crate::multiplayer_group_rooms::GroupRoomPhase::Prepared
+        });
+        let committed = session.start_committed();
+        self.setup_wait
+            .as_mut()
+            .ok_or(RoomClientSetupError::InvalidState)?
+            .step(now, admitted, prepared, committed)
+            .map_err(RoomClientSetupError::Policy)
     }
 }
 

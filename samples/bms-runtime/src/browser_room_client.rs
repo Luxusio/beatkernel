@@ -8,7 +8,7 @@ use crate::{
     multiplayer_room_play::RoomPlayClient,
     multiplayer_rooms::ParticipantId,
     multiplayer_start::StartPolicy,
-    room_client_driver::{RoomClientDriver, RoomDrainError},
+    room_client_driver::{RoomClientDriver, RoomDrainError, RoomClientSetupError},
 };
 use wasm_bindgen::prelude::*;
 
@@ -96,6 +96,44 @@ impl BrowserRoomClient {
                 self.close();
                 error("room error property assignment refused")
             }
+            Err(failure) => {
+                self.close();
+                failure
+            }
+        }
+    }
+
+    fn setup_error(&mut self, value: RoomClientSetupError) -> JsValue {
+        let (code, operation) = match &value {
+            RoomClientSetupError::Policy(crate::room_setup_wait::RoomSetupError::Deadline(
+                phase,
+                crate::room_setup_wait::RoomDeadlineError::Expired,
+            )) => (
+                "timeout",
+                if *phase == crate::room_setup_wait::RoomSetupPhase::Prepared {
+                    "prepared"
+                } else {
+                    "setup"
+                },
+            ),
+            RoomClientSetupError::InvalidState => ("state", "setup"),
+            _ => ("protocol", "setup"),
+        };
+        let result = error(value);
+        let assigned = (|| -> Result<(), JsValue> {
+            field(
+                &js_sys::Object::from(result.clone()),
+                "code",
+                JsValue::from_str(code),
+            )?;
+            field(
+                &js_sys::Object::from(result.clone()),
+                "operation",
+                JsValue::from_str(operation),
+            )
+        })();
+        match assigned {
+            Ok(()) => result,
             Err(failure) => {
                 self.close();
                 failure
@@ -253,6 +291,21 @@ impl BrowserRoomClient {
         result
     }
 
+    pub fn begin_setup(&mut self, now_ns: i64, timeout_ns: u64) -> Result<(), JsValue> {
+        self.driver
+            .begin_setup(now_ns, timeout_ns)
+            .map_err(|error| self.setup_error(error))
+    }
+    pub fn setup_wait_step(&mut self, now_ns: i64) -> Result<i64, JsValue> {
+        self.driver
+            .setup_step(now_ns)
+            .map(|step| match step {
+                crate::room_setup_wait::RoomSetupStep::Idle => -2,
+                crate::room_setup_wait::RoomSetupStep::Complete => -1,
+                crate::room_setup_wait::RoomSetupStep::Wait(ns) => ns as i64,
+            })
+            .map_err(|error| self.setup_error(error))
+    }
     pub fn begin_drain(&mut self, now_ns: i64, timeout_ns: u64) -> Result<(), JsValue> {
         self.driver
             .begin_drain(now_ns, timeout_ns)

@@ -99,6 +99,36 @@ async function harness(faults = {}) {
     receiveTimes: [], writeTimes: [], pollTimes: [], schedules: [], startCalls: 0,
     publications: [], peerUpdates: [], finalWritten: false, finalAcknowledged: false,
     progressComplete: false, drainComplete: false, peerAcks: new Set(), peerAckQueries: [],
+    setupBegins: [], setupSteps: [], setupOutputs: [], setupPhase: "admission",
+    begin_setup(elapsed, timeout) {
+      this.alive(); this.setupBegins.push({ elapsed, timeout });
+      if (this.beginSetupError) throw this.beginSetupError;
+      this.setupTimeout = timeout; this.setupExpires = elapsed + timeout;
+    },
+    setup_wait_step(elapsed) {
+      this.alive(); this.setupSteps.push(elapsed);
+      // Compatibility scripts expose the old fake's accepted DTO transitions.
+      // Independent cases below provide explicit outputs rather than a model.
+      if (this.setupOutputs.length) {
+        const output = this.setupOutputs.shift();
+        if (output instanceof Error) throw output;
+        return output;
+      }
+      if (this.setupPhase === "complete") return -1n;
+      if (this.setupPhase !== "lobby" && elapsed >= this.setupExpires) {
+        throw Object.assign(new Error("scripted common setup expiry"), {
+          code: "timeout", operation: this.setupPhase === "prepared" ? "prepared" : "setup",
+        });
+      }
+      if (this.setupPhase === "admission" && this.hasSnapshot && this.participant !== 0n) this.setupPhase = "lobby";
+      if (this.setupPhase === "lobby" && this.dto?.phase === 2) {
+        this.setupPhase = "prepared"; this.setupExpires = elapsed + this.setupTimeout;
+      }
+      if (this.setupPhase === "prepared" && this.schedules.length) {
+        this.setupPhase = "complete"; return -1n;
+      }
+      return this.setupPhase === "lobby" ? -2n : this.setupExpires - elapsed;
+    },
     drainBegins: [], drainSteps: [], drainOutputs: [], drainAdmitted: false,
     begin_drain(elapsed, timeout) {
       this.alive(); this.drainBegins.push({ elapsed, timeout });
@@ -303,7 +333,7 @@ test("configuration retains caller ownership; actual frames preserve u64 IDs and
     assert.equal(h.opens.length, 0);
     assert.equal(h.session.closes, 0); assert.equal(h.session.frees, 0);
   }
-  for (const method of ["needed_bytes", "frame_pending", "receive_bytes", "next_write", "written", "revision", "snapshot", "take_start", "publish_progress", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written", "progress_complete", "request_drain", "drain_complete", "begin_drain", "drain_wait_step", "drain_requested", "free"]) {
+  for (const method of ["needed_bytes", "frame_pending", "receive_bytes", "next_write", "written", "revision", "snapshot", "take_start", "publish_progress", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written", "progress_complete", "request_drain", "drain_complete", "begin_drain", "drain_wait_step", "drain_requested", "begin_setup", "setup_wait_step", "free"]) {
     const h = await harness(); delete h.session[method];
     await failure(h.opening(), "validation");
     assert.equal(h.opens.length, 0); assert.equal(h.session.frees, 0);
@@ -1152,4 +1182,107 @@ test("recoverable common refusal seals the drain promise across later valid rece
   assert.deepEqual(h.session.requests, []);
   assert.equal(owner.receipts.drainComplete, false);
   await cleaned(h, owner, io);
+});
+
+test("setup timer consults scripted Rust policy instead of declaring timeout and idle clears it", async () => {
+  const h = await harness();
+  h.session.setupOutputs.push(50000000n, 50000000n, -2n);
+  const { owner, io } = await h.opened();
+  assert.equal(h.session.setupBegins.length, 1);
+  assert.equal(h.session.setupBegins[0].elapsed, 0n);
+  assert.equal(h.session.setupBegins[0].timeout, 50000000n);
+  io.writes[0].gate.resolve(); await flush();
+  const steps = h.session.setupSteps.length;
+  await h.elapse(50);
+  assert.equal(owner.closed, false, "timer must ask Rust even at the former JS timeout");
+  assert.equal(h.session.setupSteps.length, steps + 1);
+  assert.equal(h.timers.size, 0);
+  h.session.setupOutputs.push(-2n);
+  h.setClock(CLOCK_ORIGIN + 9007199254740993n);
+  await h.receive(io, () => {});
+  assert.equal(h.session.setupSteps.at(-1), 9007199254740993n);
+  assert.equal(h.session.setupBegins.length, 1);
+  await cleaned(h, owner, io);
+});
+
+test("post-receive and post-write setup refusal preserves IO evidence but suppresses callbacks", async () => {
+  for (const boundary of ["receive", "write"]) {
+    const h = await harness(); const { owner, io } = await h.opened();
+    const original = Object.assign(new Error("original late accepted setup evidence"), {
+      code: "timeout", operation: boundary === "receive" ? "prepared" : "setup",
+    });
+    h.session.setupOutputs.push(original);
+    if (boundary === "receive") {
+      await h.receive(io, () => {
+        h.session.participant = MAX_U64; h.session.revisionValue = 1n;
+        h.session.hasSnapshot = true; h.session.dto = preparedSnapshot();
+        h.session.schedules.push({ targetNs: 1000000000n, songTargetNs: 1100000000n, uncertaintyNs: 17n });
+      });
+      assert.equal(h.session.receives.length, 1);
+    } else {
+      io.writes[0].gate.resolve(); await flush();
+      assert.deepEqual(h.session.credits, [MAX_U64]);
+    }
+    assert.equal(owner.closed, true);
+    assert.equal(h.closures[0].cause, original);
+    assert.equal(h.closures[0].code, "timeout");
+    assert.equal(h.closures[0].operation, original.operation);
+    assert.deepEqual(h.callbacks, []);
+    assert.deepEqual(h.starts, []);
+    assert.equal(h.session.setupBegins.length, 1);
+    await cleaned(h, owner, io);
+  }
+});
+
+test("malformed setup scheduling outputs refuse before channel acquisition", async () => {
+  for (const output of [-3n, 0n, 120000000001n, 1, null, "-2"]) {
+    const h = await harness(); h.session.setupOutputs.push(output);
+    const error = await failure(h.opening(), "protocol");
+    assert.equal(error.operation, "setup");
+    assert.equal(h.opens.length, 0);
+    assert.equal(h.session.setupBegins.length, 1);
+    assert.equal(h.session.setupSteps.length, 1);
+    assert.equal(h.timers.size, 0);
+    assert.deepEqual(h.callbacks, []);
+    assert.deepEqual(h.starts, []);
+  }
+});
+
+test("completed Rust setup adds no later setup calls during actual transport traffic", async () => {
+  const h = await harness(); const { owner, io } = await progressOwner(h);
+  const steps = h.session.setupSteps.length;
+  assert.equal(h.session.setupPhase, "complete");
+  await h.receive(io, () => {});
+  h.session.onPublish = () => h.session.controls.push(frame(811n));
+  owner.publishProgress(progressWords(), false); await flush();
+  io.writes.at(-1).gate.resolve(); await flush();
+  assert.equal(h.session.setupSteps.length, steps);
+  assert.equal(h.session.setupBegins.length, 1);
+  assert.equal(h.starts.length, 1);
+  assert.ok(h.session.credits.includes(811n));
+  await cleaned(h, owner, io);
+});
+
+test("close abort and Leave clear pending setup scheduling without a later policy call", async () => {
+  for (const mode of ["close", "abort", "leave"]) {
+    const h = await harness(); const controller = new AbortController();
+    const { owner, io } = await h.opened({ signal: controller.signal });
+    io.writes[0].gate.resolve(); await flush();
+    const steps = h.session.setupSteps.length;
+    if (mode === "leave") {
+      h.session.onRequest = kind => {
+        assert.equal(kind, "leave"); h.session.controls.push(frame(812n));
+      };
+      h.session.onWritten = id => { if (id === 812n) h.session.leaveDone = true; };
+      const leaving = attempt(() => owner.leave()); await flush();
+      io.writes.at(-1).gate.resolve(); await success(leaving);
+    } else if (mode === "abort") controller.abort();
+    else await owner.close();
+    await flush(); await h.elapse(100);
+    assert.equal(h.session.setupSteps.length, steps);
+    assert.equal(h.session.setupBegins.length, 1);
+    assert.equal(h.timers.size, 0);
+    assert.deepEqual(h.starts, []);
+    await cleaned(h, owner, io);
+  }
 });
