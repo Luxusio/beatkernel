@@ -15,6 +15,8 @@ use crate::{
     native_start::{NativeStartAgreement, NativeStartResult, SessionHostBracket},
     room_opponent_hud::{RoomHudStatus, RoomOpponentHud},
     room_ui_host::RoomUiHost,
+    room_runtime_host::RoomRuntimeHost,
+    native_room_runtime_bridge::NativeRoomRuntimeHost,
     native_room_ui_bridge::NativeRoomUiHost,
     room_presentation::{
         RoomLobby, RoomPresentation, RoomResults, RoomStatus, RoomUiAction, RoomUiReply,
@@ -22,12 +24,7 @@ use crate::{
     },
 };
 use beatkernel::time::ClockPoint;
-use std::{
-    collections::VecDeque,
-    io,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::VecDeque, io, sync::Arc, time::Duration};
 
 const PUBLICATION_NS: i64 = 50_000_000;
 const LOBBY_LIMIT: usize = 16;
@@ -85,7 +82,9 @@ fn ui_message(message: &str) -> String {
 pub struct NativeRoomCompetition<
     P: NativeRoomPort = NativeRoomNetwork,
     H: RoomUiHost = NativeRoomUiHost,
+    R: RoomRuntimeHost = NativeRoomRuntimeHost,
 > {
+    runtime: R,
     host: H,
     port: P,
     players: Vec<PlayerId>,
@@ -114,12 +113,13 @@ pub struct NativeRoomCompetition<
     ui_error: Option<String>,
 }
 
-impl<P: NativeRoomPort, H: RoomUiHost> NativeRoomCompetition<P, H> {
-    pub fn new_with_host(
+impl<P: NativeRoomPort, H: RoomUiHost, R: RoomRuntimeHost> NativeRoomCompetition<P, H, R> {
+    pub fn new_with_ports(
         mut port: P,
         players: Vec<PlayerId>,
         finish_timeout: Duration,
         host: H,
+        runtime: R,
     ) -> io::Result<Self> {
         let validated = (|| {
             validate_roster(&players).map_err(|error| invalid(error.to_string()))?;
@@ -159,6 +159,7 @@ impl<P: NativeRoomPort, H: RoomUiHost> NativeRoomCompetition<P, H> {
             }
         };
         Ok(Self {
+            runtime,
             host,
             port,
             players,
@@ -761,11 +762,7 @@ impl<P: NativeRoomPort, H: RoomUiHost> NativeRoomCompetition<P, H> {
         let deadline_ns = started
             .checked_add(duration)
             .ok_or_else(|| invalid("native room finish deadline overflow"))?;
-        let deadline = Instant::now()
-            .checked_add(self.finish_timeout)
-            .ok_or_else(|| invalid("native room finish deadline overflow"))?;
-        let (mut control, control_deadline_ns) =
-            crate::native_room_final_wait_bridge::NativeRoomFinalWaitControl::until(deadline)?;
+        let (mut control, control_deadline_ns) = self.runtime.final_wait(self.finish_timeout)?;
         crate::room_final_wait::wait_for_room_final(
             &mut NativeRoomFinalPort {
                 owner: self,
@@ -911,12 +908,12 @@ impl<P: NativeRoomPort, H: RoomUiHost> NativeRoomCompetition<P, H> {
     }
 }
 
-struct NativeRoomFinalPort<'a, P: NativeRoomPort, H: RoomUiHost> {
-    owner: &'a mut NativeRoomCompetition<P, H>,
+struct NativeRoomFinalPort<'a, P: NativeRoomPort, H: RoomUiHost, R: RoomRuntimeHost> {
+    owner: &'a mut NativeRoomCompetition<P, H, R>,
     members: &'a [MemberProgress],
 }
-impl<P: NativeRoomPort, H: RoomUiHost> crate::room_final_wait::RoomFinalPort
-    for NativeRoomFinalPort<'_, P, H>
+impl<P: NativeRoomPort, H: RoomUiHost, R: RoomRuntimeHost> crate::room_final_wait::RoomFinalPort
+    for NativeRoomFinalPort<'_, P, H, R>
 {
     type Error = io::Error;
     fn poll(&mut self) -> io::Result<crate::room_final_wait::RoomFinalObservation> {
@@ -972,11 +969,11 @@ impl<P: NativeRoomPort, H: RoomUiHost> crate::room_final_wait::RoomFinalPort
     }
 }
 
-struct NativeRoomStartPort<'a, P: NativeRoomPort, H: RoomUiHost>(
-    &'a mut NativeRoomCompetition<P, H>,
+struct NativeRoomStartPort<'a, P: NativeRoomPort, H: RoomUiHost, R: RoomRuntimeHost>(
+    &'a mut NativeRoomCompetition<P, H, R>,
 );
-impl<P: NativeRoomPort, H: RoomUiHost> crate::room_start_wait::RoomStartPort
-    for NativeRoomStartPort<'_, P, H>
+impl<P: NativeRoomPort, H: RoomUiHost, R: RoomRuntimeHost> crate::room_start_wait::RoomStartPort
+    for NativeRoomStartPort<'_, P, H, R>
 {
     type Error = io::Error;
     fn initial(&mut self) -> crate::room_start_wait::RoomStartInitial {
@@ -1002,14 +999,17 @@ impl<P: NativeRoomPort, H: RoomUiHost> crate::room_start_wait::RoomStartPort
     }
 }
 
-impl<P: NativeRoomPort, H: RoomUiHost> NativeStartAgreement for NativeRoomCompetition<P, H> {
+impl<P: NativeRoomPort, H: RoomUiHost, R: RoomRuntimeHost> NativeStartAgreement
+    for NativeRoomCompetition<P, H, R>
+{
     fn await_commit(
         &mut self,
         service: &mut dyn FnMut() -> NativeStartResult<bool>,
     ) -> NativeStartResult<bool> {
+        let mut control = self.runtime.start_wait();
         let result = crate::room_start_wait::await_room_start(
             &mut NativeRoomStartPort(self),
-            &mut crate::native_room_final_wait_bridge::NativeRoomStartWaitControl,
+            &mut control,
             service,
         )
         .map_err(|error| -> Box<dyn std::error::Error> {
@@ -1068,14 +1068,12 @@ impl<P: NativeRoomPort, H: RoomUiHost> NativeStartAgreement for NativeRoomCompet
     }
 }
 
-impl<P: NativeRoomPort, H: RoomUiHost> Drop for NativeRoomCompetition<P, H> {
+impl<P: NativeRoomPort, H: RoomUiHost, R: RoomRuntimeHost> Drop for NativeRoomCompetition<P, H, R> {
     fn drop(&mut self) {
         if self.outcome.is_none() {
             self.port.request_stop();
             let outcome = self.port.stop();
-            if let Some(error) = outcome.cleanup_error.as_ref().or(outcome.error.as_ref()) {
-                eprintln!("native room competition dropped after failure: {error}");
-            }
+            self.runtime.dropped(&outcome);
         }
     }
 }
@@ -1098,3 +1096,18 @@ use crate::player;
 #[cfg(test)]
 #[path = "room_ui_host_fixtures.rs"]
 mod room_ui_host_fixtures;
+
+impl<P: NativeRoomPort, H: RoomUiHost> NativeRoomCompetition<P, H, NativeRoomRuntimeHost> {
+    pub fn new_with_host(
+        port: P,
+        players: Vec<PlayerId>,
+        finish_timeout: Duration,
+        host: H,
+    ) -> io::Result<Self> {
+        Self::new_with_ports(port, players, finish_timeout, host, NativeRoomRuntimeHost)
+    }
+}
+
+#[cfg(test)]
+#[path = "room_runtime_host_fixtures.rs"]
+mod room_runtime_host_fixtures;

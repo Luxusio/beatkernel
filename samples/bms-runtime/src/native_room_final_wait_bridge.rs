@@ -4,11 +4,11 @@ use std::{
     io, thread,
     time::{Duration, Instant},
 };
-pub(crate) struct NativeRoomFinalWaitControl {
+pub struct NativeRoomFinalWaitControl {
     origin: Instant,
 }
 impl NativeRoomFinalWaitControl {
-    pub(crate) fn until(deadline: Instant) -> io::Result<(Self, u64)> {
+    pub fn until(deadline: Instant) -> io::Result<(Self, u64)> {
         let origin = Instant::now();
         let remaining = deadline
             .checked_duration_since(origin)
@@ -47,7 +47,7 @@ impl FinalWaitControl for NativeRoomFinalWaitControl {
 }
 
 /// Startup uses the owner's existing setup deadline, with no replacement clock.
-pub(crate) struct NativeRoomStartWaitControl;
+pub struct NativeRoomStartWaitControl;
 impl crate::room_start_wait::RoomStartWaitControl for NativeRoomStartWaitControl {
     type Error = io::Error;
     fn wait_ns(&mut self, duration_ns: u64) -> io::Result<()> {
