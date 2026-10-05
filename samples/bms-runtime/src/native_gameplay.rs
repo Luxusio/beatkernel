@@ -3,10 +3,10 @@ use crate::{
     bgm::{BgmFeedReport, BgmFeeder},
     completion::SongCompletion,
     gameplay_competition::SoloCompetitionPort,
+    gameplay_presentation::GameplayPresentationPort,
     gauge::{BmsGauge, GaugeError, GaugeProfile},
     live_pause::{
-        LivePauseBoundary, LivePauseObservation, prepare_live_transport, update_live_pause,
-        validate_pre_pause_input,
+        LivePauseBoundary, prepare_live_transport, update_live_pause, validate_pre_pause_input,
     },
     local_runtime::SoloRuntime,
     native_end::{EndBoundary, NativeEnd},
@@ -26,13 +26,13 @@ use beatkernel::{
         ClockDomainId, ClockMapper, ClockMappingQuality, ClockPair, ClockPoint, Duration, Timestamp,
     },
 };
-use beatkernel_platform::audio::presentation::discipline::{
-    DisciplineConfig, DisciplineUpdate, PresentationDiscipline,
-};
+use beatkernel::time::presentation::{DisciplineConfig, DisciplineUpdate};
+#[cfg(test)]
+use beatkernel_platform::audio::presentation::discipline::PresentationDiscipline;
 use std::{collections::VecDeque, error::Error, fmt, time::Duration as WallDuration};
 
 pub use crate::native_gameplay_bridge::{
-    NativeGameplaySession, run_gameplay, run_gameplay_with_control,
+    NativeGameplayDevice, NativeGameplaySession, run_gameplay, run_gameplay_with_control,
 };
 
 pub type NativeGameplayResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -56,36 +56,6 @@ pub struct InputBatch {
     pub closed: bool,
 }
 
-pub trait NativeGameplayDevice {
-    fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()>;
-    /// Native interval owners override this with original coherent evidence;
-    /// correction-only midpoint pairs cannot establish their pause boundary.
-    fn pause_observation(
-        &mut self,
-        reference: ClockPair,
-    ) -> NativeGameplayResult<LivePauseObservation> {
-        Ok(LivePauseObservation::Point(reference))
-    }
-    fn render_report(&mut self) -> NativeGameplayResult<Option<RenderReport>>;
-    fn host_now(&self) -> NativeGameplayResult<ClockPoint>;
-    fn acquire(
-        &mut self,
-        events: &mut VecDeque<PhysicalInputEvent>,
-    ) -> NativeGameplayResult<InputBatch>;
-    fn observe_end(
-        &mut self,
-        end: &mut NativeEnd,
-        discipline: &PresentationDiscipline,
-        report: Option<RenderReport>,
-    ) -> NativeGameplayResult<Option<EndBoundary>>;
-    /// Reseed using the original native observation source, never a fabricated snapshot.
-    fn seed_resume(
-        &mut self,
-        discipline: &mut PresentationDiscipline,
-        reference: ClockPair,
-    ) -> NativeGameplayResult<()>;
-    fn fallback_schedule(&mut self, rate: u32) -> NativeGameplayResult<ClockPoint>;
-}
 #[derive(Clone, Copy, Debug)]
 pub struct NativeGameplayConfig {
     pub origin: ClockPoint,
@@ -100,11 +70,11 @@ pub struct NativeGameplayConfig {
     pub logical_schedule: bool,
 }
 /// Borrowed gameplay state with an explicitly selected competition observer.
-pub struct GameplaySession<'a, S> {
+pub struct GameplaySession<'a, S, P> {
     pub runtime: &'a mut SoloRuntime,
     pub gauge: &'a mut BmsGauge,
     pub bgm: &'a mut BgmFeeder,
-    pub discipline: &'a mut PresentationDiscipline,
+    pub discipline: &'a mut P,
     pub pause: &'a mut NativePause,
     pub end: &'a mut Option<NativeEnd>,
     pub completion: &'a mut Option<SongCompletion>,
@@ -204,9 +174,9 @@ fn watermark(
         timestamp: Timestamp::from_nanos(i64::try_from(at)?),
     }))
 }
-fn schedule<D: NativeGameplayDevice, S>(
+fn schedule<D: crate::gameplay_presentation::GameplayDevice, S>(
     device: &mut D,
-    session: &GameplaySession<'_, S>,
+    session: &GameplaySession<'_, S, D::Presentation>,
     config: NativeGameplayConfig,
 ) -> NativeGameplayResult<ClockPoint> {
     if config.logical_schedule {
@@ -240,8 +210,8 @@ fn publish_with_stops(
         &mut crate::native_gameplay_bridge::PlayerGameplayHost,
     )
 }
-fn publish_with_host<S: SoloCompetitionPort, H: NativeGameplayHost>(
-    session: &mut GameplaySession<'_, S>,
+fn publish_with_host<S: SoloCompetitionPort, P, H: NativeGameplayHost>(
+    session: &mut GameplaySession<'_, S, P>,
     mut report: RuntimeReport,
     evidence: &mut OwnedStopEvidence,
     host_port: &mut H,
@@ -301,9 +271,13 @@ fn publish_with_host<S: SoloCompetitionPort, H: NativeGameplayHost>(
     }
     Ok(())
 }
-fn process<D: NativeGameplayDevice, S: SoloCompetitionPort, H: NativeGameplayHost>(
+fn process<
+    D: crate::gameplay_presentation::GameplayDevice,
+    S: SoloCompetitionPort,
+    H: NativeGameplayHost,
+>(
     device: &mut D,
-    session: &mut GameplaySession<'_, S>,
+    session: &mut GameplaySession<'_, S, D::Presentation>,
     config: NativeGameplayConfig,
     event: PhysicalInputEvent,
     evidence: &mut OwnedStopEvidence,
@@ -367,13 +341,13 @@ fn finite_done_with_terminal(
 /// Runs the actual pump with explicit device, clock/wait and host effects.
 /// Neither the control deadline nor cancellation is successful song completion.
 pub fn run_gameplay_with_ports<
-    D: NativeGameplayDevice,
+    D: crate::gameplay_presentation::GameplayDevice,
     C: NativePumpControl,
     H: NativeGameplayHost,
     S: SoloCompetitionPort,
 >(
     device: &mut D,
-    mut session: GameplaySession<'_, S>,
+    mut session: GameplaySession<'_, S, D::Presentation>,
     config: NativeGameplayConfig,
     control: &mut C,
     host_port: &mut H,
@@ -476,7 +450,7 @@ pub fn run_gameplay_with_ports<
                     resume_boundary = Some(boundary.at);
                     paused_boundary = None;
                     pause_committed = false;
-                    let mut discipline = PresentationDiscipline::new_with_playback_origin(
+                    let mut discipline = D::Presentation::new_with_playback_origin(
                         DisciplineConfig::default(),
                         config.stream_origin,
                         config.playback_origin,

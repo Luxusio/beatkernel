@@ -44,6 +44,7 @@ cases without a platform dependency. Adapter fixtures use memory-only native
 snapshots and ASIO evidence, comparing actual forwarded pairs and update results,
 source rejection, duplicate/stale behavior and failed-operation preservation.
 Existing fixtures/assertions stay unchanged. This increment extracts the actual
-algorithm; common BMS sessions/device interfaces still reference the platform
-wrapper until a subsequent presentation port migration. Actual assertions,
+algorithm. The subsequent [gameplay presentation port](REQ__gameplay-presentation-port.md)
+migration injects either this estimator or the native wrapper into common
+sessions without a concrete platform dependency in production gameplay policy. Actual assertions,
 hardware timing, formal review/QA and performance measurements remain deferred.

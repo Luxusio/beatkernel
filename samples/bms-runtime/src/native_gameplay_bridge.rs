@@ -3,6 +3,9 @@
 use crate::{
     competition_live::LiveCompetition,
     gameplay_competition::{GroupCompetitionPort, SoloCompetitionPort},
+    gameplay_presentation::{GameplayDevice, GameplayPresentationPort},
+    live_pause::LivePauseObservation,
+    native_end::{EndBoundary, NativeEnd},
     local_runtime::PlayerReport,
     multiplayer_group::MemberProgress,
     native_cohort::{
@@ -10,7 +13,7 @@ use crate::{
         member_progress_for_states, run_cohort_with_ports,
     },
     native_gameplay::{
-        GameplaySession, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
+        GameplaySession, InputBatch, NativeGameplayConfig, NativeGameplayResult,
         run_gameplay_with_ports,
     },
     native_gameplay_host::{NativeGameplayDiagnostic, NativeGameplayHost, PauseState},
@@ -20,14 +23,131 @@ use crate::{
     player,
 };
 use beatkernel::{
+    audio::RenderReport,
+    input::PhysicalInputEvent,
     runtime::RuntimeReport,
-    time::{ClockPoint, Timestamp},
+    time::{
+        ClockDomainId, ClockMappingQuality, ClockPair, ClockPoint, Timestamp,
+        presentation::{DisciplineConfig, DisciplineUpdate},
+    },
+    transport::Transport,
 };
 
+use beatkernel_platform::audio::presentation::discipline::PresentationDiscipline;
+use std::collections::VecDeque;
+
+pub trait NativeGameplayDevice {
+    fn observe(&mut self, discipline: &mut PresentationDiscipline) -> NativeGameplayResult<()>;
+    /// Native interval owners override this with original coherent evidence;
+    /// correction-only midpoint pairs cannot establish their pause boundary.
+    fn pause_observation(
+        &mut self,
+        reference: ClockPair,
+    ) -> NativeGameplayResult<LivePauseObservation> {
+        Ok(LivePauseObservation::Point(reference))
+    }
+    fn render_report(&mut self) -> NativeGameplayResult<Option<RenderReport>>;
+    fn host_now(&self) -> NativeGameplayResult<ClockPoint>;
+    fn acquire(
+        &mut self,
+        events: &mut VecDeque<PhysicalInputEvent>,
+    ) -> NativeGameplayResult<InputBatch>;
+    fn observe_end(
+        &mut self,
+        end: &mut NativeEnd,
+        discipline: &PresentationDiscipline,
+        report: Option<RenderReport>,
+    ) -> NativeGameplayResult<Option<EndBoundary>>;
+    /// Reseed using the original native observation source, never a fabricated snapshot.
+    fn seed_resume(
+        &mut self,
+        discipline: &mut PresentationDiscipline,
+        reference: ClockPair,
+    ) -> NativeGameplayResult<()>;
+    fn fallback_schedule(&mut self, rate: u32) -> NativeGameplayResult<ClockPoint>;
+}
+impl GameplayPresentationPort for PresentationDiscipline {
+    fn new_with_playback_origin(
+        config: DisciplineConfig,
+        output_origin: ClockPoint,
+        playback_origin: ClockPoint,
+        host_domain: ClockDomainId,
+        applied_song_origin: Timestamp,
+    ) -> NativeGameplayResult<Self> {
+        Ok(Self::new_with_playback_origin(
+            config,
+            output_origin,
+            playback_origin,
+            host_domain,
+            applied_song_origin,
+        )?)
+    }
+    fn latest_pair(&self) -> Option<ClockPair> {
+        Self::latest_pair(self)
+    }
+    fn quality(&self) -> ClockMappingQuality {
+        Self::quality(self)
+    }
+    fn validate_host(&self, point: ClockPoint) -> NativeGameplayResult<()> {
+        Ok(Self::validate_host(self, point)?)
+    }
+    fn update(
+        &mut self,
+        now: ClockPoint,
+        transport: &mut Transport,
+    ) -> NativeGameplayResult<DisciplineUpdate> {
+        Ok(Self::update(self, now, transport)?)
+    }
+}
+
+impl<D: NativeGameplayDevice> GameplayDevice for D {
+    type Presentation = PresentationDiscipline;
+    fn observe(&mut self, discipline: &mut Self::Presentation) -> NativeGameplayResult<()> {
+        NativeGameplayDevice::observe(self, discipline)
+    }
+    fn pause_observation(
+        &mut self,
+        reference: ClockPair,
+    ) -> NativeGameplayResult<LivePauseObservation> {
+        NativeGameplayDevice::pause_observation(self, reference)
+    }
+    fn render_report(&mut self) -> NativeGameplayResult<Option<RenderReport>> {
+        NativeGameplayDevice::render_report(self)
+    }
+    fn host_now(&self) -> NativeGameplayResult<ClockPoint> {
+        NativeGameplayDevice::host_now(self)
+    }
+    fn acquire(
+        &mut self,
+        events: &mut VecDeque<PhysicalInputEvent>,
+    ) -> NativeGameplayResult<InputBatch> {
+        NativeGameplayDevice::acquire(self, events)
+    }
+    fn observe_end(
+        &mut self,
+        end: &mut NativeEnd,
+        discipline: &Self::Presentation,
+        report: Option<RenderReport>,
+    ) -> NativeGameplayResult<Option<EndBoundary>> {
+        NativeGameplayDevice::observe_end(self, end, discipline, report)
+    }
+    fn seed_resume(
+        &mut self,
+        discipline: &mut Self::Presentation,
+        reference: ClockPair,
+    ) -> NativeGameplayResult<()> {
+        NativeGameplayDevice::seed_resume(self, discipline, reference)
+    }
+    fn fallback_schedule(&mut self, rate: u32) -> NativeGameplayResult<ClockPoint> {
+        NativeGameplayDevice::fallback_schedule(self, rate)
+    }
+}
+
 /// Compatibility specialization selected by native application composition.
-pub type NativeGameplaySession<'a> = GameplaySession<'a, LiveCompetition>;
+pub type NativeGameplaySession<'a> = GameplaySession<'a, LiveCompetition, PresentationDiscipline>;
 /// Compatibility cohort specialization with the actual native competition owners.
-pub type NativeCohortSession<'a> = CohortSession<'a, LiveCompetition, NativeGroupCompetition>;
+pub type NativeCohortSession<'a> =
+    CohortSession<'a, LiveCompetition, NativeGroupCompetition, PresentationDiscipline>;
 /// Compatibility per-member state for native comparison owners.
 pub type PlayerState = GameplayPlayerState<LiveCompetition>;
 

@@ -91,12 +91,15 @@ is distinct from judgment timing. Native pump wall-clock deadlines and waits use
 an explicit control port. The fully injected solo/cohort entry points also
 receive a business-owned host for commands, publication and typed diagnostics;
 the outer compatibility bridge selects legacy player/system adapters. Shared
-pumps still depend on platform presentation-discipline types. The actual
+pumps now receive a business-owned device contract with an associated injected
+presentation implementation. The actual
 bounded observation ring, freshness, drift/phase calculation and continuous
 transport correction now belong to the pure core presentation estimator; the
 platform wrapper validates native source metadata and delegates calculation.
-Migrating gameplay sessions/device contracts to a business-owned presentation
-port remains unfinished. See [the estimator boundary](REQ__pure-presentation-estimator.md).
+Gameplay sessions and resume reconstruction use the presentation port; native
+trait specialization and platform port implementation live in the compatibility
+bridge. See [the presentation port](REQ__gameplay-presentation-port.md) and
+[the estimator boundary](REQ__pure-presentation-estimator.md).
 Their generic sessions now accept business-owned solo/group competition observers; concrete
 native specializations live in the compatibility bridge. The native competition
 implementations still mix comparison, network, clock and UI effects internally.

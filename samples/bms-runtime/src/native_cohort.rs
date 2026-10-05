@@ -4,6 +4,7 @@ use crate::{
     competition::ScoreSummary,
     completion::SongCompletion,
     gameplay_competition::{GroupCompetitionPort, SoloCompetitionPort},
+    gameplay_presentation::GameplayPresentationPort,
     gauge::{BmsGauge, GaugeProfile},
     live_pause::{
         LivePauseBoundary, prepare_live_transport, update_live_pause, validate_pre_pause_input,
@@ -18,9 +19,7 @@ use crate::{
     offline::OwnedStopEvidence,
     multiplayer_group::{MemberProgress, validate_members},
     multiplayer::Progress,
-    native_gameplay::{
-        MAX_PENDING_INPUT_EVENTS, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
-    },
+    native_gameplay::{MAX_PENDING_INPUT_EVENTS, NativeGameplayConfig, NativeGameplayResult},
     playback_pause::{NativePause, PauseKeyboard, PausePhase},
     replay_capture::LiveReplayCapture,
 };
@@ -30,7 +29,11 @@ use beatkernel::{
     telemetry::InputDeliveryTelemetry,
     time::{ClockDomainId, ClockMapper, ClockMappingQuality, ClockPoint, Timestamp},
 };
-use beatkernel_platform::audio::presentation::discipline::{DisciplineConfig, PresentationDiscipline};
+use beatkernel::time::presentation::DisciplineConfig;
+#[cfg(test)]
+use beatkernel_platform::audio::presentation::discipline::PresentationDiscipline;
+#[cfg(test)]
+use crate::native_gameplay::NativeGameplayDevice;
 use std::{
     collections::VecDeque,
     fmt,
@@ -45,13 +48,13 @@ pub use crate::native_gameplay_bridge::{
 use crate::native_group_competition::NativeGroupCompetition;
 
 /// Borrowed cohort state with explicit per-member and shared competition ports.
-pub struct CohortSession<'a, S, G> {
+pub struct CohortSession<'a, S, G, P> {
     pub group: &'a mut RuntimeGroup,
     pub network: Option<&'a mut G>,
     pub states: &'a mut [GameplayPlayerState<S>],
     pub merger: &'a mut InputMerger,
     pub bgm: &'a mut BgmFeeder,
-    pub discipline: &'a mut PresentationDiscipline,
+    pub discipline: &'a mut P,
     pub pause: &'a mut NativePause,
     pub end: &'a mut Option<NativeEnd>,
     pub delivery: &'a mut InputDeliveryTelemetry,
@@ -72,9 +75,9 @@ fn point(event: &PhysicalInputEvent) -> ClockPoint {
         timestamp: event.meta().timestamp,
     }
 }
-fn schedule<D: NativeGameplayDevice, S, G>(
+fn schedule<D: crate::gameplay_presentation::GameplayDevice, S, G>(
     device: &mut D,
-    session: &CohortSession<'_, S, G>,
+    session: &CohortSession<'_, S, G, D::Presentation>,
     config: NativeGameplayConfig,
 ) -> NativeGameplayResult<ClockPoint> {
     if config.logical_schedule {
@@ -121,13 +124,13 @@ fn process_with_stops<D: NativeGameplayDevice>(
     )
 }
 fn process_with_host<
-    D: NativeGameplayDevice,
+    D: crate::gameplay_presentation::GameplayDevice,
     S: SoloCompetitionPort,
     G: GroupCompetitionPort,
     H: NativeGameplayHost,
 >(
     device: &mut D,
-    session: &mut CohortSession<'_, S, G>,
+    session: &mut CohortSession<'_, S, G, D::Presentation>,
     config: NativeGameplayConfig,
     event: PhysicalInputEvent,
     evidence: &mut OwnedStopEvidence,
@@ -164,13 +167,13 @@ fn process_with_host<
     }
 }
 fn advance<
-    D: NativeGameplayDevice,
+    D: crate::gameplay_presentation::GameplayDevice,
     S: SoloCompetitionPort,
     G: GroupCompetitionPort,
     H: NativeGameplayHost,
 >(
     device: &mut D,
-    session: &mut CohortSession<'_, S, G>,
+    session: &mut CohortSession<'_, S, G, D::Presentation>,
     config: NativeGameplayConfig,
     at: ClockPoint,
     evidence: &mut OwnedStopEvidence,
@@ -204,13 +207,13 @@ fn advance<
     }
 }
 fn reconcile<
-    D: NativeGameplayDevice,
+    D: crate::gameplay_presentation::GameplayDevice,
     S: SoloCompetitionPort,
     G: GroupCompetitionPort,
     H: NativeGameplayHost,
 >(
     device: &mut D,
-    session: &mut CohortSession<'_, S, G>,
+    session: &mut CohortSession<'_, S, G, D::Presentation>,
     config: NativeGameplayConfig,
     keyboard: &mut PauseKeyboard,
     at: ClockPoint,
@@ -538,14 +541,14 @@ pub fn lag_reaches(now: ClockPoint, boundary: ClockPoint, lag: i64) -> NativeGam
 /// Runs the actual cohort policy with explicit device, clock/wait and host effects.
 /// Acquired input and native presentation keep their original clock domains.
 pub fn run_cohort_with_ports<
-    D: NativeGameplayDevice,
+    D: crate::gameplay_presentation::GameplayDevice,
     C: NativePumpControl,
     H: NativeGameplayHost,
     S: SoloCompetitionPort,
     G: GroupCompetitionPort,
 >(
     device: &mut D,
-    mut session: CohortSession<'_, S, G>,
+    mut session: CohortSession<'_, S, G, D::Presentation>,
     config: NativeGameplayConfig,
     control: &mut C,
     host_port: &mut H,
@@ -683,7 +686,7 @@ pub fn run_cohort_with_ports<
                     resume_boundary = Some(boundary.at);
                     paused_boundary = None;
                     pause_committed = false;
-                    let mut discipline = PresentationDiscipline::new_with_playback_origin(
+                    let mut discipline = D::Presentation::new_with_playback_origin(
                         DisciplineConfig::default(),
                         config.stream_origin,
                         config.playback_origin,

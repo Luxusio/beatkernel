@@ -92,6 +92,10 @@ mod font_grapheme_window_fixtures;
 pub mod font_text;
 /// Explicit competition observation and completion ports for gameplay policy.
 pub mod gameplay_competition;
+/// Business presentation and device contracts with injected implementations.
+pub mod gameplay_presentation;
+#[cfg(test)]
+mod gameplay_presentation_port_fixtures;
 /// Shared fixed-point gauge observations from committed normal and mine outcomes.
 pub mod gauge;
 #[cfg(test)]
@@ -275,6 +279,8 @@ mod native_invisible_identity_fixtures;
 /// Shared native profile, completion and optional capture configuration.
 pub mod native_judge;
 #[cfg(test)]
+mod native_local_presentation_port_fixtures;
+#[cfg(test)]
 mod native_mine_audio_fixtures;
 #[cfg(test)]
 mod native_mine_fixtures;
@@ -289,6 +295,8 @@ pub mod native_room_competition;
 /// Dedicated native room network thread, bounded commands and retained real receipts.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_room_network;
+#[cfg(test)]
+mod native_solo_presentation_port_fixtures;
 /// Checked nominal session/host/output projection for future native frame startup.
 pub mod native_start;
 /// Full-prefix prepared-object presentation state.

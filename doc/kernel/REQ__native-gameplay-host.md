@@ -35,8 +35,8 @@ solo/local publication refusal and no-op diagnostics. Use real portable queue,
 Mixer and capture paths with runtime profiling disabled and virtual waits.
 Compare repeated reports, PCM, captures and hashes independently of an ambient
 publisher, and retain partial/fatal report prefixes across publication failure.
-This is a boundary increment; platform presentation types and network owner
-coupling still require separate work. Test execution and formal QA remain deferred.
+This is a boundary increment; the native network owner
+implementation still requires separate work. Test execution and formal QA remain deferred.
 
 The legacy native `LiveCompetition` and `NativeGroupCompetition` implementations
 still include network operations, presentation publication and native timing
@@ -45,4 +45,5 @@ The host-boundary fixtures use absent competition owners; the subsequent
 [competition-port boundary](REQ__gameplay-competition-ports.md) also supports
 generic sessions containing populated deterministic observers. The final
 architecture still requires separation inside the comparison/IO adapters and
-of platform presentation types.
+of remaining IO boundaries. The [presentation port](REQ__gameplay-presentation-port.md)
+now separates common gameplay policy from the concrete platform estimator.
