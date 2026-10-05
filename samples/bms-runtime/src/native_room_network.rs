@@ -2,8 +2,7 @@
 //! Command admission is not a transport receipt or permission to start audio.
 
 use crate::local_players::PlayerId;
-use crate::multiplayer_group::{validate_members, GroupPrefix};
-use crate::multiplayer_group_rooms::GroupRoomMember;
+use crate::multiplayer_group::validate_members;
 use crate::multiplayer_room_io::RoomPlayIo;
 use crate::multiplayer_room_play::RoomPlayClient;
 #[cfg(test)]
@@ -11,8 +10,7 @@ use crate::multiplayer_rooms::ParticipantId;
 use crate::multiplayer_webtransport_client::WebTransportOptions;
 use std::{
     collections::VecDeque,
-    fmt,
-    io::{self, Read, Write},
+    fmt, io,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
@@ -43,12 +41,8 @@ fn copy_slice<T: Clone>(slice: &[T]) -> io::Result<Vec<T>> {
     Ok(result)
 }
 
-/// Nonblocking/deadline-bounded stream operations run only on the network thread.
-/// `finish` is attempted on success, cancellation and failure, before dropping it.
-pub trait NativeRoomStream: Read + Write {
-    fn idle(&mut self, duration: Duration) -> io::Result<()>;
-    fn finish(&mut self, timeout: Duration) -> io::Result<()>;
-}
+pub use crate::room_network_actor::RoomNetworkStream as NativeRoomStream;
+use crate::room_network_actor::RoomNetworkActor as Actor;
 
 #[cfg(feature = "webtransport")]
 impl NativeRoomStream for crate::multiplayer_webtransport_client::WebTransportStream {
@@ -68,267 +62,6 @@ pub use crate::room_network_model::{
     RoomOutcome as NativeRoomOutcome, RoomSnapshot as NativeRoomSnapshot,
     RoomPoll as NativeRoomPoll,
 };
-
-struct Drain {
-    deadline_ns: i64,
-    requested: bool,
-}
-
-/// The same bounded actor is used by the thread and in-memory fixture streams.
-struct Actor<S: NativeRoomStream> {
-    io: RoomPlayIo<S>,
-    options: NativeRoomOptions,
-    snapshot: NativeRoomSnapshot,
-    last_now: Option<i64>,
-    drain: Option<Drain>,
-    leaving: bool,
-    changed: bool,
-}
-impl<S: NativeRoomStream> Actor<S> {
-    fn new(io: RoomPlayIo<S>, options: NativeRoomOptions) -> io::Result<Self> {
-        // The public owner validates options before acquiring a stream.
-        options.validate()?;
-        Ok(Self {
-            io,
-            options,
-            snapshot: NativeRoomSnapshot::default(),
-            last_now: None,
-            drain: None,
-            leaving: false,
-            changed: false,
-        })
-    }
-
-    fn snapshot(&self) -> &NativeRoomSnapshot {
-        &self.snapshot
-    }
-
-    fn check_now(&self, now: i64) -> io::Result<()> {
-        if now < 0 || self.last_now.is_some_and(|previous| now < previous) {
-            return Err(invalid("native room observation is negative or regressing"));
-        }
-        Ok(())
-    }
-
-    fn command(&mut self, command: NativeRoomCommand, now: i64) -> io::Result<()> {
-        self.check_now(now)?;
-        if self.finished() || self.leaving {
-            return Err(invalid("native room no longer accepts commands"));
-        }
-        match command {
-            NativeRoomCommand::Seal => self.io.request_seal()?,
-            NativeRoomCommand::Ready => self.io.request_ready()?,
-            NativeRoomCommand::Leave => {
-                self.io.request_leave()?;
-                self.leaving = true;
-            }
-            NativeRoomCommand::Publish {
-                members,
-                final_prefix,
-            } => {
-                self.io.publish_progress(&members, final_prefix)?;
-            }
-            NativeRoomCommand::Drain => {
-                if self.snapshot.schedule.is_none() || self.drain.is_some() {
-                    return Err(invalid(
-                        "native room drain requires one committed live owner",
-                    ));
-                }
-                let deadline_ns = now
-                    .checked_add(nanos(self.options.drain_timeout)?)
-                    .ok_or_else(|| invalid("native room drain deadline overflow"))?;
-                let requested = self.io.progress_complete();
-                if requested {
-                    self.io.request_drain()?;
-                }
-                self.drain = Some(Drain {
-                    deadline_ns,
-                    requested,
-                });
-            }
-        }
-        self.last_now = Some(now);
-        Ok(())
-    }
-
-    fn refresh(&mut self) -> io::Result<()> {
-        let participant = self.io.session().participant();
-        if self.snapshot.participant != participant {
-            self.snapshot.participant = participant;
-            self.changed = true;
-        }
-        if let Some(room) = self.io.session().room() {
-            let changed = self.snapshot.room.as_ref().is_none_or(|old| {
-                old.phase != room.phase
-                    || old.deadline_ns != room.deadline_ns
-                    || old.members.as_slice() != room.members
-            });
-            if changed {
-                let revision = self
-                    .snapshot
-                    .revision
-                    .checked_add(1)
-                    .ok_or_else(|| invalid("native room revision exhausted"))?;
-                let mut members = Vec::new();
-                members
-                    .try_reserve_exact(room.members.len())
-                    .map_err(allocation)?;
-                for member in room.members {
-                    members.push(GroupRoomMember {
-                        id: member.id,
-                        players: copy_slice(&member.players)?,
-                        prepared: member.prepared,
-                    });
-                }
-                self.snapshot.room = Some(Arc::new(NativeRoomRoster {
-                    members,
-                    phase: room.phase,
-                    deadline_ns: room.deadline_ns,
-                }));
-                self.snapshot.revision = revision;
-                self.changed = true;
-            }
-            for member in room.members {
-                if let Some(prefix) = self.io.peer_progress(member.id) {
-                    let old = self
-                        .snapshot
-                        .peers
-                        .iter()
-                        .position(|(id, _)| *id == member.id);
-                    if old.is_none_or(|index| {
-                        self.snapshot.peers[index].1.sequence != prefix.sequence
-                    }) {
-                        let next = Arc::new(GroupPrefix {
-                            sequence: prefix.sequence,
-                            final_prefix: prefix.final_prefix,
-                            members: copy_slice(&prefix.members)?,
-                        });
-                        if let Some(index) = old {
-                            self.snapshot.peers[index].1 = next;
-                        } else {
-                            self.snapshot.peers.try_reserve(1).map_err(allocation)?;
-                            self.snapshot.peers.push((member.id, next));
-                            // Different peers can publish first in any order; presentation stays roster-ordered.
-                            self.snapshot.peers.sort_by_key(|(id, _)| {
-                                room.members.iter().position(|member| member.id == *id)
-                            });
-                        }
-                        self.changed = true;
-                    }
-                }
-            }
-        }
-        let receipts = NativeRoomReceipts {
-            local_final_written: self.snapshot.receipts.local_final_written
-                || self.io.local_final_written(),
-            local_final_acknowledged: self.snapshot.receipts.local_final_acknowledged
-                || self.io.local_final_acknowledged(),
-            progress_complete: self.snapshot.receipts.progress_complete
-                || self.io.progress_complete(),
-            drain_complete: self.snapshot.receipts.drain_complete || self.io.drain_complete(),
-        };
-        if self.snapshot.receipts != receipts {
-            self.snapshot.receipts = receipts;
-            self.changed = true;
-        }
-        if self.snapshot.schedule.is_none() && !self.io.session().leave_written() {
-            if let Some(schedule) = self.io.take_schedule()? {
-                self.snapshot.schedule = Some(schedule);
-                self.changed = true;
-            }
-        }
-        Ok(())
-    }
-
-    fn finished(&self) -> bool {
-        self.io.session().leave_written() || self.io.drain_complete()
-    }
-
-    fn drive<F: FnMut() -> io::Result<i64>>(&mut self, mut now: F) -> io::Result<bool> {
-        if self.finished() {
-            return Ok(false);
-        }
-        let observed = now()?;
-        self.check_now(observed)?;
-        self.last_now = Some(observed);
-        self.refresh()?;
-        if self.snapshot.schedule.is_none() && observed >= nanos(self.options.setup_timeout)? {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "native room setup deadline expired",
-            ));
-        }
-        if let Some(drain) = &mut self.drain {
-            if observed >= drain.deadline_ns {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "native room drain deadline expired",
-                ));
-            }
-            if !drain.requested && self.io.progress_complete() {
-                self.io.request_drain()?;
-                drain.requested = true;
-            }
-        }
-        let setup_pending = self.snapshot.schedule.is_none();
-        let last = &mut self.last_now;
-        let result = self.io.step(|| {
-            let value = now()?;
-            if value < 0 || last.is_some_and(|previous| value < previous) {
-                return Err(invalid("native room clock is negative or regressing"));
-            }
-            *last = Some(value);
-            Ok(value)
-        });
-        // Preserve any accepted prefix even when a later I/O operation failed.
-        let refreshed = self.refresh();
-        match result {
-            Err(error) => Err(error),
-            Ok(progressed) => {
-                refreshed?;
-                // A bounded transport operation can complete across its fixed
-                // deadline. Real late receipts remain history, never timely success.
-                let completed = self.last_now.unwrap_or(observed);
-                if setup_pending && completed >= nanos(self.options.setup_timeout)? {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "native room setup deadline expired during I/O",
-                    ));
-                }
-                if self
-                    .drain
-                    .as_ref()
-                    .is_some_and(|drain| completed >= drain.deadline_ns)
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        "native room drain deadline expired during I/O",
-                    ));
-                }
-                Ok(progressed)
-            }
-        }
-    }
-
-    fn finish(mut self, error: Option<NativeRoomFailure>, cancelled: bool) -> NativeRoomOutcome {
-        let leave_written = self.io.session().leave_written();
-        let refresh_error = self.refresh().err().map(NativeRoomFailure::from);
-        let receipts = self.snapshot.receipts;
-        self.io.stop();
-        let mut stream = self.io.into_stream();
-        let cleanup_error = stream
-            .finish(self.options.finish_timeout)
-            .err()
-            .map(NativeRoomFailure::from);
-        NativeRoomOutcome {
-            cancelled,
-            error: error.or(refresh_error),
-            cleanup_error,
-            receipts,
-            leave_written,
-        }
-    }
-}
 
 struct Envelope {
     id: u64,
@@ -633,12 +366,11 @@ fn lock_error<T>(error: TryLockError<T>) -> io::Error {
     }
 }
 fn publish<S: NativeRoomStream>(actor: &mut Actor<S>, shared: &Mutex<Shared>) {
-    if actor.changed {
+    if let Some(snapshot) = actor.take_changed_snapshot() {
         shared
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .snapshot = actor.snapshot().clone();
-        actor.changed = false;
+            .snapshot = snapshot.clone();
     }
 }
 fn terminal(shared: &Mutex<Shared>, receiver: &Receiver<Envelope>, outcome: NativeRoomOutcome) {
@@ -684,7 +416,7 @@ fn run<S: NativeRoomStream>(
             Ok(progressed) => {
                 publish(&mut actor, shared);
                 if !progressed && !actor.finished() && !stop.load(Ordering::Acquire) {
-                    if let Err(failure) = actor.io.stream_mut().idle(IDLE) {
+                    if let Err(failure) = actor.idle(IDLE) {
                         error = Some(failure.into());
                         break;
                     }
@@ -697,7 +429,7 @@ fn run<S: NativeRoomStream>(
         }
     }
     publish(&mut actor, shared);
-    let cancelled = stop.load(Ordering::Acquire) || actor.io.session().leave_written();
+    let cancelled = stop.load(Ordering::Acquire) || actor.leave_written();
     let outcome = actor.finish(error, cancelled);
     terminal(shared, &receiver, outcome);
 }

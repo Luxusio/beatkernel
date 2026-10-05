@@ -55,9 +55,8 @@ impl<S: Read + Write> RoomPlayIo<S> {
         &self.session
     }
 
-    /// Native network-thread transport servicing; protocol writes and reads
+    /// Portable caller-driven transport servicing; protocol writes and reads
     /// remain exclusively owned by this driver.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn stream_mut(&mut self) -> &mut S {
         &mut self.stream
     }

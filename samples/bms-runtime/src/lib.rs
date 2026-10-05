@@ -910,3 +910,5 @@ pub mod native_room_runtime_bridge;
 pub mod room_runtime_host;
 
 pub mod room_competition;
+
+pub mod room_network_actor;
