@@ -80,11 +80,13 @@ The [replay failure sound plan](REQ__replay-gauge-sound-stop.md) reuses the shar
 scheduled-stop state and derives fixed-default failure from actual recorded
 operations. The [offline owner connection](REQ__offline-gauge-sound-stop.md)
 uses actual Runtime reports and accepted Stop evidence in its closed queue.
-Other per-owner output diagnostics, result clear/fail and output cleanup remain
-unfinished.
+The [native terminal readiness contract](REQ__native-failed-terminal-readiness.md)
+connects actual producer-admitted Stops and numeric-fenced gameplay to existing
+native output completion. Final clear/fail and remaining output cleanup still
+require integration.
 Stopping a configured inactive or never-played voice preserves the Mixer's
 existing unknown_stops diagnostic. The current strict normal-completion evidence
-validator rejects that counter; failed-session output completion needs an
-explicit evidence policy in its own integration. Do not weaken the generic
+validator rejects that counter; stepped and native owners use explicit evidence
+policies in their own integrations. Do not weaken the generic
 validator or hide real counters to claim completion after scheduled stops.
 Keep the high-level mine file admission guard until all actual owners are wired.

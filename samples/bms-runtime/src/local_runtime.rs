@@ -563,6 +563,10 @@ impl RuntimeGroup {
     pub fn enqueue_audio(&mut self, command: AudioCommand) -> Result<(), CommandPushError> {
         self.producer.try_push(command)
     }
+    /// Actual shared-producer admissions, including initial BGM and every member.
+    pub(crate) fn admitted_audio_commands(&self) -> u64 {
+        self.producer.counters().accepted
+    }
     /// Shared output control only; acknowledged Transport/input coordination
     /// remains the native session owner's responsibility for the whole cohort.
     pub fn request_audio_pause(&mut self, paused: bool) {
@@ -683,6 +687,9 @@ impl SoloRuntime {
     }
     pub fn transport_mut(&mut self) -> &mut Transport {
         self.0.transport_mut()
+    }
+    pub(crate) fn admitted_audio_commands(&self) -> u64 {
+        self.0.admitted_audio_commands()
     }
     /// Uses the same shared output control as a multi-player cohort.
     pub fn request_audio_pause(&mut self, paused: bool) {

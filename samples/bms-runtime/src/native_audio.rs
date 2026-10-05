@@ -1,10 +1,11 @@
 //! Common owner-thread queue/BGM/mixer composition; no native device operations.
 use crate::{
     PreparedBms,
-    bgm::{BgmConfig, BgmFeeder},
+    bgm::{BgmConfig, BgmFeedError, BgmFeedReport, BgmFeeder},
     input_sounds::InputSoundPlan,
     mine_sounds::MineSoundPlan,
     native_gameplay::NativeGameplayResult,
+    offline::OwnedStopEvidence,
 };
 use beatkernel::{
     audio::{
@@ -14,6 +15,100 @@ use beatkernel::{
     runtime::{input_sound::InputSoundTimeline, hazard_sound::HazardSoundTimeline},
     time::{ClockPoint, Duration, Timestamp},
 };
+
+/// Keeps the original native mixer counters when Stop ownership is insufficient.
+#[derive(Debug)]
+pub(crate) struct NativeStopEvidenceError {
+    pub(crate) report: RenderReport,
+    pub(crate) admitted_stops: u64,
+}
+impl std::fmt::Display for NativeStopEvidenceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "native unknown Stops {} exceed admitted {} or applied commands {}",
+            self.report.counters.unknown_stops,
+            self.admitted_stops,
+            self.report.counters.commands_applied,
+        )
+    }
+}
+impl std::error::Error for NativeStopEvidenceError {}
+
+/// Queue admission permits only its own cumulative unknown-Stop observations.
+/// Clock, grid and presentation authority stay with the existing native owners.
+pub(crate) fn validate_stop_evidence(
+    rendered: Option<RenderReport>,
+    evidence: &OwnedStopEvidence,
+) -> NativeGameplayResult<()> {
+    if let Some(report) = rendered {
+        if !evidence.permits_unknown_stops(report.counters.unknown_stops)
+            || report.counters.unknown_stops > report.counters.commands_applied
+        {
+            return Err(Box::new(NativeStopEvidenceError {
+                report,
+                admitted_stops: evidence.admitted_stops(),
+            }));
+        }
+    }
+    Ok(())
+}
+
+/// Finite output is sealed by the real immutable endpoint. Retained BGM voices
+/// cannot play again, but every queued command must actually have been applied.
+/// NativeEnd's endpoint/presentation proof remains a separate required guard.
+pub(crate) fn finite_terminal_output_ready(
+    bgm: BgmFeedReport,
+    rendered: Option<RenderReport>,
+    admitted_commands: u64,
+) -> bool {
+    admitted_commands != u64::MAX
+        && bgm.remaining == 0
+        && bgm.outstanding == 0
+        && rendered.is_some_and(|report| {
+            report.paused
+                && report.playback_end_physical_frame.is_some()
+                && report.pending_commands == 0
+                && report.counters.commands_consumed == admitted_commands
+                && report.counters.commands_applied == admitted_commands
+        })
+}
+
+/// Finite playback needs a real block after the latest Stop queue admission.
+#[derive(Default)]
+pub(crate) struct NativeStopBarrier {
+    admitted_stops: u64,
+    after_frame: Option<u64>,
+}
+impl NativeStopBarrier {
+    pub(crate) fn observe(
+        &mut self,
+        evidence: &OwnedStopEvidence,
+        rendered: Option<RenderReport>,
+    ) -> NativeGameplayResult<bool> {
+        if evidence.admitted_stops() != self.admitted_stops {
+            self.admitted_stops = evidence.admitted_stops();
+            self.after_frame = None;
+        }
+        if self.admitted_stops == 0 {
+            return Ok(true);
+        }
+        let Some(report) = rendered.filter(|report| report.frames > 0) else {
+            return Ok(false);
+        };
+        let end = report
+            .start_frame
+            .checked_add(u64::try_from(report.frames)?)
+            .ok_or("native Stop render barrier overflow")?;
+        match self.after_frame {
+            Some(after) => Ok(report.start_frame >= after),
+            None => {
+                self.after_frame = Some(end);
+                Ok(false)
+            }
+        }
+    }
+}
 /// Validate native press sounds before moving PCM or starting output ownership.
 /// Empty invisible sources retain the unconfigured legacy runtime path.
 pub fn prepare_input_sounds(
@@ -92,8 +187,38 @@ pub fn prepare_audio(
         capacity,
     )?;
     let format = bank.format();
+    let commands = crate::section_start::relative_commands(commands, config.start)?;
+    let commands = if let Some(end) = config.playback_end_frame {
+        let mut retained = Vec::new();
+        retained.try_reserve_exact(commands.len())?;
+        for command in commands {
+            let AudioCommand::Play { at, gain, .. } = command else {
+                return Err(BgmFeedError::InvalidCommand(command).into());
+            };
+            let elapsed = i128::from(at.as_nanos()) + i128::from(config.preroll.as_nanos());
+            if !gain.is_finite() || elapsed < 0 {
+                return Err(BgmFeedError::InvalidCommand(command).into());
+            }
+            let mapped =
+                i64::try_from(i128::from(config.output_origin.timestamp.as_nanos()) + elapsed)
+                    .map_err(|_| BgmFeedError::Overflow)?;
+            if crate::replay_audio::before_endpoint(
+                Timestamp::from_nanos(mapped),
+                config.output_origin,
+                format.sample_rate(),
+                Some(end),
+            )? {
+                // Keep relative time: the real feeder performs its usual single
+                // origin/preroll mapping after this exact frame-bound check.
+                retained.push(command);
+            }
+        }
+        retained
+    } else {
+        commands
+    };
     let mut bgm = BgmFeeder::new(
-        crate::section_start::relative_commands(commands, config.start)?,
+        commands,
         BgmConfig {
             output_origin: config.output_origin,
             sample_rate: format.sample_rate(),
@@ -126,13 +251,16 @@ pub fn prepare_audio(
         mixer,
     })
 }
-/// Replenish only from successful active logical playback, never physical silence.
+/// Replenish from completed logical playback, including the retained finite end.
+/// Ordinary paused/startup silence cannot advance BGM admission or retirement.
 pub fn feed_rendered(
     bgm: &mut BgmFeeder,
     report: Option<RenderReport>,
     admit: impl FnMut(AudioCommand) -> Result<(), CommandPushError>,
 ) -> NativeGameplayResult<()> {
-    if let Some(report) = report.filter(|report| !report.paused) {
+    if let Some(report) =
+        report.filter(|report| !report.paused || report.playback_end_physical_frame.is_some())
+    {
         let cursor = report
             .playback_start_frame
             .checked_add(u64::try_from(report.playback_frames)?)
@@ -144,6 +272,9 @@ pub fn feed_rendered(
 
 #[cfg(test)]
 mod fixtures {
+    mod stop_evidence {
+        include!("native_stop_evidence_fixtures.rs");
+    }
     use super::*;
     use beatkernel::audio::*;
     use beatkernel::time::ClockDomainId;

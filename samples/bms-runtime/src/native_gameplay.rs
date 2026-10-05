@@ -1,6 +1,6 @@
 //! One solo gameplay owner; native adapters acquire evidence and own cleanup.
 use crate::{
-    bgm::BgmFeeder,
+    bgm::{BgmFeedReport, BgmFeeder},
     competition_live::LiveCompetition,
     completion::SongCompletion,
     gauge::{BmsGauge, GaugeError, GaugeProfile},
@@ -10,6 +10,8 @@ use crate::{
     },
     local_runtime::SoloRuntime,
     native_end::{EndBoundary, NativeEnd},
+    native_audio::{NativeStopBarrier, finite_terminal_output_ready, validate_stop_evidence},
+    offline::OwnedStopEvidence,
     playback_pause::{NativePause, PauseKeyboard, PausePhase},
     player::{self, PauseState},
     replay_capture::{CaptureError, LiveReplayCapture},
@@ -119,18 +121,20 @@ pub struct NativeReportObservationError {
     pub capture_error: Option<CaptureError>,
     pub competition_error: Option<Box<dyn Error>>,
     pub presentation_error: Option<Box<dyn Error>>,
+    pub stop_evidence_error: Option<&'static str>,
 }
 impl fmt::Display for NativeReportObservationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "native report observation: judge {:?}, {} audio failures, gauge {:?}, capture {:?}, competition {:?}, presentation {:?}",
+            "native report observation: judge {:?}, {} audio failures, gauge {:?}, capture {:?}, competition {:?}, presentation {:?}, Stop evidence {:?}",
             self.report.judge_error,
             self.report.audio_failures.len(),
             self.gauge_error,
             self.capture_error,
             self.competition_error,
             self.presentation_error,
+            self.stop_evidence_error,
         )
     }
 }
@@ -215,9 +219,17 @@ fn schedule<D: NativeGameplayDevice>(
         device.fallback_schedule(config.sample_rate)
     }
 }
+#[cfg(test)]
 fn publish(
     session: &mut NativeGameplaySession<'_>,
+    report: RuntimeReport,
+) -> NativeGameplayResult<()> {
+    publish_with_stops(session, report, &mut OwnedStopEvidence::default())
+}
+fn publish_with_stops(
+    session: &mut NativeGameplaySession<'_>,
     mut report: RuntimeReport,
+    evidence: &mut OwnedStopEvidence,
 ) -> NativeGameplayResult<()> {
     let was_fenced = session.runtime.gameplay_fence().is_some();
     let gauge_error = session
@@ -237,12 +249,19 @@ fn publish(
         .as_mut()
         .and_then(|competition| competition.observe(&report).err());
     let presentation_error = player::publish_report(&report).err();
+    let mut stop_evidence_error = None;
     if session.gauge.snapshot().failure.is_some() {
         session.runtime.fence_gameplay();
         if let Some(stops) = session
             .runtime
             .fence_gameplay_sounds(report.audio_at.timestamp)
         {
+            stop_evidence_error = evidence.record_admitted(&stops.commands).err();
+            if !stops.commands.is_empty() {
+                if let Some(completion) = session.completion.as_mut() {
+                    completion.reset_drain();
+                }
+            }
             report.audio_commands.extend(stops.commands);
             report.audio_failures.extend(stops.failures);
         }
@@ -259,6 +278,7 @@ fn publish(
         || capture_error.is_some()
         || competition_error.is_some()
         || presentation_error.is_some()
+        || stop_evidence_error.is_some()
     {
         return Err(Box::new(NativeReportObservationError {
             report,
@@ -266,6 +286,7 @@ fn publish(
             capture_error,
             competition_error,
             presentation_error,
+            stop_evidence_error,
         }));
     }
     Ok(())
@@ -275,11 +296,12 @@ fn process<D: NativeGameplayDevice>(
     session: &mut NativeGameplaySession<'_>,
     config: NativeGameplayConfig,
     event: PhysicalInputEvent,
+    evidence: &mut OwnedStopEvidence,
 ) -> NativeGameplayResult<Timestamp> {
     let at = schedule(device, session, config)?;
     let report = session.runtime.process_input(event, &ExplicitDomains, at)?;
     let song = report.song_time;
-    publish(session, report)?;
+    publish_with_stops(session, report, evidence)?;
     Ok(song)
 }
 fn finite_done(
@@ -290,12 +312,45 @@ fn finite_done(
     backlog: bool,
     resuming: bool,
 ) -> bool {
-    config.end_song.is_some_and(|end| song >= end)
+    finite_frontier_ready(
+        config.end_song.is_some_and(|end| song >= end),
+        boundary,
+        last,
+        backlog,
+        resuming,
+    )
+}
+fn finite_frontier_ready(
+    gameplay_ready: bool,
+    boundary: Option<EndBoundary>,
+    last: ClockPoint,
+    backlog: bool,
+    resuming: bool,
+) -> bool {
+    gameplay_ready
         && boundary.is_some_and(|boundary| {
             boundary.host.domain == last.domain && last.timestamp >= boundary.host.timestamp
         })
         && !backlog
         && !resuming
+}
+fn finite_done_with_terminal(
+    config: NativeGameplayConfig,
+    boundary: Option<EndBoundary>,
+    last: ClockPoint,
+    song: Timestamp,
+    backlog: bool,
+    resuming: bool,
+    numeric_terminal: bool,
+    bgm: BgmFeedReport,
+    rendered: Option<RenderReport>,
+    admitted_commands: u64,
+) -> bool {
+    if !numeric_terminal {
+        return finite_done(config, boundary, last, song, backlog, resuming);
+    }
+    finite_frontier_ready(config.end_song.is_some(), boundary, last, backlog, resuming)
+        && finite_terminal_output_ready(bgm, rendered, admitted_commands)
 }
 
 /// Complete solo pump. Device cancellation and all errors leave native cleanup to caller.
@@ -339,6 +394,8 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
     let mut end_boundary = None;
     let mut end_rendered = false;
     let mut pause_announced = false;
+    let mut stop_evidence = OwnedStopEvidence::default();
+    let mut stop_barrier = NativeStopBarrier::default();
     while !player::cancelled() && deadline.is_none_or(|deadline| Instant::now() < deadline) {
         player::retry_pause_publication();
         device.observe(session.discipline)?;
@@ -347,6 +404,7 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
             .latest_pair()
             .ok_or("gameplay requires native clock relation")?;
         let rendered = device.render_report()?;
+        validate_stop_evidence(rendered, &stop_evidence)?;
         if let Some(end) = session.end.as_mut() {
             end_rendered |=
                 rendered.is_some_and(|report| report.playback_end_physical_frame.is_some());
@@ -487,7 +545,7 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
             // Reconciliation precedes every post-resume input, including equal time.
             chronology(at, last_operation)?;
             for event in keyboard.resume(at)? {
-                last_song = process(device, &mut session, config, event)?;
+                last_song = process(device, &mut session, config, event, &mut stop_evidence)?;
             }
             last_operation = at;
             resume_boundary = None;
@@ -509,7 +567,7 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
             if config.pause_supported && !keyboard.accept(&event)? {
                 continue;
             }
-            last_song = process(device, &mut session, config, event)?;
+            last_song = process(device, &mut session, config, event, &mut stop_evidence)?;
             last_operation = host;
         }
         if !batch.backlog {
@@ -520,7 +578,7 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
                     let audio_at = schedule(device, &session, config)?;
                     let report = session.runtime.advance_to(at, &ExplicitDomains, audio_at)?;
                     last_song = report.song_time;
-                    publish(&mut session, report)?;
+                    publish_with_stops(&mut session, report, &mut stop_evidence)?;
                     last_operation = at;
                     pause_committed = true;
                     player::publish_pause(PauseState::Paused);
@@ -572,35 +630,64 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
                 println!("logical song={}ns", last_song.as_nanos());
                 last_progress = Some(second);
             }
-            publish(&mut session, report)?;
+            publish_with_stops(&mut session, report, &mut stop_evidence)?;
         }
-        if finite_done(
-            config,
-            end_boundary,
-            last_operation,
-            last_song,
-            batch.backlog,
-            resume_boundary.is_some(),
-        ) {
+        // Read after this iteration's admissions. A pre-admission idle block
+        // cannot establish that newly queued Stops reached the mixer.
+        let rendered = device.render_report()?;
+        validate_stop_evidence(rendered, &stop_evidence)?;
+        let numeric_terminal = session.gauge.snapshot().failure.is_some()
+            && session.runtime.gameplay_fence().is_some();
+        let stops_rendered = if config.end_song.is_some() {
+            stop_barrier.observe(&stop_evidence, rendered)?
+        } else {
+            true
+        };
+        if stops_rendered
+            && finite_done_with_terminal(
+                config,
+                end_boundary,
+                last_operation,
+                last_song,
+                batch.backlog,
+                resume_boundary.is_some(),
+                numeric_terminal,
+                session.bgm.report(),
+                rendered,
+                session.runtime.admitted_audio_commands(),
+            )
+        {
             if let Some(competition) = session.competition.as_mut() {
                 competition.mark_native_completed();
             }
             player::publish_section_end(config.end_song.expect("finite endpoint admitted"));
             return Ok(());
         }
-        if !batch.backlog
+        if config.end_song.is_none()
+            && !batch.backlog
             && pending.is_empty()
             && resume_boundary.is_none()
             && session.pause.phase() == PausePhase::Running
         {
             if let Some(completion) = session.completion.as_mut() {
-                if completion.observe(
-                    session.runtime.judge(),
-                    last_song,
-                    session.bgm.report(),
-                    device.render_report()?,
-                    session.discipline.latest_pair().map(|pair| pair.source),
-                )? {
+                let presented = session.discipline.latest_pair().map(|pair| pair.source);
+                let finished = if numeric_terminal {
+                    completion.observe_terminal_ready(
+                        true,
+                        session.bgm.report(),
+                        rendered,
+                        presented,
+                    )?
+                } else {
+                    completion.observe(
+                        session.runtime.judge(),
+                        last_song,
+                        session.bgm.report(),
+                        rendered,
+                        presented,
+                    )?
+                };
+                if finished {
                     if let Some(competition) = session.competition.as_mut() {
                         competition.mark_native_completed();
                     }
@@ -615,6 +702,9 @@ pub fn run_gameplay<D: NativeGameplayDevice>(
 
 #[cfg(test)]
 mod fixtures {
+    mod failed_terminal {
+        include!("native_solo_failed_terminal_fixtures.rs");
+    }
     mod sound_stop {
         include!("native_solo_sound_stop_fixtures.rs");
     }
