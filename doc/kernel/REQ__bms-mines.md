@@ -34,6 +34,11 @@ source and long-duration fixtures for deferred execution.
 
 ## Integration boundary
 
+The [common gauge contract](REQ__bms-gauge.md) defines fixed-point recovery,
+mine damage and latched failure state from committed reports. Actual terminal
+playback control, native/HUD publication and final file admission remain required;
+a readable InstantDeath snapshot alone does not complete mine support.
+
 ### BMS WAV00 plan and stepped live installation
 
 MineSoundPlan prepares validated original mine IDs with optional SampleId(0)

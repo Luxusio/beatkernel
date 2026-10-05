@@ -6,6 +6,7 @@ use crate::{
     bgm::{BgmConfig, BgmFeedError, BgmFeedReport, BgmFeeder},
     competition::{CompetitionError, ScoreSummary},
     completion::{CompletionError, SongCompletion},
+    gauge::{BmsGauge, GaugeError},
     input_sounds::{InputSoundIdentity, InputSoundPlan},
     local_players::{PlayerId, ResolvedInputPlan},
     local_preparation::{
@@ -101,6 +102,15 @@ pub enum StepGameplayError {
         score_error: Option<CompetitionError>,
         capture_error: Option<CaptureError>,
     },
+    /// Gauge aggregation refused a committed report without losing independent
+    /// postprocessing errors or changing the previous atomic gauge snapshot.
+    Gauge {
+        error: GaugeError,
+        report: RuntimeReport,
+        score_error: Option<CompetitionError>,
+        capture_error: Option<CaptureError>,
+        mine_error: Option<MineDamageError>,
+    },
     /// Capture rejected a committed operation, or setup/export failed without
     /// an operation. Earlier recorded operations remain the accepted prefix.
     Capture {
@@ -187,6 +197,21 @@ impl fmt::Display for StepGameplayError {
                 report.audio_failures.len(),
                 score_error,
                 capture_error
+            ),
+            Self::Gauge {
+                error,
+                report,
+                score_error,
+                capture_error,
+                mine_error,
+            } => write!(
+                f,
+                "step gameplay gauge: {error}; judge {:?}, {} audio failures, score {:?}, capture {:?}, mine damage {:?}",
+                report.judge_error,
+                report.audio_failures.len(),
+                score_error,
+                capture_error,
+                mine_error
             ),
             Self::Capture { error, .. } => write!(f, "step gameplay capture: {error}"),
             Self::Bgm { error, report } => write!(
@@ -330,6 +355,7 @@ pub struct StepGameplay {
     capture: Option<LiveReplayCapture>,
     score: ScoreSummary,
     mine_damage: MineDamageSummary,
+    gauge: BmsGauge,
     song: Timestamp,
     host_domain: ClockDomainId,
     start: Timestamp,
@@ -352,6 +378,7 @@ impl fmt::Debug for StepGameplay {
             .field("song", &self.song)
             .field("score", &self.score)
             .field("mine_damage", &self.mine_damage)
+            .field("gauge", &self.gauge)
             .field(
                 "pending_sequence",
                 &self.pending.as_ref().map(|batch| batch.sequence),
@@ -807,6 +834,7 @@ impl StepGameplay {
             capture: None,
             score: ScoreSummary::default(),
             mine_damage: MineDamageSummary::default(),
+            gauge: BmsGauge::default(),
             song,
             host_domain: config.host_origin.domain,
             start,
@@ -1158,11 +1186,25 @@ impl StepGameplay {
             self.reset_drain();
         }
         let mine_error = self.mine_damage.observe(&report.hazard_events).err();
+        let gauge_error = self
+            .gauge
+            .observe(&report.judge_events, &report.hazard_events)
+            .err();
         let score_error = self.score.observe(&report.judge_events).err();
         let capture_error = self
             .capture
             .as_mut()
             .and_then(|capture| capture.record_report(&report).err());
+        if let Some(error) = gauge_error {
+            self.failed = true;
+            return Err(StepGameplayError::Gauge {
+                error,
+                report,
+                score_error,
+                capture_error,
+                mine_error,
+            });
+        }
         if let Some(error) = mine_error {
             self.failed = true;
             return Err(StepGameplayError::MineDamage {
@@ -1499,6 +1541,10 @@ impl StepGameplay {
     pub fn mine_damage(&self) -> &MineDamageSummary {
         &self.mine_damage
     }
+    /// Fixed default-policy gauge from actual committed reports, including failures.
+    pub fn gauge(&self) -> &BmsGauge {
+        &self.gauge
+    }
     pub fn bgm_report(&self) -> BgmFeedReport {
         self.bgm.report()
     }
@@ -1518,6 +1564,7 @@ pub struct StepLocalMemberFailure {
     pub score_error: Option<CompetitionError>,
     pub capture_error: Option<CaptureError>,
     pub mine_error: Option<MineDamageError>,
+    pub gauge_error: Option<GaugeError>,
 }
 
 /// Local failure retains the complete committed group prefix and every member's
@@ -1563,6 +1610,7 @@ struct LocalMemberState {
     player: PlayerId,
     score: ScoreSummary,
     mine_damage: MineDamageSummary,
+    gauge: BmsGauge,
     capture: Option<LiveReplayCapture>,
     song: Timestamp,
 }
@@ -1637,6 +1685,7 @@ impl StepLocalGameplay {
             player,
             score: ScoreSummary::default(),
             mine_damage: MineDamageSummary::default(),
+            gauge: BmsGauge::default(),
             capture: None,
             song: control.song,
         }));
@@ -1688,6 +1737,13 @@ impl StepLocalGameplay {
             .iter()
             .find(|member| member.player == player)
             .map(|member| &member.mine_damage)
+    }
+    /// Independent fixed-policy gauge for one actual prepared member.
+    pub fn gauge(&self, player: PlayerId) -> Option<&BmsGauge> {
+        self.members
+            .iter()
+            .find(|member| member.player == player)
+            .map(|member| &member.gauge)
     }
     pub fn judge(&self, player: PlayerId) -> Option<&JudgeEngine> {
         self.group().member_judge(player)
@@ -1983,18 +2039,27 @@ impl StepLocalGameplay {
                 .expect("group reports only prepared members");
             member.song = report.song_time;
             let mine_error = member.mine_damage.observe(&report.hazard_events).err();
+            let gauge_error = member
+                .gauge
+                .observe(&report.judge_events, &report.hazard_events)
+                .err();
             let score_error = member.score.observe(&report.judge_events).err();
             let capture_error = member
                 .capture
                 .as_mut()
                 .and_then(|capture| capture.record_report(report).err());
             reported_failure |= report.judge_error.is_some() || !report.audio_failures.is_empty();
-            if score_error.is_some() || capture_error.is_some() || mine_error.is_some() {
+            if score_error.is_some()
+                || capture_error.is_some()
+                || mine_error.is_some()
+                || gauge_error.is_some()
+            {
                 member_errors.push(StepLocalMemberFailure {
                     player: *player,
                     score_error,
                     capture_error,
                     mine_error,
+                    gauge_error,
                 });
             }
         }

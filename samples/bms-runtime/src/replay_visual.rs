@@ -1,5 +1,6 @@
 //! Incremental actual recorded operations for presentation, without synthetic judging.
 use crate::{
+    gauge::BmsGauge,
     mine_damage::MineDamageSummary,
     replay_playback::{
         decode_section_setup, reconstruct, reconstruct_section, validate_section_setup,
@@ -29,6 +30,7 @@ pub struct ReplayVisual {
     observed: Option<Timestamp>,
     pressed: crate::pressed_keys::PressedKeys,
     mine_damage: MineDamageSummary,
+    gauge: BmsGauge,
     failed: bool,
 }
 impl ReplayVisual {
@@ -84,6 +86,7 @@ impl ReplayVisual {
             observed: None,
             pressed,
             mine_damage: MineDamageSummary::default(),
+            gauge: BmsGauge::default(),
             failed: false,
         })
     }
@@ -100,17 +103,21 @@ impl ReplayVisual {
     pub fn mine_damage(&self) -> &MineDamageSummary {
         &self.mine_damage
     }
+    /// Default-policy gauge from the actual recorded operation prefix.
+    pub fn gauge(&self) -> &BmsGauge {
+        &self.gauge
+    }
     pub fn recorded_until(&self) -> Option<Timestamp> {
         self.records.last().map(|record| record.song_time)
     }
     /// Applies every actual operation at or before this presentation target.
     /// Equal-time operations retain their validated ordinal order. Regressions
     /// reject before mutation, including after the actual prefix has finished.
-    /// Damage aggregation failure fences further operations after the committed
-    /// judge call; previously accumulated damage remains readable.
+    /// Damage or gauge aggregation failure fences further operations after the
+    /// committed judge call; previously accumulated state remains readable.
     pub fn advance_to(&mut self, song: Timestamp) -> Result<Vec<JudgeEvent>, BoxError> {
         if self.failed {
-            return Err("replay presentation is fenced after mine damage failure".into());
+            return Err("replay presentation is fenced after report aggregation failure".into());
         }
         if self.observed.is_some_and(|prior| song < prior) {
             return Err("replay presentation target regressed".into());
@@ -125,7 +132,16 @@ impl ReplayVisual {
                 ReplayOperation::Input(input) => self.engine.push_input(input, record.song_time)?,
                 ReplayOperation::Advance => self.engine.advance_to(record.song_time)?,
             };
-            if let Err(error) = self.mine_damage.observe(self.engine.hazard_events()) {
+            let mine_error = self.mine_damage.observe(self.engine.hazard_events()).err();
+            let gauge_error = self
+                .gauge
+                .observe(&events, self.engine.hazard_events())
+                .err();
+            if let Some(error) = mine_error {
+                self.failed = true;
+                return Err(error.into());
+            }
+            if let Some(error) = gauge_error {
                 self.failed = true;
                 return Err(error.into());
             }
