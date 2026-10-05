@@ -28,7 +28,6 @@ use std::{
 
 const PUBLICATION_NS: i64 = 50_000_000;
 const LOBBY_LIMIT: usize = 16;
-const WAIT: Duration = Duration::from_millis(1);
 
 /// The production implementation delegates only to the existing network owner.
 /// In-memory ports can exercise this same controller without creating a second
@@ -979,47 +978,58 @@ impl<P: NativeRoomPort> crate::room_final_wait::RoomFinalPort for NativeRoomFina
     }
 }
 
+struct NativeRoomStartPort<'a, P: NativeRoomPort>(&'a mut NativeRoomCompetition<P>);
+impl<P: NativeRoomPort> crate::room_start_wait::RoomStartPort for NativeRoomStartPort<'_, P> {
+    type Error = io::Error;
+    fn initial(&mut self) -> crate::room_start_wait::RoomStartInitial {
+        self.0.service_ui_cancellation();
+        crate::room_start_wait::RoomStartInitial {
+            cancelled: self.0.cancelled,
+            closing: self.0.finishing
+                || self.0.outcome.is_some()
+                || self.0.cancelled
+                || self.0.leaving
+                || self.0.pending(CommandKind::Leave),
+        }
+    }
+    fn poll(&mut self) -> crate::room_start_wait::RoomStartObservation<Self::Error> {
+        let polled = self.0.poll();
+        crate::room_start_wait::RoomStartObservation {
+            cancelled: self.0.cancelled,
+            failure: polled.err(),
+            leaving: self.0.leaving || self.0.pending(CommandKind::Leave),
+            terminal: self.0.snapshot.terminal.is_some(),
+            committed: self.0.snapshot.schedule.is_some(),
+        }
+    }
+}
+
 impl<P: NativeRoomPort> NativeStartAgreement for NativeRoomCompetition<P> {
     fn await_commit(
         &mut self,
         service: &mut dyn FnMut() -> NativeStartResult<bool>,
     ) -> NativeStartResult<bool> {
-        let result = (|| -> NativeStartResult<bool> {
-            self.service_ui_cancellation();
-            if self.cancelled {
-                return Ok(false);
+        let result = crate::room_start_wait::await_room_start(
+            &mut NativeRoomStartPort(self),
+            &mut crate::native_room_final_wait_bridge::NativeRoomStartWaitControl,
+            service,
+        )
+        .map_err(|error| -> Box<dyn std::error::Error> {
+            match error {
+                crate::room_start_wait::RoomStartWaitError::Port(error)
+                | crate::room_start_wait::RoomStartWaitError::Control(error) => error.into(),
+                crate::room_start_wait::RoomStartWaitError::Service(error) => error,
+                crate::room_start_wait::RoomStartWaitError::Closing => {
+                    "native room startup is closing".into()
+                }
+                crate::room_start_wait::RoomStartWaitError::LeavePending => {
+                    "native room Leave is pending before output activation".into()
+                }
+                crate::room_start_wait::RoomStartWaitError::Terminal => {
+                    "native room ended before output activation".into()
+                }
             }
-            if self.finishing
-                || self.outcome.is_some()
-                || self.cancelled
-                || self.leaving
-                || self.pending(CommandKind::Leave)
-            {
-                return Err("native room startup is closing".into());
-            }
-            loop {
-                if !service()? {
-                    return Ok(false);
-                }
-                let polled = self.poll();
-                if self.cancelled {
-                    return Ok(false);
-                }
-                polled?;
-                if self.leaving || self.pending(CommandKind::Leave) {
-                    return Err("native room Leave is pending before output activation".into());
-                }
-                // A late failed Commit can be retained as history; terminal
-                // failure must be checked before using that schedule for output.
-                if self.snapshot.terminal.is_some() {
-                    return Err("native room ended before output activation".into());
-                }
-                if self.snapshot.schedule.is_some() {
-                    return Ok(true);
-                }
-                std::thread::sleep(WAIT);
-            }
-        })();
+        });
         match &result {
             Ok(false) => {
                 self.cancelled = true;

@@ -896,3 +896,5 @@ mod native_final_wait_bridge;
 #[cfg(not(target_arch = "wasm32"))]
 mod native_room_final_wait_bridge;
 pub mod room_final_wait;
+
+pub mod room_start_wait;
