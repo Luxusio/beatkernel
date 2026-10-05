@@ -876,3 +876,6 @@ pub mod competition_progress;
 /// Portable comparison progress publication cadence with an injected clock.
 pub mod competition_progress_cadence;
 mod competition_progress_clock_bridge;
+
+pub mod competition_terminal;
+mod competition_terminal_bridge;

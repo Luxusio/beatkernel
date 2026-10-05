@@ -4,6 +4,8 @@
 use crate::{
     competition_live::{CompetitionOptions, replay_limits},
     competition_progress,
+    competition_terminal::{self, DeliveryIntent},
+    competition_terminal_bridge::NativeTerminalPort,
     competition_progress_cadence::{self, CompetitionProgressClock, ProgressCadence, CadenceError},
     competition_progress_clock_bridge::NativeProgressClock,
     input_sounds::InputSoundIdentity,
@@ -197,18 +199,15 @@ impl NativeGroupCompetition {
     /// Cleanup only: after an observation, send one actual terminal prefix and
     /// await its application ACK. Always join, including unplayed cancellation.
     pub fn finish(&mut self, members: &[MemberProgress]) -> Result<()> {
+        if self.finished {
+            return Err("group competition already stopped".into());
+        }
         if self.network.is_room() {
-            if self.finished {
-                return Err("group competition already stopped".into());
-            }
-            // Actual native completion proof is held by this shared backend;
-            // cleanup success and initialized state cannot create it.
-            let delivery = copy_members(members)
-                .and_then(|members| self.network.finish_delivery(members).map_err(Into::into));
-            let joined = self
-                .network
-                .stop()
-                .map_err(Box::<dyn std::error::Error>::from);
+            // Completion authority remains held by the room backend.
+            let outcome = competition_terminal::finalize_terminal(
+                &mut NativeTerminalPort::new(&mut self.network),
+                DeliveryIntent::Send(members),
+            );
             self.finished = true;
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(outcome) = self.network.room_outcome() {
@@ -217,47 +216,50 @@ impl NativeGroupCompetition {
                     outcome.cancelled, outcome.receipts, outcome.error, outcome.cleanup_error
                 );
             }
-            return delivery.and(joined);
+            return outcome.into_result();
         }
         let was_failed = self.is_failed();
-        let delivery = (|| -> Result<()> {
-            if self.finished {
-                return Err("group competition already stopped".into());
-            }
-            // Preparation/cancellation alone has not observed gameplay. Caller
-            // initialization values must not become a fabricated final prefix.
+        let preparation = (|| -> Result<()> {
+            // Unobserved initialization is not a terminal gameplay prefix.
             if self.local.is_none() {
                 return Ok(());
             }
             let terminal = validated_local_prefix(&self.players, self.local.as_deref(), members)?;
-            let retained = copy_members(&terminal)?;
-            self.local = Some(retained);
+            self.local = Some(terminal);
             if let Err(error) = self.poll_network() {
                 self.disconnect(error);
             }
             if let Some(error) = &self.failure {
                 return Err(error.clone().into());
             }
-            if let Err(error) = self.network.finish_delivery(terminal) {
-                self.disconnect(error.clone());
-                return Err(error.into());
-            }
             Ok(())
         })();
-        let joined = self.network.stop().map_err(|error| {
-            self.disconnect(error.clone());
-            Box::<dyn std::error::Error>::from(error)
-        });
-        self.finished = true;
-        // Joining fences the worker. Drain its remaining accepted notices before
-        // publishing the retained final display; EOF alone cannot undo an ACK.
-        let drained = match self.poll_network() {
-            Ok(()) | Err(MultiplayerError::Closed) => Ok(()),
-            Err(error) => {
-                self.disconnect(error.clone());
-                Err(Box::<dyn std::error::Error>::from(error))
-            }
+        let intent = match preparation {
+            Err(error) => DeliveryIntent::Refuse(error),
+            Ok(()) => match self.local.as_deref() {
+                Some(members) => DeliveryIntent::Send(members),
+                None => DeliveryIntent::Skip,
+            },
         };
+        let outcome = competition_terminal::finalize_terminal(
+            &mut NativeTerminalPort::new(&mut self.network),
+            intent,
+        );
+        self.finished = true;
+        for error in [
+            outcome.delivery.as_ref().err(),
+            outcome.cleanup.as_ref().err(),
+            outcome.drain.as_ref().err(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(error) = error.downcast_ref::<MultiplayerError>() {
+                // Display failure state copies its diagnostic; the returned
+                // terminal outcome keeps the original boxed error intact.
+                self.disconnect(error.clone());
+            }
+        }
         let reported = (|| -> Result<()> {
             for (player, remote) in remote_members(
                 &self.players,
@@ -273,22 +275,13 @@ impl NativeGroupCompetition {
             }
             Ok(())
         })();
-        self.status = if was_failed
-            || delivery.is_err()
-            || joined.is_err()
-            || drained.is_err()
-            || reported.is_err()
-        {
+        self.status = if was_failed || outcome.has_failed() || reported.is_err() {
             NetworkStatus::Disconnected
         } else {
             NetworkStatus::Stopped
         };
         let presentation = self.publish_presentation(true);
-        delivery
-            .and(joined)
-            .and(drained)
-            .and(reported)
-            .and(presentation)
+        outcome.into_result().and(reported).and(presentation)
     }
 }
 
