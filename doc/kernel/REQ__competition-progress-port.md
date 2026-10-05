@@ -47,7 +47,9 @@ establish runtime, platform, performance or independent review/QA acceptance.
 
 ## Known ceiling
 
-Endpoint acquisition, native start/cleanup owners, group cadence clock and some
-retained prefix allocations remain in outer owners. This increment separates
+Endpoint acquisition, native start/cleanup owners and some retained prefix
+allocations remain in outer owners. Group cadence now uses an injected clock
+through [the cadence contract](REQ__competition-progress-cadence.md), with
+native time acquisition confined to its adapter. This increment separates
 progress policy and does not claim complete IO-layer separation, allocation-free
 networking, real QUIC/WebTransport acceptance or measured latency improvements.

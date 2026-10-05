@@ -52,9 +52,12 @@ native path construction and file writes stay in the adapter. See
 Competition progress polling and publication use a generic port with owned
 notice iterators, borrowed original member data and associated errors. Shared
 policy validates state/gates; native adapters translate transport notices and
-perform publication. Endpoint acquisition, start/cleanup and some cadence
-clocks still require further separation. See
-[the progress port contract](REQ__competition-progress-port.md).
+perform publication. Group publication cadence now receives an explicit generic
+clock, with exact portable nanosecond state and post-effect interval commit;
+native clock acquisition lives in a per-owner adapter. Endpoint acquisition,
+start/cleanup and underlying room waits still require further separation. See
+[the progress port contract](REQ__competition-progress-port.md) and
+[its cadence contract](REQ__competition-progress-cadence.md).
 
 Clock domains and physical input/output provenance cannot be substituted with
 test/control time. Native and browser adapters use common business rules.
@@ -127,7 +130,8 @@ implementations still own network, preparation/storage and terminal
 diagnostics. Their outer solo/cohort setup waiting now delegates to a shared
 business start gate with explicit readiness/polling and opaque control-clock
 ports; network release time stays separate. Group network publication cadence
-and underlying room-adapter waiting still use native time. See
+uses an injected clock through portable policy; underlying room-adapter waiting
+still uses native time. See
 [the start gate](REQ__competition-start-gate.md). Competition display payloads,
 projection and 50ms cadence
 now live in a pure policy using an injected presentation host; native UI and
@@ -166,7 +170,14 @@ consuming captures and transfers one bounded whole-roster artifact. The Window
 uses a pure finite admission model and retains opaque bytes; IndexedDB stores
 replay/archive associations in the existing transaction, charging both byte
 lengths. See [the browser storage contract](../runtime/REQ__browser-completed-result-storage.md).
-Native/browser catalog and loaded-result UI archive integration remain unfinished. See
+Native catalog preview now uses pure exact header/member association and displays
+stored gauge/outcome independently of reconstructed prefix scores. New local
+recordings receive adjacent original-member sidecars. Browser loaded historical
+results use a separate Worker-owned cached presentation. See
+[native association](../runtime/REQ__historical-record-association.md) and
+[browser history](../runtime/REQ__browser-historical-record.md).
+Explicit selection/migration for old native local files, rich archived
+score/timing/comparison values and runtime acceptance remain unfinished. See
 [the archive boundary](../runtime/REQ__completed-result-archive.md).
 Browser execution remains unfinished. Test execution, hardware QA and comparative benchmarks remain deferred
 under the user's existing verification instruction; no quality target is
