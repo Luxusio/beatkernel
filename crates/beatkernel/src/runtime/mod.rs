@@ -132,6 +132,17 @@ pub struct RuntimeReport {
     pub audio_failures: Vec<CommandPushError>,
 }
 
+/// One scheduled gameplay-voice stop attempt, preserving all queue evidence.
+#[derive(Clone, Debug)]
+pub struct RuntimeSoundStopReport {
+    /// Effective output-domain time, no earlier than accepted gameplay audio.
+    pub at: Timestamp,
+    /// Stop commands accepted by the existing producer in prepared voice order.
+    pub commands: Vec<AudioCommand>,
+    /// Original rejected commands and reasons; no automatic retry is permitted.
+    pub failures: Vec<CommandPushError>,
+}
+
 /// Software profiling only; never an input, song or output clock.
 ///
 /// Hosts without a usable `std::time::Instant` must select `External` or
@@ -197,6 +208,9 @@ pub struct Runtime {
     sounds: Vec<SoundBinding>,
     input_sounds: Option<InputSoundTimeline>,
     hazard_sounds: Option<HazardSoundTimeline>,
+    gameplay_voices: Vec<VoiceId>,
+    gameplay_audio_watermark: Option<Timestamp>,
+    gameplay_sound_stop_attempted: bool,
     input_sounds_locked: bool,
     last_host: Option<Timestamp>,
     last_song: Option<Timestamp>,
@@ -223,6 +237,9 @@ impl Runtime {
         if sounds.iter().any(|sound| !sound.gain.is_finite()) {
             return Err(RuntimeError::InvalidGain);
         }
+        let mut gameplay_voices: Vec<_> = sounds.iter().map(|sound| sound.voice).collect();
+        gameplay_voices.sort_unstable();
+        gameplay_voices.dedup();
         Ok(Self {
             host_domain,
             audio_domain,
@@ -234,6 +251,9 @@ impl Runtime {
             sounds,
             input_sounds: None,
             hazard_sounds: None,
+            gameplay_voices,
+            gameplay_audio_watermark: None,
+            gameplay_sound_stop_attempted: false,
             input_sounds_locked: false,
             last_host: None,
             last_song: None,
@@ -255,7 +275,12 @@ impl Runtime {
         if self.input_sounds_locked || self.input_sounds.is_some() {
             return Err(RuntimeError::InputSoundConfigurationLocked);
         }
+        let mut voices = self.gameplay_voices.clone();
+        voices.extend(timeline.markers().iter().map(|marker| marker.voice));
+        voices.sort_unstable();
+        voices.dedup();
         self.input_sounds = Some(timeline);
+        self.gameplay_voices = voices;
         Ok(())
     }
 
@@ -271,7 +296,12 @@ impl Runtime {
         if self.input_sounds_locked {
             return Err(HazardSoundError::AlreadyStarted);
         }
+        let mut voices = self.gameplay_voices.clone();
+        voices.extend(timeline.bindings().iter().map(|binding| binding.voice));
+        voices.sort_unstable();
+        voices.dedup();
         self.hazard_sounds = Some(timeline);
+        self.gameplay_voices = voices;
         Ok(())
     }
 
@@ -310,6 +340,40 @@ impl Runtime {
     /// The optional committed frontier latched by `fence_gameplay`.
     pub const fn gameplay_fence(&self) -> Option<Timestamp> {
         self.gameplay_fence
+    }
+
+    /// Attempts every configured gameplay voice once after a committed fence.
+    /// `requested_at` must use this runtime's output domain. The effective time
+    /// is at least the latest successfully admitted gameplay sound time, so a
+    /// previously queued Play cannot follow its Stop. External `enqueue_audio`
+    /// commands remain caller-owned and do not establish this watermark.
+    ///
+    /// Returns `None` before fencing or after any prior stop attempt, including
+    /// partial failure. Accepted commands are not physical silence or drain proof.
+    pub fn fence_gameplay_sounds(
+        &mut self,
+        requested_at: Timestamp,
+    ) -> Option<RuntimeSoundStopReport> {
+        if self.gameplay_fence.is_none() || self.gameplay_sound_stop_attempted {
+            return None;
+        }
+        let at = self
+            .gameplay_audio_watermark
+            .map_or(requested_at, |latest| requested_at.max(latest));
+        let mut report = RuntimeSoundStopReport {
+            at,
+            commands: Vec::with_capacity(self.gameplay_voices.len()),
+            failures: Vec::with_capacity(self.gameplay_voices.len()),
+        };
+        self.gameplay_sound_stop_attempted = true;
+        for &voice in &self.gameplay_voices {
+            let command = AudioCommand::Stop { voice, at };
+            match admit_audio(&mut self.producer, self.telemetry.counters_mut(), command) {
+                Ok(()) => report.commands.push(command),
+                Err(error) => report.failures.push(error),
+            }
+        }
+        Some(report)
     }
 
     /// Installs spatial routing before any committed operation, at most once.
@@ -610,7 +674,12 @@ impl Runtime {
                 let Some(command) = sound.command_for(event, report.audio_at.timestamp) else {
                     continue;
                 };
-                match admit_audio(&mut self.producer, counters, command) {
+                match admit_gameplay_audio(
+                    &mut self.producer,
+                    counters,
+                    &mut self.gameplay_audio_watermark,
+                    command,
+                ) {
                     Ok(()) => {
                         report.audio_commands.push(command);
                     }
@@ -623,7 +692,12 @@ impl Runtime {
         // Accepted bound presses retain their order, after all judged sounds.
         // A later fanout or queue failure cannot erase an earlier sound attempt.
         for &command in input_commands {
-            match admit_audio(&mut self.producer, counters, command) {
+            match admit_gameplay_audio(
+                &mut self.producer,
+                counters,
+                &mut self.gameplay_audio_watermark,
+                command,
+            ) {
                 Ok(()) => report.audio_commands.push(command),
                 Err(error) => report.audio_failures.push(error),
             }
@@ -633,7 +707,12 @@ impl Runtime {
                 let Some(command) = timeline.command_for(event, report.audio_at.timestamp) else {
                     continue;
                 };
-                match admit_audio(&mut self.producer, counters, command) {
+                match admit_gameplay_audio(
+                    &mut self.producer,
+                    counters,
+                    &mut self.gameplay_audio_watermark,
+                    command,
+                ) {
                     Ok(()) => report.audio_commands.push(command),
                     Err(error) => report.audio_failures.push(error),
                 }
@@ -695,6 +774,8 @@ impl Runtime {
     /// restoring active contacts requires `replace_state_with_touch_router` instead.
     /// The caller must reconstruct its failure policy and refence a failed
     /// prefix when applicable after restoration.
+    /// Prepared voices remain, but the stop-attempt latch and gameplay audio
+    /// watermark reset. Stop/reset the old output before changing its timeline.
     pub fn replace_state(
         &mut self,
         judge: JudgeEngine,
@@ -734,6 +815,8 @@ impl Runtime {
         self.last_song = None;
         self.song_end = None;
         self.gameplay_fence = None;
+        self.gameplay_audio_watermark = None;
+        self.gameplay_sound_stop_attempted = false;
         self.sequences.clear();
         (previous_judge, previous_transport)
     }
@@ -768,6 +851,17 @@ impl Runtime {
     pub fn telemetry_mut(&mut self) -> &mut RuntimeTelemetry {
         &mut self.telemetry
     }
+}
+
+fn admit_gameplay_audio(
+    producer: &mut CommandProducer,
+    counters: &mut RuntimeCounters,
+    watermark: &mut Option<Timestamp>,
+    command: AudioCommand,
+) -> Result<(), CommandPushError> {
+    admit_audio(producer, counters, command)?;
+    *watermark = Some(watermark.map_or(command.at(), |previous| previous.max(command.at())));
+    Ok(())
 }
 
 fn admit_audio(

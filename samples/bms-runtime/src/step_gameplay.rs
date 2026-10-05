@@ -1173,7 +1173,7 @@ impl StepGameplay {
         result: Result<RuntimeReport, GroupError>,
     ) -> Result<RuntimeReport, StepGameplayError> {
         let was_fenced = self.gameplay_fence().is_some();
-        let report = match result {
+        let mut report = match result {
             Ok(report) => report,
             Err(error) => {
                 // SoloRuntime returns committed partial reports as Ok. Its
@@ -1200,7 +1200,15 @@ impl StepGameplay {
                 .and_then(|capture| capture.record_report(&report).err())
         };
         if self.gauge.snapshot().failure.is_some() {
-            self.runtime.solo_mut()?.fence_gameplay();
+            let runtime = self.runtime.solo_mut()?;
+            runtime.fence_gameplay();
+            if let Some(stops) = runtime.fence_gameplay_sounds(report.audio_at.timestamp) {
+                if !stops.commands.is_empty() {
+                    self.reset_drain();
+                }
+                report.audio_commands.extend(stops.commands);
+                report.audio_failures.extend(stops.failures);
+            }
         }
         if let Some(error) = gauge_error {
             self.failed = true;
@@ -2040,7 +2048,7 @@ impl StepLocalGameplay {
     ) -> Result<Vec<PlayerReport>, StepLocalGameplayError> {
         self.control.started = true;
         self.control.correction_watermark = None;
-        let (reports, group_error) = match result {
+        let (mut reports, group_error) = match result {
             Ok(reports) => (reports, None),
             Err(error) => (error.completed_reports.clone(), Some(error)),
         };
@@ -2092,10 +2100,26 @@ impl StepLocalGameplay {
                 });
             }
         }
-        for player in fences.into_iter().flatten() {
+        for (index, player) in fences.into_iter().enumerate() {
+            let Some(player) = player else {
+                continue;
+            };
             self.group_mut()
                 .fence_player(player)
                 .expect("group reports only prepared members");
+            let report = &mut reports[index].report;
+            if let Some(stops) = self
+                .group_mut()
+                .fence_player_sounds(player, report.audio_at.timestamp)
+                .expect("group reports only prepared members")
+            {
+                if !stops.commands.is_empty() {
+                    self.control.reset_drain();
+                }
+                reported_failure |= !stops.failures.is_empty();
+                report.audio_commands.extend(stops.commands);
+                report.audio_failures.extend(stops.failures);
+            }
         }
         if group_error.is_some() || reported_failure || !member_errors.is_empty() {
             self.control.fail();

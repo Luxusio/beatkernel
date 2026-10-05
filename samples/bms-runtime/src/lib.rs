@@ -98,6 +98,8 @@ mod gauge_fence_fixtures;
 mod gauge_fixtures;
 #[cfg(test)]
 mod gauge_hud_fixtures;
+#[cfg(test)]
+mod gauge_sound_stop_fixtures;
 /// Reusable asynchronous native/Web GPU presentation, separate from game I/O.
 #[cfg(feature = "graphics")]
 pub mod graphics;
@@ -144,6 +146,8 @@ mod local_preparation_fixtures;
 pub mod local_runtime;
 /// Graphical local-player draft using typed keyboard metadata and stable IDs.
 pub mod local_setup;
+#[cfg(test)]
+mod local_sound_stop_fixtures;
 #[cfg(test)]
 mod local_source_plan_fixtures;
 #[cfg(test)]

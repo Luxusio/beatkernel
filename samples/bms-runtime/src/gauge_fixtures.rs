@@ -13,7 +13,7 @@ use crate::{
     step_replay::{StepReplay, StepReplayConfig},
 };
 use beatkernel::{
-    audio::{AudioFormat, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId},
+    audio::{AudioCommand, AudioFormat, PcmLimits, PcmSample, SampleBank, SampleId, VoiceId},
     chart::ObjectId,
     input::{
         Binding, BindingMap, ButtonEvent, ButtonState, CodecLimits, ContactId, DeviceId,
@@ -551,6 +551,14 @@ fn actual_solo_reports_preserve_gauge_on_queue_failure_and_numeric_fatal_fences_
         .unwrap();
     assert!(first.judge_events.is_empty());
     assert_eq!(first.hazard_events[0].value, 1295);
+    assert_eq!(
+        first.audio_commands,
+        [AudioCommand::Stop {
+            voice: VoiceId(1),
+            at: ts(OUTPUT),
+        }]
+    );
+    assert!(first.audio_failures.is_empty());
     assert_eq!(
         fatal.gauge().snapshot(),
         &snapshot(0, Some(GaugeFailure::InstantDeath))

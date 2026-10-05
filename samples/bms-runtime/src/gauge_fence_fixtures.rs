@@ -191,13 +191,35 @@ fn fatal_operation_finishes_its_real_fanout_then_freezes_hold_pending_work_and_a
     assert_eq!(first.judge_events[0].stage, JudgeStage::HoldHead);
     assert_eq!(first.hazard_events[0].value, 1295);
     assert_eq!(first.hazard_events[0].outcome, HazardOutcome::Triggered);
-    assert_eq!(first.audio_commands.len(), 2);
+    assert_eq!(first.audio_commands.len(), 6);
     assert!(
         matches!(first.audio_commands[0], AudioCommand::Play { sample: SampleId(1), at, .. } if at == ts(OUTPUT))
     );
     assert!(
         matches!(first.audio_commands[1], AudioCommand::Play { sample: SampleId(2), at, .. } if at == ts(OUTPUT))
     );
+    assert_eq!(
+        &first.audio_commands[2..],
+        &[
+            AudioCommand::Stop {
+                voice: VoiceId(117),
+                at: ts(OUTPUT)
+            },
+            AudioCommand::Stop {
+                voice: VoiceId(118),
+                at: ts(OUTPUT)
+            },
+            AudioCommand::Stop {
+                voice: VoiceId(119),
+                at: ts(OUTPUT)
+            },
+            AudioCommand::Stop {
+                voice: VoiceId(120),
+                at: ts(OUTPUT)
+            },
+        ]
+    );
+    assert!(first.audio_failures.is_empty());
     assert_eq!(game.gameplay_fence(), Some(ts(0)));
     assert!(!game.failed());
     assert_eq!(
@@ -249,7 +271,7 @@ fn fatal_operation_finishes_its_real_fanout_then_freezes_hold_pending_work_and_a
     game.acknowledge(batch.sequence, batch.commands.len(), true)
         .unwrap();
     assert!(game.take_commands(16).unwrap().is_none());
-    assert!(!game.failed()); // Numeric failure neither flushes PCM nor fabricates output completion.
+    assert!(!game.failed()); // Accepted scheduled Stops neither flush PCM nor prove output completion.
 
     for kind in 0..4 {
         let (_, mut owner, _) = fatal_game();
@@ -372,12 +394,13 @@ fn sealed_failure_capture_reconstructs_exact_hash_score_gauge_and_held_state_wit
     assert_eq!(visual.gauge(), &gauge);
     assert_eq!(*visual.mine_damage(), damage);
     assert_eq!(visual.recorded_until(), Some(ts(0)));
-    assert_eq!(visual.pressed_lanes(), 3);
+    // Failed-player display ownership is cleared; the canonical judge/capture hash above is unchanged.
+    assert_eq!(visual.pressed_lanes(), 0);
     for song in [0, SECOND, 9 * SECOND] {
         assert!(visual.advance_to(ts(song)).unwrap().is_empty());
         assert_eq!(visual.gauge(), &gauge);
         assert_eq!(*visual.mine_damage(), damage);
-        assert_eq!(visual.pressed_lanes(), 3);
+        assert_eq!(visual.pressed_lanes(), 0);
     }
     let (mut replay, _) = StepReplay::new(
         prepared(source),
@@ -405,7 +428,7 @@ fn sealed_failure_capture_reconstructs_exact_hash_score_gauge_and_held_state_wit
         assert_eq!(replay.gauge(), &gauge);
         assert_eq!(replay.score(), &score);
         assert_eq!(*replay.mine_damage(), damage);
-        assert_eq!(replay.pressed_lanes(), 3);
+        assert_eq!(replay.pressed_lanes(), 0);
     }
 }
 
@@ -510,6 +533,19 @@ fn last_roster_members_failure_seals_only_its_capture_and_cannot_regress_survivi
                     None
                 }
             );
+            if index + 1 == count {
+                assert_eq!(
+                    report.report.audio_commands,
+                    [AudioCommand::Stop {
+                        voice: VoiceId(count as u64),
+                        at: ts(OUTPUT + SECOND),
+                    }]
+                );
+            } else {
+                assert!(report.report.audio_commands.is_empty());
+            }
+            assert!(report.report.audio_failures.is_empty());
+            admitted.extend(report.report.audio_commands.iter().copied());
         }
         assert!(!game.failed());
         let dead_hash = game.judge(dead).unwrap().stable_hash().unwrap();
@@ -661,9 +697,32 @@ fn fatal_report_with_audio_or_capture_failure_preserves_each_observation_and_ins
         assert_eq!(report.hazard_events[0].value, 1295);
         assert_eq!(
             report.audio_commands.len(),
-            if capacity == 2 { 2 } else { 3 }
+            if capacity == 2 { 2 } else { 6 }
         );
-        assert_eq!(report.audio_failures.len(), usize::from(capacity == 2));
+        assert!(matches!(
+            report.audio_commands[0],
+            AudioCommand::Play {
+                sample: SampleId(1),
+                voice: VoiceId(117),
+                ..
+            }
+        ));
+        assert!(matches!(
+            report.audio_commands[1],
+            AudioCommand::Play {
+                sample: SampleId(1),
+                voice: VoiceId(118),
+                ..
+            }
+        ));
+        let stops = [117, 118, 119].map(|voice| AudioCommand::Stop {
+            voice: VoiceId(voice),
+            at: ts(OUTPUT),
+        });
+        assert_eq!(
+            report.audio_failures.len(),
+            if capacity == 2 { 4 } else { 0 }
+        );
         if capacity == 2 {
             assert_eq!(report.audio_failures[0].reason, QueuePushError::Full);
             assert!(matches!(
@@ -673,6 +732,29 @@ fn fatal_report_with_audio_or_capture_failure_preserves_each_observation_and_ins
                     ..
                 }
             ));
+            assert_eq!(
+                report.audio_failures[1..]
+                    .iter()
+                    .map(|error| error.command)
+                    .collect::<Vec<_>>(),
+                stops
+            );
+            assert!(
+                report
+                    .audio_failures
+                    .iter()
+                    .all(|error| error.reason == QueuePushError::Full)
+            );
+        } else {
+            assert!(matches!(
+                report.audio_commands[2],
+                AudioCommand::Play {
+                    sample: SampleId(2),
+                    voice: VoiceId(119),
+                    ..
+                }
+            ));
+            assert_eq!(&report.audio_commands[3..], &stops);
         }
         if max_records == 1 {
             assert!(matches!(

@@ -8,7 +8,8 @@ use beatkernel::{
     },
     judge::JudgeEngine,
     runtime::{
-        Runtime, RuntimeError, RuntimeProcessingClock, RuntimeReport, SoundBinding,
+        Runtime, RuntimeError, RuntimeProcessingClock, RuntimeReport, RuntimeSoundStopReport,
+        SoundBinding,
         input_sound::InputSoundTimeline,
         hazard_sound::{HazardSoundBinding, HazardSoundTimeline},
     },
@@ -530,6 +531,21 @@ impl RuntimeGroup {
             .find(|member| member.player == player)
             .and_then(|member| member.runtime.gameplay_fence())
     }
+    /// Attempts only this member's prepared voices through the real shared
+    /// producer, including after poison. Unknown members leave ownership intact.
+    pub fn fence_player_sounds(
+        &mut self,
+        player: PlayerId,
+        requested_at: Timestamp,
+    ) -> Result<Option<RuntimeSoundStopReport>, String> {
+        let member = self
+            .members
+            .iter_mut()
+            .find(|member| member.player == player)
+            .ok_or("unknown local player")?;
+        let guard = OwnerGuard::new(&mut member.runtime, &mut self.transport, &mut self.producer);
+        Ok(guard.runtime.fence_gameplay_sounds(requested_at))
+    }
     pub fn member_judge(&self, player: PlayerId) -> Option<&JudgeEngine> {
         self.members
             .iter()
@@ -679,6 +695,15 @@ impl SoloRuntime {
     /// Returns the solo member's latched gameplay frontier.
     pub fn gameplay_fence(&self) -> Option<Timestamp> {
         self.0.members[0].runtime.gameplay_fence()
+    }
+    /// Attempts the solo member's gameplay voice stops through its shared queue.
+    pub fn fence_gameplay_sounds(
+        &mut self,
+        requested_at: Timestamp,
+    ) -> Option<RuntimeSoundStopReport> {
+        self.0
+            .fence_player_sounds(PlayerId(1), requested_at)
+            .expect("solo runtime retains its prepared member")
     }
     pub fn judge(&self) -> &JudgeEngine {
         self.0.members[0].runtime.judge()

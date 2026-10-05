@@ -43,7 +43,9 @@ idempotence, explicit restoration, and independent local source/member behavior.
 
 Known ceiling: this component is explicit owner control. The automatic stepped
 and native default-gauge calls are described in [BMS gauge ownership](REQ__bms-gauge.md).
-Broader replay failure policy, completion outcomes and actual per-player
-audio-stop/output-drain integration still need implementation. It
+The separate [scheduled gameplay sound stop](REQ__gameplay-sound-stop.md) adds
+explicit per-runtime/shared-member audio control and the stepped failure hookup.
+Broader replay failure policy, native audio-stop wiring, completion outcomes and
+actual output-drain integration still need implementation. The fence
 does not itself make mine-containing files playable. Keep the high-level mine
 admission guard. Hardware/browser/performance acceptance requires later execution.
