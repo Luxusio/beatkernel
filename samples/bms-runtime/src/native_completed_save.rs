@@ -62,6 +62,22 @@ pub fn solo_archive(
     capture: Option<&LiveReplayCapture>,
     profile: &GaugeProfile,
 ) -> NativeGameplayResult<Option<ResultArchive>> {
+    solo_archive_impl(outcome, capture, profile, None)
+}
+pub fn solo_archive_with_score(
+    outcome: &NativeGameplayResult<Option<CompletedPlayResult>>,
+    capture: Option<&LiveReplayCapture>,
+    profile: &GaugeProfile,
+    score: &crate::competition::ScoreSummary,
+) -> NativeGameplayResult<Option<ResultArchive>> {
+    solo_archive_impl(outcome, capture, profile, Some(score))
+}
+fn solo_archive_impl(
+    outcome: &NativeGameplayResult<Option<CompletedPlayResult>>,
+    capture: Option<&LiveReplayCapture>,
+    profile: &GaugeProfile,
+    score: Option<&crate::competition::ScoreSummary>,
+) -> NativeGameplayResult<Option<ResultArchive>> {
     let Some(capture) = capture else {
         return Ok(None);
     };
@@ -74,10 +90,14 @@ pub fn solo_archive(
     let Some(result) = result else {
         return Ok(None);
     };
-    Ok(Some(ResultArchive::from_completed(
-        &[(PlayerId(1), *result)],
-        &[identity(PlayerId(1), capture, profile)?],
-    )?))
+    let rows = [(PlayerId(1), *result)];
+    let identities = [identity(PlayerId(1), capture, profile)?];
+    Ok(Some(match score {
+        None => ResultArchive::from_completed(&rows, &identities)?,
+        Some(score) => {
+            ResultArchive::from_completed_with_scores(&rows, &identities, &[(PlayerId(1), score)])?
+        }
+    }))
 }
 /// Borrowed business data; no concrete competition or device owner crosses this port.
 pub struct ArchiveMember<'a> {
@@ -89,6 +109,20 @@ pub struct ArchiveMember<'a> {
 pub fn cohort_archive(
     outcome: &NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>>,
     states: &[ArchiveMember<'_>],
+) -> NativeGameplayResult<Option<ResultArchive>> {
+    cohort_archive_impl(outcome, states, None)
+}
+pub fn cohort_archive_with_scores(
+    outcome: &NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>>,
+    states: &[ArchiveMember<'_>],
+    scores: &[(PlayerId, &crate::competition::ScoreSummary)],
+) -> NativeGameplayResult<Option<ResultArchive>> {
+    cohort_archive_impl(outcome, states, Some(scores))
+}
+fn cohort_archive_impl(
+    outcome: &NativeGameplayResult<Option<Vec<(PlayerId, CompletedPlayResult)>>>,
+    states: &[ArchiveMember<'_>],
+    scores: Option<&[(PlayerId, &crate::competition::ScoreSummary)]>,
 ) -> NativeGameplayResult<Option<ResultArchive>> {
     if states.iter().all(|state| state.capture.is_none()) {
         return Ok(None);
@@ -116,7 +150,10 @@ pub fn cohort_archive(
             .ok_or("completed archive member missing capture")?;
         identities.push(identity(state.player, capture, state.profile)?);
     }
-    Ok(Some(ResultArchive::from_completed(results, &identities)?))
+    Ok(Some(match scores {
+        None => ResultArchive::from_completed(results, &identities)?,
+        Some(scores) => ResultArchive::from_completed_with_scores(results, &identities, scores)?,
+    }))
 }
 /// All replay effects precede the archive effect, even when an earlier stage failed.
 /// Original boxed owner errors are returned unchanged after both save attempts.
@@ -139,3 +176,7 @@ pub fn finalize_completed_save<T>(
     archived?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "native_archived_score_fixtures.rs"]
+mod native_archived_score_fixtures;

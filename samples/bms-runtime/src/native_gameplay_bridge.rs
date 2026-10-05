@@ -325,6 +325,22 @@ pub fn run_gameplay_with_result<D: NativeGameplayDevice>(
     )
 }
 
+pub fn run_gameplay_with_result_and_score<D: NativeGameplayDevice>(
+    device: &mut D,
+    session: NativeGameplaySession<'_>,
+    config: NativeGameplayConfig,
+    score: &mut crate::competition::ScoreSummary,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    crate::native_gameplay::run_gameplay_with_result_and_score_and_ports(
+        device,
+        session,
+        config,
+        &mut SystemControl,
+        &mut PlayerGameplayHost,
+        score,
+    )
+}
+
 pub fn run_cohort_with_results<D: NativeGameplayDevice>(
     device: &mut D,
     session: NativeCohortSession<'_>,

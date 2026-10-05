@@ -87,3 +87,55 @@ impl NativeGameplayHost for NoopGameplayHost {
     }
     fn diagnostic(&mut self, _: NativeGameplayDiagnostic<'_>) {}
 }
+
+/// Static observer of genuine solo reports, retaining original publication effects.
+pub struct NativeScoreHost<'a, H: NativeGameplayHost> {
+    host: &'a mut H,
+    score: &'a mut crate::competition::ScoreSummary,
+}
+impl<'a, H: NativeGameplayHost> NativeScoreHost<'a, H> {
+    pub fn new(host: &'a mut H, score: &'a mut crate::competition::ScoreSummary) -> Self {
+        Self { host, score }
+    }
+}
+impl<H: NativeGameplayHost> NativeGameplayHost for NativeScoreHost<'_, H> {
+    fn cancelled(&self) -> bool {
+        self.host.cancelled()
+    }
+    fn pause_requested(&self) -> bool {
+        self.host.pause_requested()
+    }
+    fn retry_pause_publication(&mut self) {
+        self.host.retry_pause_publication();
+    }
+    fn publish_pause(&mut self, pause: PauseState) {
+        self.host.publish_pause(pause);
+    }
+    fn publish_section_end(&mut self, end: Timestamp) {
+        self.host.publish_section_end(end);
+    }
+    fn publish_report(&mut self, report: &RuntimeReport) -> NativeGameplayResult<()> {
+        let scored = self.score.observe(&report.judge_events);
+        let published = self.host.publish_report(report);
+        scored?;
+        published
+    }
+    fn publish_local_reports(&mut self, reports: &[PlayerReport]) -> NativeGameplayResult<()> {
+        self.host.publish_local_reports(reports)
+    }
+    fn diagnostic(&mut self, diagnostic: NativeGameplayDiagnostic<'_>) {
+        self.host.diagnostic(diagnostic);
+    }
+    fn publish_completed_solo(&mut self, result: CompletedPlayResult) -> NativeGameplayResult<()> {
+        self.host.publish_completed_solo(result)
+    }
+    fn publish_completed_local(
+        &mut self,
+        results: &[(PlayerId, CompletedPlayResult)],
+    ) -> NativeGameplayResult<()> {
+        self.host.publish_completed_local(results)
+    }
+}
+#[cfg(test)]
+#[path = "native_score_host_fixtures.rs"]
+mod native_score_host_fixtures;

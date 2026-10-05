@@ -370,15 +370,18 @@ pub fn finish_cohort_with_results(
             return Err("completed archive roster exceeds bound".into());
         }
         let mut members = Vec::new();
+        let mut scores = Vec::new();
         members.try_reserve_exact(states.len())?;
+        scores.try_reserve_exact(states.len())?;
         for state in &states {
+            scores.push((state.player, &state.score));
             members.push(crate::native_completed_save::ArchiveMember {
                 player: state.player,
                 capture: state.capture.as_ref(),
                 profile: state.gauge.profile(),
             });
         }
-        crate::native_completed_save::cohort_archive(&outcome, &members)
+        crate::native_completed_save::cohort_archive_with_scores(&outcome, &members, &scores)
     })();
     if outcome.is_err() {
         failures.insert(

@@ -46,6 +46,62 @@ pub fn finish_solo_with_result(
         Option<&Path>,
     ) -> NativeGameplayResult<()>,
 ) -> NativeGameplayResult<()> {
+    finish_solo_with_result_impl(
+        outcome,
+        output_stop,
+        input_close,
+        competition,
+        capture,
+        profile,
+        None,
+        path,
+        save,
+        save_archive,
+    )
+}
+pub fn finish_solo_with_result_and_score(
+    outcome: NativeGameplayResult<Option<crate::play_result::CompletedPlayResult>>,
+    output_stop: NativeGameplayResult<()>,
+    input_close: NativeGameplayResult<()>,
+    competition: Option<&mut LiveCompetition>,
+    capture: Option<LiveReplayCapture>,
+    profile: &crate::gauge::GaugeProfile,
+    score: &crate::competition::ScoreSummary,
+    path: Option<&Path>,
+    save: impl FnOnce(Option<LiveReplayCapture>, Option<&Path>, bool) -> NativeGameplayResult<()>,
+    save_archive: impl FnOnce(
+        &crate::result_archive::ResultArchive,
+        Option<&Path>,
+    ) -> NativeGameplayResult<()>,
+) -> NativeGameplayResult<()> {
+    finish_solo_with_result_impl(
+        outcome,
+        output_stop,
+        input_close,
+        competition,
+        capture,
+        profile,
+        Some(score),
+        path,
+        save,
+        save_archive,
+    )
+}
+fn finish_solo_with_result_impl(
+    outcome: NativeGameplayResult<Option<crate::play_result::CompletedPlayResult>>,
+    output_stop: NativeGameplayResult<()>,
+    input_close: NativeGameplayResult<()>,
+    competition: Option<&mut LiveCompetition>,
+    capture: Option<LiveReplayCapture>,
+    profile: &crate::gauge::GaugeProfile,
+    score: Option<&crate::competition::ScoreSummary>,
+    path: Option<&Path>,
+    save: impl FnOnce(Option<LiveReplayCapture>, Option<&Path>, bool) -> NativeGameplayResult<()>,
+    save_archive: impl FnOnce(
+        &crate::result_archive::ResultArchive,
+        Option<&Path>,
+    ) -> NativeGameplayResult<()>,
+) -> NativeGameplayResult<()> {
     let has_completion = match &outcome {
         Ok(result) => result.is_some(),
         Err(error) => error
@@ -57,7 +113,15 @@ pub fn finish_solo_with_result(
     } else if has_completion && capture.is_none() {
         Err("completed recording missing capture".into())
     } else {
-        crate::native_completed_save::solo_archive(&outcome, capture.as_ref(), profile)
+        match score {
+            Some(score) => crate::native_completed_save::solo_archive_with_score(
+                &outcome,
+                capture.as_ref(),
+                profile,
+                score,
+            ),
+            None => crate::native_completed_save::solo_archive(&outcome, capture.as_ref(), profile),
+        }
     };
     let failed_session = outcome.is_err() || output_stop.is_err() || input_close.is_err();
     if let Some(competition) = competition {

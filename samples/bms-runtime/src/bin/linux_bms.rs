@@ -405,7 +405,7 @@ impl Drop for DeliverySession {
 }
 
 #[cfg(target_os = "linux")]
-use beatkernel_bms_runtime::native_finish::{finish_solo_with_result, save_capture};
+use beatkernel_bms_runtime::native_finish::{finish_solo_with_result_and_score, save_capture};
 
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
@@ -588,7 +588,7 @@ mod native {
     }
     use beatkernel_bms_runtime::native_gameplay::{
         InputBatch, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
-        NativeGameplaySession, retain_input, run_gameplay_with_result,
+        NativeGameplaySession, retain_input, run_gameplay_with_result_and_score,
     };
     struct GameplayDevice<'a> {
         stream: &'a mut AlsaStream,
@@ -864,6 +864,7 @@ mod native {
         let mut capture = None;
         let mut startup_inputs = VecDeque::with_capacity(MAX_START_INPUT_EVENTS);
         let mut gauge = beatkernel_bms_runtime::gauge::BmsGauge::default();
+        let mut score = beatkernel_bms_runtime::competition::ScoreSummary::default();
         let outcome =
             (|| -> Result<Option<beatkernel_bms_runtime::play_result::CompletedPlayResult>> {
                 capture = prepare_section_capture_for_source(
@@ -981,7 +982,7 @@ mod native {
                         clock: &clock,
                         retained: &mut startup_inputs,
                     };
-                    run_gameplay_with_result(
+                    run_gameplay_with_result_and_score(
                         &mut device,
                         NativeGameplaySession {
                             runtime: &mut runtime,
@@ -1008,6 +1009,7 @@ mod native {
                             pause_supported,
                             logical_schedule: true,
                         },
+                        &mut score,
                     )
                 };
                 println!(
@@ -1038,13 +1040,14 @@ mod native {
         }
         // Final input counters were read above; close evdev before file I/O.
         drop(input);
-        finish_solo_with_result(
+        finish_solo_with_result_and_score(
             outcome,
             stop.map_err(Into::into),
             Ok(()),
             competition.as_mut(),
             capture,
             gauge.profile(),
+            &score,
             options.record_replay.as_deref(),
             save_capture,
             |archive, path| {

@@ -34,7 +34,7 @@ use std::{collections::VecDeque, error::Error, fmt, time::Duration as WallDurati
 
 pub use crate::native_gameplay_bridge::{
     NativeGameplayDevice, NativeGameplaySession, run_gameplay, run_gameplay_with_control,
-    run_gameplay_with_result,
+    run_gameplay_with_result, run_gameplay_with_result_and_score,
 };
 
 pub type NativeGameplayResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -379,6 +379,26 @@ fn complete_gameplay<S: SoloCompetitionPort, P, H: NativeGameplayHost>(
 
 /// Runs the actual pump with explicit device, clock/wait and host effects.
 /// Neither the control deadline nor cancellation is successful song completion.
+pub fn run_gameplay_with_result_and_score_and_ports<
+    D: crate::gameplay_presentation::GameplayDevice,
+    C: NativePumpControl,
+    H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+>(
+    device: &mut D,
+    session: GameplaySession<'_, S, D::Presentation>,
+    config: NativeGameplayConfig,
+    control: &mut C,
+    host_port: &mut H,
+    score: &mut crate::competition::ScoreSummary,
+) -> NativeGameplayResult<Option<CompletedPlayResult>> {
+    if score != &crate::competition::ScoreSummary::default() {
+        return Err("native scored gameplay requires a default initial score".into());
+    }
+    let mut observer = crate::native_gameplay_host::NativeScoreHost::new(host_port, score);
+    run_gameplay_with_result_and_ports(device, session, config, control, &mut observer)
+}
+
 pub fn run_gameplay_with_result_and_ports<
     D: crate::gameplay_presentation::GameplayDevice,
     C: NativePumpControl,
@@ -1221,3 +1241,7 @@ mod fixtures {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "native_scored_play_fixtures.rs"]
+mod native_scored_play_fixtures;
