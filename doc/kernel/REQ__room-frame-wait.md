@@ -35,6 +35,36 @@ timer; later frames have independent bounds; leave/close/abort/drain clears pend
 waiting. Actual capture times, write IDs and complete-write receipts remain intact.
 The Window gains no domain or rendering work.
 
+## Leave cancellation
+
+Only successful actual Leave admission cancels incomplete-frame waiting and
+inbound servicing. Refused Leave leaves the original deadline intact. Already
+failed/stopped owners preserve their first refusal and cannot use Leave to
+recover. Cancellation cannot reset or reconfigure a new frame deadline.
+
+After admitted Leave, the split-operation driver refuses additional prefixes
+before decoding without poisoning a healthy outgoing Leave. Frame wait queries
+return Idle without inspecting their timestamps; configuration refuses. Actual
+partial decoder history stays inspectable until owner disposal. Native IO
+services only the original outstanding outgoing frame and actual Leave; it
+performs no inbound read or incomplete-frame checks during cancellation. It
+retains existing output clocks, write offsets, error precedence and full-write
+receipts. Neither admission nor cancellation fabricates leave_written.
+
+The Worker ceases inbound processing after admitted Leave. A read already in
+flight may settle, but its data is discarded without a new clock observation,
+protocol dispatch or user callback. The write loop remains responsible for
+the actual Leave receipt and existing bounded cleanup. Drain is not Leave;
+coordinated drain still requires all genuine incoming receipts and deadlines.
+
+The native actor cancels setup and coordinated-drain waiting only after actual
+Leave admission. It grants one fixed outgoing Leave bound using drain_timeout,
+starting at the original command observation. Checked deadline arithmetic is
+validated before admission. Rejected Leave does not install or renew a bound.
+The actor checks this bound at existing pre/post IO observations with IO errors
+retaining precedence. A late full write stays history, not timely completion;
+WouldBlock cannot wait indefinitely. Cancellation adds no clock samples.
+
 ## Known ceiling
 
 Existing transport read/connect timeouts remain IO bounds. Frame policy measures
