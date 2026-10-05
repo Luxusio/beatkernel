@@ -1018,7 +1018,15 @@ impl BrowserLocalGame {
                 }
                 member.recent.push(*event);
             }
-            if report.song_end_reached {
+            if report.song_end_reached
+                || self
+                    .game
+                    .gauge(*player)
+                    .expect("actual local reports reference prepared members")
+                    .snapshot()
+                    .failure
+                    .is_some()
+            {
                 member.pressed_owners.clear();
                 member.pressed = 0;
             } else if let Err(reason) = member.pressed_owners.apply(&report.bound_inputs) {
@@ -1038,3 +1046,7 @@ impl BrowserLocalGame {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "gauge_pressed_browser_local_fixtures.rs"]
+mod gauge_pressed_fixtures;

@@ -102,7 +102,7 @@ pub struct LocalPlayerSnapshot {
     pub gauge: BmsGauge,
     pub last_judge: Option<JudgeEvent>,
     pub recent_results: Vec<JudgeEvent>,
-    /// Actual admitted button ownership, masked during native pause transitions.
+    /// Actual admitted ownership, masked during pause and cleared after gauge failure.
     pub pressed_lanes: u32,
     /// Authoritative full-prefix state for the exact prepared chart, if available.
     pub note_progress: Option<NoteProgress>,
@@ -903,6 +903,7 @@ pub fn publish_replay_prefix_with_mines(
 
 /// Publishes the authoritative replay gauge without observing its results again.
 /// The default profile is required until captured policy identity is available.
+/// A failed gauge clears display ownership regardless of the supplied valid mask.
 pub fn publish_replay_prefix_with_gauge(
     song: Timestamp,
     events: &[JudgeEvent],
@@ -1029,12 +1030,23 @@ fn publish_solo(
             summary
         };
         let prepared = pressed.keys.prepare(inputs)?;
-        if let Some(mask) = prepared {
-            pressed.keys.commit(mask);
-            pressed.mask = mask;
-        }
-        if let Some(mask) = replay_mask {
-            pressed.mask = mask;
+        if gauge
+            .as_ref()
+            .unwrap_or(&member.gauge)
+            .snapshot()
+            .failure
+            .is_some()
+        {
+            pressed.keys.clear();
+            pressed.mask = 0;
+        } else {
+            if let Some(mask) = prepared {
+                pressed.keys.commit(mask);
+                pressed.mask = mask;
+            }
+            if let Some(mask) = replay_mask {
+                pressed.mask = mask;
+            }
         }
         if let Some(score) = score {
             member.score = score;
@@ -1135,8 +1147,16 @@ pub fn publish_local_reports(reports: &[PlayerReport]) -> Result<(), Box<dyn std
             }
         }
         for (index, mask) in changed_pressed {
-            current.pressed[index].keys.commit(mask);
-            current.pressed[index].mask = mask;
+            if changed_gauges[index]
+                .as_ref()
+                .unwrap_or(&current.snapshot.players[index].gauge)
+                .snapshot()
+                .failure
+                .is_none()
+            {
+                current.pressed[index].keys.commit(mask);
+                current.pressed[index].mask = mask;
+            }
         }
         for (index, score) in changed_scores {
             current.snapshot.players[index].score = score;
@@ -1154,6 +1174,10 @@ pub fn publish_local_reports(reports: &[PlayerReport]) -> Result<(), Box<dyn std
             }
             if let Some(gauge) = changed_gauges[index].take() {
                 member.gauge = gauge;
+            }
+            if member.gauge.snapshot().failure.is_some() {
+                current.pressed[index].keys.clear();
+                current.pressed[index].mask = 0;
             }
             member.update_report(&report.report);
         }
@@ -1262,6 +1286,10 @@ impl Session {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "gauge_pressed_native_fixtures.rs"]
+mod gauge_pressed_fixtures;
 
 #[cfg(test)]
 #[path = "room_presentation_fixtures.rs"]

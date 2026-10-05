@@ -137,6 +137,9 @@ impl ReplayVisual {
                 .gauge
                 .observe(&events, self.engine.hazard_events())
                 .err();
+            if self.gauge.snapshot().failure.is_some() {
+                self.pressed.clear();
+            }
             if let Some(error) = mine_error {
                 self.failed = true;
                 return Err(error.into());
@@ -145,8 +148,10 @@ impl ReplayVisual {
                 self.failed = true;
                 return Err(error.into());
             }
-            if let ReplayOperation::Input(input) = &record.operation {
-                self.pressed.apply(std::slice::from_ref(input))?;
+            if self.gauge.snapshot().failure.is_none() {
+                if let ReplayOperation::Input(input) = &record.operation {
+                    self.pressed.apply(std::slice::from_ref(input))?;
+                }
             }
             results.extend(events);
             self.cursor += 1;
@@ -158,6 +163,10 @@ impl ReplayVisual {
         self.cursor == self.records.len()
     }
 }
+
+#[cfg(test)]
+#[path = "gauge_pressed_replay_fixtures.rs"]
+mod gauge_pressed_fixtures;
 
 #[cfg(test)]
 mod fixtures {

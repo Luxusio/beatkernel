@@ -171,6 +171,26 @@ owner fixtures use actual common report/pump paths and fake acquisition/output
 evidence, covering headless and attached cases, prefix/error preservation,
 replay reconstruction, and surviving independent local members.
 
+## Failed-player pressed feedback
+
+After a valid numeric gauge failure, clear only that player's retained display
+button/contact owners and pressed lane mask. Native publication and browser
+Worker solo/local observation perform this before publishing or drawing the
+failure report, including simultaneous technical failures. Subsequent reports
+must not reacquire display ownership for a failed gauge. Recoverable zero and
+clear readiness alone do not clear a player's keys. Healthy cohort members keep
+their own ownership, including exact full-width device/contact identities.
+
+Replay presentation clears its display ownership after the actual recorded
+operation first produces gauge failure. Later legacy recorded operations still
+reconstruct their original judge state but cannot reacquire failed-player
+display ownership. Authoritative replay publication also clears the retained
+mask regardless of a supplied stale absolute pressed mask. Equal display targets
+remain idempotent. Do not synthesize release events, mutate judge held state,
+rewrite captures or clear shared audio as part of this presentation policy.
+Whole-batch publication validation still precedes mutation; invalid reports leave
+all members unchanged. Add no Window rendering or gameplay work.
+
 Completion clear/fail decisions and
 actual per-player audio stopping/output cleanup still need integration.
 The [portable gameplay fence](REQ__gameplay-fence.md) is an explicit control

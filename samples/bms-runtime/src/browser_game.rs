@@ -905,7 +905,7 @@ impl BrowserGame {
             }
             self.recent.push(*event);
         }
-        if report.song_end_reached {
+        if report.song_end_reached || self.game.gauge().snapshot().failure.is_some() {
             self.pressed_owners.clear();
             self.pressed = 0;
             return Ok(());
@@ -918,6 +918,10 @@ impl BrowserGame {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "gauge_pressed_browser_fixtures.rs"]
+mod gauge_pressed_fixtures;
 
 /// One actual saved-prefix DTO for the solo and local browser owners.
 pub(crate) fn encode_saved_opponents(opponents: &SavedOpponents) -> Result<JsValue, JsValue> {
