@@ -6,7 +6,9 @@ vector. Unchanged recorded cursors retain their existing score maps while exact
 requested song times still publish on successful whole-owner transactions.
 Empty local reports retain local score storage and continue advancing ghosts
 through actual recorded operations. Changed prefixes and nonempty local reports
-retain their original score staging behavior.
+retained their original score staging behavior at this increment.
+[The following scalar transaction increment](CHANGE__score-transactions.md)
+retains existing grade maps for those forward updates too.
 
 All candidates are prepared before any local/opponent logical state is committed.
 A later opponent failure drops staged candidates and leaves the previous scores,
@@ -18,7 +20,9 @@ semantics, including no synthesized misses past a recording frontier.
 ## Known ceiling
 
 This removes recurring preparation-vector allocation and unchanged-prefix clones.
-New grades, changed ghost prefixes and nonempty local staging may still allocate.
+At this increment, changed ghost prefixes and nonempty local staging could still
+clone grade maps; the subsequent scalar transaction increment removes these
+forward clones. New grade insertion may still allocate.
 Backward prefix rebuild and replay loading are cold reconstruction work. No
 throughput, global allocation-freedom or world-leading performance is established.
 Saved record UI coverage, broader BMS features and platform acceptance remain work.

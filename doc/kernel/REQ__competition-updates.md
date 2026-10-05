@@ -23,15 +23,17 @@ Adding a replay after local progress starts retains its correct initial prefix.
 
 With loaded opponents but an empty local report, retain the local score instead
 of cloning it; ghosts still advance through actual recorded operations. Nonempty
-local reports and changed ghost prefixes retain their existing score clones for
-cross-owner atomicity. Add no clocks, locks, dynamic dispatch, dependencies or
-new crate. Public APIs remain unchanged and all adapters use the common owner.
+local reports and changed forward ghost prefixes use private scalar plans under
+[the score transaction policy](REQ__score-transactions.md) for cross-owner
+atomicity while retaining existing grade maps. Add no clocks, locks, dynamic
+dispatch, dependencies or new crate. Public APIs remain unchanged and all
+adapters use the common owner.
 
 ## Known ceiling and evidence
 
 Reusable slot storage removes recurring preparation-vector allocation. Unchanged
-prefixes retain grade storage; new grades, nonempty local staging and changed
-ghost prefixes can still allocate. This is not an allocation-free or measured
+and advancing forward prefixes retain grade storage; new grades and cold
+reconstruction can still allocate. This is not an allocation-free or measured
 performance claim. Independent pure owner fixtures shall use genuine captured
 replays, compare old transactional results, exercise failure/retry/rebuild/reset,
 and verify retained scratch and unchanged-grade storage. Address/capacity checks

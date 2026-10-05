@@ -30,8 +30,9 @@ same exact song time even for an empty report, and rejection retains the prior
 score/time. When saved opponents exist, keep the original cross-opponent atomic
 transaction and prefix behavior. Retained scratch and unchanged-prefix storage
 are governed by [the saved-opponent update policy](REQ__competition-updates.md);
-nonempty local staging and changed-prefix score clones remain separate work.
-Rebuild and loading retain their existing preparation behavior.
+nonempty local staging and changed forward prefixes use private scalar plans
+under [the score transaction policy](REQ__score-transactions.md).
+Rebuild and loading retain their ordered prefix semantics and cold allocation.
 
 ## Evidence and known ceiling
 

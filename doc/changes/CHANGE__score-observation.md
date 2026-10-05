@@ -28,8 +28,10 @@ profile or world-leading performance claim is established by source changes.
 At this increment, saved-opponent Competition updates and GhostOpponent prefix
 transactions still cloned summaries and used a temporary update vector.
 [The following retained-update increment](CHANGE__competition-updates.md)
-addresses that vector and unchanged prefixes. Nonempty local staging and changed
-prefix clones remain; rebuild/loading behavior is unchanged.
+addresses that vector and unchanged prefixes.
+[The subsequent scalar transaction increment](CHANGE__score-transactions.md)
+removes nonempty local staging and changed forward-prefix map clones.
+Rebuild/loading retain their ordered prefix meaning and cold allocations.
 
 Nine independent reference, boundary, atomicity and storage-retention fixture
 groups are authored for later execution. Deterministic ordered batches and split
