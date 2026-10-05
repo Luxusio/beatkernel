@@ -908,3 +908,5 @@ pub mod room_network_model;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_room_runtime_bridge;
 pub mod room_runtime_host;
+
+pub mod room_competition;

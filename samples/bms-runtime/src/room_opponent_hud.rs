@@ -116,9 +116,8 @@ impl RoomOpponentHud {
         self.update_prefix(participant, prefix, false)
     }
 
-    /// The native owner calls this only after joining and reading its retained
+    /// The shared controller calls this after joining and reading its retained
     /// accepted prefixes. Disconnection still fences ordinary live updates.
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn retain_after_join(
         &mut self,
         participant: ParticipantId,
