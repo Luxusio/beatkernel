@@ -194,6 +194,7 @@ async function workerHarness(options = {}) {
     free() { this.live(); assert.equal(++this.frees, 1); }
   }
   class BrowserGame {
+    completed_results() { return null; }
     static new_physical_contact(prepared, ...args) {
       contactConstructions.push({ prepared, args });
       if (options.contactConstructError) { prepared.moved = true; throw new Error(options.contactConstructError); }
@@ -793,6 +794,7 @@ async function workerHarness(options = {}) {
   const network = new SyntheticModule(["BrowserMultiplayerOwner"], function () {
     this.setExport("BrowserMultiplayerOwner", BrowserMultiplayerOwner);
   }, { context });
+  const completedHelper = new SourceTextModule(await readFile(new URL("./completed-results-model.mjs", import.meta.url), "utf8"), { context });
   const helper = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
   const playHelper = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const settingsHelper = new SourceTextModule(await readFile(new URL("./settings-profile.mjs", import.meta.url), "utf8"), { context });
@@ -812,6 +814,7 @@ async function workerHarness(options = {}) {
   await worker.link(specifier => {
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./host_model.mjs") return helper;
+    if (specifier === "./completed-results-model.mjs") return completedHelper;
     if (specifier === "./play-model.mjs") return playHelper;
     if (specifier === "./settings-profile.mjs") return settingsHelper;
     if (specifier === "./multiplayer-owner.mjs") return network;

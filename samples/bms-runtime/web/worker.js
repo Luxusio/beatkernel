@@ -1,3 +1,4 @@
+import { validateCompletedResults, resultRequest } from "./completed-results-model.mjs";
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
 import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
 import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, renderedCursor } from "./play-model.mjs";
@@ -30,6 +31,7 @@ let extent = [0, 0];
 let play = null;
 let roomFinalization = null;
 let roomResults = null;
+let completedResults = null;
 let roomResultsEpoch = {};
 let lastPlayId = 0;
 let settingsOperation = null;
@@ -70,7 +72,51 @@ async function settingsProfile(request) {
     if (settingsOperation === operation) settingsOperation = null;
   }
 }
+function completedResultsMetadata(results) {
+  if (!results) return null;
+  return validateCompletedResults(results);
+}
+function discardCompletedResults() {
+  const previous = completedResults;
+  completedResults = null;
+  if (previous?.binding) { try { previous.binding.free(); } catch {} previous.binding = null; }
+}
+function captureCompletedResults(state) {
+  if (state.mode !== "live" || !state.game || !state.completed || state.completedResults) return;
+  const binding = state.game.completed_results();
+  if (binding == null) return;
+  try {
+    const metadata = validateCompletedResults({ proof: true, players: Array.from(binding.players),
+      page: binding.page, pages: binding.pages, comparisons: binding.comparisons,
+      hasComparisons: binding.has_comparisons, failed: binding.failed,
+      detailPages: binding.detail_pages, comparisonPages: binding.comparison_pages });
+    state.completedResults = { ...metadata, id: state.id, lastRpc: state.lastRpc, ready: false, shown: false,
+      epoch: state.resultsEpoch, binding, displayError: binding.failed ? message(binding.error ?? "Completed Results projection unavailable.") : null };
+  } catch (error) { try { binding.free(); } catch {} throw error; }
+}
+function retainCompletedResults(state, error = null) {
+  const results = state.completedResults;
+  if (!results) return;
+  if (failed || results.epoch !== roomResultsEpoch || play !== null) {
+    try { results.binding?.free(); } catch {} results.binding = null; return;
+  }
+  results.ready = true;
+  results.lastRpc = state.lastRpc;
+  results.technicalError = error === null ? null : message(error);
+  completedResults = results;
+}
+function completedResultsFailure(results, error) {
+  if (completedResults !== results) return;
+  // A rendering failure does not erase the Rust-owned historical completion table.
+  results.failed = true;
+  results.page = results.pages = results.detailPages = results.comparisonPages = 0;
+  results.comparisons = results.hasComparisons = false;
+  stopRedraw();
+  report("play-completed-results", { playId: results.id, completedResults: completedResultsMetadata(results), error: message(error) });
+}
+
 function discardRoomResults() {
+  discardCompletedResults();
   roomResultsEpoch = {};
   const previous = roomResults;
   roomResults = null;
@@ -111,16 +157,21 @@ function fatal(error) {
 }
 
 function scheduleDraw(reset = true) {
-  if (failed || !view || (!selectedId && !play?.game && !roomResults?.binding) || extent.includes(0)) return;
+  if (failed || !view || (!selectedId && !play?.game && !roomResults?.binding && !completedResults?.shown) || extent.includes(0)) return;
   if (reset) retries = 0;
   if (redraw !== null) return;
   const draw = () => {
     redraw = null;
     const results = !play?.game ? roomResults : null;
+    const completed = !play?.game && completedResults?.shown ? completedResults : null;
     try {
       if (play?.game && play.mode === "replay") view.draw_replay(play.game);
       else if (play?.game && play.localPlan) view.draw_local_game(play.game, play.localPage);
       else if (play?.game) view.draw_game(play.game);
+      else if (completed?.binding && !completed.failed) {
+        if (results?.binding && !results.failed) view.draw_completed_room_results(completed.binding, results.binding);
+        else view.draw_completed_results(completed.binding);
+      }
       else if (results?.binding) view.draw_room_results(results.binding);
       else if (results) return;
       else view.draw();
@@ -128,7 +179,7 @@ function scheduleDraw(reset = true) {
         if (++retries <= 3) scheduleDraw(false);
         else report("render-wait", { selectedId, ...(play ? { playId: play.id } : {}) });
       } else report("drawn", { selectedId, ...(play ? { playId: play.id } : {}) });
-    } catch (error) { if (results) roomResultsFailure(results, error); else fatal(error); }
+    } catch (error) { if (completed) completedResultsFailure(completed, error); else if (results) roomResultsFailure(results, error); else fatal(error); }
   };
   // Only schedules presentation. Its timestamp is never a song/audio clock.
   if (typeof self.requestAnimationFrame === "function") {
@@ -1177,13 +1228,15 @@ function disposeGame(state) {
   state.pointerSources = null;
   state.sourceOrder.clear();
   client?.close();
+  let captureError = null;
+  try { captureCompletedResults(state); } catch (error) { captureError = error; }
   const game = state.game;
   state.game = null;
-  const result = { cleanupError: null, replay: null, replayError: null,
+  const result = { cleanupError: captureError, replay: null, replayError: null,
     ...(state.localPlan ? { replays: state.localPlan.members.map(({ player }) => ({ player, replay: null, replayError: null, replayComplete: false })) } : {}) };
   if (!game) return result;
   let stopped = false;
-  try { game.stop(); stopped = true; } catch (cause) { result.cleanupError = cause; }
+  try { game.stop(); stopped = true; } catch (cause) { result.cleanupError ??= cause; }
   if (state.localPlan && state.recordReplay && stopped) {
     let total = 0;
     const buffers = new Set();
@@ -1239,13 +1292,17 @@ function failPlay(state, error, request = null) {
   if (state.network) state.network.rpcId = null;
   if (state.room) state.room.rpcId = null;
   for (const rpcId of pending) if (identity(rpcId)) report("play-reply", { playId: state.id, rpcId, error: text });
-  const finished = roomError => report("play-error", { playId: state.id,
+  const finished = roomError => {
+    retainCompletedResults(state, cleanupError ?? roomError ?? error);
+    report("play-error", { playId: state.id,
+    completedResults: completedResultsMetadata(state.completedResults), completedResultsError: state.completedResults?.displayError ?? null,
     message: roomError ? message(`${text}; room cleanup: ${message(roomError)}`) : text,
     released: cleanupError === null && roomError === null,
     replay, replayComplete: false, replayError, ...score, ...(replays ? { replays } : {}),
     ...(state.network ? { multiplayer: multiplayerOutcome(state.network) } : {}),
     ...(state.room ? { room: roomOutcome(state.room), roomResults: roomResultsMetadata(state.roomResults) } : {}),
     ...(savedOpponents ? { savedOpponents } : {}) }, replayTransfers(replay, replays));
+  };
   if (roomClosing) void roomClosing.then(finished).catch(fatal);
   else finished(null);
   scheduleDraw();
@@ -1279,8 +1336,9 @@ function stopPlay(state, request) {
   }
   const stopped = (multiplayer, roomError = null) => {
     const cleanupFailure = cleanupError ?? roomError;
+    retainCompletedResults(state, cleanupFailure);
     if (replays) for (const row of replays) row.replayComplete = !cleanupFailure && completed && row.replay !== null && row.replayError === null;
-    const result = { replay, replayError, ...score, ...(multiplayer ? { multiplayer } : {}),
+    const result = { replay, replayError, ...score, completedResults: completedResultsMetadata(state.completedResults), completedResultsError: state.completedResults?.displayError ?? null, ...(multiplayer ? { multiplayer } : {}),
       ...(state.room ? { room: roomOutcome(state.room), roomResults: roomResultsMetadata(state.roomResults) } : {}),
       ...(savedOpponents ? { savedOpponents } : {}), ...(replays ? { replays } : {}) };
     if (cleanupFailure) report("play-error", { playId: state.id, message: message(cleanupFailure), released: false,
@@ -1890,6 +1948,8 @@ function observeOutput(state, observation, output) {
   if (typeof completed !== "boolean" || (completed && (state.batch !== null || state.commandPumping))) {
     throw new Error("Invalid completion with outstanding gameplay commands.");
   }
+  state.completed = completed;
+  if (completed && state.mode === "live") captureCompletedResults(state);
   if (state.mode === "live" && observation.presentedNs !== null) {
     state.game.observe_presentation(observation.presentedNs, observation.presentedHostNs);
   }
@@ -2203,7 +2263,7 @@ function handlePlay(request) {
     discardRoomResults();
     const priorRoom = cancelRoomFinalization();
     const state = {
-      resultsEpoch: roomResultsEpoch, roomResults: null,
+      resultsEpoch: roomResultsEpoch, roomResults: null, completedResults: null,
       id: request.playId, startRpcId: identity(request.rpcId) ? request.rpcId : null,
       game: null, keys: null, active: false, origin: null, startFrame: null,
       batch: null, commandClient: null, commandPumping: false, audioPumping: false,
@@ -2230,10 +2290,36 @@ function handlePlay(request) {
     })().catch(fatal);
     return;
   }
+  if (completedResults?.id === request.playId && play === null
+    && ["play-results-present", "play-results-page"].includes(request.kind)) {
+    const results = completedResults;
+    try {
+      const room = roomResults?.id === results.id ? roomResults : null;
+      results.lastRpc = Math.max(results.lastRpc, room?.lastRpc ?? 0);
+      const prior = { ...results };
+      rpc(results, request, true);
+      if (room) room.lastRpc = results.lastRpc;
+      const next = resultRequest(prior, request);
+      if (request.kind === "play-results-page") {
+        results.binding.set_presentation(next.page, next.comparisons);
+        if (results.binding.page !== next.page || results.binding.pages !== next.pages
+          || results.binding.comparisons !== next.comparisons) throw new Error("Results binding changed admitted page metadata.");
+      }
+      Object.assign(results, next);
+      reply(results, request, { kind: "completed-results", completedResults: completedResultsMetadata(results) });
+      scheduleDraw();
+    } catch (error) {
+      if (identity(request.rpcId)) report("play-reply", { playId: results.id, rpcId: request.rpcId, error: message(error) });
+    }
+    return;
+  }
   if (roomResults?.id === request.playId && play === null) {
     const results = roomResults;
     try {
+      const local = completedResults?.id === results.id ? completedResults : null;
+      results.lastRpc = Math.max(results.lastRpc, local?.lastRpc ?? 0);
       rpc(results, request, true);
+      if (local) local.lastRpc = results.lastRpc;
       if (request.kind !== "play-room-page") throw new Error("Joined room Results accept only page requests.");
       if (results.failed || !results.binding) throw new Error("Room Results display unavailable.");
       if (!integer(request.page, 0, results.pages - 1)) throw new Error("Invalid room Results page.");

@@ -21,6 +21,8 @@ pub mod browser_audio;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
 mod browser_canvas;
 #[cfg(all(target_arch = "wasm32", feature = "browser"))]
+pub mod browser_completed_results;
+#[cfg(all(target_arch = "wasm32", feature = "browser"))]
 pub mod browser_game;
 #[cfg(test)]
 mod browser_hid_fixtures;
@@ -69,6 +71,8 @@ mod competition_start_bridge;
 pub mod competition_start_gate;
 #[cfg(test)]
 mod competition_start_gate_fixtures;
+#[cfg(feature = "graphics")]
+pub mod completed_results_presentation;
 /// Actual judge completion and native output drain for full-song play.
 pub mod completion;
 #[cfg(test)]

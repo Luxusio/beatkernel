@@ -110,6 +110,26 @@ pub struct BrowserLocalGame {
 
 #[wasm_bindgen]
 impl BrowserLocalGame {
+    pub fn completed_results(
+        &self,
+    ) -> Result<Option<crate::browser_completed_results::BrowserCompletedResults>, JsValue> {
+        let comparisons: Vec<_> = self
+            .members
+            .iter()
+            .map(|member| (member.player, member.saved_hud.snapshot()))
+            .collect();
+        let mut presentation =
+            crate::completed_results_presentation::CompletedResultsPresentation::default();
+        let captured = presentation.capture_local(&self.game, &comparisons);
+        if presentation.results().is_none() {
+            captured.map_err(|error| JsValue::from_str(&error))?;
+        }
+        Ok(
+            crate::browser_completed_results::BrowserCompletedResults::from_presentation(
+                presentation,
+            ),
+        )
+    }
     /// Consume live preparation once. Plan rows have four words; binding rows
     /// have a stable player ID followed by the seven physical identity words.
     pub fn new_physical(

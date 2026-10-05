@@ -114,6 +114,7 @@ async function workerHarness(options = {}) {
     needs_redraw() { return options.needsRedraw ?? false; }
   }
   class BrowserGame {
+    completed_results() { return null; }
     constructor(prepared, ...constructorArgs) {
       if (!options.gameplay) throw new Error("Preview fixtures must not create gameplay owners");
       assert.equal(prepared.moved, false);
@@ -201,6 +202,7 @@ async function workerHarness(options = {}) {
       static open() { throw new Error("Preview fixtures must not open room connections"); }
     });
   }, { context });
+  const completedHelpers = new SourceTextModule(await readFile(new URL("./completed-results-model.mjs", import.meta.url), "utf8"), { context });
   const helpers = new SourceTextModule(await readFile(new URL("./host_model.mjs", import.meta.url), "utf8"), { context });
   const playHelpers = new SourceTextModule(await readFile(new URL("./play-model.mjs", import.meta.url), "utf8"), { context });
   const settingsHelpers = new SourceTextModule(await readFile(new URL("./settings-profile.mjs", import.meta.url), "utf8"), { context });
@@ -216,6 +218,7 @@ async function workerHarness(options = {}) {
   await worker.link(specifier => {
     if (specifier === "./pkg/beatkernel_bms_runtime.js") return wasm;
     if (specifier === "./host_model.mjs") return helpers;
+    if (specifier === "./completed-results-model.mjs") return completedHelpers;
     if (specifier === "./play-model.mjs") return playHelpers;
     if (specifier === "./settings-profile.mjs") return settingsHelpers;
     if (specifier === "./multiplayer-owner.mjs") return network;

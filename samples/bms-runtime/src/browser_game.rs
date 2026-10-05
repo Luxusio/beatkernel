@@ -133,6 +133,22 @@ pub struct BrowserGame {
 }
 #[wasm_bindgen]
 impl BrowserGame {
+    /// Extract only actual StepGameplay completion, never a JavaScript choice.
+    pub fn completed_results(
+        &self,
+    ) -> Result<Option<crate::browser_completed_results::BrowserCompletedResults>, JsValue> {
+        let mut presentation =
+            crate::completed_results_presentation::CompletedResultsPresentation::default();
+        let captured = presentation.capture_solo(&self.game, self.saved_hud.snapshot());
+        if presentation.results().is_none() {
+            captured.map_err(|error| JsValue::from_str(&error))?;
+        }
+        Ok(
+            crate::browser_completed_results::BrowserCompletedResults::from_presentation(
+                presentation,
+            ),
+        )
+    }
     #[wasm_bindgen(constructor)]
     pub fn new(
         prepared: BrowserPrepared,

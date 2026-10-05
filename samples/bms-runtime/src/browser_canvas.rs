@@ -234,6 +234,48 @@ impl BrowserCanvas {
         self.renderer.render(&self.scene)
     }
 
+    pub(crate) fn present_completed_results(
+        &mut self,
+        results: &crate::browser_completed_results::BrowserCompletedResults,
+        room: Option<&crate::room_presentation::RoomPresentation>,
+    ) -> Result<(), String> {
+        if self.renderer.needs_surface_recreation() {
+            let surface = self
+                .instance
+                .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(self.canvas.clone()))
+                .map_err(|error| format!("recreate browser canvas surface: {error}"))?;
+            self.renderer.replace_surface(surface)?;
+        }
+        self.backgrounds
+            .sync_presentations(None, &[], &mut self.renderer)?;
+        let view = results
+            .presentation
+            .view()
+            .ok_or("completed Results display unavailable")?;
+        self.scene.clear();
+        crate::ui::atoms::text(
+            &mut self.scene,
+            24,
+            65,
+            if results.has_comparisons() {
+                "COMPLETED RESULTS - C COMPARISONS"
+            } else {
+                "COMPLETED RESULTS"
+            },
+            2,
+            0x9bb1cf,
+        );
+        view.compose_mode(
+            &mut self.scene,
+            results.page() as usize,
+            results.comparisons(),
+        )?;
+        if let Some(room) = room {
+            organisms::room_presentation_footer(&mut self.scene, room)?;
+        }
+        self.renderer.render(&self.scene)
+    }
+
     pub(crate) fn present_room_results(
         &mut self,
         page: &crate::room_presentation::RoomPresentation,

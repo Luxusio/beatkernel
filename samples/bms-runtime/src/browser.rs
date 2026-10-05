@@ -413,6 +413,28 @@ impl BrowserView {
             .map_err(js_error)
     }
 
+    pub fn draw_completed_results(
+        &mut self,
+        results: &crate::browser_completed_results::BrowserCompletedResults,
+    ) -> Result<(), JsValue> {
+        self.canvas
+            .present_completed_results(results, None)
+            .map_err(js_error)
+    }
+    pub fn draw_completed_room_results(
+        &mut self,
+        results: &crate::browser_completed_results::BrowserCompletedResults,
+        room: &BrowserRoomResults,
+    ) -> Result<(), JsValue> {
+        let page = room
+            .builder
+            .presentation()
+            .ok_or_else(|| js_error("room Results are not frozen"))?;
+        self.canvas
+            .present_completed_results(results, Some(page))
+            .map_err(js_error)
+    }
+
     pub fn draw_room_results(&mut self, results: &BrowserRoomResults) -> Result<(), JsValue> {
         let page = results
             .builder

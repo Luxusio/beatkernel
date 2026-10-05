@@ -1,3 +1,4 @@
+import { validateCompletedResults } from "./completed-results-model.mjs";
 import { snapshotFiles, nanoseconds, seconds } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
 import { RecordsStore } from "./record-store.mjs";
@@ -37,6 +38,7 @@ let hasPreview = false;
 let audioModule = null;
 let activePlay = null;
 let roomResults = null;
+let completedResults = null;
 let settingsOperation = null;
 let settingsURL = null;
 let settingsURLTimer = null;
@@ -180,7 +182,58 @@ function receiveSettings(data) {
   }
 }
 
+function clearCompletedResults() {
+  const previous = completedResults;
+  completedResults = null;
+  if (previous?.rpc) {
+    clearTimeout(previous.rpc.timer);
+    previous.rpc.reject(new Error("Completed Results were replaced."));
+    previous.rpc = null;
+  }
+}
+function retainCompletedResults(session) {
+  clearCompletedResults();
+  if (session.mode !== "live" || session.owner !== owner) return;
+  const value = session.finalScore?.completedResults;
+  if (value === null || value === undefined) return;
+  try {
+    completedResults = { ...validateCompletedResults(value), id: session.id, owner, rpc: null, shown: false };
+  } catch (error) { status(`Completed Results metadata unavailable: ${String(error.message).slice(0, 4096)}`, true); return; }
+  if (worker && !completedResults.failed) void requestCompletedResults("play-results-present");
+}
+async function requestCompletedResults(kind, page, comparisons) {
+  const results = completedResults;
+  if (activePlay || !worker || !results || results.owner !== owner || results.rpc || results.failed
+    || importing || preparing || settingsOperation) return;
+  const rpcId = ++serial;
+  if (!Number.isSafeInteger(rpcId)) return;
+  try {
+    const response = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (results.rpc?.rpcId !== rpcId) return;
+        results.rpc = null; reject(new Error("Completed Results request timed out."));
+      }, 10000);
+      results.rpc = { rpcId, timer, resolve, reject };
+      try { worker.postMessage({ kind, playId: results.id, rpcId,
+        ...(kind === "play-results-page" ? { page, comparisons } : {}) }); }
+      catch (error) { clearTimeout(timer); results.rpc = null; reject(error); }
+    });
+    if (completedResults !== results || results.owner !== owner || activePlay) return;
+    if (response?.kind !== "completed-results") throw new Error("Invalid completed Results reply.");
+    const next = validateCompletedResults(response.completedResults);
+    if (next.players.length !== results.players.length || next.players.some((player, index) => player !== results.players[index])
+      || next.detailPages !== results.detailPages || next.comparisonPages !== results.comparisonPages
+      || (kind === "play-results-page" && (next.page !== page || next.comparisons !== comparisons))) {
+      throw new Error("Completed Results reply changed its admitted presentation.");
+    }
+    Object.assign(results, next, { shown: true });
+  } catch (error) {
+    if (completedResults === results && results.owner === owner) status(`Completed Results: ${String(error.message).slice(0, 4096)}`, true);
+  }
+}
+
 function clearRoomResults() {
+  clearCompletedResults();
   const previous = roomResults;
   roomResults = null;
   if (previous?.rpc) {
@@ -1728,6 +1781,20 @@ async function play(mode = "live") {
 }
 
 function key(event, down) {
+  if (!activePlay && completedResults?.owner === owner && completedResults.shown && !completedResults.failed
+    && down && !event.repeat && ["PageUp", "PageDown", "KeyC"].includes(event.code)) {
+    const target = event.target;
+    if (target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName)) return;
+    event.preventDefault();
+    const results = completedResults;
+    const comparisons = event.code === "KeyC" ? !results.comparisons : results.comparisons;
+    if (comparisons && !results.hasComparisons) return;
+    const pages = comparisons ? results.comparisonPages : results.detailPages;
+    const page = event.code === "KeyC" ? Math.min(results.page, pages - 1)
+      : Math.max(0, Math.min(pages - 1, results.page + (event.code === "PageDown" ? 1 : -1)));
+    void requestCompletedResults("play-results-page", page, comparisons);
+    return;
+  }
   const session = activePlay;
   if (!session || session.owner !== owner || session.phase === "closing" || session.keyAcquiring) return;
   const current = () => activePlay === session && session.owner === owner && session.phase !== "closing";
@@ -2191,6 +2258,21 @@ function finalLocalPeerText(peers, players) {
 
 function receivePlay(data) {
   const session = activePlay;
+  const completed = completedResults;
+  if (!session && completed?.id === data.playId && completed.owner === owner) {
+    if (data.kind === "play-reply" && completed.rpc?.rpcId === data.rpcId) {
+      const request = completed.rpc;
+      completed.rpc = null; clearTimeout(request.timer);
+      if (typeof data.error === "string") request.reject(new Error(data.error)); else request.resolve(data.result);
+      return;
+    }
+    if (data.kind === "play-completed-results") {
+      try { Object.assign(completed, validateCompletedResults(data.completedResults)); }
+      catch { completed.failed = true; }
+      status(`Completed Results display unavailable: ${String(data.error ?? "unknown error").slice(0, 4096)}`, true);
+      return;
+    }
+  }
   const results = roomResults;
   if (!session && results?.id === data.playId && results.owner === owner) {
     if (data.kind === "play-reply" && results.rpc?.rpcId === data.rpcId) {
@@ -2475,6 +2557,12 @@ function stopPlay(reason, failed = false, completed = false) {
         }
         activePlay = null;
         retainRoomResults(session);
+        // Audio, input and Worker ownership have all settled before this explicit presentation ACK.
+        retainCompletedResults(session);
+        if (completedResults?.failed) {
+          reason += ` Historical completion retained; Results display unavailable: ${String(session.finalScore?.completedResultsError ?? "projection failed").slice(0, 4096)}`;
+          failed = true;
+        }
         session.opponentSelection = null;
         controls();
         if (session.owner === owner || failed) status(reason + result, failed);
