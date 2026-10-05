@@ -271,7 +271,8 @@ async function harness(faults = {}) {
     "audio-queue", "audio-voices", "audio-pending", "audio-frames", "audio-commands", "touch-input", "pointer-input", "pointer-bindings",
     "hid-input", "hid-authorize", "hid-profile", "hid-profile-name", "hid-status",
     "gamepad-profile", "gamepad-profile-name", "gamepad-profile-clear",
-    "local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay"]) {
+    "local-count", "local-discover", "local-release", "local-sources", "local-status", "local-page", "local-results", "captured-replay",
+    "historical-grade-prev", "historical-grade-next", "historical-grade-page"]) {
     elements.set(id, new Element(["chart", "records", "local-page", "captured-replay", "multiplayer-mode"].includes(id) ? "select" : id, id));
   }
   elements.get("folder").webkitdirectory = true;
@@ -336,6 +337,11 @@ async function harness(faults = {}) {
         ...posted.opponents[index], file: entry.file,
       }));
       this.posts.push({ value: posted, transferCount: transfer.length, transfer: [...transfer] });
+      // Mechanical legacy compatibility: the actual Worker acknowledges clear
+      // with unavailable metadata. Page RPC replies remain explicitly scripted.
+      if (value.kind === "historical-record-clear") queueMicrotask(() => this.emit("message", { data: {
+        kind: "historical-record-result", id: value.id, available: false, error: null, gradePage: null, gradePages: 0,
+      } }));
     }
     terminate() { this.terminations++; traces.push(["terminate"]); }
     messages(kind) { return this.posts.map(entry => entry.value).filter(value => value.kind === kind); }
@@ -6384,4 +6390,92 @@ test("room Leave, closure, deadline and cancellation settle the schedule wait an
   await deadline.advance(60000);
   assert.equal(waiting.worker.messages("play-stop").length, 1); assert.deepEqual(deadline.audio.arms, []);
   await deadline.receive(localFinal(waiting.start)); await deadline.close();
+});
+
+async function selectedHistoricalGrades(h, pages = 3) {
+  await h.preview(); h.click("records-refresh"); await flush();
+  h.click("records-use"); await flush();
+  const worker = h.workers.at(-1), request = worker.last("historical-record-present");
+  assert.ok(request, "actual completed-record load requests Worker historical presentation");
+  await h.receive({ kind: "historical-record-result", id: request.id, available: true, error: null, gradePage: 0, gradePages: pages });
+  return { worker, request };
+}
+function storedHistoricalFields(id = 41) {
+  const row = savedRecord({ id });
+  return { recordsList: [row, savedRecord({ id: 42, name: "replacement.bkr" })],
+    recordsLoaded: { metadata: row, bytes: Uint8Array.from([66,75,82,0]), completedArchive: Uint8Array.from([66,75,82,69,83,85,76,84]), archivePlayer: 4294967295 } };
+}
+test("historical page controls survive completed library operation and only matching ACK changes confirmed caption", async () => {
+  const h = await harness(storedHistoricalFields()); const { worker, request } = await selectedHistoricalGrades(h);
+  assert.equal(h.get("historical-grade-next").hidden, false); assert.equal(h.get("historical-grade-next").disabled, false);
+  assert.equal(h.get("historical-grade-prev").disabled, true); assert.equal(h.get("historical-grade-page").textContent, "Stored grades page 1 / 3");
+  h.click("historical-grade-next"); await flush(); const page = worker.last("historical-record-page");
+  assert.equal(page.id, request.id); assert.equal(page.page, 1);
+  assert.equal(h.get("historical-grade-next").disabled, true); assert.equal(h.get("historical-grade-prev").disabled, true);
+  h.click("historical-grade-next"); await flush(); assert.equal(worker.messages("historical-record-page").length, 1);
+  for (const stale of [{ id: page.id + 1, rpcId: page.rpcId }, { id: page.id, rpcId: page.rpcId - 1 }]) {
+    await h.receive({ kind: "historical-record-page-result", ...stale, gradePage: 1, gradePages: 3, error: null });
+    assert.equal(h.get("historical-grade-page").textContent, "Stored grades page 1 / 3"); assert.equal(h.get("historical-grade-next").disabled, true);
+  }
+  await h.receive({ kind: "historical-record-page-result", id: page.id, rpcId: page.rpcId, gradePage: 1, gradePages: 3, error: null });
+  assert.equal(h.get("historical-grade-page").textContent, "Stored grades page 2 / 3"); assert.equal(h.get("historical-grade-prev").disabled, false);
+  h.click("historical-grade-next"); await flush(); const refused = worker.last("historical-record-page");
+  await h.receive({ kind: "historical-record-page-result", id: refused.id, rpcId: refused.rpcId, gradePage: null, gradePages: 0, error: "cold page allocation refused" });
+  assert.equal(h.get("historical-grade-page").textContent, "Stored grades page 2 / 3"); assert.equal(h.get("historical-grade-next").disabled, false);
+  assert.equal(h.opens.length, 0); await h.close();
+});
+test("page timeout post refusal and malformed matching receipt clear uncertain display but preserve selected replay", async () => {
+  for (const failure of ["timeout", "post", "malformed"]) {
+    const h = await harness(storedHistoricalFields()); const { worker } = await selectedHistoricalGrades(h);
+    const replayName = h.get("replay-name").textContent;
+    if (failure === "post") worker.failKind = "historical-record-page";
+    h.click("historical-grade-next"); await flush();
+    if (failure === "timeout") await h.advance(10000);
+    if (failure === "malformed") {
+      const request = worker.last("historical-record-page");
+      await h.receive({ kind: "historical-record-page-result", id: request.id, rpcId: request.rpcId, gradePage: 2, gradePages: 3, error: null });
+    }
+    assert.equal(h.get("historical-grade-next").hidden, true); assert.equal(h.get("historical-grade-page").textContent, "");
+    assert.ok(worker.last("historical-record-clear")); assert.equal(h.get("replay-name").textContent, replayName);
+    if (failure === "post") {
+      assert.match(h.get("status").textContent, /unavailable/i);
+      assert.match(h.get("status").textContent, /replay.*remain/i);
+    }
+    assert.equal(h.get("replay-play").disabled, false); assert.equal(h.opens.length, 0); await h.close();
+  }
+});
+test("replacement record protects its page controls from old RPC ACK and already queued old deadline", async () => {
+  const h = await harness(storedHistoricalFields()); const { worker } = await selectedHistoricalGrades(h);
+  const priorTimers = new Set(h.timers.keys());
+  h.click("historical-grade-next"); await flush(); const old = worker.last("historical-record-page");
+  const queued = [...h.timers.entries()].find(([id]) => !priorTimers.has(id))?.[1];
+  assert.ok(queued);
+  h.get("records").value = "42"; h.get("records").emit("change"); await flush();
+  h.faults.recordsLoaded = storedHistoricalFields(42).recordsLoaded;
+  h.click("records-use"); await flush(); const replacement = worker.last("historical-record-present");
+  assert.notEqual(replacement.id, old.id);
+  await h.receive({ kind: "historical-record-result", id: replacement.id, available: true, error: null, gradePage: 0, gradePages: 2 });
+  const clears = worker.messages("historical-record-clear").length;
+  queued.callback(); await flush();
+  await h.receive({ kind: "historical-record-page-result", id: old.id, rpcId: old.rpcId, gradePage: 1, gradePages: 3, error: null });
+  assert.equal(worker.messages("historical-record-clear").length, clears);
+  assert.equal(h.get("historical-grade-page").textContent, "Stored grades page 1 / 2"); assert.equal(h.get("historical-grade-next").disabled, false);
+  await h.close();
+});
+test("saved-record selection change aborts unabortable library read before stale historical or replay replacement", async () => {
+  const gate = deferred(); const h = await harness({ ...storedHistoricalFields(), recordsLoadGate: gate }); await h.preview();
+  const original = selectedRecording(); chooseRecording(h, [original.file]);
+  const name = h.get("replay-name").textContent;
+  h.click("records-refresh"); await flush(); h.click("records-use"); await flush();
+  assert.equal(h.recordCalls.filter(call => call.method === "load").length, 1);
+  h.get("records").value = "42"; h.get("records").emit("change"); await flush();
+  gate.resolve(); await flush();
+  assert.equal(h.workers.at(-1).messages("historical-record-present").length, 0);
+  assert.equal(h.get("replay-name").textContent, name); assert.equal(original.reads, 0);
+  assert.equal(h.get("historical-grade-next").hidden, true); assert.equal(h.opens.length, 0); await h.close();
+  const disposed = await harness(storedHistoricalFields()); const selected = await selectedHistoricalGrades(disposed);
+  disposed.click("historical-grade-next"); await flush(); const pending = selected.worker.last("historical-record-page");
+  await disposed.close();
+  await disposed.receive({ kind: "historical-record-page-result", id: pending.id, rpcId: pending.rpcId, gradePage: 1, gradePages: 3, error: null }, selected.worker);
+  assert.equal(disposed.get("historical-grade-next").hidden, true); assert.equal(disposed.timers.size, 0);
 });

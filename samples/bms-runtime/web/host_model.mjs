@@ -60,3 +60,50 @@ export function nanoseconds(input) {
   const ns = BigInt(whole) * 1000000000n + BigInt(fraction.padEnd(9, "0"));
   return previewNanos(ns.toString()).toString();
 }
+
+export function validateHistoricalGradeSnapshot(value) {
+  if (!value || !Number.isSafeInteger(value.pages) || value.pages < 1 || value.pages > 1024
+    || !Number.isSafeInteger(value.page) || value.page < 0 || value.page >= value.pages) {
+    throw new Error("Historical grade page metadata is invalid.");
+  }
+  return { page: value.page, pages: value.pages };
+}
+export class HistoricalGradePager {
+  #selection = null;
+  #pending = null;
+  #lastRpc = 0;
+  bind(id, page, pages) {
+    if (!Number.isSafeInteger(id) || id < 1) throw new Error("Historical grade selection identity is invalid.");
+    const metadata = validateHistoricalGradeSnapshot({ page, pages });
+    this.#selection = { id, ...metadata };
+    this.#pending = null;
+    this.#lastRpc = 0;
+  }
+  snapshot() { return this.#selection ? { ...this.#selection, pending: this.#pending !== null } : null; }
+  request(page, rpcId) {
+    if (!this.#selection || this.#pending) return null;
+    validateHistoricalGradeSnapshot({ page, pages: this.#selection.pages });
+    if (page === this.#selection.page) return null;
+    if (!Number.isSafeInteger(rpcId) || rpcId < 1 || rpcId <= this.#lastRpc) throw new Error("Historical grade RPC identity must increase.");
+    this.#pending = { page, rpcId };
+    this.#lastRpc = rpcId;
+    return { kind: "historical-record-page", id: this.#selection.id, rpcId, page };
+  }
+  accept(reply) {
+    if (!this.#selection || !this.#pending || reply?.id !== this.#selection.id || reply?.rpcId !== this.#pending.rpcId) return false;
+    if (reply.kind !== "historical-record-page-result") throw new Error("Historical grade receipt kind is invalid.");
+    if (reply.error !== null) {
+      if (typeof reply.error !== "string" || reply.error.length < 1 || reply.error.length > 4096 || reply.gradePage !== null || reply.gradePages !== 0) {
+        throw new Error("Historical grade refusal is invalid.");
+      }
+    } else {
+      const metadata = validateHistoricalGradeSnapshot({ page: reply.gradePage, pages: reply.gradePages });
+      if (metadata.page !== this.#pending.page || metadata.pages !== this.#selection.pages) throw new Error("Historical grade receipt does not match its request.");
+      this.#selection = { id: this.#selection.id, ...metadata };
+    }
+    this.#pending = null;
+    return true;
+  }
+  cancel() { this.#pending = null; }
+  clear() { this.#selection = null; this.#pending = null; this.#lastRpc = 0; }
+}

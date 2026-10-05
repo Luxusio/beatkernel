@@ -1,5 +1,5 @@
 import { validateCompletedResults, validateCompletedArchive } from "./completed-results-model.mjs";
-import { snapshotFiles, nanoseconds, seconds } from "./host_model.mjs";
+import { snapshotFiles, nanoseconds, seconds, validateHistoricalGradeSnapshot, HistoricalGradePager } from "./host_model.mjs";
 import { AudioHost } from "./audio-host.mjs";
 import { RecordsStore } from "./record-store.mjs";
 import { HidInputOwner } from "./hid-input.mjs";
@@ -17,6 +17,7 @@ for (const id of ["local-count", "local-discover", "local-release", "local-sourc
 for (const id of ["multiplayer-mode", "room-seal", "room-ready", "room-leave", "room-score-prev", "room-score-next", "room-score-page"]) ui[id] = byId(id);
 for (const id of ["settings-save", "settings-load", "settings-status"]) ui[id] = byId(id);
 for (const id of ["pointer-input", "pointer-bindings"]) ui[id] = byId(id);
+for (const id of ["historical-grade-prev", "historical-grade-next", "historical-grade-page"]) ui[id] = byId(id);
 let canvas = byId("canvas");
 let cssExtent = [0, 0];
 let surfaceExtent = [0, 0];
@@ -271,6 +272,8 @@ let recordsStore = null;
 let recordsOperation = null;
 let historicalOperation = null;
 let historicalSelection = null;
+const historicalGradePager = new HistoricalGradePager();
+let historicalPageOperation = null;
 let selectedHidProfile = null;
 let selectedGamepadProfile = null;
 let hidPermission = null;
@@ -772,6 +775,7 @@ function controls() {
   ui["records-opponent"].disabled = recordsDisabled || !ui.records.value || opponents.size >= 8;
   ui["opponents-clear"].disabled = recordsDisabled || opponents.size === 0;
   for (const button of opponentButtons) button.disabled = recordsDisabled;
+  historicalGradeControls();
 }
 function stop() {
   cancelSettings("Settings request cancelled with the page.");
@@ -836,6 +840,7 @@ function prepare() {
     if (!ui.chart.value) throw new Error("Select a chart first.");
     selectId = ++serial;
     seeking = false;
+    clearHistoricalRecord("Prepared chart changed.");
     clearRoomResults();
     preparing = true;
     canvas.hidden = true;
@@ -846,6 +851,7 @@ function prepare() {
 }
 
 function received(data) {
+  if (data?.kind === "historical-record-page-result") { receiveHistoricalGradePage(data); return; }
   if (data?.kind === "historical-record-result") { receiveHistoricalRecord(data); return; }
   if ((settingsOperation && data?.id === settingsOperation.id)
     || (typeof data?.kind === "string" && data.kind.startsWith("settings-profile-"))) { receiveSettings(data); return; }
@@ -986,6 +992,7 @@ function choose(event) {
   void releaseLocalSources("Song library changed. Discover local sources again.");
   importId = ++serial;
   seeking = false;
+  clearHistoricalRecord("Song library changed.");
   clearRoomResults();
   importing = true;
   controls();
@@ -1005,6 +1012,7 @@ byId("seek-form").addEventListener("submit", event => {
     const ns = nanoseconds(ui.position.value);
     seekId = ++serial;
     seeking = true;
+    clearHistoricalRecord("Preview position changed.");
     clearRoomResults();
     controls();
     worker.postMessage({ kind: "seek", id: seekId, selectedId, ns });
@@ -1130,7 +1138,14 @@ ui["bindings-reset"].addEventListener("click", () => {
   status("Keyboard bindings reset to defaults.");
 });
 ui.export.addEventListener("click", downloadReplay);
-ui.records.addEventListener("change", controls);
+ui.records.addEventListener("change", () => {
+  clearHistoricalRecord("Saved record selection changed.");
+  recordsOperation?.controller.abort();
+  recordsOperation = null;
+  controls();
+});
+ui["historical-grade-prev"].addEventListener("click", () => requestHistoricalGradePage(false));
+ui["historical-grade-next"].addEventListener("click", () => requestHistoricalGradePage(true));
 ui["output-latency"].addEventListener("change", controls);
 for (const [id, action] of [["records-refresh", "refresh"], ["records-save", "save"], ["records-use", "use"], ["records-delete", "delete"], ["records-opponent", "opponent"]]) {
   ui[id].addEventListener("click", () => { void recordAction(action); });
@@ -2838,8 +2853,68 @@ function settleHistorical(error, result) {
   pending.operation.controller.signal.removeEventListener("abort", pending.abort);
   if (error) pending.reject(error); else pending.resolve(result);
 }
+function cancelHistoricalGradePage() {
+  if (historicalPageOperation) clearTimeout(historicalPageOperation.timer);
+  historicalPageOperation = null;
+  historicalGradePager.clear();
+}
+function historicalPageIdle() {
+  return initialized && worker && historicalSelection?.owner === owner && !activePlay && !settingsOperation
+    && !importing && !preparing && !seeking && !recordsOperation && !hidPermission && !hidOwnershipFailed
+    && !localSetup && !localCleanup && !localDiscovery;
+}
+function historicalGradeControls() {
+  const snapshot = historicalGradePager.snapshot();
+  const selected = snapshot && historicalSelection?.id === snapshot.id && historicalSelection.owner === owner;
+  const visible = Boolean(selected && snapshot.pages > 1);
+  const busy = !historicalPageIdle() || snapshot?.pending === true;
+  for (const id of ["historical-grade-prev", "historical-grade-next", "historical-grade-page"]) ui[id].hidden = !visible;
+  ui["historical-grade-prev"].disabled = !visible || busy || snapshot.page === 0;
+  ui["historical-grade-next"].disabled = !visible || busy || snapshot.page + 1 >= snapshot.pages;
+  const caption = visible ? `Stored grades page ${snapshot.page + 1} / ${snapshot.pages}` : "";
+  if (ui["historical-grade-page"].textContent !== caption) ui["historical-grade-page"].textContent = caption;
+}
+function requestHistoricalGradePage(forward) {
+  if (!historicalPageIdle()) return;
+  const snapshot = historicalGradePager.snapshot();
+  if (!snapshot || snapshot.pending || snapshot.id !== historicalSelection.id) return;
+  const page = forward ? Math.min(snapshot.page + 1, snapshot.pages - 1) : Math.max(snapshot.page - 1, 0);
+  let request;
+  try { request = historicalGradePager.request(page, ++serial); }
+  catch (error) { clearHistoricalRecord(String(error.message).slice(0, 4096)); return; }
+  if (!request) return;
+  const operation = { selection: historicalSelection, owner, worker, rpcId: request.rpcId, timer: null };
+  historicalPageOperation = operation;
+  operation.timer = setTimeout(() => {
+    if (historicalPageOperation !== operation || historicalSelection !== operation.selection || owner !== operation.owner || worker !== operation.worker) return;
+    clearHistoricalRecord("Stored grade request timed out; selected replay remains available.");
+    status("Stored grade display timed out. Selected replay remains available.", true);
+  }, 10000);
+  historicalGradeControls();
+  try { worker.postMessage(request); }
+  catch (error) {
+    if (historicalPageOperation !== operation) return;
+    const diagnostic = String(error?.message ?? error).slice(0, 4096) || "Could not send the stored grade request.";
+    clearHistoricalRecord(diagnostic);
+    status(`Stored grade display unavailable: ${diagnostic} Selected replay remains available.`, true);
+  }
+}
+function receiveHistoricalGradePage(data) {
+  const operation = historicalPageOperation;
+  if (!operation || historicalSelection !== operation.selection || owner !== operation.owner || worker !== operation.worker
+    || data.id !== operation.selection.id || data.rpcId !== operation.rpcId) return;
+  try {
+    if (!historicalGradePager.accept(data)) return;
+  } catch (error) { clearHistoricalRecord("Stored grade response is invalid; selected replay remains available."); status(String(error.message).slice(0, 4096), true); return; }
+  clearTimeout(operation.timer);
+  historicalPageOperation = null;
+  historicalGradeControls();
+  if (data.error !== null) status(`Stored grade request refused: ${data.error} Selected replay remains available.`, true);
+}
 function clearHistoricalRecord(reason = "Historical record display was cleared.") {
+  cancelHistoricalGradePage();
   historicalSelection = null;
+  historicalGradeControls();
   if (!hasPreview) canvas.hidden = true;
   settleHistorical(new Error(reason));
   if (worker) {
@@ -2851,20 +2926,28 @@ function receiveHistoricalRecord(data) {
   const pending = historicalOperation;
   if (!pending || data.id !== pending.id || !recordCurrent(pending.operation)) {
     if (historicalSelection?.id === data.id && historicalSelection.owner === owner && !activePlay
-      && data.available === false && typeof data.error === "string" && data.error.length >= 1 && data.error.length <= 4096) {
+      && data.available === false && data.gradePage === null && data.gradePages === 0
+      && (data.error === null || (typeof data.error === "string" && data.error.length >= 1 && data.error.length <= 4096))) {
+      cancelHistoricalGradePage();
       historicalSelection = null;
+      historicalGradeControls();
       if (!hasPreview) canvas.hidden = true;
-      status(`Stored historical display unavailable: ${data.error} Selected replay remains available.`, true);
+      if (data.error !== null) status(`Stored historical display unavailable: ${data.error} Selected replay remains available.`, true);
     }
     return;
   }
-  if (typeof data.available !== "boolean" || !(data.error === null || (typeof data.error === "string" && data.error.length >= 1 && data.error.length <= 4096))
-    || (data.available && data.error !== null)) {
-    clearHistoricalRecord("Historical Worker response is invalid.");
-    return;
-  }
+  try {
+    if (typeof data.available !== "boolean" || !(data.error === null || (typeof data.error === "string" && data.error.length >= 1 && data.error.length <= 4096))
+      || (data.available && data.error !== null)) throw new Error("Historical Worker response is invalid.");
+    if (data.available) {
+      const grades = validateHistoricalGradeSnapshot({ page: data.gradePage, pages: data.gradePages });
+      historicalGradePager.bind(pending.id, grades.page, grades.pages);
+    } else if (data.gradePage !== null || data.gradePages !== 0) throw new Error("Unavailable historical grade metadata is invalid.");
+  } catch (error) { clearHistoricalRecord("Historical Worker response is invalid."); return; }
   historicalSelection = data.available ? { id: pending.id, owner } : null;
   if (data.available) canvas.hidden = false;
+  else cancelHistoricalGradePage();
+  historicalGradeControls();
   settleHistorical(null, { available: data.available, error: data.error });
 }
 function requestHistoricalRecord(operation, replayFile, completedArchive, archivePlayer) {

@@ -1,6 +1,6 @@
 import { validateCompletedResults, resultRequest } from "./completed-results-model.mjs";
 import init, * as runtime from "./pkg/beatkernel_bms_runtime.js";
-import { LIMITS, preflight, previewNanos } from "./host_model.mjs";
+import { LIMITS, preflight, previewNanos, validateHistoricalGradeSnapshot } from "./host_model.mjs";
 import { ORIGINAL_PCM_SAMPLES, PLAY_PCM_SAMPLES, bindingsFor, validateTiming, validateStart, validateEnd, replayOutputFromMetadata, millisecondsToNanos, audioScheduleFromFrame, presentationPair, renderedCursor } from "./play-model.mjs";
 import { BrowserMultiplayerOwner } from "./multiplayer-owner.mjs";
 import { BrowserRoomOwner } from "./room-owner.mjs";
@@ -125,8 +125,8 @@ function discardHistoricalRecord() {
   try { previous?.binding.free(); } catch { /* Historical display disposal has no gameplay outcome. */ }
   stopRedraw();
 }
-function historicalReply(id, available, error = null) {
-  report("historical-record-result", { id, available, error: error === null ? null : message(error) });
+function historicalReply(id, available, error = null, grades = null) {
+  report("historical-record-result", { id, available, gradePage: grades?.page ?? null, gradePages: grades?.pages ?? 0, error: error === null ? null : (message(error) || "Historical presentation failed.") });
 }
 function historicalRequestId(request) {
   if (!identity(request.id)) return false;
@@ -174,15 +174,61 @@ async function presentHistoricalRecord(request) {
     const error = binding.error;
     if (typeof available !== "boolean" || !(error == null || (typeof error === "string" && error.length >= 1 && error.length <= 4096))
       || (available && error != null)) throw new Error("Historical presentation returned invalid metadata.");
-    if (available) { historicalRecord = { id: request.id, binding }; binding = null; }
+    const grades = available ? validateHistoricalGradeSnapshot({ page: binding.grade_page, pages: binding.grade_pages }) : null;
+    if (available) { historicalRecord = { id: request.id, binding, grades, lastRpc: 0 }; binding = null; }
     else { const previous = binding; binding = null; previous.free(); }
-    historicalReply(request.id, available, error ?? null);
+    historicalReply(request.id, available, error ?? null, grades);
     scheduleDraw();
   } catch (error) {
     try { binding?.free(); } catch {}
     if (current()) { historicalReply(request.id, false, error); scheduleDraw(); }
   }
 }
+function historicalPageReply(request, grades, error = null) {
+  report("historical-record-page-result", { id: request.id, rpcId: request.rpcId,
+    gradePage: grades?.page ?? null, gradePages: grades?.pages ?? 0, error: grades === null ? (message(error ?? "Historical grade request failed.") || "Historical grade request failed.") : null });
+}
+function pageHistoricalRecord(request) {
+  if (!identity(request.id) || !identity(request.rpcId)) return;
+  const current = historicalRecord;
+  if (failed || !view || play || roomFinalization || importing || stagedLibrary || settingsOperation
+    || completedResults?.shown || roomResults || !current || current.id !== request.id
+    || request.rpcId <= current.lastRpc) {
+    historicalPageReply(request, null, "Historical grade request requires the current idle selection.");
+    return;
+  }
+  let requested;
+  try { requested = validateHistoricalGradeSnapshot({ page: request.page, pages: current.grades.pages }); }
+  catch (error) { historicalPageReply(request, null, error); return; }
+  let before;
+  try {
+    before = validateHistoricalGradeSnapshot({ page: current.binding.grade_page, pages: current.binding.grade_pages });
+    if (before.page !== current.grades.page || before.pages !== current.grades.pages) throw new Error("Historical grade binding changed unexpectedly.");
+  } catch (error) {
+    discardHistoricalRecord(); historicalReply(current.id, false, error); historicalPageReply(request, null, error); scheduleDraw(); return;
+  }
+  if (requested.page === before.page) {
+    current.lastRpc = request.rpcId;
+    historicalPageReply(request, before);
+    return;
+  }
+  let refusal = null;
+  let refused = false;
+  try { current.binding.set_grade_page(requested.page); }
+  catch (error) { refused = true; refusal = error; }
+  try {
+    const after = validateHistoricalGradeSnapshot({ page: current.binding.grade_page, pages: current.binding.grade_pages });
+    if (after.pages !== before.pages || after.page !== (refused ? before.page : requested.page)) throw new Error("Historical grade mutation returned unexpected metadata.");
+    if (refused) { historicalPageReply(request, null, refusal ?? "Historical grade request refused."); return; }
+    current.grades = after;
+    current.lastRpc = request.rpcId;
+    historicalPageReply(request, after);
+    scheduleDraw();
+  } catch (error) {
+    discardHistoricalRecord(); historicalReply(current.id, false, error); historicalPageReply(request, null, error); scheduleDraw();
+  }
+}
+
 function clearHistoricalRecord(request) {
   if (!historicalRequestId(request)) return;
   discardHistoricalRecord();
@@ -2580,6 +2626,7 @@ self.addEventListener("message", event => {
     ready.catch(fatal);
     return;
   }
+  if (request.kind === "historical-record-page") { pageHistoricalRecord(request); return; }
   if (request.kind === "historical-record-clear") { clearHistoricalRecord(request); return; }
   if (request.kind === "historical-record-present") { void presentHistoricalRecord(request); return; }
   if (request.kind === "settings-profile-save" || request.kind === "settings-profile-load") {

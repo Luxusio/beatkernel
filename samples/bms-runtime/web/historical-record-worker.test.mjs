@@ -129,6 +129,76 @@ function historicalRequest(id=1,fields={}){
   return {kind:"historical-record-present",id,replayFile:new FileType([new Uint8Array([66,75,82,0])],"selected.bkr"),
     completedArchive:new Uint8Array([66,75,82,69,83,85,76,84]),archivePlayer:4294967295,...fields};
 }
+
+test("historical grade metadata comes from validated binding getters before display admission",async()=>{
+  const h=await catalogWorker({historicalGradePages:3});await h.send(historicalRequest());
+  const reply=h.of("historical-record-result").at(-1);
+  assert.equal(reply.available,true);assert.equal(reply.gradePage,0);assert.equal(reply.gradePages,3);
+  for(const fields of [{historicalGradePages:0},{historicalGradePages:1025},{historicalGradePages:1.5},{historicalGradePage:1}]){
+    const bad=await catalogWorker(fields);await bad.send(historicalRequest());
+    const refused=bad.of("historical-record-result").at(-1);
+    assert.equal(refused.available,false);assert.equal(refused.gradePage,null);assert.equal(refused.gradePages,0);assert.ok(refused.error);
+    assert.equal(bad.historicalOwners[0].frees,1);await bad.tick();assert.equal(bad.views[0].historicalDraws?.length??0,0);
+  }
+  const legacy=await catalogWorker();await legacy.send(historicalRequest(1,{completedArchive:undefined,archivePlayer:undefined}));
+  const unavailable=legacy.of("historical-record-result").at(-1);
+  assert.equal(unavailable.gradePage,null);assert.equal(unavailable.gradePages,0);
+});
+test("actual Worker grade RPCs preserve same-page no-op and successful frontier without a rendering loop",async()=>{
+  const h=await catalogWorker({historicalGradePages:3});await h.send(historicalRequest());await h.tick();
+  const binding=h.historicalOwners[0];const before=h.views[0].historicalDraws.length;
+  await h.send({kind:"historical-record-page",id:1,rpcId:1,page:0});
+  assert.deepEqual(binding.pageSetters,[]);assert.equal(h.views[0].historicalDraws.length,before);
+  assert.equal(h.timers.size,0);
+  const same=h.of("historical-record-page-result").at(-1);assert.equal(same.gradePage,0);assert.equal(same.error,null);
+  await h.send({kind:"historical-record-page",id:1,rpcId:2,page:1});await h.tick();
+  assert.deepEqual(binding.pageSetters,[1]);assert.equal(h.of("historical-record-page-result").at(-1).gradePage,1);
+  const after=h.views[0].historicalDraws.length;assert.equal(h.timers.size,0);assert.equal(after,before+1);
+  for(const fields of [{id:1,rpcId:2,page:2},{id:99,rpcId:3,page:2},{id:1,rpcId:3,page:3}]){
+    await h.send({kind:"historical-record-page",...fields});assert.ok(h.of("historical-record-page-result").at(-1).error);
+    assert.deepEqual(binding.pageSetters,[1]);
+  }
+  await h.send({kind:"historical-record-page",id:1,rpcId:3,page:2});
+  assert.deepEqual(binding.pageSetters,[1,2]);assert.equal(h.of("historical-record-page-result").at(-1).error,null);
+});
+test("recoverable grade preparation refusal keeps selected binding and confirmed page",async()=>{
+  const h=await catalogWorker({historicalGradePages:3,historicalPageError:"grade allocation refused"});
+  await h.send(historicalRequest());await h.tick();const binding=h.historicalOwners[0];
+  await h.send({kind:"historical-record-page",id:1,rpcId:1,page:1});
+  const reply=h.of("historical-record-page-result").at(-1);
+  assert.equal(reply.gradePage,null);assert.equal(reply.gradePages,0);assert.match(reply.error,/grade allocation refused/);
+  assert.equal(binding.page,0);assert.equal(binding.frees,0);
+  await h.send({kind:"historical-record-page",id:1,rpcId:2,page:0});
+  assert.equal(h.of("historical-record-page-result").at(-1).gradePage,0);assert.equal(binding.frees,0);
+  assert.deepEqual(binding.pageSetters,[1]);
+});
+test("unexpected post-set grade metadata disposes historical display instead of adopting mismatched page",async()=>{
+  for(const fields of [{historicalAfterPage:2},{historicalAfterPages:4},{historicalAfterPage:-1}]){
+    const h=await catalogWorker({historicalGradePages:3,...fields});await h.send(historicalRequest());await h.tick();
+    const previewDraws=h.views[0].draws,historicalDraws=h.views[0].historicalDraws.length;
+    await h.send({kind:"historical-record-page",id:1,rpcId:1,page:1});
+    const reply=h.of("historical-record-page-result").at(-1);
+    assert.equal(reply.gradePage,null);assert.equal(reply.gradePages,0);assert.ok(reply.error);
+    assert.equal(h.historicalOwners[0].frees,1);
+    await h.tick();assert.equal(h.views[0].draws,previewDraws+1);assert.equal(h.views[0].historicalDraws.length,historicalDraws);
+    assert.deepEqual(h.views[0].gameDraws,[]);assert.deepEqual(h.views[0].replayDraws,[]);assert.deepEqual(h.views[0].localDraws,[]);
+    assert.equal(h.games.length,0);assert.equal(h.historicalOwners[0].frees,1);
+    await h.send({kind:"historical-record-page",id:1,rpcId:2,page:2});assert.equal(h.historicalOwners[0].pageSetters.length,1);
+  }
+});
+test("cleared replacement and active-play owners refuse stale grade setters without touching gameplay",async()=>{
+  for(const next of ["clear","replacement","play"]){
+    const h=await catalogWorker({historicalGradePages:3});await h.send(historicalRequest());const old=h.historicalOwners[0];
+    if(next==="clear")await h.send({kind:"historical-record-clear",id:2});
+    else if(next==="replacement")await h.send(historicalRequest(2));
+    else await h.send(startRequest());
+    await h.send({kind:"historical-record-page",id:1,rpcId:1,page:1});
+    assert.ok(h.of("historical-record-page-result").at(-1).error);assert.deepEqual(old.pageSetters,[]);assert.equal(old.frees,1);
+    if(next==="replacement")assert.deepEqual(h.historicalOwners[1].pageSetters,[]);
+    if(next==="play")assert.equal(h.games[0].frees,0);
+    assert.equal(h.of("fatal").length,0);
+  }
+});
 test("idle Worker forwards opaque bytes and original player to binding and owns cached drawing/disposal",async()=>{
   const h=await catalogWorker();await h.send(historicalRequest());
   const reply=h.of("historical-record-result").at(-1);assert.equal(reply.id,1);assert.equal(reply.available,true);assert.equal(reply.error,null);
@@ -250,11 +320,19 @@ async function workerHarness(options = {}) {
       assert.ok(replay instanceof Uint8Array);if(archive!=null)assert.ok(archive instanceof Uint8Array);
       if(options.historicalError) throw new Error(options.historicalError);
       this.replay=replay.slice(); this.archive=archive?.slice()??null; this.player=player; this.frees=0;
+      this.page=options.historicalGradePage??0; this.pageSetters=[];
       historicalOwners.push(this);
     }
     live(){assert.equal(this.frees,0);}
     get available(){this.live();return this.archive!==null && !options.historicalDiagnostic;}
     get error(){this.live();return options.historicalDiagnostic??null;}
+    get grade_page(){this.live();return this.pageSetters.length && Object.hasOwn(options,"historicalAfterPage") ? options.historicalAfterPage : this.page;}
+    get grade_pages(){this.live();return this.pageSetters.length && Object.hasOwn(options,"historicalAfterPages") ? options.historicalAfterPages : options.historicalGradePages??1;}
+    set_grade_page(page){
+      this.live(); this.pageSetters.push(page); trace.push("historical-grade-set");
+      if(options.historicalPageError)throw new Error(options.historicalPageError);
+      const changed=this.page!==page; this.page=page; return changed;
+    }
     free(){this.live();assert.equal(++this.frees,1);trace.push("free-historical");}
   }
   class BrowserLibrary {
