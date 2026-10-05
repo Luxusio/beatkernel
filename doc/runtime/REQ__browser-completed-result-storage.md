@@ -30,10 +30,11 @@ to the existing IndexedDB transaction, not power-loss or crash durability.
 Existing metadata/recordings without archives remain compatible. New archive
 metadata/payload associations must agree exactly when loading; inconsistent
 lengths, missing payload, oversized bytes or invalid IDs refuse the stored entry.
-Loaded bytes remain untrusted historical data and must be decoded by Rust before
-future result presentation; no storage metadata or file authenticates live play.
-Catalog/loaded-result presentation and rich score/timing/comparison archival
-remain later integration.
+Loaded bytes remain untrusted historical data and are decoded and exactly
+associated by Worker-owned Rust before result presentation; see
+[the loaded historical record contract](REQ__browser-historical-record.md).
+No storage metadata or file authenticates live play. Rich score/timing/comparison
+archival and actual browser acceptance remain unfinished.
 
 Independent deferred fixtures cover actual stepped solo/cohort completion and
 refusal, byte/header/gauge identities, malformed late members, Worker transfer

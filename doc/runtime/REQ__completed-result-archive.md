@@ -43,7 +43,11 @@ after cleanup and replay save attempts; see
 Browser source now exports actual stepped completion on the Worker and stores
 the opaque archive alongside recordings in IndexedDB; see
 [the browser storage contract](REQ__browser-completed-result-storage.md).
-Native/browser catalog and loaded-result UI association remains subsequent integration.
+Native adjacent-record lookup and browser loaded-result UI now use the shared
+exact historical association policy; see
+[historical association](REQ__historical-record-association.md) and
+[browser historical presentation](REQ__browser-historical-record.md).
+Native local-member whole-roster sidecar discovery remains subsequent integration.
 Rich score/timing and
 comparison snapshots may require additional versioned metadata; no data omitted
 by version 1 is claimed to be archived. Independent deferred tests cover golden

@@ -37,8 +37,10 @@ base path, so member-record lookup still requires explicit archive/player
 selection or durable association metadata in subsequent integration. The pure
 matcher supports explicit IDs now, including equal headers across players, but
 the UI must not guess those IDs from member filenames. Browser loaded-record
-presentation, rich score/timing/comparison archival, actual filesystem/GPU
-acceptance and race-free directory containment also remain unfinished.
+presentation now uses the same matcher through a separate Worker-owned historical
+binding; see [its contract](REQ__browser-historical-record.md). Rich
+score/timing/comparison archival, actual browser/filesystem/GPU acceptance and
+race-free directory containment remain unfinished.
 
 Independent deferred fixtures cover exact header fields and original IDs,
 ambiguous/missing rows, finite draft equality, long extents, recorded-prefix-only
