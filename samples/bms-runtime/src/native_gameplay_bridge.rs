@@ -1,18 +1,70 @@
 //! Compatibility composition: legacy player publication and native pump effects.
 
 use crate::{
+    competition_live::LiveCompetition,
+    gameplay_competition::{GroupCompetitionPort, SoloCompetitionPort},
     local_runtime::PlayerReport,
-    native_cohort::{NativeCohortSession, run_cohort_with_ports},
+    multiplayer_group::MemberProgress,
+    native_cohort::{
+        CohortSession, GameplayPlayerState, finite_cohort_done_for_states,
+        member_progress_for_states, run_cohort_with_ports,
+    },
     native_gameplay::{
-        NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult, NativeGameplaySession,
+        GameplaySession, NativeGameplayConfig, NativeGameplayDevice, NativeGameplayResult,
         run_gameplay_with_ports,
     },
     native_gameplay_host::{NativeGameplayDiagnostic, NativeGameplayHost, PauseState},
+    native_group_competition::NativeGroupCompetition,
     native_pump_control::NativePumpControl,
     native_pump_system::SystemControl,
     player,
 };
-use beatkernel::{runtime::RuntimeReport, time::Timestamp};
+use beatkernel::{
+    runtime::RuntimeReport,
+    time::{ClockPoint, Timestamp},
+};
+
+/// Compatibility specialization selected by native application composition.
+pub type NativeGameplaySession<'a> = GameplaySession<'a, LiveCompetition>;
+/// Compatibility cohort specialization with the actual native competition owners.
+pub type NativeCohortSession<'a> = CohortSession<'a, LiveCompetition, NativeGroupCompetition>;
+/// Compatibility per-member state for native comparison owners.
+pub type PlayerState = GameplayPlayerState<LiveCompetition>;
+
+impl SoloCompetitionPort for LiveCompetition {
+    fn observe(&mut self, report: &RuntimeReport) -> NativeGameplayResult<()> {
+        LiveCompetition::observe(self, report)
+    }
+    fn mark_native_completed(&mut self) {
+        LiveCompetition::mark_native_completed(self);
+    }
+}
+
+impl GroupCompetitionPort for NativeGroupCompetition {
+    fn observe(&mut self, members: &[MemberProgress]) -> NativeGameplayResult<()> {
+        NativeGroupCompetition::observe(self, members)
+    }
+    fn mark_native_completed(&mut self) {
+        NativeGroupCompetition::mark_native_completed(self);
+    }
+}
+
+/// Native compatibility wrapper, including type inference for an empty roster.
+pub fn member_progress(states: &[PlayerState]) -> NativeGameplayResult<Vec<MemberProgress>> {
+    member_progress_for_states(states)
+}
+
+/// Native compatibility wrapper over the unchanged finite frontier policy.
+pub fn finite_cohort_done(
+    end: Option<i64>,
+    presented: Option<ClockPoint>,
+    committed: Option<ClockPoint>,
+    states: &[PlayerState],
+    backlog: bool,
+    resuming: bool,
+) -> bool {
+    finite_cohort_done_for_states(end, presented, committed, states, backlog, resuming)
+}
 
 pub(crate) struct PlayerGameplayHost;
 

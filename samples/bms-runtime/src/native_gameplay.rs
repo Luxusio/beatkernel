@@ -1,8 +1,8 @@
 //! One solo gameplay owner; native adapters acquire evidence and own cleanup.
 use crate::{
     bgm::{BgmFeedReport, BgmFeeder},
-    competition_live::LiveCompetition,
     completion::SongCompletion,
+    gameplay_competition::SoloCompetitionPort,
     gauge::{BmsGauge, GaugeError, GaugeProfile},
     live_pause::{
         LivePauseBoundary, LivePauseObservation, prepare_live_transport, update_live_pause,
@@ -31,7 +31,9 @@ use beatkernel_platform::audio::presentation::discipline::{
 };
 use std::{collections::VecDeque, error::Error, fmt, time::Duration as WallDuration};
 
-pub use crate::native_gameplay_bridge::{run_gameplay, run_gameplay_with_control};
+pub use crate::native_gameplay_bridge::{
+    NativeGameplaySession, run_gameplay, run_gameplay_with_control,
+};
 
 pub type NativeGameplayResult<T> = Result<T, Box<dyn std::error::Error>>;
 pub const MAX_PENDING_INPUT_EVENTS: usize = 65_536;
@@ -97,7 +99,8 @@ pub struct NativeGameplayConfig {
     pub pause_supported: bool,
     pub logical_schedule: bool,
 }
-pub struct NativeGameplaySession<'a> {
+/// Borrowed gameplay state with an explicitly selected competition observer.
+pub struct GameplaySession<'a, S> {
     pub runtime: &'a mut SoloRuntime,
     pub gauge: &'a mut BmsGauge,
     pub bgm: &'a mut BgmFeeder,
@@ -106,7 +109,7 @@ pub struct NativeGameplaySession<'a> {
     pub end: &'a mut Option<NativeEnd>,
     pub completion: &'a mut Option<SongCompletion>,
     pub capture: &'a mut Option<LiveReplayCapture>,
-    pub competition: &'a mut Option<LiveCompetition>,
+    pub competition: &'a mut Option<S>,
     pub delivery: &'a mut InputDeliveryTelemetry,
     pub pre_origin_inputs: &'a mut u64,
 }
@@ -201,9 +204,9 @@ fn watermark(
         timestamp: Timestamp::from_nanos(i64::try_from(at)?),
     }))
 }
-fn schedule<D: NativeGameplayDevice>(
+fn schedule<D: NativeGameplayDevice, S>(
     device: &mut D,
-    session: &NativeGameplaySession<'_>,
+    session: &GameplaySession<'_, S>,
     config: NativeGameplayConfig,
 ) -> NativeGameplayResult<ClockPoint> {
     if config.logical_schedule {
@@ -237,8 +240,8 @@ fn publish_with_stops(
         &mut crate::native_gameplay_bridge::PlayerGameplayHost,
     )
 }
-fn publish_with_host<H: NativeGameplayHost>(
-    session: &mut NativeGameplaySession<'_>,
+fn publish_with_host<S: SoloCompetitionPort, H: NativeGameplayHost>(
+    session: &mut GameplaySession<'_, S>,
     mut report: RuntimeReport,
     evidence: &mut OwnedStopEvidence,
     host_port: &mut H,
@@ -298,9 +301,9 @@ fn publish_with_host<H: NativeGameplayHost>(
     }
     Ok(())
 }
-fn process<D: NativeGameplayDevice, H: NativeGameplayHost>(
+fn process<D: NativeGameplayDevice, S: SoloCompetitionPort, H: NativeGameplayHost>(
     device: &mut D,
-    session: &mut NativeGameplaySession<'_>,
+    session: &mut GameplaySession<'_, S>,
     config: NativeGameplayConfig,
     event: PhysicalInputEvent,
     evidence: &mut OwnedStopEvidence,
@@ -367,9 +370,10 @@ pub fn run_gameplay_with_ports<
     D: NativeGameplayDevice,
     C: NativePumpControl,
     H: NativeGameplayHost,
+    S: SoloCompetitionPort,
 >(
     device: &mut D,
-    mut session: NativeGameplaySession<'_>,
+    mut session: GameplaySession<'_, S>,
     config: NativeGameplayConfig,
     control: &mut C,
     host_port: &mut H,
@@ -728,7 +732,10 @@ pub fn run_gameplay_with_ports<
 
 #[cfg(test)]
 mod fixtures {
-    use crate::player;
+    use crate::{competition_live::LiveCompetition, player};
+    mod competition_port {
+        include!("native_solo_competition_port_fixtures.rs");
+    }
     mod host {
         include!("native_solo_host_fixtures.rs");
     }

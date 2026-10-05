@@ -2,8 +2,8 @@
 use crate::{
     bgm::{BgmFeedReport, BgmFeeder},
     competition::ScoreSummary,
-    competition_live::LiveCompetition,
     completion::SongCompletion,
+    gameplay_competition::{GroupCompetitionPort, SoloCompetitionPort},
     gauge::{BmsGauge, GaugeProfile},
     live_pause::{
         LivePauseBoundary, prepare_live_transport, update_live_pause, validate_pre_pause_input,
@@ -16,7 +16,6 @@ use crate::{
     native_gameplay_host::{NativeGameplayDiagnostic, NativeGameplayHost, PauseState},
     native_pump_control::{NativePumpControl, NativePumpDeadline},
     offline::OwnedStopEvidence,
-    native_group_competition::NativeGroupCompetition,
     multiplayer_group::{MemberProgress, validate_members},
     multiplayer::Progress,
     native_gameplay::{
@@ -38,11 +37,18 @@ use std::{
     path::{Path, PathBuf},
     time::Duration as WallDuration,
 };
-pub use crate::native_gameplay_bridge::{run_cohort, run_cohort_with_control};
-pub struct NativeCohortSession<'a> {
+pub use crate::native_gameplay_bridge::{
+    NativeCohortSession, PlayerState, finite_cohort_done, member_progress, run_cohort,
+    run_cohort_with_control,
+};
+#[cfg(test)]
+use crate::native_group_competition::NativeGroupCompetition;
+
+/// Borrowed cohort state with explicit per-member and shared competition ports.
+pub struct CohortSession<'a, S, G> {
     pub group: &'a mut RuntimeGroup,
-    pub network: Option<&'a mut NativeGroupCompetition>,
-    pub states: &'a mut [PlayerState],
+    pub network: Option<&'a mut G>,
+    pub states: &'a mut [GameplayPlayerState<S>],
     pub merger: &'a mut InputMerger,
     pub bgm: &'a mut BgmFeeder,
     pub discipline: &'a mut PresentationDiscipline,
@@ -66,9 +72,9 @@ fn point(event: &PhysicalInputEvent) -> ClockPoint {
         timestamp: event.meta().timestamp,
     }
 }
-fn schedule<D: NativeGameplayDevice>(
+fn schedule<D: NativeGameplayDevice, S, G>(
     device: &mut D,
-    session: &NativeCohortSession<'_>,
+    session: &CohortSession<'_, S, G>,
     config: NativeGameplayConfig,
 ) -> NativeGameplayResult<ClockPoint> {
     if config.logical_schedule {
@@ -114,9 +120,14 @@ fn process_with_stops<D: NativeGameplayDevice>(
         &mut crate::native_gameplay_bridge::PlayerGameplayHost,
     )
 }
-fn process_with_host<D: NativeGameplayDevice, H: NativeGameplayHost>(
+fn process_with_host<
+    D: NativeGameplayDevice,
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+    H: NativeGameplayHost,
+>(
     device: &mut D,
-    session: &mut NativeCohortSession<'_>,
+    session: &mut CohortSession<'_, S, G>,
     config: NativeGameplayConfig,
     event: PhysicalInputEvent,
     evidence: &mut OwnedStopEvidence,
@@ -124,7 +135,7 @@ fn process_with_host<D: NativeGameplayDevice, H: NativeGameplayHost>(
 ) -> NativeGameplayResult<()> {
     let at = schedule(device, session, config)?;
     match session.group.process_input(event, &ExplicitDomains, at) {
-        Ok(InputResult::Processed(mut reports)) => observe_reports_with_host(
+        Ok(InputResult::Processed(mut reports)) => observe_reports_with_competition(
             &mut reports,
             session.states,
             session.group,
@@ -136,7 +147,7 @@ fn process_with_host<D: NativeGameplayDevice, H: NativeGameplayHost>(
             Err(format!("merged source {device:?} has no cohort owner").into())
         }
         Err(mut error) => {
-            let observation_error = observe_reports_with_host(
+            let observation_error = observe_reports_with_competition(
                 &mut error.completed_reports,
                 session.states,
                 session.group,
@@ -152,9 +163,14 @@ fn process_with_host<D: NativeGameplayDevice, H: NativeGameplayHost>(
         }
     }
 }
-fn advance<D: NativeGameplayDevice, H: NativeGameplayHost>(
+fn advance<
+    D: NativeGameplayDevice,
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+    H: NativeGameplayHost,
+>(
     device: &mut D,
-    session: &mut NativeCohortSession<'_>,
+    session: &mut CohortSession<'_, S, G>,
     config: NativeGameplayConfig,
     at: ClockPoint,
     evidence: &mut OwnedStopEvidence,
@@ -162,7 +178,7 @@ fn advance<D: NativeGameplayDevice, H: NativeGameplayHost>(
 ) -> NativeGameplayResult<()> {
     let audio_at = schedule(device, session, config)?;
     match session.group.advance_to(at, &ExplicitDomains, audio_at) {
-        Ok(mut reports) => observe_reports_with_host(
+        Ok(mut reports) => observe_reports_with_competition(
             &mut reports,
             session.states,
             session.group,
@@ -171,7 +187,7 @@ fn advance<D: NativeGameplayDevice, H: NativeGameplayHost>(
             host_port,
         ),
         Err(mut error) => {
-            let observation_error = observe_reports_with_host(
+            let observation_error = observe_reports_with_competition(
                 &mut error.completed_reports,
                 session.states,
                 session.group,
@@ -187,9 +203,14 @@ fn advance<D: NativeGameplayDevice, H: NativeGameplayHost>(
         }
     }
 }
-fn reconcile<D: NativeGameplayDevice, H: NativeGameplayHost>(
+fn reconcile<
+    D: NativeGameplayDevice,
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+    H: NativeGameplayHost,
+>(
     device: &mut D,
-    session: &mut NativeCohortSession<'_>,
+    session: &mut CohortSession<'_, S, G>,
     config: NativeGameplayConfig,
     keyboard: &mut PauseKeyboard,
     at: ClockPoint,
@@ -201,10 +222,11 @@ fn reconcile<D: NativeGameplayDevice, H: NativeGameplayHost>(
     }
     Ok(())
 }
-pub struct PlayerState {
+/// One player's retained actual prefix and optional competition observer.
+pub struct GameplayPlayerState<S> {
     pub player: PlayerId,
     pub capture: Option<LiveReplayCapture>,
-    pub competition: Option<LiveCompetition>,
+    pub competition: Option<S>,
     pub completion: Option<SongCompletion>,
     pub score: ScoreSummary,
     pub gauge: BmsGauge,
@@ -253,7 +275,9 @@ impl std::error::Error for NativeCohortProcessingError {
 }
 
 /// Snapshot every member's retained committed prefix without advancing gameplay.
-pub fn member_progress(states: &[PlayerState]) -> NativeGameplayResult<Vec<MemberProgress>> {
+pub fn member_progress_for_states<S>(
+    states: &[GameplayPlayerState<S>],
+) -> NativeGameplayResult<Vec<MemberProgress>> {
     let members = states
         .iter()
         .map(|state| MemberProgress {
@@ -273,11 +297,11 @@ pub fn member_progress(states: &[PlayerState]) -> NativeGameplayResult<Vec<Membe
 
 /// A candidate watermark is insufficient: every member requires the same
 /// actually committed acquisition frontier and acknowledged native endpoint.
-pub fn finite_cohort_done(
+pub fn finite_cohort_done_for_states<S>(
     end: Option<i64>,
     presented: Option<ClockPoint>,
     committed: Option<ClockPoint>,
-    states: &[PlayerState],
+    states: &[GameplayPlayerState<S>],
     backlog: bool,
     resuming: bool,
 ) -> bool {
@@ -296,23 +320,23 @@ pub fn finite_cohort_done(
     })
 }
 
-fn finite_cohort_done_with_terminal(
+fn finite_cohort_done_with_terminal<S>(
     end: Option<i64>,
     presented: Option<ClockPoint>,
     committed: Option<ClockPoint>,
-    states: &[PlayerState],
+    states: &[GameplayPlayerState<S>],
     group: &RuntimeGroup,
     backlog: bool,
     resuming: bool,
     bgm: BgmFeedReport,
     rendered: Option<RenderReport>,
 ) -> bool {
-    let failed = |state: &PlayerState| {
+    let failed = |state: &GameplayPlayerState<S>| {
         state.gauge.snapshot().failure.is_some()
             && group.player_gameplay_fence(state.player).is_some()
     };
     if !states.iter().any(failed) {
-        return finite_cohort_done(end, presented, committed, states, backlog, resuming);
+        return finite_cohort_done_for_states(end, presented, committed, states, backlog, resuming);
     }
     end.is_some_and(|end| {
         states
@@ -371,11 +395,26 @@ fn observe_reports_with_stops(
         &mut crate::native_gameplay_bridge::PlayerGameplayHost,
     )
 }
+#[cfg(test)]
 fn observe_reports_with_host<H: NativeGameplayHost>(
     reports: &mut [PlayerReport],
     states: &mut [PlayerState],
     group: &mut RuntimeGroup,
     network: Option<&mut NativeGroupCompetition>,
+    evidence: &mut OwnedStopEvidence,
+    host_port: &mut H,
+) -> NativeGameplayResult<()> {
+    observe_reports_with_competition(reports, states, group, network, evidence, host_port)
+}
+fn observe_reports_with_competition<
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
+    H: NativeGameplayHost,
+>(
+    reports: &mut [PlayerReport],
+    states: &mut [GameplayPlayerState<S>],
+    group: &mut RuntimeGroup,
+    network: Option<&mut G>,
     evidence: &mut OwnedStopEvidence,
     host_port: &mut H,
 ) -> NativeGameplayResult<()> {
@@ -425,7 +464,7 @@ fn observe_reports_with_host<H: NativeGameplayHost>(
         }
     }
     if let Some(network) = network {
-        match member_progress(states).and_then(|members| network.observe(&members)) {
+        match member_progress_for_states(states).and_then(|members| network.observe(&members)) {
             Ok(()) => {}
             Err(error) => failures.push(format!("shared competition: {error}")),
         }
@@ -502,9 +541,11 @@ pub fn run_cohort_with_ports<
     D: NativeGameplayDevice,
     C: NativePumpControl,
     H: NativeGameplayHost,
+    S: SoloCompetitionPort,
+    G: GroupCompetitionPort,
 >(
     device: &mut D,
-    mut session: NativeCohortSession<'_>,
+    mut session: CohortSession<'_, S, G>,
     config: NativeGameplayConfig,
     control: &mut C,
     host_port: &mut H,
@@ -857,6 +898,11 @@ pub fn run_cohort_with_ports<
                 rendered,
             )
         {
+            for state in session.states.iter_mut() {
+                if let Some(competition) = state.competition.as_mut() {
+                    competition.mark_native_completed();
+                }
+            }
             if let Some(network) = session.network.as_deref_mut() {
                 network.mark_native_completed();
             }
@@ -900,6 +946,11 @@ pub fn run_cohort_with_ports<
                 };
             }
             if finished {
+                for state in session.states.iter_mut() {
+                    if let Some(competition) = state.competition.as_mut() {
+                        competition.mark_native_completed();
+                    }
+                }
                 if let Some(network) = session.network.as_deref_mut() {
                     network.mark_native_completed();
                 }
@@ -913,6 +964,9 @@ pub fn run_cohort_with_ports<
 
 #[cfg(test)]
 mod fixtures {
+    mod competition_port {
+        include!("native_local_competition_port_fixtures.rs");
+    }
     use crate::player;
     mod host {
         include!("native_local_host_fixtures.rs");

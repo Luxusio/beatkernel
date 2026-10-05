@@ -90,6 +90,8 @@ mod font_grapheme_window_fixtures;
 /// Cached font glyphs composed through the existing ordered sprite path.
 #[cfg(feature = "graphics")]
 pub mod font_text;
+/// Explicit competition observation and completion ports for gameplay policy.
+pub mod gameplay_competition;
 /// Shared fixed-point gauge observations from committed normal and mine outcomes.
 pub mod gauge;
 #[cfg(test)]

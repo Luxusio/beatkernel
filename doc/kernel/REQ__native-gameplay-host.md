@@ -38,9 +38,11 @@ publisher, and retain partial/fatal report prefixes across publication failure.
 This is a boundary increment; platform presentation types and network owner
 coupling still require separate work. Test execution and formal QA remain deferred.
 
-Optional `LiveCompetition` and `NativeGroupCompetition` owners currently include
-network operations, presentation publication and native timing internally. This
-increment does not convert them to pure ports; injecting a host alone cannot
-make a configured network/ghost competition run fully free of ambient effects.
-The new deterministic pump fixtures therefore use absent competition owners.
-The final architecture still requires explicit competition/network effect ports.
+The legacy native `LiveCompetition` and `NativeGroupCompetition` implementations
+still include network operations, presentation publication and native timing
+internally. Injecting a host alone cannot make those concrete adapters pure.
+The host-boundary fixtures use absent competition owners; the subsequent
+[competition-port boundary](REQ__gameplay-competition-ports.md) also supports
+generic sessions containing populated deterministic observers. The final
+architecture still requires separation inside the comparison/IO adapters and
+of platform presentation types.

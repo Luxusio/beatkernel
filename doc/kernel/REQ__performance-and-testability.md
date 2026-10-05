@@ -89,10 +89,13 @@ is distinct from judgment timing. Native pump wall-clock deadlines and waits use
 an explicit control port. The fully injected solo/cohort entry points also
 receive a business-owned host for commands, publication and typed diagnostics;
 the outer compatibility bridge selects legacy player/system adapters. Shared
-pumps still depend on platform presentation-discipline types and optional
-competition owners that internally perform network, clock and UI effects.
-Those owners, file/network boundaries and adapter coverage require continued
-audit and separation. See [the host boundary](REQ__native-gameplay-host.md) for
+pumps still depend on platform presentation-discipline types. Their generic
+sessions now accept business-owned solo/group competition observers; concrete
+native specializations live in the compatibility bridge. The native competition
+implementations still mix comparison, network, clock and UI effects internally.
+Those adapters, file/network boundaries and adapter coverage require continued
+audit and separation. See [the competition ports](REQ__gameplay-competition-ports.md)
+and [the host boundary](REQ__native-gameplay-host.md) for
 its exact scope and remaining effects. Completed-play result integration remains
 planned. Test execution, hardware QA and comparative benchmarks remain deferred
 under the user's existing verification instruction; no quality target is
