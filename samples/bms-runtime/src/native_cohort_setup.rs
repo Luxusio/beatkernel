@@ -6,7 +6,10 @@ use crate::{
     competition_live::{CompetitionOptions, LiveCompetition},
     local_input::InputMerger,
     local_players::{MAX_LOCAL_PLAYERS, PlayerId, ResolvedInputPlan},
-    local_preparation::{PreparedLocalMembers, prepare_local_members, prepare_local_input_sounds},
+    local_preparation::{
+        PreparedLocalMembers, prepare_local_members, prepare_local_input_sounds,
+        prepare_local_mine_sounds,
+    },
     local_runtime::{MemberConfig, RuntimeGroup},
     native_cohort::{PlayerState, member_progress, replay_path},
     native_group_competition::NativeGroupCompetition,
@@ -17,7 +20,7 @@ use crate::{
 use beatkernel::{
     audio::{CommandProducer, VoiceId},
     input::{Binding, BindingMap, DeviceId, DeviceSelector, GameControlId, PhysicalControlId},
-    runtime::input_sound::InputSoundTimeline,
+    runtime::{input_sound::InputSoundTimeline, hazard_sound::HazardSoundTimeline},
     time::{ClockDomainId, ClockPoint, Timestamp},
     transport::Transport,
 };
@@ -50,6 +53,7 @@ pub struct CohortPreparation<'a> {
 pub struct PreparedCohort {
     pub configs: Vec<MemberConfig>,
     pub input_sounds: Vec<(PlayerId, InputSoundTimeline)>,
+    pub hazard_sounds: Vec<(PlayerId, HazardSoundTimeline)>,
     pub states: Vec<PlayerState>,
     pub save_paths: Vec<(PlayerId, Option<PathBuf>)>,
     pub reserved: Vec<VoiceId>,
@@ -93,6 +97,7 @@ pub fn prepare_cohort(
         .iter()
         .map(|note| note.lane)
         .chain(prepared.source.invisible.iter().map(|event| event.lane))
+        .chain(prepared.source.mines.iter().map(|event| event.lane))
     {
         if !config.bindings.contains_key(&lane.channel()) {
             return Err(format!("missing --bind for BMS channel{:02X}", lane.channel()).into());
@@ -137,6 +142,7 @@ pub fn prepare_cohort(
         beatkernel_bms::BmsInputMode::ButtonOnly,
     )?;
     let input_sounds = prepare_local_input_sounds(prepared, &configs, &reserved)?;
+    let hazard_sounds = prepare_local_mine_sounds(prepared, &configs, &reserved, &input_sounds)?;
     let mut states = Vec::new();
     let mut save_paths = Vec::new();
     states.try_reserve_exact(assignments.len())?;
@@ -197,6 +203,7 @@ pub fn prepare_cohort(
         network,
         configs,
         input_sounds,
+        hazard_sounds,
         states,
         save_paths,
         reserved,
@@ -236,6 +243,32 @@ pub fn activate_cohort_with_input_sounds(
     end: Option<Timestamp>,
     input_sounds: Vec<(PlayerId, InputSoundTimeline)>,
 ) -> NativeGameplayResult<(RuntimeGroup, InputMerger)> {
+    activate_cohort_with_sounds(
+        configs,
+        reserved,
+        host_origin,
+        output,
+        transport,
+        producer,
+        end,
+        input_sounds,
+        Vec::new(),
+    )
+}
+
+/// Activates actual press and hazard sound timelines before the finite endpoint.
+#[allow(clippy::too_many_arguments)]
+pub fn activate_cohort_with_sounds(
+    configs: Vec<MemberConfig>,
+    reserved: &[VoiceId],
+    host_origin: ClockPoint,
+    output: ClockDomainId,
+    transport: Transport,
+    producer: CommandProducer,
+    end: Option<Timestamp>,
+    input_sounds: Vec<(PlayerId, InputSoundTimeline)>,
+    hazard_sounds: Vec<(PlayerId, HazardSoundTimeline)>,
+) -> NativeGameplayResult<(RuntimeGroup, InputMerger)> {
     admit_cohort(configs.len(), false)?;
     if transport.anchor().host_time != host_origin.timestamp {
         return Err("cohort transport anchor differs from native host origin".into());
@@ -260,6 +293,9 @@ pub fn activate_cohort_with_input_sounds(
     )?;
     if !input_sounds.is_empty() {
         group.configure_input_sounds(input_sounds)?;
+    }
+    if !hazard_sounds.is_empty() {
+        group.configure_hazard_sounds(hazard_sounds)?;
     }
     if let Some(end) = end {
         group.set_song_end(end)?;

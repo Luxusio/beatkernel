@@ -11,8 +11,8 @@ use beatkernel::{
 };
 use beatkernel_bms_runtime::native_audio::{NativeAudioConfig, PreparedNativeAudio, prepare_audio};
 use beatkernel_bms_runtime::native_cohort_setup::{
-    CohortPreparation, PreparedCohort, activate_cohort_with_input_sounds,
-    admit_cohort as admit_mode, finish_cohort, prepare_cohort,
+    CohortPreparation, PreparedCohort, activate_cohort_with_sounds, admit_cohort as admit_mode,
+    finish_cohort, prepare_cohort,
 };
 use beatkernel_bms_runtime::{
     ChannelPolicy,
@@ -250,6 +250,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         mut network,
         configs,
         input_sounds,
+        hazard_sounds,
         mut states,
         save_paths,
         reserved,
@@ -386,7 +387,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             };
             (discipline, host_origin, output_origin())
         };
-        let (mut group, mut merger) = activate_cohort_with_input_sounds(
+        let (mut group, mut merger) = activate_cohort_with_sounds(
             configs,
             &reserved,
             host_origin,
@@ -395,6 +396,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             producer,
             options.end_ns.map(Timestamp::from_nanos),
             input_sounds,
+            hazard_sounds,
         )?;
         let pump = {
             let mut backlogged = vec![true; count];

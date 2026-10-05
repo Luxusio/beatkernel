@@ -249,6 +249,8 @@ mod native_invisible_identity_fixtures;
 /// Shared native profile, completion and optional capture configuration.
 pub mod native_judge;
 #[cfg(test)]
+mod native_mine_audio_fixtures;
+#[cfg(test)]
 mod native_mine_fixtures;
 #[cfg(test)]
 mod native_mine_presentation_fixtures;

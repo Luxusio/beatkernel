@@ -3,6 +3,7 @@ use crate::{
     PreparedBms,
     bgm::{BgmConfig, BgmFeeder},
     input_sounds::InputSoundPlan,
+    mine_sounds::MineSoundPlan,
     native_gameplay::NativeGameplayResult,
 };
 use beatkernel::{
@@ -10,7 +11,7 @@ use beatkernel::{
         AudioCommand, AudioLimits, CommandProducer, CommandPushError, Mixer, MixerConfig,
         RenderReport, SampleBank, command_queue, command_queue_with_start_gate,
     },
-    runtime::input_sound::InputSoundTimeline,
+    runtime::{input_sound::InputSoundTimeline, hazard_sound::HazardSoundTimeline},
     time::{ClockPoint, Duration, Timestamp},
 };
 /// Validate native press sounds before moving PCM or starting output ownership.
@@ -33,6 +34,30 @@ pub fn prepare_input_sounds(
         }
     }
     Ok(Some(plan.timeline()))
+}
+
+/// Validates optional native WAV00 sounds after press voice preparation, before
+/// moving PCM or starting output. Unused WAV00 requires no sample or voice.
+pub fn prepare_mine_sounds(
+    prepared: &PreparedBms,
+    input_sounds: Option<&InputSoundTimeline>,
+) -> NativeGameplayResult<Option<HazardSoundTimeline>> {
+    if prepared.source.mines.is_empty() {
+        return Ok(None);
+    }
+    let plan = MineSoundPlan::prepare(
+        &prepared.source,
+        &prepared.sounds,
+        &prepared.bgm_commands,
+        input_sounds,
+        beatkernel_bms::ParseOptions::default().max_objects,
+    )?;
+    for &sample in plan.samples() {
+        if prepared.bank.get(sample).is_none() {
+            return Err("native mine sound sample is missing from PCM bank".into());
+        }
+    }
+    Ok(plan.timeline())
 }
 
 pub const LIVE_COMMAND_RESERVE: usize = 1024;

@@ -70,13 +70,38 @@ and mine fingerprint with `beatkernel-bms/input-sounds/v2`, a one-byte invisible
 presence flag, its u64 fingerprint when present, and the u64 mine fingerprint.
 Both domains use the existing semantic FNV-1a64 convention, not a cryptographic
 asset digest. Existing source-aware capture/replay validation
-consume that common identity; this does not yet schedule native/replay/offline
-mine audio or load WAV00 through guarded file preparation.
+consume that common identity. Native installation is specified below; replay
+and offline mine audio and guarded WAV00 file loading remain separate work.
 
 Author independent deferred plan/voice/identity, atomic group-order collision,
 real solo/local report-to-command and completion-tail fixtures. Gauge/fatal-stop
-policy, native/replay/offline installation and guarded asset admission remain
+policy, replay/offline installation and guarded asset admission remain
 unfinished. Execution and acceptance remain deferred.
+
+### Native WAV00 preparation and activation
+
+Native solo preparation uses the common MineSoundPlan with already prepared
+press voices and the actual PCM bank, before bank movement or output startup.
+No-mine sources retain the unconfigured path. Audible missing WAV00 PCM fails
+preparation; absent WAV00 and fatal-only sources require no explosion PCM.
+Linux, Windows and macOS solo owners install that timeline after press sounds
+and before finite-end activation, without platform-specific sound semantics.
+
+The common native cohort preparation includes mine lanes in binding coverage
+and prepares member-disjoint hazard timelines after gameplay/BGM/press voices.
+It validates all sound preparation before opponent loading. PreparedCohort
+carries those timelines to a common activation entry point, which installs
+press and hazard timelines before setting the song end. Existing legacy and
+press-only activation APIs remain available as empty-hazard wrappers. All three
+actual platform local owners pass the prepared hazard timelines through that
+same entry point. No sound configuration publishes commands during activation.
+
+Author independent deferred actual native-plan/Runtime/Mixer and cohort fixtures
+for routing, held triggering versus avoidance/fatal silence, simultaneous normal
+and press sounds, disjoint member voices, finite-end fences, atomic refusal and
+missing PCM. Native source changes and portable composition compilation do not
+prove Windows/macOS device behavior. File mine admission, WAV00 asset loading,
+replay/offline scheduling and complete gauge/fatal-stop policy remain unfinished.
 
 ### Common optional sound primitive
 
