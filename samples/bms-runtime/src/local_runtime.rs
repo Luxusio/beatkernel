@@ -512,6 +512,24 @@ impl RuntimeGroup {
     pub fn transport_mut(&mut self) -> &mut Transport {
         &mut self.transport
     }
+    /// Fences only this member's committed gameplay frontier. A technical
+    /// group failure does not prevent fencing its committed prefix or become
+    /// cleared by this operation. Unknown players leave every member intact.
+    pub fn fence_player(&mut self, player: PlayerId) -> Result<Option<Timestamp>, String> {
+        let member = self
+            .members
+            .iter_mut()
+            .find(|member| member.player == player)
+            .ok_or("unknown local player")?;
+        Ok(member.runtime.fence_gameplay())
+    }
+    /// Returns this member's latched frontier, or `None` when unfenced or unknown.
+    pub fn player_gameplay_fence(&self, player: PlayerId) -> Option<Timestamp> {
+        self.members
+            .iter()
+            .find(|member| member.player == player)
+            .and_then(|member| member.runtime.gameplay_fence())
+    }
     pub fn member_judge(&self, player: PlayerId) -> Option<&JudgeEngine> {
         self.members
             .iter()
@@ -653,6 +671,14 @@ impl SoloRuntime {
     /// Uses the same shared output control as a multi-player cohort.
     pub fn request_audio_pause(&mut self, paused: bool) {
         self.0.request_audio_pause(paused);
+    }
+    /// Fences the solo member's committed frontier without clearing poison.
+    pub fn fence_gameplay(&mut self) -> Option<Timestamp> {
+        self.0.members[0].runtime.fence_gameplay()
+    }
+    /// Returns the solo member's latched gameplay frontier.
+    pub fn gameplay_fence(&self) -> Option<Timestamp> {
+        self.0.members[0].runtime.gameplay_fence()
     }
     pub fn judge(&self) -> &JudgeEngine {
         self.0.members[0].runtime.judge()

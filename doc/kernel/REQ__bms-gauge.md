@@ -108,6 +108,9 @@ new polling/render loop is permitted.
 
 Completion clear/fail decisions and
 actual per-player failure fencing/output cleanup still need integration.
+The [portable gameplay fence](REQ__gameplay-fence.md) is an explicit control
+component for that integration; introducing it does not automatically connect
+gauge policy, replay reconstruction or per-player audio cleanup.
 InstantDeath state alone does not establish playback termination. Keep the
 high-level mine file admission guard until those owners are connected. Author
 independent deferred fixed-point/configuration/atomicity and real solo/local/

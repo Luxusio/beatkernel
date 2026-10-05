@@ -201,6 +201,7 @@ pub struct Runtime {
     last_host: Option<Timestamp>,
     last_song: Option<Timestamp>,
     song_end: Option<Timestamp>,
+    gameplay_fence: Option<Timestamp>,
     sequences: HashMap<DeviceId, u64>,
     telemetry: RuntimeTelemetry,
     processing_clock: RuntimeProcessingClock,
@@ -237,6 +238,7 @@ impl Runtime {
             last_host: None,
             last_song: None,
             song_end: None,
+            gameplay_fence: None,
             sequences: HashMap::new(),
             telemetry: RuntimeTelemetry::new(telemetry_capacity),
             processing_clock: RuntimeProcessingClock::Native,
@@ -289,6 +291,25 @@ impl Runtime {
     /// Configured logical song endpoint, independent of native playback state.
     pub const fn song_end(&self) -> Option<Timestamp> {
         self.song_end
+    }
+
+    /// Fences gameplay at the latest committed song time, limited by the
+    /// configured endpoint. Repeated calls retain the first frontier; before
+    /// any committed operation this returns `None` without changing setup.
+    /// Acquisition chronology remains active, while judging, routing and new
+    /// gameplay sounds stop. Existing held state and queued audio stay intact.
+    pub fn fence_gameplay(&mut self) -> Option<Timestamp> {
+        if self.gameplay_fence.is_none() {
+            self.gameplay_fence = self
+                .last_song
+                .map(|song| self.song_end.map_or(song, |end| song.min(end)));
+        }
+        self.gameplay_fence
+    }
+
+    /// The optional committed frontier latched by `fence_gameplay`.
+    pub const fn gameplay_fence(&self) -> Option<Timestamp> {
+        self.gameplay_fence
     }
 
     /// Installs spatial routing before any committed operation, at most once.
@@ -384,6 +405,14 @@ impl Runtime {
                 meta.timestamp = host.timestamp;
                 meta.clock_domain = host.domain;
             }
+            if self.gameplay_fence.is_some() {
+                self.sequences.insert(meta.source, meta.sequence);
+                self.commit_time(host.timestamp, mapped_song);
+                let counters = self.telemetry.counters_mut();
+                counters.inputs = counters.inputs.saturating_add(1);
+                report.input = Some(input);
+                return Ok(report);
+            }
             let routed = if report.song_end_reached {
                 TouchRoute::Unconfigured
             } else if let Some(router) = &mut self.touch_router {
@@ -462,6 +491,7 @@ impl Runtime {
     }
 
     /// Advances judge deadlines using explicit host and output clock points.
+    /// After a gameplay fence, only acquisition chronology advances.
     pub fn advance_to(
         &mut self,
         host: ClockPoint,
@@ -472,6 +502,10 @@ impl Runtime {
         let result = (|| {
             let (host, quality) = normalize(host, self.host_domain, mapper)?;
             let (mut report, mapped_song) = self.prepare(host, audio_at, mapper, quality)?;
+            if self.gameplay_fence.is_some() {
+                self.commit_time(host.timestamp, mapped_song);
+                return Ok(report);
+            }
             match self.judge.advance_to(report.song_time) {
                 Ok(events) => {
                     report
@@ -519,7 +553,9 @@ impl Runtime {
             RuntimeReport {
                 input: None,
                 bound_inputs: Vec::new(),
-                song_time: self.song_end.map_or(song_time, |end| song_time.min(end)),
+                song_time: self
+                    .gameplay_fence
+                    .unwrap_or_else(|| self.song_end.map_or(song_time, |end| song_time.min(end))),
                 song_end_reached,
                 audio_at,
                 input_mapping_quality,
@@ -651,11 +687,14 @@ impl Runtime {
         &mut self.judge
     }
     /// Replaces both gameplay owners after explicit replay reconstruction.
-    /// Resets input chronology, acquisition sequences and song-end setup; leaves telemetry,
-    /// bindings, configured input/hazard sounds and already queued audio commands intact. The caller must
-    /// separately synchronize audio output when restoring a timeline. Configured
+    /// Resets input chronology, acquisition sequences, song-end setup and the
+    /// gameplay fence; leaves telemetry, bindings, configured input/hazard sounds
+    /// and already queued audio commands intact. The caller must separately
+    /// synchronize audio output when restoring a timeline. Configured
     /// touch regions remain, but held routes are cleared for a fresh contact start;
     /// restoring active contacts requires `replace_state_with_touch_router` instead.
+    /// The caller must reconstruct its failure policy and refence a failed
+    /// prefix when applicable after restoration.
     pub fn replace_state(
         &mut self,
         judge: JudgeEngine,
@@ -671,7 +710,8 @@ impl Runtime {
     /// Installs explicitly paired judge, transport and contact routing owners.
     /// Returns all prior owners without clearing either router's held contacts.
     /// The caller must supply a coherent checkpoint and synchronize audio;
-    /// chronology/sequences/song-end setup reset as in `replace_state`.
+    /// chronology/sequences/song-end setup and the gameplay fence reset as in
+    /// `replace_state`, including its caller-owned failure-policy restoration.
     pub fn replace_state_with_touch_router(
         &mut self,
         judge: JudgeEngine,
@@ -693,6 +733,7 @@ impl Runtime {
         self.last_host = None;
         self.last_song = None;
         self.song_end = None;
+        self.gameplay_fence = None;
         self.sequences.clear();
         (previous_judge, previous_transport)
     }
