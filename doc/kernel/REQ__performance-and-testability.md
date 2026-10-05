@@ -27,10 +27,12 @@ import concrete UI or IO implementations to choose or instantiate them.
 The application composition root supplies concrete ports at construction or
 explicit operation boundaries. Tests inject deterministic implementations
 through those same entry points. Avoid hidden globals, thread-local service
-lookup or platform branches as substitutes for injection. Existing player
-thread-local control/publication bridges require explicit ports in a follow-up;
-they do not satisfy this final architecture rule. Backend conversion stays in
-IO while backend-independent presentation/time algorithms belong in the domain.
+lookup or platform branches as substitutes for injection. Legacy player
+thread-local control/publication access belongs only in the outer compatibility
+bridge; fully injected gameplay entry points receive
+explicit command/publication ports. Remaining concrete adapters still require
+audit against this rule. Backend conversion stays in IO while backend-independent
+presentation/time algorithms belong in the domain.
 UI lifecycles and back-stack decisions remain testable independently of graphics.
 IO lifecycle/cleanup failures cannot fabricate business completion evidence.
 
@@ -89,8 +91,13 @@ is distinct from judgment timing. Native pump wall-clock deadlines and waits use
 an explicit control port. The fully injected solo/cohort entry points also
 receive a business-owned host for commands, publication and typed diagnostics;
 the outer compatibility bridge selects legacy player/system adapters. Shared
-pumps still depend on platform presentation-discipline types. Their generic
-sessions now accept business-owned solo/group competition observers; concrete
+pumps still depend on platform presentation-discipline types. The actual
+bounded observation ring, freshness, drift/phase calculation and continuous
+transport correction now belong to the pure core presentation estimator; the
+platform wrapper validates native source metadata and delegates calculation.
+Migrating gameplay sessions/device contracts to a business-owned presentation
+port remains unfinished. See [the estimator boundary](REQ__pure-presentation-estimator.md).
+Their generic sessions now accept business-owned solo/group competition observers; concrete
 native specializations live in the compatibility bridge. The native competition
 implementations still mix comparison, network, clock and UI effects internally.
 Those adapters, file/network boundaries and adapter coverage require continued
