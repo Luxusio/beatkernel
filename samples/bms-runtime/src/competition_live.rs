@@ -1,6 +1,7 @@
 //! Shared native application flags and observation outside the audio callback.
 use crate::{
     competition::{Competition, OpponentKind},
+    competition_progress,
     input_sounds::InputSoundIdentity,
     local_players::PlayerId,
     multiplayer::{
@@ -613,60 +614,38 @@ impl LiveCompetition {
         let song = report.song_time.as_nanos();
         let mut disconnected = false;
         if let Some(network) = &mut self.network {
-            for event in network.poll() {
-                let MultiplayerNotice::Session(event) = event else {
-                    continue;
-                };
-                match event {
-                    MultiplayerEvent::Connected => {
-                        self.network_status = Some(NetworkStatus::Waiting);
-                        println!(
-                            "multiplayer peer compatible; waiting for native preparation readiness"
-                        );
-                    }
-                    MultiplayerEvent::Ready => self.network_status = Some(NetworkStatus::Connected),
-                    MultiplayerEvent::Progress(_)
-                    | MultiplayerEvent::ClockEstimated(_)
-                    | MultiplayerEvent::StartScheduled(_)
-                    | MultiplayerEvent::FinalProgress(_)
-                    | MultiplayerEvent::FinalAcknowledged => {}
-                    MultiplayerEvent::Disconnected(error) => {
-                        eprintln!("multiplayer disconnected: {error}; local play continues");
-                        disconnected = true;
-                    }
-                }
+            let mut status = self.network_status.unwrap_or(NetworkStatus::Waiting);
+            let active = !self.network_failed;
+            if let Err(error) = competition_progress::poll_progress(network, &mut status, active) {
+                eprintln!("multiplayer disconnected: {error}; local play continues");
+                disconnected = true;
             }
+            self.network_status = Some(status);
+            let score = self.competition.score();
+            let members = [MemberProgress {
+                player: self.player,
+                progress: Progress {
+                    song_ns: song,
+                    hits: score.hits,
+                    misses: score.misses,
+                    combo: score.combo,
+                    max_combo: score.max_combo,
+                },
+            }];
             if network.is_room() {
-                let score = self.competition.score();
-                network.observe_room(&[MemberProgress {
-                    player: self.player,
-                    progress: Progress {
-                        song_ns: song,
-                        hits: score.hits,
-                        misses: score.misses,
-                        combo: score.combo,
-                        max_combo: score.max_combo,
-                    },
-                }])?;
-            } else if !self.network_failed
-                && !disconnected
-                && network.is_ready()
-                && self
-                    .last_publish
-                    .is_none_or(|last| i128::from(song) - i128::from(last) >= 50_000_000)
-            {
-                let score = self.competition.score();
-                match network.try_publish(vec![MemberProgress {
-                    player: self.player,
-                    progress: Progress {
-                        song_ns: song,
-                        hits: score.hits,
-                        misses: score.misses,
-                        combo: score.combo,
-                        max_combo: score.max_combo,
-                    },
-                }]) {
-                    Ok(()) => self.last_publish = Some(song),
+                competition_progress::observe_room_progress(network, &members)?;
+            } else {
+                let allowed = !self.network_failed
+                    && !disconnected
+                    && matches!(status, NetworkStatus::Waiting | NetworkStatus::Connected);
+                let due = allowed
+                    && self
+                        .last_publish
+                        .is_none_or(|last| i128::from(song) - i128::from(last) >= 50_000_000);
+                match competition_progress::publish_progress(network, &members, allowed, false, due)
+                {
+                    Ok(true) => self.last_publish = Some(song),
+                    Ok(false) => {}
                     Err(error) => {
                         eprintln!("multiplayer unavailable: {error}; local play continues");
                         disconnected = true;
@@ -674,6 +653,7 @@ impl LiveCompetition {
                 }
             }
         }
+
         let second = song.div_euclid(1_000_000_000);
         if self.last_display != Some(second) {
             println!(

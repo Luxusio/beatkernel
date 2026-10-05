@@ -3,14 +3,15 @@
 use crate::{
     competition_live::NetworkRole,
     local_players::PlayerId,
-    multiplayer::{GroupMultiplayer, MultiplayerError, MultiplayerNotice, MultiplayerOptions},
+    multiplayer::{
+        GroupMultiplayer, MultiplayerError, MultiplayerNotice, MultiplayerOptions, MultiplayerEvent,
+    },
     multiplayer_group::{GroupPrefix, MemberProgress},
     multiplayer_start::{StartPolicy, StartSchedule},
     multiplayer_webtransport_client::WebTransportOptions,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use crate::{
-    multiplayer::MultiplayerEvent,
     multiplayer_start::StartRole,
     native_room_competition::NativeRoomCompetition,
     native_room_network::{NativeRoomNetwork, NativeRoomOptions, NativeRoomOutcome},
@@ -290,3 +291,57 @@ impl NativeCompetitionNetwork {
 #[cfg(test)]
 #[path = "native_room_app_fixtures.rs"]
 mod fixtures;
+
+/// Direct iterator mapping reuses the transport notice allocation without a second vector.
+pub struct NativeProgressNotices {
+    notices: std::vec::IntoIter<MultiplayerNotice>,
+}
+impl Iterator for NativeProgressNotices {
+    type Item = crate::competition_progress::ProgressNotice<MultiplayerError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        use crate::competition_progress::ProgressNotice;
+        loop {
+            match self.notices.next()? {
+                MultiplayerNotice::Session(MultiplayerEvent::Connected) => {
+                    return Some(ProgressNotice::Connected);
+                }
+                MultiplayerNotice::Session(MultiplayerEvent::Ready) => {
+                    return Some(ProgressNotice::Ready);
+                }
+                MultiplayerNotice::Session(MultiplayerEvent::Disconnected(error)) => {
+                    return Some(ProgressNotice::Disconnected(error));
+                }
+                _ => {}
+            }
+        }
+    }
+}
+impl crate::competition_progress::CompetitionProgressPort for NativeCompetitionNetwork {
+    type Error = MultiplayerError;
+    type Notices = NativeProgressNotices;
+    fn notices(&mut self) -> Self::Notices {
+        NativeProgressNotices {
+            notices: NativeCompetitionNetwork::poll(self).into_iter(),
+        }
+    }
+    fn ready(&self) -> bool {
+        self.is_ready()
+    }
+    fn started(&self) -> bool {
+        self.start_schedule().is_some()
+    }
+    fn publish(&mut self, members: &[MemberProgress]) -> Result<(), Self::Error> {
+        let mut publication = Vec::new();
+        publication.try_reserve_exact(members.len()).map_err(|_| {
+            MultiplayerError::Protocol("competition publication allocation failed".into())
+        })?;
+        publication.extend_from_slice(members);
+        self.try_publish(publication)
+    }
+    fn observe_room(&mut self, members: &[MemberProgress]) -> Result<(), Self::Error> {
+        NativeCompetitionNetwork::observe_room(self, members)
+    }
+    fn request_stop(&mut self) {
+        NativeCompetitionNetwork::request_stop(self);
+    }
+}

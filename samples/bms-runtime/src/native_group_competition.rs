@@ -3,13 +3,11 @@
 
 use crate::{
     competition_live::{CompetitionOptions, replay_limits},
+    competition_progress,
     input_sounds::InputSoundIdentity,
     local_players::PlayerId,
     local_runtime::MemberConfig,
-    multiplayer::{
-        MultiplayerError, MultiplayerEvent, MultiplayerNotice, MultiplayerOptions,
-        competition_identity_for_section,
-    },
+    multiplayer::{MultiplayerError, MultiplayerOptions, competition_identity_for_section},
     multiplayer_group::{GroupPrefix, MemberProgress, validate_members, validate_roster},
     native_competition_network::NativeCompetitionNetwork,
     native_start::{NativeStartAgreement, NativeStartResult, SessionHostBracket},
@@ -112,7 +110,7 @@ impl NativeGroupCompetition {
         if self.network.is_room() {
             // The room controller retains every actual prefix and applies its
             // own network-clock cadence and display-only failure policy.
-            self.network.observe_room(members)?;
+            competition_progress::observe_room_progress(&mut self.network, members)?;
             return Ok(());
         }
         let next = validated_local_prefix(&self.players, self.local.as_deref(), members)?;
@@ -121,49 +119,26 @@ impl NativeGroupCompetition {
         if let Err(error) = self.poll_network() {
             self.disconnect(error);
         }
-        if self.failure.is_none()
-            && self.network.is_ready()
-            && self.network.start_schedule().is_some()
+        let allowed = self.failure.is_none()
+            && matches!(
+                self.status,
+                NetworkStatus::Waiting | NetworkStatus::Connected
+            );
+        let due = allowed
             && self
                 .last_publish
-                .is_none_or(|last| last.elapsed() >= Duration::from_millis(50))
+                .is_none_or(|last| last.elapsed() >= Duration::from_millis(50));
+        match competition_progress::publish_progress(&mut self.network, members, allowed, true, due)
         {
-            let publication = copy_members(members)?;
-            match self.network.try_publish(publication) {
-                Ok(()) => self.last_publish = Some(Instant::now()),
-                Err(error) => self.disconnect(error),
-            }
+            Ok(true) => self.last_publish = Some(Instant::now()),
+            Ok(false) => {}
+            Err(error) => self.disconnect(error),
         }
         self.publish_presentation_with_host(before != self.status, host)
     }
 
     fn poll_network(&mut self) -> std::result::Result<(), MultiplayerError> {
-        let mut failure = None;
-        let active = !self.finished
-            && matches!(
-                self.status,
-                NetworkStatus::Waiting | NetworkStatus::Connected
-            );
-        for notice in self.network.poll() {
-            match notice {
-                MultiplayerNotice::Session(MultiplayerEvent::Connected) if active => {
-                    self.status = NetworkStatus::Waiting
-                }
-                MultiplayerNotice::Session(MultiplayerEvent::Ready) if active => {
-                    self.status = NetworkStatus::Connected
-                }
-                MultiplayerNotice::Session(MultiplayerEvent::Disconnected(error)) => {
-                    if failure.is_none() {
-                        failure = Some(error);
-                    }
-                }
-                _ => {}
-            }
-        }
-        match failure {
-            Some(error) => Err(error),
-            None => Ok(()),
-        }
+        competition_progress::poll_progress(&mut self.network, &mut self.status, !self.finished)
     }
 
     fn disconnect(&mut self, error: MultiplayerError) {
