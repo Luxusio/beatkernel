@@ -43,8 +43,10 @@ restore/reusable checkpoints/config mismatch and default compatibility.
 
 ## Known ceiling
 
-This component installs hazard processing in JudgeEngine only. RuntimeReport,
-BMS preparation/live/local/replay/practice/offline wiring, gauge/death, WAV00,
-completion and rendering are subsequent integrations. Keep the shared BMS mine
+JudgeEngine processes hazards and RuntimeReport now delivers actual successful
+call outcomes. BMS source-plan/judge construction now shares the actual stepped,
+local-member, source-aware replay and offline composition paths;
+consumer-side live/local/replay/practice/offline gauge/death, WAV00, completion
+and rendering remain required integrations. Keep the shared BMS mine
 admission refusal until those owners actually consume hazards. Compile checks
 and authored fixtures do not prove executed browser/device/performance acceptance.
