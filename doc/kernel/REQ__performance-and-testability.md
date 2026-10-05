@@ -94,9 +94,13 @@ adapt their real notices and queues to this policy; native clock acquisition and
 thread parking live in a private bridge. Room final/drain waiting now similarly
 uses generic observation/command and wait-control ports, with separate original
 room/control deadlines and actual admission, acceptance and receipt gates.
-Actual joins/cleanup errors, startup and underlying worker waits remain native.
+Room startup now uses a generic initial/poll observation port, service callback
+and narrow 1 ms wait port. Cancellation, Leave and terminal history refuse before
+Commit; native UI/owner effects remain in adapters. Actual joins/cleanup errors
+and underlying worker waits remain native.
 See [final ACK waiting](REQ__final-ack-wait.md) and
 [room final/drain waiting](REQ__room-final-wait.md).
+See also [room startup waiting](REQ__room-start-wait.md).
 
 Solo terminal delivery selection and its one-shot guard are pure; observation
 and start requests cannot revive a finalized owner. Underlying endpoint ownership

@@ -29,7 +29,9 @@ clock evidence and owned command copies; native sleep lives in a private bridge.
 The production natural-finish path delegates to this policy. Actual stop/join,
 post-join polls, presentation and final cleanup errors remain the existing native
 owner's responsibility. A completed wait alone cannot fabricate gameplay proof
-or erase a later cleanup error. Room startup waits and worker waits remain work.
+or erase a later cleanup error. Room startup waiting has its
+[separate policy](REQ__room-start-wait.md); native UI/owner internals and worker
+waits remain work.
 
 Independent scripted fixtures cover queue/acceptance/receipt gates, fixed dual
 deadlines, long times, regressions and errors before/after effects. Assertions,
