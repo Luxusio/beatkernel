@@ -54,8 +54,8 @@ notice iterators, borrowed original member data and associated errors. Shared
 policy validates state/gates; native adapters translate transport notices and
 perform publication. Group publication cadence now receives an explicit generic
 clock, with exact portable nanosecond state and post-effect interval commit;
-native clock acquisition lives in a per-owner adapter. Endpoint acquisition,
-credential loading and underlying room/ACK waits still require further separation. See
+native clock acquisition lives in a per-owner adapter. Endpoint acquisition
+and underlying room/ACK waits still require further separation. See
 [the progress port contract](REQ__competition-progress-port.md) and
 [its cadence contract](REQ__competition-progress-cadence.md).
 
@@ -70,6 +70,14 @@ each supplied decoded recording still passes actual competition reconstruction.
 Native file reads and path formatting live in the adapter. Loader failure keeps
 the explicit previously accepted prefix, not an atomic batch claim. See
 [the opponent loader](REQ__competition-opponent-loader.md).
+
+QUIC credential metadata validation and ordered byte acquisition use portable
+policy with an injected reader. Original Path keys and owned byte buffers cross
+the boundary without policy formatting or copies, and opaque read errors retain
+their identity. The native reader owns regular-file checks and bounded filesystem
+reads; TLS decoding and sockets remain native. WebTransport CA acquisition and
+full endpoint construction still need boundary work. See
+[credential preparation](REQ__multiplayer-credential-loading.md).
 
 Solo terminal delivery selection and its one-shot guard are pure; observation
 and start requests cannot revive a finalized owner. Endpoint acquisition and
