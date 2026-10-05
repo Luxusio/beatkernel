@@ -49,6 +49,13 @@ staging, duplicate refusal and error precedence are portable policy; original
 native path construction and file writes stay in the adapter. See
 [the publication contract](../runtime/REQ__archive-publication-port.md).
 
+Competition progress polling and publication use a generic port with owned
+notice iterators, borrowed original member data and associated errors. Shared
+policy validates state/gates; native adapters translate transport notices and
+perform publication. Endpoint acquisition, start/cleanup and some cadence
+clocks still require further separation. See
+[the progress port contract](REQ__competition-progress-port.md).
+
 Clock domains and physical input/output provenance cannot be substituted with
 test/control time. Native and browser adapters use common business rules.
 Use static dispatch or direct value inputs where sufficient; do not add heap
