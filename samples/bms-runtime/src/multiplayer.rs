@@ -563,7 +563,11 @@ impl Multiplayer {
             progress,
             final_prefix: true,
         }))?;
-        let deadline = Instant::now() + self.finish_timeout;
+        let deadline = Instant::now()
+            .checked_add(self.finish_timeout)
+            .ok_or_else(|| {
+                MultiplayerError::Protocol("final wait deadline extent exceeded".into())
+            })?;
         self.wait_for_delivery(progress, deadline)
     }
     fn wait_for_delivery(
@@ -584,40 +588,28 @@ impl Multiplayer {
         message: OutgoingMessage,
         deadline: Instant,
     ) -> Result<(), MultiplayerError> {
-        let mut admitted = self.local_final;
-        loop {
-            let mut failure = None;
-            for event in self.poll_notices() {
-                if let MultiplayerNotice::Session(MultiplayerEvent::Disconnected(error)) = event {
-                    failure = Some(error);
-                }
+        let already_admitted = self.local_final;
+        let (mut control, deadline_ns) =
+            crate::native_final_wait_bridge::NativeFinalWaitControl::until(deadline)?;
+        crate::final_ack_wait::wait_for_final_ack(
+            &mut NativeFinalAckPort {
+                owner: self,
+                message: &message,
+            },
+            &mut control,
+            deadline_ns,
+            already_admitted,
+        )
+        .map_err(|error| match error {
+            crate::final_ack_wait::FinalAckWaitError::Port(error)
+            | crate::final_ack_wait::FinalAckWaitError::Control(error) => error,
+            crate::final_ack_wait::FinalAckWaitError::Cancelled
+            | crate::final_ack_wait::FinalAckWaitError::Closed => MultiplayerError::Closed,
+            crate::final_ack_wait::FinalAckWaitError::TimedOut => MultiplayerError::IoStalled,
+            crate::final_ack_wait::FinalAckWaitError::ClockRegressed => {
+                MultiplayerError::Protocol("final wait clock regressed".into())
             }
-            if self.stop_flag.load(Ordering::Acquire) {
-                return Err(MultiplayerError::Closed);
-            }
-            if let Some(error) = failure {
-                if error != MultiplayerError::Closed || !self.final_acknowledged {
-                    return Err(error);
-                }
-            }
-            if self.final_acknowledged {
-                return Ok(());
-            }
-            if self.closed {
-                return Err(MultiplayerError::Closed);
-            }
-            if Instant::now() >= deadline {
-                return Err(MultiplayerError::IoStalled);
-            }
-            if !admitted {
-                match self.admit(message.try_clone()?) {
-                    Ok(()) => admitted = true,
-                    Err(MultiplayerError::QueueFull) => {}
-                    Err(error) => return Err(error),
-                }
-            }
-            thread::park_timeout(TICK.min(deadline.saturating_duration_since(Instant::now())));
-        }
+        })
     }
     fn retain_event(&mut self, event: &MultiplayerEvent) {
         match event {
@@ -750,6 +742,43 @@ impl Multiplayer {
         Ok(())
     }
 }
+struct NativeFinalAckPort<'a> {
+    owner: &'a mut Multiplayer,
+    message: &'a OutgoingMessage,
+}
+impl crate::final_ack_wait::FinalAckPort for NativeFinalAckPort<'_> {
+    type Error = MultiplayerError;
+    fn poll(
+        &mut self,
+    ) -> Result<crate::final_ack_wait::FinalAckObservation<Self::Error>, Self::Error> {
+        use crate::final_ack_wait::{FinalAckObservation, FinalAckFailure};
+        let mut failure = None;
+        for event in self.owner.poll_notices() {
+            if let MultiplayerNotice::Session(MultiplayerEvent::Disconnected(error)) = event {
+                failure = Some(if matches!(error, MultiplayerError::Closed) {
+                    FinalAckFailure::Closed(error)
+                } else {
+                    FinalAckFailure::Other(error)
+                });
+            }
+        }
+        Ok(FinalAckObservation {
+            cancelled: self.owner.stop_flag.load(Ordering::Acquire),
+            acknowledged: self.owner.final_acknowledged,
+            closed: self.owner.closed,
+            failure,
+        })
+    }
+    fn admit(&mut self) -> Result<crate::final_ack_wait::FinalAdmission, Self::Error> {
+        use crate::final_ack_wait::FinalAdmission;
+        match self.owner.admit(self.message.try_clone()?) {
+            Ok(()) => Ok(FinalAdmission::Accepted),
+            Err(MultiplayerError::QueueFull) => Ok(FinalAdmission::QueueFull),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 impl Drop for Multiplayer {
     fn drop(&mut self) {
         let _ = self.stop();
@@ -867,7 +896,11 @@ impl GroupMultiplayer {
             final_prefix: true,
         };
         self.owner.validate_publication(&message)?;
-        let deadline = Instant::now() + self.owner.finish_timeout;
+        let deadline = Instant::now()
+            .checked_add(self.owner.finish_timeout)
+            .ok_or_else(|| {
+                MultiplayerError::Protocol("final wait deadline extent exceeded".into())
+            })?;
         self.owner.wait_for_notice_delivery(message, deadline)
     }
     pub fn poll(&mut self) -> Vec<MultiplayerNotice> {
