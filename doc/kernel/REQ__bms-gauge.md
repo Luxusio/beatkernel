@@ -56,7 +56,32 @@ StepReplay delegates to the same gauge rather than observing results twice.
 Keep existing replay setup bytes and core judge identity unchanged; this slice
 derives the documented fixed application policy from the same recorded results.
 
-Native gauge publication, graphics/HUD, completion clear/fail decisions and
+## Native publication contract
+
+Each local presentation member retains its own default BmsGauge. Native solo
+and group report publication updates gauge, score, mine summary, pressed state
+and history atomically after whole-batch validation. An invalid later member
+must leave every earlier member unchanged. Empty deadline reports do not clone
+gauge profiles or allocate gauge scratch. The legacy solo gauge mirrors exactly
+one member; a multi-member cohort has no aggregate gauge.
+
+Actual replay presentation copies the authoritative ReplayVisual gauge, including
+pause-boundary publication. It must not rebuild gauge order from cumulative mine
+damage or apply incremental judgments a second time. Only the documented default
+profile is admitted by this bridge until capture policy identity is connected.
+An unchanged absolute replay gauge remains unchanged on repeated publication.
+Legacy replay APIs lacking an authoritative gauge cannot establish mine-aware
+gauge accuracy: they observe actual normal judgments without synthesizing mine
+events from a cumulative summary. Actual replay callers must use the full gauge
+publication API. Reject a default replay gauge whose instant-death state disagrees
+with its summary, or which changes an already frozen failed state, before any
+presentation mutation. Ordinary level loss/recovery is not a monotonic counter.
+
+These retained gauges are presentation state. Unattached native publication
+remains a no-op; headless termination policy must live in the actual game owner,
+not depend on whether a UI publisher is installed.
+
+Graphics/HUD, completion clear/fail decisions and
 actual per-player failure fencing/output cleanup still need integration.
 InstantDeath state alone does not establish playback termination. Keep the
 high-level mine file admission guard until those owners are connected. Author

@@ -249,6 +249,8 @@ pub mod native_end;
 pub mod native_finish;
 /// Shared native solo gameplay sequencing behind device operations.
 pub mod native_gameplay;
+#[cfg(test)]
+mod native_gauge_fixtures;
 /// One shared network/start owner over actual native local-member prefixes.
 pub mod native_group_competition;
 #[cfg(test)]

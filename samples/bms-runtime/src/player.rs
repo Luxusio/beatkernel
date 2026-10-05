@@ -1,6 +1,7 @@
 //! Latest-state presentation bridge; never called from the audio callback.
 use crate::{
     competition::{OpponentKind, ScoreSummary},
+    gauge::{BmsGauge, GaugeFailure, GaugeProfile},
     local_players::PlayerId,
     local_runtime::PlayerReport,
     mine_damage::MineDamageSummary,
@@ -97,6 +98,8 @@ pub struct LocalPlayerSnapshot {
     pub score: ScoreSummary,
     /// Exact committed mine evidence, independent of ordinary-note score.
     pub mine_damage: MineDamageSummary,
+    /// Independent default-policy observations for this actual member.
+    pub gauge: BmsGauge,
     pub last_judge: Option<JudgeEvent>,
     pub recent_results: Vec<JudgeEvent>,
     /// Actual admitted button ownership, masked during native pause transitions.
@@ -113,6 +116,7 @@ impl LocalPlayerSnapshot {
             song_time: None,
             score: ScoreSummary::default(),
             mine_damage: MineDamageSummary::default(),
+            gauge: BmsGauge::default(),
             last_judge: None,
             recent_results: Vec::new(),
             pressed_lanes: 0,
@@ -252,6 +256,8 @@ pub struct PlayerSnapshot {
     pub score: ScoreSummary,
     /// Mirrors the sole member only; multiple members have no aggregate damage.
     pub mine_damage: MineDamageSummary,
+    /// Mirrors one member; the default value is not a multi-member aggregate.
+    pub gauge: BmsGauge,
     pub last_judge: Option<JudgeEvent>,
     pub recent_results: Vec<JudgeEvent>,
     /// Actual admitted button ownership, masked during native pause transitions.
@@ -277,6 +283,7 @@ impl Default for PlayerSnapshot {
             song_time: None,
             score: ScoreSummary::default(),
             mine_damage: MineDamageSummary::default(),
+            gauge: BmsGauge::default(),
             last_judge: None,
             recent_results: Vec::new(),
             pressed_lanes: 0,
@@ -853,6 +860,7 @@ pub fn publish_report(report: &RuntimeReport) -> Result<(), Box<dyn std::error::
         None,
         &report.hazard_events,
         None,
+        None,
     )
 }
 
@@ -867,17 +875,21 @@ pub fn publish_replay_prefix(
 }
 
 /// Publishes an actual replay prefix and its independently reconstructed ownership.
+/// Without an authoritative gauge, only normal-stage gauge changes are observed;
+/// use the full gauge API for mine-aware replay publication.
 pub fn publish_replay_prefix_with_pressed(
     song: Timestamp,
     events: &[JudgeEvent],
     mask: u32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_mask(mask)?;
-    publish_solo(song, events, &[], Some(mask), &[], None)
+    publish_solo(song, events, &[], Some(mask), &[], None, None)
 }
 
 /// Publishes incremental replay judgments with the actual cumulative mine
 /// summary. Equal summaries are assigned without adding their damage again.
+/// The summary cannot reconstruct ordered hazard gauge changes; this legacy API
+/// observes only normal stages for gauge state. Actual replay uses the full API.
 pub fn publish_replay_prefix_with_mines(
     song: Timestamp,
     events: &[JudgeEvent],
@@ -886,7 +898,53 @@ pub fn publish_replay_prefix_with_mines(
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_mask(mask)?;
     validate_mine_summary(MineDamageSummary::default(), summary)?;
-    publish_solo(song, events, &[], Some(mask), &[], Some(summary))
+    publish_solo(song, events, &[], Some(mask), &[], Some(summary), None)
+}
+
+/// Publishes the authoritative replay gauge without observing its results again.
+/// The default profile is required until captured policy identity is available.
+pub fn publish_replay_prefix_with_gauge(
+    song: Timestamp,
+    events: &[JudgeEvent],
+    mask: u32,
+    summary: MineDamageSummary,
+    gauge: &BmsGauge,
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_mask(mask)?;
+    validate_mine_summary(MineDamageSummary::default(), summary)?;
+    validate_replay_gauge(None, summary, gauge)?;
+    publish_solo(
+        song,
+        events,
+        &[],
+        Some(mask),
+        &[],
+        Some(summary),
+        Some(gauge),
+    )
+}
+
+fn validate_replay_gauge(
+    previous: Option<&BmsGauge>,
+    summary: MineDamageSummary,
+    gauge: &BmsGauge,
+) -> Result<(), &'static str> {
+    if gauge.profile() != &GaugeProfile::default() {
+        return Err("replay presentation requires the default gauge profile");
+    }
+    let snapshot = gauge.snapshot();
+    if summary.instant_death != (snapshot.failure == Some(GaugeFailure::InstantDeath))
+        || (snapshot.failure.is_some()
+            && (snapshot.failure != Some(GaugeFailure::InstantDeath) || snapshot.level_units != 0))
+    {
+        return Err("replay gauge failure differs from its cumulative mine summary");
+    }
+    if previous.is_some_and(|previous| {
+        previous.snapshot().failure.is_some() && previous.snapshot() != snapshot
+    }) {
+        return Err("replay gauge changed after its latched failure");
+    }
+    Ok(())
 }
 
 fn validate_mine_summary(
@@ -917,6 +975,7 @@ fn publish_solo(
     replay_mask: Option<u32>,
     hazards: &[HazardEvent],
     replay_mines: Option<MineDamageSummary>,
+    replay_gauge: Option<&BmsGauge>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     SESSION.with(|session| {
         let mut session = session.borrow_mut();
@@ -939,6 +998,20 @@ fn publish_solo(
             (member, pressed)
         } else {
             (&mut current.snapshot.players[0], &mut current.pressed[0])
+        };
+        let gauge = if let Some(gauge) = replay_gauge {
+            validate_replay_gauge(
+                Some(&member.gauge),
+                replay_mines.expect("full replay gauge publication supplies a mine summary"),
+                gauge,
+            )?;
+            Some(gauge.clone())
+        } else if events.is_empty() && hazards.is_empty() {
+            None
+        } else {
+            let mut gauge = member.gauge.clone();
+            gauge.observe(events, hazards)?;
+            Some(gauge)
         };
         let score = if events.is_empty() {
             None
@@ -967,6 +1040,9 @@ fn publish_solo(
             member.score = score;
         }
         member.mine_damage = mine_damage;
+        if let Some(gauge) = gauge {
+            member.gauge = gauge;
+        }
         member.update_results(song, events);
         if let Some((member, pressed)) = fresh {
             current.snapshot.players.push(member);
@@ -1014,10 +1090,11 @@ pub fn publish_local_reports(reports: &[PlayerReport]) -> Result<(), Box<dyn std
             }
         }
         // Prepare only changed scores: empty 1ms deadline reports do not clone
-        // history/Arc/score maps or allocate scratch. All score/damage errors precede
+        // history/Arc/score maps or clone gauge profiles. All score/damage/gauge errors precede
         // any mutation of any member in this batch.
         let mut changed_scores = Vec::new();
         let mut changed_mines: [Option<MineDamageSummary>; 64] = [None; 64];
+        let mut changed_gauges: [Option<BmsGauge>; 64] = std::array::from_fn(|_| None);
         for report in reports {
             if report.report.judge_events.is_empty() && report.report.hazard_events.is_empty() {
                 continue;
@@ -1028,6 +1105,9 @@ pub fn publish_local_reports(reports: &[PlayerReport]) -> Result<(), Box<dyn std
                 .iter()
                 .position(|member| member.player == report.player)
                 .expect("validated registered player");
+            let mut gauge = current.snapshot.players[index].gauge.clone();
+            gauge.observe(&report.report.judge_events, &report.report.hazard_events)?;
+            changed_gauges[index] = Some(gauge);
             if !report.report.judge_events.is_empty() {
                 let mut score = current.snapshot.players[index].score.clone();
                 score.observe(&report.report.judge_events)?;
@@ -1072,6 +1152,9 @@ pub fn publish_local_reports(reports: &[PlayerReport]) -> Result<(), Box<dyn std
             if let Some(summary) = changed_mines[index] {
                 member.mine_damage = summary;
             }
+            if let Some(gauge) = changed_gauges[index].take() {
+                member.gauge = gauge;
+            }
             member.update_report(&report.report);
         }
         current.observe_cancellation(true);
@@ -1102,6 +1185,7 @@ impl PlayerSnapshot {
             self.song_time = member.song_time;
             self.score = member.score.clone();
             self.mine_damage = member.mine_damage;
+            self.gauge.clone_from(&member.gauge);
             self.last_judge = member.last_judge;
             self.recent_results = member.recent_results.clone();
         } else {
@@ -1110,6 +1194,7 @@ impl PlayerSnapshot {
             self.song_time = None;
             self.score = ScoreSummary::default();
             self.mine_damage = MineDamageSummary::default();
+            self.gauge = BmsGauge::default();
             self.last_judge = None;
             self.recent_results.clear();
         }

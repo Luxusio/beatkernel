@@ -1095,11 +1095,12 @@ fn run(options: Options) -> Result<()> {
                 }
                 if boundary.paused {
                     let events = visual.advance_to(boundary.song)?;
-                    player::publish_replay_prefix_with_mines(
+                    player::publish_replay_prefix_with_gauge(
                         boundary.song,
                         &events,
                         visual.pressed_lanes(),
                         *visual.mine_damage(),
+                        visual.gauge(),
                     )?;
                 }
                 player::publish_pause(if boundary.paused {
@@ -1125,11 +1126,12 @@ fn run(options: Options) -> Result<()> {
                     };
                     if let Some(song) = song {
                         let events = visual.advance_to(song)?;
-                        player::publish_replay_prefix_with_mines(
+                        player::publish_replay_prefix_with_gauge(
                             song,
                             &events,
                             visual.pressed_lanes(),
                             *visual.mine_damage(),
+                            visual.gauge(),
                         )?;
                     }
                 }

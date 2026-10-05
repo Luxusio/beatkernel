@@ -1096,6 +1096,7 @@ mod tests {
             .into_iter()
             .map(|(id, event)| LocalPlayerSnapshot {
                 mine_damage: Default::default(),
+                gauge: Default::default(),
                 player: crate::local_players::PlayerId(id),
                 chart: Some(std::sync::Arc::clone(&chart)),
                 song_time: Some(Timestamp::ZERO),
@@ -1197,6 +1198,7 @@ mod tests {
             .into_iter()
             .map(|(id, pressed_lanes)| LocalPlayerSnapshot {
                 mine_damage: Default::default(),
+                gauge: Default::default(),
                 player: crate::local_players::PlayerId(id),
                 chart: Some(std::sync::Arc::clone(&chart)),
                 song_time: Some(Timestamp::ZERO),
@@ -1352,6 +1354,7 @@ mod tests {
             .into_iter()
             .map(|(id, note_progress)| LocalPlayerSnapshot {
                 mine_damage: Default::default(),
+                gauge: Default::default(),
                 player: crate::local_players::PlayerId(id),
                 chart: Some(std::sync::Arc::clone(&chart)),
                 song_time: Some(Timestamp::ZERO),
@@ -1457,6 +1460,7 @@ mod tests {
         let players: Vec<_> = (0..64)
             .map(|index| LocalPlayerSnapshot {
                 mine_damage: Default::default(),
+                gauge: Default::default(),
                 player: crate::local_players::PlayerId(if index == 63 {
                     u32::MAX
                 } else {
@@ -1635,6 +1639,7 @@ mod tests {
                     ..Default::default()
                 },
                 mine_damage: Default::default(),
+                gauge: Default::default(),
                 last_judge: None,
                 recent_results: Vec::new(),
                 competition: None,
@@ -1774,6 +1779,7 @@ mod tests {
                 song_time: Some(Timestamp::ZERO),
                 score: ScoreSummary::default(),
                 mine_damage: Default::default(),
+                gauge: Default::default(),
                 last_judge: None,
                 recent_results: Vec::new(),
                 competition: Some(comparisons(NetworkStatus::Connected, i64::MIN)),

@@ -5911,7 +5911,7 @@ mod tests {
             let chart = Arc::new(player_chart::PlayerChart::from_compiled(&source, &source.compile().unwrap().chart).unwrap());
             let mut progress = beatkernel_bms_runtime::note_progress::NoteProgress::new(chart.clone()).unwrap();
             progress.apply(&[JudgeEvent { object: chart.notes[0].object, stage: JudgeStage::Instant, outcome: JudgeOutcome::Miss { reason: MissReason::HeadTimeout }, at: Timestamp::ZERO, input: None }]);
-            player::LocalPlayerSnapshot { player: PlayerId(mode + 1), chart: Some(chart), song_time: Some(Timestamp::from_nanos(i64::from(mode) * 125_000_000)), score: Default::default(), mine_damage: Default::default(), last_judge: None, recent_results: vec![], pressed_lanes: 0, note_progress: Some(progress), competition: None }
+            player::LocalPlayerSnapshot { player: PlayerId(mode + 1), chart: Some(chart), song_time: Some(Timestamp::from_nanos(i64::from(mode) * 125_000_000)), score: Default::default(), mine_damage: Default::default(), gauge: Default::default(), last_judge: None, recent_results: vec![], pressed_lanes: 0, note_progress: Some(progress), competition: None }
         }).collect();
         let mut snapshot = player::PlayerSnapshot {
             players: members,
@@ -6000,6 +6000,7 @@ mod tests {
                     player: PlayerId(id),
                     chart: Some(chart.clone()),
                     mine_damage: Default::default(),
+                    gauge: Default::default(),
                     song_time: Some(Timestamp::ZERO),
                     score: Default::default(),
                     last_judge: None,
@@ -6067,6 +6068,7 @@ mod tests {
                 ])
                 .map(|(id, ns)| player::LocalPlayerSnapshot {
                     mine_damage: Default::default(),
+                    gauge: Default::default(),
                     player: PlayerId(id),
                     chart: Some(Arc::clone(&chart)),
                     song_time: Some(Timestamp::from_nanos(ns)),
@@ -7957,6 +7959,7 @@ mod tests {
                     player: PlayerId(id),
                     chart: None,
                     mine_damage: Default::default(),
+                    gauge: Default::default(),
                     song_time: None,
                     score: Default::default(),
                     last_judge: None,
@@ -8253,6 +8256,7 @@ mod tests {
             .map(|id| player::LocalPlayerSnapshot {
                 player: beatkernel_bms_runtime::local_players::PlayerId(id),
                 mine_damage: Default::default(),
+                gauge: Default::default(),
                 chart: None,
                 song_time: None,
                 score: Default::default(),

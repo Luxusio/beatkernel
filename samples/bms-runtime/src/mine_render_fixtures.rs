@@ -539,6 +539,7 @@ mod rendering {
                     song_time: Some(ts(0)),
                     score: Default::default(),
                     mine_damage: Default::default(),
+                    gauge: Default::default(),
                     last_judge: None,
                     recent_results: vec![],
                     pressed_lanes: 0,
