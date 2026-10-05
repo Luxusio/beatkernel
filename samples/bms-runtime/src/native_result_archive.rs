@@ -117,40 +117,46 @@ fn write_sidecar_bytes(
     Ok(())
 }
 
-/// Stage the whole base archive and all one-member associations before any publication.
-/// Every prepared destination is attempted; the first original callback error survives.
+struct NativeArchivePublication<'a, F> {
+    base: &'a Path,
+    write: F,
+}
+impl<F: FnMut(&Path, &[u8]) -> crate::native_gameplay::NativeGameplayResult<()>>
+    crate::result_archive_publication::ResultArchivePublicationPort
+    for NativeArchivePublication<'_, F>
+{
+    type Destination = PathBuf;
+    type Error = Box<dyn std::error::Error>;
+    fn destination(
+        &self,
+        player: Option<crate::local_players::PlayerId>,
+    ) -> Result<PathBuf, Self::Error> {
+        match player {
+            None => sidecar_path(self.base),
+            Some(player) => sidecar_path(&crate::native_cohort::replay_path(self.base, player)?),
+        }
+    }
+    fn create_new(&mut self, destination: &PathBuf, bytes: &[u8]) -> Result<(), Self::Error> {
+        (self.write)(destination, bytes)
+    }
+}
+/// Native composition of portable staging policy and caller-supplied exclusive publication.
 pub fn publish_cohort_sidecars(
     archive: &crate::result_archive::ResultArchive,
     base: &Path,
-    mut write: impl FnMut(&Path, &[u8]) -> crate::native_gameplay::NativeGameplayResult<()>,
+    write: impl FnMut(&Path, &[u8]) -> crate::native_gameplay::NativeGameplayResult<()>,
 ) -> crate::native_gameplay::NativeGameplayResult<()> {
-    let whole = crate::result_archive::encode_archive(archive)?;
-    let base_destination = sidecar_path(base)?;
-    let mut publications = Vec::new();
-    publications.try_reserve_exact(archive.entries().len() + 1)?;
-    publications.push((base_destination, whole));
-    for entry in archive.entries() {
-        let replay = crate::native_cohort::replay_path(base, entry.player)?;
-        let destination = sidecar_path(&replay)?;
-        if publications.iter().any(|(path, _)| path == &destination) {
-            return Err("duplicate completed sidecar destination".into());
-        }
-        let member = archive.for_player(entry.player)?;
-        let bytes = crate::result_archive::encode_archive(&member)?;
-        publications.push((destination, bytes));
-    }
-    let mut first_error = None;
-    for (path, bytes) in publications {
-        if let Err(error) = write(&path, &bytes) {
-            if first_error.is_none() {
-                first_error = Some(error);
-            }
-        }
-    }
-    match first_error {
-        Some(error) => Err(error),
-        None => Ok(()),
-    }
+    use crate::result_archive_publication::PublicationError;
+    crate::result_archive_publication::publish_archive_set(
+        archive,
+        &mut NativeArchivePublication { base, write },
+    )
+    .map_err(|error| match error {
+        PublicationError::Destination(error) | PublicationError::Storage(error) => error,
+        PublicationError::Archive(error) => Box::new(error),
+        PublicationError::Allocation(error) => Box::new(error),
+        PublicationError::DuplicateDestination => "duplicate completed sidecar destination".into(),
+    })
 }
 /// Outer filesystem adapter; files are exclusive but the group is not transactional.
 pub fn save_cohort_sidecars(

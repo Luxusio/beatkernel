@@ -866,3 +866,6 @@ pub mod browser_historical_record;
 /// Cached exact historical replay/archive identity presentation.
 #[cfg(feature = "graphics")]
 pub mod historical_record_presentation;
+
+/// Portable whole/member archive staging with opaque publication destinations.
+pub mod result_archive_publication;
