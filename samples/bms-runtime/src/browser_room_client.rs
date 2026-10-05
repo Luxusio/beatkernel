@@ -1,16 +1,15 @@
-//! WASM access to common room start/progress owners, without transport or clock acquisition.
-
-use crate::browser_multiplayer::BrowserMultiplayerWrite;
-use crate::local_players::{PlayerId, MAX_LOCAL_PLAYERS};
-use crate::multiplayer_group::{decode_words, encode_words};
-use crate::multiplayer_group_rooms::GroupRoomPhase;
-use crate::multiplayer_protocol::WriteStep;
-use crate::multiplayer_room_client::RoomClientError;
-use crate::multiplayer_room_play::{RoomPlayClient, RoomPlayError};
-use crate::multiplayer_room_progress_client::RoomProgressClientError;
-use crate::multiplayer_room_wire::{RoomFrameDecoder, RoomMessage, RoomWireError};
-use crate::multiplayer_rooms::ParticipantId;
-use crate::multiplayer_start::StartPolicy;
+//! WASM value conversion for the portable split-operation room driver.
+use crate::{
+    browser_multiplayer::BrowserMultiplayerWrite,
+    local_players::{PlayerId, MAX_LOCAL_PLAYERS},
+    multiplayer_group::encode_words,
+    multiplayer_group_rooms::GroupRoomPhase,
+    multiplayer_protocol::WriteStep,
+    multiplayer_room_play::RoomPlayClient,
+    multiplayer_rooms::ParticipantId,
+    multiplayer_start::StartPolicy,
+    room_client_driver::RoomClientDriver,
+};
 use wasm_bindgen::prelude::*;
 
 fn error(value: impl std::fmt::Display) -> JsValue {
@@ -65,57 +64,12 @@ fn snapshot_value(session: &RoomPlayClient) -> Result<JsValue, JsValue> {
 
 #[wasm_bindgen]
 pub struct BrowserRoomClient {
-    session: Option<RoomPlayClient>,
-    decoder: Option<RoomFrameDecoder>,
-    failure: Option<RoomPlayError>,
-    revision: u64,
-    pending_peer: Option<ParticipantId>,
+    driver: RoomClientDriver,
 }
-
 impl BrowserRoomClient {
-    fn ensure_live(&self) -> Result<(), RoomPlayError> {
-        if let Some(failure) = &self.failure {
-            return Err(failure.clone());
-        }
-        if self.session.is_none() || self.decoder.is_none() {
-            return Err(RoomPlayError::InvalidState);
-        }
-        Ok(())
-    }
-
-    fn operate<T>(
-        &mut self,
-        fatal_state: bool,
-        operation: impl FnOnce(&mut Self) -> Result<T, RoomPlayError>,
-    ) -> Result<T, JsValue> {
-        self.ensure_live().map_err(error)?;
-        let result = operation(self);
-        if let Err(failure) = &result {
-            if fatal_state
-                || !matches!(
-                    failure,
-                    RoomPlayError::InvalidState
-                        | RoomPlayError::Admission(RoomClientError::InvalidState)
-                        | RoomPlayError::Progress(RoomProgressClientError::InvalidState)
-                )
-            {
-                self.failure = Some(failure.clone());
-            }
-        }
-        result.map_err(error)
-    }
-
-    fn session(&mut self) -> Result<&mut RoomPlayClient, RoomPlayError> {
-        self.session.as_mut().ok_or(RoomPlayError::InvalidState)
-    }
-
-    fn decoder(&mut self) -> Result<&mut RoomFrameDecoder, RoomPlayError> {
-        self.decoder.as_mut().ok_or(RoomPlayError::InvalidState)
-    }
-
     fn local_result(&mut self, result: Result<(), JsValue>) -> Result<(), JsValue> {
         if let Err(value) = &result {
-            if self.failure.is_none() {
+            if !self.driver.failed() {
                 // The JS owner distinguishes a recoverable local phase refusal
                 // from malformed protocol evidence that failed this facade.
                 match js_sys::Reflect::set(
@@ -141,14 +95,10 @@ impl BrowserRoomClient {
 
 #[wasm_bindgen]
 impl BrowserRoomClient {
-    /// The caller bounds both arrays before generated WASM glue copies them.
-    /// The common session validates the exact identity and positive unique roster.
     #[wasm_bindgen(constructor)]
     pub fn new(identity: Vec<u8>, players: Vec<u32>) -> Result<Self, JsValue> {
         Self::new_with_start(identity, players, 0)
     }
-
-    /// Supplies the actual local audio preroll to the common measured start owner.
     pub fn new_with_start(
         identity: Vec<u8>,
         players: Vec<u32>,
@@ -162,134 +112,78 @@ impl BrowserRoomClient {
         for (target, player) in roster.iter_mut().zip(players) {
             *target = PlayerId(player);
         }
-        let session = RoomPlayClient::new(
-            &identity,
-            &roster[..count],
-            StartPolicy::default(),
-            preroll_ns,
-        )
-        .map_err(error)?;
         Ok(Self {
-            session: Some(session),
-            decoder: Some(RoomFrameDecoder::new()),
-            failure: None,
-            revision: 0,
-            pending_peer: None,
+            driver: RoomClientDriver::new(
+                &identity,
+                &roster[..count],
+                StartPolicy::default(),
+                preroll_ns,
+            )
+            .map_err(error)?,
         })
     }
-
-    /// Local request-state refusals leave the live owner available for valid calls.
     pub fn request_seal(&mut self) -> Result<(), JsValue> {
-        self.operate(false, |owner| owner.session()?.request_seal())
+        self.driver.request_seal().map_err(error)
     }
     pub fn request_ready(&mut self) -> Result<(), JsValue> {
-        self.operate(false, |owner| owner.session()?.request_ready())
+        self.driver.request_ready().map_err(error)
     }
     pub fn request_leave(&mut self) -> Result<(), JsValue> {
-        self.operate(false, |owner| owner.session()?.request_leave())
+        self.driver.request_leave().map_err(error)
     }
-
-    /// Premature/repeated local requests return code="state" without failing
-    /// the live facade. Actual received drain protocol errors remain fatal.
     pub fn request_drain(&mut self) -> Result<(), JsValue> {
-        let result = self.operate(false, |owner| owner.session()?.request_drain());
+        let result = self.driver.request_drain().map_err(error);
         self.local_result(result)
     }
-
-    /// The Worker bounds and owns complete eleven-word rows before WASM copies
-    /// them. Common validation retains counter, roster and finality authority.
     pub fn publish_progress(&mut self, words: Vec<u32>, final_prefix: bool) -> Result<(), JsValue> {
-        let result = self.operate(false, |owner| {
-            let members = decode_words(&words)
-                .map_err(|_| RoomPlayError::Progress(RoomProgressClientError::InvalidProgress))?;
-            owner.session()?.publish_progress(&members, final_prefix)
-        });
+        let result = self
+            .driver
+            .publish_progress_words(&words, final_prefix)
+            .map_err(error);
         self.local_result(result)
     }
-
     pub fn needed_bytes(&mut self) -> Result<u32, JsValue> {
-        self.operate(true, |owner| Ok(owner.decoder()?.needed()? as u32))
+        self.driver
+            .needed_bytes()
+            .map(|size| size as u32)
+            .map_err(error)
     }
-
     pub fn frame_pending(&self) -> bool {
-        self.decoder
-            .as_ref()
-            .is_some_and(|decoder| decoder.buffered_bytes() != 0)
+        self.driver.frame_pending()
     }
-
-    /// Supply only the current decoder prefix, sliced before entering WASM.
-    /// Only complete admitted/snapshot messages increment the metadata revision.
     pub fn receive_bytes(
         &mut self,
         bytes: Vec<u8>,
         captured_ns: i64,
         now_ns: i64,
     ) -> Result<u32, JsValue> {
-        self.operate(true, |owner| {
-            if captured_ns < 0 || captured_ns > now_ns {
-                return Err(RoomPlayError::InvalidObservation);
-            }
-            if bytes.len() > 65_808 || bytes.len() > owner.decoder()?.needed()? {
-                return Err(RoomWireError::InvalidFrame.into());
-            }
-            let consumed = owner.decoder()?.push(&bytes)?;
-            if let Some(message) = owner.decoder()?.take()? {
-                let peer = match &message {
-                    RoomMessage::PeerProgress { participant, .. } => Some(*participant),
-                    _ => None,
-                };
-                if peer.is_some() && owner.pending_peer.is_some() {
-                    return Err(RoomPlayError::InvalidState);
-                }
-                let revision = if matches!(
-                    &message,
-                    RoomMessage::Admitted { .. } | RoomMessage::Snapshot { .. }
-                ) {
-                    owner
-                        .revision
-                        .checked_add(1)
-                        .ok_or(RoomPlayError::IdExhausted)?
-                } else {
-                    owner.revision
-                };
-                owner.session()?.receive_at(message, captured_ns, now_ns)?;
-                owner.revision = revision;
-                if peer.is_some() {
-                    owner.pending_peer = peer;
-                }
-            }
-            Ok(consumed as u32)
-        })
+        self.driver
+            .receive_bytes(&bytes, captured_ns, now_ns)
+            .map(|size| size as u32)
+            .map_err(error)
     }
-
-    /// Only waiting or a genuine frame; room controls have no application slot.
     pub fn next_write(&mut self, now_ns: i64) -> Result<BrowserMultiplayerWrite, JsValue> {
-        self.operate(true, |owner| {
-            Ok(match owner.session()?.poll_write(now_ns)? {
+        self.driver
+            .next_write(now_ns)
+            .map(|frame| match frame {
                 Some(frame) => WriteStep::Frame(frame).into(),
                 None => WriteStep::Waiting.into(),
             })
-        })
+            .map_err(error)
     }
-
     pub fn written(&mut self, id: u64, completed_ns: i64, now_ns: i64) -> Result<(), JsValue> {
-        self.operate(true, |owner| {
-            owner.session()?.written_at(id, completed_ns, now_ns)
-        })
+        self.driver.written(id, completed_ns, now_ns).map_err(error)
     }
-
     /// Consume one accepted participant token, materializing only its latest
     /// borrowed prefix. Metadata revision is independent of progress traffic.
     pub fn take_peer_progress(&mut self) -> Result<JsValue, JsValue> {
-        self.ensure_live().map_err(error)?;
-        let Some(participant) = self.pending_peer else {
+        let Some(participant) = self.driver.pending_peer().map_err(error)? else {
             return Ok(JsValue::NULL);
         };
         let result = (|| {
             let prefix = self
-                .session
-                .as_ref()
-                .and_then(|session| session.peer_progress(participant))
+                .driver
+                .peer_progress(participant)
                 .ok_or_else(|| error("missing accepted room peer prefix"))?;
             let words = encode_words(&prefix.members).map_err(error)?;
             let value = js_sys::Object::new();
@@ -318,49 +212,31 @@ impl BrowserRoomClient {
         if result.is_err() {
             self.close();
         } else {
-            self.pending_peer = None;
+            self.driver.consume_peer_progress();
         }
         result
     }
 
     pub fn local_final_written(&self) -> bool {
-        self.session
-            .as_ref()
-            .is_some_and(RoomPlayClient::local_final_written)
+        self.driver.local_final_written()
     }
-
     pub fn local_final_acknowledged(&self) -> bool {
-        self.session
-            .as_ref()
-            .is_some_and(RoomPlayClient::local_final_acknowledged)
+        self.driver.local_final_acknowledged()
     }
-
     pub fn peer_final_ack_written(&self, participant: u64) -> bool {
-        self.session
-            .as_ref()
-            .is_some_and(|session| session.peer_final_ack_written(ParticipantId(participant)))
+        self.driver
+            .peer_final_ack_written(ParticipantId(participant))
     }
-
     pub fn progress_complete(&self) -> bool {
-        self.failure.is_none()
-            && self
-                .session
-                .as_ref()
-                .is_some_and(RoomPlayClient::progress_complete)
+        self.driver.progress_complete()
     }
-
     pub fn drain_complete(&self) -> bool {
-        self.failure.is_none()
-            && self
-                .session
-                .as_ref()
-                .is_some_and(RoomPlayClient::drain_complete)
+        self.driver.drain_complete()
     }
-
     /// Consumes only a genuine committed common schedule. All values retain
     /// their exact integer domains across the JavaScript boundary.
     pub fn take_start(&mut self) -> Result<JsValue, JsValue> {
-        let schedule = self.operate(true, |owner| Ok(owner.session()?.take_schedule()))?;
+        let schedule = self.driver.take_start().map_err(error)?;
         let Some(schedule) = schedule else {
             return Ok(JsValue::NULL);
         };
@@ -390,52 +266,25 @@ impl BrowserRoomClient {
     }
 
     pub fn participant_id(&self) -> u64 {
-        self.session
-            .as_ref()
-            .and_then(RoomPlayClient::participant)
-            .map_or(0, |participant| participant.0)
+        self.driver.participant_id()
     }
-
     pub fn revision(&self) -> u64 {
-        self.revision
+        self.driver.revision()
     }
-
     pub fn has_snapshot(&self) -> bool {
-        self.session
-            .as_ref()
-            .is_some_and(|session| session.room().is_some())
+        self.driver.has_snapshot()
     }
-
     pub fn leave_written(&self) -> bool {
-        self.session
-            .as_ref()
-            .is_some_and(RoomPlayClient::leave_written)
+        self.driver.leave_written()
     }
-
-    /// Exact accepted metadata. Participant IDs and deadline values stay BigInt.
     pub fn snapshot(&mut self) -> Result<JsValue, JsValue> {
-        self.ensure_live().map_err(error)?;
-        let result = snapshot_value(
-            self.session
-                .as_ref()
-                .ok_or_else(|| error("room client closed"))?,
-        );
+        let result = snapshot_value(self.driver.session_ref().map_err(error)?);
         if result.is_err() {
             self.close();
         }
         result
     }
-
-    /// Idempotently release owned state. The caller separately frees this WASM handle.
     pub fn close(&mut self) {
-        if let Some(session) = &mut self.session {
-            session.stop();
-        }
-        self.session = None;
-        self.decoder = None;
-        self.pending_peer = None;
-        if self.failure.is_none() {
-            self.failure = Some(RoomPlayError::Stopped);
-        }
+        self.driver.close();
     }
 }

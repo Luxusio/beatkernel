@@ -1,0 +1,472 @@
+//! Deferred split-operation fixtures using genuine common admission frames.
+use super::RoomClientDriver;
+use crate::{
+    local_players::PlayerId,
+    multiplayer_group::{MemberProgress, encode_words},
+    multiplayer_group_rooms::{GroupRoomPolicy, GroupRoomRegistry},
+    multiplayer_protocol::Progress,
+    multiplayer_room_clock::RoomClockExchange,
+    multiplayer_room_play::RoomPlayError,
+    multiplayer_room_progress::RoomProgressRelay,
+    multiplayer_room_start::RoomStartCoordinator,
+    multiplayer_room_wire::{RoomMessage, decode_message, encode_message},
+    multiplayer_rooms::ParticipantId,
+    multiplayer_start::{StartMessage, StartPolicy},
+};
+
+const IDENTITY: &[u8] = &[0, 91, 255, 17];
+const PLAYERS: &[PlayerId] = &[PlayerId(u32::MAX), PlayerId(7)];
+
+fn driver() -> RoomClientDriver {
+    RoomClientDriver::new(IDENTITY, PLAYERS, StartPolicy::default(), 0).unwrap()
+}
+fn receive(
+    driver: &mut RoomClientDriver,
+    message: &RoomMessage,
+    now: i64,
+) -> Result<(), RoomPlayError> {
+    let bytes = encode_message(message).unwrap();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let count = driver.needed_bytes()?.min(bytes.len() - offset);
+        assert!(count > 0);
+        assert_eq!(
+            driver.receive_bytes(&bytes[offset..offset + count], now, now)?,
+            count
+        );
+        offset += count;
+    }
+    Ok(())
+}
+fn snapshot(registry: &GroupRoomRegistry) -> RoomMessage {
+    let room = registry.room("driver").unwrap();
+    RoomMessage::Snapshot {
+        members: room.members.to_vec(),
+        phase: room.phase,
+        deadline_ns: room.deadline_ns,
+    }
+}
+fn admitted(now: i64) -> (RoomClientDriver, GroupRoomRegistry, ParticipantId) {
+    let mut driver = driver();
+    let frame = driver.next_write(now).unwrap().expect("actual Join");
+    let RoomMessage::Join { identity, players } = decode_message(&frame.bytes).unwrap() else {
+        panic!("actual Join required")
+    };
+    assert_eq!(identity, IDENTITY);
+    assert_eq!(players, PLAYERS);
+    driver.written(frame.id, now, now).unwrap();
+    let mut registry = GroupRoomRegistry::new(GroupRoomPolicy::new(1, 2, 16, 1_000).unwrap());
+    let id = registry.join("driver", &identity, &players, 0).unwrap().id;
+    receive(&mut driver, &RoomMessage::Admitted { participant: id }, now).unwrap();
+    receive(&mut driver, &snapshot(&registry), now).unwrap();
+    (driver, registry, id)
+}
+fn no_final_receipts(driver: &RoomClientDriver) {
+    assert!(!driver.local_final_written());
+    assert!(!driver.local_final_acknowledged());
+    assert!(!driver.peer_final_ack_written(ParticipantId(u64::MAX)));
+    assert!(!driver.progress_complete());
+    assert!(!driver.drain_complete());
+}
+
+#[test]
+fn construction_rejects_invalid_identity_roster_and_start_configuration() {
+    for players in [
+        vec![],
+        vec![PlayerId(0)],
+        vec![PlayerId(7), PlayerId(7)],
+        (1..=65).map(PlayerId).collect(),
+    ] {
+        assert!(RoomClientDriver::new(IDENTITY, &players, StartPolicy::default(), 0).is_err());
+    }
+    for identity in [Vec::new(), vec![1; 65_537]] {
+        assert!(RoomClientDriver::new(&identity, PLAYERS, StartPolicy::default(), 0).is_err());
+    }
+    assert!(RoomClientDriver::new(IDENTITY, PLAYERS, StartPolicy::default(), -1).is_err());
+    let mut policy = StartPolicy::default();
+    policy.min_remaining_ns = 0;
+    assert!(RoomClientDriver::new(IDENTITY, PLAYERS, policy, 0).is_err());
+    let valid = RoomClientDriver::new(
+        IDENTITY,
+        PLAYERS,
+        StartPolicy::default(),
+        604_800_000_000_000,
+    )
+    .unwrap();
+    assert!(!valid.failed());
+    assert_eq!(valid.revision(), 0);
+}
+
+#[test]
+fn local_phase_refusals_remain_recoverable_but_malformed_progress_latches_first_failure() {
+    let mut driver = driver();
+    assert!(driver.request_seal().is_err());
+    assert!(driver.request_ready().is_err());
+    assert!(driver.request_leave().is_err());
+    assert!(driver.request_drain().is_err());
+    assert!(!driver.failed());
+    assert!(driver.next_write(0).unwrap().is_some());
+    let first = driver.publish_progress_words(&[1], false).unwrap_err();
+    assert!(driver.failed());
+    assert_eq!(driver.request_ready().unwrap_err(), first);
+    assert_eq!(driver.needed_bytes().unwrap_err(), first);
+    assert_eq!(driver.next_write(1).unwrap_err(), first);
+    driver.close();
+    driver.close();
+    assert_eq!(driver.session_ref().unwrap_err(), first);
+    no_final_receipts(&driver);
+}
+
+#[test]
+fn fragmented_admission_advances_revision_only_after_complete_accepted_frames() {
+    let mut driver = driver();
+    let frame = driver.next_write(0).unwrap().unwrap();
+    let RoomMessage::Join { identity, players } = decode_message(&frame.bytes).unwrap() else {
+        panic!("Join required")
+    };
+    driver.written(frame.id, 0, 0).unwrap();
+    let mut registry = GroupRoomRegistry::new(GroupRoomPolicy::new(1, 2, 16, 1_000).unwrap());
+    let id = registry.join("driver", &identity, &players, 0).unwrap().id;
+    for (message, previous) in [
+        (RoomMessage::Admitted { participant: id }, 0),
+        (snapshot(&registry), 1),
+    ] {
+        let bytes = encode_message(&message).unwrap();
+        for (index, byte) in bytes.iter().enumerate() {
+            assert!(driver.needed_bytes().unwrap() > 0);
+            assert_eq!(
+                driver
+                    .receive_bytes(std::slice::from_ref(byte), 1, 1)
+                    .unwrap(),
+                1
+            );
+            let complete = index + 1 == bytes.len();
+            assert_eq!(driver.revision(), previous + u64::from(complete));
+            assert_eq!(driver.frame_pending(), !complete);
+        }
+    }
+    assert_eq!(driver.participant_id(), id.0);
+    assert!(driver.has_snapshot());
+    assert_eq!(
+        driver.session_ref().unwrap().room().unwrap().members[0].players,
+        PLAYERS
+    );
+    assert!(driver.pending_peer().unwrap().is_none());
+    driver.consume_peer_progress();
+    assert!(driver.pending_peer().unwrap().is_none());
+    assert!(driver.take_start().unwrap().is_none());
+    no_final_receipts(&driver);
+}
+
+#[test]
+fn malformed_prefix_and_observation_refusals_preserve_accepted_metadata_revision() {
+    for failure in 0..3 {
+        let (mut driver, _, id) = admitted(10);
+        let before = driver.revision();
+        let needed = driver.needed_bytes().unwrap();
+        let first = match failure {
+            0 => driver
+                .receive_bytes(&vec![0; needed + 1], 10, 10)
+                .unwrap_err(),
+            1 => driver.receive_bytes(&[0], -1, 10).unwrap_err(),
+            _ => driver.receive_bytes(&[0], 11, 10).unwrap_err(),
+        };
+        assert!(driver.failed());
+        assert_eq!(driver.revision(), before);
+        assert_eq!(driver.participant_id(), id.0);
+        assert!(driver.has_snapshot());
+        assert_eq!(driver.take_start().unwrap_err(), first);
+        assert_eq!(driver.receive_bytes(&[], 10, 10).unwrap_err(), first);
+        no_final_receipts(&driver);
+    }
+    let (mut driver, registry, _) = admitted(10);
+    let previous = driver.revision();
+    let mut wrong = snapshot(&registry);
+    let RoomMessage::Snapshot { members, .. } = &mut wrong else {
+        unreachable!()
+    };
+    members[0].players[1] = PlayerId(91);
+    let first = receive(&mut driver, &wrong, 11).unwrap_err();
+    assert_eq!(driver.revision(), previous);
+    assert!(driver.failed());
+    assert_eq!(driver.request_leave().unwrap_err(), first);
+    no_final_receipts(&driver);
+}
+
+#[test]
+fn outbound_admission_requires_exact_completed_write_id_and_chronology() {
+    for failure in 0..3 {
+        let mut driver = driver();
+        let frame = driver.next_write(100).unwrap().unwrap();
+        assert_eq!(frame.id, 1);
+        assert!(driver.next_write(100).unwrap().is_none());
+        assert_eq!(driver.participant_id(), 0);
+        assert_eq!(driver.revision(), 0);
+        assert!(!driver.has_snapshot());
+        no_final_receipts(&driver);
+        let first = match failure {
+            0 => driver.written(frame.id + 1, 100, 100).unwrap_err(),
+            1 => driver.written(frame.id, 99, 100).unwrap_err(),
+            _ => driver.written(frame.id, 101, 100).unwrap_err(),
+        };
+        assert_eq!(
+            first,
+            if failure == 0 {
+                RoomPlayError::UnknownWrite
+            } else {
+                RoomPlayError::InvalidObservation
+            }
+        );
+        assert!(driver.failed());
+        assert_eq!(driver.written(frame.id, 100, 100).unwrap_err(), first);
+        assert_eq!(driver.revision(), 0);
+        no_final_receipts(&driver);
+    }
+}
+
+#[test]
+fn full_width_time_leave_receipt_and_idempotent_close_preserve_distinct_history() {
+    let now = 9_007_199_254_740_993;
+    let (mut driver, _, _) = admitted(now);
+    assert_eq!(
+        driver.session_ref().unwrap().room().unwrap().members[0].players,
+        PLAYERS
+    );
+    driver.request_leave().unwrap();
+    let leave = driver.next_write(i64::MAX).unwrap().unwrap();
+    assert_eq!(decode_message(&leave.bytes).unwrap(), RoomMessage::Leave);
+    assert!(!driver.leave_written());
+    driver.written(leave.id, i64::MAX, i64::MAX).unwrap();
+    assert!(driver.leave_written());
+    no_final_receipts(&driver);
+    let revision = driver.revision();
+    driver.close();
+    driver.close();
+    assert!(driver.failed());
+    assert_eq!(driver.revision(), revision);
+    assert_eq!(driver.participant_id(), 0);
+    assert!(!driver.has_snapshot() && !driver.frame_pending());
+    assert_eq!(driver.session_ref().unwrap_err(), RoomPlayError::Stopped);
+    assert_eq!(driver.needed_bytes().unwrap_err(), RoomPlayError::Stopped);
+    assert_eq!(driver.pending_peer().unwrap_err(), RoomPlayError::Stopped);
+    no_final_receipts(&driver);
+}
+
+fn measured_policy() -> StartPolicy {
+    StartPolicy {
+        lead_ns: 10_000,
+        min_remaining_ns: 1_000,
+        max_age_ns: 100_000,
+        max_uncertainty_ns: 100,
+        max_release_lateness_ns: 25,
+    }
+}
+
+// Every server response below comes from the actual admission, clock or start
+// owner. Only externally observed completed frames receive write receipts.
+fn committed_pair() -> (Vec<RoomClientDriver>, GroupRoomRegistry, Vec<ParticipantId>) {
+    let mut registry = GroupRoomRegistry::new(GroupRoomPolicy::new(1, 2, 16, 1_000).unwrap());
+    let mut clients = Vec::new();
+    let mut ids = Vec::new();
+    for roster in [PLAYERS, &[PlayerId(91)][..]] {
+        let mut client = RoomClientDriver::new(IDENTITY, roster, measured_policy(), 0).unwrap();
+        let join = client.next_write(0).unwrap().unwrap();
+        let RoomMessage::Join { identity, players } = decode_message(&join.bytes).unwrap() else {
+            panic!("actual Join required")
+        };
+        client.written(join.id, 0, 0).unwrap();
+        let id = registry.join("driver", &identity, &players, 0).unwrap().id;
+        receive(&mut client, &RoomMessage::Admitted { participant: id }, 0).unwrap();
+        clients.push(client);
+        ids.push(id);
+        for client in &mut clients {
+            receive(client, &snapshot(&registry), 0).unwrap();
+        }
+    }
+    clients[0].request_seal().unwrap();
+    let seal = clients[0].next_write(1).unwrap().unwrap();
+    assert_eq!(decode_message(&seal.bytes).unwrap(), RoomMessage::Seal);
+    clients[0].written(seal.id, 1, 1).unwrap();
+    registry.seal(ids[0], 1).unwrap();
+    for client in &mut clients {
+        receive(client, &snapshot(&registry), 1).unwrap();
+    }
+    for index in 0..2 {
+        clients[index].request_ready().unwrap();
+        let ready = clients[index].next_write(2).unwrap().unwrap();
+        assert_eq!(decode_message(&ready.bytes).unwrap(), RoomMessage::Ready);
+        clients[index].written(ready.id, 2, 2).unwrap();
+        registry.ready(ids[index], 2).unwrap();
+        for client in &mut clients {
+            receive(client, &snapshot(&registry), 2).unwrap();
+        }
+    }
+    let room = registry.room("driver").unwrap();
+    let mut coordinator = RoomStartCoordinator::new(room, measured_policy()).unwrap();
+    for index in 0..2 {
+        let mut server = RoomClockExchange::new(room, ids[index]).unwrap();
+        let client = &mut clients[index];
+        for sequence in 1..=8 {
+            let at = 10_000 + (sequence - 1) * 100;
+            let ping = server.next(at).unwrap().unwrap();
+            let local_ping = client.next_write(at).unwrap().unwrap();
+            server.written(ping.id, at + 2).unwrap();
+            client.written(local_ping.id, at + 3, at + 3).unwrap();
+            server
+                .receive(&decode_message(&local_ping.bytes).unwrap(), at + 7)
+                .unwrap();
+            receive(client, &decode_message(&ping.bytes).unwrap(), at + 11).unwrap();
+            let pong = server.next(at + 13).unwrap().unwrap();
+            let local_pong = client.next_write(at + 17).unwrap().unwrap();
+            server.written(pong.id, at + 14).unwrap();
+            client.written(local_pong.id, at + 18, at + 18).unwrap();
+            server
+                .receive(&decode_message(&local_pong.bytes).unwrap(), at + 23)
+                .unwrap();
+            receive(client, &decode_message(&pong.bytes).unwrap(), at + 29).unwrap();
+            assert!(client.take_start().unwrap().is_none());
+        }
+        let estimate = server.estimate().unwrap();
+        assert_eq!((estimate.lower_ns(), estimate.upper_ns()), (-6, 11));
+        coordinator.prepare(ids[index], estimate, 10_800).unwrap();
+    }
+    for index in 0..2 {
+        let ready = coordinator.next(ids[index], 10_800).unwrap().unwrap();
+        assert_eq!(ready, StartMessage::ClockReady(0));
+        coordinator.written(ids[index], ready, 10_800).unwrap();
+        receive(&mut clients[index], &RoomMessage::Start(ready), 10_800).unwrap();
+        let ready = clients[index].next_write(10_801).unwrap().unwrap();
+        clients[index].written(ready.id, 10_802, 10_802).unwrap();
+        let RoomMessage::Start(ready) = decode_message(&ready.bytes).unwrap() else {
+            panic!("actual ClockReady required")
+        };
+        coordinator.receive(ids[index], ready, 10_803).unwrap();
+    }
+    for index in 0..2 {
+        let proposal = coordinator
+            .next(ids[index], 11_000 + index as i64)
+            .unwrap()
+            .unwrap();
+        coordinator
+            .written(ids[index], proposal, 11_000 + index as i64)
+            .unwrap();
+        receive(&mut clients[index], &RoomMessage::Start(proposal), 11_080).unwrap();
+        let accept = clients[index].next_write(11_081).unwrap().unwrap();
+        assert!(clients[index].take_start().unwrap().is_none());
+        clients[index].written(accept.id, 11_082, 11_082).unwrap();
+        let RoomMessage::Start(accept) = decode_message(&accept.bytes).unwrap() else {
+            panic!("actual Accept required")
+        };
+        coordinator.receive(ids[index], accept, 11_090).unwrap();
+    }
+    for index in 0..2 {
+        let commit = coordinator
+            .next(ids[index], 11_100 + index as i64)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(commit, StartMessage::Commit(_)));
+        coordinator
+            .written(ids[index], commit, 11_101 + index as i64)
+            .unwrap();
+        receive(&mut clients[index], &RoomMessage::Start(commit), 11_200).unwrap();
+    }
+    assert!(coordinator.committed());
+    (clients, registry, ids)
+}
+
+#[test]
+fn genuine_start_and_relay_hold_peer_token_until_consumed_and_refuse_collision_atomically() {
+    for consume in [false, true] {
+        let (mut clients, registry, ids) = committed_pair();
+        for client in &mut clients {
+            let schedule = client
+                .take_start()
+                .unwrap()
+                .expect("genuine Commit schedule");
+            assert_eq!(schedule.target_ns, schedule.song_target_ns);
+            assert_eq!(schedule.uncertainty_ns, 17);
+            assert!(schedule.target_ns > 11_200);
+            assert!(client.take_start().unwrap().is_none());
+        }
+        let mut relay = RoomProgressRelay::new(registry.room("driver").unwrap()).unwrap();
+        relay.activate().unwrap();
+        let revision = clients[1].revision();
+        let mut first_prefix = None;
+        for sequence in 1..=2 {
+            let rows = PLAYERS
+                .iter()
+                .map(|&player| MemberProgress {
+                    player,
+                    progress: Progress {
+                        song_ns: 9_007_199_254_740_993 + sequence,
+                        hits: u64::MAX,
+                        misses: 0,
+                        combo: u64::MAX,
+                        max_combo: u64::MAX,
+                    },
+                })
+                .collect::<Vec<_>>();
+            clients[0]
+                .publish_progress_words(&encode_words(&rows).unwrap(), false)
+                .unwrap();
+            let at = 12_000 + sequence * 100;
+            let upload = clients[0].next_write(at).unwrap().unwrap();
+            let upload_message = decode_message(&upload.bytes).unwrap();
+            relay.receive(ids[0], &upload_message).unwrap();
+            clients[0].written(upload.id, at + 1, at + 1).unwrap();
+            let frame = relay.poll_write(ids[1]).unwrap().unwrap();
+            let message = decode_message(&frame.bytes).unwrap();
+            let RoomMessage::PeerProgress {
+                participant,
+                prefix,
+            } = &message
+            else {
+                panic!("actual relay peer frame required")
+            };
+            assert_eq!(*participant, ids[0]);
+            assert_eq!(prefix.sequence, sequence as u64);
+            assert_eq!(prefix.members, rows);
+            let result = receive(&mut clients[1], &message, at + 10);
+            relay.written(ids[1], frame.id).unwrap();
+            assert_eq!(clients[1].revision(), revision);
+            if sequence == 1 {
+                result.unwrap();
+                assert_eq!(clients[1].pending_peer().unwrap(), Some(ids[0]));
+                let accepted = clients[1].peer_progress(ids[0]).unwrap();
+                assert_eq!(accepted, prefix);
+                let pointer = accepted as *const _;
+                assert_eq!(clients[1].pending_peer().unwrap(), Some(ids[0]));
+                assert_eq!(
+                    clients[1].peer_progress(ids[0]).unwrap() as *const _,
+                    pointer
+                );
+                first_prefix = Some(accepted.clone());
+                if consume {
+                    clients[1].consume_peer_progress();
+                    assert!(clients[1].pending_peer().unwrap().is_none());
+                    assert_eq!(clients[1].peer_progress(ids[0]), first_prefix.as_ref());
+                }
+            } else if consume {
+                result.unwrap();
+                assert!(!clients[1].failed());
+                assert_eq!(clients[1].pending_peer().unwrap(), Some(ids[0]));
+                assert_eq!(clients[1].peer_progress(ids[0]), Some(prefix));
+                clients[1].consume_peer_progress();
+                assert!(clients[1].pending_peer().unwrap().is_none());
+            } else {
+                assert_eq!(result.unwrap_err(), RoomPlayError::InvalidState);
+                assert!(clients[1].failed());
+                assert_eq!(clients[1].peer_progress(ids[0]), first_prefix.as_ref());
+                assert_eq!(
+                    clients[1].pending_peer().unwrap_err(),
+                    RoomPlayError::InvalidState
+                );
+                assert_eq!(
+                    clients[1].request_ready().unwrap_err(),
+                    RoomPlayError::InvalidState
+                );
+            }
+            no_final_receipts(&clients[1]);
+        }
+    }
+}

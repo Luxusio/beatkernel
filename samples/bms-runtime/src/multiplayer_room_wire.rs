@@ -577,7 +577,6 @@ impl RoomFrameDecoder {
         Self::default()
     }
 
-    #[cfg(all(target_arch = "wasm32", feature = "browser"))]
     pub(crate) fn buffered_bytes(&self) -> usize {
         self.bytes.len()
     }
