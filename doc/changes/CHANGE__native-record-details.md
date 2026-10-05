@@ -18,8 +18,10 @@ must migrate with that layout while preserving its repaint/cache assertions.
 
 ## Known ceiling
 
-The full opaque grade table stays in metadata; scrolling grade-table UI and saved
-comparison archival remain unfinished. Cold association and first geometry build
+At this increment the full opaque grade table stayed in metadata without paging.
+[The subsequent grade-page increment](CHANGE__stored-grade-pages.md) exposes all
+entries in the native detail view. Browser interactive paging and saved comparison
+archival remain unfinished. Cold association and first geometry build
 can allocate. Structural historical validation does not authenticate local files.
 The initial common detail builder currently makes one additional fallible grade
 copy beyond the metadata Arc; stable composition does not repeat that copy.

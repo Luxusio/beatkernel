@@ -47,5 +47,6 @@ Runtime assertions, formal reviews, required QA, verify and close remain deferre
 Cold archive construction may allocate; first new grade uses existing score-map
 insertion. No benchmark or globally allocation-free claim is established.
 Native Records now retains associated stored final score details in a cached
-subview under [the detail contract](REQ__native-record-details.md). Full
-grade-table UI and saved comparison archival remain unfinished.
+subview under [the detail contract](REQ__native-record-details.md), including
+[bounded native grade pages](REQ__stored-grade-pages.md). Browser interactive
+grade paging and saved comparison archival remain unfinished.

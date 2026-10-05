@@ -22,24 +22,28 @@ invalidate old hits. Show stored provenance, original player, full/practice exte
 outcome, gauge, final counters and exact timing sums/extrema when present. Version-1
 details retain historical metadata and explicitly unavailable score statistics.
 
-The subview shows only its back control (66), which returns to the same catalog
+The subview's back control (66) returns to the same catalog
 selection/page without popping the Records navigation entry. Escape/back also
 return to the catalog first; the next back follows normal navigation. Ignore
-catalog actions, text edits, paging, watching and opponent mutations while details
-are visible. Selection/directory replacement and pending metadata requests clear
+catalog actions, text edits, catalog paging, watching and opponent mutations while
+details are visible. Stored-grade navigation follows its separate page contract.
+Selection/directory replacement and pending metadata requests clear
 detail mode. Disposing the parent releases cached geometry/shared metadata; no
 second navigation stack, gameplay owner, IO resource or independent modal life
 is introduced. Invalid/stale/pending detail frames refuse before UI mutation.
 
 HistoricalRecordPresentation.from_record(value, score) builds the same cached
 pure historical geometry as browser display, without reading files, parsing
-replays or decoding archive bytes. The Records subview reuses it. Build geometry
+replays or decoding archive bytes. The Records subview reuses it. Build metadata/timing geometry
 only on changed associated metadata or changed immutable score identity; stable
 frames reuse packets without grade-vector copies, string formatting or decoding.
 Cache the complete detail packet, including background/back button. Detail-only
 hover/pressed changes update that packet without repainting hidden catalog nodes.
-RecordPreview still retains full grades even though the current detail screen
-focuses on totals/timing; scrolling grade-table UI remains future work.
+Grade-page changes rebuild only the prepared grade leaf and composed detail
+packet under [the page contract](REQ__stored-grade-pages.md).
+RecordPreview retains full grades. The subview now adds bounded grade pages
+and previous/next controls under [the grade-page contract](REQ__stored-grade-pages.md).
+Unavailable or empty tables still offer only Back.
 
 Keep the catalog's existing controls and paging. Compress preview text rows within
 the existing 514..571 area to avoid overlap with secondary controls at 575 and
@@ -60,5 +64,5 @@ stops. Source and compile checks do not prove browser/GPU,
 filesystem, runtime, performance or complete lifecycle acceptance. Assertions,
 formal review, required QA, verify and close remain deferred. Cold metadata copies
 and initial detail geometry may allocate; no global allocation-free claim is made.
-Full grade-table paging, saved comparison archival and platform acceptance remain
-unfinished, and the full player Goal stays active.
+Browser interactive grade paging, saved comparison archival and platform
+acceptance remain unfinished, and the full player Goal stays active.

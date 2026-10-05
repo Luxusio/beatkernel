@@ -48,8 +48,9 @@ Comparison archival, actual browser/filesystem/
 GPU acceptance and race-free directory containment remain unfinished.
 Native Records now retains associated final score metadata separately from its
 prefix and exposes a cached detail subview under
-[the stored detail contract](REQ__native-record-details.md). Full grade-table
-presentation and saved comparison archival remain pending.
+[the stored detail contract](REQ__native-record-details.md). Native grade-table
+presentation uses [bounded pages](REQ__stored-grade-pages.md). Browser interactive
+grade paging and saved comparison archival remain pending.
 
 Independent deferred fixtures cover exact header fields and original IDs,
 ambiguous/missing rows, finite draft equality, long extents, recorded-prefix-only
