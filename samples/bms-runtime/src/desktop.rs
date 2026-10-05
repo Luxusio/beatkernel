@@ -22,6 +22,9 @@ mod ime_fields_fixtures;
 #[path = "desktop_renderer_startup_fixtures.rs"]
 mod renderer_startup_fixtures;
 #[cfg(test)]
+#[path = "desktop_results_detail_fixtures.rs"]
+mod results_detail_fixtures;
+#[cfg(test)]
 #[path = "desktop_room_fixtures.rs"]
 mod room_fixtures;
 #[cfg(test)]
@@ -46,7 +49,7 @@ use beatkernel_bms_runtime::ui::{
     players::{PlayersFrame, PlayersView},
     practice::{PracticeFrame, PracticeView},
     records::{RecordsFrame, RecordsView},
-    results::ResultsView,
+    results::{ResultsView, ResultDetails},
     selection::{ROW_HEIGHT, SelectionFrame, SelectionItem, SelectionView, VISIBLE_ROWS},
     settings::{BUTTONS as SETTINGS_BUTTONS, SettingsFrame, SettingsView},
     text_input::LineEditor,
@@ -430,6 +433,31 @@ struct Game {
 }
 
 impl Game {
+    fn presentation_page_count(&self) -> usize {
+        if self.joined && !self.replay {
+            if let Some(results) = &self.completed_results {
+                return results.page_count_for(self.local_comparisons);
+            }
+        }
+        self.snapshot.as_ref().map_or(0, |snapshot| {
+            snapshot
+                .players
+                .len()
+                .div_ceil(organisms::LOCAL_PLAYERS_PER_PAGE)
+        })
+    }
+    fn comparisons_available(&self) -> bool {
+        if self.joined && !self.replay {
+            return self
+                .completed_results
+                .as_ref()
+                .is_some_and(ResultsView::has_comparisons);
+        }
+        self.snapshot
+            .as_ref()
+            .is_some_and(|snapshot| local_comparisons_available(&snapshot.players))
+    }
+
     fn room_action_allowed(&self, action: RoomUiAction) -> bool {
         if self.replay || self.prepared_retry.is_some() {
             return false;
@@ -506,7 +534,16 @@ impl Game {
                     .iter()
                     .map(|member| member.player)
                     .collect();
-                match ResultsView::new(results, &roster) {
+                let details: Vec<_> = snapshot
+                    .players
+                    .iter()
+                    .map(|member| ResultDetails {
+                        player: member.player,
+                        score: &member.score,
+                        competition: member.competition.as_ref(),
+                    })
+                    .collect();
+                match ResultsView::new_with_details(results, &roster, &details) {
                     Ok(view) => {
                         self.completed_results = Some(view);
                         self.completed_results_error = None;
@@ -528,7 +565,7 @@ impl Game {
             }
         }
         let count = snapshot.players.len();
-        if count > 0 {
+        if count > 0 && !(self.joined && !self.replay && self.completed_results.is_some()) {
             self.local_page = self.local_page.min(
                 count
                     .div_ceil(organisms::LOCAL_PLAYERS_PER_PAGE)
@@ -536,6 +573,11 @@ impl Game {
             );
         }
         self.snapshot = Some(snapshot);
+        if self.joined && !self.replay && self.completed_results.is_some() {
+            self.local_page = self
+                .local_page
+                .min(self.presentation_page_count().saturating_sub(1));
+        }
     }
     fn retry_available(&self) -> bool {
         self.prepared_retry.is_none() && (self.joined || !self.cancelling)
@@ -3178,20 +3220,23 @@ impl Desktop {
     }
     fn change_local_page(&mut self, forward: bool) {
         if let Some(game) = &mut self.game {
-            let count = game.snapshot.as_ref().map_or(0, |s| s.players.len());
-            game.local_page = local_page(count, game.local_page, forward);
+            let last = game.presentation_page_count().saturating_sub(1);
+            game.local_page = if forward {
+                game.local_page.saturating_add(1).min(last)
+            } else {
+                game.local_page.saturating_sub(1).min(last)
+            };
             self.gesture.cancel();
             self.invalidate_hits();
         }
     }
     fn toggle_local_comparisons(&mut self) {
         if let Some(game) = &mut self.game {
-            if game
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| local_comparisons_available(&snapshot.players))
-            {
+            if game.comparisons_available() {
                 game.local_comparisons = !game.local_comparisons;
+                game.local_page = game
+                    .local_page
+                    .min(game.presentation_page_count().saturating_sub(1));
                 self.gesture.cancel();
                 self.invalidate_hits();
             }
@@ -4770,8 +4815,8 @@ impl Desktop {
                     }
                 }
             }
-            let count = game.snapshot.as_ref().map_or(0, |s| s.players.len());
-            if count > organisms::LOCAL_PLAYERS_PER_PAGE {
+            let pages = game.presentation_page_count();
+            if pages > 1 {
                 if game.local_page > 0 {
                     control(
                         pixels,
@@ -4788,7 +4833,7 @@ impl Desktop {
                         "PREVIOUS",
                     );
                 }
-                if game.local_page + 1 < count.div_ceil(organisms::LOCAL_PLAYERS_PER_PAGE) {
+                if game.local_page + 1 < pages {
                     control(
                         pixels,
                         &mut self.hits,
@@ -4805,11 +4850,7 @@ impl Desktop {
                     );
                 }
             }
-            if game
-                .snapshot
-                .as_ref()
-                .is_some_and(|snapshot| local_comparisons_available(&snapshot.players))
-            {
+            if game.comparisons_available() {
                 control(
                     pixels,
                     &mut self.hits,
@@ -5691,6 +5732,7 @@ fn local_comparisons_available(players: &[player::LocalPlayerSnapshot]) -> bool 
             })
         })
 }
+#[cfg(test)]
 fn local_page(count: usize, current: usize, forward: bool) -> usize {
     let last = count
         .div_ceil(organisms::LOCAL_PLAYERS_PER_PAGE)
@@ -5798,7 +5840,7 @@ fn draw_game_with_background(
     text(pixels, 24, 65, status, 2, 0x9bb1cf);
     if game.joined && !game.replay {
         if let Some(results) = &game.completed_results {
-            results.compose(pixels, game.local_page)?;
+            results.compose_mode(pixels, game.local_page, game.local_comparisons)?;
         } else if let Some(error) = &game.completed_results_error {
             text(
                 pixels,
