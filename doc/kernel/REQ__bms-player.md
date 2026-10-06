@@ -452,6 +452,11 @@ menu pointer conversion and pixel-wheel scaling. Reject zero extents and
 nonfinite coordinates; menu edges are half-open. Round the contained dimension
 down to whole pixels, with a one-pixel minimum on nonzero surfaces. Center any
 odd remainder deterministically; tiny extents necessarily quantize the ratio.
+Identity-scale axes preserve finite fractional captured positions directly.
+Avoid avoidable division/multiplication round trips; finite downscaled positions
+must not be rejected solely because an intermediate product overflows.
+Pending startup/profile/renderer preparation cannot acquire search focus or begin
+text input. Lifecycle cleanup may still clear existing focus while UI is unready.
 
 Browser Window forwards original touch coordinates, CSS extents and the cached
 requested backing extent from the same acquisition observation. It does no lane
