@@ -596,6 +596,7 @@ mod native {
     type OwnedOutput = GameplayOutputOwner<AlsaReplacementBackend>;
     struct GameplayDevice<'a> {
         output: &'a mut OwnedOutput,
+        output_ui: &'a mut beatkernel_bms_runtime::native_alsa_output_ui::NativeAlsaOutputUi,
         input: &'a mut EvdevDevice,
         clock: &'a MonotonicClock,
         retained: &'a mut VecDeque<PhysicalInputEvent>,
@@ -605,7 +606,7 @@ mod native {
             Ok(self.output.observe(discipline)?)
         }
         fn output_replacement_pending(&self) -> bool {
-            self.output.replacement_pending()
+            self.output.replacement_pending() || self.output_ui.pending()
         }
         fn publish_paused_output(
             &mut self,
@@ -614,10 +615,11 @@ mod native {
                 PresentationDiscipline,
             >,
         ) -> NativeGameplayResult<bool> {
-            if !self.output.has_work() {
+            if !self.output.has_work() && !self.output_ui.pending() {
                 return Ok(false);
             }
-            self.output.publish_paused(context, self.clock.now()?)
+            self.output_ui
+                .service(self.output, context, self.clock.now()?)
         }
         fn pause_observation(
             &mut self,
@@ -837,7 +839,7 @@ mod native {
                 preroll: Duration::from_nanos(options.preroll),
                 lookahead: Duration::from_nanos(options.bgm_lookahead),
                 voices: options.voices,
-                max_render_frames: options.period as usize,
+                max_render_frames: AudioLimits::MAX_RENDER_FRAMES,
                 playback_end_frame: playback_end,
                 gated_start: network_start,
             },
@@ -864,6 +866,10 @@ mod native {
             AlsaReplacementBackend,
             AlsaReplacementOutput::from_stream(stream),
         );
+        let mut output_ui = beatkernel_bms_runtime::native_alsa_output_ui::NativeAlsaOutputUi::new(
+            &output,
+            competition_options.network.is_none(),
+        )?;
         println!(
             "requested/applied ALSA={:?}; evdev={:?}; exact source={:?}; bindings={:?}; windows={}/{}ns offset={}ns preroll={}ns advance_lag={}ns voices={} channel_policy={} queue/pending={} live_slack={SLACK}",
             output
@@ -1020,6 +1026,7 @@ mod native {
                 let pump_outcome = {
                     let mut device = GameplayDevice {
                         output: &mut output,
+                        output_ui: &mut output_ui,
                         input: &mut input,
                         clock: &clock,
                         retained: &mut startup_inputs,

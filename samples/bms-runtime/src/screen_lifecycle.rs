@@ -5,6 +5,7 @@
 pub enum ScreenRoute {
     Selection,
     Settings,
+    LiveAudio,
     Display,
     Practice,
     Records,
@@ -19,6 +20,7 @@ pub enum ScreenRoute {
 pub enum ScreenKind {
     Selection,
     Settings,
+    LiveAudio,
     Display,
     Practice,
     Records,
@@ -32,6 +34,7 @@ impl ScreenRoute {
     /// retry requires its explicit edge and a joined game owner.
     pub const fn parent(self) -> Option<Self> {
         match self {
+            Self::LiveAudio => Some(Self::Play { replay: false }),
             Self::Display
             | Self::Practice
             | Self::Records
@@ -51,6 +54,7 @@ impl ScreenRoute {
         let direct = match self {
             Self::Selection => Some(ScreenKind::Selection),
             Self::Settings => Some(ScreenKind::Settings),
+            Self::LiveAudio => Some(ScreenKind::LiveAudio),
             Self::Display => Some(ScreenKind::Display),
             Self::Practice => Some(ScreenKind::Practice),
             Self::Records => Some(ScreenKind::Records),
@@ -176,6 +180,14 @@ impl ScreenNavigator {
             return Ok(None);
         }
         let allowed = match (self.route, to) {
+            (ScreenRoute::Play { replay: false }, ScreenRoute::LiveAudio)
+            | (ScreenRoute::LiveAudio, ScreenRoute::Play { replay: false }) => true,
+            (ScreenRoute::LiveAudio, ScreenRoute::Results { replay: false }) => {
+                if !owner_joined {
+                    return Err("screen navigation waits for the game owner to join".into());
+                }
+                true
+            }
             (ScreenRoute::Selection, ScreenRoute::Settings | ScreenRoute::Play { .. })
             | (
                 ScreenRoute::Settings,
@@ -249,6 +261,10 @@ impl ScreenNavigator {
             }
             if reset {
                 self.stack.clear();
+            } else if self.route == ScreenRoute::LiveAudio
+                && to == (ScreenRoute::Results { replay: false })
+            {
+                self.stack.pop();
             }
             self.stack.push(ScreenEntry {
                 route: to,
@@ -666,3 +682,7 @@ mod fixtures {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "screen_lifecycle_live_output_fixtures.rs"]
+mod live_output_fixtures;

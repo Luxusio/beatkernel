@@ -505,7 +505,11 @@ impl Game {
         Ok(())
     }
     fn pause_target(&self) -> Option<bool> {
-        if self.joined || self.cancelling || self.prepared_retry.is_some() {
+        if self.joined
+            || self.cancelling
+            || self.prepared_retry.is_some()
+            || self.viewer.output_pending()
+        {
             return None;
         }
         let snapshot = self.snapshot.as_ref()?;
@@ -751,7 +755,7 @@ pub(super) fn run(
 ) -> Result<(), Box<dyn Error>> {
     if args.len() == 1 && args[0] == "--help" {
         println!(
-            "player (--library DIR | --chart PATH) [--profile PATH] [--title-font PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings; F3 in selection: search; F4 in settings: records; F6 in settings: practice; W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry pinned start and disable loop; F7: mark live position/loop start; F8: restart mark after cleanup; F9: pause/resume when native owner supports it; F10: mark loop end; F11: toggle native finite loop (live nonnetwork only, joins before restart; reopening may leave a gap); Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
+            "player (--library DIR | --chart PATH) [--profile PATH] [--title-font PATH] [--ui-lookahead-ms 100..10000] [--ui-fps 30..240] [--gpu-backend auto|vulkan|dx12|metal|gl] [--present fifo|immediate|mailbox] NATIVE_OPTIONS\nSolo devices are automatic. Advanced native overrides and key bindings use flag-value pairs.\nF2: settings or audio output in supported paused play; F3 in selection: search; F4 in settings: records; F6 in settings: practice; W in records list: watch; Up/Down: select; Enter: play/return; PageUp/PageDown: local player pages; C: toggle local comparisons; F5: retry pinned start and disable loop; F7: mark live position/loop start; F8: restart mark after cleanup; F9: pause/resume when native owner supports it; F10: mark loop end; F11: toggle native finite loop (live nonnetwork only, joins before restart; reopening may leave a gap); Escape or focus loss: cancel; close: cancel and drain.\nUI keys do not provide gameplay input. Use the native play command's help for platform options."
         );
         return Ok(());
     }
@@ -780,6 +784,8 @@ pub(super) fn run(
         picker: None,
         local_setup: None,
         accepted_local: None,
+        live_audio: None,
+        live_audio_view: None,
         settings: None,
         settings_view: None,
         profile_io: None,
@@ -833,6 +839,36 @@ pub(super) fn run(
 }
 
 const SETTINGS_ROWS: usize = 10;
+struct LiveAudioDraft {
+    values: NativeSettings,
+    selected: usize,
+    editor: LineEditor,
+    request: Option<u64>,
+    message: Option<String>,
+}
+impl LiveAudioDraft {
+    fn select(&mut self, index: usize) -> Result<(), String> {
+        let field = self
+            .values
+            .fields()
+            .get(index)
+            .ok_or("output field unavailable")?;
+        self.editor = LineEditor::new(&field.value, 4096)?;
+        self.selected = index;
+        Ok(())
+    }
+    fn edit(&mut self, key: Option<KeyCode>, value: Option<&str>) {
+        let before = self.editor.clone();
+        let result = edit_line(&mut self.editor, key, value)
+            .and_then(|_| self.values.set_value(self.selected, self.editor.value()));
+        if let Err(error) = result {
+            self.editor = before;
+            self.message = Some(error);
+        } else {
+            self.message = None;
+        }
+    }
+}
 struct SettingsDraft {
     values: NativeSettings,
     presentation: PresentationSettings,
@@ -1240,6 +1276,7 @@ struct ImeDraft {
 enum TextField {
     Search,
     Setting(usize),
+    LiveOutput(usize),
     Profile,
     Display(usize),
     PracticeStart,
@@ -1281,6 +1318,8 @@ struct Desktop {
     picker: Option<PanelScope<DevicePicker>>,
     local_setup: Option<PanelScope<LocalDraft>>,
     accepted_local: Option<LocalSetup>,
+    live_audio: Option<PanelScope<LiveAudioDraft>>,
+    live_audio_view: Option<beatkernel_bms_runtime::ui::live_audio::LiveAudioView>,
     settings: Option<PanelScope<SettingsDraft>>,
     settings_view: Option<SettingsView>,
     profile_io: Option<ProfileOperation>,
@@ -1557,6 +1596,19 @@ impl Desktop {
                     .value();
                 1
             }
+            ScreenRoute::LiveAudio => {
+                if let Some(draft) = &self.live_audio {
+                    for (index, field) in draft.values.fields().iter().enumerate() {
+                        values[index] = if index == draft.selected {
+                            self.ime_editor(ImeField::LiveOutput(index), &draft.editor)
+                                .value()
+                        } else {
+                            &field.value
+                        };
+                    }
+                }
+                3
+            }
             ScreenRoute::Settings => {
                 if let Some(draft) = &self.settings {
                     let first = draft.selected / SETTINGS_ROWS * SETTINGS_ROWS;
@@ -1657,15 +1709,171 @@ impl Desktop {
             && self.profile_io.is_none()
     }
     /// Prepare an atomic route change before data preparation or thread spawn.
+    fn live_output_available(&self) -> bool {
+        self.game.as_ref().is_some_and(|game| {
+            !game.replay
+                && !game.joined
+                && !game.cancelling
+                && !game.network_launch()
+                && game.snapshot.as_ref().is_some_and(|snapshot| {
+                    !snapshot.cancelled
+                        && snapshot.pause == player::PauseState::Paused
+                        && snapshot.status == player::PlayerStatus::Playing
+                })
+                && game.viewer.pause_requested()
+                && game.viewer.output_supported()
+        })
+    }
+    fn open_live_audio(&mut self) {
+        if !self.ui_ready() || self.navigator.route() != (ScreenRoute::Play { replay: false }) {
+            return;
+        }
+        let prepared = (|| -> Result<_, String> {
+            let next = self.prepare_route(ScreenRoute::LiveAudio)?;
+            let capability = self
+                .game
+                .as_ref()
+                .ok_or("play owner unavailable")?
+                .viewer
+                .output_capability()
+                .map_err(|e| e.to_string())?
+                .ok_or("live output controls unsupported")?;
+            let values = NativeSettings::output_only(&capability.current_args, capability.host)?;
+            let editor = LineEditor::new(&values.fields()[0].value, 4096)?;
+            let view = beatkernel_bms_runtime::ui::live_audio::LiveAudioView::new(
+                next.active_id()
+                    .ok_or("output screen identity unavailable")?,
+                WIDTH as u32,
+                HEIGHT as u32,
+            )?;
+            Ok((
+                next,
+                LiveAudioDraft {
+                    values,
+                    selected: 0,
+                    editor,
+                    request: None,
+                    message: None,
+                },
+                view,
+            ))
+        })();
+        match prepared {
+            Ok((next, draft, view)) => {
+                self.commit_route(next);
+                self.live_audio = Some(PanelScope::new(
+                    self.navigator.active_id().expect("live output route"),
+                    draft,
+                ));
+                self.live_audio_view = Some(view);
+                self.invalidate_hits();
+            }
+            Err(error) => self.failure = Some(error),
+        }
+    }
+    fn apply_live_audio(&mut self) {
+        if !self.ui_ready() || self.navigator.route() != ScreenRoute::LiveAudio {
+            return;
+        }
+        let result = (|| -> Result<u64, String> {
+            let draft = self.live_audio.as_ref().ok_or("output draft unavailable")?;
+            self.game
+                .as_ref()
+                .ok_or("play owner unavailable")?
+                .viewer
+                .request_output(draft.values.native_args())
+                .map_err(|e| e.to_string())
+        })();
+        if let Some(draft) = &mut self.live_audio {
+            match result {
+                Ok(id) => {
+                    draft.request = Some(id);
+                    draft.message = Some("Applying audio output settings...".into());
+                }
+                Err(error) => draft.message = Some(error),
+            }
+        }
+        self.invalidate_hits();
+    }
+    fn live_audio_key(&mut self, key: KeyCode, repeat: bool) {
+        if !repeat && key == KeyCode::Escape {
+            self.back();
+            return;
+        }
+        if !repeat && key == KeyCode::Enter {
+            self.apply_live_audio();
+            return;
+        }
+        if self
+            .game
+            .as_ref()
+            .is_some_and(|game| game.viewer.output_pending())
+        {
+            return;
+        }
+        if let Some(draft) = &mut self.live_audio {
+            if matches!(key, KeyCode::Tab | KeyCode::ArrowUp | KeyCode::ArrowDown) {
+                let count = draft.values.fields().len();
+                let next = if key == KeyCode::ArrowUp {
+                    (draft.selected + count - 1) % count
+                } else {
+                    (draft.selected + 1) % count
+                };
+                draft.message = draft.select(next).err();
+                self.gesture.cancel();
+            } else {
+                draft.edit(Some(key), None);
+            }
+        }
+        self.invalidate_hits();
+    }
+    fn draw_live_audio(&mut self) -> Result<(), String> {
+        let draft = self.live_audio.as_ref().ok_or("output draft unavailable")?;
+        let view = self
+            .live_audio_view
+            .as_ref()
+            .ok_or("output view unavailable")?;
+        let id = draft.id();
+        let pending = self
+            .game
+            .as_ref()
+            .is_some_and(|game| game.viewer.output_pending());
+        let hovered = self.hit();
+        let armed = beatkernel_bms_runtime::ui::live_audio::BUTTONS
+            .iter()
+            .map(|(id, _, _)| *id)
+            .find(|id| self.gesture.is_armed(*id));
+        view.update(beatkernel_bms_runtime::ui::live_audio::LiveAudioFrame {
+            fields: draft.values.fields(),
+            selected: draft.selected,
+            editor: self.ime_editor(ImeField::LiveOutput(draft.selected), &draft.editor),
+            message: draft.message.as_deref(),
+            pending,
+            hovered,
+            armed,
+        })?;
+        view.set_input_font(self.input_font.clone());
+        if view.dirty() || self.painted_reactive != Some(id) {
+            view.compose(&mut self.scene, &mut self.hits)?;
+            self.painted_reactive = Some(id);
+        }
+        self.render_scene()
+    }
     fn prepare_route(&self, to: ScreenRoute) -> Result<ScreenNavigator, String> {
         if (self.startup.is_some() || self.renderer_pending()) && to != ScreenRoute::Closing {
             return Err("navigation waits for startup preparation".into());
         }
         if to != ScreenRoute::Closing
-            && !matches!(to, ScreenRoute::Play { .. } | ScreenRoute::Results { .. })
+            && !matches!(
+                to,
+                ScreenRoute::Play { .. } | ScreenRoute::Results { .. } | ScreenRoute::LiveAudio
+            )
             && self.game.as_ref().is_some_and(|game| !game.joined)
         {
             return Err("navigation waits for native session cleanup".into());
+        }
+        if to == ScreenRoute::LiveAudio && !self.live_output_available() {
+            return Err("live output controls require a supported acknowledged pause".into());
         }
         let mut next = self.navigator.clone();
         next.navigate(
@@ -1717,6 +1925,14 @@ impl Desktop {
             .is_some_and(|view| !self.navigator.retains(view.id()))
         {
             self.players_view = None;
+        }
+        release_panel(&mut self.live_audio, &self.navigator);
+        if self
+            .live_audio_view
+            .as_ref()
+            .is_some_and(|view| !self.navigator.retains(view.id()))
+        {
+            self.live_audio_view = None;
         }
         release_panel(&mut self.settings, &self.navigator);
         if self
@@ -3053,6 +3269,27 @@ impl Desktop {
         if !self.ui_ready() {
             return;
         }
+        if self.navigator.route() == ScreenRoute::LiveAudio {
+            match id.0 {
+                90 => self.apply_live_audio(),
+                91 => self.back(),
+                value if (1000..1003).contains(&value) => {
+                    if !self
+                        .game
+                        .as_ref()
+                        .is_some_and(|game| game.viewer.output_pending())
+                    {
+                        if let Some(draft) = &mut self.live_audio {
+                            draft.message = draft.select((value - 1000) as usize).err();
+                        }
+                        self.gesture.cancel();
+                        self.invalidate_hits();
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.navigator.route() == ScreenRoute::Records {
             if id.0 == 66 {
                 self.toggle_record_details();
@@ -3531,6 +3768,35 @@ impl Desktop {
         self.request_close();
     }
     fn collect_game(&mut self) {
+        if let Some(game) = &self.game {
+            if let Ok(Some(reply)) = game.viewer.take_output_reply() {
+                if self.navigator.route() == ScreenRoute::LiveAudio {
+                    if let Some(draft) = &mut self.live_audio {
+                        if self.navigator.accepts(draft.id()) && draft.request == Some(reply.id) {
+                            draft.request = None;
+                            match reply.result {
+                                Ok(cap) => {
+                                    match NativeSettings::output_only(&cap.current_args, cap.host) {
+                                        Ok(values) => {
+                                            draft.values = values;
+                                            let selected = draft.selected;
+                                            let _ = draft.select(selected);
+                                            draft.message = Some(
+                                                "Output settings applied. Playback remains paused."
+                                                    .into(),
+                                            );
+                                        }
+                                        Err(error) => draft.message = Some(error),
+                                    }
+                                }
+                                Err(error) => draft.message = Some(error),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let renderer_pending = self.renderer_pending();
         if let Some(game) = &mut self.game {
             for _ in 0..beatkernel_bms_runtime::room_presentation::ROOM_UI_CAPACITY {
@@ -3578,7 +3844,12 @@ impl Desktop {
         self.repeat_practice_if_due();
         if self.navigator.phase() == ScreenPhase::Active && !self.renderer_pending() {
             if let Some(game) = &self.game {
-                if game.joined && matches!(self.navigator.route(), ScreenRoute::Play { .. }) {
+                if game.joined
+                    && matches!(
+                        self.navigator.route(),
+                        ScreenRoute::Play { .. } | ScreenRoute::LiveAudio
+                    )
+                {
                     if let Err(error) = self.navigate(ScreenRoute::Results {
                         replay: game.replay,
                     }) {
@@ -3628,6 +3899,7 @@ impl Desktop {
         }
         let control = ControlId(match target.field {
             ImeField::Search => 80,
+            ImeField::LiveOutput(index) => 1000_u64.checked_add(u64::try_from(index).ok()?)?,
             ImeField::Setting(index) => 1000_u64.checked_add(u64::try_from(index).ok()?)?,
             ImeField::Profile => 15,
             ImeField::Display(index) => 40_000_u64.checked_add(u64::try_from(index).ok()?)?,
@@ -3856,6 +4128,9 @@ impl Desktop {
         let screen = self.navigator.active_id()?;
         let field = match self.navigator.route() {
             ScreenRoute::Selection if self.search_focused => TextField::Search,
+            ScreenRoute::LiveAudio if !self.game.as_ref()?.viewer.output_pending() => {
+                TextField::LiveOutput(self.live_audio.as_ref()?.selected)
+            }
             ScreenRoute::Settings => {
                 let draft = self.settings.as_ref()?;
                 if draft.profile_focused {
@@ -3882,6 +4157,11 @@ impl Desktop {
     fn text_editor(&self, field: TextField) -> Option<&LineEditor> {
         match field {
             TextField::Search => Some(&self.search_editor),
+            TextField::LiveOutput(index) => self
+                .live_audio
+                .as_ref()
+                .filter(|draft| draft.selected == index)
+                .map(|draft| &draft.editor),
             TextField::Setting(index) => self
                 .settings
                 .as_ref()
@@ -3897,6 +4177,11 @@ impl Desktop {
     fn text_editor_mut(&mut self, field: TextField) -> Option<&mut LineEditor> {
         match field {
             TextField::Search => Some(&mut self.search_editor),
+            TextField::LiveOutput(index) => self
+                .live_audio
+                .as_mut()
+                .filter(|draft| draft.selected == index)
+                .map(|draft| &mut draft.editor),
             TextField::Setting(index) => self
                 .settings
                 .as_mut()
@@ -3960,7 +4245,16 @@ impl Desktop {
         field: TextField,
         editor: &LineEditor,
     ) -> Result<Option<NativeSettings>, String> {
-        if let TextField::Setting(index) = field {
+        if let TextField::LiveOutput(index) = field {
+            let mut values = self
+                .live_audio
+                .as_ref()
+                .ok_or("output draft unavailable")?
+                .values
+                .clone();
+            values.set_value(index, editor.value())?;
+            Ok(Some(values))
+        } else if let TextField::Setting(index) = field {
             let mut values = self
                 .settings
                 .as_ref()
@@ -4014,9 +4308,15 @@ impl Desktop {
             }
             self.search_editor = editor;
         } else if let Some(values) = settings {
-            let draft = self.settings.as_mut().ok_or("settings draft unavailable")?;
-            draft.values = values;
-            draft.editor = editor;
+            if matches!(target.field, TextField::LiveOutput(_)) {
+                let draft = self.live_audio.as_mut().ok_or("output draft unavailable")?;
+                draft.values = values;
+                draft.editor = editor;
+            } else {
+                let draft = self.settings.as_mut().ok_or("settings draft unavailable")?;
+                draft.values = values;
+                draft.editor = editor;
+            }
         } else if target.field == TextField::RecordDirectory {
             let draft = self
                 .records
@@ -4169,6 +4469,17 @@ impl Desktop {
                             display.edit(None, Some(value));
                         }
                     }
+                    ScreenRoute::LiveAudio => {
+                        if !self
+                            .game
+                            .as_ref()
+                            .is_some_and(|game| game.viewer.output_pending())
+                        {
+                            if let Some(draft) = &mut self.live_audio {
+                                draft.edit(None, Some(value));
+                            }
+                        }
+                    }
                     ScreenRoute::Settings => {
                         if let Some(draft) = &mut self.settings {
                             draft.edit(None, Some(value));
@@ -4253,6 +4564,17 @@ impl Desktop {
         }
         if self.navigator.route() == ScreenRoute::Players {
             self.local_key(key, repeat);
+            return;
+        }
+        if self.navigator.route() == ScreenRoute::LiveAudio {
+            self.live_audio_key(key, repeat);
+            return;
+        }
+        if !repeat
+            && key == KeyCode::F2
+            && self.navigator.route() == (ScreenRoute::Play { replay: false })
+        {
+            self.open_live_audio();
             return;
         }
         if self.navigator.route() == ScreenRoute::Settings {
@@ -4846,6 +5168,11 @@ impl Desktop {
             return Ok(());
         }
         let route = self.navigator.route();
+        if route == ScreenRoute::LiveAudio {
+            return self.draw_live_audio();
+        }
+        let live_audio_available =
+            route == (ScreenRoute::Play { replay: false }) && self.live_output_available();
         let backgrounds = self.background_frames(route)?;
         if route == ScreenRoute::Selection {
             return self.draw_selection();
@@ -4893,6 +5220,10 @@ impl Desktop {
                 .as_ref()
                 .ok_or("session screen data unavailable")?;
             draw_game_with_background(pixels, game, self.options.lookahead, &backgrounds)?;
+            if live_audio_available {
+                text(pixels, 740, 26, "F2: AUDIO OUTPUT", 1, 0x74e5c5);
+            }
+
             let room = game
                 .snapshot
                 .as_ref()
@@ -6764,6 +7095,8 @@ mod tests {
             picker: None,
             local_setup: None,
             accepted_local: None,
+            live_audio: None,
+            live_audio_view: None,
             settings: None,
             settings_view: None,
             profile_io: None,
@@ -8771,6 +9104,9 @@ mod tests {
                 .any(char::is_control)
         );
         assert_eq!(window_title(&"A".repeat(1024), "").chars().count(), 256);
+    }
+    mod live_output {
+        include!("desktop_live_output_fixtures.rs");
     }
 }
 

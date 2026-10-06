@@ -471,3 +471,7 @@ fn actual_cohort_owner_controller_defers_early_resume_and_keeps_original_roster_
     assert_eq!(&device.trace.borrow().pcm[50..52], &[0.5, 1.]);
     assert!(device.owner.stop().is_ok());
 }
+
+mod live_output {
+    include!("native_live_output_fixtures.rs");
+}

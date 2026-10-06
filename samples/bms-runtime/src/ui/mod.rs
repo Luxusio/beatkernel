@@ -20,3 +20,5 @@ mod retained;
 pub mod selection;
 pub mod settings;
 pub mod text_input;
+
+pub mod live_audio;

@@ -107,6 +107,7 @@ use beatkernel_bms_runtime::{
 type OwnedOutput = GameplayOutputOwner<AlsaReplacementBackend>;
 struct CohortDevice<'a> {
     output: &'a mut OwnedOutput,
+    output_ui: &'a mut beatkernel_bms_runtime::native_alsa_output_ui::NativeAlsaOutputUi,
     inputs: &'a mut [EvdevDevice],
     clock: &'a MonotonicClock,
     backlogged: &'a mut [bool],
@@ -117,7 +118,7 @@ impl NativeGameplayDevice for CohortDevice<'_> {
         Ok(self.output.observe(discipline)?)
     }
     fn output_replacement_pending(&self) -> bool {
-        self.output.replacement_pending()
+        self.output.replacement_pending() || self.output_ui.pending()
     }
     fn publish_paused_output(
         &mut self,
@@ -126,10 +127,11 @@ impl NativeGameplayDevice for CohortDevice<'_> {
             PresentationDiscipline,
         >,
     ) -> NativeGameplayResult<bool> {
-        if !self.output.has_work() {
+        if !self.output.has_work() && !self.output_ui.pending() {
             return Ok(false);
         }
-        self.output.publish_paused(context, self.clock.now()?)
+        self.output_ui
+            .service(self.output, context, self.clock.now()?)
     }
     fn pause_observation(
         &mut self,
@@ -306,7 +308,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             preroll: Duration::from_nanos(options.preroll),
             lookahead: Duration::from_nanos(options.bgm_lookahead),
             voices: options.voices,
-            max_render_frames: options.period as usize,
+            max_render_frames: AudioLimits::MAX_RENDER_FRAMES,
             playback_end_frame: playback_end,
             gated_start: network.is_some(),
         },
@@ -343,6 +345,10 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
         AlsaReplacementBackend,
         AlsaReplacementOutput::from_stream(stream),
     );
+    let mut output_ui = beatkernel_bms_runtime::native_alsa_output_ui::NativeAlsaOutputUi::new(
+        &output,
+        competition_options.network.is_none(),
+    )?;
     println!(
         "local players={count}; shared requested/applied ALSA={:?}; exact input devices={:?}; one asset bank/BGM/output; independent judges/captures/scores",
         output
@@ -429,6 +435,7 @@ pub(super) fn run(options: Options, competition_options: CompetitionOptions) -> 
             let mut backlogged = vec![true; count];
             let mut device = CohortDevice {
                 output: &mut output,
+                output_ui: &mut output_ui,
                 inputs: &mut inputs,
                 clock: &clock,
                 backlogged: &mut backlogged,

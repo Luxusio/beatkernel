@@ -20,7 +20,7 @@ fn field_app(field: TextField) -> Desktop {
                 app.practice.as_mut().unwrap().end_focused = field == TextField::PracticeEnd;
             }
             TextField::RecordDirectory => app.open_records(),
-            TextField::Search => unreachable!(),
+            TextField::Search | TextField::LiveOutput(_) => unreachable!(),
         }
     }
     app.sync_ime();

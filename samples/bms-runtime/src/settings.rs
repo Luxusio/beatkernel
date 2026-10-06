@@ -404,6 +404,44 @@ pub struct NativeSettings {
     fields: Vec<SettingsField>,
 }
 impl NativeSettings {
+    /// Bounded output-only schema; empty values preserve the current native setting.
+    pub fn output_only(args: &[String], host: SettingsHost) -> Result<Self, String> {
+        let allowed: &[&str] = match host {
+            SettingsHost::Linux => &["--alsa", "--period-frames", "--buffer-frames"],
+            SettingsHost::Windows => &["--device", "--buffer", "--period"],
+            SettingsHost::Macos => &["--device", "--buffer-frames"],
+        };
+        if args.len() % 2 != 0
+            || args
+                .chunks_exact(2)
+                .any(|pair| !allowed.contains(&pair[0].as_str()))
+        {
+            return Err("live settings contain an unsupported output field".into());
+        }
+        let mut settings = Self::from_args(args, host)?;
+        settings
+            .fields
+            .retain(|field| allowed.contains(&field.flag));
+        for field in &mut settings.fields {
+            match field.flag {
+                "--alsa" | "--device" => {
+                    field.label = "OUTPUT DEVICE";
+                    field.hint = "Empty keeps the current output. ALSA default can be selected explicitly as default.";
+                }
+                "--buffer-frames" | "--buffer" => {
+                    field.label = "HARDWARE BUFFER (FRAMES)";
+                    field.hint = "Empty keeps the current buffer. Applied sizes are confirmed by the output owner.";
+                }
+                "--period-frames" | "--period" => {
+                    field.label = "PROCESSING PERIOD (FRAMES)";
+                    field.hint = "Empty keeps the current period. It must be smaller than the hardware buffer.";
+                }
+                _ => {}
+            }
+        }
+        Ok(settings)
+    }
+
     /// Retains configured pair order/repeated bindings and opponents. Missing
     /// known options become empty fields; no device, key or numeric default is guessed.
     pub fn from_args(args: &[String], host: SettingsHost) -> Result<Self, String> {

@@ -306,6 +306,11 @@ impl Default for PlayerSnapshot {
     }
 }
 struct Shared {
+    output: Mutex<crate::live_output_control::OutputControls>,
+    output_supported: AtomicBool,
+    output_closed: AtomicBool,
+    output_queued: AtomicBool,
+    output_busy: AtomicBool,
     latest: Mutex<Option<PlayerSnapshot>>,
     cancel: AtomicBool,
     pause_requested: AtomicBool,
@@ -364,6 +369,11 @@ pub struct PlayerViewer(Arc<Shared>);
 /// Make one bounded latest-state slot; fresh channels isolate restarted sessions.
 pub fn channel() -> (PlayerPublisher, PlayerViewer) {
     let shared = Arc::new(Shared {
+        output: Mutex::new(crate::live_output_control::OutputControls::new()),
+        output_supported: AtomicBool::new(false),
+        output_closed: AtomicBool::new(false),
+        output_queued: AtomicBool::new(false),
+        output_busy: AtomicBool::new(false),
         latest: Mutex::new(Some(PlayerSnapshot::default())),
         cancel: AtomicBool::new(false),
         pause_requested: AtomicBool::new(false),
@@ -379,7 +389,141 @@ pub fn channel() -> (PlayerPublisher, PlayerViewer) {
     });
     (PlayerPublisher(shared.clone()), PlayerViewer(shared))
 }
+impl PlayerPublisher {
+    pub fn advertise_output(
+        &self,
+        capability: Option<crate::live_output_control::OutputCapability>,
+    ) -> io::Result<()> {
+        if self.0.output_closed.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "output controls closed",
+            ));
+        }
+        let supported = capability.is_some();
+        self.0
+            .output
+            .try_lock()
+            .map_err(room_lock_error)?
+            .advertise(capability)
+            .map_err(io::Error::other)?;
+        self.0.output_supported.store(supported, Ordering::Release);
+        Ok(())
+    }
+    pub fn take_output_request(
+        &self,
+    ) -> io::Result<Option<crate::live_output_control::OutputRequest>> {
+        if !self.0.output_queued.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        let mut controls = self.0.output.try_lock().map_err(room_lock_error)?;
+        if self.0.cancel.load(Ordering::Acquire) || self.0.output_closed.load(Ordering::Acquire) {
+            controls.close("output controls closed or cancelled");
+        }
+        let request = controls.take_request();
+        self.0
+            .output_queued
+            .store(controls.queued(), Ordering::Release);
+        self.0
+            .output_busy
+            .store(controls.pending(), Ordering::Release);
+        Ok(request)
+    }
+    pub fn reply_output(&self, reply: &crate::live_output_control::OutputReply) -> io::Result<()> {
+        let mut controls = self.0.output.try_lock().map_err(room_lock_error)?;
+        if self.0.cancel.load(Ordering::Acquire) || self.0.output_closed.load(Ordering::Acquire) {
+            controls.close("output controls closed or cancelled");
+            self.0
+                .output_busy
+                .store(controls.pending(), Ordering::Release);
+            return Ok(());
+        }
+        controls.reply(reply).map_err(io::Error::other)?;
+        self.0
+            .output_supported
+            .store(controls.capability().is_some(), Ordering::Release);
+        self.0.output_busy.store(true, Ordering::Release);
+        Ok(())
+    }
+    pub fn output_pending(&self) -> bool {
+        self.0.output_busy.load(Ordering::Acquire)
+    }
+}
+fn output_publisher<T>(
+    run: impl FnOnce(&PlayerPublisher) -> io::Result<T>,
+    absent: T,
+) -> io::Result<T> {
+    SESSION.with(|session| match session.borrow().as_ref() {
+        Some(session) => run(&session.publisher),
+        None => Ok(absent),
+    })
+}
+pub fn advertise_output(
+    cap: Option<crate::live_output_control::OutputCapability>,
+) -> io::Result<()> {
+    output_publisher(|p| p.advertise_output(cap), ())
+}
+pub fn take_output_request() -> io::Result<Option<crate::live_output_control::OutputRequest>> {
+    output_publisher(|p| p.take_output_request(), None)
+}
+pub fn reply_output(reply: &crate::live_output_control::OutputReply) -> io::Result<()> {
+    output_publisher(|p| p.reply_output(reply), ())
+}
+pub fn output_pending() -> bool {
+    output_publisher(|p| Ok(p.output_pending()), false).unwrap_or(true)
+}
 impl PlayerViewer {
+    pub fn output_supported(&self) -> bool {
+        self.0.output_supported.load(Ordering::Acquire)
+            && !self.0.cancel.load(Ordering::Acquire)
+            && !self.0.output_closed.load(Ordering::Acquire)
+    }
+    pub fn output_capability(
+        &self,
+    ) -> io::Result<Option<crate::live_output_control::OutputCapability>> {
+        if self.0.cancel.load(Ordering::Acquire) || self.0.output_closed.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        Ok(self
+            .0
+            .output
+            .try_lock()
+            .map_err(room_lock_error)?
+            .capability()
+            .cloned())
+    }
+    pub fn output_pending(&self) -> bool {
+        self.0.output_busy.load(Ordering::Acquire)
+    }
+    pub fn request_output(&self, args: Vec<String>) -> io::Result<u64> {
+        let mut controls = self.0.output.try_lock().map_err(room_lock_error)?;
+        if self.0.cancel.load(Ordering::Acquire) || self.0.output_closed.load(Ordering::Acquire) {
+            controls.close("output controls closed or cancelled");
+            return Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "output request cancelled",
+            ));
+        }
+        let id = controls.request(args).map_err(io::Error::other)?;
+        self.0.output_busy.store(true, Ordering::Release);
+        self.0.output_queued.store(true, Ordering::Release);
+        Ok(id)
+    }
+    pub fn take_output_reply(&self) -> io::Result<Option<crate::live_output_control::OutputReply>> {
+        let mut controls = self.0.output.try_lock().map_err(room_lock_error)?;
+        if self.0.cancel.load(Ordering::Acquire) || self.0.output_closed.load(Ordering::Acquire) {
+            controls.close("output controls closed or cancelled");
+        }
+        let reply = controls.take_reply();
+        self.0
+            .output_busy
+            .store(controls.pending(), Ordering::Release);
+        self.0
+            .output_queued
+            .store(controls.queued(), Ordering::Release);
+        Ok(reply)
+    }
+
     /// UI identity is distinct from the network owner's command identity.
     pub fn request_room(&self, action: RoomUiAction) -> io::Result<u64> {
         let mut controls = self.0.room.try_lock().map_err(room_lock_error)?;
@@ -489,6 +633,20 @@ struct PressedState {
     keys: PressedKeys,
     mask: u32,
 }
+struct OutputAttachmentGuard(Arc<Shared>);
+impl Drop for OutputAttachmentGuard {
+    fn drop(&mut self) {
+        self.0.output_supported.store(false, Ordering::Release);
+        self.0.output_closed.store(true, Ordering::Release);
+        self.0.output_queued.store(false, Ordering::Release);
+        if let Ok(mut controls) = self.0.output.try_lock() {
+            controls.close("native play owner ended");
+            self.0
+                .output_busy
+                .store(controls.pending(), Ordering::Release);
+        }
+    }
+}
 struct Session {
     pressed: Vec<PressedState>,
     publisher: PlayerPublisher,
@@ -561,9 +719,49 @@ pub fn with_publisher<T>(
     })?;
     // Unwind drops the thread-local session with its game owner; the UI observes
     // JoinHandle's panic separately. No unwind crosses a native callback ABI.
+    let _output_guard = SESSION.with(|session| {
+        OutputAttachmentGuard(
+            session
+                .borrow()
+                .as_ref()
+                .expect("attached play owner")
+                .publisher
+                .0
+                .clone(),
+        )
+    });
     let result = run();
     SESSION.with(|session| {
         if let Some(mut current) = session.borrow_mut().take() {
+            current
+                .publisher
+                .0
+                .output_supported
+                .store(false, Ordering::Release);
+            current
+                .publisher
+                .0
+                .output_closed
+                .store(true, Ordering::Release);
+            if let Ok(mut output) = current.publisher.0.output.lock() {
+                output.close(
+                    result
+                        .as_ref()
+                        .err()
+                        .map(String::as_str)
+                        .unwrap_or("native play finished"),
+                );
+                current
+                    .publisher
+                    .0
+                    .output_queued
+                    .store(false, Ordering::Release);
+                current
+                    .publisher
+                    .0
+                    .output_busy
+                    .store(output.pending(), Ordering::Release);
+            }
             current
                 .publisher
                 .0
@@ -2030,3 +2228,8 @@ mod fixtures {
 #[cfg(test)]
 #[path = "player_completed_result_fixtures.rs"]
 mod completed_result_fixtures;
+
+#[cfg(test)]
+mod live_output_channel_fixtures {
+    crate::live_output_control::fixtures::player_channel_tests!();
+}

@@ -950,3 +950,10 @@ mod native_output_publication_fixtures;
 pub mod gameplay_output_owner;
 #[cfg(test)]
 mod native_owned_output_fixtures;
+
+/// Static cold command bridge to actual gameplay output ownership.
+pub mod gameplay_output_ui;
+/// Pure bounded session output commands and applied capabilities.
+pub mod live_output_control;
+#[cfg(target_os = "linux")]
+pub mod native_alsa_output_ui;
