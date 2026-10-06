@@ -1444,6 +1444,11 @@ Prepare independent original-song opacity indexes for channels0B (Base),0C (Laye
 
 
 ### Static BGA crop preparation
+Filesystem and selected-file preparation share one pure image plan preflight.
+Run it before root canonicalization, source resolution, reads or canvas
+allocation, then pass the validated plan into preparation without rebuilding its
+reference sets. Selected-file budgets require a positive per-file byte maximum
+no larger than the aggregate maximum; reject incoherent settings at construction.
 Prepare #BGA/#@BGA fragments into default256x256 transparent canvases before playback; explicit CANVASSIZE is defined below. Validate typed crop rectangles/IDs and combined visual counts before filesystem access; gather displayed IDs plus initial BMP00/BGA00 and their original BMP dependencies, capped together by max_images. Crop wins over raw same-ID BMP, and refers to original files even with self/swap IDs. Load dependencies via existing contained literal/canonical dedup; preserve source-unavailable reasons for selected cropped IDs with no fallback. Retain original raw source Arcs, charge all raw source buffers plus unique normalized-crop variants and changed Layer variants to aggregate decoded bytes before allocation. Share identical crops of canonical raw aliases. Apply existing exact-black key after cropping only to Layer/Layer2; Base/Poor retain produced RGBA. Publish immutable bank atomically through actual native preparation. Existing Scene, texture ownership and opacity paths consume it with no perframe cropping, IO or new shader. Half-open corners, negative-origin clamp before placement and clipped destination are explicit policy; full historical renderer conformity/overspill remain unverified/pending, while explicit CANVASSIZE is defined below. Author parser/pixel/clipping/cap/alias/unavailability/cache/Scene/actualRuntime/live-replay/native publication/freshpractice fixtures for deferred execution.
 
 
