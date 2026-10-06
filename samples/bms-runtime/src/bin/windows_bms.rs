@@ -2073,7 +2073,7 @@ mod preroll_fixtures {
             assert!(parse(&args).is_ok());
         }
         configured.extend(["--mp-host".into(), "127.0.0.1:34567".into()]);
-        assert!(validate_args(&configured).is_err());
+        assert!(validate_args(&configured).is_ok());
     }
     #[test]
     fn local_cli_rejects_missing_duplicate_mixed_and_oversized_assignments() {

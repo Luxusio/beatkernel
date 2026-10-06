@@ -362,9 +362,7 @@ fn recorded_asio_natural_completion_requires_explicit_bounded_clock_assessments(
 
 mod playback_control {
     use super::*;
-    use beatkernel::audio::{
-        AudioCommand, CommandProducer, PcmSample, SampleBank, SampleId, VoiceId,
-    };
+    use beatkernel::audio::{AudioCommand, CommandProducer, PcmSample, SampleBank, SampleId, VoiceId};
     use beatkernel_bms_runtime::native_start::interval::StartInterval;
 
     fn point(domain: ClockDomainId, ns: i64) -> ClockPoint {
@@ -376,7 +374,7 @@ mod playback_control {
     fn fixture() -> (CommandProducer, Mixer, ReplayPause) {
         let format = AudioFormat::new(1000, 1).unwrap();
         let limits = AudioLimits::new(8, 2, 8, 32, 8).unwrap();
-        let pcm = PcmLimits::new(128, 512, 1).unwrap();
+        let pcm = PcmLimits::new(256, 512, 1).unwrap();
         let mut bank = SampleBank::new(format, pcm).unwrap();
         bank.insert(
             SampleId(1),

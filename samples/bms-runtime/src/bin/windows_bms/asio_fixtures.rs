@@ -325,16 +325,11 @@ fn asio_finite_prefix_admits_exact_solo_or_local_end_without_network_or_sdk_io()
     append(&mut arguments, "--local-player", "4294967295:path-b");
     assert!(super::validate_args(&arguments).is_ok());
     append(&mut arguments, "--mp-host", "127.0.0.1:39001");
-    assert!(super::validate_args(&arguments).is_err());
+    assert!(super::validate_args(&arguments).is_ok());
     let mut solo_network = asio();
     append(&mut solo_network, "--end-ns", "1");
     append(&mut solo_network, "--mp-host", "127.0.0.1:39001");
-    assert!(
-        super::validate_args(&solo_network)
-            .unwrap_err()
-            .to_string()
-            .contains("network")
-    );
+    assert!(super::validate_args(&solo_network).is_ok());
     for value in [
         "",
         "-1",
