@@ -28,8 +28,10 @@ the optional recovered mixer to preserve its original signature/semantics.
 This preserves software state at failure, not pre-open cursor state after an
 adapter has rendered, native buffer delivery, voice rewinding or automatic live
 handoff. WASAPI integration and the shared static worker owner now follow
-[WASAPI recoverable open](REQ__wasapi-recoverable-open.md). CoreAudio/ASIO
-recoverable open integration remains subsequent work. A worker panic can lose
+[WASAPI recoverable open](REQ__wasapi-recoverable-open.md). CoreAudio
+recoverable open integration follows
+[CoreAudio recoverable open](REQ__coreaudio-recoverable-open.md) for pending
+callback ownership; ASIO integration remains subsequent work. A worker panic can lose
 the mixer; callers must distinguish that ceiling.
 
 Author core ownership and actual ALSA preflight/launch/normal-join/panic fixtures
