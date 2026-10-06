@@ -413,8 +413,6 @@ fn validate_recorded_setup(
         ));
     }
     let selected = crate::section_start::source_at(source, start)?;
-    let input_sounds =
-        InputSoundIdentity::from_source(&selected).map_err(PlaybackError::InputSounds)?;
     let compiled = selected.compile()?;
     let judge = prepare_judge(
         &selected,
@@ -424,6 +422,8 @@ fn validate_recorded_setup(
         beatkernel_bms::ParseOptions::default().max_objects,
     )
     .map_err(PlaybackError::Hazards)?;
+    let input_sounds =
+        InputSoundIdentity::from_source(&selected).map_err(PlaybackError::InputSounds)?;
     let expected = setup_input_sound_header(
         &judge,
         file.header.normalized_clock,
