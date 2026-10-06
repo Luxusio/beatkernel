@@ -18,6 +18,9 @@ without treating damage values as WAV resource indices.
 
 The existing actual paths are the implementation: mine_plan.prepare_judge installs
 immutable one-shot core hazards before pristine replay/competition identity;
+replay validation must finish this judge/hazard preparation before computing
+input/mine sound identity. Invalid mine timing retains PlaybackError::Hazards;
+it must not be reclassified as InputSounds by an earlier identity preparation.
 StepGameplay/StepLocalGameplay, native source-aware solo/local construction and
 offline use that judge. Practice selects original-song markers without changing
 their IDs/times. replay_playback reconstructs the same configured judge from accepted
