@@ -36,7 +36,12 @@ Canonical BKPI raw report encoding retains source, acquisition sequence, Window
 clock point (domain 0x57494e), native backend 0x57484944, report ID
 provenance and exact separate-ID payload. Accept empty reports within configured
 bounds. Canonical encoded packets use core BKPI v1 RawHidReport variant 5. Existing
-keyboard/touch codecs and ownership remain unchanged. Reports alone have no
+keyboard/touch codecs and ownership remain unchanged. The raw payload length is
+an unsigned 64-bit little-endian field, matching the core input codec; the browser
+writes it with BigInt precision. With the current native provenance fields, the
+payload begins at byte 68 for an unnumbered report and byte 69 for a numbered
+report. Independent JS/Rust literals and core round-trip tests verify this wire
+layout, including empty and 1024-byte reports. Reports alone have no
 logical lane binding; descriptor/profile interpretation, actual page/Worker
 forwarding, permission UI and gameplay stop policy remain required integration.
 Fixtures and compile checks are source evidence. Device/browser/runtime and
