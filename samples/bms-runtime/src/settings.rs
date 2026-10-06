@@ -422,7 +422,13 @@ impl NativeSettings {
                 "--buffer-frames",
                 "--output-matrix",
             ],
-            SettingsHost::Windows => &["--device", "--buffer", "--period", "--output-matrix"],
+            SettingsHost::Windows => &[
+                "--device",
+                "--buffer",
+                "--period",
+                "--output-channels",
+                "--output-matrix",
+            ],
             SettingsHost::Macos => &["--device", "--buffer-frames", "--output-matrix"],
         };
         if args.len() % 2 != 0

@@ -16,22 +16,24 @@ use beatkernel_platform::audio::{
 pub(super) fn asio_request(
     device: &str,
     buffer: beatkernel_platform::audio::asio::AsioBufferRequest,
-    channels: u16,
+    channels: &[u32],
     matrix: Option<&ChannelMatrix>,
     args: &[String],
 ) -> Result<
     (
         beatkernel_platform::audio::asio::AsioBufferRequest,
+        Vec<u32>,
         Option<ChannelMatrix>,
     ),
     String,
 > {
     use beatkernel_platform::audio::asio::AsioBufferRequest;
-    if channels == 0 || channels > 32 {
+    if channels.is_empty() || channels.len() > 32 {
         return Err("ASIO selected channel count is outside core limits".into());
     }
     let draft = NativeSettings::output_only(args, SettingsHost::Windows)?;
     let mut buffer = buffer;
+    let mut selected = channels.to_vec();
     let mut text = "";
     for field in draft
         .fields()
@@ -57,27 +59,33 @@ pub(super) fn asio_request(
                 }
             }
             "--output-matrix" => text = &field.value,
+            "--output-channels" => {
+                selected = super::parse_output_channels(&field.value).map_err(|e| e.to_string())?
+            }
             _ => return Err("ASIO live replacement does not support a period field".into()),
         }
     }
-    let source = matrix.map_or(channels, ChannelMatrix::source_channels);
+    let source = matrix.map_or(channels.len() as u16, ChannelMatrix::source_channels);
     let (target, matrix) = select_matrix(source, matrix, text)?;
-    if target != channels {
+    if target as usize != selected.len() {
         return Err("ASIO matrix target width must match selected driver channels".into());
     }
-    Ok((buffer, matrix))
+    Ok((buffer, selected, matrix))
 }
 
 #[cfg(any(feature = "asio-sdk", test))]
 pub(super) fn asio_capability(
     buffer: beatkernel_platform::audio::asio::AsioBufferRequest,
-    channels: u16,
+    channels: &[u32],
     matrix: Option<&ChannelMatrix>,
 ) -> Result<OutputCapability, String> {
-    if channels == 0
-        || channels > 32
+    if channels.is_empty()
+        || channels.len() > 32
+        || channels.iter().enumerate().any(|(index, channel)| {
+            *channel > i32::MAX as u32 || channels[..index].contains(channel)
+        })
         || matches!(buffer, beatkernel_platform::audio::asio::AsioBufferRequest::Frames(frames) if frames == 0 || frames as usize > AudioLimits::MAX_RENDER_FRAMES)
-        || matrix.is_some_and(|matrix| matrix.target_channels() != channels)
+        || matrix.is_some_and(|matrix| matrix.target_channels() as usize != channels.len())
     {
         return Err("ASIO applied channel matrix differs from selected channels".into());
     }
@@ -100,6 +108,15 @@ pub(super) fn asio_capability(
             },
         ],
     };
+    let mut cap = cap;
+    cap.current_args.extend([
+        "--output-channels".into(),
+        channels
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+    ]);
     cap.validate()?;
     Ok(cap)
 }
@@ -390,17 +407,17 @@ mod tests {
     fn asio_draft_preserves_trusted_driver_channels_and_matrix_when_buffer_changes() {
         use beatkernel_platform::audio::asio::AsioBufferRequest;
         let matrix = ChannelMatrix::new(2, 2, &[0., 1., 1., 0.]).unwrap();
-        let (buffer, retained) = asio_request(
+        let (buffer, channels, retained) = asio_request(
             "trusted-driver",
             AsioBufferRequest::DriverPreferred,
-            2,
+            &[0, 1],
             Some(&matrix),
             &["--buffer".into(), "frames:128".into()],
         )
         .unwrap();
         assert_eq!(buffer, AsioBufferRequest::Frames(128));
         assert_eq!(retained.as_ref(), Some(&matrix));
-        let cap = asio_capability(buffer, 2, retained.as_ref()).unwrap();
+        let cap = asio_capability(buffer, &channels, retained.as_ref()).unwrap();
         let fields = cap.settings().unwrap();
         assert_eq!(
             fields
@@ -408,23 +425,23 @@ mod tests {
                 .iter()
                 .map(|field| field.flag)
                 .collect::<Vec<_>>(),
-            vec!["--buffer", "--output-matrix"]
+            vec!["--buffer", "--output-channels", "--output-matrix"]
         );
         assert_eq!(
             asio_request(
                 "trusted-driver",
                 buffer,
-                2,
+                &[0, 1],
                 retained.as_ref(),
                 &cap.current_args
             )
             .unwrap(),
-            (buffer, retained)
+            (buffer, channels, retained)
         );
-        let (preferred, cleared) = asio_request(
+        let (preferred, _, cleared) = asio_request(
             "trusted-driver",
             buffer,
-            2,
+            &[0, 1],
             Some(&matrix),
             &[
                 "--buffer".into(),
@@ -453,14 +470,115 @@ mod tests {
                 asio_request(
                     "trusted-driver",
                     AsioBufferRequest::DriverPreferred,
-                    2,
+                    &[0, 1],
                     None,
                     &args.into_iter().map(str::to_owned).collect::<Vec<_>>()
                 )
                 .is_err()
             );
         }
-        assert!(asio_capability(AsioBufferRequest::Frames(0), 2, None).is_err());
-        assert!(asio_capability(AsioBufferRequest::DriverPreferred, 0, None).is_err());
+        assert!(asio_capability(AsioBufferRequest::Frames(0), &[0, 1], None).is_err());
+        assert!(asio_capability(AsioBufferRequest::DriverPreferred, &[], None).is_err());
+        assert!(asio_capability(AsioBufferRequest::DriverPreferred, &[0, 0], None).is_err());
+        assert!(asio_capability(AsioBufferRequest::DriverPreferred, &[u32::MAX], None).is_err());
+    }
+
+    #[test]
+    fn asio_channel_reorder_and_resize_keep_original_source_grid_and_explicit_reset() {
+        use beatkernel_platform::audio::asio::AsioBufferRequest;
+        let original = [0, 1];
+        let (buffer, reordered, matrix) = asio_request(
+            "trusted",
+            AsioBufferRequest::Frames(64),
+            &original,
+            None,
+            &["--output-channels".into(), "7,4".into()],
+        )
+        .unwrap();
+        assert_eq!(reordered, [7, 4]);
+        assert!(matrix.is_none());
+        assert!(
+            asio_request(
+                "trusted",
+                buffer,
+                &reordered,
+                None,
+                &["--output-channels".into(), "7,4,2".into()]
+            )
+            .is_err()
+        );
+        let (_, resized, matrix) = asio_request(
+            "trusted",
+            buffer,
+            &reordered,
+            None,
+            &[
+                "--output-channels".into(),
+                "7,4,2".into(),
+                "--output-matrix".into(),
+                "1,0;0,1;0.5,0.5".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(resized, [7, 4, 2]);
+        assert_eq!(matrix.as_ref().unwrap().source_channels(), 2);
+        let (_, same, retained) = asio_request(
+            "trusted",
+            buffer,
+            &resized,
+            matrix.as_ref(),
+            &["--buffer".into(), "frames:128".into()],
+        )
+        .unwrap();
+        assert_eq!(same, resized);
+        assert_eq!(retained, matrix);
+        assert!(
+            asio_request(
+                "trusted",
+                buffer,
+                &resized,
+                matrix.as_ref(),
+                &["--output-matrix".into(), "exact".into()]
+            )
+            .is_err()
+        );
+        let (_, reset, cleared) = asio_request(
+            "trusted",
+            buffer,
+            &resized,
+            matrix.as_ref(),
+            &[
+                "--output-channels".into(),
+                "4,7".into(),
+                "--output-matrix".into(),
+                "exact".into(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(reset, [4, 7]);
+        assert!(cleared.is_none());
+    }
+
+    #[test]
+    fn asio_channel_syntax_is_shared_with_launch_and_never_reaches_wasapi() {
+        use beatkernel_platform::audio::asio::AsioBufferRequest;
+        for text in ["", "0,0", "0,", "-1", "+1", "2147483648", "4294967296"] {
+            assert!(super::super::parse_output_channels(text).is_err());
+            if !text.is_empty() {
+                assert!(
+                    asio_request(
+                        "trusted",
+                        AsioBufferRequest::DriverPreferred,
+                        &[0, 1],
+                        None,
+                        &["--output-channels".into(), text.into()]
+                    )
+                    .is_err()
+                );
+            }
+        }
+        let oversized = (0..33).map(|n| n.to_string()).collect::<Vec<_>>().join(",");
+        assert!(super::super::parse_output_channels(&oversized).is_err());
+        assert!(request(current(), None, &["--output-channels".into(), "0,1".into()]).is_err());
     }
 }

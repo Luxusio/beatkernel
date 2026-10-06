@@ -136,6 +136,20 @@ fn size(value: &str) -> Result<Option<(bool, u64)>> {
         _ => Err("size must be default, frames:N or ns:N".into()),
     }
 }
+fn parse_output_channels(value: &str) -> Result<Vec<u32>> {
+    let mut selected = Vec::new();
+    for token in value.split(',') {
+        if token.is_empty() || !token.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("invalid ASIO channel token".into());
+        }
+        let index: u32 = token.parse()?;
+        if index > i32::MAX as u32 || selected.contains(&index) || selected.len() == 32 {
+            return Err("invalid or duplicate ASIO output channel".into());
+        }
+        selected.push(index);
+    }
+    Ok(selected)
+}
 fn local_assignment(
     value: &str,
 ) -> Result<(beatkernel_bms_runtime::local_players::PlayerId, String)> {
@@ -279,19 +293,7 @@ fn parse(args: &[String]) -> Result<Options> {
                 })
             }
             "--output-channels" => {
-                let mut selected = Vec::new();
-                for token in value.split(',') {
-                    if token.is_empty() || !token.bytes().all(|b| b.is_ascii_digit()) {
-                        return Err("invalid ASIO channel token".into());
-                    }
-                    let index: u32 = token.parse()?;
-                    if index > i32::MAX as u32 || selected.contains(&index) || selected.len() == 32
-                    {
-                        return Err("invalid or duplicate ASIO output channel".into());
-                    }
-                    selected.push(index);
-                }
-                output_channels = Some(selected);
+                output_channels = Some(parse_output_channels(value)?);
             }
             "--asio-system-clock" => {
                 if value != "multimedia" {

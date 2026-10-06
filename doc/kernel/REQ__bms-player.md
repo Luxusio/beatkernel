@@ -2127,10 +2127,14 @@ owner and paused-boundary policy for device/buffer/period/matrix fields. Its
 mapper preserves the current shared/exclusive mode and negotiation policy.
 ASIO solo/local observation also uses that owner while retaining the native
 HWND/message pump and original interval evidence. ASIO nonnetwork live controls
-expose buffer and same-width matrix changes for the currently trusted driver
-and selected channel order. Reopening preserves the original clock error bounds
+expose buffer, ordered driver-channel selection and matrix changes for the
+currently trusted driver. Channel count changes require an explicit matrix
+whose source width remains the original Mixer width and whose target rows match
+the selected channel count. Exact reset requires explicitly selecting that
+source count again; no channels are silently truncated or inferred.
+Reopening preserves the original clock error bounds
 and registry view; pending native cleanup retains its stream and attempt HWND.
-Driver/channel-selection and cross-backend controls remain pending.
+Driver selection and cross-backend controls remain pending.
 Output capability arguments declare the exact editable fields: the UI must not
 invent a WASAPI period or device selector for an ASIO buffer-only capability.
 Network/Watch output controls remain unavailable.

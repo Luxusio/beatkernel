@@ -278,7 +278,7 @@ fn capability(
             native.applied_buffer_frames().map_err(|e| e.to_string())?;
             super::output_settings::asio_capability(
                 native.live.buffer,
-                u16::try_from(native.live.channels.len()).map_err(|e| e.to_string())?,
+                &native.live.channels,
                 output.matrix.as_ref(),
             )
         }
@@ -324,12 +324,13 @@ impl WindowsOutputUi {
                 }),
                 #[cfg(feature = "asio-sdk")]
                 Output::Asio(native) => {
-                    let (buffer, matrix) = super::output_settings::asio_request(
+                    let (buffer, channels, matrix) = super::output_settings::asio_request(
                         &native.live.registration.id.clsid, native.live.buffer,
-                        u16::try_from(native.live.channels.len()).map_err(|e| e.to_string())?,
+                        &native.live.channels,
                         output.matrix.as_ref(), &request.args)?;
                     let mut config = native.live.clone();
                     config.buffer = buffer;
+                    config.channels = channels;
                     Ok(beatkernel_bms_runtime::gameplay::output::domain::remix::RemixedOutputRequest {
                         native: WindowsRequest::Asio(config), matrix,
                     })

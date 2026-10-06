@@ -191,6 +191,61 @@ fn empty_output_capability_does_not_panic_or_commit_an_unusable_panel() {
     assert_eq!(app.navigator.active_id(), scope);
     assert!(app.live_audio.is_none());
 }
+
+#[test]
+fn asio_channel_field_batches_with_matrix_and_refreshes_without_replacing_screen() {
+    let (mut app, publisher) = prepared();
+    let cap = OutputCapability {
+        host: SettingsHost::Windows,
+        current_args: vec![
+            "--buffer".into(),
+            "frames:64".into(),
+            "--output-channels".into(),
+            "0,1".into(),
+            "--output-matrix".into(),
+            "exact".into(),
+        ],
+    };
+    publisher.advertise_output(Some(cap)).unwrap();
+    app.open_live_audio();
+    let scope = app.navigator.active_id();
+    let draft = app.live_audio.as_mut().unwrap();
+    assert_eq!(draft.values.fields().len(), 3);
+    draft.select(1).unwrap();
+    draft.editor.select_all();
+    draft.edit(None, Some("7,4,2"));
+    draft.select(2).unwrap();
+    draft.editor.select_all();
+    draft.edit(None, Some("1,0;0,1;0.5,0.5"));
+    compose(&mut app);
+    app.apply_live_audio();
+    let request = publisher.take_output_request().unwrap().unwrap();
+    assert!(
+        request
+            .args
+            .chunks_exact(2)
+            .any(|pair| pair == ["--output-channels", "7,4,2"])
+    );
+    assert!(
+        request
+            .args
+            .chunks_exact(2)
+            .any(|pair| pair == ["--output-matrix", "1,0;0,1;0.5,0.5"])
+    );
+    publisher
+        .reply_output(&OutputReply {
+            id: request.id,
+            result: Ok(OutputCapability {
+                host: SettingsHost::Windows,
+                current_args: request.args,
+            }),
+        })
+        .unwrap();
+    app.collect_game();
+    compose(&mut app);
+    assert_eq!(app.navigator.active_id(), scope);
+    assert_eq!(app.live_audio.as_ref().unwrap().selected, 2);
+}
 #[test]
 fn actual_f2_gate_refuses_replay_terminal_cancel_and_unacknowledged_resume_intent_without_changing_play_instance()
  {
