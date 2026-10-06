@@ -1,7 +1,10 @@
 //! Strict native FLAC preparation; no filesystem or native codec ownership.
 use crate::AssetDecoder;
 use beatkernel::audio::{AudioFormat, PcmLimits, PcmSample};
-use claxon::{FlacReader, FlacReaderOptions, frame::FrameReader, metadata::StreamInfo};
+use claxon::{
+    frame::FrameReader,
+    metadata::{MetadataBlock, StreamInfo, read_metadata_block_with_header},
+};
 use std::{
     error::Error,
     io::{self, Cursor},
@@ -20,11 +23,28 @@ fn invalid(message: &'static str) -> io::Error {
 
 fn audio_offset(bytes: &[u8]) -> io::Result<usize> {
     let mut offset = 4usize;
+    let mut comment_seen = false;
     loop {
         let header = bytes
             .get(offset..offset + 4)
             .ok_or_else(|| invalid("truncated FLAC metadata"))?;
         let last = header[0] & 0x80 != 0;
+        let kind = header[0] & 0x7f;
+        if offset == 4 && kind != 0 {
+            return Err(invalid("FLAC must start with STREAMINFO"));
+        }
+        if offset != 4 && kind == 0 {
+            return Err(invalid("duplicate FLAC STREAMINFO"));
+        }
+        if kind == 127 {
+            return Err(invalid("invalid FLAC metadata block type"));
+        }
+        if kind == 4 {
+            if comment_seen {
+                return Err(invalid("duplicate FLAC Vorbis comment"));
+            }
+            comment_seen = true;
+        }
         let size =
             (usize::from(header[1]) << 16) | (usize::from(header[2]) << 8) | usize::from(header[3]);
         offset = offset
@@ -169,15 +189,13 @@ impl AssetDecoder for FlacDecoder {
         if !encoded.starts_with(b"fLaC") {
             return Err(invalid("native FLAC signature required").into());
         }
-        let reader = FlacReader::new_ext(
-            Cursor::new(encoded),
-            FlacReaderOptions {
-                metadata_only: false,
-                read_vorbis_comment: false,
-            },
-        )?;
-        let info = reader.streaminfo();
-        drop(reader);
+        let offset = audio_offset(encoded)?;
+        // Parse only STREAMINFO. Claxon's reader options discard comments only
+        // after parsing their bodies, which can allocate or reject unused tags.
+        let info = match read_metadata_block_with_header(&mut Cursor::new(&encoded[4..]))? {
+            MetadataBlock::StreamInfo(info) => info,
+            _ => return Err(invalid("FLAC must start with STREAMINFO").into()),
+        };
         if !(1..=32).contains(&info.bits_per_sample) || !(1..=8).contains(&info.channels) {
             return Err(invalid("invalid FLAC source bit depth or channels").into());
         }
@@ -199,7 +217,6 @@ impl AssetDecoder for FlacDecoder {
                 .try_reserve_exact(count)
                 .map_err(|_| io::Error::other("FLAC PCM allocation failed"))?;
         }
-        let offset = audio_offset(encoded)?;
         let mut cursor = Cursor::new(&encoded[offset..]);
         let mut scratch = Vec::new();
         let mut frame_index = 0u64;
@@ -381,6 +398,39 @@ mod fixtures {
         encoded[4] = 0; // STREAMINFO is followed by a final malformed comment.
         encoded.splice(42..42, [0x84, 0, 0, 1, 0xff]);
         assert_eq!(decode(&encoded, 4).unwrap().samples(), [123.0 / 32768.0]);
+    }
+    #[test]
+    fn ignored_metadata_bodies_preserve_pcm_but_headers_remain_strict() {
+        let original = flac16(8000, 1, &[123], Some(1));
+        for kind in [1, 2, 3, 4, 5, 6, 7, 126] {
+            let mut encoded = original.clone();
+            encoded[4] = 0;
+            encoded.splice(42..42, [0x80 | kind, 0, 0, 1, 0xff]);
+            assert_eq!(decode(&encoded, 4).unwrap().samples(), [123.0 / 32768.0]);
+        }
+        for kind in [0, 127] {
+            let mut encoded = original.clone();
+            encoded[4] = 0;
+            encoded.splice(42..42, [0x80 | kind, 0, 0, 1, 0xff]);
+            assert!(decode(&encoded, 4).is_err());
+        }
+        let mut missing_info = original.clone();
+        missing_info[4] = 0x84;
+        assert!(decode(&missing_info, 4).is_err());
+        let mut duplicate_comment = original.clone();
+        duplicate_comment[4] = 0;
+        duplicate_comment.splice(42..42, [4, 0, 0, 1, 0xff, 0x84, 0, 0, 1, 0xff]);
+        assert!(decode(&duplicate_comment, 4).is_err());
+        for suffix in [
+            &[0x86, 0, 0][..],
+            &[0x86, 0, 0, 2, 0xff],
+            &[6, 0, 0, 1, 0xff],
+        ] {
+            let mut truncated = original[..42].to_vec();
+            truncated[4] = 0;
+            truncated.extend_from_slice(suffix);
+            assert!(decode(&truncated, 4).is_err());
+        }
     }
     #[test]
     fn real_multiframe_chronology_rejects_gaps_duplicates_and_accepts_final_short_block() {
