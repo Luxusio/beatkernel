@@ -31,6 +31,52 @@ fn request(backend: AudioBackendKind, mode: AudioStreamMode, rate: u32) -> Audio
     )
     .unwrap()
 }
+
+#[test]
+fn pure_wasapi_remix_preflight_supports_shared_and_exclusive_without_changing_source() {
+    let mixer = mixer();
+    let before = mixer.output_frame_basis();
+    for mode in [
+        AudioStreamMode::Shared(SharedPeriodPolicy::DeviceDefault),
+        AudioStreamMode::Shared(SharedPeriodPolicy::EnginePeriod),
+        AudioStreamMode::Exclusive,
+    ] {
+        let requested = AudioStreamRequest::new(
+            AudioDeviceId("never-acquire".into()),
+            AudioBackendKind::Wasapi,
+            mode,
+            DeviceFormat::new(48_000, 1, SampleEncoding::Float32, None).unwrap(),
+            BufferRequest::DeviceDefault,
+            PeriodRequest::DeviceDefault,
+        )
+        .unwrap();
+        let matrix = ChannelMatrix::default_mix(2, 1).unwrap();
+        assert_eq!(
+            validate_open_with_matrix(&requested, &mixer, WasapiOptions::default(), Some(&matrix)),
+            Ok(())
+        );
+        assert_eq!(
+            validate_open(&requested, &mixer, WasapiOptions::default()),
+            Err(AudioPlatformError::InvalidFormat)
+        );
+        let wrong = ChannelMatrix::default_mix(1, 1).unwrap();
+        assert_eq!(
+            validate_open_with_matrix(&requested, &mixer, WasapiOptions::default(), Some(&wrong)),
+            Err(AudioPlatformError::InvalidFormat)
+        );
+        assert_eq!(mixer.output_frame_basis(), before);
+    }
+    let matrix = ChannelMatrix::default_mix(2, 2).unwrap();
+    assert_eq!(
+        validate_open_with_matrix(
+            &request(AudioBackendKind::Wasapi, AudioStreamMode::Exclusive, 44_100),
+            &mixer,
+            WasapiOptions::default(),
+            Some(&matrix)
+        ),
+        Err(AudioPlatformError::InvalidFormat)
+    );
+}
 #[test]
 fn pure_wasapi_open_preflight_rejects_backend_format_and_invalid_timer_without_mutating_original_mixer()
  {

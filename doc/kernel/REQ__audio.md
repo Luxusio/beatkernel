@@ -281,7 +281,17 @@ strict; no automatic matrix or rate fallback is introduced. Verify real
 PCM/telemetry, pause/finite-end behavior, preflight mixer recovery and an
 explicit ALSA null-plugin diagnostic separately from acoustic acceptance.
 
-Known ceiling: other native owners still compare mixer and device formats and
+WASAPI exposes explicit `open_remixed_recoverable` with the same channel-only
+contract in shared and exclusive modes. ALSA/WASAPI reuse portable validation,
+applied-capacity preparation and rendering helpers; channel/rate policy is not
+duplicated per OS. WASAPI prepares the converter before priming and uses the
+original mixer report with the existing buffer lease, encoding, clock and
+retirement paths. Original source and requested client rates must match; actual
+native clock frequency remains separately observed. Legacy open remains strict.
+Portable fixtures exercise these common helpers; Windows type-checking and
+native Windows device execution are separate evidence tiers.
+
+Known ceiling: remaining native owners still compare mixer and device formats and
 refuse a mismatch; adopting the converter, mapping presentation through its lookahead
 and choosing quality per device remain integration work. Quality is bounded by
 the fixed tap count; no measured passband/stopband specification, dithering or

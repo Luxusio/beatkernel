@@ -13,10 +13,7 @@ use crate::audio::{
     encode_pcm, telemetry::Telemetry,
 };
 use beatkernel::{
-    audio::{
-        AudioError, ChannelMatrix, FormatConverter, Mixer, MixerOpenFailure, RenderReport,
-        ResampleQuality,
-    },
+    audio::{AudioError, ChannelMatrix, FormatConverter, Mixer, MixerOpenFailure, RenderReport},
     time::{ClockDomainId, ClockPoint, Timestamp},
 };
 use std::{
@@ -492,14 +489,11 @@ impl AlsaStream {
             let source = mixer.config().format();
             let target = request.format.pcm();
             if let Some(matrix) = &matrix {
-                if source.sample_rate() != target.sample_rate()
-                    || matrix.source_channels() != source.channels()
-                    || matrix.target_channels() != target.channels()
-                {
-                    return Err(LinuxError::InvalidConfiguration(
+                crate::audio::channel_remix::validate(source, target, matrix).map_err(|_| {
+                    LinuxError::InvalidConfiguration(
                         "ALSA remix requires equal rates and matching matrix channel dimensions",
-                    ));
-                }
+                    )
+                })?;
             } else if source != target {
                 return Err(LinuxError::InvalidConfiguration(
                     "ALSA and mixer formats must match exactly",
@@ -530,11 +524,10 @@ impl AlsaStream {
                 let conversion = vec![0u8; bytes];
                 let remix = matrix
                     .map(|matrix| {
-                        FormatConverter::for_mixer(
+                        crate::audio::channel_remix::prepare(
                             mixer.config(),
                             request.format.pcm(),
                             matrix,
-                            ResampleQuality::Linear,
                             period as usize,
                         )
                         .map_err(LinuxError::Mixer)
@@ -824,21 +817,7 @@ fn render_device_and_publish(
     telemetry: &Telemetry,
     version: &mut u64,
 ) -> Result<RenderReport, AudioError> {
-    match remix {
-        Some(converter) => converter.render(output, |source| {
-            render_and_publish(mixer, source, telemetry, version)
-        }),
-        None => render_and_publish(mixer, output, telemetry, version),
-    }
-}
-
-fn render_and_publish(
-    mixer: &mut Mixer,
-    output: &mut [f32],
-    telemetry: &Telemetry,
-    version: &mut u64,
-) -> Result<RenderReport, AudioError> {
-    let report = mixer.render(output)?;
+    let report = crate::audio::channel_remix::render(mixer, remix, output)?;
     telemetry.publish(
         AudioStreamSnapshot {
             telemetry_available: true,
@@ -850,6 +829,16 @@ fn render_and_publish(
         version,
     );
     Ok(report)
+}
+
+#[cfg(test)]
+fn render_and_publish(
+    mixer: &mut Mixer,
+    output: &mut [f32],
+    telemetry: &Telemetry,
+    version: &mut u64,
+) -> Result<RenderReport, AudioError> {
+    render_device_and_publish(mixer, &mut None, output, telemetry, version)
 }
 
 // Opaque C objects are never dereferenced by Rust; they remain worker-owned.

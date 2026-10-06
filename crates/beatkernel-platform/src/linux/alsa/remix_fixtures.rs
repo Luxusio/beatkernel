@@ -2,7 +2,7 @@
 use super::*;
 use beatkernel::audio::{
     AudioCommand, AudioFormat, AudioLimits, CommandProducer, MixerConfig, PcmLimits, PcmSample,
-    SampleBank, SampleId, StoppedMixerSource, VoiceId,
+    ResampleQuality, SampleBank, SampleId, StoppedMixerSource, VoiceId,
 };
 
 fn rig(end: Option<u64>) -> (CommandProducer, Mixer) {

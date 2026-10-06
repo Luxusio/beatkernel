@@ -10,7 +10,7 @@ use crate::audio::{
     *,
 };
 use beatkernel::{
-    audio::Mixer,
+    audio::{ChannelMatrix, FormatConverter, Mixer},
     time::{ClockMappingQuality, ClockPoint, Duration, Timestamp},
 };
 use std::{
@@ -208,8 +208,30 @@ impl WasapiBackend {
         clock: QpcClock,
         options: WasapiOptions,
     ) -> Result<WasapiStream, beatkernel::audio::MixerOpenFailure<AudioPlatformError>> {
+        self.open_impl(request, mixer, clock, options, None)
+    }
+    /// Opens with an explicit channel matrix at the unchanged source/client rate.
+    /// Original mixer-frame reports, pause/end boundaries and recovery are retained.
+    pub fn open_remixed_recoverable(
+        &self,
+        request: AudioStreamRequest,
+        mixer: Mixer,
+        clock: QpcClock,
+        options: WasapiOptions,
+        matrix: ChannelMatrix,
+    ) -> Result<WasapiStream, beatkernel::audio::MixerOpenFailure<AudioPlatformError>> {
+        self.open_impl(request, mixer, clock, options, Some(matrix))
+    }
+    fn open_impl(
+        &self,
+        request: AudioStreamRequest,
+        mixer: Mixer,
+        clock: QpcClock,
+        options: WasapiOptions,
+        matrix: Option<ChannelMatrix>,
+    ) -> Result<WasapiStream, beatkernel::audio::MixerOpenFailure<AudioPlatformError>> {
         let basis = mixer.output_frame_basis();
-        if let Err(error) = validate_open(&request, &mixer, options) {
+        if let Err(error) = validate_open_with_matrix(&request, &mixer, options, matrix.as_ref()) {
             return Err(beatkernel::audio::MixerOpenFailure::new(error, Some(mixer)));
         }
         let control = Arc::new(Control {
@@ -225,7 +247,7 @@ impl WasapiBackend {
                 let mut owned = Some(mixer);
                 // Setup result owns all partial COM/native resources locally;
                 // an error has dropped them before the failure is sent.
-                let setup = Worker::new(request, &mut owned, clock, options);
+                let setup = Worker::new(request, &mut owned, clock, options, matrix);
                 let mut worker = match setup {
                     Ok(worker) => worker,
                     Err(error) => {
@@ -283,10 +305,19 @@ impl WasapiBackend {
     }
 }
 
+#[cfg(test)]
 fn validate_open(
     request: &AudioStreamRequest,
     mixer: &Mixer,
     options: WasapiOptions,
+) -> Result<(), AudioPlatformError> {
+    validate_open_with_matrix(request, mixer, options, None)
+}
+fn validate_open_with_matrix(
+    request: &AudioStreamRequest,
+    mixer: &Mixer,
+    options: WasapiOptions,
+    matrix: Option<&ChannelMatrix>,
 ) -> Result<(), AudioPlatformError> {
     if request.backend() == AudioBackendKind::Asio {
         return Err(AudioPlatformError::BackendUnavailable(
@@ -294,7 +325,14 @@ fn validate_open(
         ));
     }
     validate_options(request, options)?;
-    if mixer.config().format() != request.format().pcm() {
+    if let Some(matrix) = matrix {
+        crate::audio::channel_remix::validate(
+            mixer.config().format(),
+            request.format().pcm(),
+            matrix,
+        )
+        .map_err(|_| AudioPlatformError::InvalidFormat)?;
+    } else if mixer.config().format() != request.format().pcm() {
         return Err(AudioPlatformError::InvalidFormat);
     }
     Ok(())
@@ -873,6 +911,7 @@ struct Worker {
     render_event: Event,
     control_event: Event,
     mixer: Option<Mixer>,
+    remix: Option<FormatConverter>,
     scratch: Vec<f32>,
     configuration: AppliedStreamConfig,
     options: WasapiOptions,
@@ -892,6 +931,7 @@ impl Worker {
         mixer: &mut Option<Mixer>,
         clock: QpcClock,
         options: WasapiOptions,
+        matrix: Option<ChannelMatrix>,
     ) -> Result<Self, AudioPlatformError> {
         let mixer_config = mixer
             .as_ref()
@@ -1077,6 +1117,17 @@ impl Worker {
             .try_reserve_exact(sample_count)
             .map_err(|_| AudioPlatformError::Capacity)?;
         scratch.resize(sample_count, 0.0);
+        let remix = matrix
+            .map(|matrix| {
+                crate::audio::channel_remix::prepare(
+                    mixer_config,
+                    request.format().pcm(),
+                    matrix,
+                    buffer_frames as usize,
+                )
+                .map_err(|_| AudioPlatformError::Capacity)
+            })
+            .transpose()?;
         let mmcss = options.mmcss_priority.map(Mmcss::new).transpose()?;
         let configuration = AppliedStreamConfig {
             format: request.format(),
@@ -1095,6 +1146,7 @@ impl Worker {
             render_event,
             control_event,
             mixer: mixer.take(),
+            remix,
             scratch,
             configuration,
             options,
@@ -1271,7 +1323,11 @@ impl Worker {
                 let render_start = cadence
                     .and_then(|_| self.clock.sample_realtime())
                     .map(|receipt| receipt.normalized.timestamp);
-                match mixer.render(&mut self.scratch[..count]) {
+                match crate::audio::channel_remix::render(
+                    mixer,
+                    &mut self.remix,
+                    &mut self.scratch[..count],
+                ) {
                     Ok(report) => {
                         if let Some(cadence) = cadence {
                             match render_start {

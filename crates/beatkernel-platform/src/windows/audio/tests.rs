@@ -96,15 +96,27 @@ fn failing_ack_stream(panic_after_ack: bool) -> (WasapiStream, Arc<AtomicBool>) 
                 );
                 thread::yield_now();
             }
+            None // This lifecycle fixture owns no Mixer.
         })
     };
     (
         WasapiStream {
             configuration,
+            basis: beatkernel::audio::OutputFrameBasis::new(
+                ClockPoint {
+                    domain: beatkernel::time::ClockDomainId(9),
+                    timestamp: Timestamp::ZERO,
+                },
+                48_000,
+                0,
+            )
+            .unwrap(),
             options: WasapiOptions::default(),
             control,
             wake,
             worker: Some(worker),
+            recovered_mixer: None,
+            retired: false,
             started,
             has_started: false,
         },
