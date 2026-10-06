@@ -151,6 +151,87 @@ fn queued_and_inflight_cancellation_settle_one_bounded_correlated_reply_and_keep
 macro_rules! player_channel_tests {
     () => {
         #[test]
+        fn decided_output_reply_survives_cancel_poll_and_terminal_owner_failure() {
+            for poll in [false, true] {
+                let (publisher, viewer) = super::channel();
+                let cap = crate::live_output_control::fixtures::capability();
+                publisher.advertise_output(Some(cap.clone())).unwrap();
+                let id = viewer.request_output(crate::live_output_control::fixtures::args()).unwrap();
+                publisher.take_output_request().unwrap().unwrap();
+                let reply = crate::live_output_control::OutputReply { id, result: Ok(cap) };
+                super::with_publisher(publisher.clone(), || {
+                    viewer.cancel();
+                    if poll {
+                        assert!(viewer.take_output_reply().unwrap().is_none());
+                        assert!(viewer.output_pending());
+                    }
+                    publisher.reply_output(&reply).unwrap();
+                    Err::<(), String>("later owner failure".into())
+                }).unwrap_err();
+                assert_eq!(viewer.take_output_reply().unwrap(), Some(reply));
+                assert!(viewer.take_output_reply().unwrap().is_none());
+                assert!(!viewer.output_pending());
+                assert!(!viewer.output_supported());
+            }
+        }
+        #[test]
+        fn cancelled_inflight_output_without_decision_waits_for_owner_and_settles_once() {
+            let (publisher, viewer) = super::channel();
+            publisher.advertise_output(Some(crate::live_output_control::fixtures::capability())).unwrap();
+            let id = viewer.request_output(crate::live_output_control::fixtures::args()).unwrap();
+            publisher.take_output_request().unwrap().unwrap();
+            super::with_publisher(publisher, || {
+                viewer.cancel();
+                assert!(viewer.take_output_reply().unwrap().is_none());
+                assert!(viewer.request_output(crate::live_output_control::fixtures::args()).is_err());
+                assert!(viewer.take_output_reply().unwrap().is_none());
+                assert!(viewer.output_pending());
+                Err::<(), String>("original owner failure".into())
+            }).unwrap_err();
+            let reply = viewer.take_output_reply().unwrap().unwrap();
+            assert_eq!(reply.id, id);
+            assert_eq!(reply.result.unwrap_err(), "original owner failure");
+            assert!(viewer.take_output_reply().unwrap().is_none());
+            assert!(!viewer.output_pending());
+        }
+        #[test]
+        fn actual_player_output_adapter_commits_decided_reply_before_return_despite_ui_contention() {
+            use crate::gameplay_output_ui::OutputUiPort;
+            use crate::gameplay::output::adapters::player::PlayerOutputUi;
+            use std::{sync::mpsc, time::Duration};
+            let (publisher, viewer) = super::channel();
+            let mut applied = crate::live_output_control::fixtures::capability();
+            publisher.advertise_output(Some(applied.clone())).unwrap();
+            let id = viewer.request_output(crate::live_output_control::fixtures::args()).unwrap();
+            publisher.take_output_request().unwrap().unwrap();
+            applied.current_args[1] = "actual-new-endpoint".into();
+            let reply = crate::live_output_control::OutputReply { id, result: Ok(applied) };
+            let decided = reply.clone();
+            let owner = publisher.clone();
+            let locked = publisher.0.output.lock().unwrap();
+            let (started_tx, started_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                let result = super::with_publisher(owner, || {
+                    started_tx.send(()).unwrap();
+                    PlayerOutputUi.reply(&decided).map_err(|e| e.to_string())?;
+                    Err::<(), String>("later terminal error".into())
+                });
+                done_tx.send(result).unwrap();
+            });
+            started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(matches!(done_rx.try_recv(), Err(mpsc::TryRecvError::Empty)));
+            viewer.cancel();
+            assert_eq!(viewer.take_output_reply().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+            drop(locked);
+            assert_eq!(done_rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap_err(), "later terminal error");
+            worker.join().unwrap();
+            assert_eq!(viewer.take_output_reply().unwrap(), Some(reply));
+            assert!(viewer.take_output_reply().unwrap().is_none());
+            assert!(!viewer.output_pending());
+            assert!(!viewer.output_supported());
+        }
+        #[test]
         fn actual_output_channels_are_session_isolated_and_reply_contention_retains_pending_identity() {
             use crate::live_output_control::{OutputReply};
             let (a,av)=super::channel(); let (b,bv)=super::channel(); let cap=crate::live_output_control::fixtures::capability(); let args=crate::live_output_control::fixtures::args();

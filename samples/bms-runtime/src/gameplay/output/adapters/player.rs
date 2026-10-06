@@ -14,7 +14,7 @@ impl OutputUiPort for PlayerOutputUi {
         crate::player::take_output_request()
     }
     fn reply(&mut self, reply: &OutputReply) -> io::Result<()> {
-        crate::player::reply_output(reply)
+        crate::player::commit_output_reply(reply)
     }
     fn pending(&self) -> bool {
         crate::player::output_pending()

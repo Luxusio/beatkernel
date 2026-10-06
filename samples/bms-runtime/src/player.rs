@@ -360,6 +360,20 @@ fn settle_room(shared: &Shared, controls: &mut RoomControls) -> bool {
         false
     }
 }
+fn settle_output(
+    shared: &Shared,
+    controls: &mut crate::live_output_control::OutputControls,
+) -> bool {
+    if shared.output_closed.load(Ordering::Acquire) {
+        controls.close("output controls closed");
+        true
+    } else if shared.cancel.load(Ordering::Acquire) {
+        controls.cancel("output controls cancelled");
+        true
+    } else {
+        false
+    }
+}
 /// Sendable attachment token; native input/window objects never cross threads.
 #[derive(Clone)]
 pub struct PlayerPublisher(Arc<Shared>);
@@ -411,7 +425,7 @@ impl PlayerPublisher {
             .lock()
             .map_err(|_| io::Error::other("output controls are unavailable"))?;
         if self.0.cancel.load(Ordering::Acquire) {
-            controls.close("output controls cancelled during setup");
+            controls.cancel("output controls cancelled during setup");
             self.0.output_supported.store(false, Ordering::Release);
             self.0
                 .output_queued
@@ -439,9 +453,7 @@ impl PlayerPublisher {
             return Ok(None);
         }
         let mut controls = self.0.output.try_lock().map_err(room_lock_error)?;
-        if self.0.cancel.load(Ordering::Acquire) || self.0.output_closed.load(Ordering::Acquire) {
-            controls.close("output controls closed or cancelled");
-        }
+        settle_output(&self.0, &mut controls);
         let request = controls.take_request();
         self.0
             .output_queued
@@ -453,18 +465,41 @@ impl PlayerPublisher {
     }
     pub fn reply_output(&self, reply: &crate::live_output_control::OutputReply) -> io::Result<()> {
         let mut controls = self.0.output.try_lock().map_err(room_lock_error)?;
-        if self.0.cancel.load(Ordering::Acquire) || self.0.output_closed.load(Ordering::Acquire) {
-            controls.close("output controls closed or cancelled");
-            self.0
-                .output_busy
-                .store(controls.pending(), Ordering::Release);
-            return Ok(());
+        self.complete_output_reply(&mut controls, reply)
+    }
+    /// Cold owner-thread publication; never call from an audio callback.
+    /// A decided reply must reach shared state before the gameplay pump exits.
+    pub fn commit_output_reply(
+        &self,
+        reply: &crate::live_output_control::OutputReply,
+    ) -> io::Result<()> {
+        let mut controls = self
+            .0
+            .output
+            .lock()
+            .map_err(|_| io::Error::other("output controls are unavailable"))?;
+        self.complete_output_reply(&mut controls, reply)
+    }
+    fn complete_output_reply(
+        &self,
+        controls: &mut crate::live_output_control::OutputControls,
+        reply: &crate::live_output_control::OutputReply,
+    ) -> io::Result<()> {
+        if !self.0.output_closed.load(Ordering::Acquire) {
+            controls.reply(reply).map_err(io::Error::other)?;
         }
-        controls.reply(reply).map_err(io::Error::other)?;
+        // Cancellation cannot supersede the owner's already-decided result.
+        let closed = settle_output(&self.0, controls);
+        self.0.output_supported.store(
+            !closed && controls.capability().is_some(),
+            Ordering::Release,
+        );
         self.0
-            .output_supported
-            .store(controls.capability().is_some(), Ordering::Release);
-        self.0.output_busy.store(true, Ordering::Release);
+            .output_busy
+            .store(controls.pending(), Ordering::Release);
+        self.0
+            .output_queued
+            .store(controls.queued(), Ordering::Release);
         Ok(())
     }
     pub fn output_pending(&self) -> bool {
@@ -490,6 +525,9 @@ pub fn take_output_request() -> io::Result<Option<crate::live_output_control::Ou
 }
 pub fn reply_output(reply: &crate::live_output_control::OutputReply) -> io::Result<()> {
     output_publisher(|p| p.reply_output(reply), ())
+}
+pub fn commit_output_reply(reply: &crate::live_output_control::OutputReply) -> io::Result<()> {
+    output_publisher(|p| p.commit_output_reply(reply), ())
 }
 pub fn output_pending() -> bool {
     output_publisher(|p| Ok(p.output_pending()), false).unwrap_or(true)
@@ -519,8 +557,7 @@ impl PlayerViewer {
     }
     pub fn request_output(&self, args: Vec<String>) -> io::Result<u64> {
         let mut controls = self.0.output.try_lock().map_err(room_lock_error)?;
-        if self.0.cancel.load(Ordering::Acquire) || self.0.output_closed.load(Ordering::Acquire) {
-            controls.close("output controls closed or cancelled");
+        if settle_output(&self.0, &mut controls) {
             return Err(io::Error::new(
                 io::ErrorKind::NotConnected,
                 "output request cancelled",
@@ -536,9 +573,7 @@ impl PlayerViewer {
             return Ok(None);
         }
         let mut controls = self.0.output.try_lock().map_err(room_lock_error)?;
-        if self.0.cancel.load(Ordering::Acquire) || self.0.output_closed.load(Ordering::Acquire) {
-            controls.close("output controls closed or cancelled");
-        }
+        settle_output(&self.0, &mut controls);
         let reply = controls.take_reply();
         self.0
             .output_busy

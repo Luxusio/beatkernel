@@ -128,6 +128,15 @@ impl OutputControls {
         self.closed = true;
         self.capability = None;
     }
+    /// Stop admission immediately, but let the owner decide an in-flight result.
+    /// Owner return/unwind must still call close to settle undecided work.
+    pub fn cancel(&mut self, message: &str) {
+        if self.flight.is_none() {
+            self.settle(message);
+        }
+        self.closed = true;
+        self.capability = None;
+    }
 }
 #[cfg(test)]
 #[path = "control_fixtures.rs"]
