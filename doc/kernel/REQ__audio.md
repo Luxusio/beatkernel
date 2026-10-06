@@ -451,3 +451,7 @@ controls remain separate from [output clock epochs](REQ__output-clock-epochs.md)
 Fresh ALSA/WASAPI counters map onto the captured original physical mixer grid
 through [output frame basis](REQ__output-frame-basis.md). Automatic backend/buffer
 handoff and acoustic latency acceptance remain incomplete.
+ALSA opening failure now has an explicit ownership-returning path under
+[recoverable output open](REQ__recoverable-output-open.md). Ordinary startup
+failure returns the original mixer after worker retirement; panic recovery and
+the other backend opener integrations remain incomplete.
