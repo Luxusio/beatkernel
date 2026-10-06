@@ -32,17 +32,7 @@ fn identity(
         result.extend_from_slice(bytes);
         Ok(result)
     };
-    let mut grades = Vec::new();
-    grades.try_reserve_exact(profile.grades().len())?;
-    grades.extend_from_slice(profile.grades());
-    let profile = GaugeProfile::new(
-        profile.initial_units(),
-        profile.clear_units(),
-        profile.default_hit_delta(),
-        profile.miss_delta(),
-        profile.fail_on_empty(),
-        grades,
-    )?;
+    let profile = profile.try_copy()?;
     Ok((
         player,
         ReplayHeader {

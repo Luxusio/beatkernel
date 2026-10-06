@@ -124,6 +124,123 @@ fn actual_solo_completion_preserves_capture_header_and_scope_before_one_shot_rep
         assert!(game.completed_archive().is_err());
     }
 }
+
+#[test]
+fn actual_step_completion_copies_dynamic_gauge_policy_to_archive() {
+    use crate::gauge::{GaugeProfile, GaugeDynamics};
+    let profile = GaugeProfile::new(100_000_000, 0, 1, -10_000_000, true, vec![])
+        .unwrap()
+        .with_dynamics(GaugeDynamics {
+            minimum_alive: 0,
+            failure_below: 2_000_000,
+            damage_reduction_below: 32_000_000,
+        })
+        .unwrap();
+    let (prepared, config) = setup();
+    let (mut game, bank) = StepGameplay::new_section(
+        prepared,
+        config,
+        BindingMap::from_bindings([]).unwrap(),
+        Timestamp::ZERO,
+        Some(Timestamp::from_nanos(5_000_000)),
+    )
+    .unwrap();
+    game.configure_gauge(profile.clone()).unwrap();
+    let limits = crate::native_judge::capture_limits(true, 8192, 8)
+        .unwrap()
+        .unwrap();
+    game.configure_capture(limits, 1).unwrap();
+    assert!(game.configure_gauge(profile.clone()).is_err());
+    game.activate(point(1, 0)).unwrap();
+    game.advance_to(point(1, 5_000_000), &Domains, point(2, 0))
+        .unwrap();
+    let (_producer, mut mixer) = output(bank, Some(5_000_000));
+    for index in 0..3 {
+        let mut pcm = [1.; 10];
+        let report = mixer.render(&mut pcm).unwrap();
+        game.observe_completion(Some(report), Some(point(2, index * 10_000_000)))
+            .unwrap();
+    }
+    let bytes = game.completed_archive().unwrap().unwrap();
+    assert_eq!(
+        u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+        crate::result_archive::DYNAMIC_VERSION
+    );
+    assert_eq!(
+        decode_archive(&bytes).unwrap().entries()[0].profile,
+        profile
+    );
+}
+
+#[test]
+fn actual_local_completion_keeps_distinct_dynamic_and_legacy_member_policies() {
+    use crate::gauge::{GaugeProfile, GaugeDynamics};
+    let profile = GaugeProfile::new(100_000_000, 0, 1, -10_000_000, true, vec![])
+        .unwrap()
+        .with_dynamics(GaugeDynamics {
+            minimum_alive: 0,
+            failure_below: 2_000_000,
+            damage_reduction_below: 32_000_000,
+        })
+        .unwrap();
+    let ids = [PlayerId(7), PlayerId(u32::MAX)];
+    let plan = ResolvedInputPlan::new(vec![
+        (ids[0], Some(DeviceId(1))),
+        (ids[1], Some(DeviceId(2))),
+    ])
+    .unwrap();
+    let (prepared, config) = setup();
+    let (mut game, bank) = StepLocalGameplay::new_section(
+        prepared,
+        config,
+        plan,
+        vec![
+            BindingMap::from_bindings([]).unwrap(),
+            BindingMap::from_bindings([]).unwrap(),
+        ],
+        Timestamp::ZERO,
+        Some(Timestamp::from_nanos(5_000_000)),
+        beatkernel_bms::BmsInputMode::ButtonOnly,
+    )
+    .unwrap();
+    game.configure_gauge(ids[0], profile.clone()).unwrap();
+    let limits = crate::native_judge::capture_limits(true, 8192, 8)
+        .unwrap()
+        .unwrap();
+    for id in ids {
+        game.configure_capture(id, limits, 1).unwrap();
+    }
+    assert!(game.configure_gauge(ids[1], profile.clone()).is_err());
+    game.activate(point(1, 0)).unwrap();
+    game.advance_to(point(1, 5_000_000), &Domains, point(2, 0))
+        .unwrap();
+    let (_producer, mut mixer) = output(bank, Some(5_000_000));
+    for index in 0..3 {
+        let mut pcm = [1.; 10];
+        let report = mixer.render(&mut pcm).unwrap();
+        game.observe_completion(Some(report), Some(point(2, index * 10_000_000)))
+            .unwrap();
+    }
+    let decoded = decode_archive(&game.completed_archive().unwrap().unwrap()).unwrap();
+    assert_eq!(
+        decoded
+            .entries()
+            .iter()
+            .find(|row| row.player == ids[0])
+            .unwrap()
+            .profile,
+        profile
+    );
+    assert_eq!(
+        decoded
+            .entries()
+            .iter()
+            .find(|row| row.player == ids[1])
+            .unwrap()
+            .profile,
+        GaugeProfile::default()
+    );
+}
 #[test]
 fn actual_local_whole_roster_preserves_all_original_ids_and_missing_later_capture_refuses() {
     for count in 1u32..=64 {

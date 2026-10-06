@@ -5,6 +5,60 @@ use crate::{
     local_players::PlayerId,
     play_result::{CompletedPlayResult, PlayResultScope, PlayResultOutcome},
 };
+
+#[test]
+fn dynamic_gauge_versions_roundtrip_profile_and_reject_corrupted_bounds() {
+    use crate::gauge::{GaugeDynamics, GaugeSnapshot};
+    let profile = GaugeProfile::new(100_000_000, 0, 100_000, -10_000_000, true, vec![])
+        .unwrap()
+        .with_dynamics(GaugeDynamics {
+            minimum_alive: 0,
+            failure_below: 2_000_000,
+            damage_reduction_below: 32_000_000,
+        })
+        .unwrap();
+    let gauge = BmsGauge::new(profile.clone());
+    let result = CompletedPlayResult::from_completed(Timestamp::ZERO, None, &gauge);
+    let mut archive = ResultArchive::from_completed(
+        &[(PlayerId(7), result)],
+        &[(PlayerId(7), header(0, None), profile.clone())],
+    )
+    .unwrap();
+    for (comparison, version) in [(false, DYNAMIC_VERSION), (true, DYNAMIC_COMPARISON_VERSION)] {
+        if comparison {
+            archive.attach_comparisons(&[(PlayerId(7), None)]).unwrap();
+        }
+        let encoded = encode_archive(&archive).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(encoded[8..12].try_into().unwrap()),
+            version
+        );
+        let decoded = decode_archive(&encoded).unwrap();
+        assert_eq!(decoded.entries()[0].profile, profile);
+        assert_eq!(encode_archive(&decoded).unwrap(), encoded);
+        for end in 0..encoded.len() {
+            assert!(decode_archive(&encoded[..end]).is_err());
+        }
+        let dynamics_offset =
+            24 + u32::from_le_bytes(encoded[20..24].try_into().unwrap()) as usize + 37;
+        let mut corrupt = encoded;
+        corrupt[dynamics_offset..dynamics_offset + 8]
+            .copy_from_slice(&(crate::gauge::MAX_GAUGE_UNITS + 1).to_le_bytes());
+        assert!(decode_archive(&corrupt).is_err());
+    }
+    let mut entries = archive.entries().to_vec();
+    entries[0].result.gauge = GaugeSnapshot {
+        level_units: 1_000_000,
+        failure: None,
+    };
+    assert!(
+        encode_archive(&ResultArchive {
+            entries,
+            comparisons: archive.comparisons.clone()
+        })
+        .is_err()
+    );
+}
 use beatkernel::{
     judge::JudgeGrade,
     replay::ReplayHeader,

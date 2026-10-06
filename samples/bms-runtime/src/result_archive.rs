@@ -1,7 +1,8 @@
 //! Bounded historical records, distinct from live completion evidence.
 use crate::{
     gauge::{
-        GaugeProfile, GaugeSnapshot, GaugeFailure, GradeDelta, MAX_GAUGE_UNITS, MAX_GAUGE_GRADES,
+        GaugeProfile, GaugeSnapshot, GaugeFailure, GradeDelta, GaugeDynamics, MAX_GAUGE_UNITS,
+        MAX_GAUGE_GRADES,
     },
     local_players::PlayerId,
     play_result::{CompletedPlayResult, PlayResultScope, PlayResultOutcome},
@@ -18,6 +19,8 @@ use beatkernel::{
 
 pub const VERSION: u32 = 2;
 pub const COMPARISON_VERSION: u32 = 3;
+pub const DYNAMIC_VERSION: u32 = 4;
+pub const DYNAMIC_COMPARISON_VERSION: u32 = 5;
 pub const LEGACY_VERSION: u32 = 1;
 pub const MAX_SCORE_GRADES: usize = 4096;
 pub const MAX_PLAYERS: usize = 64;
@@ -174,18 +177,10 @@ fn copy_header(header: &ReplayHeader) -> Result<ReplayHeader, ArchiveError> {
     })
 }
 fn copy_profile(profile: &GaugeProfile) -> Result<GaugeProfile, ArchiveError> {
-    let mut grades = Vec::new();
-    reserve(&mut grades, profile.grades().len())?;
-    grades.extend_from_slice(profile.grades());
-    GaugeProfile::new(
-        profile.initial_units(),
-        profile.clear_units(),
-        profile.default_hit_delta(),
-        profile.miss_delta(),
-        profile.fail_on_empty(),
-        grades,
-    )
-    .map_err(|_| ArchiveError::Invalid("gauge profile"))
+    profile.try_copy().map_err(|error| match error {
+        crate::gauge::GaugeError::AllocationFailed => ArchiveError::AllocationFailed,
+        _ => ArchiveError::Invalid("gauge profile"),
+    })
 }
 fn replay_limits() -> ReplayCodecLimits {
     ReplayCodecLimits::new(
@@ -504,7 +499,10 @@ fn validate(archive: &ResultArchive) -> Result<(), ArchiveError> {
             {
                 return Err(ArchiveError::Invalid("depletion policy"));
             }
-            None if gauge.level_units == 0 && entry.profile.fail_on_empty() => {
+            None if (gauge.level_units == 0 && entry.profile.fail_on_empty())
+                || gauge.level_units < entry.profile.dynamics().failure_below
+                || gauge.level_units < entry.profile.dynamics().minimum_alive =>
+            {
                 return Err(ArchiveError::Invalid("missing depletion"));
             }
             _ => {}
@@ -553,7 +551,14 @@ fn encode_archive_parts(
 ) -> Result<Vec<u8>, ArchiveError> {
     let mut w = Writer(Vec::new());
     w.put(MAGIC)?;
-    let version = if comparisons.is_some() {
+    let dynamic = entries
+        .iter()
+        .any(|entry| entry.profile.dynamics() != GaugeDynamics::default());
+    let version = if dynamic && comparisons.is_some() {
+        DYNAMIC_COMPARISON_VERSION
+    } else if dynamic {
+        DYNAMIC_VERSION
+    } else if comparisons.is_some() {
         COMPARISON_VERSION
     } else if entries[0].score.is_some() {
         VERSION
@@ -577,6 +582,16 @@ fn encode_archive_parts(
         for grade in p.grades() {
             w.put(&grade.grade.0.to_le_bytes())?;
             w.put(&grade.delta.to_le_bytes())?;
+        }
+        if matches!(version, DYNAMIC_VERSION | DYNAMIC_COMPARISON_VERSION) {
+            let dynamics = p.dynamics();
+            for value in [
+                dynamics.minimum_alive,
+                dynamics.failure_below,
+                dynamics.damage_reduction_below,
+            ] {
+                w.put(&value.to_le_bytes())?;
+            }
         }
         match e.result.scope {
             PlayResultScope::FullSong => w.put(&[0])?,
@@ -902,7 +917,14 @@ pub fn decode_archive(bytes: &[u8]) -> Result<ResultArchive, ArchiveError> {
         return Err(ArchiveError::Invalid("magic"));
     }
     let version = r.u32()?;
-    if version != VERSION && version != LEGACY_VERSION && version != COMPARISON_VERSION {
+    if !matches!(
+        version,
+        VERSION
+            | LEGACY_VERSION
+            | COMPARISON_VERSION
+            | DYNAMIC_VERSION
+            | DYNAMIC_COMPARISON_VERSION
+    ) {
         return Err(ArchiveError::UnsupportedVersion(version));
     }
     let count = r.u32()? as usize;
@@ -947,7 +969,17 @@ pub fn decode_archive(bytes: &[u8]) -> Result<ResultArchive, ArchiveError> {
         if grades.windows(2).any(|pair| pair[0].grade >= pair[1].grade) {
             return Err(ArchiveError::Invalid("grade order"));
         }
+        let dynamics = if matches!(version, DYNAMIC_VERSION | DYNAMIC_COMPARISON_VERSION) {
+            GaugeDynamics {
+                minimum_alive: r.u64()?,
+                failure_below: r.u64()?,
+                damage_reduction_below: r.u64()?,
+            }
+        } else {
+            GaugeDynamics::default()
+        };
         let profile = GaugeProfile::new(initial, clear, hit, miss, fail, grades)
+            .and_then(|profile| profile.with_dynamics(dynamics))
             .map_err(|_| ArchiveError::Invalid("gauge profile"))?;
         let scope = match r.byte()? {
             0 => PlayResultScope::FullSong,
@@ -1000,7 +1032,7 @@ pub fn decode_archive(bytes: &[u8]) -> Result<ResultArchive, ArchiveError> {
             },
         });
     }
-    let comparisons = if version == COMPARISON_VERSION {
+    let comparisons = if matches!(version, COMPARISON_VERSION | DYNAMIC_COMPARISON_VERSION) {
         Some(read_comparisons(&mut r, count)?)
     } else {
         None

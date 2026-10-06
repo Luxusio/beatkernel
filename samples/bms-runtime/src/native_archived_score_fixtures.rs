@@ -44,6 +44,58 @@ fn completed(start: i64, end: Option<i64>) -> CompletedPlayResult {
         &BmsGauge::default(),
     )
 }
+
+#[test]
+fn native_solo_and_cohort_archive_preserve_dynamic_profile_and_version() {
+    use crate::gauge::{GaugeProfile, GaugeDynamics};
+    let profile = GaugeProfile::new(100_000_000, 0, 1, -10_000_000, true, vec![])
+        .unwrap()
+        .with_dynamics(GaugeDynamics {
+            minimum_alive: 0,
+            failure_below: 2_000_000,
+            damage_reduction_below: 32_000_000,
+        })
+        .unwrap();
+    let gauge = BmsGauge::new(profile.clone());
+    let result = CompletedPlayResult::from_completed(Timestamp::ZERO, None, &gauge);
+    let recorded = capture(0, None, 1);
+    let solo = solo_archive(&Ok(Some(result)), Some(&recorded), &profile)
+        .unwrap()
+        .unwrap();
+    assert_eq!(solo.entries()[0].profile, profile);
+    let bytes = encode_archive(&solo).unwrap();
+    assert_eq!(
+        u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+        crate::result_archive::DYNAMIC_VERSION
+    );
+    assert_eq!(
+        decode_archive(&bytes).unwrap().entries()[0].profile,
+        profile
+    );
+    let members = [
+        ArchiveMember {
+            player: PlayerId(7),
+            capture: Some(&recorded),
+            profile: &profile,
+        },
+        ArchiveMember {
+            player: PlayerId(u32::MAX),
+            capture: Some(&recorded),
+            profile: &profile,
+        },
+    ];
+    let cohort = cohort_archive(
+        &Ok(Some(vec![
+            (PlayerId(u32::MAX), result),
+            (PlayerId(7), result),
+        ])),
+        &members,
+    )
+    .unwrap()
+    .unwrap();
+    let decoded = decode_archive(&encode_archive(&cohort).unwrap()).unwrap();
+    assert!(decoded.entries().iter().all(|row| row.profile == profile));
+}
 #[test]
 fn scored_solo_preserves_full_or_practice_capture_and_publication_failure_proof_while_legacy_is_v1()
 {

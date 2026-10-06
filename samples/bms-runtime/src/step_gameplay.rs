@@ -937,6 +937,21 @@ impl StepGameplay {
         .map_err(|error| StepGameplayError::Setup(error.to_string()))
     }
 
+    /// Installs a resolved gauge before activation, processing or capture identity.
+    pub fn configure_gauge(
+        &mut self,
+        profile: crate::gauge::GaugeProfile,
+    ) -> Result<(), StepGameplayError> {
+        self.ensure_solo()?;
+        self.ensure_usable()?;
+        if !self.input_setup_available() || self.capture_configured {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "gauge configuration requires pristine setup before capture",
+            ));
+        }
+        self.gauge = BmsGauge::new(profile);
+        Ok(())
+    }
     /// Opt in while the original judge is pristine, using the resolved chart
     /// branch seed. Setup refusal is atomic and leaves this owner usable.
     /// Preroll reports retain their actual song times before the section start;
@@ -2018,6 +2033,25 @@ impl StepLocalGameplay {
         .map_err(|error| StepGameplayError::Setup(error.to_string()).into())
     }
 
+    /// Configures a member's gauge before any member captures or gameplay activates.
+    pub fn configure_gauge(
+        &mut self,
+        player: PlayerId,
+        profile: crate::gauge::GaugeProfile,
+    ) -> Result<(), StepLocalGameplayError> {
+        self.control.ensure_usable()?;
+        let index = self.member_index(player)?;
+        if !self.input_setup_available()
+            || self.members.iter().any(|member| member.capture_configured)
+        {
+            return Err(StepGameplayError::InvalidConfiguration(
+                "gauge configuration requires pristine setup before capture",
+            )
+            .into());
+        }
+        self.members[index].gauge = BmsGauge::new(profile);
+        Ok(())
+    }
     pub fn configure_capture(
         &mut self,
         player: PlayerId,
@@ -2755,20 +2789,10 @@ fn completed_archive_identity(
         v.extend_from_slice(bytes);
         Ok(v)
     };
-    let mut grades = Vec::new();
-    grades
-        .try_reserve_exact(profile.grades().len())
-        .map_err(|_| ArchiveError::AllocationFailed)?;
-    grades.extend_from_slice(profile.grades());
-    let profile = crate::gauge::GaugeProfile::new(
-        profile.initial_units(),
-        profile.clear_units(),
-        profile.default_hit_delta(),
-        profile.miss_delta(),
-        profile.fail_on_empty(),
-        grades,
-    )
-    .map_err(|_| ArchiveError::Invalid("gauge profile"))?;
+    let profile = profile.try_copy().map_err(|error| match error {
+        crate::gauge::GaugeError::AllocationFailed => ArchiveError::AllocationFailed,
+        _ => ArchiveError::Invalid("gauge profile"),
+    })?;
     Ok((
         player,
         beatkernel::replay::ReplayHeader {

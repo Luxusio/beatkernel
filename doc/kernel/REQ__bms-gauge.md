@@ -9,11 +9,14 @@ for stepped solo/local playback and incremental replay presentation.
 
 One percentage point is 1,000,000 integer units; maximum level is 100,000,000.
 GaugeProfile specifies initial/clear levels, signed default hit and miss deltas,
-an optional fail-on-empty latch, and up to 64 explicit opaque grade overrides.
+an optional fail-on-empty latch, up to 64 explicit opaque grade overrides and
+resolved level-dependent dynamics described below.
 Validate initial/clear bounds, override capacity and duplicate grades at setup.
 Sort overrides once; hot observation uses binary lookup and no allocation.
-Signed deltas use wide arithmetic and clamp to [0, maximum], including i64
-extremes. An unlisted hit uses the explicit fallback delta, not grade ordering.
+Signed deltas use wide arithmetic and clamp to [minimum_alive, maximum],
+including i64 extremes; the default minimum is zero. Depletion and instant death
+may latch a failed level of zero below that living minimum. An unlisted hit uses
+the explicit fallback delta, not grade ordering.
 Every actual normal judged stage contributes once, including hold head/tail;
 invisible presses and mine markers contribute no normal-note stage recovery.
 
@@ -22,15 +25,18 @@ successful judged stage, -6% per missed stage, and recoverable zero. It is an
 explicit application policy, not LR2/IIDX/Angolmois gauge compatibility. Live
 owners do not yet consume TOTAL; the adapter's pure LR2 rules below resolve it
 without changing this runtime default. Pure custom profiles support
-other grade deltas and fail-on-empty policy; actual session owners use the fixed
-documented default until configurable session policy and capture identity are
-connected. Do not silently expose configurable live policy with an unrecorded
-replay configuration.
+other grade deltas and fail-on-empty policy. Native launchers, browser launch
+defaults and replay defaults retain the fixed documented policy. Stepped owners
+can accept resolved profiles in pristine setup and retain them in result archives
+as described below. Standalone capture identity and end-user policy selection
+remain unfinished; do not expose a policy selector without connecting replay
+configuration identity.
 
 Observe the report's normal results first, then its hazard events in original
 order. Validate every hazard value in 1..1295, including avoided outcomes and
 events after failure, before committing a batch. Nonfatal triggered values cost
-exactly value * 500,000 units; clamp damage exceeding the whole level to zero.
+exactly value * 500,000 units before the profile's living floor/depletion rules;
+with default dynamics, damage exceeding the whole level clamps to zero.
 Avoided events cost nothing. Triggered 1295 (ZZ) sets level zero and latches
 InstantDeath independently of fail-on-empty. These mine meanings follow the
 [original Angolmois documentation](https://github.com/lifthrasiir/angolmois/blob/master/INTERNALS.md#data-commands);
@@ -90,14 +96,17 @@ qualify only when the final level reaches their border. Survival gauges qualify
 while alive. Qualification is not evidence that a song finished.
 
 BmsGaugeState is Copy, has no heap or dynamic dispatch, and applies one
-judgment with constant work. Runtime owners still use the documented default
-profile: selecting an LR2 variant live, mine damage on these variants, course
-gauges and replay/capture policy identity remain separate integration work.
+judgment with constant work. Player launch defaults still use the documented
+default profile. Stepped setup may consume resolved adapter rules through
+`GaugeProfile::from_bms_rules` and `configure_gauge`; end-user LR2 selection,
+historical mine compatibility, course gauges and replay/capture policy identity
+remain separate integration work.
 
 ## Actual owners and remaining terminal control
 
-StepGameplay and each StepLocalGameplay member own a default BmsGauge and
-consume actual committed report prefixes even when judge/audio/score/capture
+StepGameplay and each StepLocalGameplay member initially own a default BmsGauge,
+optionally replaced by a resolved profile during pristine setup, and consume
+actual committed report prefixes even when judge/audio/score/capture
 postprocessing also fails. Retain the original report and independent errors
 when gauge aggregation fails, fence technical processing and expose the previous
 atomic gauge state. Numeric gauge failure is readable game state; it is not a
@@ -189,8 +198,10 @@ replay pipeline and verify that hash, score, gauge and hazard observations match
 the actual retained prefix. No new wire policy or retrospective rewriting of
 older recordings is introduced here: legacy recordings continue to reconstruct
 their own recorded operations. Configurable gauge/failure capture identity is
-still separate work. This fixed default's only numeric failure is instant death;
-custom pure profiles do not become unrecorded live options.
+still separate work. This fixed default's only numeric failure is instant death.
+Resolved profiles in stepped setup are retained by result archives, but their
+standalone capture/replay identity integration remains unfinished; the public
+player must keep its documented default until that integration is complete.
 
 ## Native game owner failure contract
 
@@ -262,3 +273,27 @@ high-level mine file admission guard until those owners are connected. Author
 independent deferred fixed-point/configuration/atomicity and real solo/local/
 replay prefix/failure fixtures; no application, browser, device or performance
 acceptance is established by source compilation.
+
+## Resolved dynamic policy and record identity
+
+Application profiles may carry a living minimum, a strict failure-below level
+and a strict low-level judgment damage reduction (3/5). Zero dynamics retain the
+legacy BeatKernel policy. Survival depletion latches at zero; grade classes are
+explicitly mapped by callers, never inferred from opaque grade numbers. Mines
+retain raw existing application damage and instant death, without judgment guts.
+This does not assert full LR2 mine/empty-judgment compatibility.
+
+`StepGameplay::configure_gauge` and `StepLocalGameplay::configure_gauge` accept
+resolved profiles only while input setup remains pristine, before activation,
+processing or capture configuration. A local member keeps its own profile, but
+capture configuration for any member closes gauge setup for the whole cohort.
+Refusal preserves the existing profile and owner usability. Native-save and
+stepped completion archives must copy the entire resolved profile; fixtures
+exercise solo and mixed-policy local completion, including original player IDs.
+
+Records with nonzero dynamics use versions 4/5, preserving all resolved fields
+(and optional comparison snapshots). Legacy/default records keep versions 1/2/3
+and old decoding supplies zero dynamics. Copied profiles and decoded live-level
+invariants must preserve these fields. Native/browser/replay default policy and
+selectable judge/gauge/capture identity integration remain separate unfinished
+work; merely introducing resolved rules must not silently change old playback.
