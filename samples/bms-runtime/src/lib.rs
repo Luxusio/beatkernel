@@ -930,3 +930,10 @@ mod audio_pause_hold_fixtures;
 pub mod native_alsa_replacement;
 /// Portable paused-output replacement policy and statically injected lifecycle ports.
 pub mod output_replacement;
+
+#[cfg(target_os = "macos")]
+pub mod native_coreaudio_replacement;
+/// Portable WASAPI replacement snapshot admission.
+pub mod native_replacement_observation;
+#[cfg(target_os = "windows")]
+pub mod native_wasapi_replacement;

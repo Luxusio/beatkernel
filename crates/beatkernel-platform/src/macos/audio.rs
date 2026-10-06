@@ -215,6 +215,7 @@ fn validate_open(request: &CoreAudioRequest, mixer: &Mixer) -> Result<(), CoreAu
 /// Mutable mixer storage is accessed only by one guarded native callback.
 /// This owner is intentionally !Send/!Sync; callback telemetry uses atomics.
 pub struct CoreAudioStream {
+    basis: beatkernel::audio::OutputFrameBasis,
     applied: CoreAudioApplied,
     context: Option<Box<Context>>,
     recovered_mixer: Option<Mixer>,
@@ -228,6 +229,10 @@ pub struct CoreAudioStream {
     final_cadence: Option<Box<crate::audio::cadence::Capture>>,
 }
 impl CoreAudioStream {
+    /// Original physical mixer frame basis captured before any native operation.
+    pub const fn frame_basis(&self) -> beatkernel::audio::OutputFrameBasis {
+        self.basis
+    }
     /// Query the OS default media output without changing or opening a stream.
     pub fn default_output_device() -> Result<u32, CoreAudioError> {
         // AudioHardware.h: system object 1, global UInt32 'dOut' property.
@@ -276,6 +281,7 @@ impl CoreAudioStream {
         clock: MachClock,
         mixer: Mixer,
     ) -> Result<Self, CoreAudioOpenFailure> {
+        let basis = mixer.output_frame_basis();
         if let Err(error) = validate_open(&request, &mixer) {
             return Err(CoreAudioOpenFailure::recovered(error, Some(mixer)));
         }
@@ -388,6 +394,7 @@ impl CoreAudioStream {
             block_frames: AtomicU32::new(0),
         });
         let mut stream = Self {
+            basis,
             applied,
             context: Some(context),
             recovered_mixer: None,
