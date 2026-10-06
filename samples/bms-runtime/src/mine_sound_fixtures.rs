@@ -355,7 +355,12 @@ fn audible_semantic_identity_excludes_paths_voices_and_nonfatal_damage_but_actua
     changed.mines[0].beat = Beat::new(3).unwrap();
     changes.push(changed);
     let mut changed = original.clone();
-    changed.mines[0].lane = original.mines[3].lane;
+    changed.mines[0].lane = original
+        .mines
+        .iter()
+        .find(|mine| mine.lane != original.mines[0].lane)
+        .unwrap()
+        .lane;
     changes.push(changed);
     let mut changed = original.clone();
     changed.mines[0].damage = MineDamage::from_raw(1295).unwrap();
@@ -436,6 +441,7 @@ fn audible_semantic_identity_excludes_paths_voices_and_nonfatal_damage_but_actua
         point(2, OUTPUT),
     )
     .unwrap();
+    game.fail(); // Explicitly stop acquisition before exporting its accepted prefix.
     let file = decode_replay(&game.take_replay().unwrap().unwrap(), limits()).unwrap();
     assert_eq!(file.header, header);
     assert!(validate_section_setup(&original, &file, limits()).is_ok());

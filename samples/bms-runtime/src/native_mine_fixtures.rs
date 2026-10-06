@@ -119,7 +119,7 @@ fn solo(judge: JudgeEngine, producer: CommandProducer) -> SoloRuntime {
     let mut runtime = SoloRuntime::new(
         HOST,
         OUTPUT,
-        Transport::new(ts(ORIGIN), Timestamp::ZERO, Rate::NORMAL),
+        Transport::new(ts(ORIGIN - 1), ts(-1), Rate::NORMAL),
         bindings(DeviceSelector::Any, 91),
         judge,
         producer,

@@ -301,7 +301,8 @@ fn shared_runtime_first_player_occupancy_and_other_avoids_match_independent_sour
 fn all_held_members_execute_disjoint_note_and_mine_commands_using_one_original_pcm_bank() {
     for count in [1, 2, 64] {
         let assets = Assets::default();
-        let prepared = loaded(MINES, &assets);
+        // 1/64 gain keeps every contribution observable even with 64 players.
+        let prepared = loaded(&format!("#VOLWAV 1.5625\n{MINES}"), &assets);
         let plan = plan(count);
         let members = prepare_local_members(
             &prepared,
@@ -371,10 +372,10 @@ fn all_held_members_execute_disjoint_note_and_mine_commands_using_one_original_p
         assert_eq!(
             (pcm[0], pcm[1], pcm[20], pcm[21]),
             (
-                count as f32 * 0.5,
-                count as f32 * -0.5,
-                count as f32 * 0.25,
-                count as f32 * -0.25
+                count as f32 * (0.5 / 64.0),
+                count as f32 * (-0.5 / 64.0),
+                count as f32 * (0.25 / 64.0),
+                count as f32 * (-0.25 / 64.0)
             )
         );
         assert_eq!(rendered.counters.commands_consumed, count as u64 * 2);

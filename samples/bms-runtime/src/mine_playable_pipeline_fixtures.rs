@@ -126,8 +126,11 @@ fn config() -> StepGameplayConfig {
     }
 }
 fn bindings() -> BindingMap {
+    bindings_for(DeviceSelector::Any)
+}
+fn bindings_for(device: DeviceSelector) -> BindingMap {
     BindingMap::from_bindings([Binding {
-        device: DeviceSelector::Any,
+        device,
         physical: PhysicalControlId::keyboard(91),
         game_control: GameControlId(0x11),
     }])
@@ -264,7 +267,10 @@ fn actual_loaded_local_players_have_independent_occupancy_damage_and_disjoint_mi
             prepared,
             config(),
             plan,
-            vec![bindings(), bindings()],
+            vec![
+                bindings_for(DeviceSelector::Exact(DeviceId(1))),
+                bindings_for(DeviceSelector::Exact(DeviceId(2))),
+            ],
             Timestamp::ZERO,
             None,
             BmsInputMode::ButtonOnly,
@@ -414,9 +420,15 @@ fn actual_loaded_finite_practice_retains_original_marker_time_identity_and_zero_
         zero
     );
     let markers = selected.source.compile_mines().unwrap();
-    assert_eq!(markers.len(), 1);
-    assert_eq!(markers[0].ordinal, 1);
-    assert_eq!(markers[0].at.as_nanos(), 2_000_000_000);
+    assert_eq!(markers.len(), 2);
+    assert_eq!(
+        (markers[0].ordinal, markers[0].at.as_nanos()),
+        (0, 1_000_000_000)
+    );
+    assert_eq!(
+        (markers[1].ordinal, markers[1].at.as_nanos()),
+        (1, 2_000_000_000)
+    );
     let actual = recorded(
         &selected,
         &[
@@ -468,7 +480,7 @@ fn source_only_mine_prevents_completion_until_actual_hazard_and_output_frontier_
         StepGameplay::new_section(prepared, config(), bindings(), Timestamp::ZERO, None).unwrap();
     game.activate(point(1, 0)).unwrap();
     game.advance_to(point(1, 0), &Domains, point(2, 0)).unwrap();
-    let (_, mut output) = mixer(bank, 0);
+    let (_producer, mut output) = mixer(bank, 0);
     let first = output.render(&mut [0.; 1]).unwrap();
     assert!(
         !game
@@ -479,6 +491,9 @@ fn source_only_mine_prevents_completion_until_actual_hazard_and_output_frontier_
     game.advance_to(point(1, 2_000_000_000), &Domains, point(2, 2_000_000_000))
         .unwrap();
     assert_eq!(game.mine_damage().avoided, 1);
+    // Completion requires moving strictly beyond the inclusive last marker.
+    game.advance_to(point(1, 2_000_000_001), &Domains, point(2, 2_000_000_001))
+        .unwrap();
     for (frames, ns) in [(20usize, 2_100_000_000), (1, 2_200_000_000)] {
         let report = output.render(&mut vec![0.; frames]).unwrap();
         game.observe_completion(Some(report), Some(point(2, ns)))
