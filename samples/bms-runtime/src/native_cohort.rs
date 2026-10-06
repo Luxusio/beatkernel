@@ -736,10 +736,6 @@ pub fn run_cohort_with_results_and_ports<
                 } else {
                     let transport =
                         prepare_live_transport(session.group.transport_mut(), boundary, last_song)?;
-                    *session.group.transport_mut() = transport;
-                    resume_boundary = Some(boundary.at);
-                    paused_boundary = None;
-                    pause_committed = false;
                     let mut discipline = session.discipline.restart_for_resume(
                         config.stream_origin,
                         config.playback_origin,
@@ -747,7 +743,14 @@ pub fn run_cohort_with_results_and_ports<
                         session.pause.song_origin_after_pause(config.song_origin)?,
                     )?;
                     device.seed_resume(&mut discipline, reference)?;
+                    if discipline.latest_pair().is_none() {
+                        return Err("resume presentation seed has no accepted observation".into());
+                    }
+                    *session.group.transport_mut() = transport;
                     *session.discipline = discipline;
+                    resume_boundary = Some(boundary.at);
+                    paused_boundary = None;
+                    pause_committed = false;
                 }
             }
         }

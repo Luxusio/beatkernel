@@ -110,6 +110,8 @@ pub mod gameplay_competition;
 pub mod gameplay_presentation;
 #[cfg(test)]
 mod gameplay_presentation_port_fixtures;
+#[cfg(test)]
+mod gameplay_resume_failure_fixtures;
 /// Shared fixed-point gauge observations from committed normal and mine outcomes.
 pub mod gauge;
 #[cfg(test)]

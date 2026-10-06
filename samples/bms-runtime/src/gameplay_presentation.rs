@@ -158,6 +158,7 @@ pub trait GameplayDevice {
         report: Option<RenderReport>,
     ) -> NativeGameplayResult<Option<EndBoundary>>;
     /// Reseed from the device owner's original observation evidence.
+    /// Success must leave an accepted latest pair in the staged observer.
     fn seed_resume(
         &mut self,
         discipline: &mut Self::Presentation,

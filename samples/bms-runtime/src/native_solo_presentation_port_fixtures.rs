@@ -216,3 +216,7 @@ fn actual_solo_pause_resume_reconstructs_pure_port_and_reconciles_original_relea
 mod resume_clock {
     include!("native_solo_resume_clock_fixtures.rs");
 }
+
+mod resume_failure {
+    include!("native_solo_resume_failure_fixtures.rs");
+}

@@ -61,6 +61,7 @@ pub trait NativeGameplayDevice {
         report: Option<RenderReport>,
     ) -> NativeGameplayResult<Option<EndBoundary>>;
     /// Reseed using the original native observation source, never a fabricated snapshot.
+    /// Success must leave an accepted latest pair in the staged observer.
     fn seed_resume(
         &mut self,
         discipline: &mut PresentationDiscipline,
