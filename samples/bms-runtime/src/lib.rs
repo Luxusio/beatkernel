@@ -953,6 +953,8 @@ pub mod gameplay_output_owner;
 #[cfg(test)]
 #[path = "gameplay/output/tests/owned_pumps.rs"]
 mod native_owned_output_fixtures;
+/// Static two-backend adapter for cross-backend output replacement.
+pub mod output_backend_switch;
 
 /// Static cold command bridge to actual gameplay output ownership.
 pub mod gameplay_output_ui;

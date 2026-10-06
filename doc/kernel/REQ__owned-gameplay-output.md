@@ -57,8 +57,9 @@ availability during failed replacement. User-facing live setting commands and
 other native adapter compositions remain follow-up integration work.
 Each static backend owns its typed output/request. Cross-backend switching can
 use a platform adapter enum implementing the same port; the common owner must
-not introduce OS-specific branches to achieve that. Such enum composition and
-sample-format changes are not yet delivered by this owner increment.
+not introduce OS-specific branches to achieve that. That enum adapter follows
+[output backend switch](REQ__output-backend-switch.md); sample-format changes
+are not yet delivered by this owner increment.
 
 Independent tests use real Mixer/queue/PCM and presentation implementations to
 cover multi-poll waiting, request and failure ownership, cancellation/retirement,

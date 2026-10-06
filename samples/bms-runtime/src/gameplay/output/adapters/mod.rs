@@ -9,5 +9,6 @@ pub mod asio;
 pub mod coreaudio;
 pub mod observation;
 pub mod player;
+pub mod switch;
 #[cfg(target_os = "windows")]
 pub mod wasapi;
