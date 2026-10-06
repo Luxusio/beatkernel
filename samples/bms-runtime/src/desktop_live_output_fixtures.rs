@@ -59,10 +59,9 @@ fn compose(app: &mut Desktop) {
 #[test]
 fn actual_f2_gate_refuses_replay_terminal_cancel_and_unacknowledged_resume_intent_without_changing_play_instance()
  {
-    for case in 0..7 {
+    for case in 0..9 {
         let (mut app, publisher) = prepared();
         let before = app.navigator.clone();
-        let launch = app.game.as_ref().unwrap().launch.args().to_vec();
         match case {
             0 => app.game.as_mut().unwrap().replay = true,
             1 => app.game.as_mut().unwrap().joined = true,
@@ -78,15 +77,34 @@ fn actual_f2_gate_refuses_replay_terminal_cancel_and_unacknowledged_resume_inten
             }
             4 => app.game.as_ref().unwrap().viewer.request_pause(false),
             5 => publisher.advertise_output(None).unwrap(),
-            _ => {
+            6 => {
                 app.game.as_mut().unwrap().snapshot.as_mut().unwrap().pause =
                     player::PauseState::Pausing
             }
+            7 => {
+                app.game.as_mut().unwrap().launch = SessionLaunch::new(vec![
+                    "--chart".into(),
+                    "pinned.bms".into(),
+                    "--mp-host".into(),
+                    "127.0.0.1:9000".into(),
+                ])
+                .unwrap();
+            }
+            _ => {
+                app.game.as_mut().unwrap().snapshot.as_mut().unwrap().pause =
+                    player::PauseState::Running
+            }
         }
+        if case == 8 {
+            app.failure = Some("existing owner failure".into());
+        }
+        let launch = app.game.as_ref().unwrap().launch.args().to_vec();
+        let failure = app.failure.clone();
         app.key(KeyCode::F2, false);
         assert_eq!(app.navigator, before);
         assert!(app.live_audio.is_none());
         assert_eq!(app.game.as_ref().unwrap().launch.args(), launch);
+        assert_eq!(app.failure, failure);
     }
     let (mut app, _) = prepared();
     let play = app.navigator.active_id().unwrap();
@@ -102,6 +120,55 @@ fn actual_f2_gate_refuses_replay_terminal_cancel_and_unacknowledged_resume_inten
     assert!(app.live_audio_view.is_none());
     assert!(app.game.as_ref().unwrap().viewer.pause_requested());
     assert_eq!(app.options.native, native);
+}
+#[test]
+fn rejected_live_output_paste_and_ime_commit_report_local_errors_without_mutating_settings() {
+    for ime in [false, true] {
+        let (mut app, _) = prepared();
+        app.open_live_audio();
+        app.live_audio.as_mut().unwrap().editor.select_all();
+        let before = app.live_audio.as_ref().unwrap().editor.clone();
+        let values = app.live_audio.as_ref().unwrap().values.native_args();
+        if ime {
+            app.sync_ime();
+            app.ime_event(Ime::Enabled);
+            app.ime_event(Ime::Commit("invalid\nendpoint".into()));
+        } else {
+            let target = app.text_target().unwrap();
+            app.pending_clipboard = Some(PendingClipboard {
+                target,
+                edit: ClipboardEdit::prepare(&before, ClipboardAction::Paste)
+                    .unwrap()
+                    .unwrap(),
+            });
+            app.finish_clipboard(Ok(Some("invalid\nendpoint".into())));
+        }
+        let draft = app.live_audio.as_ref().unwrap();
+        assert!(
+            draft
+                .message
+                .as_ref()
+                .is_some_and(|message| !message.is_empty())
+        );
+        assert_eq!(draft.editor, before);
+        assert_eq!(draft.values.native_args(), values);
+        assert!(app.failure.is_none());
+        if ime {
+            app.ime_event(Ime::Commit("valid-endpoint".into()));
+        } else {
+            let target = app.text_target().unwrap();
+            app.pending_clipboard = Some(PendingClipboard {
+                target,
+                edit: ClipboardEdit::prepare(&before, ClipboardAction::Paste)
+                    .unwrap()
+                    .unwrap(),
+            });
+            app.finish_clipboard(Ok(Some("valid-endpoint".into())));
+        }
+        let draft = app.live_audio.as_ref().unwrap();
+        assert_eq!(draft.editor.value(), "valid-endpoint");
+        assert!(draft.message.is_none());
+    }
 }
 #[test]
 fn field_ime_edits_use_child_scope_pending_disables_hits_and_back_cancels_composition_and_pointer_arm()

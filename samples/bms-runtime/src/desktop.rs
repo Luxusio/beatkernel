@@ -1752,7 +1752,10 @@ impl Desktop {
         })
     }
     fn open_live_audio(&mut self) {
-        if !self.ui_ready() || self.navigator.route() != (ScreenRoute::Play { replay: false }) {
+        if !self.ui_ready()
+            || self.navigator.route() != (ScreenRoute::Play { replay: false })
+            || !self.live_output_available()
+        {
             return;
         }
         let prepared = (|| -> Result<_, String> {
@@ -4249,6 +4252,11 @@ impl Desktop {
     fn clipboard_error(&mut self, error: Option<String>) {
         match self.navigator.route() {
             ScreenRoute::Selection => self.failure = error,
+            ScreenRoute::LiveAudio => {
+                if let Some(draft) = &mut self.live_audio {
+                    draft.message = error;
+                }
+            }
             ScreenRoute::Settings => {
                 if let Some(draft) = &mut self.settings {
                     draft.error = error;
