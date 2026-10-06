@@ -83,6 +83,12 @@ impl<E, S> OutputOpenFailure<E, S> {
             cleanup: None,
         }
     }
+    /// Attaches the latest cleanup diagnostic without replacing the original
+    /// opening error or changing recovered/pending ownership.
+    pub fn with_cleanup_error(mut self, error: E) -> Self {
+        self.cleanup = Some(error);
+        self
+    }
     /// Original opening error, unchanged by retirement attempts.
     pub fn error(&self) -> &E {
         &self.error

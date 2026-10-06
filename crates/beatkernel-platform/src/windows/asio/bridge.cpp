@@ -294,12 +294,21 @@ extern "C" BkAsioStatus bk_asio_open(const std::uint16_t* clsid_text,
         return ok();
     } catch (...) { return {Bridge, NativeException}; }
 }
-extern "C" BkAsioStatus bk_asio_close(void* raw) noexcept {
+extern "C" BkAsioStatus bk_asio_close_with_retirement(void* raw, std::uint32_t* retired) noexcept {
+    if (!retired) return {Bridge, BadArgument};
+    *retired = 0;
     if (!raw) return {Bridge, BadArgument};
     auto* control = static_cast<Control*>(raw);
     if (control->owner != GetCurrentThreadId()) return {Bridge, WrongThread};
     std::unique_ptr<Control> owned(control);
-    return owned->cleanup();
+    const auto result = owned->cleanup();
+    // cleanup detached routing and drained admitted readers before driver calls.
+    *retired = 1;
+    return result;
+}
+extern "C" BkAsioStatus bk_asio_close(void* raw) noexcept {
+    std::uint32_t retired = 0;
+    return bk_asio_close_with_retirement(raw, &retired);
 }
 extern "C" BkAsioStatus bk_asio_channels(void* raw, std::int32_t* inputs, std::int32_t* outputs) noexcept {
     if (!inputs || !outputs) return {Bridge, BadArgument};

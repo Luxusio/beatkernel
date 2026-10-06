@@ -11,6 +11,7 @@ use crate::windows::clock::QpcClock;
 use beatkernel::audio::{Mixer, RenderReport};
 use std::{
     cell::UnsafeCell,
+    mem::ManuallyDrop,
     error::Error,
     ffi::c_void,
     fmt, ptr,
@@ -417,11 +418,66 @@ unsafe extern "C" fn render(
 pub struct AsioStream {
     control: Option<AsioControl>,
     retired: bool,
-    context: Box<RenderContext>,
+    context: ManuallyDrop<Box<RenderContext>>,
     phase: AsioStreamPhase,
     native: AsioDiagnostics,
     latencies: AsioLatencies,
     sample_rate: u32,
+}
+/// Original prepare error with software mixer or an owner pending callback retirement.
+pub type AsioPrepareFailure = beatkernel::audio::OutputOpenFailure<AsioStreamError, AsioStream>;
+fn validate_channels(
+    channels: &[u32],
+    format: beatkernel::audio::AudioFormat,
+) -> Result<(), AsioStreamError> {
+    if channels.len() != usize::from(format.channels())
+        || channels.is_empty()
+        || channels.len() > 32
+        || channels
+            .iter()
+            .enumerate()
+            .any(|(i, channel)| *channel > i32::MAX as u32 || channels[..i].contains(channel))
+    {
+        return Err(AsioStreamError::InvalidChannels);
+    }
+    Ok(())
+}
+fn recover_before_context(
+    control: AsioControl,
+    original: AsioStreamError,
+    mixer: Option<Mixer>,
+) -> AsioPrepareFailure {
+    let close = control.close_with_retirement();
+    let failure = AsioPrepareFailure::recovered(original, mixer);
+    match close.error {
+        Some(error) => failure.with_cleanup_error(AsioStreamError::Control(error)),
+        None => failure,
+    }
+}
+fn recover_after_prepare(mut stream: AsioStream, original: AsioStreamError) -> AsioPrepareFailure {
+    let close = stream
+        .control
+        .take()
+        .expect("prepare owns its control")
+        .close_with_retirement();
+    stream.retired = close.retired;
+    stream.phase = AsioStreamPhase::Failed;
+    let cleanup = close.error.map(AsioStreamError::Control);
+    let failure = if stream.retired {
+        match beatkernel::audio::StoppedMixerSource::take_stopped_mixer(&mut stream) {
+            Ok(mixer) => AsioPrepareFailure::recovered(original, mixer),
+            Err(error) => {
+                return AsioPrepareFailure::pending(original, stream)
+                    .with_cleanup_error(cleanup.unwrap_or(error));
+            }
+        }
+    } else {
+        AsioPrepareFailure::pending(original, stream)
+    };
+    match cleanup {
+        Some(error) => failure.with_cleanup_error(error),
+        None => failure,
+    }
 }
 impl AsioStream {
     /// Consumes exact driver/Mixer/channel choices, prepares buffers and primes B.
@@ -432,7 +488,8 @@ impl AsioStream {
         channels: Vec<u32>,
         request: AsioBufferRequest,
     ) -> Result<Self, AsioStreamError> {
-        Self::prepare_internal(control, mixer, channels, request, None)
+        Self::prepare_recoverable(control, mixer, channels, request)
+            .map_err(|failure| failure.into_parts().0)
     }
 
     /// Prepares exact buffers with opt-in direct callback render-entry cadence.
@@ -445,61 +502,103 @@ impl AsioStream {
         request: AsioBufferRequest,
         host_clock: QpcClock,
     ) -> Result<Self, AsioStreamError> {
-        Self::prepare_internal(control, mixer, channels, request, Some(host_clock))
+        Self::prepare_with_clock_recoverable(control, mixer, channels, request, host_clock)
+            .map_err(|failure| failure.into_parts().0)
     }
 
+    /// Preserves current software state or the actual partial callback owner on error.
+    pub fn prepare_recoverable(
+        control: AsioControl,
+        mixer: Mixer,
+        channels: Vec<u32>,
+        request: AsioBufferRequest,
+    ) -> Result<Self, AsioPrepareFailure> {
+        Self::prepare_internal(control, mixer, channels, request, None)
+    }
+    /// Recoverable preparation with the original opt-in host cadence clock.
+    pub fn prepare_with_clock_recoverable(
+        control: AsioControl,
+        mixer: Mixer,
+        channels: Vec<u32>,
+        request: AsioBufferRequest,
+        host_clock: QpcClock,
+    ) -> Result<Self, AsioPrepareFailure> {
+        Self::prepare_internal(control, mixer, channels, request, Some(host_clock))
+    }
+    /// Retries only while actual control/retirement evidence remains available.
+    /// A consumed control without proof cannot be treated as a successful close.
+    pub fn retry_prepare_cleanup(
+        failure: &mut AsioPrepareFailure,
+    ) -> Result<bool, &AsioStreamError> {
+        failure.retry_retirement(|stream| {
+            if stream.control.is_none() && !stream.retired {
+                return Err(AsioStreamError::InvalidState);
+            }
+            stream.stop()?;
+            beatkernel::audio::StoppedMixerSource::take_stopped_mixer(stream)
+        })
+    }
     fn prepare_internal(
         mut control: AsioControl,
         mixer: Mixer,
         channels: Vec<u32>,
         request: AsioBufferRequest,
         host_clock: Option<QpcClock>,
-    ) -> Result<Self, AsioStreamError> {
+    ) -> Result<Self, AsioPrepareFailure> {
         fn require_send<T: Send>() {}
         require_send::<AsioBlockRenderer>();
         let format = mixer.configuration().format();
-        if channels.len() != usize::from(format.channels())
-            || channels.is_empty()
-            || channels.len() > 32
-            || channels
-                .iter()
-                .enumerate()
-                .any(|(i, channel)| *channel > i32::MAX as u32 || channels[..i].contains(channel))
-        {
-            return Err(AsioStreamError::InvalidChannels);
-        }
-        let rate = control.sample_rate()?;
-        if rate != f64::from(format.sample_rate()) {
-            return Err(AsioStreamError::RateMismatch {
-                expected: format.sample_rate(),
-                actual: rate,
-            });
-        }
-        let frames = control
-            .buffer_constraints()?
-            .resolve(request)
-            .map_err(AsioControlError::from)?;
-        let mut encodings = Vec::new();
-        encodings
-            .try_reserve_exact(channels.len())
-            .map_err(|_| AsioRenderError::Capacity)?;
-        let mut rows = [RawOutput::default(); 32];
-        for (row, channel) in rows.iter_mut().zip(&channels) {
-            let info = control.channel_info(*channel, false)?;
-            let encoding = info.pcm_encoding().map_err(AsioRenderError::Pcm)?;
-            *row = RawOutput {
-                channel: *channel as i32,
-                sample_type: info.sample_type,
-                width: encoding.bytes_per_sample() as u32,
-                ..Default::default()
-            };
-            encodings.push(encoding);
-        }
-        let renderer = AsioBlockRenderer::new(mixer, frames, encodings)?;
+        let staged = (|| -> Result<_, AsioStreamError> {
+            validate_channels(&channels, format)?;
+            let rate = control.sample_rate()?;
+            if rate != f64::from(format.sample_rate()) {
+                return Err(AsioStreamError::RateMismatch {
+                    expected: format.sample_rate(),
+                    actual: rate,
+                });
+            }
+            let frames = control
+                .buffer_constraints()?
+                .resolve(request)
+                .map_err(AsioControlError::from)?;
+            let mut encodings = Vec::new();
+            encodings
+                .try_reserve_exact(channels.len())
+                .map_err(|_| AsioRenderError::Capacity)?;
+            let mut rows = [RawOutput::default(); 32];
+            for (row, channel) in rows.iter_mut().zip(&channels) {
+                let info = control.channel_info(*channel, false)?;
+                let encoding = info.pcm_encoding().map_err(AsioRenderError::Pcm)?;
+                *row = RawOutput {
+                    channel: *channel as i32,
+                    sample_type: info.sample_type,
+                    width: encoding.bytes_per_sample() as u32,
+                    ..Default::default()
+                };
+                encodings.push(encoding);
+            }
+            Ok((rate, frames, encodings, rows))
+        })();
+        let (rate, frames, encodings, rows) = match staged {
+            Ok(staged) => staged,
+            Err(error) => return Err(recover_before_context(control, error, Some(mixer))),
+        };
+        let renderer = match AsioBlockRenderer::new_recoverable(mixer, frames, encodings) {
+            Ok(renderer) => renderer,
+            Err(failure) => {
+                let (error, mixer) = failure.into_parts();
+                return Err(recover_before_context(
+                    control,
+                    AsioStreamError::Render(error),
+                    mixer,
+                ));
+            }
+        };
+
         let mut stream = Self {
             control: Some(control),
             retired: false,
-            context: Box::new(RenderContext {
+            context: ManuallyDrop::new(Box::new(RenderContext {
                 host_clock,
                 cadence: crate::audio::cadence::Capture::new(),
                 state: UnsafeCell::new(RenderState {
@@ -512,7 +611,7 @@ impl AsioStream {
                 telemetry: Telemetry::new(),
                 publication: AtomicU64::new(0),
                 event_values: std::array::from_fn(|_| AtomicU64::new(0)),
-            }),
+            })),
             phase: AsioStreamPhase::Ready,
             sample_rate: format.sample_rate(),
             native: AsioDiagnostics::default(),
@@ -521,30 +620,37 @@ impl AsioStream {
                 output_frames: 0,
             },
         };
-        let context = ptr::from_ref(stream.context.as_ref())
-            .cast_mut()
-            .cast::<c_void>();
-        let state = stream.context.state.get_mut();
-        // SAFETY: same-thread live control, stable Box and fixed rows, verified
-        // positive signed SDK frames/count and actual format. prepare doesn't render;
-        // any error drops stream, closing/draining before freeing callback context.
-        check(
-            unsafe {
-                bk_asio_prepare(
-                    stream.control.as_ref().unwrap().raw(),
-                    state.rows.as_mut_ptr(),
-                    channels.len() as i32,
-                    frames as i32,
-                    rate,
-                    render,
-                    context,
-                )
-            },
-            "createBuffers",
-        )?;
-        stream.latencies = stream.control.as_mut().unwrap().latencies()?;
-        // SAFETY: native prepare validated all regions; start has not enabled render.
-        unsafe { stream.context.fill(1, None) }?;
+        let prepared = (|| -> Result<(), AsioStreamError> {
+            let context = ptr::from_ref(stream.context.as_ref())
+                .cast_mut()
+                .cast::<c_void>();
+            let state = stream.context.state.get_mut();
+            // SAFETY: same-thread live control, stable Box and fixed rows, verified
+            // positive signed SDK frames/count and actual format. prepare doesn't render;
+            // errors attempt reported retirement before context release; unproven
+            // retirement retains the actual context in a pending owner.
+            check(
+                unsafe {
+                    bk_asio_prepare(
+                        stream.control.as_ref().unwrap().raw(),
+                        state.rows.as_mut_ptr(),
+                        channels.len() as i32,
+                        frames as i32,
+                        rate,
+                        render,
+                        context,
+                    )
+                },
+                "createBuffers",
+            )?;
+            stream.latencies = stream.control.as_mut().unwrap().latencies()?;
+            // SAFETY: native prepare validated all regions; start has not enabled render.
+            unsafe { stream.context.fill(1, None) }?;
+            Ok(())
+        })();
+        if let Err(error) = prepared {
+            return Err(recover_after_prepare(stream, error));
+        }
         Ok(stream)
     }
     /// Driver-reported latency after buffer creation; changes require reopening.
@@ -719,8 +825,12 @@ impl AsioStream {
             return Ok(());
         }
         let diagnostic = self.diagnostics();
-        let close = self.control.take().unwrap().close();
-        self.retired = close.is_ok();
+        let outcome = self.control.take().unwrap().close_with_retirement();
+        self.retired = outcome.retired;
+        let close = match outcome.error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        };
         self.phase =
             if close.is_err() || diagnostic.is_err() || self.native.faults.requires_reopen() {
                 AsioStreamPhase::Failed
@@ -737,10 +847,19 @@ impl AsioStream {
 }
 impl Drop for AsioStream {
     fn drop(&mut self) {
-        // Close detaches and drains callback admission before context's field drop.
         if let Some(control) = self.control.take() {
-            let _ = control.close();
+            self.retired = control.close_with_retirement().retired;
         }
+        if self.retired {
+            // SAFETY: reported close detached routing and drained every admitted
+            // reader. The exclusive owner can now release its stable context.
+            unsafe {
+                ManuallyDrop::drop(&mut self.context);
+            }
+        }
+        // Unproven retirement intentionally retains callback storage rather than
+        // freeing memory behind a possibly live native pointer. Keep/retry the
+        // pending owner instead of discarding it when that distinction matters.
     }
 }
 
@@ -759,3 +878,7 @@ impl beatkernel::audio::StoppedMixerSource for AsioStream {
         Ok(state.renderer.take_mixer())
     }
 }
+
+#[cfg(test)]
+#[path = "stream/open_failure_fixtures.rs"]
+mod open_failure_fixtures;

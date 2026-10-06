@@ -63,22 +63,37 @@ impl AsioBlockRenderer {
         frames: u32,
         encodings: Vec<AsioPcmEncoding>,
     ) -> Result<Self, AsioRenderError> {
-        let config = mixer.configuration();
-        let format = config.format();
-        if frames == 0 || encodings.len() != usize::from(format.channels()) {
-            return Err(AsioRenderError::InvalidConfiguration);
-        }
-        if frames as usize > config.limits().max_render_frames() {
-            return Err(AsioRenderError::Capacity);
-        }
-        let samples = (frames as usize)
-            .checked_mul(encodings.len())
-            .ok_or(AsioRenderError::Capacity)?;
-        let mut scratch = Vec::new();
-        scratch
-            .try_reserve_exact(samples)
-            .map_err(|_| AsioRenderError::Capacity)?;
-        scratch.resize(samples, 0.0);
+        Self::new_recoverable(mixer, frames, encodings).map_err(|failure| failure.into_parts().0)
+    }
+    /// Returns the unchanged mixer on bounded validation/storage refusal.
+    pub fn new_recoverable(
+        mixer: Mixer,
+        frames: u32,
+        encodings: Vec<AsioPcmEncoding>,
+    ) -> Result<Self, beatkernel::audio::MixerOpenFailure<AsioRenderError>> {
+        let staged = (|| -> Result<_, AsioRenderError> {
+            let config = mixer.configuration();
+            let format = config.format();
+            if frames == 0 || encodings.len() != usize::from(format.channels()) {
+                return Err(AsioRenderError::InvalidConfiguration);
+            }
+            if frames as usize > config.limits().max_render_frames() {
+                return Err(AsioRenderError::Capacity);
+            }
+            let samples = (frames as usize)
+                .checked_mul(encodings.len())
+                .ok_or(AsioRenderError::Capacity)?;
+            let mut scratch = Vec::new();
+            scratch
+                .try_reserve_exact(samples)
+                .map_err(|_| AsioRenderError::Capacity)?;
+            scratch.resize(samples, 0.0);
+            Ok((format, scratch))
+        })();
+        let (format, scratch) = match staged {
+            Ok(staged) => staged,
+            Err(error) => return Err(beatkernel::audio::MixerOpenFailure::new(error, Some(mixer))),
+        };
         Ok(Self {
             mixer: Some(mixer),
             format,

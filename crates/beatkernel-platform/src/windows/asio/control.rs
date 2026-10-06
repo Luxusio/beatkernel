@@ -188,6 +188,7 @@ unsafe extern "C" {
     fn bk_asio_select_clock(handle: *mut c_void, index: i32) -> Status;
     fn bk_asio_open(clsid: *const u16, host: usize, out: *mut *mut c_void) -> Status;
     fn bk_asio_close(handle: *mut c_void) -> Status;
+    fn bk_asio_close_with_retirement(handle: *mut c_void, retired: *mut u32) -> Status;
     fn bk_asio_channels(handle: *mut c_void, inputs: *mut i32, outputs: *mut i32) -> Status;
     fn bk_asio_buffer(
         handle: *mut c_void,
@@ -201,8 +202,26 @@ unsafe extern "C" {
     fn bk_asio_probe_rate(handle: *mut c_void, rate: f64) -> Status;
     fn bk_asio_set_rate(handle: *mut c_void, rate: f64) -> Status;
     fn bk_asio_channel(handle: *mut c_void, index: i32, input: i32, out: *mut RawChannel)
-        -> Status;
+    -> Status;
     fn bk_asio_control_panel(handle: *mut c_void) -> Status;
+}
+pub(crate) struct CloseOutcome {
+    pub(crate) retired: bool,
+    pub(crate) error: Option<AsioControlError>,
+}
+fn interpret_close_outcome(status: Status, proof: u32) -> CloseOutcome {
+    let mut error = check(status, "Release/CoUninitialize").err();
+    if proof != 1 && error.is_none() {
+        error = Some(AsioControlError::Native {
+            operation: "callback retirement",
+            domain: AsioControlErrorDomain::Bridge,
+            code: 1,
+        });
+    }
+    CloseOutcome {
+        retired: proof == 1,
+        error,
+    }
 }
 pub(super) fn check(status: Status, operation: &'static str) -> Result<(), AsioControlError> {
     if status.domain == 0 && status.code == 0 {
@@ -509,14 +528,19 @@ impl AsioControl {
     }
     /// Releases IASIO then balances this handle's COM initialization on this thread.
     /// Consumes control even when native cleanup reports failure; no implicit retry.
-    pub fn close(mut self) -> Result<(), AsioControlError> {
+    pub fn close(self) -> Result<(), AsioControlError> {
+        match self.close_with_retirement().error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+    pub(crate) fn close_with_retirement(mut self) -> CloseOutcome {
         let handle = self.handle.take().expect("live owning control");
-        // SAFETY: uniquely owned pointer, same opening thread guaranteed by the
-        // !Send/!Sync marker; bridge consumes it once and balances COM afterward.
-        check(
-            unsafe { bk_asio_close(handle.as_ptr()) },
-            "Release/CoUninitialize",
-        )
+        let mut retired = 0;
+        // SAFETY: unique same-thread owner and initialized exact-width proof output.
+        // The bridge consumes the handle; proof is separate from cleanup status.
+        let status = unsafe { bk_asio_close_with_retirement(handle.as_ptr(), &mut retired) };
+        interpret_close_outcome(status, retired)
     }
 }
 impl Drop for AsioControl {
@@ -528,3 +552,7 @@ impl Drop for AsioControl {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "control/open_failure_fixtures.rs"]
+mod open_failure_fixtures;
