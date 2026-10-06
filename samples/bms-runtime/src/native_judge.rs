@@ -6,9 +6,9 @@ use crate::{
 use beatkernel::{
     chart::CompiledChart,
     input::CodecLimits,
-    judge::{JudgeEngine, JudgeGrade, JudgeProfile, JudgeWindow},
+    judge::{JudgeEngine, JudgeProfile},
     replay::codec::ReplayCodecLimits,
-    time::{ClockDomainId, Duration, Timestamp},
+    time::{ClockDomainId, Timestamp},
 };
 use beatkernel_bms::{BmsChart, BmsInputMode};
 
@@ -23,14 +23,17 @@ pub struct NativeJudgeConfig {
 impl NativeJudgeConfig {
     /// Retain the builtin single grade-one window and signed input calibration.
     pub fn profile(&self) -> NativeGameplayResult<JudgeProfile> {
-        Ok(JudgeProfile::new(
-            vec![JudgeWindow {
-                grade: JudgeGrade(1),
-                early: Duration::from_nanos(self.early),
-                late: Duration::from_nanos(self.late),
-            }],
-            Duration::from_nanos(self.offset),
-        )?)
+        Ok(
+            crate::play_policy::ResolvedPlayPolicy::builtin(self.early, self.late, self.offset)
+                .map_err(|error| -> Box<dyn std::error::Error> {
+                    match error {
+                        crate::play_policy::PolicyError::Judge(error) => Box::new(error),
+                        other => Box::new(other),
+                    }
+                })?
+                .into_parts()
+                .0,
+        )
     }
     /// Constructs the actual source-aware pristine judge before native output
     /// starts. Mine timing and identity use the common ButtonOnly composition.
@@ -136,6 +139,8 @@ pub fn prepare_section_capture_for_source(
     )?))
 }
 
+#[cfg(test)]
+use beatkernel::{judge::JudgeGrade, time::Duration};
 #[cfg(test)]
 mod fixtures {
     use super::*;

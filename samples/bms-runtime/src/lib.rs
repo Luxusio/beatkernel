@@ -334,6 +334,7 @@ pub mod offline;
 mod offline_gauge_sound_stop_fixtures;
 /// Typed UI panel ownership and cancellation permits for off-thread work.
 pub mod panel_scope;
+pub mod play_policy;
 /// Read-only outcomes retained after actual live gameplay and output completion.
 pub mod play_result;
 #[cfg(test)]

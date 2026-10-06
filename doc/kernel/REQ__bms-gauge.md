@@ -343,3 +343,27 @@ Missing render/presentation evidence cannot complete playback. Ordinary idle
 drain is insufficient for a finite cutoff, and wall limits remain truncation.
 Headless publication validates gauge consistency and remains a presentation
 no-op. This does not establish physical audio/GPU or driver acceptance.
+
+## Common play policy preparation
+
+An immutable resolved play policy owns both JudgeProfile and GaugeProfile.
+Builtin selection preserves the existing single grade-one early/late window,
+signed calibration offset and BeatKernel gauge; native preparation uses this
+same common builder. Selection names are exact `beatkernel`, `assist-easy`,
+`easy`, `groove`, `hard`, `ex-hard`, `hazard`; other spellings are refused.
+
+For the six adapter gauge kinds, callers provide explicit opaque JudgeGrade,
+BMS hit class (PGREAT/GREAT/GOOD/BAD), and nanosecond early/late windows. Never
+infer classes from grade numbers or invent an historical timing table. Reject
+empty or more than 64 windows, duplicate grades, invalid JudgeProfile windows,
+and POOR/empty POOR as hit classes. Resolve TOTAL and judged-stage count from
+the supplied original source; retain TOTAL fallback diagnostics. Unknown-hit
+fallback is explicitly PGREAT, while every prepared hit grade has its own
+mapping and core misses use POOR. Empty presses remain separate integration.
+
+Preparation is control-side; owning judge/gauge parts needs no dynamic dispatch
+or extra runtime wrapper. Replay capture retains the resulting windows/deltas
+and dynamics through the existing full setup identity. Public CLI/UI selection,
+nondefault live native admission, class-aware score labels and complete mine/
+empty compatibility remain unfinished; the common builder does not enable
+those launchers by itself.
