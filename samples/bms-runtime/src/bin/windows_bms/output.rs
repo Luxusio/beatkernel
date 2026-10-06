@@ -567,20 +567,27 @@ impl AsioOutput {
         self.pump_driver_messages()?;
         self.checked()?;
         let now = self.clock.sample()?.normalized;
-        let refresh = self.anchor.as_ref().is_none_or(|anchor| {
-            i128::from(now.timestamp.as_nanos()) - i128::from(anchor.after().timestamp.as_nanos())
-                >= i128::from(self.age) / 2
-        });
+        let refresh = match self.anchor.as_ref() {
+            Some(anchor) => anchor.refresh_due(now)?,
+            None => true,
+        };
         if refresh {
             let receipt = self.clock.sample_multimedia()?;
-            self.anchor = Some(MultimediaClockAnchor::new(
-                receipt.milliseconds,
-                receipt.before.normalized,
-                receipt.after.normalized,
-                self.age,
-                self.timer_error,
-                self.drift_error,
-            )?);
+            self.anchor = Some(match self.anchor.as_ref() {
+                Some(anchor) => anchor.refreshed(
+                    receipt.milliseconds,
+                    receipt.before.normalized,
+                    receipt.after.normalized,
+                )?,
+                None => MultimediaClockAnchor::new(
+                    receipt.milliseconds,
+                    receipt.before.normalized,
+                    receipt.after.normalized,
+                    self.age,
+                    self.timer_error,
+                    self.drift_error,
+                )?,
+            });
         }
         match self.stream.presentation_observation(
             self.anchor.as_ref().unwrap(),

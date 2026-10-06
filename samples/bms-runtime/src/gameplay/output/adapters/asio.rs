@@ -29,6 +29,7 @@ use beatkernel_platform::{
 #[derive(Debug)]
 pub enum AsioReplacementError {
     Native(AsioStreamError),
+    Host(std::io::Error),
     Presentation(AsioPresentationError),
     Observation(ReplacementObservationError),
     Status(AsioStreamPhase),
@@ -37,6 +38,7 @@ impl std::fmt::Display for AsioReplacementError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Native(e) => e.fmt(f),
+            Self::Host(e) => e.fmt(f),
             Self::Presentation(e) => e.fmt(f),
             Self::Observation(e) => e.fmt(f),
             Self::Status(phase) => write!(f, "ASIO replacement output phase: {phase:?}"),
@@ -47,6 +49,7 @@ impl std::error::Error for AsioReplacementError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Native(e) => Some(e),
+            Self::Host(e) => Some(e),
             Self::Presentation(e) => Some(e),
             Self::Observation(e) => Some(e),
             Self::Status(_) => None,
@@ -206,6 +209,29 @@ impl OutputReplacementBackend for AsioReplacementBackend {
             AsioStreamPhase::Ready => return Ok(()),
             AsioStreamPhase::Running => {}
             phase => return Err(AsioReplacementError::Status(phase)),
+        }
+        let now = self
+            .clock
+            .sample()
+            .map_err(AsioReplacementError::Host)?
+            .normalized;
+        if self.anchor.refresh_due(now).map_err(|error| {
+            AsioReplacementError::Presentation(AsioPresentationError::Clock(error))
+        })? {
+            let receipt = self
+                .clock
+                .sample_multimedia()
+                .map_err(AsioReplacementError::Host)?;
+            self.anchor = self
+                .anchor
+                .refreshed(
+                    receipt.milliseconds,
+                    receipt.before.normalized,
+                    receipt.after.normalized,
+                )
+                .map_err(|error| {
+                    AsioReplacementError::Presentation(AsioPresentationError::Clock(error))
+                })?;
         }
         let output_origin = output.stream.frame_basis().origin();
         let observation = match output.stream.presentation_observation(

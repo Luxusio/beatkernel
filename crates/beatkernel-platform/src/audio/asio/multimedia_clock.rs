@@ -90,6 +90,80 @@ mod tests {
             Err(MultimediaClockError::Malformed)
         );
     }
+
+    #[test]
+    fn renewal_threshold_checks_domain_regression_and_integer_boundaries() {
+        let anchor = MultimediaClockAnchor::new(0, host(0), host(10), 5, 0, 0).unwrap();
+        assert_eq!(anchor.refresh_due(host(12)), Ok(false));
+        assert_eq!(anchor.refresh_due(host(13)), Ok(true));
+        assert_eq!(anchor.refresh_due(host(16)), Ok(true));
+        assert_eq!(
+            anchor.refresh_due(host(9)),
+            Err(MultimediaClockError::Malformed)
+        );
+        let mut wrong = host(13);
+        wrong.domain = ClockDomainId(8);
+        assert_eq!(
+            anchor.refresh_due(wrong),
+            Err(MultimediaClockError::DomainMismatch)
+        );
+        let tiny = MultimediaClockAnchor::new(0, host(0), host(0), 1, 0, 0).unwrap();
+        assert_eq!(tiny.refresh_due(host(0)), Ok(false));
+        assert_eq!(tiny.refresh_due(host(1)), Ok(true));
+        let extreme =
+            MultimediaClockAnchor::new(0, host(i64::MIN), host(i64::MIN), 1, 0, 0).unwrap();
+        assert_eq!(extreme.refresh_due(host(i64::MAX)), Ok(true));
+    }
+
+    #[test]
+    fn renewal_rejects_invalid_receipts_without_modifying_original_anchor() {
+        let anchor = MultimediaClockAnchor::new(42, host(10), host(20), 100, 3, 4).unwrap();
+        let original = anchor;
+        assert_eq!(
+            anchor.refreshed(43, host(19), host(25)),
+            Err(MultimediaClockError::Malformed)
+        );
+        assert_eq!(
+            anchor.refreshed(43, host(25), host(24)),
+            Err(MultimediaClockError::Malformed)
+        );
+        let mut wrong = host(25);
+        wrong.domain = ClockDomainId(8);
+        assert_eq!(
+            anchor.refreshed(43, wrong, wrong),
+            Err(MultimediaClockError::DomainMismatch)
+        );
+        assert_eq!(anchor, original);
+        let renewed = anchor.refreshed(43, host(25), host(26)).unwrap();
+        assert_eq!(renewed.raw_ms(), 43);
+        assert_eq!(renewed.before(), host(25));
+        assert_eq!(renewed.after(), host(26));
+        assert_eq!(renewed.max_age_ns(), 100);
+        assert_eq!(renewed.measurement_error_ns(), 3);
+        assert_eq!(renewed.drift_error_ns(), 4);
+    }
+
+    #[test]
+    fn repeated_renewal_keeps_one_week_host_timeline_across_native_timer_wrap() {
+        const HOUR_NS: i64 = 3_600_000_000_000;
+        let initial_ms = u32::MAX - 1_000;
+        let mut anchor =
+            MultimediaClockAnchor::new(initial_ms, host(0), host(0), 2 * HOUR_NS as u64, 3, 4)
+                .unwrap();
+        for hour in 1..=168 {
+            let time = hour * HOUR_NS;
+            let raw = initial_ms.wrapping_add((time / 1_000_000) as u32);
+            assert_eq!(anchor.refresh_due(host(time)), Ok(true));
+            anchor = anchor.refreshed(raw, host(time), host(time)).unwrap();
+            let mapped = anchor
+                .map_wrapped_ns(u64::from(raw) * 1_000_000, host(time))
+                .unwrap();
+            assert_eq!(mapped.before, host(time - 7));
+            assert_eq!(mapped.after, host(time + 7));
+            assert_eq!(anchor.refresh_due(host(time)), Ok(false));
+        }
+        assert_eq!(anchor.after(), host(7 * 24 * HOUR_NS));
+    }
 }
 
 impl std::fmt::Display for MultimediaClockError {
@@ -193,6 +267,46 @@ impl MultimediaClockAnchor {
     /// Explicitly supplied drift error across the finite horizon, in nanoseconds.
     pub const fn drift_error_ns(&self) -> u64 {
         self.drift_error_ns
+    }
+
+    /// Requests renewal halfway through the finite horizon using an actual host
+    /// reading. A different domain or regressed reading is an error, not a reason
+    /// to hide a clock discontinuity by acquiring a new anchor.
+    pub fn refresh_due(&self, now: ClockPoint) -> Result<bool, MultimediaClockError> {
+        if now.domain != self.after.domain {
+            return Err(MultimediaClockError::DomainMismatch);
+        }
+        let elapsed =
+            i128::from(now.timestamp.as_nanos()) - i128::from(self.after.timestamp.as_nanos());
+        if elapsed < 0 {
+            return Err(MultimediaClockError::Malformed);
+        }
+        Ok(elapsed >= i128::from(self.max_age_ns.div_ceil(2)))
+    }
+
+    /// Renews with another actual timer receipt while preserving every supplied
+    /// age/error bound. The new bracket must follow the original bracket.
+    /// This does not establish a new accuracy claim or alter native timestamps.
+    pub fn refreshed(
+        &self,
+        raw_ms: u32,
+        before: ClockPoint,
+        after: ClockPoint,
+    ) -> Result<Self, MultimediaClockError> {
+        if before.domain != self.after.domain || after.domain != self.after.domain {
+            return Err(MultimediaClockError::DomainMismatch);
+        }
+        if before.timestamp < self.after.timestamp {
+            return Err(MultimediaClockError::Malformed);
+        }
+        Self::new(
+            raw_ms,
+            before,
+            after,
+            self.max_age_ns,
+            self.measurement_error_ns,
+            self.drift_error_ns,
+        )
     }
 
     /// Maps canonical wrapped native nanoseconds to a bounded host interval.

@@ -2099,6 +2099,13 @@ terminal STOPPED before scoped format and exactly four compile-only checks;
 assertions, native/browser execution and formal review/QA remain deferred.
 # Live channel matrix settings
 
+ASIO common-output composition must renew finite multimedia-clock anchors from
+fresh, same-QPC native timer brackets before their validity horizon expires.
+Renewal retains caller-supplied age/measurement/drift bounds and never resets
+host chronology to conceal a regressed reading or a different clock domain.
+The SDK-free checked renewal policy is shared with the Windows live path;
+its portable week/wrap fixtures are not native driver or acoustic evidence.
+
 The Linux paused-live output panel exposes OUTPUT CHANNEL MATRIX. Each output
 channel is a semicolon-delimited row; comma-delimited coefficients address the
 original source channels in order (`1;0.5` maps mono to two channels). Accept at
