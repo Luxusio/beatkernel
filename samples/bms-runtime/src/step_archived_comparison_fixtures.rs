@@ -62,23 +62,26 @@ fn setup() -> (PreparedBms, StepGameplayConfig) {
         },
     )
 }
-fn output(bank: SampleBank, end: Option<i64>) -> Mixer {
-    let (_, consumer) = command_queue(8).unwrap();
+fn output(bank: SampleBank, end: Option<i64>) -> (beatkernel::audio::CommandProducer, Mixer) {
+    let (producer, consumer) = command_queue(8).unwrap();
     let config = MixerConfig::new(
         AudioFormat::new(1000, 1).unwrap(),
         ClockDomainId(2),
         Timestamp::ZERO,
         AudioLimits::new(8, 2, 8, 16, 8).unwrap(),
     );
-    Mixer::new(
-        match end {
-            Some(end) => config.with_playback_end_frame(end as u64 / 1_000_000),
-            None => config,
-        },
-        bank,
-        consumer,
+    (
+        producer,
+        Mixer::new(
+            match end {
+                Some(end) => config.with_playback_end_frame(end as u64 / 1_000_000),
+                None => config,
+            },
+            bank,
+            consumer,
+        )
+        .unwrap(),
     )
-    .unwrap()
 }
 fn selected() -> CompetitionSnapshot {
     // Borrowed port data; these prefix statistics convey no local completion.
@@ -132,7 +135,7 @@ fn actual_solo_full_and_finite_completion_attach_borrowed_comparisons_before_one
                 .unwrap()
                 .is_none()
         );
-        let mut mixer = output(bank, end);
+        let (_producer, mut mixer) = output(bank, end);
         for index in 1..=2 {
             let report = mixer.render(&mut [0.; 10]).unwrap();
             game.observe_completion(Some(report), Some(point(2, index * 10_000_000)))
@@ -220,7 +223,7 @@ fn actual_local_completion_exports_whole_original_roster_and_validates_shuffled_
         game.activate(point(1, 0)).unwrap();
         game.advance_to(point(1, 1_000_000), &Domains, point(2, 0))
             .unwrap();
-        let mut mixer = output(bank, None);
+        let (_producer, mut mixer) = output(bank, None);
         for index in 1..=2 {
             let report = mixer.render(&mut [0.; 10]).unwrap();
             game.observe_completion(Some(report), Some(point(2, index * 10_000_000)))
@@ -306,7 +309,7 @@ fn cancelled_or_disabled_owner_cannot_promote_comparison_data_and_invalid_comple
         disabled
             .advance_to(point(1, 1_000_000), &Domains, point(2, 0))
             .unwrap();
-        let mut mixer = output(bank, None);
+        let (_producer, mut mixer) = output(bank, None);
         for index in 1..=2 {
             let report = mixer.render(&mut [0.; 10]).unwrap();
             disabled
@@ -334,7 +337,7 @@ fn cancelled_or_disabled_owner_cannot_promote_comparison_data_and_invalid_comple
     game.activate(point(1, 0)).unwrap();
     game.advance_to(point(1, 1_000_000), &Domains, point(2, 0))
         .unwrap();
-    let mut mixer = output(bank, None);
+    let (_producer, mut mixer) = output(bank, None);
     for index in 1..=2 {
         let report = mixer.render(&mut [0.; 10]).unwrap();
         game.observe_completion(Some(report), Some(point(2, index * 10_000_000)))

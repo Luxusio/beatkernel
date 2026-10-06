@@ -97,7 +97,14 @@ fn actual_common_cohort_finish_retains_one_two_sixty_four_original_ids_scores_an
             |capture, path, failed| {
                 assert!(!failed);
                 let capture = capture.unwrap();
-                let id = PlayerId(capture.header().seed as u32);
+                let id = PlayerId(
+                    u32::try_from(
+                        crate::replay_playback::decode_section_setup(&capture.header().options)
+                            .unwrap()
+                            .chart_seed,
+                    )
+                    .unwrap(),
+                );
                 assert_eq!(path, Some(Path::new(&format!("member{}.bkr", id.0))));
                 calls.borrow_mut().push(id);
                 Ok(())
@@ -188,7 +195,16 @@ fn later_archive_refusal_and_replay_failures_attempt_every_member_and_retain_ori
             Some(Path::new("whole.bkr")),
             |capture, _, failed| {
                 assert_eq!(failed, mask & 1 != 0);
-                let id = PlayerId(capture.unwrap().header().seed as u32);
+                let id = PlayerId(
+                    u32::try_from(
+                        crate::replay_playback::decode_section_setup(
+                            &capture.unwrap().header().options,
+                        )
+                        .unwrap()
+                        .chart_seed,
+                    )
+                    .unwrap(),
+                );
                 calls.borrow_mut().push(id);
                 if mask & 4 != 0 && (id == ids[0] || id == ids[2]) {
                     Err(Box::new(Fault(Arc::new(id.0 as usize))))

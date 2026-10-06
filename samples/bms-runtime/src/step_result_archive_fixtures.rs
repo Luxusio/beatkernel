@@ -52,23 +52,26 @@ fn setup() -> (PreparedBms, StepGameplayConfig) {
         },
     )
 }
-fn output(bank: SampleBank, end: Option<i64>) -> Mixer {
-    let (_, consumer) = command_queue(8).unwrap();
+fn output(bank: SampleBank, end: Option<i64>) -> (beatkernel::audio::CommandProducer, Mixer) {
+    let (producer, consumer) = command_queue(8).unwrap();
     let config = MixerConfig::new(
         AudioFormat::new(1000, 1).unwrap(),
         ClockDomainId(2),
         Timestamp::ZERO,
         AudioLimits::new(8, 2, 8, 16, 8).unwrap(),
     );
-    Mixer::new(
-        match end {
-            Some(end) => config.with_playback_end_frame((end as u64 + 999_999) / 1_000_000),
-            None => config,
-        },
-        bank,
-        consumer,
+    (
+        producer,
+        Mixer::new(
+            match end {
+                Some(end) => config.with_playback_end_frame((end as u64 + 999_999) / 1_000_000),
+                None => config,
+            },
+            bank,
+            consumer,
+        )
+        .unwrap(),
     )
-    .unwrap()
 }
 #[test]
 fn actual_solo_completion_preserves_capture_header_and_scope_before_one_shot_replay_take() {
@@ -91,7 +94,7 @@ fn actual_solo_completion_preserves_capture_header_and_scope_before_one_shot_rep
         game.advance_to(point(1, end.unwrap_or(1_000_000)), &Domains, point(2, 0))
             .unwrap();
         assert!(game.completed_archive().unwrap().is_none());
-        let mut mixer = output(bank, end);
+        let (_producer, mut mixer) = output(bank, end);
         for index in 1..=2 {
             let report = mixer.render(&mut [0.; 10]).unwrap();
             game.observe_completion(Some(report), Some(point(2, index * 10_000_000)))
@@ -157,7 +160,7 @@ fn actual_local_whole_roster_preserves_all_original_ids_and_missing_later_captur
         game.activate(point(1, 0)).unwrap();
         game.advance_to(point(1, 1_000_000), &Domains, point(2, 0))
             .unwrap();
-        let mut mixer = output(bank, None);
+        let (_producer, mut mixer) = output(bank, None);
         for index in 1..=2 {
             let report = mixer.render(&mut [0.; 10]).unwrap();
             game.observe_completion(Some(report), Some(point(2, index * 10_000_000)))
@@ -205,7 +208,7 @@ fn actual_completed_disabled_solo_and_missing_unconfigured_later_local_capture_r
     solo.activate(point(1, 0)).unwrap();
     solo.advance_to(point(1, 1_000_000), &Domains, point(2, 0))
         .unwrap();
-    let mut mixer = output(bank, None);
+    let (_producer, mut mixer) = output(bank, None);
     for index in 1..=2 {
         let report = mixer.render(&mut [0.; 10]).unwrap();
         solo.observe_completion(Some(report), Some(point(2, index * 10_000_000)))
@@ -244,7 +247,7 @@ fn actual_completed_disabled_solo_and_missing_unconfigured_later_local_capture_r
     game.activate(point(1, 0)).unwrap();
     game.advance_to(point(1, 5_000_000), &Domains, point(2, 0))
         .unwrap();
-    let mut mixer = output(bank, Some(5_000_000));
+    let (_producer, mut mixer) = output(bank, Some(5_000_000));
     for index in 1..=2 {
         let report = mixer.render(&mut [0.; 10]).unwrap();
         game.observe_completion(Some(report), Some(point(2, index * 10_000_000)))

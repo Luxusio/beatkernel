@@ -54,8 +54,8 @@ fn setup() -> (PreparedBms, StepGameplayConfig) {
         },
     )
 }
-fn mixer(bank: SampleBank, end: Option<i64>) -> Mixer {
-    let (_, consumer) = command_queue(8).unwrap();
+fn mixer(bank: SampleBank, end: Option<i64>) -> (beatkernel::audio::CommandProducer, Mixer) {
+    let (producer, consumer) = command_queue(8).unwrap();
     let config = MixerConfig::new(
         AudioFormat::new(1000, 1).unwrap(),
         ClockDomainId(2),
@@ -66,7 +66,7 @@ fn mixer(bank: SampleBank, end: Option<i64>) -> Mixer {
         Some(end) => config.with_playback_end_frame((end as u64 + 999_999) / 1_000_000),
         None => config,
     };
-    Mixer::new(config, bank, consumer).unwrap()
+    (producer, Mixer::new(config, bank, consumer).unwrap())
 }
 fn solo(end: Option<i64>) -> StepGameplay {
     let (prepared, config) = setup();
@@ -81,7 +81,7 @@ fn solo(end: Option<i64>) -> StepGameplay {
     game.activate(point(1, 0)).unwrap();
     game.advance_to(point(1, end.unwrap_or(1_000_000)), &Domains, point(2, 0))
         .unwrap();
-    let mut output = mixer(bank, end);
+    let (_producer, mut output) = mixer(bank, end);
     let first = output.render(&mut [0.0; 10]).unwrap();
     game.observe_completion(Some(first), Some(point(2, 10_000_000)))
         .unwrap();
@@ -210,7 +210,7 @@ fn actual_local_completion_requires_entire_original_roster_and_rejects_bad_later
     game.activate(point(1, 0)).unwrap();
     game.advance_to(point(1, 1_000_000), &Domains, point(2, 0))
         .unwrap();
-    let mut output = mixer(bank, None);
+    let (_producer, mut output) = mixer(bank, None);
     for block in 1..=2 {
         let report = output.render(&mut [0.0; 10]).unwrap();
         game.observe_completion(Some(report), Some(point(2, block * 10_000_000)))
