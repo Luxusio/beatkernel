@@ -212,17 +212,32 @@ impl RoomPlayClient {
     /// Publish actual local member progress only after genuine start commitment.
     /// A current upload may remain in flight while an ordinary next snapshot is
     /// coalesced; no upload sequence is consumed by this operation.
+    fn preflight_progress_phase(&self) -> Result<(), RoomPlayError> {
+        if self.stopped {
+            return Err(RoomPlayError::Stopped);
+        }
+        if self.leaving || !self.start.committed() || self.progress.is_none() {
+            return Err(RoomPlayError::InvalidState);
+        }
+        Ok(())
+    }
+    pub(crate) fn preflight_progress(
+        &self,
+        members: &[MemberProgress],
+    ) -> Result<(), RoomPlayError> {
+        self.preflight_progress_phase()?;
+        self.progress
+            .as_ref()
+            .ok_or(RoomPlayError::InvalidState)?
+            .preflight_publish(members)?;
+        Ok(())
+    }
     pub fn publish_progress(
         &mut self,
         members: &[MemberProgress],
         final_prefix: bool,
     ) -> Result<(), RoomPlayError> {
-        if self.stopped {
-            return Err(RoomPlayError::Stopped);
-        }
-        if self.leaving || !self.start.committed() {
-            return Err(RoomPlayError::InvalidState);
-        }
+        self.preflight_progress_phase()?;
         self.progress
             .as_mut()
             .ok_or(RoomPlayError::InvalidState)?

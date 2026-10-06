@@ -8,7 +8,7 @@ const I64_MAX = 9223372036854775807n;
 const METHODS = ["request_seal", "request_ready", "request_leave", "needed_bytes",
   "frame_pending", "receive_bytes", "next_write", "written", "participant_id",
   "revision", "has_snapshot", "leave_written", "snapshot", "take_start", "publish_progress",
-  "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written",
+  "publication_due", "publish_progress_at", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written",
   "progress_complete", "request_drain", "drain_complete", "begin_drain", "drain_wait_step", "drain_requested", "begin_setup", "setup_wait_step", "configure_frame_wait", "frame_wait_step", "close", "free"];
 
 export class BrowserRoomOwnerError extends Error {
@@ -287,6 +287,20 @@ export class BrowserRoomOwner {
   requestSeal() { this.#request("request_seal"); }
   requestReady() { this.#request("request_ready"); }
 
+  progressDue(finalPrefix = false) {
+    this.#ensure();
+    if (typeof finalPrefix !== "boolean") throw new BrowserRoomOwnerError("validation", "publication_due", "Room final prefix flag must be boolean.");
+    if (this.#roster === null || this.#leaveGate !== null) throw new BrowserRoomOwnerError("state", "publication_due", "Room progress publication is unavailable.");
+    let due;
+    try { due = this.#session.publication_due(this.#elapsed(), finalPrefix); }
+    catch (cause) {
+      if (cause?.code === "state") throw new BrowserRoomOwnerError("state", "publication_due", "Room progress publication is unavailable.", cause);
+      throw this.#fatal(cause, "core", "publication_due");
+    }
+    if (typeof due !== "boolean") throw this.#fatal(new BrowserRoomOwnerError("protocol", "publication_due", "Invalid room publication timing hint."));
+    return due;
+  }
+
   publishProgress(words, finalPrefix = false) {
     this.#ensure();
     let owned;
@@ -299,14 +313,17 @@ export class BrowserRoomOwner {
     if (this.#roster === null || this.#leaveGate !== null) {
       throw new BrowserRoomOwnerError("state", "publish_progress", "Room progress publication is unavailable.");
     }
-    try { this.#session.publish_progress(owned, finalPrefix); }
+    let admitted;
+    try { admitted = this.#session.publish_progress_at(owned, finalPrefix, this.#elapsed()); }
     catch (cause) {
       if (cause?.code === "state") {
         throw new BrowserRoomOwnerError("state", "publish_progress", "Room progress publication is unavailable.", cause);
       }
       throw this.#fatal(cause, "core", "publish_progress");
     }
-    this.#wake();
+    if (typeof admitted !== "boolean") throw this.#fatal(new BrowserRoomOwnerError("protocol", "publish_progress", "Invalid room progress admission."));
+    if (admitted) this.#wake();
+    return admitted;
   }
 
   peerFinalAckWritten(participant) {

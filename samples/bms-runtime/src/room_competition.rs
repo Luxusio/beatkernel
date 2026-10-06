@@ -19,7 +19,6 @@ use crate::{
 };
 use std::{collections::VecDeque, io, sync::Arc, time::Duration};
 
-const PUBLICATION_NS: i64 = 50_000_000;
 const LOBBY_LIMIT: usize = 16;
 
 fn invalid(message: impl Into<String>) -> io::Error {
@@ -85,7 +84,7 @@ pub struct RoomCompetition<P: RoomNetworkPort, H: RoomUiHost, R: RoomRuntimeHost
     replies: VecDeque<RoomReply>,
     last_id: Option<u64>,
     last_clock: Option<i64>,
-    last_publish: Option<i64>,
+    publication: crate::competition_progress_cadence::ProgressCadence,
     failure: Option<RoomFailure>,
     finish_timeout: Duration,
     finishing: bool,
@@ -160,7 +159,7 @@ impl<P: RoomNetworkPort, H: RoomUiHost, R: RoomRuntimeHost> RoomCompetition<P, H
             replies,
             last_id: None,
             last_clock: None,
-            last_publish: None,
+            publication: crate::competition_progress_cadence::ProgressCadence::new(),
             failure: None,
             finish_timeout,
             finishing: false,
@@ -604,6 +603,7 @@ impl<P: RoomNetworkPort, H: RoomUiHost, R: RoomRuntimeHost> RoomCompetition<P, H
             || self.cancelled
             || self.leaving
             || self.pending(CommandKind::Leave)
+            || self.pending(CommandKind::Progress)
         {
             RoomStatus::Closed
         } else if self.failure.is_some() || self.snapshot.terminal.is_some() {
@@ -710,7 +710,6 @@ impl<P: RoomNetworkPort, H: RoomUiHost, R: RoomRuntimeHost> RoomCompetition<P, H
             || self.leaving
             || self.cancelled
             || self.pending(CommandKind::Leave)
-            || self.pending(CommandKind::Progress)
         {
             return Ok(());
         }
@@ -721,10 +720,14 @@ impl<P: RoomNetworkPort, H: RoomUiHost, R: RoomRuntimeHost> RoomCompetition<P, H
                 return Ok(());
             }
         };
-        if self
-            .last_publish
-            .is_some_and(|previous| now - previous < PUBLICATION_NS)
-        {
+        if !self.publication.observe(now as u64) {
+            self.fail_network(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native room publication clock regressed",
+            ));
+            return Ok(());
+        }
+        if !self.publication.due(false) {
             return Ok(());
         }
         let publication = copy_members(members)?;
@@ -735,7 +738,7 @@ impl<P: RoomNetworkPort, H: RoomUiHost, R: RoomRuntimeHost> RoomCompetition<P, H
                 final_prefix: false,
             },
         ) {
-            Ok(_) => self.last_publish = Some(now),
+            Ok(_) => self.publication.admitted(),
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => self.fail_network(error),
         }
@@ -927,6 +930,16 @@ impl<P: RoomNetworkPort, H: RoomUiHost, R: RoomRuntimeHost> crate::room_final_wa
     }
     fn queue_final(&mut self) -> io::Result<crate::room_final_wait::RoomFinalAdmission> {
         use crate::room_final_wait::RoomFinalAdmission;
+        let now = self
+            .owner
+            .last_clock
+            .ok_or_else(|| invalid("native room final publication requires a clock observation"))?;
+        if !self.owner.publication.observe(now as u64) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "native room publication clock regressed",
+            ));
+        }
         match self.owner.send(
             CommandKind::Final,
             RoomCommand::Publish {
@@ -934,7 +947,10 @@ impl<P: RoomNetworkPort, H: RoomUiHost, R: RoomRuntimeHost> crate::room_final_wa
                 final_prefix: true,
             },
         ) {
-            Ok(_) => Ok(RoomFinalAdmission::Accepted),
+            Ok(_) => {
+                self.owner.publication.admitted();
+                Ok(RoomFinalAdmission::Accepted)
+            }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 Ok(RoomFinalAdmission::QueueFull)
             }
@@ -1091,3 +1107,7 @@ use crate::{
 #[cfg(test)]
 #[path = "room_competition_fixtures.rs"]
 mod room_competition_fixtures;
+
+#[cfg(test)]
+#[path = "room_controller_publication_fixtures.rs"]
+mod room_controller_publication_fixtures;

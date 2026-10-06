@@ -1016,13 +1016,10 @@ function sendRoomProgress(state, final = false) {
   if (play !== state || !state.active || !state.game || !room || !room.start || room.disposed
     || room.leaving || room.failure !== null || room.finalQueued || !room.owner || room.owner.closed) return;
   try {
-    const now = networkNow();
-    if (!hostTime(now) || (room.lastProgress !== null && now < room.lastProgress)) throw new Error("Room publication clock regressed.");
-    if (!final && room.lastProgress !== null && now - room.lastProgress < PROGRESS_INTERVAL_NS) return;
+    if (!room.owner.progressDue(final)) return;
     const words = roomProgressWords(state.game.progress_words(), room.localPlayers, "actual room progress");
-    room.owner.publishProgress(words, final);
-    room.lastProgress = now;
-    if (final) room.finalQueued = true;
+    const accepted = room.owner.publishProgress(words, final);
+    if (accepted && final) room.finalQueued = true;
   } catch (error) { roomFailure(state, room, error); }
 }
 
@@ -1186,7 +1183,7 @@ function openRoom(state, request) {
     rpcId: request.rpcId, disposed: false, leaving: false, closedReported: false, cleanupError: null,
     windowOriginNs, originNs: null, start: null, failure: null, participant: null,
     localPlayers: Object.freeze(Array.from(players)), peerPlayers: null, peers: new Map(),
-    lastProgress: null, finalQueued: false, draining: false, finalDrain: "cancelled",
+    finalQueued: false, draining: false, finalDrain: "cancelled",
     hudConfigured: false, hudFailed: false, hudPage: 0, hudPages: 0,
     receipts: Object.freeze({ localFinalWritten: false, localFinalAcknowledged: false, complete: false, drainComplete: false }) };
   const client = session;

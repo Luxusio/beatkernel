@@ -17,6 +17,7 @@ pub struct RoomClientDriver {
     failure: Option<RoomPlayError>,
     revision: u64,
     pending_peer: Option<ParticipantId>,
+    publication: crate::competition_progress_cadence::ProgressCadence,
     final_admitted: bool,
     drain_admitted: bool,
     leave_requested: bool,
@@ -82,6 +83,7 @@ impl RoomClientDriver {
             failure: None,
             revision: 0,
             pending_peer: None,
+            publication: crate::competition_progress_cadence::ProgressCadence::new(),
             final_admitted: false,
             drain_admitted: false,
             leave_requested: false,
@@ -127,6 +129,56 @@ impl RoomClientDriver {
                 owner.final_admitted = true;
             }
             Ok(())
+        })
+    }
+    /// Scalar timing hint only; actual publication always validates protocol state.
+    pub fn publication_due(
+        &mut self,
+        now_ns: i64,
+        final_prefix: bool,
+    ) -> Result<bool, RoomPlayError> {
+        self.operate(false, |owner| {
+            if owner.leave_requested {
+                return Err(RoomPlayError::InvalidState);
+            }
+            let now = u64::try_from(now_ns).map_err(|_| {
+                RoomPlayError::Progress(RoomProgressClientError::InvalidObservation)
+            })?;
+            if !owner.publication.observe(now) {
+                return Err(RoomPlayError::Progress(
+                    RoomProgressClientError::InvalidObservation,
+                ));
+            }
+            Ok(owner.publication.due(final_prefix))
+        })
+    }
+    pub fn publish_progress_words_at(
+        &mut self,
+        words: &[u32],
+        final_prefix: bool,
+        now_ns: i64,
+    ) -> Result<bool, RoomPlayError> {
+        self.operate(false, |owner| {
+            let members = decode_words(words)
+                .map_err(|_| RoomPlayError::Progress(RoomProgressClientError::InvalidProgress))?;
+            owner.session()?.preflight_progress(&members)?;
+            let now = u64::try_from(now_ns).map_err(|_| {
+                RoomPlayError::Progress(RoomProgressClientError::InvalidObservation)
+            })?;
+            if !owner.publication.observe(now) {
+                return Err(RoomPlayError::Progress(
+                    RoomProgressClientError::InvalidObservation,
+                ));
+            }
+            if !owner.publication.due(final_prefix) {
+                return Ok(false);
+            }
+            owner.session()?.publish_progress(&members, final_prefix)?;
+            if final_prefix {
+                owner.final_admitted = true;
+            }
+            owner.publication.admitted();
+            Ok(true)
         })
     }
     pub fn needed_bytes(&mut self) -> Result<usize, RoomPlayError> {
@@ -596,3 +648,7 @@ impl crate::final_ack_wait::FinalWaitControl for DriverDrainControl {
 #[cfg(test)]
 #[path = "room_client_driver_fixtures.rs"]
 mod fixtures;
+
+#[cfg(test)]
+#[path = "room_driver_publication_fixtures.rs"]
+mod room_driver_publication_fixtures;

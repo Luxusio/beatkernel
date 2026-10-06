@@ -267,7 +267,7 @@ fn measured_policy() -> StartPolicy {
 
 // Every server response below comes from the actual admission, clock or start
 // owner. Only externally observed completed frames receive write receipts.
-fn committed_pair() -> (Vec<RoomClientDriver>, GroupRoomRegistry, Vec<ParticipantId>) {
+pub(super) fn committed_pair() -> (Vec<RoomClientDriver>, GroupRoomRegistry, Vec<ParticipantId>) {
     committed_pair_with_setup(false)
 }
 fn committed_pair_with_setup(

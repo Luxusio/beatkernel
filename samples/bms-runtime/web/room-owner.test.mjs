@@ -98,6 +98,7 @@ async function harness(faults = {}) {
     controls: [frame()], receives: [], credits: [], requests: [], nextCalls: 0,
     receiveTimes: [], writeTimes: [], pollTimes: [], schedules: [], startCalls: 0,
     publications: [], peerUpdates: [], finalWritten: false, finalAcknowledged: false,
+    publicationDueCalls: [], publicationAtCalls: [], publicationDueOutputs: [], publicationOutputs: [],
     progressComplete: false, drainComplete: false, peerAcks: new Set(), peerAckQueries: [],
     frameConfigurations: [], frameSteps: [], frameOutputs: [], frameExpires: null,
     configure_frame_wait(timeout) {
@@ -218,6 +219,19 @@ async function harness(faults = {}) {
       if (this.publishError) throw this.publishError;
       this.publications.push({ words, finalPrefix });
       this.onPublish?.(words, finalPrefix);
+    },
+    publication_due(elapsed, finalPrefix) {
+      this.alive(); this.publicationDueCalls.push({ elapsed, finalPrefix });
+      const result = this.publicationDueOutputs.length ? this.publicationDueOutputs.shift() : true;
+      if (result instanceof Error) throw result;
+      return result;
+    },
+    publish_progress_at(words, finalPrefix, elapsed) {
+      this.alive(); this.publicationAtCalls.push({ elapsed, finalPrefix });
+      const result = this.publicationOutputs.length ? this.publicationOutputs.shift() : true;
+      if (result instanceof Error) throw result;
+      if (result !== true) return result;
+      this.publish_progress(words, finalPrefix); return true;
     },
     take_peer_progress() { this.alive(); return this.peerUpdates.shift() ?? null; },
     local_final_written() { this.alive(); return this.finalWritten; },
@@ -358,7 +372,7 @@ test("configuration retains caller ownership; actual frames preserve u64 IDs and
     assert.equal(h.opens.length, 0);
     assert.equal(h.session.closes, 0); assert.equal(h.session.frees, 0);
   }
-  for (const method of ["needed_bytes", "frame_pending", "receive_bytes", "next_write", "written", "revision", "snapshot", "take_start", "publish_progress", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written", "progress_complete", "request_drain", "drain_complete", "begin_drain", "drain_wait_step", "drain_requested", "begin_setup", "setup_wait_step", "configure_frame_wait", "frame_wait_step", "free"]) {
+  for (const method of ["needed_bytes", "frame_pending", "receive_bytes", "next_write", "written", "revision", "snapshot", "take_start", "publish_progress", "publication_due", "publish_progress_at", "take_peer_progress", "local_final_written", "local_final_acknowledged", "peer_final_ack_written", "progress_complete", "request_drain", "drain_complete", "begin_drain", "drain_wait_step", "drain_requested", "begin_setup", "setup_wait_step", "configure_frame_wait", "frame_wait_step", "free"]) {
     const h = await harness(); delete h.session[method];
     await failure(h.opening(), "validation");
     assert.equal(h.opens.length, 0); assert.equal(h.session.frees, 0);
@@ -785,6 +799,38 @@ async function progressOwner(h, options = {}, channelOptions = {}) {
   assert.equal(h.starts.length, options.onStart ? 0 : 1);
   return opened;
 }
+
+test("owner supplies exact elapsed cadence observations and false admission does not wake queued writer", async () => {
+  const h = await harness(); const { owner, io } = await progressOwner(h);
+  h.setClock(CLOCK_ORIGIN + 123n); h.session.publicationDueOutputs.push(false);
+  assert.equal(owner.progressDue(false), false);
+  assert.deepEqual(h.session.publicationDueCalls.at(-1), { elapsed: 123n, finalPrefix: false });
+  h.session.controls.push(frame(42n)); const writes = io.writes.length, calls = h.session.nextCalls;
+  h.session.publicationOutputs.push(false); assert.equal(owner.publishProgress(progressWords(), false), false); await flush();
+  assert.deepEqual(h.session.publicationAtCalls.at(-1), { elapsed: 123n, finalPrefix: false });
+  assert.equal(h.session.publications.length, 0); assert.equal(io.writes.length, writes); assert.equal(h.session.nextCalls, calls);
+  assert.equal(owner.publishProgress(progressWords(), false), true); await flush(); assert.equal(io.writes.length, writes + 1);
+  assert.equal(h.session.credits.includes(42n), false); io.writes.at(-1).gate.resolve(); await flush(); assert.equal(h.session.credits.includes(42n), true);
+  await cleaned(h, owner, io);
+});
+test("recoverable common publication state refusal preserves owner and exact original cause", async () => {
+  const h = await harness(); const { owner, io } = await progressOwner(h);
+  const cause = Object.assign(new Error("common local phase refused"), { code: "state" });
+  h.session.publicationOutputs.push(cause);
+  assert.throws(() => owner.publishProgress(progressWords(), true), error => error.code === "state" && error.cause === cause);
+  assert.equal(owner.closed, false); assert.equal(h.session.publications.length, 0);
+  h.session.publicationOutputs.push(false); assert.equal(owner.publishProgress(progressWords(), true), false);
+  assert.equal(owner.receipts.localFinalWritten, false); assert.equal(owner.receipts.localFinalAcknowledged, false);
+  await cleaned(h, owner, io);
+});
+test("nonboolean Rust hint or admission is a protocol failure without fabricated publication", async () => {
+  for (const method of ["hint", "admission"]) {
+    const h = await harness(); const { owner, io } = await progressOwner(h);
+    if (method === "hint") h.session.publicationDueOutputs.push(1); else h.session.publicationOutputs.push(1);
+    assert.throws(() => method === "hint" ? owner.progressDue(false) : owner.publishProgress(progressWords(), false), error => error.code === "protocol");
+    assert.equal(owner.closed, true); assert.equal(h.session.publications.length, 0); await cleaned(h, owner, io);
+  }
+});
 
 test("progress publication snapshots exact full-width member words and wakes existing writes without invented credit", async () => {
   const h = await harness(); const { owner, io } = await h.opened();

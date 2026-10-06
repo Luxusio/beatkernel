@@ -172,7 +172,7 @@ impl BrowserRoomClient {
         }
     }
 
-    fn local_result(&mut self, result: Result<(), JsValue>) -> Result<(), JsValue> {
+    fn local_result<T>(&mut self, result: Result<T, JsValue>) -> Result<T, JsValue> {
         if let Err(value) = &result {
             if !self.driver.failed() {
                 // The JS owner distinguishes a recoverable local phase refusal
@@ -244,6 +244,25 @@ impl BrowserRoomClient {
         let result = self
             .driver
             .publish_progress_words(&words, final_prefix)
+            .map_err(error);
+        self.local_result(result)
+    }
+    pub fn publication_due(&mut self, now_ns: i64, final_prefix: bool) -> Result<bool, JsValue> {
+        let result = self
+            .driver
+            .publication_due(now_ns, final_prefix)
+            .map_err(error);
+        self.local_result(result)
+    }
+    pub fn publish_progress_at(
+        &mut self,
+        words: Vec<u32>,
+        final_prefix: bool,
+        now_ns: i64,
+    ) -> Result<bool, JsValue> {
+        let result = self
+            .driver
+            .publish_progress_words_at(&words, final_prefix, now_ns)
             .map_err(error);
         self.local_result(result)
     }

@@ -29,12 +29,25 @@ impl ProgressCadence {
     pub const fn last_published(&self) -> Option<u64> {
         self.last_published
     }
-    fn observe(&mut self, now: u64) -> bool {
+    pub fn observe(&mut self, now: u64) -> bool {
         if self.last_observed.is_some_and(|previous| now < previous) {
             return false;
         }
         self.last_observed = Some(now);
         true
+    }
+    /// Requires a successful observation; final prefixes bypass only the interval.
+    pub fn due(&self, force: bool) -> bool {
+        force
+            || self.last_published.is_none()
+            || self.last_observed.is_some_and(|now| {
+                self.last_published
+                    .is_some_and(|last| now - last >= PUBLICATION_INTERVAL_NS)
+            })
+    }
+    /// Call only after successful queue admission or completed publication.
+    pub fn admitted(&mut self) {
+        self.last_published = self.last_observed;
     }
 }
 /// A successful effect with a failed post-effect sample cannot be rolled back.
@@ -54,10 +67,7 @@ pub fn publish_progress_with_clock<P: CompetitionProgressPort, C: CompetitionPro
     if !cadence.observe(now) {
         return Err(CadenceError::ClockRegressed);
     }
-    if cadence
-        .last_published
-        .is_some_and(|last| now - last < PUBLICATION_INTERVAL_NS)
-    {
+    if !cadence.due(false) {
         return Ok(false);
     }
     port.publish(members).map_err(CadenceError::Publication)?;
@@ -65,9 +75,13 @@ pub fn publish_progress_with_clock<P: CompetitionProgressPort, C: CompetitionPro
     if !cadence.observe(completed) {
         return Err(CadenceError::ClockRegressed);
     }
-    cadence.last_published = Some(completed);
+    cadence.admitted();
     Ok(true)
 }
 #[cfg(test)]
 #[path = "competition_progress_cadence_fixtures.rs"]
 mod fixtures;
+
+#[cfg(test)]
+#[path = "room_publication_cadence_fixtures.rs"]
+mod room_publication_cadence_fixtures;

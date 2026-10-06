@@ -195,10 +195,9 @@ impl RoomProgressClient {
         Ok(())
     }
 
-    pub fn publish(
-        &mut self,
+    pub(crate) fn preflight_publish(
+        &self,
         members: &[MemberProgress],
-        final_prefix: bool,
     ) -> Result<(), RoomProgressClientError> {
         self.ensure_live()?;
         if !self.active || self.final_queued {
@@ -215,6 +214,15 @@ impl RoomProgressClient {
         }
         validate_members(self.latest_local.as_deref(), members)
             .map_err(|_| RoomProgressClientError::InvalidProgress)?;
+        Ok(())
+    }
+
+    pub fn publish(
+        &mut self,
+        members: &[MemberProgress],
+        final_prefix: bool,
+    ) -> Result<(), RoomProgressClientError> {
+        self.preflight_publish(members)?;
         let owned = copy_slice(members)?;
         self.latest_local = Some(owned);
         self.upload_pending = true;

@@ -617,6 +617,7 @@ async function workerHarness(options = {}) {
       this.credits = []; this.received = []; this.requests = [];
       this.receiveTimes = []; this.writeTimes = []; this.pollTimes = []; this.schedules = [];
       this.publications = []; this.peerProgress = [];
+      this.publicationDueCalls = []; this.publicationAtCalls = []; this.publicationDueOutputs = []; this.publicationOutputs = [];
       this.finalWritten = false; this.finalAcknowledged = false; this.progressComplete = false; this.drainComplete = false;
       this.frames = [{ kind: 1, id: 1n, bytes: new Uint8Array(11) }];
       roomSessions.push(this);
@@ -673,6 +674,19 @@ async function workerHarness(options = {}) {
       if (this.publicationError) throw this.publicationError;
       this.publications.push({ words: words.slice(), finalPrefix });
       this.onPublish?.(words, finalPrefix);
+    }
+    publication_due(elapsed, finalPrefix) {
+      this.live(); this.publicationDueCalls.push({ elapsed, finalPrefix });
+      const result = this.publicationDueOutputs.length ? this.publicationDueOutputs.shift() : true;
+      if (result instanceof Error) throw result;
+      return result;
+    }
+    publish_progress_at(words, finalPrefix, elapsed) {
+      this.live(); this.publicationAtCalls.push({ elapsed, finalPrefix });
+      const result = this.publicationOutputs.length ? this.publicationOutputs.shift() : true;
+      if (result instanceof Error) throw result;
+      if (result !== true) return result;
+      this.publish_progress(words, finalPrefix); return true;
     }
     take_peer_progress() { this.live(); return this.peerProgress.shift() ?? null; }
     local_final_written() { this.live(); return this.finalWritten; }
@@ -1373,6 +1387,36 @@ async function committedRoom(h, schedule, members = null) {
   return h.of("play-room").find(row => row.event.kind === "start")?.event;
 }
 
+test("actual room Worker asks scalar due before progress words and false admission leaves publication unaccepted", async () => {
+  const h = await roomPrepared(); const event = await committedRoom(h);
+  await h.rpc("play-activate", { hostNs: event.targetHostNs, targetHostNs: event.targetHostNs, startFrame: START });
+  const game = h.locals[0], session = h.roomSessions[0]; const before = game.groupProgressReads;
+  session.publicationDueOutputs.push(false);
+  await h.send(step({ watermark: event.targetHostNs }));
+  assert.equal(game.groupProgressReads, before); assert.equal(session.publicationAtCalls.length, 0); assert.equal(session.publications.length, 0);
+  session.publicationDueOutputs.push(true); session.publicationOutputs.push(false);
+  await h.send(step({ tickId: 2, watermark: event.targetHostNs }));
+  assert.equal(game.groupProgressReads, before + 1); assert.equal(session.publicationAtCalls.length, 1); assert.equal(session.publications.length, 0);
+  assert.equal(session.publicationDueCalls.at(-1).finalPrefix, false); assert.equal(typeof session.publicationDueCalls.at(-1).elapsed, "bigint");
+  assert.equal(game.stops, 0); assert.equal(game.frees, 0);
+  await h.send({ kind: "play-stop", playId: 7 });
+});
+test("finalQueued follows accepted Rust admission so refusal retries before disposal and success is one-shot", async () => {
+  for (const firstRefused of [false, true]) {
+    const h = await roomPrepared({ observeOutput: () => true }); const event = await committedRoom(h);
+    await h.rpc("play-activate", { hostNs: event.targetHostNs, targetHostNs: event.targetHostNs, startFrame: START });
+    const game = h.locals[0], session = h.roomSessions[0]; session.publicationOutputs.push(...(firstRefused ? [false, true] : [true]));
+    session.onPublish = (_, finalPrefix) => { assert.equal(finalPrefix, true); assert.equal(game.stops, 0); assert.equal(game.frees, 0); };
+    await h.send(directObservation()); await h.roomPort.acknowledge({ report: renderReport() });
+    assert.equal(h.of("play-render-done").at(-1).completed, true);
+    assert.equal(session.publications.length, firstRefused ? 0 : 1);
+    await h.send({ kind: "play-stop", playId: 7 });
+    assert.equal(session.publications.length, 1); assert.equal(session.publicationAtCalls.length, firstRefused ? 2 : 1);
+    assert.equal(game.groupProgressReads, firstRefused ? 2 : 1); assert.equal(game.stops, 1); assert.equal(game.frees, 1);
+    assert.equal(session.finalAcknowledged, false);
+  }
+});
+
 test("room acquisition uses every actual local identity only after samples and direct command ACK drain", async () => {
   for (const request of [roomStartRequest(), localRequest({ recordReplay: true })]) {
     const h = await started({ allowNetworkClock: true, batches: [batch(771n)], startRequest: request });
@@ -1411,7 +1455,7 @@ test("room acquisition uses every actual local identity only after samples and d
 test("room mode, capability, URL and complete member identity refusals stay before acquisition and preserve local preparation", async () => {
   for (const options of [
     { missingRoomExport: true }, { missingRoomMethod: "receive_bytes" }, { missingRoomMethod: "take_start" },
-    { missingRoomMethod: "publish_progress" }, { missingRoomMethod: "request_drain" },
+    { missingRoomMethod: "publish_progress" }, { missingRoomMethod: "publication_due" }, { missingRoomMethod: "publish_progress_at" }, { missingRoomMethod: "request_drain" },
     { missingRoomMethod: "drain_complete" }, { missingLocalProgress: true },
     { missingRoomStartConstructor: true }, { missingLocalIdentity: true },
     { roomConstructError: "actual room constructor refused" },
