@@ -9,13 +9,13 @@ use beatkernel_bms_runtime::{
     ChannelPolicy,
     bgm::{BgmConfig, BgmFeeder},
     completion::ReplayCompletion,
-    load_prepared_for_replay,
+    load_prepared_for_section_replay,
     native_start::HostStartWindow,
     playback_pause::{PauseIntervalObservation, PausePhase},
     player,
-    replay_audio::{completed_render_cursor_for_feeder, plan_audio},
+    replay_audio::{completed_render_cursor_for_feeder, plan_section_audio},
     replay_pause::ReplayPause,
-    replay_playback::read_replay,
+    replay_playback::{read_replay, decode_section_setup},
     replay_visual::ReplayVisual,
 };
 #[cfg(test)]
@@ -951,7 +951,10 @@ fn run(options: Options) -> Result<()> {
         CodecLimits::new(65536, 32768)?,
     )?;
     let file = read_replay(&mut File::open(&options.replay)?, limits)?;
-    let prepared = load_prepared_for_replay(
+    if decode_section_setup(&file.header.options)?.end.is_some() {
+        return Err("native replay command does not yet support finite recorded endpoints".into());
+    }
+    let prepared = load_prepared_for_section_replay(
         &options.chart,
         options.format,
         PcmLimits::new(
@@ -963,7 +966,7 @@ fn run(options: Options) -> Result<()> {
         &file,
         limits,
     )?;
-    let prepared = beatkernel_bms_runtime::section_start::prepare_replay(
+    let prepared = beatkernel_bms_runtime::section_start::prepare_section_replay(
         prepared,
         &file,
         limits,
@@ -980,15 +983,15 @@ fn run(options: Options) -> Result<()> {
         domain: OUTPUT,
         timestamp: Timestamp::ZERO,
     };
-    let mut visual = ReplayVisual::new(&prepared.source, &file, limits)?;
-    player::publish_native_chart(
+    let mut visual = ReplayVisual::new_section(&prepared.source, &file, limits)?;
+    player::publish_native_replay_chart(
         &options.chart,
         &prepared.source,
         &prepared.compiled.chart,
-        &[beatkernel_bms_runtime::local_players::PlayerId(1)],
+        &visual,
     )?;
     let mut completion = ReplayCompletion::new(OUTPUT, options.format.sample_rate());
-    let plan = plan_audio(&prepared, file, limits, origin, options.preroll)?;
+    let plan = plan_section_audio(&prepared, file, limits, origin, options.preroll)?;
     println!(
         "reconstructed logical replay: results={} hits={} recorded_until={:?} final_judge_hash={:#018x}; no live acquisition or original physical timing reproduction",
         plan.judge_events.len(),

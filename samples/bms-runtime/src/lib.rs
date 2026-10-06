@@ -311,6 +311,8 @@ mod native_mine_presentation_fixtures;
 /// Injectable diagnostic deadlines and waiting for shared native pumps.
 pub mod native_pump_control;
 mod native_pump_system;
+#[cfg(test)]
+mod native_replay_policy_fixtures;
 /// Game-owned room lobby, comparison, committed start and natural finalization.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native_room_competition;
@@ -606,6 +608,29 @@ pub fn load_prepared_for_replay(
     )
 }
 
+/// Policy-aware replay loading validates the full recorded setup before asset IO.
+pub fn load_prepared_for_section_replay(
+    path: &Path,
+    format: AudioFormat,
+    pcm_limits: PcmLimits,
+    channels: ChannelPolicy,
+    file: &ReplayFile,
+    limits: ReplayCodecLimits,
+) -> Result<PreparedBms, Box<dyn Error>> {
+    encode_replay(file, limits)?;
+    let seed = replay_playback::decode_section_setup(&file.header.options)?.chart_seed;
+    prepare_seeded(
+        path,
+        format,
+        pcm_limits,
+        channels,
+        &DefaultAssetDecoder,
+        asset_paths::AssetPathPolicy::AudioVariants,
+        seed,
+        Some((file, limits)),
+    )
+}
+
 /// Prepare using an explicit codec, retaining the same path and storage policy.
 ///
 /// Encoded assets are bounded to 64 MiB before decoder invocation. This function
@@ -700,7 +725,7 @@ pub fn prepare_from_source(
         source.compile_invisible()?
     };
     if let Some((file, limits)) = replay {
-        replay_playback::validate_setup(&source, file, limits)?;
+        replay_playback::validate_section_setup(&source, file, limits)?;
     }
     let compiled = source.compile()?;
     let referenced =

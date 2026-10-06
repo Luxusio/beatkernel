@@ -90,6 +90,16 @@ impl ReplayVisual {
             failed: false,
         })
     }
+    /// Cold presentation setup is available only before any display advancement.
+    pub(crate) fn pristine_presentation_setup(
+        &self,
+    ) -> Option<(
+        &beatkernel::chart::CompiledChart,
+        &crate::gauge::GaugeProfile,
+    )> {
+        (self.observed.is_none() && self.cursor == 0 && self.engine.effective_song_time().is_none())
+            .then(|| (self.engine.chart(), self.gauge.profile()))
+    }
     pub const fn start(&self) -> Timestamp {
         self.start
     }

@@ -713,6 +713,7 @@ struct Session {
     snapshot: PlayerSnapshot,
     last_publish: Option<Instant>,
     chart_published: bool,
+    replay_policy: Option<GaugeProfile>,
     pause_dirty: bool,
     room_dirty: bool,
 }
@@ -772,6 +773,7 @@ pub fn with_publisher<T>(
             snapshot: PlayerSnapshot::default(),
             last_publish: None,
             chart_published: false,
+            replay_policy: None,
             pause_dirty: false,
             room_dirty: false,
         });
@@ -1034,7 +1036,7 @@ pub fn publish_local_chart(
     chart: &CompiledChart,
     players: &[PlayerId],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    register_chart(source, chart, players, None)
+    register_chart(source, chart, players, None, None)
 }
 
 /// Registers an attached native chart and referenced images before play starts.
@@ -1046,7 +1048,30 @@ pub fn publish_native_chart(
     chart: &CompiledChart,
     players: &[PlayerId],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    register_chart(source, chart, players, Some(chart_path))
+    register_chart(source, chart, players, Some(chart_path), None)
+}
+
+/// Registers the immutable policy of a pristine, fully validated replay.
+/// Chart/profile evidence comes from ReplayVisual, never a caller's raw snapshot.
+pub fn publish_native_replay_chart(
+    chart_path: &std::path::Path,
+    source: &BmsChart,
+    chart: &CompiledChart,
+    visual: &crate::replay_visual::ReplayVisual,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (recorded_chart, policy) = visual
+        .pristine_presentation_setup()
+        .ok_or("replay chart registration requires a pristine visual owner")?;
+    if recorded_chart != chart {
+        return Err("replay presentation chart differs from its validated owner".into());
+    }
+    register_chart(
+        source,
+        chart,
+        &[PlayerId(1)],
+        Some(chart_path),
+        Some(policy),
+    )
 }
 
 fn register_chart(
@@ -1054,6 +1079,7 @@ fn register_chart(
     chart: &CompiledChart,
     players: &[PlayerId],
     native_path: Option<&std::path::Path>,
+    replay_policy: Option<&GaugeProfile>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_players(players)?;
     SESSION.with(|session| {
@@ -1061,6 +1087,9 @@ fn register_chart(
         let Some(current) = session.as_mut() else {
             return Ok(());
         };
+        if replay_policy.is_some() && !current.snapshot.players.is_empty() {
+            return Err("replay policy requires a fresh presentation roster".into());
+        }
         if current.chart_published {
             return Err("game presentation chart is already registered".into());
         }
@@ -1103,9 +1132,17 @@ fn register_chart(
                 None
             };
         }
+        let admitted_policy = replay_policy.map(GaugeProfile::try_copy).transpose()?;
+        if let Some(policy) = &admitted_policy {
+            members[0].gauge = BmsGauge::new(policy.try_copy()?);
+        }
         if current.pressed.is_empty() {
             current.pressed = players.iter().map(|_| PressedState::default()).collect();
         }
+        if admitted_policy.is_some() {
+            current.snapshot.gauge = members[0].gauge.clone();
+        }
+        current.replay_policy = admitted_policy;
         current.snapshot.players = members;
         current.snapshot.chart = Some(prepared);
         current.snapshot.images = images;
@@ -1168,7 +1205,7 @@ pub fn publish_replay_prefix_with_mines(
 }
 
 /// Publishes the authoritative replay gauge without observing its results again.
-/// The default profile is required until captured policy identity is available.
+/// The registered replay policy is immutable; legacy registration uses default.
 /// A failed gauge clears display ownership regardless of the supplied valid mask.
 pub fn publish_replay_prefix_with_gauge(
     song: Timestamp,
@@ -1179,7 +1216,7 @@ pub fn publish_replay_prefix_with_gauge(
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_mask(mask)?;
     validate_mine_summary(MineDamageSummary::default(), summary)?;
-    validate_replay_gauge(None, summary, gauge)?;
+    validate_replay_gauge(None, summary, gauge, gauge.profile())?;
     publish_solo(
         song,
         events,
@@ -1195,15 +1232,20 @@ fn validate_replay_gauge(
     previous: Option<&BmsGauge>,
     summary: MineDamageSummary,
     gauge: &BmsGauge,
+    expected: &GaugeProfile,
 ) -> Result<(), &'static str> {
-    if gauge.profile() != &GaugeProfile::default() {
-        return Err("replay presentation requires the default gauge profile");
+    if gauge.profile() != expected {
+        return Err("replay presentation gauge differs from its registered policy");
     }
     let snapshot = gauge.snapshot();
-    if summary.instant_death != (snapshot.failure == Some(GaugeFailure::InstantDeath))
-        || (snapshot.failure.is_some()
-            && (snapshot.failure != Some(GaugeFailure::InstantDeath) || snapshot.level_units != 0))
-    {
+    let failure_valid = match snapshot.failure {
+        None => !summary.instant_death,
+        Some(GaugeFailure::InstantDeath) => summary.instant_death && snapshot.level_units == 0,
+        Some(GaugeFailure::Depleted) => expected.fail_on_empty() && snapshot.level_units == 0,
+    };
+    let default_consistent = expected != &GaugeProfile::default()
+        || summary.instant_death == (snapshot.failure == Some(GaugeFailure::InstantDeath));
+    if !failure_valid || !default_consistent {
         return Err("replay gauge failure differs from its cumulative mine summary");
     }
     if previous.is_some_and(|previous| {
@@ -1271,6 +1313,10 @@ fn publish_solo(
                 Some(&member.gauge),
                 replay_mines.expect("full replay gauge publication supplies a mine summary"),
                 gauge,
+                current
+                    .replay_policy
+                    .as_ref()
+                    .unwrap_or(&GaugeProfile::default()),
             )?;
             Some(gauge.clone())
         } else if events.is_empty() && hazards.is_empty() {

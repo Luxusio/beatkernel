@@ -130,17 +130,22 @@ one member; a multi-member cohort has no aggregate gauge.
 
 Actual replay presentation copies the authoritative ReplayVisual gauge, including
 pause-boundary publication. It must not rebuild gauge order from cumulative mine
-damage or apply incremental judgments a second time. Only the documented default
-profile is admitted by this native bridge; admitting validated recorded policies
-through that publication boundary remains unfinished even though stepped capture
-and replay now preserve policy identity.
+damage or apply incremental judgments a second time. Legacy chart registration
+admits only the documented default profile. Native replay chart registration may
+admit a nondefault profile from a pristine validated ReplayVisual, only when its
+exact compiled chart matches and no chart/roster/prefix is already registered.
+Store that expected policy for the session; every later replay gauge must match.
+Refusal preserves chart, roster, scores, pressed state and gauge atomically.
 An unchanged absolute replay gauge remains unchanged on repeated publication.
 Legacy replay APIs lacking an authoritative gauge cannot establish mine-aware
 gauge accuracy: they observe actual normal judgments without synthesizing mine
 events from a cumulative summary. Actual replay callers must use the full gauge
 publication API. Reject a default replay gauge whose instant-death state disagrees
-with its summary, or which changes an already frozen failed state, before any
-presentation mutation. Ordinary level loss/recovery is not a monotonic counter.
+with its summary. For survival profiles, depletion may precede a later mine death
+in a retained full log, so cumulative mine death may coexist with first-latched
+Depleted. Depleted requires a fail-on-empty policy; every failed gauge has zero
+level. Reject changed policy or any change to an already frozen failed state
+before presentation mutation. Ordinary level loss/recovery is not a monotonic counter.
 
 These retained gauges are presentation state. Unattached native publication
 remains a no-op; headless termination policy must live in the actual game owner,
@@ -318,3 +323,10 @@ Record catalog comparisons must include gauge policy. The kernel replay format
 and judge hash remain unchanged: the application options own this policy.
 Public/native/browser policy selection and complete LR2 compatibility remain
 unfinished; preserving a policy does not imply those launchers select it.
+
+The native output-only replay command uses policy-aware validation before PCM
+asset reads, pristine replay chart registration, and recorded-policy audio/visual
+planning for unlimited recordings. Finite replay commands remain explicitly
+unsupported until the native mixer cutoff and owner endpoint are integrated.
+Headless publication validates gauge consistency and remains a presentation
+no-op. This does not establish physical audio/GPU or driver acceptance.
