@@ -35,6 +35,7 @@ mapping tests using real Mixer/error values without constructing fake streams,
 QPC/Mach clocks or native callbacks. Windows/macOS modules and target-only tests
 remain uncompiled by the four existing Linux/WASM checks. Assertions/runtime/
 device/formal review/QA remain deferred; scope formatting and four sequential
-compile-only checks follow both writer terminal stops. ASIO controller adapter,
+compile-only checks follow both writer terminal stops. ASIO now follows
+[ASIO replacement adapter](REQ__asio-replacement-adapter.md);
 native/UI pump wiring and platform/physical acceptance remain pending. Full
 BMS player Goal remains active.
