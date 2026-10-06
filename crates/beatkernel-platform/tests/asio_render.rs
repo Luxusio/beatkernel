@@ -3,9 +3,7 @@ use beatkernel::{
     audio::*,
     time::{ClockDomainId, Timestamp},
 };
-use beatkernel_platform::audio::asio::{
-    AsioBlockRenderer, AsioPcmEncoding::*, AsioPcmError, AsioRenderError,
-};
+use beatkernel_platform::audio::asio::{AsioBlockRenderer, AsioPcmEncoding::*, AsioRenderError};
 use std::{
     alloc::{GlobalAlloc, Layout, System},
     cell::Cell,
@@ -169,21 +167,16 @@ fn every_output_is_validated_before_consuming_queue_or_advancing_frame_zero() {
 }
 
 #[test]
-fn nonfinite_mixed_last_channel_preserves_all_planes_but_retains_actual_mixer_progress() {
+fn extreme_finite_gain_is_clamped_by_actual_mixer_before_asio_encoding() {
     let (mut producer, mixer) = rig(&[(1, &[0.25, f32::MAX])], 8);
     producer.try_push(play(1, 1, 2.0)).unwrap();
     let mut renderer = AsioBlockRenderer::new(mixer, 1, vec![Int16Lsb, Float32Msb]).unwrap();
     let mut left = [0xa5; 2];
     let mut right = [0xa5; 4];
-    assert!(matches!(
-        renderer.render(&mut [&mut left, &mut right]),
-        Err(AsioRenderError::Pcm(AsioPcmError::NonFiniteSample))
-    ));
-    assert_eq!(left, [0xa5; 2]);
-    assert_eq!(right, [0xa5; 4]);
-    let mixed = renderer
-        .last_render_report()
-        .expect("successful core report survives conversion failure");
+    let mixed = renderer.render(&mut [&mut left, &mut right]).unwrap();
+    assert_eq!(left, [0, 0x40]); // 0.5 in Int16Lsb.
+    assert_eq!(right, [0x3f, 0x80, 0, 0]); // Clamped 1.0 in Float32Msb.
+    assert_eq!(renderer.last_render_report(), Some(mixed));
     assert_eq!(
         (
             mixed.start_frame,
@@ -192,7 +185,7 @@ fn nonfinite_mixed_last_channel_preserves_all_planes_but_retains_actual_mixer_pr
         ),
         (0, 1, 1)
     );
-    assert_eq!(mixed.counters.invalid_gains, 0); // Finite gain can still overflow the mixed f32.
+    assert_eq!(mixed.counters.invalid_gains, 0);
     let next = renderer.render(&mut [&mut left, &mut right]).unwrap();
     assert_eq!((next.start_frame, next.frames), (1, 1));
     assert_eq!(left, [0; 2]);

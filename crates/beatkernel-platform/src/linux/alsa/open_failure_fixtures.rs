@@ -141,6 +141,7 @@ fn actual_launch_helper_keeps_control_owned_mixer_and_original_spawn_error_witho
     let basis = mixer.output_frame_basis();
     let typed = Box::new(LaunchRefusal(99));
     let pointer = typed.as_ref() as *const LaunchRefusal;
+    let typed: Box<dyn std::error::Error + Send + Sync> = typed;
     let spawner = RefusingSpawner {
         error: std::io::Error::new(std::io::ErrorKind::WouldBlock, typed),
     };

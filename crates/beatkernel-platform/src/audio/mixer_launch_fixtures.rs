@@ -98,6 +98,7 @@ fn shared_spawn_refusal_retains_original_io_payload_and_control_owned_mixer_befo
     let counters = mixer.counters();
     let error = Box::new(LaunchError(71));
     let pointer = error.as_ref() as *const LaunchError;
+    let error: Box<dyn std::error::Error + Send + Sync> = error;
     let entered = Arc::new(AtomicBool::new(false));
     let worker_entered = entered.clone();
     let result = launch_worker(
