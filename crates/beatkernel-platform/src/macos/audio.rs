@@ -195,6 +195,22 @@ struct Context {
     first_frame: AtomicU64,
     block_frames: AtomicU32,
 }
+/// Recoverable CoreAudio opening error with retained callback owner for retry.
+pub type CoreAudioOpenFailure =
+    beatkernel::audio::OutputOpenFailure<CoreAudioError, CoreAudioStream>;
+
+fn validate_open(request: &CoreAudioRequest, mixer: &Mixer) -> Result<(), CoreAudioError> {
+    if request.device == 0
+        || request.buffer_frames == 0
+        || mixer.config().format() != request.format
+    {
+        return Err(CoreAudioError::InvalidRequest);
+    }
+    if mixer.config().limits().max_render_frames() < request.buffer_frames as usize {
+        return Err(CoreAudioError::Capacity);
+    }
+    Ok(())
+}
 /// Owned HAL IOProc and stable callback state, with explicit start/close lifecycle.
 /// Mutable mixer storage is accessed only by one guarded native callback.
 /// This owner is intentionally !Send/!Sync; callback telemetry uses atomics.
@@ -251,87 +267,98 @@ impl CoreAudioStream {
         clock: MachClock,
         mixer: Mixer,
     ) -> Result<Self, CoreAudioError> {
-        if request.device == 0
-            || request.buffer_frames == 0
-            || mixer.config().format() != request.format
-        {
-            return Err(CoreAudioError::InvalidRequest);
+        Self::open_recoverable(request, clock, mixer).map_err(|failure| failure.into_parts().0)
+    }
+    /// Retains software ownership or the actual partial callback owner on failure.
+    /// Device-global setting changes are not rolled back by this operation.
+    pub fn open_recoverable(
+        request: CoreAudioRequest,
+        clock: MachClock,
+        mixer: Mixer,
+    ) -> Result<Self, CoreAudioOpenFailure> {
+        if let Err(error) = validate_open(&request, &mixer) {
+            return Err(CoreAudioOpenFailure::recovered(error, Some(mixer)));
         }
-        if mixer.config().limits().max_render_frames() < request.buffer_frames as usize {
-            return Err(CoreAudioError::Capacity);
-        }
-        if !u32_property(1, address(DEVICES, GLOBAL))?.contains(&request.device) {
-            return Err(CoreAudioError::DeviceUnavailable);
-        }
-        let initial_layout = native_layout(request.device)?;
-        if initial_layout.is_empty() {
-            return Err(CoreAudioError::DeviceUnavailable);
-        }
-        if initial_layout.iter().sum::<u32>() != u32::from(request.format.channels()) {
-            return Err(CoreAudioError::UnsupportedLayout);
-        }
-        let requested_rate = f64::from(request.format.sample_rate());
-        let prior_rate: f64 = scalar(request.device, address(RATE, GLOBAL))?;
-        if prior_rate != requested_rate {
-            set_scalar(request.device, address(RATE, GLOBAL), requested_rate)?;
-        }
-        let prior_frames: u32 = scalar(request.device, address(BUFFER, GLOBAL))?;
-        if prior_frames != request.buffer_frames {
-            set_scalar(
-                request.device,
-                address(BUFFER, GLOBAL),
-                request.buffer_frames,
-            )?;
-        }
-        let actual_rate: f64 = scalar(request.device, address(RATE, GLOBAL))?;
-        let actual_frames: u32 = scalar(request.device, address(BUFFER, GLOBAL))?;
-        if actual_rate != requested_rate || actual_frames != request.buffer_frames {
-            return Err(CoreAudioError::AppliedMismatch {
-                rate: actual_rate,
-                buffer_frames: actual_frames,
-            });
-        }
-        let streams = u32_property(request.device, address(STREAMS, OUTPUT))?;
-        if streams.is_empty() {
-            return Err(CoreAudioError::DeviceUnavailable);
-        }
-        let mut expected = Vec::new();
-        for stream in &streams {
-            let format: ffi::Asbd = scalar(*stream, address(FORMAT, GLOBAL))?;
-            validate_format(format, requested_rate)?;
-            if format.format_flags & PLANAR != 0 {
-                for _ in 0..format.channels_per_frame {
-                    expected.push(1);
-                }
-            } else {
-                expected.push(format.channels_per_frame);
+        let staged = (|| -> Result<_, CoreAudioError> {
+            if !u32_property(1, address(DEVICES, GLOBAL))?.contains(&request.device) {
+                return Err(CoreAudioError::DeviceUnavailable);
             }
-        }
-        let layout = native_layout(request.device)?;
-        if layout != expected
-            || layout.len() > MAX_BUFFERS
-            || layout.iter().sum::<u32>() != u32::from(request.format.channels())
-        {
-            return Err(CoreAudioError::UnsupportedLayout);
-        }
-        let config = mixer.config();
-        let samples = (request.buffer_frames as usize)
-            .checked_mul(usize::from(request.format.channels()))
-            .ok_or(CoreAudioError::Capacity)?;
-        let mut scratch = Vec::new();
-        scratch
-            .try_reserve_exact(samples)
-            .map_err(|_| CoreAudioError::Capacity)?;
-        scratch.resize(samples, 0.0);
-        let applied = CoreAudioApplied {
-            request,
-            format: request.format,
-            buffer_frames: actual_frames,
-            buffer_channels: layout.clone(),
-            output_domain: config.domain(),
-            output_origin: config.origin(),
-            native_clock: clock.native_domain(),
+            let initial_layout = native_layout(request.device)?;
+            if initial_layout.is_empty() {
+                return Err(CoreAudioError::DeviceUnavailable);
+            }
+            if initial_layout.iter().sum::<u32>() != u32::from(request.format.channels()) {
+                return Err(CoreAudioError::UnsupportedLayout);
+            }
+            let requested_rate = f64::from(request.format.sample_rate());
+            let prior_rate: f64 = scalar(request.device, address(RATE, GLOBAL))?;
+            if prior_rate != requested_rate {
+                set_scalar(request.device, address(RATE, GLOBAL), requested_rate)?;
+            }
+            let prior_frames: u32 = scalar(request.device, address(BUFFER, GLOBAL))?;
+            if prior_frames != request.buffer_frames {
+                set_scalar(
+                    request.device,
+                    address(BUFFER, GLOBAL),
+                    request.buffer_frames,
+                )?;
+            }
+            let actual_rate: f64 = scalar(request.device, address(RATE, GLOBAL))?;
+            let actual_frames: u32 = scalar(request.device, address(BUFFER, GLOBAL))?;
+            if actual_rate != requested_rate || actual_frames != request.buffer_frames {
+                return Err(CoreAudioError::AppliedMismatch {
+                    rate: actual_rate,
+                    buffer_frames: actual_frames,
+                });
+            }
+            let streams = u32_property(request.device, address(STREAMS, OUTPUT))?;
+            if streams.is_empty() {
+                return Err(CoreAudioError::DeviceUnavailable);
+            }
+            let mut expected = Vec::new();
+            for stream in &streams {
+                let format: ffi::Asbd = scalar(*stream, address(FORMAT, GLOBAL))?;
+                validate_format(format, requested_rate)?;
+                if format.format_flags & PLANAR != 0 {
+                    for _ in 0..format.channels_per_frame {
+                        expected.push(1);
+                    }
+                } else {
+                    expected.push(format.channels_per_frame);
+                }
+            }
+            let layout = native_layout(request.device)?;
+            if layout != expected
+                || layout.len() > MAX_BUFFERS
+                || layout.iter().sum::<u32>() != u32::from(request.format.channels())
+            {
+                return Err(CoreAudioError::UnsupportedLayout);
+            }
+            let config = mixer.config();
+            let samples = (request.buffer_frames as usize)
+                .checked_mul(usize::from(request.format.channels()))
+                .ok_or(CoreAudioError::Capacity)?;
+            let mut scratch = Vec::new();
+            scratch
+                .try_reserve_exact(samples)
+                .map_err(|_| CoreAudioError::Capacity)?;
+            scratch.resize(samples, 0.0);
+            let applied = CoreAudioApplied {
+                request,
+                format: request.format,
+                buffer_frames: actual_frames,
+                buffer_channels: layout.clone(),
+                output_domain: config.domain(),
+                output_origin: config.origin(),
+                native_clock: clock.native_domain(),
+            };
+            Ok((applied, layout, scratch, streams))
+        })();
+        let (applied, layout, scratch, streams) = match staged {
+            Ok(staged) => staged,
+            Err(error) => return Err(CoreAudioOpenFailure::recovered(error, Some(mixer))),
         };
+        let config = mixer.config();
         let context = Box::new(Context {
             render: UnsafeCell::new(RenderState {
                 mixer,
@@ -345,7 +372,7 @@ impl CoreAudioStream {
             output_domain: config.domain(),
             rate: request.format.sample_rate(),
             layout,
-            buffer_frames: actual_frames,
+            buffer_frames: applied.buffer_frames,
             enabled: AtomicBool::new(false),
             rendering: AtomicBool::new(false),
             active: AtomicUsize::new(0),
@@ -373,37 +400,57 @@ impl CoreAudioStream {
             final_render_report: None,
             final_cadence: None,
         };
-        let pointer =
-            stream.context.as_deref().expect("context installed") as *const Context as *mut c_void;
-        // SAFETY: stable box contains callback-exclusive UnsafeCell storage and
-        // atomics; registration lifetime is retained until successful destruction.
-        check("AudioDeviceCreateIOProcID", unsafe {
-            ffi::AudioDeviceCreateIOProcID(
-                request.device,
-                render_callback,
-                pointer,
-                &mut stream.proc_id,
-            )
-        })?;
-        if stream.proc_id.is_null() {
-            return Err(CoreAudioError::DeviceUnavailable);
-        }
-        let mut properties = vec![
-            (request.device, address(RATE, GLOBAL)),
-            (request.device, address(BUFFER, GLOBAL)),
-            (request.device, address(STREAM_CONFIG, OUTPUT)),
-            (request.device, address(STREAMS, OUTPUT)),
-        ];
-        properties.extend(streams.into_iter().map(|id| (id, address(FORMAT, GLOBAL))));
-        for (id, address) in properties {
-            // SAFETY: stable callback context, native object/address and correct
-            // listener ABI; every successful registration is tracked for removal.
-            check("AudioObjectAddPropertyListener", unsafe {
-                ffi::AudioObjectAddPropertyListener(id, &address, configuration_changed, pointer)
+        let registration = (|| -> Result<(), CoreAudioError> {
+            let pointer = stream.context.as_deref().expect("context installed") as *const Context
+                as *mut c_void;
+            // SAFETY: stable box contains callback-exclusive UnsafeCell storage and
+            // atomics; registration lifetime is retained until successful destruction.
+            check("AudioDeviceCreateIOProcID", unsafe {
+                ffi::AudioDeviceCreateIOProcID(
+                    request.device,
+                    render_callback,
+                    pointer,
+                    &mut stream.proc_id,
+                )
             })?;
-            stream.listeners.push((id, address));
+            if stream.proc_id.is_null() {
+                return Err(CoreAudioError::DeviceUnavailable);
+            }
+            let mut properties = vec![
+                (request.device, address(RATE, GLOBAL)),
+                (request.device, address(BUFFER, GLOBAL)),
+                (request.device, address(STREAM_CONFIG, OUTPUT)),
+                (request.device, address(STREAMS, OUTPUT)),
+            ];
+            properties.extend(streams.into_iter().map(|id| (id, address(FORMAT, GLOBAL))));
+            for (id, address) in properties {
+                // SAFETY: stable callback context, native object/address and correct
+                // listener ABI; every successful registration is tracked for removal.
+                check("AudioObjectAddPropertyListener", unsafe {
+                    ffi::AudioObjectAddPropertyListener(
+                        id,
+                        &address,
+                        configuration_changed,
+                        pointer,
+                    )
+                })?;
+                stream.listeners.push((id, address));
+            }
+            Ok(())
+        })();
+        if let Err(error) = registration {
+            let mut failure = CoreAudioOpenFailure::pending(error, stream);
+            let _ = Self::retry_open_cleanup(&mut failure);
+            return Err(failure);
         }
         Ok(stream)
+    }
+    /// Retry failed-open retirement, extracting only after actual stop/unregister/drain.
+    pub fn retry_open_cleanup(failure: &mut CoreAudioOpenFailure) -> Result<bool, &CoreAudioError> {
+        failure.retry_retirement(|stream| {
+            stream.stop()?;
+            beatkernel::audio::StoppedMixerSource::take_stopped_mixer(stream)
+        })
     }
     /// Returns original request and applied native layout/domain separately.
     pub const fn configuration(&self) -> &CoreAudioApplied {
@@ -931,3 +978,7 @@ impl beatkernel::audio::StoppedMixerSource for CoreAudioStream {
         Ok(self.recovered_mixer.take())
     }
 }
+
+#[cfg(test)]
+#[path = "audio/open_failure_fixtures.rs"]
+mod open_failure_fixtures;
