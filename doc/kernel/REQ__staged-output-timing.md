@@ -40,3 +40,7 @@ resume. Assertions/runtime/device/formal review/QA remain deferred; scoped
 Rustfmt and four sequential compile-only checks follow both writer terminal
 stops. Actual backend/UI handoff, error fallback and physical acceptance remain
 subsequent work; full BMS player Goal remains active.
+Owned replacement lifecycle and a durable core pause hold now follow
+[output replacement controller](REQ__output-replacement-controller.md).
+The returned hold stays with the candidate until clock/output ownership is
+committed; dropping it leaves effective requested pause for coordinated resume.
