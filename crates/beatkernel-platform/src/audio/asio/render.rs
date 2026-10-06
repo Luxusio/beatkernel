@@ -7,6 +7,8 @@ use std::{error::Error, fmt};
 /// Setup, Mixer or planar output failure without implicit resizing or remapping.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AsioRenderError {
+    /// The uniquely owned mixer was already transferred off the retired renderer.
+    MixerUnavailable,
     /// Nonpositive frame count or encoding count mismatch.
     InvalidConfiguration,
     /// Output count or an exact channel extent does not match setup.
@@ -21,6 +23,7 @@ pub enum AsioRenderError {
 impl fmt::Display for AsioRenderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::MixerUnavailable => f.write_str("ASIO renderer mixer was transferred"),
             Self::InvalidConfiguration => f.write_str("invalid ASIO Mixer block configuration"),
             Self::InvalidBuffers => f.write_str("ASIO output planes do not match exact setup"),
             Self::Capacity => f.write_str("ASIO Mixer setup capacity/allocation failure"),
@@ -45,7 +48,7 @@ impl Error for AsioRenderError {
 /// the entire mixed block before writing any plane. A successful Mixer report is
 /// retained even if a later finite-sample check rejects native delivery.
 pub struct AsioBlockRenderer {
-    mixer: Mixer,
+    mixer: Option<Mixer>,
     format: AudioFormat,
     frames: u32,
     encodings: Vec<AsioPcmEncoding>,
@@ -77,13 +80,18 @@ impl AsioBlockRenderer {
             .map_err(|_| AsioRenderError::Capacity)?;
         scratch.resize(samples, 0.0);
         Ok(Self {
-            mixer,
+            mixer: Some(mixer),
             format,
             frames,
             encodings,
             scratch,
             last_report: None,
         })
+    }
+    /// Cold mutable transfer after the caller has retired every render callback.
+    /// This method does not stop or wait; subsequent rendering refuses untouched.
+    pub fn take_mixer(&mut self) -> Option<Mixer> {
+        self.mixer.take()
     }
     /// Configured native frame count for every render.
     pub const fn frames(&self) -> u32 {
@@ -105,6 +113,10 @@ impl AsioBlockRenderer {
     /// Bad destination layouts do not consume commands or advance the Mixer.
     /// Nonfinite mixed output leaves every native destination untouched.
     pub fn render(&mut self, outputs: &mut [&mut [u8]]) -> Result<RenderReport, AsioRenderError> {
+        let mixer = self
+            .mixer
+            .as_mut()
+            .ok_or(AsioRenderError::MixerUnavailable)?;
         if outputs.len() != self.encodings.len()
             || outputs
                 .iter()
@@ -116,8 +128,7 @@ impl AsioBlockRenderer {
         {
             return Err(AsioRenderError::InvalidBuffers);
         }
-        let report = self
-            .mixer
+        let report = mixer
             .render(&mut self.scratch)
             .map_err(AsioRenderError::Core)?;
         self.last_report = Some(report);

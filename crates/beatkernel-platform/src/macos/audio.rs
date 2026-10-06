@@ -74,6 +74,8 @@ pub struct CoreAudioApplied {
 /// Off-callback precise native/configuration/lifecycle failure.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CoreAudioError {
+    /// Callback unregister/drain has not succeeded; mixer transfer is unavailable.
+    RecoveryUnavailable,
     /// Native OSStatus and operation retained for diagnosis.
     Native {
         /// API which returned the error.
@@ -106,6 +108,9 @@ pub enum CoreAudioError {
 impl std::fmt::Display for CoreAudioError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::RecoveryUnavailable => {
+                f.write_str("CoreAudio mixer recovery requires confirmed callback retirement")
+            }
             Self::Native { operation, code } => write!(f, "{operation} failed: {code:#x}"),
             Self::InvalidRequest => f.write_str("CoreAudio exact request/mixer mismatch"),
             Self::DeviceUnavailable => f.write_str("explicit CoreAudio output device unavailable"),
@@ -196,6 +201,8 @@ struct Context {
 pub struct CoreAudioStream {
     applied: CoreAudioApplied,
     context: Option<Box<Context>>,
+    recovered_mixer: Option<Mixer>,
+    retired: bool,
     proc_id: ffi::IoProcId,
     listeners: Vec<(u32, ffi::PropertyAddress)>,
     started: bool,
@@ -356,6 +363,8 @@ impl CoreAudioStream {
         let mut stream = Self {
             applied,
             context: Some(context),
+            recovered_mixer: None,
+            retired: false,
             proc_id: std::ptr::null_mut(),
             listeners: Vec::new(),
             started: false,
@@ -462,7 +471,11 @@ impl CoreAudioStream {
             .context
             .take()
             .expect("context retained through callback drain");
+        let context = *context;
+        let render = context.render.into_inner();
+        self.recovered_mixer = Some(render.mixer);
         self.final_cadence = Some(context.cadence);
+        self.retired = true;
         Ok(())
     }
     /// Direct pre-Mixer mach cadence, available after successful unregister/drain.
@@ -907,4 +920,14 @@ fn string_property(device: u32, selector: u32) -> Option<String> {
     }
     let owned = ffi::OwnedRef(value);
     ffi::cf_string(owned.0)
+}
+
+impl beatkernel::audio::StoppedMixerSource for CoreAudioStream {
+    type Error = CoreAudioError;
+    fn take_stopped_mixer(&mut self) -> Result<Option<Mixer>, Self::Error> {
+        if !self.retired || self.context.is_some() {
+            return Err(CoreAudioError::RecoveryUnavailable);
+        }
+        Ok(self.recovered_mixer.take())
+    }
 }

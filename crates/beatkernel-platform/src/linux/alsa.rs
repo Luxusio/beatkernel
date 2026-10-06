@@ -405,7 +405,9 @@ impl Shared {
 pub struct AlsaStream {
     configuration: AlsaAppliedConfig,
     shared: Arc<Shared>,
-    worker: Option<JoinHandle<Result<(), LinuxError>>>,
+    worker: Option<JoinHandle<(Result<(), LinuxError>, Mixer)>>,
+    recovered_mixer: Option<Mixer>,
+    retired: bool,
 }
 impl AlsaStream {
     /// Opens/configures on the worker and waits for its actual startup result.
@@ -433,6 +435,7 @@ impl AlsaStream {
         let worker = thread::Builder::new()
             .name("beatkernel-alsa".into())
             .spawn(move || {
+                let mut mixer = mixer;
                 let opened = NativePcm::open(&request).and_then(|(pcm, buffer, period)| {
                     if period as usize > mixer.config().limits().max_render_frames() {
                         return Err(LinuxError::InvalidConfiguration(
@@ -463,11 +466,11 @@ impl AlsaStream {
                     Ok(opened) => opened,
                     Err(error) => {
                         let _ = sender.send(Err(error));
-                        return Ok(());
+                        return (Ok(()), mixer);
                     }
                 };
                 if sender.send(Ok(configuration.clone())).is_err() {
-                    return Ok(());
+                    return (Ok(()), mixer);
                 }
                 drop(sender);
                 while !worker_shared.start.load(Ordering::Acquire)
@@ -476,14 +479,14 @@ impl AlsaStream {
                     thread::park();
                 }
                 if worker_shared.stop.load(Ordering::Acquire) {
-                    return Ok(());
+                    return (Ok(()), mixer);
                 }
                 worker_shared.status.store(1, Ordering::Release);
                 // Worker-local unwind/return guard clears timing even on panic.
                 let _timing_guard = TimingInvalidation(&worker_shared.timing);
                 let result = run_worker(
                     &mut pcm,
-                    mixer,
+                    &mut mixer,
                     &configuration,
                     &mut render,
                     &mut conversion,
@@ -507,13 +510,15 @@ impl AlsaStream {
                         worker_shared.status.store(3, Ordering::Release);
                     }
                 }
-                result
+                (result, mixer)
             })?;
         match receiver.recv() {
             Ok(Ok(configuration)) => Ok(Self {
                 configuration,
                 shared,
                 worker: Some(worker),
+                recovered_mixer: None,
+                retired: false,
             }),
             Ok(Err(error)) => {
                 let _ = worker.join();
@@ -551,7 +556,9 @@ impl AlsaStream {
         };
         worker.thread().unpark();
         match worker.join() {
-            Ok(result) => {
+            Ok((result, mixer)) => {
+                self.recovered_mixer = Some(mixer);
+                self.retired = true;
                 self.shared.timing.invalidate();
                 if result.is_ok() {
                     self.shared.status.store(2, Ordering::Release);
@@ -650,7 +657,7 @@ fn increment(counter: &AtomicU64, amount: u64) {
 }
 fn run_worker(
     pcm: &mut NativePcm,
-    mut mixer: Mixer,
+    mixer: &mut Mixer,
     config: &AlsaAppliedConfig,
     render: &mut [f32],
     conversion: &mut [u8],
@@ -663,13 +670,9 @@ fn run_worker(
     while !shared.stop.load(Ordering::Acquire) {
         if pending_offset == config.period_frames as usize {
             let render_start = clock.now()?;
-            let report = render_and_publish(
-                &mut mixer,
-                render,
-                &shared.render_telemetry,
-                &mut render_version,
-            )
-            .map_err(LinuxError::Mixer)?;
+            let report =
+                render_and_publish(mixer, render, &shared.render_telemetry, &mut render_version)
+                    .map_err(LinuxError::Mixer)?;
             shared.cadence.record(
                 render_start.timestamp,
                 report.start_frame,
@@ -1273,6 +1276,8 @@ mod tests {
             },
             shared: Arc::clone(&shared),
             worker: None, // Pure facade fixture: no native thread/PCM/device.
+            recovered_mixer: None,
+            retired: false,
         };
         assert_eq!(stream.last_render_report(), None);
         let format = AudioFormat::new(48_000, 2).unwrap();
@@ -1364,3 +1369,16 @@ mod tests {
         assert_eq!(stream.timing_snapshot(), None);
     }
 }
+
+impl beatkernel::audio::StoppedMixerSource for AlsaStream {
+    type Error = LinuxError;
+    fn take_stopped_mixer(&mut self) -> Result<Option<Mixer>, Self::Error> {
+        if !self.retired || self.worker.is_some() {
+            return Err(LinuxError::InvalidLifecycle);
+        }
+        Ok(self.recovered_mixer.take())
+    }
+}
+#[cfg(test)]
+#[path = "alsa/recovery_fixtures.rs"]
+mod recovery_fixtures;

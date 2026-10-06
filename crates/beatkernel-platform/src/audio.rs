@@ -511,6 +511,8 @@ pub enum ConfigurationConstraint {
 /// Precise off-thread platform failure with no implicit mode/device replacement.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AudioPlatformError {
+    /// Worker retirement is not confirmed, so mixer ownership cannot be transferred.
+    RecoveryUnavailable,
     /// Format widths/rate/channels/mask/byte-rate are invalid.
     InvalidFormat,
     /// Empty device identity or nonpositive requested size.
@@ -558,17 +560,42 @@ pub enum AudioPlatformError {
 impl fmt::Display for AudioPlatformError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RecoveryUnavailable => {
+                f.write_str("audio mixer recovery requires confirmed worker retirement")
+            }
             Self::InvalidFormat => f.write_str("invalid native sample format or speaker layout"),
-            Self::InvalidRequest => f.write_str("audio device identity and requested sizes must be nonempty/positive"),
+            Self::InvalidRequest => {
+                f.write_str("audio device identity and requested sizes must be nonempty/positive")
+            }
             Self::DeviceUnavailable => f.write_str("requested audio endpoint is unavailable"),
-            Self::BackendUnavailable(kind) => write!(f, "requested {kind:?} backend is unavailable"),
-            Self::AsioLicenseUnresolved => f.write_str("ASIO licensing/distribution path remains unresolved"),
-            Self::FormatUnsupported { closest } => write!(f, "requested format unsupported; advisory alternative: {closest:?}"),
-            Self::ConfigurationUnsupported { constraint, constraints, suggested_buffer_frames, suggested_period_frames } => write!(f,
-                "unsupported audio configuration: {constraint:?}; constraints: {constraints:?}; advisory buffer/period frames: {suggested_buffer_frames:?}/{suggested_period_frames:?}"),
-            Self::EndpointBusy => f.write_str("audio endpoint is busy or exclusive access unavailable"),
-            Self::ExclusiveDisabled => f.write_str("exclusive mode disabled for requested endpoint"),
-            Self::DeviceInvalidated => f.write_str("audio endpoint invalidated; explicit reopen required"),
+            Self::BackendUnavailable(kind) => {
+                write!(f, "requested {kind:?} backend is unavailable")
+            }
+            Self::AsioLicenseUnresolved => {
+                f.write_str("ASIO licensing/distribution path remains unresolved")
+            }
+            Self::FormatUnsupported { closest } => write!(
+                f,
+                "requested format unsupported; advisory alternative: {closest:?}"
+            ),
+            Self::ConfigurationUnsupported {
+                constraint,
+                constraints,
+                suggested_buffer_frames,
+                suggested_period_frames,
+            } => write!(
+                f,
+                "unsupported audio configuration: {constraint:?}; constraints: {constraints:?}; advisory buffer/period frames: {suggested_buffer_frames:?}/{suggested_period_frames:?}"
+            ),
+            Self::EndpointBusy => {
+                f.write_str("audio endpoint is busy or exclusive access unavailable")
+            }
+            Self::ExclusiveDisabled => {
+                f.write_str("exclusive mode disabled for requested endpoint")
+            }
+            Self::DeviceInvalidated => {
+                f.write_str("audio endpoint invalidated; explicit reopen required")
+            }
             Self::Native { code } => write!(f, "native audio failure {code:#x}"),
             Self::WorkerFailure => f.write_str("audio worker startup/shutdown/join failed"),
             Self::Capacity => f.write_str("audio setup capacity/allocation failed"),

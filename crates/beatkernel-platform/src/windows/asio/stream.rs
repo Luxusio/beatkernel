@@ -416,6 +416,7 @@ unsafe extern "C" fn render(
 /// callbacks use only preallocated state. Drop closes/drains before freeing it.
 pub struct AsioStream {
     control: Option<AsioControl>,
+    retired: bool,
     context: Box<RenderContext>,
     phase: AsioStreamPhase,
     native: AsioDiagnostics,
@@ -497,6 +498,7 @@ impl AsioStream {
         let renderer = AsioBlockRenderer::new(mixer, frames, encodings)?;
         let mut stream = Self {
             control: Some(control),
+            retired: false,
             context: Box::new(RenderContext {
                 host_clock,
                 cadence: crate::audio::cadence::Capture::new(),
@@ -718,6 +720,7 @@ impl AsioStream {
         }
         let diagnostic = self.diagnostics();
         let close = self.control.take().unwrap().close();
+        self.retired = close.is_ok();
         self.phase =
             if close.is_err() || diagnostic.is_err() || self.native.faults.requires_reopen() {
                 AsioStreamPhase::Failed
@@ -743,3 +746,16 @@ impl Drop for AsioStream {
 
 #[cfg(test)]
 mod tests;
+
+impl beatkernel::audio::StoppedMixerSource for AsioStream {
+    type Error = AsioStreamError;
+    fn take_stopped_mixer(&mut self) -> Result<Option<Mixer>, Self::Error> {
+        if !self.retired || self.control.is_some() {
+            return Err(AsioStreamError::InvalidState);
+        }
+        // SAFETY: successful close detached and drained callback admission. The
+        // control is gone and this exclusive owner is the sole remaining accessor.
+        let state = unsafe { &mut *self.context.state.get() };
+        Ok(state.renderer.take_mixer())
+    }
+}

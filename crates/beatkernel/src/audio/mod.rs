@@ -39,11 +39,13 @@
 //! # Ok::<(), beatkernel::audio::AudioError>(())
 //! ```
 
+mod handoff;
 mod mixer;
 mod model;
 mod pcm;
 mod queue;
 
+pub use handoff::StoppedMixerSource;
 pub use mixer::Mixer;
 pub use model::{
     AudioCommand, AudioCounters, AudioError, AudioFormat, AudioLimits, MixerConfig, PcmLimits,

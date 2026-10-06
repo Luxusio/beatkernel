@@ -223,7 +223,7 @@ impl WasapiBackend {
                     Ok(worker) => worker,
                     Err(error) => {
                         let _ = opened_tx.send(Err(error));
-                        return;
+                        return None;
                     }
                 };
                 worker.publish(&worker_control.telemetry);
@@ -232,16 +232,17 @@ impl WasapiBackend {
                     Err(error) => {
                         drop(worker);
                         let _ = opened_tx.send(Err(error));
-                        return;
+                        return None;
                     }
                 };
                 if opened_tx
                     .send(Ok((worker.configuration.clone(), duplicate)))
                     .is_err()
                 {
-                    return;
+                    return None;
                 }
                 worker.run(&worker_control, &started_tx);
+                worker.mixer.take()
             })
             .map_err(|_| AudioPlatformError::WorkerFailure)?;
         match opened_rx.recv() {
@@ -251,6 +252,8 @@ impl WasapiBackend {
                 control,
                 wake,
                 worker: Some(worker),
+                recovered_mixer: None,
+                retired: false,
                 started: started_rx,
                 has_started: false,
             }),
@@ -272,7 +275,9 @@ pub struct WasapiStream {
     options: WasapiOptions,
     control: Arc<Control>,
     wake: Event,
-    worker: Option<JoinHandle<()>>,
+    worker: Option<JoinHandle<Option<Mixer>>>,
+    recovered_mixer: Option<Mixer>,
+    retired: bool,
     started: mpsc::Receiver<Result<(), i32>>,
     has_started: bool,
 }
@@ -363,12 +368,18 @@ impl AudioOutputStream for WasapiStream {
         };
         self.control.request.store(2, Ordering::Release);
         let signal_error = self.wake.signal().err();
-        if worker.join().is_err() {
-            self.control.telemetry.status.store(
-                status_code(AudioStreamStatus::WorkerPanicked),
-                Ordering::SeqCst,
-            );
-            return Err(AudioPlatformError::WorkerFailure);
+        match worker.join() {
+            Ok(mixer) => {
+                self.recovered_mixer = mixer;
+                self.retired = true;
+            }
+            Err(_) => {
+                self.control.telemetry.status.store(
+                    status_code(AudioStreamStatus::WorkerPanicked),
+                    Ordering::SeqCst,
+                );
+                return Err(AudioPlatformError::WorkerFailure);
+            }
         }
         if let Some(error) = signal_error {
             return Err(error);
@@ -723,7 +734,7 @@ fn constraints(
                 result.buffer_bounds_event_driven = Some(event_driven);
             }
             Err(error) if error.code() == AUDCLNT_E_DEVICE_INVALIDATED => {
-                return Err(AudioPlatformError::DeviceInvalidated)
+                return Err(AudioPlatformError::DeviceInvalidated);
             }
             _ => {}
         }
@@ -814,7 +825,7 @@ struct Worker {
     audio_clock: IAudioClock,
     render_event: Event,
     control_event: Event,
-    mixer: Mixer,
+    mixer: Option<Mixer>,
     scratch: Vec<f32>,
     configuration: AppliedStreamConfig,
     options: WasapiOptions,
@@ -1032,7 +1043,7 @@ impl Worker {
             audio_clock,
             render_event,
             control_event,
-            mixer,
+            mixer: Some(mixer),
             scratch,
             configuration,
             options,
@@ -1156,6 +1167,7 @@ impl Worker {
         running: bool,
         cadence: Option<&crate::audio::cadence::Capture>,
     ) -> Result<(), i32> {
+        let mixer = self.mixer.as_mut().ok_or(E_INVALIDARG_CODE)?;
         let exclusive = self.configuration.requested.mode() == AudioStreamMode::Exclusive;
         let mut padding = 0;
         if !exclusive {
@@ -1204,7 +1216,7 @@ impl Worker {
                 let render_start = cadence
                     .and_then(|_| self.clock.sample_realtime())
                     .map(|receipt| receipt.normalized.timestamp);
-                match self.mixer.render(&mut self.scratch[..count]) {
+                match mixer.render(&mut self.scratch[..count]) {
                     Ok(report) => {
                         if let Some(cadence) = cadence {
                             match render_start {
@@ -1350,3 +1362,13 @@ struct Control {
 
 #[cfg(test)]
 mod tests;
+
+impl beatkernel::audio::StoppedMixerSource for WasapiStream {
+    type Error = AudioPlatformError;
+    fn take_stopped_mixer(&mut self) -> Result<Option<Mixer>, Self::Error> {
+        if !self.retired || self.worker.is_some() {
+            return Err(AudioPlatformError::RecoveryUnavailable);
+        }
+        Ok(self.recovered_mixer.take())
+    }
+}
