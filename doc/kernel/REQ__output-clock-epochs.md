@@ -1,0 +1,44 @@
+# Explicit output clock epochs
+
+PresentationEstimator and its platform discipline expose an explicit output
+observation epoch, initially zero for existing constructors. A caller can rebind
+to a strictly newer u64 epoch with an explicit new stream origin, playback origin
+and applied song origin. The host domain and validated discipline configuration
+stay fixed. Reject equal/older epochs and inconsistent playback domains/origins
+before changing any state. Checked maximum epoch never wraps.
+
+Successful rebind clears the old observation ring/history, latest pair and update
+watermark while retaining the originally reserved capacity. It supplies no clock
+sample or successful startup/completion evidence. Transport history, judged input,
+score, replay and actual audio state are untouched. New observations must warm up
+again before continuous drift/phase correction. Do not instant-seek a live judge
+or assume old latency/drift statistics apply to a reopened output stream.
+
+Epoch-tagged pair/proven-progress admissions reject a mismatched epoch before
+any observation/freshness mutation. Platform-tagged WASAPI/supplied-pair/ASIO
+admissions likewise reject old stream tokens, preserving original evidence and
+existing counter/frequency/rate checks. Rebind resets platform source identity
+only after core validation succeeds, allowing a new backend/rate to establish
+new observations. Assign the token when the stream/observation is created, never
+relabel a delayed old observation with the current epoch at admission time.
+
+Existing untagged public APIs remain compatible and assume the current stream;
+they cannot reject an old same-domain observation by themselves. Actual callers
+must still fence/drain old callbacks and use tagged paths to get epoch isolation.
+GameplayPresentationPort exposes the cold rebind and optional epoch getter, with
+explicit unsupported refusal defaults for existing custom implementations. Core
+and native discipline adapters implement the same contract through static DI.
+No new dynamic dispatch, IO, lock, timer, thread, crate or per-note allocation.
+
+This establishes the reusable clock transition layer, not a complete live device
+hot swap. Device stop/reopen, sample-grid/PCM conversion, command/voice transfer,
+pause/output fence, actual first-playback anchor, runtime integration and physical
+latency measurements remain required. Buffer-length variation on an unchanged
+stream stays distinct from a backend/latency discontinuity. Acoustic accuracy and
+gapless or instant synchronization are not guaranteed by this helper.
+
+Author independent core storage/atomicity/epoch/warmup/continuous-history cases,
+platform source-reset/tagged-refusal cases and actual generic port delegation/
+unsupported cases. Assertions/runtime/hardware/formal review/QA remain deferred;
+scoped formatting and four sequential compile-only checks run after both paired
+writers stop. Full BMS player Goal remains active and unproven.

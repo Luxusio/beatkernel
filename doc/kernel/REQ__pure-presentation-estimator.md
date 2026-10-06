@@ -7,6 +7,10 @@ types cannot reference native snapshots, WASAPI/ASIO types, UI, clocks or IO.
 Caller-supplied clock pairs and host query values are the only timing inputs.
 Quality remains Unknown: neither midpoint relations nor integer arithmetic prove
 acoustic accuracy. Core imports no platform crate or additional dependency.
+Explicit output rebinding now follows
+[output clock epochs](REQ__output-clock-epochs.md). It drops the old fit and
+rejects mismatched tagged observations while retaining reserved storage; it does
+not perform device handoff or alter live transport/judgment history.
 
 The platform PresentationDiscipline remains a compatibility adapter. Preserve
 its public constructors, getters, observe/observe_clock_pair/observe_asio,
