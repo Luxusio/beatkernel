@@ -30,6 +30,8 @@ retirement, registration cleanup and device behavior are unverified.
 Device-global rate/buffer changes are not rolled back. Discarding an unretired
 owner may still require the existing callback-context safety leak. Native
 registration, drain, cleanup retry and physical timing remain unverified. ASIO
-recoverable prepare and automatic live application handoff remain pending.
+recoverable preparation is subsequently extended in
+[ASIO recoverable prepare](CHANGE__asio-recoverable-prepare.md); SDK acceptance
+and automatic live application handoff remain pending.
 macOS lifecycle acceptance, device-setting rollback and automatic handoff remain pending.
 Full BMS player Goal stays active and incomplete.

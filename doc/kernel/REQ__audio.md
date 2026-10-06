@@ -454,7 +454,9 @@ handoff and acoustic latency acceptance remain incomplete.
 ALSA opening failure now has an explicit ownership-returning path under
 [recoverable output open](REQ__recoverable-output-open.md). Ordinary startup
 failure returns the original mixer after worker retirement; panic recovery and
-ASIO opener integration remains incomplete. CoreAudio now follows
+ASIO recoverable preparation follows
+[ASIO recoverable prepare](REQ__asio-recoverable-prepare.md); SDK/driver acceptance
+remains pending. CoreAudio follows
 [CoreAudio recoverable open](REQ__coreaudio-recoverable-open.md), retaining a
 pending owner when callback retirement refuses. WASAPI follows
 [WASAPI recoverable open](REQ__wasapi-recoverable-open.md), sharing the cold

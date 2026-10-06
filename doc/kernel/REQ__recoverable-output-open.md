@@ -31,7 +31,9 @@ handoff. WASAPI integration and the shared static worker owner now follow
 [WASAPI recoverable open](REQ__wasapi-recoverable-open.md). CoreAudio
 recoverable open integration follows
 [CoreAudio recoverable open](REQ__coreaudio-recoverable-open.md) for pending
-callback ownership; ASIO integration remains subsequent work. A worker panic can lose
+callback ownership; ASIO follows
+[ASIO recoverable prepare](REQ__asio-recoverable-prepare.md), with separate
+callback retirement evidence and cleanup diagnostics. A worker panic can lose
 the mixer; callers must distinguish that ceiling.
 
 Author core ownership and actual ALSA preflight/launch/normal-join/panic fixtures

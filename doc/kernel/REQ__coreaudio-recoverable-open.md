@@ -39,5 +39,6 @@ opaque original/cleanup errors and Drop probes, plus macOS-only pure preflight
 fixtures with no MachClock/native calls. The latter remain uncompiled by the
 four allowed Linux/WASM checks. Assertions/runtime/device/formal review/QA remain
 deferred; scoped Rustfmt and four sequential compile-only checks follow both
-writer terminal stops. ASIO recoverable prepare, automatic live handoff and full
-BMS player completion remain pending.
+writer terminal stops. ASIO preparation now follows
+[ASIO recoverable prepare](REQ__asio-recoverable-prepare.md); SDK/device
+acceptance, automatic live handoff and full BMS player completion remain pending.
