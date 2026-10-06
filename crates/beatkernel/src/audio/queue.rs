@@ -69,6 +69,14 @@ struct Shared {
     physical_frontier: AtomicU64,
 }
 
+impl Shared {
+    fn applied_start_frame(&self) -> Option<u64> {
+        self.start_applied
+            .load(Ordering::Acquire)
+            .then(|| self.applied_start_frame.load(Ordering::Relaxed))
+    }
+}
+
 struct Slot {
     ready: AtomicBool,
     tag: AtomicU8,
@@ -246,10 +254,7 @@ impl CommandProducer {
     /// Actual immutable physical frame of first positive playback, if observed.
     /// Empty, held and zero-length finite playback never publish this evidence.
     pub fn applied_start_frame(&self) -> Option<u64> {
-        self.shared
-            .start_applied
-            .load(Ordering::Acquire)
-            .then(|| self.shared.applied_start_frame.load(Ordering::Relaxed))
+        self.shared.applied_start_frame()
     }
 
     /// Requests silence with playback scheduling frozen on a subsequent valid
@@ -299,6 +304,9 @@ impl CommandProducer {
 }
 
 impl CommandConsumer {
+    pub(crate) fn applied_start_frame(&self) -> Option<u64> {
+        self.shared.applied_start_frame()
+    }
     pub(crate) fn start_gate(&self) -> Option<Option<u64>> {
         self.shared.start_gated.then(|| {
             self.shared

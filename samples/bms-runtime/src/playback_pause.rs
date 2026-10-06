@@ -57,6 +57,9 @@ struct PendingBoundary {
 }
 #[derive(Clone, Debug)]
 pub struct NativePause {
+    epoch: u64,
+    min_physical_frame: u64,
+    min_host: Option<ClockPoint>,
     origin: ClockPoint,
     host: ClockDomainId,
     rate: u32,
@@ -90,6 +93,9 @@ impl NativePause {
             ));
         }
         Ok(Self {
+            epoch: 0,
+            min_physical_frame: 0,
+            min_host: None,
             origin: output_origin,
             host: host_domain,
             rate: sample_rate,
@@ -111,6 +117,142 @@ impl NativePause {
             interval_window: None,
             last_now: None,
         })
+    }
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+    /// Rebinds a newer output owner after the caller proves native retirement.
+    /// Frozen playback and acknowledged pause gap remain unchanged until resume.
+    pub fn rebind_output(
+        &mut self,
+        epoch: u64,
+        mixer: &beatkernel::audio::Mixer,
+    ) -> Result<(), PauseError> {
+        if epoch <= self.epoch {
+            return Err(PauseError("pause output epoch must increase"));
+        }
+        if self.phase != PausePhase::Paused || !mixer.is_paused() {
+            return Err(PauseError(
+                "pause output rebind requires acknowledged paused state",
+            ));
+        }
+        let config = mixer.config();
+        if config.domain() != self.origin.domain
+            || config.origin() != self.origin.timestamp
+            || config.format().sample_rate() != self.rate
+            || config.playback_end_frame() != self.playback_end
+        {
+            return Err(PauseError(
+                "pause output rebind changed the immutable frame grid",
+            ));
+        }
+        match mixer.start_gate_frame() {
+            None if self.start_frame == 0 => {}
+            Some(Some(frame))
+                if frame == self.start_frame && mixer.applied_start_frame() == Some(frame) => {}
+            _ => {
+                return Err(PauseError(
+                    "pause output rebind changed or has unresolved startup",
+                ));
+            }
+        }
+        if mixer.playback_frame_cursor() != self.frozen {
+            return Err(PauseError("pause output rebind changed frozen playback"));
+        }
+        if self.end_marker.is_some()
+            || self
+                .playback_end
+                .is_some_and(|end| mixer.playback_frame_cursor() >= end)
+        {
+            return Err(PauseError(
+                "pause output rebind cannot reopen a reached endpoint",
+            ));
+        }
+        let physical = mixer.frame_cursor();
+        let previous_end = self
+            .last_report
+            .map(|report| {
+                report
+                    .start_frame
+                    .checked_add(
+                        u64::try_from(report.frames)
+                            .map_err(|_| PauseError("render extent overflow"))?,
+                    )
+                    .ok_or(PauseError("previous physical extent overflow"))
+            })
+            .transpose()?;
+        if physical < self.min_physical_frame || previous_end.is_some_and(|end| physical < end) {
+            return Err(PauseError(
+                "pause output rebind physical frontier regressed",
+            ));
+        }
+        self.point(physical)?;
+        let mut min_host = self.min_host;
+        for host in [self.last_pair.map(|pair| pair.target), self.last_now]
+            .into_iter()
+            .flatten()
+        {
+            if min_host.is_none_or(|old| host.timestamp > old.timestamp) {
+                min_host = Some(host);
+            }
+        }
+        self.epoch = epoch;
+        self.min_physical_frame = physical;
+        self.min_host = min_host;
+        self.reference = None;
+        self.last_pair = None;
+        self.last_report = None;
+        self.boundary = None;
+        self.evidence_kind = None;
+        self.interval_reference = None;
+        self.last_interval = None;
+        self.interval_window = None;
+        self.setup_locked = true;
+        Ok(())
+    }
+    pub fn request_in_epoch(
+        &mut self,
+        epoch: u64,
+        paused: bool,
+        reference: ClockPair,
+    ) -> Result<bool, PauseError> {
+        if epoch != self.epoch {
+            return Err(PauseError("pause output epoch mismatch"));
+        }
+        self.request(paused, reference)
+    }
+    pub fn observe_in_epoch(
+        &mut self,
+        epoch: u64,
+        report: Option<RenderReport>,
+        pair: ClockPair,
+    ) -> Result<Option<PauseBoundary>, PauseError> {
+        if epoch != self.epoch {
+            return Err(PauseError("pause output epoch mismatch"));
+        }
+        self.observe(report, pair)
+    }
+    pub fn request_interval_in_epoch(
+        &mut self,
+        epoch: u64,
+        paused: bool,
+        reference: PauseIntervalObservation,
+    ) -> Result<bool, PauseError> {
+        if epoch != self.epoch {
+            return Err(PauseError("pause output epoch mismatch"));
+        }
+        self.request_interval(paused, reference)
+    }
+    pub fn observe_interval_in_epoch(
+        &mut self,
+        epoch: u64,
+        observation: Option<PauseIntervalObservation>,
+        now: ClockPoint,
+    ) -> Result<Option<IntervalPauseBoundary>, PauseError> {
+        if epoch != self.epoch {
+            return Err(PauseError("pause output epoch mismatch"));
+        }
+        self.observe_interval(observation, now)
     }
     /// Configures initial silent physical frames before any request/observation.
     /// Playback scheduling remains relative to logical frame zero.
@@ -164,7 +306,10 @@ impl NativePause {
     fn check_pair(&self, pair: ClockPair) -> Result<(), PauseError> {
         if pair.source.domain != self.origin.domain
             || pair.target.domain != self.host
-            || pair.source.timestamp < self.origin.timestamp
+            || pair.source.timestamp < self.point(self.min_physical_frame)?.timestamp
+            || self
+                .min_host
+                .is_some_and(|host| pair.target.timestamp < host.timestamp)
         {
             return Err(PauseError(
                 "pause clock pair has wrong domain or precedes output origin",
@@ -298,6 +443,9 @@ impl NativePause {
         next.bind(EvidenceKind::Interval)?;
         if now.domain != next.host
             || next
+                .min_host
+                .is_some_and(|host| now.timestamp < host.timestamp)
+            || next
                 .last_now
                 .is_some_and(|old| now.timestamp < old.timestamp)
         {
@@ -393,6 +541,11 @@ impl NativePause {
             .ok_or(PauseError("playback grid exceeds physical grid"))
     }
     fn check_report(&self, report: RenderReport) -> Result<(u64, u64, u64), PauseError> {
+        if report.start_frame < self.min_physical_frame {
+            return Err(PauseError(
+                "render report precedes rebound physical frontier",
+            ));
+        }
         let physical = report
             .start_frame
             .checked_add(
@@ -1423,3 +1576,7 @@ mod fixtures {
 #[cfg(test)]
 #[path = "playback_pause_interval_fixtures.rs"]
 mod interval_fixtures;
+
+#[cfg(test)]
+#[path = "playback_pause_rebind_fixtures.rs"]
+mod playback_pause_rebind_fixtures;

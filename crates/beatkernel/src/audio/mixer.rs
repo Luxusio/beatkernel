@@ -361,6 +361,16 @@ impl Mixer {
     pub const fn playback_frame_cursor(&self) -> u64 {
         self.playback_frame_cursor
     }
+    /// Immutable startup gate: None is ungated, Some(None) is unarmed, and
+    /// Some(Some(frame)) is the exact selected physical start target.
+    pub fn start_gate_frame(&self) -> Option<Option<u64>> {
+        self.consumer.start_gate()
+    }
+    /// Actual first positive playback frame, absent before genuine startup.
+    /// Ungated, held and zero-length finite playback do not publish this evidence.
+    pub fn applied_start_frame(&self) -> Option<u64> {
+        self.consumer.applied_start_frame()
+    }
     /// Applied end-state of the most recent valid nonempty render, including
     /// an immutable playback endpoint that queue resume cannot lift.
     pub const fn is_paused(&self) -> bool {
